@@ -339,23 +339,8 @@ pub async fn fetch_row_as_json(
             table: entry.schema.table,
         })?;
 
-    let select_q = SelectQuery {
-        model: entry.schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: pk.into(),
-        }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: Some(1),
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-    };
+    // #562 — by_pk constructor for single-PK-lookup shape.
+    let select_q = SelectQuery::by_pk(entry.schema, pk_field.column, pk.into());
     let fields: Vec<&'static crate::core::FieldSchema> = entry.schema.scalar_fields().collect();
     crate::sql::select_one_row_as_json(pool, &select_q, &fields).await
 }
@@ -396,11 +381,9 @@ where
     let mut visited = 0_usize;
     let mut offset = 0_i64;
     loop {
+        // #562 — struct-update over SelectQuery::new for the
+        // paginated full-table scan (no WHERE).
         let select_q = SelectQuery {
-            model: entry.schema,
-            where_clause: WhereExpr::And(vec![]),
-            search: None,
-            joins: vec![],
             order_by: vec![OrderClause {
                 column: pk_field.column,
                 desc: false,
@@ -408,10 +391,7 @@ where
             .into()],
             limit: Some(batch),
             offset: Some(offset),
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
+            ..SelectQuery::new(entry.schema)
         };
         let rows = crate::sql::select_rows_as_json(pool, &select_q, &fields).await?;
         if rows.is_empty() {
@@ -771,8 +751,8 @@ pub async fn fetch_reverse_generic(
         // panic deep in the framework.
         return Ok(Vec::new());
     };
+    // #562 — composite AND lookup; struct-update over SelectQuery::new.
     let select_q = SelectQuery {
-        model: child_schema,
         where_clause: WhereExpr::And(vec![
             WhereExpr::Predicate(Filter {
                 column: rel.ct_column,
@@ -785,15 +765,7 @@ pub async fn fetch_reverse_generic(
                 value: crate::core::SqlValue::I64(parent_pk),
             }),
         ]),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
+        ..SelectQuery::new(child_schema)
     };
     let fields: Vec<&'static crate::core::FieldSchema> = child_schema.scalar_fields().collect();
     crate::sql::select_rows_as_json(pool, &select_q, &fields).await
@@ -883,8 +855,8 @@ pub async fn prefetch_reverse_generic_for<Parent: crate::core::Model>(
         .copied()
         .map(crate::core::SqlValue::I64)
         .collect();
+    // #562 — composite AND-IN lookup; struct-update over SelectQuery::new.
     let select_q = SelectQuery {
-        model: child_schema,
         where_clause: WhereExpr::And(vec![
             WhereExpr::Predicate(Filter {
                 column: rel.ct_column,
@@ -897,15 +869,7 @@ pub async fn prefetch_reverse_generic_for<Parent: crate::core::Model>(
                 value: crate::core::SqlValue::List(pk_values),
             }),
         ]),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: None,
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
+        ..SelectQuery::new(child_schema)
     };
     let fields: Vec<&'static crate::core::FieldSchema> = child_schema.scalar_fields().collect();
     let rows = crate::sql::select_rows_as_json(pool, &select_q, &fields).await?;

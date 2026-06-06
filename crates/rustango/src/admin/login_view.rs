@@ -107,23 +107,12 @@ async fn login_submit(
     // Schema-driven lookup so we don't depend on tenancy's
     // typed query helpers — the bare admin compiles without `tenancy`.
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
-    let select = SelectQuery {
-        model: AdminUser::SCHEMA,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "username",
-            op: Op::Eq,
-            value: SqlValue::String(form.username.clone()),
-        }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: Some(1),
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-    };
+    // #562 — by_pk constructor for the single-column-lookup shape.
+    let select = SelectQuery::by_pk(
+        AdminUser::SCHEMA,
+        "username",
+        SqlValue::String(form.username.clone()),
+    );
     let row = crate::sql::select_one_row_as_json(&state.pool, &select, &fields)
         .await
         .ok()
@@ -248,23 +237,8 @@ async fn change_password_submit(
     // Look up the current row by user_id (from the session) so we
     // can verify the *current* password before mutating the hash.
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
-    let select = SelectQuery {
-        model: AdminUser::SCHEMA,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: "id",
-            op: Op::Eq,
-            value: SqlValue::I64(session.user_id),
-        }),
-        search: None,
-        joins: vec![],
-        order_by: vec![],
-        limit: Some(1),
-        offset: None,
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
-    };
+    // #562 — by_pk constructor.
+    let select = SelectQuery::by_pk(AdminUser::SCHEMA, "id", SqlValue::I64(session.user_id));
     let row = crate::sql::select_one_row_as_json(&state.pool, &select, &fields)
         .await
         .ok()
