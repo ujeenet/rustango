@@ -38,6 +38,7 @@ pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("ordinal", ordinal_filter);
     tera.register_filter("apnumber", apnumber_filter);
     tera.register_filter("naturaltime", naturaltime_filter);
+    tera.register_filter("naturaltime_short", naturaltime_short_filter);
     tera.register_filter("naturalday", naturalday_filter);
     tera.register_filter("timesince", timesince);
     tera.register_filter("timeuntil", timeuntil);
@@ -783,6 +784,14 @@ fn naturaltime_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result
     Ok(to_value(natural_time_string(now, dt))?)
 }
 
+fn naturaltime_short_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
+    let dt = match parse_datetime(value) {
+        Some(d) => d,
+        None => return Ok(value.clone()),
+    };
+    Ok(to_value(naturaltime_short(Utc::now(), dt))?)
+}
+
 fn parse_datetime(value: &Value) -> Option<DateTime<Utc>> {
     if let Some(s) = value.as_str() {
         if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
@@ -819,6 +828,62 @@ fn parse_datetime(value: &Value) -> Option<DateTime<Utc>> {
 #[must_use]
 pub fn naturaltime(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     natural_time_string(now, then)
+}
+
+/// Compact relative-time string — same semantic as [`naturaltime`]
+/// but emits a short form for tight UI:
+///
+/// * `"now"` if within 30 seconds.
+/// * `"45s ago"` / `"in 45s"` — seconds.
+/// * `"3m ago"` — minutes.
+/// * `"4h ago"` — hours.
+/// * `"2d ago"` — days.
+/// * `"3mo ago"` — months (30-day approximation).
+/// * `"2y ago"` — years (365-day approximation).
+///
+/// Use when a table cell or chip badge can't fit the long form
+/// ("3 weeks, 2 days ago" → "23d ago"). Past values get the
+/// ` ago` suffix; future values get the `in ` prefix. The
+/// boundary thresholds match the long-form [`naturaltime`] for
+/// consistency.
+///
+/// ```ignore
+/// use chrono::{Duration, TimeZone, Utc};
+/// use rustango::humanize::naturaltime_short;
+///
+/// let now = Utc.with_ymd_and_hms(2026, 6, 5, 12, 0, 0).unwrap();
+/// assert_eq!(naturaltime_short(now, now), "now");
+/// assert_eq!(naturaltime_short(now, now - Duration::seconds(45)), "45s ago");
+/// assert_eq!(naturaltime_short(now, now - Duration::minutes(5)), "5m ago");
+/// assert_eq!(naturaltime_short(now, now - Duration::hours(3)), "3h ago");
+/// assert_eq!(naturaltime_short(now, now + Duration::minutes(10)), "in 10m");
+/// ```
+#[must_use]
+pub fn naturaltime_short(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
+    let delta = now.signed_duration_since(then);
+    let abs = delta.num_seconds().abs();
+    if abs < 30 {
+        return "now".to_owned();
+    }
+    let past = delta.num_seconds() >= 0;
+    let (n, unit) = if abs < 60 {
+        (abs, "s")
+    } else if abs < 3600 {
+        (abs / 60, "m")
+    } else if abs < 86_400 {
+        (abs / 3600, "h")
+    } else if abs < 2_592_000 {
+        (abs / 86_400, "d")
+    } else if abs < 31_536_000 {
+        (abs / 2_592_000, "mo")
+    } else {
+        (abs / 31_536_000, "y")
+    };
+    if past {
+        format!("{n}{unit} ago")
+    } else {
+        format!("in {n}{unit}")
+    }
 }
 
 /// [`django.contrib.humanize.naturalday`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturalday) —
@@ -1969,5 +2034,80 @@ mod tests {
             render(&tera, "{{ garbage | format_duration_long }}", ctx),
             "not a duration"
         );
+    }
+
+    // -------- naturaltime_short --------
+
+    fn fixed_now() -> chrono::DateTime<Utc> {
+        chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 6, 5, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn naturaltime_short_within_30s_returns_now() {
+        let now = fixed_now();
+        assert_eq!(naturaltime_short(now, now), "now");
+        assert_eq!(
+            naturaltime_short(now, now - chrono::Duration::seconds(15)),
+            "now"
+        );
+    }
+
+    #[test]
+    fn naturaltime_short_seconds_minutes_hours() {
+        let now = fixed_now();
+        assert_eq!(
+            naturaltime_short(now, now - chrono::Duration::seconds(45)),
+            "45s ago"
+        );
+        assert_eq!(
+            naturaltime_short(now, now - chrono::Duration::minutes(5)),
+            "5m ago"
+        );
+        assert_eq!(
+            naturaltime_short(now, now - chrono::Duration::hours(3)),
+            "3h ago"
+        );
+    }
+
+    #[test]
+    fn naturaltime_short_days_months_years() {
+        let now = fixed_now();
+        assert_eq!(
+            naturaltime_short(now, now - chrono::Duration::days(2)),
+            "2d ago"
+        );
+        // 100 days ≈ 3.3 months → "3mo ago".
+        assert_eq!(
+            naturaltime_short(now, now - chrono::Duration::days(100)),
+            "3mo ago"
+        );
+        // 800 days ≈ 2.2 years → "2y ago".
+        assert_eq!(
+            naturaltime_short(now, now - chrono::Duration::days(800)),
+            "2y ago"
+        );
+    }
+
+    #[test]
+    fn naturaltime_short_future_uses_in_prefix() {
+        let now = fixed_now();
+        assert_eq!(
+            naturaltime_short(now, now + chrono::Duration::minutes(10)),
+            "in 10m"
+        );
+        assert_eq!(
+            naturaltime_short(now, now + chrono::Duration::hours(5)),
+            "in 5h"
+        );
+    }
+
+    #[test]
+    fn naturaltime_short_tera_filter() {
+        let tera = setup();
+        let mut ctx = tera::Context::new();
+        ctx.insert("ts", "2020-01-01T00:00:00Z");
+        let out = render(&tera, "{{ ts | naturaltime_short }}", ctx);
+        // Many years in the past — must contain "y ago".
+        assert!(out.contains("y ago"), "got: {out}");
     }
 }
