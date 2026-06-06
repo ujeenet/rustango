@@ -2046,6 +2046,107 @@ pub fn validate_file_mime_type(
     Ok(())
 }
 
+// ============================================================
+// `is_*` boolean companions
+//
+// Mirror `is_email` / `is_url` / etc. style for the rest of the
+// `validate_*` family. Useful for filter-iterators and pattern-
+// matching call sites that only need "is this valid?" without
+// consuming the Result. Each delegates to the matching
+// `validate_*` (single source of truth — change the validator,
+// the predicate follows).
+// ============================================================
+
+/// `true` when `s` would pass [`validate_alpha`].
+#[must_use]
+pub fn is_alpha(s: &str) -> bool {
+    validate_alpha(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_alphanumeric`].
+#[must_use]
+pub fn is_alphanumeric(s: &str) -> bool {
+    validate_alphanumeric(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_numeric`].
+#[must_use]
+pub fn is_numeric(s: &str) -> bool {
+    validate_numeric(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_creditcard_luhn`].
+#[must_use]
+pub fn is_creditcard_luhn(s: &str) -> bool {
+    validate_creditcard_luhn(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_hostname`].
+#[must_use]
+pub fn is_hostname(s: &str) -> bool {
+    validate_hostname(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_iban`].
+#[must_use]
+pub fn is_iban(s: &str) -> bool {
+    validate_iban(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_mac_address`].
+#[must_use]
+pub fn is_mac_address(s: &str) -> bool {
+    validate_mac_address(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_semver`].
+#[must_use]
+pub fn is_semver(s: &str) -> bool {
+    validate_semver(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_isbn`].
+#[must_use]
+pub fn is_isbn(s: &str) -> bool {
+    validate_isbn(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_iso_date`].
+#[must_use]
+pub fn is_iso_date(s: &str) -> bool {
+    validate_iso_date(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_iso_time`].
+#[must_use]
+pub fn is_iso_time(s: &str) -> bool {
+    validate_iso_time(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_iso_datetime`].
+#[must_use]
+pub fn is_iso_datetime(s: &str) -> bool {
+    validate_iso_datetime(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_base64`].
+#[must_use]
+pub fn is_base64(s: &str) -> bool {
+    validate_base64(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_base64_urlsafe`].
+#[must_use]
+pub fn is_base64_urlsafe(s: &str) -> bool {
+    validate_base64_urlsafe(s).is_ok()
+}
+
+/// `true` when `s` would pass [`validate_jwt_shape`].
+#[must_use]
+pub fn is_jwt_shape(s: &str) -> bool {
+    validate_jwt_shape(s).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3710,5 +3811,102 @@ mod tests {
         // Django shape: whitespace around each element is tolerated.
         assert!(int_list_validator("1, 2, 3", ",", false).is_ok());
         assert!(int_list_validator("  10 ,  20 ,  30  ", ",", false).is_ok());
+    }
+
+    // -------- is_* boolean companions --------
+
+    #[test]
+    fn is_alpha_companion() {
+        assert!(is_alpha("hello"));
+        assert!(!is_alpha("hello1"));
+    }
+
+    #[test]
+    fn is_alphanumeric_companion() {
+        assert!(is_alphanumeric("abc123"));
+        assert!(!is_alphanumeric("abc 123"));
+    }
+
+    #[test]
+    fn is_numeric_companion() {
+        assert!(is_numeric("12345"));
+        assert!(!is_numeric("12a"));
+    }
+
+    #[test]
+    fn is_creditcard_luhn_companion() {
+        // 4111-1111-1111-1111 is the canonical Visa test card.
+        assert!(is_creditcard_luhn("4111111111111111"));
+        assert!(!is_creditcard_luhn("1234567890123456"));
+    }
+
+    #[test]
+    fn is_hostname_companion() {
+        assert!(is_hostname("example.com"));
+        assert!(!is_hostname("not a hostname"));
+    }
+
+    #[test]
+    fn is_iban_companion() {
+        // Valid German IBAN test value (publicly known).
+        assert!(is_iban("DE89370400440532013000"));
+        assert!(!is_iban("XX00garbage"));
+    }
+
+    #[test]
+    fn is_mac_address_companion() {
+        assert!(is_mac_address("00:1A:2B:3C:4D:5E"));
+        assert!(!is_mac_address("not-a-mac"));
+    }
+
+    #[test]
+    fn is_semver_companion() {
+        assert!(is_semver("1.2.3"));
+        assert!(is_semver("1.2.3-alpha+build"));
+        assert!(!is_semver("1.2"));
+    }
+
+    #[test]
+    fn is_isbn_companion() {
+        // Valid ISBN-13.
+        assert!(is_isbn("9780132350884"));
+        assert!(!is_isbn("not-an-isbn"));
+    }
+
+    #[test]
+    fn is_iso_date_companion() {
+        assert!(is_iso_date("2026-06-05"));
+        assert!(!is_iso_date("06/05/2026"));
+    }
+
+    #[test]
+    fn is_iso_time_companion() {
+        assert!(is_iso_time("12:30:00"));
+        assert!(!is_iso_time("12 30"));
+    }
+
+    #[test]
+    fn is_iso_datetime_companion() {
+        assert!(is_iso_datetime("2026-06-05T12:30:00Z"));
+        assert!(!is_iso_datetime("2026-06-05"));
+    }
+
+    #[test]
+    fn is_base64_companion() {
+        assert!(is_base64("SGVsbG8="));
+        assert!(!is_base64("not base 64!"));
+    }
+
+    #[test]
+    fn is_base64_urlsafe_companion() {
+        assert!(is_base64_urlsafe("SGVsbG8"));
+        assert!(!is_base64_urlsafe("not+base/64"));
+    }
+
+    #[test]
+    fn is_jwt_shape_companion() {
+        // Three dot-separated base64url segments.
+        assert!(is_jwt_shape("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"));
+        assert!(!is_jwt_shape("not.a.jwt.shape.four.dots"));
     }
 }
