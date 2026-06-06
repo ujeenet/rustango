@@ -3310,6 +3310,37 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Single-column projection — `SELECT <col> FROM
+            /// <table>`. Returns `Vec<U>` where each element is the
+            /// decoded value of the column. Eloquent
+            /// `Model::pluck($column)` / Django
+            /// `Model.objects.values_list('col', flat=True)` parity.
+            ///
+            /// Thin wrapper over `QuerySet::<Self>::default()
+            /// .values_list_flat(col).fetch::<U>(pool)`. `U` must
+            /// be decodable from the column's SQL type on every
+            /// dialect the binary targets (common picks: `i64` /
+            /// `i32` / `String` / `bool` / `f64`).
+            ///
+            /// # Errors
+            /// As `ValuesFlatQuerySet::fetch`.
+            pub async fn pluck_pool<U>(
+                col: &'static str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<::std::vec::Vec<U>, ::rustango::sql::ExecError>
+            where
+                U: ::rustango::sql::MaybePgScalar
+                    + ::rustango::sql::MaybeMyScalar
+                    + ::rustango::sql::MaybeSqliteScalar
+                    + ::core::marker::Send
+                    + ::core::marker::Unpin,
+            {
+                ::rustango::query::QuerySet::<Self>::default()
+                    .values_list_flat(col)
+                    .fetch::<U>(pool)
+                    .await
+            }
+
             /// Delete every row of this model — `TRUNCATE TABLE
             /// <table> RESTART IDENTITY CASCADE` on Postgres,
             /// `DELETE FROM <table>` on MySQL / SQLite (which don't
