@@ -2127,7 +2127,7 @@ where
 // ====================================================================
 
 mod prefetch;
-pub use prefetch::{fetch_with_prefetch_filtered_pool, fetch_with_prefetch_pool};
+pub use prefetch::{fetch_with_prefetch_filtered, fetch_with_prefetch_pool};
 
 /// `select_rows_pool` with `select_related` join decoding. When the
 /// query carries no joins, behaves identically to [`select_rows_pool`]

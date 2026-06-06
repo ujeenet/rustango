@@ -2269,6 +2269,7 @@ Every `_pool` executor function has a SQLite arm now. The
 | `INSERT …, …, …` batch        | `bulk_insert_pool(&pool, &BulkInsertQuery)`  |
 | FK join (`select_related`)    | `QuerySet::select_related` (`LoadRelatedSqlite`) |
 | Parents + children prefetch   | `fetch_with_prefetch_pool`                   |
+| Filtered/ordered prefetch     | `fetch_with_prefetch_filtered` (Django `Prefetch(qs)`) |
 | `BEGIN` / `COMMIT`            | `transaction_pool` → `PoolTx::Sqlite(tx)`    |
 | `GROUP BY` + `MIN/MAX/AVG/SUM/COUNT` | `QuerySet::aggregate().compile()` + `fetch_aggregate_pool` |
 | Raw SQL (typed)               | `raw_query_pool::<T>(sql, binds, &pool)`     |
