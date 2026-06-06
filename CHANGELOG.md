@@ -46,6 +46,11 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
   - **`sql::raw_query_tx(tx, sql, binds)`** (#804) — sibling SELECT-shaped combinator for read-after-write patterns inside a tx (FOR UPDATE row locks, lookup-then-modify flows).
   - **`audit::save_one_with_audit_diff`** (#805) — partial collapse via `finish_update_with_audit_diff` shared trailer. Pre-update SELECT stays per-arm (the row decode genuinely differs by backend), but UPDATE + emit + commit suffix is shared.
   - **Unused-import cleanup** (#811) — 9 stale imports across `contenttypes` / `permissions` / `admin/views` / `fixtures` / `migrate/runner` / `crypto` removed; both backend feature subsets now warning-free for `unused_imports`.
+- **#806 / #809 / #810 / #808 follow-up DRY cleanup batch — PRs #813–#832 (8 PRs, ~250 lines removed)**. Closes 3 newly-filed DRY tickets + partial #808:
+  - **#806 url_encode consolidation** (#813) — six site-local copies of `url_encode` (across `pagination`, `admin/{views,helpers,audit}`, `auth_flows`, `totp`) folded through canonical `crate::url_codec::url_encode`. Two of the copies (`admin/views.rs:1511`, `admin/audit.rs:458`) were narrow 7-char encoders that left `/` `@` and non-ASCII bytes unencoded — closed correctness gap as a side effect.
+  - **#810 by_pk_in constructors + admin double-fetch fix** (#814, #815) — `SelectQuery::by_pk_in` + `DeleteQuery::by_pk` + `DeleteQuery::by_pk_in` join the constructor family; 4 IN-list literals migrated. Admin `update_submit` now reuses the pre-update row snapshot for the audit-diff (-1 SELECT per audited save).
+  - **#809 list-param drift fix** (#831) — new `crate::list_params` module unifies the reserved-key skip list + `?ordering=` parser + page-size clamp between `viewset::handle_list` and `template_views::ListView`. Fixes the drift where `?cursor=` / `?ordering=` would be inconsistently filtered by the two layers.
+  - **#808 partial — viewset handler helpers** (#832) — `parse_pk_or_400(field, raw)` + `pk_field_or_500(state)` factor the repeated PK-parse / PK-field-guard ceremony from `handle_retrieve` / `handle_create` / `update_inner` / `handle_destroy`.
 
 ### Fixed
 
