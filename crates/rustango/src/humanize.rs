@@ -590,6 +590,52 @@ pub fn naturalsize(n: f64) -> String {
     format!("{:.1} {}", scaled, units[scale])
 }
 
+/// SI / decimal-base companion to [`naturalsize`] — bytes
+/// formatted using 1000-base units (kB / MB / GB) as Django's
+/// `naturalsize(binary=False)` shape. Use this when the consumer
+/// expects SI units (disk-vendor marketing, storage quota
+/// dashboards reporting purchased capacity, anything that should
+/// match the labels printed on a hard drive).
+///
+/// Distinct from [`naturalsize`] which uses 1024-base (computer
+/// memory / OS-reported sizes). `naturalsize(1024)` returns
+/// `"1.0 KB"` (1 kibibyte mislabeled with the SI prefix — matches
+/// Django's `naturalsize(binary=True)` default); `naturalsize_si(1000)`
+/// returns `"1.0 kB"` (the SI-correct decimal kilobyte).
+///
+/// Units: `bytes` / `kB` / `MB` / `GB` / `TB` / `PB` / `EB` /
+/// `ZB` / `YB`. Lowercase `k` follows the SI standard
+/// (uppercase K is reserved for Kelvin in scientific contexts;
+/// Django uses lowercase too).
+///
+/// ```
+/// use rustango::humanize::naturalsize_si;
+/// assert_eq!(naturalsize_si(1000.0), "1.0 kB");
+/// assert_eq!(naturalsize_si(1_500_000.0), "1.5 MB");
+/// assert_eq!(naturalsize_si(1.0), "1 byte");
+/// assert_eq!(naturalsize_si(0.0), "0 bytes");
+/// // 1024 in 1000-base sits at 1.0 kB rounded.
+/// assert_eq!(naturalsize_si(1024.0), "1.0 kB");
+/// ```
+pub fn naturalsize_si(n: f64) -> String {
+    // SI prefixes: `k` (lowercase!) for kilo per ISO 80000-13.
+    // Django source uses the same `["bytes", "kB", "MB", ...]`.
+    let units = ["bytes", "kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
+    if n < 1000.0 {
+        if (n - 1.0).abs() < f64::EPSILON {
+            return "1 byte".to_owned();
+        }
+        return format!("{} bytes", n as u64);
+    }
+    let mut scale = 0_usize;
+    let mut scaled = n;
+    while scaled >= 1000.0 && scale < units.len() - 1 {
+        scaled /= 1000.0;
+        scale += 1;
+    }
+    format!("{:.1} {}", scaled, units[scale])
+}
+
 fn naturalsize_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let n = match value.as_u64() {
         Some(v) => v as f64,
@@ -1382,6 +1428,46 @@ mod tests {
         // 2^80 bytes — fits exactly in YB scale (the last entry).
         let n = 1024.0_f64.powi(8);
         let out = naturalsize(n);
+        assert!(out.ends_with("YB"), "got: {out}");
+    }
+
+    // -------- naturalsize_si (SI / decimal-base) --------
+
+    #[test]
+    fn naturalsize_si_basic() {
+        assert_eq!(naturalsize_si(0.0), "0 bytes");
+        assert_eq!(naturalsize_si(1.0), "1 byte");
+        assert_eq!(naturalsize_si(512.0), "512 bytes");
+        assert_eq!(naturalsize_si(1000.0), "1.0 kB");
+        assert_eq!(naturalsize_si(1_500_000.0), "1.5 MB");
+    }
+
+    #[test]
+    fn naturalsize_si_uses_lowercase_k_for_kilo() {
+        // SI standard / Django shape — lowercase `k` for kilo.
+        let out = naturalsize_si(2500.0);
+        assert!(out.contains("kB"), "got: {out}");
+        assert!(!out.contains("KB"), "must not use uppercase K: {out}");
+    }
+
+    #[test]
+    fn naturalsize_si_distinct_from_naturalsize_at_boundary() {
+        // 1024 bytes is a kibibyte (KiB) — in 1024-base ("KB" label
+        // per Django's confusing default), and in 1000-base it's
+        // 1.024 → "1.0 kB" rounded.
+        assert_eq!(naturalsize(1024.0), "1.0 KB");
+        assert_eq!(naturalsize_si(1024.0), "1.0 kB");
+        // At 1000 bytes the two paths diverge clearly: 1000-base
+        // crosses the boundary (1.0 kB) but 1024-base stays in bytes.
+        assert_eq!(naturalsize_si(1000.0), "1.0 kB");
+        assert_eq!(naturalsize(1000.0), "1000 bytes");
+    }
+
+    #[test]
+    fn naturalsize_si_top_scale_caps() {
+        // 10^24 bytes → YB scale (last entry).
+        let n = 1000.0_f64.powi(8);
+        let out = naturalsize_si(n);
         assert!(out.ends_with("YB"), "got: {out}");
     }
 
