@@ -302,6 +302,52 @@ pub fn url_has_allowed_host_and_scheme(
     allowed_hosts.iter().any(|a| a.to_ascii_lowercase() == host)
 }
 
+/// Django-parity
+/// [`django.utils.http.escape_leading_slashes(url)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.escape_leading_slashes) —
+/// escape leading slashes / backslashes on a URL fragment to prevent
+/// open-redirect attacks via protocol-relative URLs.
+///
+/// A `Location: //evil.com` header is interpreted by the browser as
+/// "navigate to https://evil.com" (the absent scheme defaults to the
+/// current page's). This helper escapes the leading `//` / `\\` /
+/// `/\` / `\/` to `/%2F` / `\%5C` / etc., so the rendered URL stays
+/// path-relative.
+///
+/// Returns the URL unchanged when it doesn't start with one of the
+/// risky double-prefix shapes — caller can use it as a defense-in-
+/// depth pass without a length penalty on every URL.
+///
+/// ```ignore
+/// use rustango::urls::escape_leading_slashes;
+///
+/// // Safe URLs pass through unchanged.
+/// assert_eq!(escape_leading_slashes("/account"), "/account");
+/// assert_eq!(escape_leading_slashes("https://example.com/x"),
+///            "https://example.com/x");
+///
+/// // Protocol-relative shapes get the leading slashes escaped.
+/// assert_eq!(escape_leading_slashes("//evil.com/path"),
+///            "/%2Fevil.com/path");
+/// assert_eq!(escape_leading_slashes("\\\\evil.com/path"),
+///            "\\%5Cevil.com/path");
+/// ```
+#[must_use]
+pub fn escape_leading_slashes(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("//") {
+        return format!("/%2F{rest}");
+    }
+    if let Some(rest) = url.strip_prefix("\\\\") {
+        return format!("\\%5C{rest}");
+    }
+    if let Some(rest) = url.strip_prefix("/\\") {
+        return format!("/%5C{rest}");
+    }
+    if let Some(rest) = url.strip_prefix("\\/") {
+        return format!("\\%2F{rest}");
+    }
+    url.to_owned()
+}
+
 fn substitute(
     name: &str,
     pattern: &str,
@@ -1304,5 +1350,55 @@ mod querystring_tests {
     #[test]
     fn parse_qs_grouped_empty_returns_empty_map() {
         assert!(parse_query_pairs_grouped("").is_empty());
+    }
+
+    // ---------- escape_leading_slashes (Django parity) ----------
+
+    #[test]
+    fn escape_leading_slashes_passes_through_safe_urls() {
+        assert_eq!(escape_leading_slashes("/account"), "/account");
+        assert_eq!(escape_leading_slashes("/"), "/");
+        assert_eq!(escape_leading_slashes(""), "");
+        assert_eq!(escape_leading_slashes("plain-text"), "plain-text");
+        assert_eq!(
+            escape_leading_slashes("https://example.com/x"),
+            "https://example.com/x"
+        );
+    }
+
+    #[test]
+    fn escape_leading_slashes_escapes_protocol_relative() {
+        // `//evil.com` is the classic open-redirect vector — browsers
+        // interpret as `https://evil.com` when scheme is missing.
+        assert_eq!(
+            escape_leading_slashes("//evil.com/path"),
+            "/%2Fevil.com/path"
+        );
+    }
+
+    #[test]
+    fn escape_leading_slashes_escapes_backslash_pairs() {
+        assert_eq!(
+            escape_leading_slashes("\\\\evil.com/path"),
+            "\\%5Cevil.com/path"
+        );
+    }
+
+    #[test]
+    fn escape_leading_slashes_escapes_mixed_pairs() {
+        // Both `/\` and `\/` are recognized as path-confusion vectors
+        // in some browser parsers; escape both.
+        assert_eq!(escape_leading_slashes("/\\evil"), "/%5Cevil");
+        assert_eq!(escape_leading_slashes("\\/evil"), "\\%2Fevil");
+    }
+
+    #[test]
+    fn escape_leading_slashes_only_touches_the_first_two_chars() {
+        // A `//` later in the URL is NOT escaped — only the leading
+        // prefix matters for open-redirect prevention.
+        assert_eq!(
+            escape_leading_slashes("/path//slashes//inside"),
+            "/path//slashes//inside"
+        );
     }
 }
