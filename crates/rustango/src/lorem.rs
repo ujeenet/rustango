@@ -8,17 +8,21 @@
 //! recognize "lorem ipsum" immediately.
 //!
 //! ```ignore
-//! use rustango::lorem::{words, paragraphs, sentence, common_paragraph};
+//! use rustango::lorem::{words, paragraphs, sentence, COMMON_PARAGRAPH_TEXT};
 //!
-//! // Single canonical opener.
-//! assert_eq!(common_paragraph().split_whitespace().count(), 67);
+//! // Canonical opener — stable string, 67 words.
+//! assert_eq!(COMMON_PARAGRAPH_TEXT.split_whitespace().count(), 67);
 //!
-//! // 5 random words, drawn deterministically (seeded by call order).
+//! // 5 random words (RNG-driven; output varies per call).
 //! let w = words(5, /* common = */ false);
 //! assert_eq!(w.split_whitespace().count(), 5);
 //!
-//! // 3 paragraphs.
-//! let p = paragraphs(3);
+//! // One random sentence — 6-12 words, capitalized, period at end.
+//! let s = sentence();
+//! assert!(s.ends_with('.'));
+//!
+//! // 3 paragraphs joined by blank lines.
+//! let p = paragraphs(3, /* common = */ false);
 //! assert_eq!(p.split("\n\n").count(), 3);
 //! ```
 //!
