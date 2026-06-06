@@ -1285,10 +1285,16 @@ async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(),
 /// # Errors
 /// Returns [`MigrateError::Exec`] for any executor / driver failure.
 pub async fn ensure_ledger_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> {
-    ensure_ledger_pool_for(pool, LEDGER_TABLE).await
+    ensure_ledger_pool_with_ledger(pool, LEDGER_TABLE).await
 }
 
-async fn ensure_ledger_pool_for(pool: &crate::sql::Pool, ledger: &str) -> Result<(), MigrateError> {
+/// Ensure a custom-named ledger table exists. Pair with the other
+/// `*_pool_with_ledger` entry points to operate against a non-default
+/// ledger. Issue #146 — operator-controlled ledger naming.
+pub async fn ensure_ledger_pool_with_ledger(
+    pool: &crate::sql::Pool,
+    ledger: &str,
+) -> Result<(), MigrateError> {
     let dialect_name = pool.dialect().name();
     let timestamp_col = match dialect_name {
         "postgres" => "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
@@ -1323,10 +1329,13 @@ async fn ensure_ledger_pool_for(pool: &crate::sql::Pool, ledger: &str) -> Result
 /// Returns [`MigrateError::Exec`] for any read failure (including a
 /// missing ledger table — call [`ensure_ledger_pool`] first).
 pub async fn applied_set_pool(pool: &crate::sql::Pool) -> Result<HashSet<String>, MigrateError> {
-    applied_set_pool_for(pool, LEDGER_TABLE).await
+    applied_set_pool_with_ledger(pool, LEDGER_TABLE).await
 }
 
-async fn applied_set_pool_for(
+/// Read the applied-migration name set from a custom-named ledger
+/// table. Pairs with [`ensure_ledger_pool_with_ledger`] / the other
+/// `*_pool_with_ledger` entry points. Issue #146.
+pub async fn applied_set_pool_with_ledger(
     pool: &crate::sql::Pool,
     ledger: &str,
 ) -> Result<HashSet<String>, MigrateError> {
@@ -1365,15 +1374,24 @@ pub async fn migrate_pool(
     migrate_pool_with_ledger(pool, dir, LEDGER_TABLE).await
 }
 
-async fn migrate_pool_with_ledger(
+/// Apply every pending migration in `dir` against a custom-named
+/// ledger table. Sibling of [`migrate_pool`] with operator-supplied
+/// ledger name (issue #146). Use for multi-tenant / multi-app
+/// deployments where two migration directories share a database and
+/// must not collide on the default `__rustango_migrations__`
+/// bookkeeping table.
+///
+/// # Errors
+/// As [`migrate_pool`].
+pub async fn migrate_pool_with_ledger(
     pool: &crate::sql::Pool,
     dir: &Path,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger_pool_for(pool, ledger).await?;
+    ensure_ledger_pool_with_ledger(pool, ledger).await?;
     with_migrate_lock_pool(pool, async {
         let all = file::list_dir(dir)?;
-        let applied = applied_set_pool_for(pool, ledger).await?;
+        let applied = applied_set_pool_with_ledger(pool, ledger).await?;
         let pending: Vec<Migration> = all
             .into_iter()
             .filter(|m| !applied.contains(&m.name))
@@ -1694,16 +1712,21 @@ pub async fn migrate_to_pool(
     migrate_to_pool_with_ledger(pool, dir, target, LEDGER_TABLE).await
 }
 
-async fn migrate_to_pool_with_ledger(
+/// Migrate to a specific target against a custom-named ledger.
+/// Sibling of [`migrate_to_pool`] (issue #146).
+///
+/// # Errors
+/// As [`migrate_to_pool`].
+pub async fn migrate_to_pool_with_ledger(
     pool: &crate::sql::Pool,
     dir: &Path,
     target: &str,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger_pool_for(pool, ledger).await?;
+    ensure_ledger_pool_with_ledger(pool, ledger).await?;
     with_migrate_lock_pool(pool, async {
         let all = file::list_dir(dir)?;
-        let applied = applied_set_pool_for(pool, ledger).await?;
+        let applied = applied_set_pool_with_ledger(pool, ledger).await?;
 
         if target == "zero" {
             return unapply_all_in_order_pool(pool, dir, &all, &applied, ledger).await;
@@ -1779,7 +1802,12 @@ pub async fn downgrade_pool(
     downgrade_pool_with_ledger(pool, dir, steps, LEDGER_TABLE).await
 }
 
-async fn downgrade_pool_with_ledger(
+/// Roll back `steps` migrations against a custom-named ledger.
+/// Sibling of [`downgrade_pool`] (issue #146).
+///
+/// # Errors
+/// As [`downgrade_pool`].
+pub async fn downgrade_pool_with_ledger(
     pool: &crate::sql::Pool,
     dir: &Path,
     steps: usize,
@@ -1788,10 +1816,10 @@ async fn downgrade_pool_with_ledger(
     if steps == 0 {
         return Ok(Vec::new());
     }
-    ensure_ledger_pool_for(pool, ledger).await?;
+    ensure_ledger_pool_with_ledger(pool, ledger).await?;
     with_migrate_lock_pool(pool, async {
         let all = file::list_dir(dir)?;
-        let applied = applied_set_pool_for(pool, ledger).await?;
+        let applied = applied_set_pool_with_ledger(pool, ledger).await?;
 
         let applied_in_order: Vec<Migration> = all
             .into_iter()
@@ -1829,13 +1857,18 @@ pub async fn unapply_pool(
     unapply_pool_with_ledger(pool, dir, name, LEDGER_TABLE).await
 }
 
-async fn unapply_pool_with_ledger(
+/// Unapply a single named migration against a custom-named ledger.
+/// Sibling of [`unapply_pool`] (issue #146).
+///
+/// # Errors
+/// As [`unapply_pool`].
+pub async fn unapply_pool_with_ledger(
     pool: &crate::sql::Pool,
     dir: &Path,
     name: &str,
     ledger: &str,
 ) -> Result<Migration, MigrateError> {
-    ensure_ledger_pool_for(pool, ledger).await?;
+    ensure_ledger_pool_with_ledger(pool, ledger).await?;
     with_migrate_lock_pool(pool, async {
         check_is_head_pool(pool, dir, name, ledger).await?;
         unapply_locked_pool(pool, dir, name, ledger).await
@@ -1862,7 +1895,7 @@ async fn unapply_force_pool_with_ledger(
     name: &str,
     ledger: &str,
 ) -> Result<Migration, MigrateError> {
-    ensure_ledger_pool_for(pool, ledger).await?;
+    ensure_ledger_pool_with_ledger(pool, ledger).await?;
     with_migrate_lock_pool(pool, unapply_locked_pool(pool, dir, name, ledger)).await
 }
 
@@ -1878,14 +1911,19 @@ pub async fn migrate_dry_run_pool(
     migrate_dry_run_pool_with_ledger(pool, dir, LEDGER_TABLE).await
 }
 
-async fn migrate_dry_run_pool_with_ledger(
+/// Dry-run pending migrations against a custom-named ledger.
+/// Sibling of [`migrate_dry_run_pool`] (issue #146).
+///
+/// # Errors
+/// As [`migrate_dry_run_pool`].
+pub async fn migrate_dry_run_pool_with_ledger(
     pool: &crate::sql::Pool,
     dir: &Path,
     ledger: &str,
 ) -> Result<Vec<MigrationPreview>, MigrateError> {
-    ensure_ledger_pool_for(pool, ledger).await?;
+    ensure_ledger_pool_with_ledger(pool, ledger).await?;
     let all = file::list_dir(dir)?;
-    let applied = applied_set_pool_for(pool, ledger).await?;
+    let applied = applied_set_pool_with_ledger(pool, ledger).await?;
     let pending: Vec<Migration> = all
         .into_iter()
         .filter(|m| !applied.contains(&m.name))
@@ -1986,7 +2024,7 @@ async fn check_is_head_pool(
     name: &str,
     ledger: &str,
 ) -> Result<(), MigrateError> {
-    let applied = applied_set_pool_for(pool, ledger).await?;
+    let applied = applied_set_pool_with_ledger(pool, ledger).await?;
     if !applied.contains(name) {
         return Ok(());
     }
@@ -2166,7 +2204,7 @@ async fn migrate_embedded_pool_with_ledger(
     embedded: &[(&str, &str)],
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger_pool_for(pool, ledger).await?;
+    ensure_ledger_pool_with_ledger(pool, ledger).await?;
     with_migrate_lock_pool(pool, async {
         let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
         for (name, json) in embedded {
@@ -2182,7 +2220,7 @@ async fn migrate_embedded_pool_with_ledger(
         all.sort_by(|a, b| a.name.cmp(&b.name));
         file::validate_chain(&all, "embedded slice")?;
 
-        let applied = applied_set_pool_for(pool, ledger).await?;
+        let applied = applied_set_pool_with_ledger(pool, ledger).await?;
         let pending: Vec<Migration> = all
             .into_iter()
             .filter(|m| !applied.contains(&m.name))
