@@ -1530,7 +1530,7 @@ pub fn wrap(text: &str, width: usize) -> String {
 ///
 /// ```
 /// use rustango::text::shorten;
-/// assert_eq!(shorten("Hello   world!", 12, " [...]"), "Hello [...]");
+/// assert_eq!(shorten("Hello   world!", 11, " [...]"), "Hello [...]");
 /// assert_eq!(shorten("short text", 80, " [...]"), "short text");
 /// assert_eq!(shorten("one two three four", 11, "..."), "one two...");
 /// ```
