@@ -666,6 +666,8 @@ mod tests {
                 auto: true,
                 unique: false,
                 case_insensitive: false,
+                generated_as: None,
+                db_comment: None,
                 fk: None,
             }],
             composite_fks: vec![],

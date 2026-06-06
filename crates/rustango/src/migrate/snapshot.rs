@@ -166,6 +166,22 @@ pub struct FieldSnapshot {
     /// dispatches to `dialect.ci_text_type(max_length)` when set.
     #[serde(skip_serializing_if = "is_false", default)]
     pub case_insensitive: bool,
+    /// Raw SQL expression for a `GENERATED ALWAYS AS (...) STORED`
+    /// computed column. Threaded through from
+    /// `FieldSchema::generated_as`. Skipped on serialize when `None`
+    /// so older snapshots stay diff-clean. Captured in #559 — was
+    /// previously dropped from file-based migrations, causing
+    /// generated columns to silently disappear when applying from
+    /// snapshot JSON instead of the live registry.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub generated_as: Option<String>,
+    /// Django-shape `db_comment="..."` column comment. Threaded
+    /// through from `FieldSchema::db_comment`. Skipped on serialize
+    /// when `None`. Captured in #559 — was previously dropped from
+    /// file-based migrations so MySQL/PG `COMMENT` clauses were
+    /// missing when applying from snapshot JSON.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub db_comment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fk: Option<RelationSnapshot>,
 }
@@ -476,6 +492,8 @@ impl FieldSnapshot {
             auto: f.auto,
             unique: f.unique,
             case_insensitive: f.case_insensitive,
+            generated_as: f.generated_as.map(str::to_owned),
+            db_comment: f.db_comment.map(str::to_owned),
             fk,
         }
     }
@@ -858,6 +876,191 @@ mod composite_fk_snapshot_tests {
         assert!(
             !json.contains("composite_fks"),
             "empty composite_fks should not appear in JSON; got: {json}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod generated_as_and_db_comment_capture {
+    use super::*;
+    use crate::core::{FieldSchema, FieldType};
+
+    fn schema_with_generated_and_comment() -> &'static ModelSchema {
+        static FIELDS: [FieldSchema; 3] = [
+            FieldSchema {
+                name: "id",
+                column: "id",
+                ty: FieldType::I64,
+                nullable: false,
+                primary_key: true,
+                relation: None,
+                max_length: None,
+                min: None,
+                max: None,
+                default: None,
+                auto: true,
+                unique: false,
+                generated_as: None,
+                help_text: None,
+                choices: None,
+                db_comment: None,
+                verbose_name: None,
+                editable: true,
+                blank: false,
+                case_insensitive: false,
+                fk_on_delete: None,
+                validators: &[],
+            },
+            FieldSchema {
+                name: "total",
+                column: "total",
+                ty: FieldType::F64,
+                nullable: false,
+                primary_key: false,
+                relation: None,
+                max_length: None,
+                min: None,
+                max: None,
+                default: None,
+                auto: false,
+                unique: false,
+                generated_as: Some("price * quantity"),
+                help_text: None,
+                choices: None,
+                db_comment: None,
+                verbose_name: None,
+                editable: true,
+                blank: false,
+                case_insensitive: false,
+                fk_on_delete: None,
+                validators: &[],
+            },
+            FieldSchema {
+                name: "label",
+                column: "label",
+                ty: FieldType::String,
+                nullable: false,
+                primary_key: false,
+                relation: None,
+                max_length: Some(64),
+                min: None,
+                max: None,
+                default: None,
+                auto: false,
+                unique: false,
+                generated_as: None,
+                help_text: None,
+                choices: None,
+                db_comment: Some("Human-readable label."),
+                verbose_name: None,
+                editable: true,
+                blank: false,
+                case_insensitive: false,
+                fk_on_delete: None,
+                validators: &[],
+            },
+        ];
+        static MS: ModelSchema = ModelSchema {
+            name: "Item",
+            table: "items",
+            fields: &FIELDS,
+            display: None,
+            app_label: None,
+            admin: None,
+            soft_delete_column: None,
+            audit_track: None,
+            permissions: false,
+            indexes: &[],
+            check_constraints: &[],
+            exclusion_constraints: &[],
+            default_permissions: &[],
+            m2m: &[],
+            composite_relations: &[],
+            generic_relations: &[],
+            scope: crate::core::ModelScope::Tenant,
+            default_order: &[],
+            is_view: false,
+            verbose_name: None,
+            verbose_name_plural: None,
+            managed: true,
+            db_table_comment: None,
+            default_related_name: None,
+            base_manager_name: None,
+            required_db_vendor: None,
+            required_db_features: &[],
+            order_with_respect_to: None,
+            proxy: false,
+            get_latest_by: None,
+            extra_permissions: &[],
+        };
+        &MS
+    }
+
+    #[test]
+    fn snapshot_captures_generated_as() {
+        let snap = TableSnapshot::from_schema(schema_with_generated_and_comment());
+        let total = snap
+            .fields
+            .iter()
+            .find(|f| f.column == "total")
+            .expect("total field");
+        assert_eq!(total.generated_as.as_deref(), Some("price * quantity"));
+    }
+
+    #[test]
+    fn snapshot_captures_db_comment() {
+        let snap = TableSnapshot::from_schema(schema_with_generated_and_comment());
+        let label = snap
+            .fields
+            .iter()
+            .find(|f| f.column == "label")
+            .expect("label field");
+        assert_eq!(label.db_comment.as_deref(), Some("Human-readable label."));
+    }
+
+    #[test]
+    fn snapshot_serializes_generated_and_comment_back() {
+        let snap = TableSnapshot::from_schema(schema_with_generated_and_comment());
+        let json = serde_json::to_string(&snap).expect("serialize");
+        // generated_as captured for the `total` column.
+        assert!(
+            json.contains(r#""generated_as":"price * quantity""#),
+            "expected generated_as in JSON: {json}"
+        );
+        // db_comment captured for the `label` column.
+        assert!(
+            json.contains(r#""db_comment":"Human-readable label.""#),
+            "expected db_comment in JSON: {json}"
+        );
+        // Round-trips through serde.
+        let back: TableSnapshot = serde_json::from_str(&json).expect("deserialize");
+        let total = back.fields.iter().find(|f| f.column == "total").unwrap();
+        assert_eq!(total.generated_as.as_deref(), Some("price * quantity"));
+        let label = back.fields.iter().find(|f| f.column == "label").unwrap();
+        assert_eq!(label.db_comment.as_deref(), Some("Human-readable label."));
+    }
+
+    #[test]
+    fn snapshot_skips_serializing_when_none() {
+        let snap = TableSnapshot::from_schema(schema_with_generated_and_comment());
+        let json = serde_json::to_string(&snap).expect("serialize");
+        // The `id` column has neither generated_as nor db_comment set —
+        // it should NOT have those keys in JSON (skip_serializing_if).
+        // We check that the `id` field's JSON object doesn't have the
+        // keys by re-parsing.
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let fields = value.get("fields").unwrap().as_array().unwrap();
+        let id_field = fields
+            .iter()
+            .find(|f| f.get("column").and_then(|c| c.as_str()) == Some("id"))
+            .unwrap();
+        assert!(
+            id_field.get("generated_as").is_none(),
+            "id field should not have generated_as key"
+        );
+        assert!(
+            id_field.get("db_comment").is_none(),
+            "id field should not have db_comment key"
         );
     }
 }
