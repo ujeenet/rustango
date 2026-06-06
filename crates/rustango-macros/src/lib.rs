@@ -3555,6 +3555,52 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Look up every row whose primary key is in `pks`.
+            /// Returns the matching rows in **inventory** order — NOT
+            /// the order of `pks`. Empty `pks` returns an empty
+            /// `Vec`. Eloquent `Model::find([1, 2, 3])` (when called
+            /// with a list) / Django `Model.objects.filter(pk__in=[...])`
+            /// parity.
+            ///
+            /// Thin wrapper over `QuerySet::<Self>::default()
+            /// .filter("<pk>__in", SqlValue::List([...])).fetch_pool(pool)`.
+            /// Caller-supplied PKs that don't match a row are
+            /// silently skipped (the returned vec is shorter than
+            /// the input list). For an order-preserving / "fail
+            /// when any missing" variant, build the queryset
+            /// explicitly with `in_bulk` instead.
+            ///
+            /// Accepts any iterable whose elements are
+            /// `Into<SqlValue>` — `Vec<i64>`, `&[i64]`, `[i64; N]`,
+            /// `Vec<Uuid>`, etc.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn find_many_pool<V>(
+                pks: impl ::core::iter::IntoIterator<Item = V>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            >
+            where
+                V: ::core::convert::Into<::rustango::core::SqlValue>,
+            {
+                use ::rustango::sql::FetcherPool as _;
+                let _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    pks.into_iter().map(::core::convert::Into::into).collect();
+                if _values.is_empty() {
+                    return ::core::result::Result::Ok(::std::vec::Vec::new());
+                }
+                let _key = ::std::format!("{}__in", ::core::stringify!(#pk_ident));
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, ::rustango::core::SqlValue::List(_values))
+                    .fetch_pool(pool)
+                    .await
+            }
+
             /// Look up the row whose primary key equals `pk`. Returns
             /// `Ok(None)` when no row matches; this is the
             /// non-throwing counterpart of Django's `.get(pk=…)`
