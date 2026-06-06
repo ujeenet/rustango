@@ -302,6 +302,67 @@ pub fn url_has_allowed_host_and_scheme(
     allowed_hosts.iter().any(|a| a.to_ascii_lowercase() == host)
 }
 
+/// `true` when `url` looks absolute — it carries a scheme prefix
+/// (`https:` / `mailto:` / `javascript:` / etc.) OR starts with `//`
+/// (protocol-relative).
+///
+/// Use this as a quick check before treating user-provided URL
+/// input as a same-site path. The complement is "path-relative",
+/// the usual safe shape for `Location:` redirects to your own app.
+///
+/// ```ignore
+/// use rustango::urls::is_absolute_url;
+/// assert!(is_absolute_url("https://example.com/"));
+/// assert!(is_absolute_url("mailto:hi@example.com"));
+/// assert!(is_absolute_url("//cdn.example.com/img.png"));  // protocol-relative
+/// assert!(!is_absolute_url("/account"));
+/// assert!(!is_absolute_url("relative/path"));
+/// ```
+///
+/// Recognized scheme shape: ASCII letter followed by 0+
+/// `[a-zA-Z0-9+.-]` characters then `:` (RFC 3986 §3.1). Matches
+/// both registered schemes (`http`, `https`, `mailto`, `ftp`, …)
+/// and exotic / dangerous ones (`javascript`, `data`, `file`, …) —
+/// the predicate is "is absolute," not "is safe." Pair with
+/// [`url_has_allowed_host_and_scheme`] for the policy check.
+#[must_use]
+pub fn is_absolute_url(url: &str) -> bool {
+    if url.starts_with("//") {
+        return true;
+    }
+    let mut chars = url.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    for c in chars {
+        if c == ':' {
+            return true;
+        }
+        if !(c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-') {
+            return false;
+        }
+    }
+    false
+}
+
+/// `true` when `url` is path-relative (the inverse of
+/// [`is_absolute_url`]). Useful as a positive-frame predicate:
+///
+/// ```ignore
+/// use rustango::urls::is_relative_url;
+/// assert!(is_relative_url("/account"));
+/// assert!(is_relative_url("page?x=1"));
+/// assert!(!is_relative_url("https://example.com"));
+/// assert!(!is_relative_url("//evil.com"));
+/// ```
+#[must_use]
+pub fn is_relative_url(url: &str) -> bool {
+    !is_absolute_url(url)
+}
+
 /// Django-parity
 /// [`django.utils.http.escape_leading_slashes(url)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.escape_leading_slashes) —
 /// escape leading slashes / backslashes on a URL fragment to prevent
@@ -1350,6 +1411,54 @@ mod querystring_tests {
     #[test]
     fn parse_qs_grouped_empty_returns_empty_map() {
         assert!(parse_query_pairs_grouped("").is_empty());
+    }
+
+    // ---------- is_absolute_url / is_relative_url ----------
+
+    #[test]
+    fn is_absolute_url_recognizes_https_and_mailto() {
+        assert!(is_absolute_url("https://example.com/"));
+        assert!(is_absolute_url("http://example.com"));
+        assert!(is_absolute_url("mailto:hi@example.com"));
+        assert!(is_absolute_url("ftp://files.example.org/"));
+    }
+
+    #[test]
+    fn is_absolute_url_flags_protocol_relative() {
+        assert!(is_absolute_url("//cdn.example.com/img.png"));
+    }
+
+    #[test]
+    fn is_absolute_url_flags_dangerous_schemes() {
+        // The predicate is "is absolute," not "is safe" — dangerous
+        // schemes still count as absolute. Caller pairs with
+        // url_has_allowed_host_and_scheme for the policy check.
+        assert!(is_absolute_url("javascript:alert(1)"));
+        assert!(is_absolute_url("data:text/html,<x>"));
+        assert!(is_absolute_url("file:///etc/passwd"));
+    }
+
+    #[test]
+    fn is_absolute_url_rejects_relative_paths() {
+        assert!(!is_absolute_url("/account"));
+        assert!(!is_absolute_url("page"));
+        assert!(!is_absolute_url("page?x=1"));
+        assert!(!is_absolute_url("/path:with-colon"));
+        assert!(!is_absolute_url(""));
+    }
+
+    #[test]
+    fn is_relative_url_is_inverse_of_absolute() {
+        assert!(is_relative_url("/account"));
+        assert!(is_relative_url(""));
+        assert!(!is_relative_url("https://example.com"));
+        assert!(!is_relative_url("//evil.com"));
+    }
+
+    #[test]
+    fn is_absolute_url_rejects_invalid_scheme_chars() {
+        // A `_` in the scheme position is not RFC 3986 valid.
+        assert!(!is_absolute_url("not_a_scheme:value"));
     }
 
     // ---------- escape_leading_slashes (Django parity) ----------
