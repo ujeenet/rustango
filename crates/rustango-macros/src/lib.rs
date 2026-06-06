@@ -3262,6 +3262,37 @@ fn inherent_impl_tokens(
                     #( #other_field_clones, )*
                 }
             }
+
+            /// Look up the row whose primary key equals `pk`. Returns
+            /// `Ok(None)` when no row matches; this is the
+            /// non-throwing counterpart of Django's `.get(pk=…)`
+            /// (which raises `DoesNotExist`). Eloquent `Model::find`
+            /// shape — accepts any value `Into<SqlValue>`.
+            ///
+            /// One-liner shortcut for the common
+            /// `QuerySet::<Self>::default().filter("<pk_field>", pk)
+            /// .limit(1).fetch_pool(pool).await?.into_iter().next()`
+            /// dance.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn find_pool(
+                pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<::core::option::Option<Self>, ::rustango::sql::ExecError>
+            {
+                use ::rustango::sql::FetcherPool as _;
+                let _pk_val: ::rustango::core::SqlValue = pk.into();
+                let mut _rows: ::std::vec::Vec<Self> =
+                    ::rustango::query::QuerySet::<Self>::default()
+                        .filter(::core::stringify!(#pk_ident), _pk_val)
+                        .limit(1)
+                        .fetch_pool(pool)
+                        .await?;
+                ::core::result::Result::Ok(_rows.into_iter().next())
+            }
         }
     } else {
         quote!()
