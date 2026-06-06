@@ -1193,77 +1193,18 @@ pub async fn insert_one_with_audit(
     query: &crate::core::InsertQuery,
     entry: &PendingEntry,
 ) -> Result<crate::sql::InsertReturningPool, crate::sql::ExecError> {
-    query.validate()?;
-    if query.returning.is_empty() {
-        return Err(crate::sql::ExecError::EmptyReturning);
-    }
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            let stmt = pool.dialect().compile_insert(query)?;
-            let mut tx = pg.begin().await?;
-            let mut q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_pg(q, v);
-            }
-            // INSERT … RETURNING — capture the row.
-            use sqlx::Executor as _;
-            let row = (&mut *tx).fetch_one(q).await?;
-            // Update the audit entry's entity_pk to the returned PK
-            // when available, so the snapshot's pk reflects the
-            // server-assigned value rather than the placeholder.
-            // For now we trust the caller-provided entry as-is.
-            emit_one(&mut *tx, entry).await?;
-            tx.commit().await?;
-            Ok(crate::sql::InsertReturningPool::PgRow(row))
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            // MySQL has no RETURNING — rewrite to a plain INSERT and
-            // read LAST_INSERT_ID() on the same connection.
-            let plain = crate::core::InsertQuery {
-                model: query.model,
-                columns: query.columns.clone(),
-                values: query.values.clone(),
-                returning: ::std::vec::Vec::new(),
-                on_conflict: query.on_conflict.clone(),
-            };
-            let stmt = pool.dialect().compile_insert(&plain)?;
-            let mut tx = my.begin().await?;
-            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_my(q, v);
-            }
-            q.execute(&mut *tx).await?;
-            use sqlx::Row as _;
-            let row = sqlx::query("SELECT LAST_INSERT_ID()")
-                .fetch_one(&mut *tx)
-                .await?;
-            let id_u64: u64 = row.try_get::<u64, _>(0)?;
-            let id = i64::try_from(id_u64).unwrap_or(i64::MAX);
-            emit_one_my(&mut *tx, entry).await?;
-            tx.commit().await?;
-            Ok(crate::sql::InsertReturningPool::MySqlAutoId(id))
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            // SQLite has full RETURNING (≥ 3.35) — same flow as PG.
-            let stmt = pool.dialect().compile_insert(query)?;
-            let mut tx = sq.begin().await?;
-            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
-                sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_sqlite(q, v);
-            }
-            use sqlx::Executor as _;
-            let row = (&mut *tx).fetch_one(q).await?;
-            emit_one_sqlite(&mut *tx, entry).await?;
-            tx.commit().await?;
-            Ok(crate::sql::InsertReturningPool::SqliteRow(row))
-        }
-    }
+    // #561 — was a 3-arm `match pool` block (~70 lines) that opened
+    // a per-backend tx, ran the INSERT via per-backend bind helpers,
+    // captured PG/SQLite RETURNING row vs MySQL LAST_INSERT_ID(),
+    // emitted the audit row, and committed. The framework's
+    // `insert_returning_tx` (executor/mod.rs:1456) already handles
+    // every backend's per-variant return shape; pair it with
+    // `transaction_pool` + `emit_one_tx` for the audit emit.
+    let mut tx = crate::sql::transaction_pool(pool).await?;
+    let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
+    emit_one_tx(&mut tx, entry).await?;
+    tx.commit().await?;
+    Ok(returning)
 }
 
 /// Local Postgres-typed bind helper — couldn't reuse
