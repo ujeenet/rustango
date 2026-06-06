@@ -691,21 +691,24 @@ impl ViewSetState {
 
 // ------------------------------------------------------------------ Serialization
 
-/// Re-export of the shared row-to-JSON helper. Lives in
-fn json_response(body: Value) -> Response {
+/// Build a JSON response with `status` and `body`. The 3-line
+/// `Response::builder()` chain repeated verbatim in [`json_response`]
+/// / [`json_created`] / [`json_error`] now lives here (#808 part 7).
+fn json_with_status(status: StatusCode, body: Value) -> Response {
     Response::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
         .unwrap()
 }
 
+/// Re-export of the shared row-to-JSON helper. Lives in
+fn json_response(body: Value) -> Response {
+    json_with_status(StatusCode::OK, body)
+}
+
 fn json_error(status: StatusCode, msg: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({"error": msg}).to_string()))
-        .unwrap()
+    json_with_status(status, json!({ "error": msg }))
 }
 
 /// #808 — was repeated verbatim in `handle_retrieve` / `update_inner`
@@ -735,11 +738,7 @@ fn pk_field_or_500(state: &ViewSetState) -> Result<&'static crate::core::FieldSc
 }
 
 fn json_created(body: Value) -> Response {
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap()
+    json_with_status(StatusCode::CREATED, body)
 }
 
 fn no_content() -> Response {
@@ -767,25 +766,24 @@ fn build_lookup_filter(
     let column = field.column;
     let predicate =
         |op: Op, value: SqlValue| Some(WhereExpr::Predicate(Filter { column, op, value }));
+    // #808 part 6 — six binary-comparison arms had byte-identical
+    // bodies modulo the `Op` constant. Map the lookup token to its
+    // `Op`, parse once, branch once.
+    let binary_op = match lookup.unwrap_or("exact") {
+        "exact" => Some(Op::Eq),
+        "ne" => Some(Op::Ne),
+        "gt" => Some(Op::Gt),
+        "gte" => Some(Op::Gte),
+        "lt" => Some(Op::Lt),
+        "lte" => Some(Op::Lte),
+        _ => None,
+    };
+    if let Some(op) = binary_op {
+        return parse_form_value(field, Some(raw))
+            .ok()
+            .and_then(|v| predicate(op, v));
+    }
     match lookup.unwrap_or("exact") {
-        "exact" => parse_form_value(field, Some(raw))
-            .ok()
-            .and_then(|v| predicate(Op::Eq, v)),
-        "ne" => parse_form_value(field, Some(raw))
-            .ok()
-            .and_then(|v| predicate(Op::Ne, v)),
-        "gt" => parse_form_value(field, Some(raw))
-            .ok()
-            .and_then(|v| predicate(Op::Gt, v)),
-        "gte" => parse_form_value(field, Some(raw))
-            .ok()
-            .and_then(|v| predicate(Op::Gte, v)),
-        "lt" => parse_form_value(field, Some(raw))
-            .ok()
-            .and_then(|v| predicate(Op::Lt, v)),
-        "lte" => parse_form_value(field, Some(raw))
-            .ok()
-            .and_then(|v| predicate(Op::Lte, v)),
         "in" | "not_in" => {
             let parts: Vec<SqlValue> = raw
                 .split(',')
