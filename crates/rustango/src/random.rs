@@ -104,6 +104,17 @@ pub const HEX_CHARS: &str = "0123456789abcdef";
 /// Uppercase hex `[0-9A-F]`.
 pub const UPPERCASE_HEX_CHARS: &str = "0123456789ABCDEF";
 
+/// Lowercase letters only `[a-z]` — useful for case-insensitive
+/// reference codes / coupon codes.
+pub const LOWERCASE_CHARS: &str = "abcdefghijklmnopqrstuvwxyz";
+
+/// Uppercase letters only `[A-Z]` — same use case, uppercase
+/// presentation.
+pub const UPPERCASE_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/// Mixed-case letters `[a-zA-Z]` (no digits).
+pub const LETTERS_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
 /// Generate a URL-safe random token of `length` characters — 6
 /// bits of entropy per char. Equivalent to
 /// `get_random_string(length, URL_SAFE_CHARS)` but slightly faster
@@ -166,6 +177,55 @@ pub fn random_hex(length: usize) -> String {
 #[must_use]
 pub fn random_alphanum(length: usize) -> String {
     get_random_string(length, ALPHANUM_CHARS)
+}
+
+/// Generate a random mixed-case letter string of `length` characters
+/// (`[a-zA-Z]`). No digits. Convenience wrapper for
+/// `get_random_string(length, LETTERS_CHARS)`.
+///
+/// ~5.7 bits of entropy per char (52-char alphabet) — `length = 23`
+/// is roughly 128 bits.
+///
+/// ```ignore
+/// use rustango::random::random_letters;
+/// let s = random_letters(8);
+/// assert_eq!(s.len(), 8);
+/// assert!(s.chars().all(|c| c.is_ascii_alphabetic()));
+/// ```
+#[must_use]
+pub fn random_letters(length: usize) -> String {
+    get_random_string(length, LETTERS_CHARS)
+}
+
+/// Generate a random lowercase-letter string of `length` characters
+/// (`[a-z]`). Convenience wrapper for
+/// `get_random_string(length, LOWERCASE_CHARS)`.
+///
+/// ~4.7 bits of entropy per char — `length = 28` is roughly 128
+/// bits.
+///
+/// ```ignore
+/// use rustango::random::random_lowercase;
+/// let s = random_lowercase(8);
+/// assert!(s.chars().all(|c| c.is_ascii_lowercase()));
+/// ```
+#[must_use]
+pub fn random_lowercase(length: usize) -> String {
+    get_random_string(length, LOWERCASE_CHARS)
+}
+
+/// Generate a random uppercase-letter string of `length` characters
+/// (`[A-Z]`). Convenience wrapper for
+/// `get_random_string(length, UPPERCASE_CHARS)`.
+///
+/// ```ignore
+/// use rustango::random::random_uppercase;
+/// let s = random_uppercase(8);
+/// assert!(s.chars().all(|c| c.is_ascii_uppercase()));
+/// ```
+#[must_use]
+pub fn random_uppercase(length: usize) -> String {
+    get_random_string(length, UPPERCASE_CHARS)
 }
 
 /// Generate a random numeric-only string of `length` digits
@@ -317,5 +377,36 @@ mod tests {
         assert!(random_hex(0).is_empty());
         assert!(random_alphanum(0).is_empty());
         assert!(random_digits(0).is_empty());
+        assert!(random_letters(0).is_empty());
+        assert!(random_lowercase(0).is_empty());
+        assert!(random_uppercase(0).is_empty());
+    }
+
+    #[test]
+    fn random_letters_mixed_case_only() {
+        let s = random_letters(40);
+        assert_eq!(s.chars().count(), 40);
+        assert!(s.chars().all(|c| c.is_ascii_alphabetic()));
+    }
+
+    #[test]
+    fn random_lowercase_only() {
+        let s = random_lowercase(40);
+        assert_eq!(s.chars().count(), 40);
+        assert!(s.chars().all(|c| c.is_ascii_lowercase()));
+    }
+
+    #[test]
+    fn random_uppercase_only() {
+        let s = random_uppercase(40);
+        assert_eq!(s.chars().count(), 40);
+        assert!(s.chars().all(|c| c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn letter_alphabet_counts() {
+        assert_eq!(LOWERCASE_CHARS.chars().count(), 26);
+        assert_eq!(UPPERCASE_CHARS.chars().count(), 26);
+        assert_eq!(LETTERS_CHARS.chars().count(), 52);
     }
 }
