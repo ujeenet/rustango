@@ -19,10 +19,27 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
 ### Fixed
 
 - **`uploads::save_uploads` chunk-by-chunk streaming with early-abort** (#565 closing [#421](https://github.com/ujeenet/rustango/issues/421)) — previously `field.bytes().await?` buffered the ENTIRE multipart body before bound-checking; a 100MB upload against a 5MB cap therefore still cost 100MB of memory. Now reads `field.chunk()` in a loop, short-circuits with `UploadError::TooLarge` the moment the next chunk would exceed `cfg.max_bytes`.
+- **Django utils / template-filter / validator parity sweep — PRs #619–#765 (147 PRs)**. Closes the `django.utils.*` + `template.defaultfilters` + `validators` parity surface end-to-end:
+  - **12 new public modules**: `random`, `base36`, `base62`, `lorem`, `http_date`, `http_methods`, `cookies`, `numberformat`, `dateparse`, `dateformat`, `timesince`, `dates`.
+  - **`text` (+34 helpers)** — Django `text` + Python `textwrap` parity: `dedent` / `indent` / `shorten` / `wrap_lines` / `truncate_middle` / `pluralize_word` / `dedent` / `escapejs` / `json_script` / `mask_email` / `mask_card` / `mask_phone` / `oxford_join` / `initials` / `yesno` / `avoid_wrapping` / `cut` / `normalize_whitespace` / `wordcount` / `linenumbers` / `ljust` / `rjust` / `center` / `get_digit` / `pluralize` / `truncate_html_chars` / `truncate_html_words` / `pascal_to_snake` / `camel_case_to_spaces` / `unescape_string_literal` / `format_html` / `format_html_join` / `urlize` / `phone2numeric` / `unescape_html_entities`.
+  - **`validators` (+35)** — Django `validators` parity: `int_list_validator`, `validate_email_with_name`, country / currency / language / postal / IPv4 / IPv6 / filepath validators, plus 26 `is_*` boolean companions for filter chains.
+  - **`humanize` (+10 public Rust)** — `intword`, `naturalsize`, `naturalsize_si`, `ordinal`, `apnumber`, `naturaltime`, `naturalday`, `intcomma`, `format_number`, `format_currency` all promoted from Tera-only to public Rust + paired Tera filters.
+  - **`dateformat` (+6 codes + 2 Tera filters)** — `z` day-of-year, AP-style `N` month abbreviation (correctness fix), `P` / `f` / `W` / `t` / `o` code coverage, plus `dateformat` / `timeformat` Tera filters that wrap `format_datetime` for `{{ ts | dateformat("Y-m-d") }}` Django parity.
+  - **`url_codec` (+6 incl. `uri_to_iri`, `filepath_to_uri`, `urlsafe_base64_encode/decode`)** + **`urls::escape_leading_slashes`** open-redirect defense.
+  - **`default_filters` (+13 Tera filter wrappers + 1 widthratio function)** — `striptags`, `capfirst`, `addslashes`, `filesizeformat`, `length_is`, `make_list`, `pprint`, `urlizetrunc`, `unordered_list`, `json_script`, `widthratio`, plus the `lorem()` Tera function from the `lorem` module.
+  - **`random` family**: `random_hex` / `random_alphanum` / `random_digits` / `random_letters` / `random_lowercase` / `random_uppercase` convenience wrappers + 7 alphabet constants.
+  - **`signals`** — `m2m_changed` (#410), `pre_migrate` / `post_migrate` (#411), `request_started` / `request_finished` (#412), `got_request_exception` (#413), `user_logged_in` / `user_logged_out` / `user_login_failed` (#414), `setting_changed` (#415) — full Django signal taxonomy.
+  - **Misc gap-closure**: `manage migrate --squash` v0.29 + `manage makemigrations --merge` (#346) + `manage check --deploy` (#406 v0.29) + Django `humanize::naturaltime` / `naturalday` / `intcomma` (#685/#686) + `dateparse::duration_iso_string` (#687) + `crypto::salted_hmac` (#647) + `cache::has_key` / `decr` / `get_or(key, default)` (#620–#622) + email attachment support (#621) + SMTP timeout settings (#626).
+
+### Fixed
+
+- **`fk_on_delete_live::ddl_renders_on_delete_clause`** (#729) — updated to inspect `create_table_sql_with_dialect` after #720 moved SQLite FK emission from post-hoc `ALTER ADD CONSTRAINT` to inline. The integration test was checking the now-empty `create_constraints_sql_with_dialect` output.
+- **`dateformat` `N` code** (#753) — was emitting day-of-year; Django's `N` is the AP-style month abbreviation ("Jan.", "March", "Sept."). Added `z` (the correct day-of-year code) and routed `N` through `dates::month_ap`.
 
 ### Docs
 
 - **Django-parity audit resync** (#567) — top summary table updated against the per-section truths after three months of incremental "MISSING → SHIPPED" flips. Totals: SHIPPED 205 → 243 (+38), PARTIAL 65 → 49 (−16), MISSING 84 → 67 (−17). Coverage: 58% → 68% full; partial+shipped: 77% → 81%.
+- **`docs/django-parity-audit-2026-05-21.md`** — refreshed footer through PR #765. Section 17 (Signals) stale-summary fix (#751). Audit utility counts now reflect 477 SHIPPED rows total.
 
 ## [0.42.0] — Django-parity gap-closure batch
 
