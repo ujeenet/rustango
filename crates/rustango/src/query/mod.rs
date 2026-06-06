@@ -912,6 +912,48 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Filter to only rows that have NOT been soft-deleted.
+    ///
+    /// When `T` carries `#[rustango(soft_delete)]` on a nullable
+    /// `DateTime<Utc>` column, AND-joins `<col> IS NULL` into the
+    /// queryset's accumulated WHERE clause. When the model has no
+    /// soft-delete column, the call is a no-op (matches
+    /// [`crate::soft_delete::active_filter`]'s `None` shape — keeps
+    /// templated code that wraps every fetch in `.active()`
+    /// compiling regardless of whether a particular model is
+    /// soft-delete-enabled). Issue #821.
+    #[must_use]
+    pub fn active(self) -> Self {
+        match crate::soft_delete::active_filter(T::SCHEMA) {
+            Some(expr) => self.where_raw(expr),
+            None => self,
+        }
+    }
+
+    /// Filter to ONLY soft-deleted rows. Mirror of [`Self::active`]
+    /// — useful for "Trash" admin pages, restore flows, etc.
+    /// When the model has no soft-delete column the call is a
+    /// no-op. Eloquent `onlyTrashed`. Issue #821.
+    #[must_use]
+    pub fn only_trashed(self) -> Self {
+        match crate::soft_delete::trashed_filter(T::SCHEMA) {
+            Some(expr) => self.where_raw(expr),
+            None => self,
+        }
+    }
+
+    /// Explicit "include both active and trashed rows" no-op
+    /// marker. Today every `QuerySet` defaults to including trashed
+    /// rows (auto-scoping a.k.a. global-scope tracking is sibling
+    /// issue [#820](https://github.com/ujeenet/rustango/issues/820));
+    /// `with_trashed()` exists as forward-compat for code that wants
+    /// to declare intent now and stay correct when auto-scoping
+    /// lands. Eloquent `withTrashed`. Issue #821.
+    #[must_use]
+    pub fn with_trashed(self) -> Self {
+        self
+    }
+
     /// or a composed [`TypedExpr`] (`User::id.eq(1).or(User::id.eq(2))`).
     /// Every `.where_()` call AND-joins its argument into the
     /// queryset's accumulated WHERE clause.
