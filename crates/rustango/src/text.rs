@@ -1947,6 +1947,69 @@ pub fn pascal_to_snake(value: &str) -> String {
     with_spaces.replace(' ', "_")
 }
 
+/// Convert a snake_case identifier to PascalCase. Inverse of
+/// [`pascal_to_snake`]. Useful for ORM-style class-name generation
+/// from table names, JSON tag conversion, and serializer
+/// auto-naming.
+///
+/// Empty segments (consecutive underscores, leading / trailing
+/// underscores) are skipped — `"_blog__post_"` → `"BlogPost"`.
+///
+/// ```
+/// use rustango::text::snake_to_pascal;
+/// assert_eq!(snake_to_pascal("blog_post"), "BlogPost");
+/// assert_eq!(snake_to_pascal("http_request"), "HttpRequest");
+/// assert_eq!(snake_to_pascal("user"), "User");
+/// assert_eq!(snake_to_pascal(""), "");
+/// // Consecutive / edge underscores ignored.
+/// assert_eq!(snake_to_pascal("_blog__post_"), "BlogPost");
+/// ```
+#[must_use]
+pub fn snake_to_pascal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for word in value.split('_').filter(|w| !w.is_empty()) {
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            for ch in first.to_uppercase() {
+                out.push(ch);
+            }
+            for ch in chars {
+                for c in ch.to_lowercase() {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Convert a snake_case identifier to camelCase (first word
+/// lowercase, subsequent words capitalized). Useful for emitting
+/// JavaScript / JSON keys from Rust snake_case fields without
+/// touching the Serde rename plumbing.
+///
+/// ```
+/// use rustango::text::snake_to_camel;
+/// assert_eq!(snake_to_camel("blog_post"), "blogPost");
+/// assert_eq!(snake_to_camel("http_request_handler"), "httpRequestHandler");
+/// assert_eq!(snake_to_camel("user"), "user");
+/// assert_eq!(snake_to_camel(""), "");
+/// ```
+#[must_use]
+pub fn snake_to_camel(value: &str) -> String {
+    let pascal = snake_to_pascal(value);
+    let mut chars = pascal.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = String::with_capacity(pascal.len());
+    for c in first.to_lowercase() {
+        out.push(c);
+    }
+    out.extend(chars);
+    out
+}
+
 /// Django-parity
 /// [`django.utils.text.camel_case_to_spaces(value)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.camel_case_to_spaces) —
 /// convert a CamelCase identifier into lowercase space-separated
@@ -3858,6 +3921,50 @@ mod tests {
         assert_eq!(pascal_to_snake("a"), "a");
         // Pure acronym (no word follows).
         assert_eq!(pascal_to_snake("HTTP"), "http");
+    }
+
+    // -------- snake_to_pascal --------
+
+    #[test]
+    fn snake_to_pascal_basic() {
+        assert_eq!(snake_to_pascal("blog_post"), "BlogPost");
+        assert_eq!(snake_to_pascal("http_request"), "HttpRequest");
+        assert_eq!(snake_to_pascal("user"), "User");
+    }
+
+    #[test]
+    fn snake_to_pascal_empty_segments_skipped() {
+        assert_eq!(snake_to_pascal(""), "");
+        assert_eq!(snake_to_pascal("_blog__post_"), "BlogPost");
+        assert_eq!(snake_to_pascal("___"), "");
+    }
+
+    #[test]
+    fn snake_to_pascal_already_titled_input_normalized() {
+        // Input has uppercase; we still get a clean PascalCase out —
+        // each segment is title-cased after lowering.
+        assert_eq!(snake_to_pascal("BLOG_POST"), "BlogPost");
+        assert_eq!(snake_to_pascal("blog_POST"), "BlogPost");
+    }
+
+    // -------- snake_to_camel --------
+
+    #[test]
+    fn snake_to_camel_basic() {
+        assert_eq!(snake_to_camel("blog_post"), "blogPost");
+        assert_eq!(snake_to_camel("http_request_handler"), "httpRequestHandler");
+        assert_eq!(snake_to_camel("user"), "user");
+        assert_eq!(snake_to_camel(""), "");
+    }
+
+    #[test]
+    fn snake_to_camel_inverts_pascal_after_lowercase_first() {
+        let pascal = snake_to_pascal("blog_post");
+        let camel = snake_to_camel("blog_post");
+        // First char lowercased; rest matches pascal[1..].
+        assert!(pascal.starts_with('B'));
+        assert!(camel.starts_with('b'));
+        assert_eq!(&pascal[1..], &camel[1..]);
     }
 
     // -------- unescape_html_entities --------
