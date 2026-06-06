@@ -1389,6 +1389,13 @@ where
     let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
     let _ = (select_cols_pg, select_cols_my, select_cols_sqlite);
     let stmt = pool.dialect().compile_update(update_query)?;
+    // #561 — the pre-update SELECT-decode-row genuinely differs per
+    // backend (PgReturningRow / MyReturningRow / SqliteReturningRow
+    // are different concrete types, so each arm has to call its own
+    // `decode_before_*` closure). But the UPDATE + emit + commit suffix
+    // is identical, so wrap the per-backend transaction into a
+    // `PoolTx::<Backend>(tx)` and finish through `raw_execute_tx` +
+    // `emit_one_tx` for the shared trailer.
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -1404,22 +1411,17 @@ where
                     Ok(Some(row)) => Some(decode_before_pg(&row)),
                     _ => None,
                 };
-            let mut q = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_pg(q, v);
-            }
-            q.execute(&mut *tx).await?;
-            if let Some(before) = before_pairs {
-                let entry = PendingEntry {
-                    entity_table,
-                    entity_pk,
-                    operation: AuditOp::Update,
-                    source: current_source(),
-                    changes: diff_changes(&before, &after_pairs),
-                };
-                emit_one(&mut *tx, &entry).await?;
-            }
-            tx.commit().await?;
+            let mut wrapped = crate::sql::PoolTx::Postgres(tx);
+            finish_update_with_audit_diff(
+                &mut wrapped,
+                &stmt,
+                before_pairs,
+                &after_pairs,
+                entity_table,
+                &entity_pk,
+            )
+            .await?;
+            wrapped.commit().await?;
             Ok(())
         }
         #[cfg(feature = "mysql")]
@@ -1436,22 +1438,17 @@ where
                     Ok(Some(row)) => Some(decode_before_my(&row)),
                     _ => None,
                 };
-            let mut q = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_my(q, v);
-            }
-            q.execute(&mut *tx).await?;
-            if let Some(before) = before_pairs {
-                let entry = PendingEntry {
-                    entity_table,
-                    entity_pk,
-                    operation: AuditOp::Update,
-                    source: current_source(),
-                    changes: diff_changes(&before, &after_pairs),
-                };
-                emit_one_my(&mut *tx, &entry).await?;
-            }
-            tx.commit().await?;
+            let mut wrapped = crate::sql::PoolTx::Mysql(tx);
+            finish_update_with_audit_diff(
+                &mut wrapped,
+                &stmt,
+                before_pairs,
+                &after_pairs,
+                entity_table,
+                &entity_pk,
+            )
+            .await?;
+            wrapped.commit().await?;
             Ok(())
         }
         #[cfg(feature = "sqlite")]
@@ -1468,23 +1465,45 @@ where
                     Ok(Some(row)) => Some(decode_before_sqlite(&row)),
                     _ => None,
                 };
-            let mut q = sqlx::query(&stmt.sql);
-            for v in stmt.params {
-                q = bind_value_sqlite(q, v);
-            }
-            q.execute(&mut *tx).await?;
-            if let Some(before) = before_pairs {
-                let entry = PendingEntry {
-                    entity_table,
-                    entity_pk,
-                    operation: AuditOp::Update,
-                    source: current_source(),
-                    changes: diff_changes(&before, &after_pairs),
-                };
-                emit_one_sqlite(&mut *tx, &entry).await?;
-            }
-            tx.commit().await?;
+            let mut wrapped = crate::sql::PoolTx::Sqlite(tx);
+            finish_update_with_audit_diff(
+                &mut wrapped,
+                &stmt,
+                before_pairs,
+                &after_pairs,
+                entity_table,
+                &entity_pk,
+            )
+            .await?;
+            wrapped.commit().await?;
             Ok(())
         }
     }
+}
+
+/// Shared trailer for `save_one_with_audit_diff` arms: run the
+/// UPDATE that was already compiled, then emit the audit row with
+/// the diff if a `before_pairs` snapshot was captured. Lives outside
+/// the per-arm body so the only per-arm code is the pre-update
+/// SELECT (the row decode genuinely differs by backend).
+async fn finish_update_with_audit_diff(
+    tx: &mut crate::sql::PoolTx<'_>,
+    stmt: &crate::sql::CompiledStatement,
+    before_pairs: Option<Vec<(&'static str, serde_json::Value)>>,
+    after_pairs: &[(&'static str, serde_json::Value)],
+    entity_table: &'static str,
+    entity_pk: &str,
+) -> Result<(), crate::sql::ExecError> {
+    crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params.clone()).await?;
+    if let Some(before) = before_pairs {
+        let entry = PendingEntry {
+            entity_table,
+            entity_pk: entity_pk.to_owned(),
+            operation: AuditOp::Update,
+            source: current_source(),
+            changes: diff_changes(&before, after_pairs),
+        };
+        emit_one_tx(tx, &entry).await?;
+    }
+    Ok(())
 }
