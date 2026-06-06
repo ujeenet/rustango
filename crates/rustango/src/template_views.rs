@@ -637,18 +637,14 @@ async fn handle_list(
         &state.vs.search_fields,
         &params,
     );
+    // #562 — struct-update over SelectQuery::new for the list+filter
+    // query (custom WHERE + paginate).
     let select_q = SelectQuery {
-        model: state.vs.schema,
         where_clause: where_clause.clone(),
-        search: None,
-        joins: vec![],
         order_by,
         limit: Some(page_size),
         offset: Some(offset),
-        lock_mode: None,
-        compound: vec![],
-        projection: None,
-        distinct: None,
+        ..SelectQuery::new(state.vs.schema)
     };
     let count_q = crate::core::CountQuery {
         model: state.vs.schema,
@@ -3410,18 +3406,14 @@ mod tenant {
             &state.vs.search_fields,
             &params,
         );
+        // #562 — struct-update over SelectQuery::new for the
+        // tenant-side list+filter query (custom WHERE + paginate).
         let select_q = SelectQuery {
-            model: state.vs.schema,
             where_clause: where_clause.clone(),
-            search: None,
-            joins: vec![],
             order_by,
             limit: Some(page_size),
             offset: Some(offset),
-            lock_mode: None,
-            compound: vec![],
-            projection: None,
-            distinct: None,
+            ..SelectQuery::new(state.vs.schema)
         };
         let count_q = crate::core::CountQuery {
             model: state.vs.schema,
