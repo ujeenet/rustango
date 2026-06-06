@@ -847,6 +847,52 @@ pub fn pluralize(count: i64, suffix_arg: &str) -> String {
     }
 }
 
+/// Truncate `s` to `max_chars` by inserting `placeholder` in the
+/// middle and keeping leading + trailing characters around it.
+/// Common pattern for ID / hash / path / commit-SHA display:
+///
+/// ```
+/// use rustango::text::truncate_middle;
+/// // Long commit SHA → short prefix + ellipsis + short suffix.
+/// assert_eq!(
+///     truncate_middle("0123456789abcdef0123456789abcdef", 10, "…"),
+///     "01234…cdef",
+/// );
+/// ```
+///
+/// If `s.chars().count() <= max_chars` the input is returned
+/// unchanged. If `max_chars` is too small for even one head/tail
+/// char around the placeholder, returns just the placeholder.
+///
+/// Character-counted (not byte-counted) so multibyte glyphs don't
+/// truncate in the middle of a UTF-8 sequence. The split favors
+/// the leading side when the budget is odd (head gets the extra
+/// char).
+#[must_use]
+pub fn truncate_middle(s: &str, max_chars: usize, placeholder: &str) -> String {
+    let total = s.chars().count();
+    if total <= max_chars {
+        return s.to_owned();
+    }
+    let placeholder_len = placeholder.chars().count();
+    if max_chars <= placeholder_len + 1 {
+        return placeholder.to_owned();
+    }
+    let budget = max_chars - placeholder_len;
+    let head_len = budget.div_ceil(2);
+    let tail_len = budget - head_len;
+    let head: String = s.chars().take(head_len).collect();
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}{placeholder}{tail}")
+}
+
 /// Pick the singular or plural form of a word based on `count`.
 /// Handy for non-i18n call sites where you'd otherwise pair
 /// [`pluralize`] with format-args:
@@ -4166,6 +4212,44 @@ mod tests {
     fn pluralize_large_counts() {
         assert_eq!(pluralize(i64::MAX, ""), "s");
         assert_eq!(pluralize(i64::MIN, ""), "s");
+    }
+
+    // -------- truncate_middle --------
+
+    #[test]
+    fn truncate_middle_basic_shape() {
+        assert_eq!(truncate_middle("abcdefghij", 7, "..."), "ab...ij");
+    }
+
+    #[test]
+    fn truncate_middle_returns_input_unchanged_when_short_enough() {
+        assert_eq!(truncate_middle("short", 10, "..."), "short");
+        assert_eq!(truncate_middle("exact", 5, "..."), "exact");
+    }
+
+    #[test]
+    fn truncate_middle_falls_back_to_placeholder_when_too_tight() {
+        // max_chars <= placeholder.len() + 1 → just placeholder.
+        assert_eq!(truncate_middle("hello world", 3, "..."), "...");
+        assert_eq!(truncate_middle("hello world", 4, "..."), "...");
+    }
+
+    #[test]
+    fn truncate_middle_favors_head_on_odd_budget() {
+        // budget=5 → head=3, tail=2.
+        let out = truncate_middle("0123456789", 6, ".");
+        // 3 head + 1 placeholder + 2 tail = 6 chars.
+        assert_eq!(out, "012.89");
+        assert_eq!(out.chars().count(), 6);
+    }
+
+    #[test]
+    fn truncate_middle_handles_multibyte_glyphs() {
+        // "héllo wörld" — multibyte chars; char-count must be honored.
+        let s = "abc🦀def🦀ghi";
+        let out = truncate_middle(s, 7, "…");
+        // Must be exactly 7 chars (not bytes).
+        assert_eq!(out.chars().count(), 7);
     }
 
     // -------- pluralize_word --------
