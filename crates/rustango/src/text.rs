@@ -1430,6 +1430,57 @@ pub fn dedent(text: &str) -> String {
     out
 }
 
+/// Python `textwrap.indent` parity — prepend `prefix` to every
+/// non-blank line of `text`.
+///
+/// Blank lines (empty or all-whitespace) pass through verbatim —
+/// don't pad them with the prefix. This is Python's default
+/// behavior and the right shape for most use cases (don't visually
+/// shift the gap between paragraphs).
+///
+/// ```
+/// use rustango::text::indent;
+/// assert_eq!(indent("a\nb", "  "), "  a\n  b");
+/// // Blank line is not prefixed.
+/// assert_eq!(indent("a\n\nb", "  "), "  a\n\n  b");
+/// // Empty input passes through.
+/// assert_eq!(indent("", "  "), "");
+/// ```
+///
+/// Pairs cleanly with [`dedent`]:
+/// `indent(dedent(s), prefix)` re-indents a previously-dedented
+/// block with a chosen prefix (e.g. `"// "` for a Rust comment
+/// block, `"    "` for a four-space code block).
+///
+/// ```
+/// use rustango::text::{dedent, indent};
+/// let original = "    a\n    b";
+/// // Strip + re-indent with a different prefix.
+/// let re_indented = indent(&dedent(original), "// ");
+/// assert_eq!(re_indented, "// a\n// b");
+/// ```
+#[must_use]
+pub fn indent(text: &str, prefix: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(text.len() + prefix.len() * 4);
+    let mut first = true;
+    for line in text.split('\n') {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        // Blank lines (empty or all-whitespace) pass through
+        // without the prefix.
+        if !line.is_empty() && !line.chars().all(|c| c.is_whitespace()) {
+            out.push_str(prefix);
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// Django-parity
 /// [`django.utils.text.wrap(text, width)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.text.wrap) —
 /// word-wrap `text` to a column width of `width` characters,
@@ -3636,6 +3687,50 @@ mod tests {
     fn dedent_preserves_trailing_newline() {
         let input = "    a\n    b\n";
         assert_eq!(dedent(input), "a\nb\n");
+    }
+
+    // -------- indent --------
+
+    #[test]
+    fn indent_basic() {
+        assert_eq!(indent("a\nb", "  "), "  a\n  b");
+        assert_eq!(indent("hello", "> "), "> hello");
+    }
+
+    #[test]
+    fn indent_blank_lines_pass_through_unchanged() {
+        assert_eq!(indent("a\n\nb", "  "), "  a\n\n  b");
+        // All-whitespace lines also pass through.
+        assert_eq!(indent("a\n   \nb", "// "), "// a\n   \n// b");
+    }
+
+    #[test]
+    fn indent_empty_input() {
+        assert_eq!(indent("", "  "), "");
+    }
+
+    #[test]
+    fn indent_empty_prefix_is_noop() {
+        assert_eq!(indent("a\nb", ""), "a\nb");
+    }
+
+    #[test]
+    fn indent_round_trips_with_dedent() {
+        let original = "    a\n    b\n    c";
+        let dedented = dedent(original);
+        assert_eq!(indent(&dedented, "    "), original);
+    }
+
+    #[test]
+    fn indent_can_re_indent_with_different_prefix() {
+        let original = "    a\n    b";
+        let re_indented = indent(&dedent(original), "// ");
+        assert_eq!(re_indented, "// a\n// b");
+    }
+
+    #[test]
+    fn indent_preserves_trailing_newline() {
+        assert_eq!(indent("a\nb\n", "  "), "  a\n  b\n");
     }
 
     // -------- yesno --------
