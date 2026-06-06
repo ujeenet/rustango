@@ -3254,6 +3254,116 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Atomically increment the integer column `col` by
+            /// `by` for this row. Equivalent to
+            /// `UPDATE <table> SET <col> = <col> + $1 WHERE <pk> = $2`.
+            /// Eloquent `Model::increment($col, $by)` / Django
+            /// `Model.objects.filter(pk=…).update(col=F('col')+$by)`
+            /// parity.
+            ///
+            /// **Doesn't mutate `self`** — the in-memory copy is now
+            /// stale; call [`Self::refresh_from_db_pool`] /
+            /// [`Self::fresh_pool`] to re-sync. Returns the rows-
+            /// affected count (0 when the PK doesn't match any row,
+            /// 1 on success).
+            ///
+            /// `col` is the Rust field name as a string; unknown
+            /// fields surface as `UnknownField` at runtime. Negative
+            /// `by` values atomically decrement (see also
+            /// [`Self::decrement_pool`]).
+            ///
+            /// # Errors
+            /// As [`UpdaterPool::execute_pool`].
+            ///
+            /// [`UpdaterPool::execute_pool`]: rustango::sql::UpdaterPool::execute_pool
+            pub async fn increment_pool(
+                &self,
+                col: &str,
+                by: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                use ::rustango::sql::UpdaterPool as _;
+                // Resolve `col` to the `&'static str` column name via
+                // the schema so `F(col_static)` can construct an
+                // `Expr::Column`. Unknown fields surface as
+                // `QueryError::UnknownField` at `compile()` time
+                // (we still go through `set_expr` for the rhs so the
+                // builder's normal validation chain runs); we also
+                // up-front-validate here to fail fast.
+                let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
+                    .field(col)
+                    .ok_or_else(|| {
+                        ::rustango::sql::ExecError::Query(
+                            ::rustango::core::QueryError::UnknownField {
+                                model: <Self as ::rustango::core::Model>::SCHEMA.name,
+                                field: ::std::string::ToString::to_string(col),
+                            },
+                        )
+                    })?
+                    .column;
+                let _pk_val: ::rustango::core::SqlValue = ::core::convert::Into::into(
+                    ::core::clone::Clone::clone(&self.#pk_ident),
+                );
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(::core::stringify!(#pk_ident), _pk_val)
+                    .update()
+                    .set_expr(
+                        col,
+                        ::rustango::core::F(_col_static)
+                            + ::rustango::core::Expr::Literal(
+                                ::rustango::core::SqlValue::I64(by),
+                            ),
+                    )
+                    .execute_pool(pool)
+                    .await
+            }
+
+            /// Sibling of [`Self::increment_pool`] — atomically
+            /// decrement by `by`. Eloquent `Model::decrement($col,
+            /// $by)` parity.
+            ///
+            /// Equivalent to `increment_pool(col, -by, pool)`. Keeping
+            /// both spellings improves call-site readability:
+            /// `counter.decrement_pool("retries", 1, &pool)` reads
+            /// better than `counter.increment_pool("retries", -1, &pool)`.
+            ///
+            /// # Errors
+            /// As [`Self::increment_pool`].
+            pub async fn decrement_pool(
+                &self,
+                col: &str,
+                by: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                use ::rustango::sql::UpdaterPool as _;
+                let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
+                    .field(col)
+                    .ok_or_else(|| {
+                        ::rustango::sql::ExecError::Query(
+                            ::rustango::core::QueryError::UnknownField {
+                                model: <Self as ::rustango::core::Model>::SCHEMA.name,
+                                field: ::std::string::ToString::to_string(col),
+                            },
+                        )
+                    })?
+                    .column;
+                let _pk_val: ::rustango::core::SqlValue = ::core::convert::Into::into(
+                    ::core::clone::Clone::clone(&self.#pk_ident),
+                );
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(::core::stringify!(#pk_ident), _pk_val)
+                    .update()
+                    .set_expr(
+                        col,
+                        ::rustango::core::F(_col_static)
+                            - ::rustango::core::Expr::Literal(
+                                ::rustango::core::SqlValue::I64(by),
+                            ),
+                    )
+                    .execute_pool(pool)
+                    .await
+            }
+
             /// Re-SELECT this row by its primary key and return a
             /// **new** instance with the freshly-fetched fields.
             /// Eloquent `Model::fresh()` parity — non-mutating
