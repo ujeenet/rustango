@@ -3285,7 +3285,7 @@ fn write_expr_compare(
             b.sql.push(')');
             Ok(())
         }
-        Op::Between => {
+        Op::Between | Op::NotBetween => {
             let Expr::Literal(SqlValue::List(bounds)) = rhs else {
                 return Err(SqlError::BetweenRequiresTwoElementList);
             };
@@ -3293,7 +3293,11 @@ fn write_expr_compare(
                 return Err(SqlError::BetweenRequiresTwoElementList);
             }
             write_expr(b, lhs, None)?;
-            b.sql.push_str(" BETWEEN ");
+            b.sql.push_str(if matches!(op, Op::NotBetween) {
+                " NOT BETWEEN "
+            } else {
+                " BETWEEN "
+            });
             b.push_param_typed(bounds[0].clone(), None);
             b.sql.push_str(" AND ");
             b.push_param_typed(bounds[1].clone(), None);
@@ -3615,7 +3619,7 @@ fn write_filter(
             }
             b.sql.push(')');
         }
-        Op::Between => {
+        Op::Between | Op::NotBetween => {
             let SqlValue::List(bounds) = &filter.value else {
                 return Err(SqlError::BetweenRequiresTwoElementList);
             };
@@ -3623,7 +3627,11 @@ fn write_filter(
                 return Err(SqlError::BetweenRequiresTwoElementList);
             }
             b.sql.push_str(&qualified_col);
-            b.sql.push_str(" BETWEEN ");
+            b.sql.push_str(if matches!(filter.op, Op::NotBetween) {
+                " NOT BETWEEN "
+            } else {
+                " BETWEEN "
+            });
             b.push_param_typed(bounds[0].clone(), cast);
             b.sql.push_str(" AND ");
             b.push_param_typed(bounds[1].clone(), cast);
@@ -3760,6 +3768,7 @@ fn op_label(op: Op) -> &'static str {
         Op::ILike => "ILIKE",
         Op::NotILike => "NOT ILIKE",
         Op::Between => "BETWEEN",
+        Op::NotBetween => "NOT BETWEEN",
         Op::IsNull => "IS NULL",
         Op::IsDistinctFrom => "IS DISTINCT FROM",
         Op::IsNotDistinctFrom => "IS NOT DISTINCT FROM",

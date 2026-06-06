@@ -31,6 +31,10 @@ pub enum Op {
     /// Range check. The bound value must be `SqlValue::List([lo, hi])`.
     /// Emits `col BETWEEN $lo AND $hi`.
     Between,
+    /// Negated range check. Bound value shape matches [`Between`]
+    /// (`SqlValue::List([lo, hi])`). Emits `col NOT BETWEEN $lo AND
+    /// $hi`. Eloquent `whereNotBetween` parity.
+    NotBetween,
     /// Compares against `NULL`. The bound value must be `SqlValue::Bool` —
     /// `true` means `IS NULL`, `false` means `IS NOT NULL`.
     IsNull,

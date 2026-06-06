@@ -832,6 +832,7 @@ impl<T: Model> QuerySet<T> {
     /// | `__not_in` | `<col> NOT IN (...)` | value must be `SqlValue::List`. Eloquent `whereNotIn` parity. |
     /// | `__isnull` | `<col> IS NULL` / `IS NOT NULL` | value must be `bool` |
     /// | `__between` / `__range` | `<col> BETWEEN ? AND ?` | value must be 2-element `SqlValue::List` |
+    /// | `__not_between` / `__not_range` | `<col> NOT BETWEEN ? AND ?` | value must be 2-element `SqlValue::List`. Eloquent `whereNotBetween` parity. |
     /// | `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` | `EXTRACT(<part> FROM <col>) = ?` | scalar value matches the date part (issue #829). Composes with trailing `__gte` / `__lt` / etc. SQLite-unsupported parts (e.g. quarter) error consistently with the underlying fn. |
     /// | `__date` | `DATE(<col>) = ?` | value is a `chrono::NaiveDate`; strips the time component before comparison. |
     ///
@@ -1755,7 +1756,7 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
             }
             Ok(pair(field, Op::IsNull, value))
         }
-        "between" | "range" => {
+        "between" | "range" | "not_between" | "not_range" => {
             match &value {
                 SqlValue::List(items) if items.len() == 2 => {}
                 SqlValue::List(_) => {
@@ -1775,7 +1776,14 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
                     });
                 }
             }
-            Ok(pair(field, Op::Between, value))
+            // Eloquent `whereNotBetween` parity — `__not_between` /
+            // `__not_range` flip the predicate to `NOT BETWEEN`.
+            let op = if matches!(suffix, "not_between" | "not_range") {
+                Op::NotBetween
+            } else {
+                Op::Between
+            };
+            Ok(pair(field, op, value))
         }
         "regex" | "iregex" => {
             if !matches!(value, SqlValue::String(_)) {
