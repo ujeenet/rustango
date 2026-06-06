@@ -101,14 +101,10 @@ async fn filtered_prefetch_skips_unpublished_children() {
     // Child queryset: only published posts.
     let child_qs = QuerySet::<Post>::default().filter("published", true);
 
-    let groups: Vec<(Author, Vec<Post>)> = fetch_with_prefetch_filtered::<Author, Post>(
-        Author::objects(),
-        "author",
-        child_qs,
-        &pool,
-    )
-    .await
-    .expect("prefetch filtered");
+    let groups: Vec<(Author, Vec<Post>)> =
+        fetch_with_prefetch_filtered::<Author, Post>(Author::objects(), "author", child_qs, &pool)
+            .await
+            .expect("prefetch filtered");
 
     assert_eq!(groups.len(), 2, "two authors");
     for (author, posts) in &groups {
@@ -139,14 +135,10 @@ async fn filtered_prefetch_preserves_user_order_by() {
         .filter("published", true)
         .order_by(&[("created", false)]);
 
-    let groups: Vec<(Author, Vec<Post>)> = fetch_with_prefetch_filtered::<Author, Post>(
-        Author::objects(),
-        "author",
-        child_qs,
-        &pool,
-    )
-    .await
-    .expect("prefetch filtered");
+    let groups: Vec<(Author, Vec<Post>)> =
+        fetch_with_prefetch_filtered::<Author, Post>(Author::objects(), "author", child_qs, &pool)
+            .await
+            .expect("prefetch filtered");
 
     // Find Ada's group; her published children should be ordered by
     // `created` ASC: Engine notes (100) before Poems on iteration (200).
@@ -171,14 +163,10 @@ async fn unfiltered_child_queryset_falls_back_to_every_child() {
 
     let child_qs = QuerySet::<Post>::default(); // no filters
 
-    let groups: Vec<(Author, Vec<Post>)> = fetch_with_prefetch_filtered::<Author, Post>(
-        Author::objects(),
-        "author",
-        child_qs,
-        &pool,
-    )
-    .await
-    .expect("prefetch filtered");
+    let groups: Vec<(Author, Vec<Post>)> =
+        fetch_with_prefetch_filtered::<Author, Post>(Author::objects(), "author", child_qs, &pool)
+            .await
+            .expect("prefetch filtered");
 
     let by_name: std::collections::HashMap<String, usize> = groups
         .iter()
