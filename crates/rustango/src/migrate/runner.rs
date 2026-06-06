@@ -15,7 +15,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::core::{inventory, ModelEntry, ModelSchema};
-use crate::sql::sqlx::{self, Row};
+use crate::sql::sqlx;
+#[cfg(feature = "postgres")]
+use crate::sql::sqlx::Row;
 // PG-typed shims below import these; sqlite/mysql-only builds get
 // just the `_pool` entry points.
 #[cfg(feature = "postgres")]

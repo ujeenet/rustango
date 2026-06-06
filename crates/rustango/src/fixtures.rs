@@ -33,7 +33,6 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::sql::sqlx;
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
 use crate::sql::Pool;

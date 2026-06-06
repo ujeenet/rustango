@@ -421,7 +421,6 @@ pub async fn has_perm_pool(
     codename: &str,
     pool: &crate::sql::Pool,
 ) -> Result<bool, TenancyError> {
-    use sqlx::Row as _;
     let dialect = pool.dialect();
     let users_t = dialect.quote_ident("rustango_users");
     let user_perms_t = dialect.quote_ident("rustango_user_permissions");
@@ -1078,7 +1077,6 @@ pub async fn user_roles_qs_pool(
     user_id: i64,
     pool: &crate::sql::Pool,
 ) -> Result<Vec<Role>, sqlx::Error> {
-    use sqlx::Row as _;
     let dialect = pool.dialect();
     let roles_t = dialect.quote_ident("rustango_roles");
     let user_roles_t = dialect.quote_ident("rustango_user_roles");

@@ -142,6 +142,8 @@ pub fn salted_hmac(key_salt: &[u8], value: &[u8], secret: &[u8]) -> Vec<u8> {
     let derived = hasher.finalize();
     hmac_sha256(&derived, value)
 }
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

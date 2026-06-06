@@ -1089,7 +1089,6 @@ where
     Option<bool>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     i64: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
-    use sqlx::Row as _;
     let raw = stringify_facet_value(row);
     let display = if expect_display {
         row.try_get::<Option<String>, _>("facet_display")
@@ -1119,7 +1118,6 @@ where
     Option<i32>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
     Option<bool>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
 {
-    use sqlx::Row as _;
     if let Ok(Some(s)) = row.try_get::<Option<String>, _>("facet_value") {
         return s;
     }
