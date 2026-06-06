@@ -602,6 +602,21 @@ fn same_action_name(a: &str, b: &str) -> bool {
     a == b
 }
 
+/// Join the router-mount `prefix` with a `suffix`, trimming the
+/// trailing `/` on `prefix` first so callers passing either `/posts`
+/// or `/posts/` produce the same canonical path. Used by every CBV
+/// `router` / `tenant_router` that mounts an off-root sub-path
+/// (e.g. `<prefix>/{pk}`, `<prefix>/new`, `<prefix>/{pk}/edit`,
+/// `<prefix>/{pk}/delete`). Issue #807.
+///
+/// `suffix` must include the leading `/` — `mount_path("/posts",
+/// "/{pk}")` returns `"/posts/{pk}"`. The leading slash on
+/// `suffix` is intentional; embedding it in the suffix keeps every
+/// call site visibly self-contained (no hidden glue).
+fn mount_path(prefix: &str, suffix: &str) -> String {
+    format!("{}{}", prefix.trim_end_matches('/'), suffix)
+}
+
 #[derive(Clone)]
 struct ListViewState {
     vs: ListView,
@@ -907,7 +922,7 @@ impl DetailView {
             tera,
             pool,
         });
-        let path = format!("{}/{{pk}}", prefix.trim_end_matches('/'));
+        let path = mount_path(prefix, "/{pk}");
         Router::new()
             .route(&path, get(handle_detail))
             .with_state(state)
@@ -918,7 +933,7 @@ impl DetailView {
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
         let state = Arc::new(TenantDetailViewState { vs: self, tera });
-        let path = format!("{}/{{pk}}", prefix.trim_end_matches('/'));
+        let path = mount_path(prefix, "/{pk}");
         Router::new()
             .route(&path, get(handle_detail_tenant))
             .with_state(state)
@@ -1052,7 +1067,7 @@ impl DeleteView {
             tera,
             pool,
         });
-        let path = format!("{}/{{pk}}/delete", prefix.trim_end_matches('/'));
+        let path = mount_path(prefix, "/{pk}/delete");
         Router::new()
             .route(
                 &path,
@@ -1066,7 +1081,7 @@ impl DeleteView {
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
         let state = Arc::new(TenantDeleteViewState { vs: self, tera });
-        let path = format!("{}/{{pk}}/delete", prefix.trim_end_matches('/'));
+        let path = mount_path(prefix, "/{pk}/delete");
         Router::new()
             .route(
                 &path,
@@ -1289,7 +1304,7 @@ impl CreateView {
             pool,
             validator: self.validator.clone(),
         });
-        let path = format!("{}/new", prefix.trim_end_matches('/'));
+        let path = mount_path(prefix, "/new");
         Router::new()
             .route(
                 &path,
@@ -1310,7 +1325,7 @@ impl CreateView {
             tera,
             validator: self.validator,
         });
-        let path = format!("{}/new", prefix.trim_end_matches('/'));
+        let path = mount_path(prefix, "/new");
         Router::new()
             .route(
                 &path,
@@ -1400,7 +1415,7 @@ impl UpdateView {
             pool,
             validator: self.validator.clone(),
         });
-        let path = format!("{}/{{pk}}/edit", prefix.trim_end_matches('/'));
+        let path = mount_path(prefix, "/{pk}/edit");
         Router::new()
             .route(
                 &path,
@@ -1421,7 +1436,7 @@ impl UpdateView {
             tera,
             validator: self.validator,
         });
-        let path = format!("{}/{{pk}}/edit", prefix.trim_end_matches('/'));
+        let path = mount_path(prefix, "/{pk}/edit");
         Router::new()
             .route(
                 &path,
