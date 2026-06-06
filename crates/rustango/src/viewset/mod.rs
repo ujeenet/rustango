@@ -711,6 +711,44 @@ fn json_error(status: StatusCode, msg: &str) -> Response {
     json_with_status(status, json!({ "error": msg }))
 }
 
+/// Unwrap-or-return-500. Collapses the `match expr { Ok(v) => v,
+/// Err(e) => return json_error(INTERNAL_SERVER_ERROR, &e.to_string()) }`
+/// shape that recurred ~5× in handler bodies. Issue #808 (item 4).
+///
+/// `$expr` must yield `Result<_, E>` where `E: ::std::fmt::Display`
+/// — covers every error type used in the viewset (`ExecError`,
+/// `String`, `QueryError`, etc.).
+macro_rules! or_500 {
+    ($expr:expr) => {
+        match $expr {
+            ::core::result::Result::Ok(v) => v,
+            ::core::result::Result::Err(e) => {
+                return json_error(
+                    ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &::std::string::ToString::to_string(&e),
+                );
+            }
+        }
+    };
+}
+
+/// Unwrap-or-return-400. Sibling of [`or_500`]; collapses the
+/// `match expr { Ok(v) => v, Err(e) => return json_error(BAD_REQUEST,
+/// &e.to_string()) }` shape. Issue #808 (item 4).
+macro_rules! or_400 {
+    ($expr:expr) => {
+        match $expr {
+            ::core::result::Result::Ok(v) => v,
+            ::core::result::Result::Err(e) => {
+                return json_error(
+                    ::axum::http::StatusCode::BAD_REQUEST,
+                    &::std::string::ToString::to_string(&e),
+                );
+            }
+        }
+    };
+}
+
 /// #808 — was repeated verbatim in `handle_retrieve` / `update_inner`
 /// / `handle_destroy` (the three item-route handlers). Each spelled
 /// out the same `match parse_pk_string(field, raw) { Ok(v) => v, Err(e)
@@ -963,14 +1001,8 @@ async fn handle_list(
             // mount the legacy `.serializer()` path under a separate
             // builder if needed; default JSON projection is now
             // tri-dialect.
-            let results = match acq.select_rows_as_json(&select_q, &fields).await {
-                Ok(r) => r,
-                Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-            };
-            let count = match acq.count_rows(&count_q).await {
-                Ok(c) => c,
-                Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-            };
+            let results = or_500!(acq.select_rows_as_json(&select_q, &fields).await);
+            let count = or_500!(acq.count_rows(&count_q).await);
             let last_page = ((count - 1).max(0) / page_size) + 1;
             json_response(json!({
                 "count": count,
@@ -1071,10 +1103,7 @@ async fn handle_list_cursor(
         limit: Some(page_size + 1),
         ..SelectQuery::new(state.vs.schema)
     };
-    let rows = match acq.select_rows_as_json(&select_q, &fields).await {
-        Ok(r) => r,
-        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    };
+    let rows = or_500!(acq.select_rows_as_json(&select_q, &fields).await);
 
     let has_more = rows.len() as i64 > page_size;
     let page_rows: &[Value] = if has_more {
@@ -1174,10 +1203,7 @@ async fn handle_create(
     }
 
     // #435 — sniff for bulk shape (JSON array body) and dispatch.
-    let create_body = match extract_create_body(parts, body).await {
-        Ok(b) => b,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let create_body = or_400!(extract_create_body(parts, body).await);
 
     let skip: Vec<&str> = state
         .vs
@@ -1207,10 +1233,7 @@ async fn create_one(
     skip: &[&str],
     pk_field: &'static crate::core::FieldSchema,
 ) -> Response {
-    let collected = match collect_values(state.vs.schema, form, skip) {
-        Ok(v) => v,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-    };
+    let collected = or_400!(collect_values(state.vs.schema, form, skip));
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let query = InsertQuery {
         model: state.vs.schema,
@@ -1219,10 +1242,7 @@ async fn create_one(
         returning: vec![pk_field.column],
         on_conflict: None,
     };
-    let pk_val = match acq.insert_returning_pk(&query, pk_field).await {
-        Ok(v) => v,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-    };
+    let pk_val = or_400!(acq.insert_returning_pk(&query, pk_field).await);
     let fields = state.effective_fields();
     match fetch_by_pk(state, acq, pk_field, pk_val, &fields).await {
         Some(obj) => json_created(obj),
@@ -1354,10 +1374,7 @@ async fn update_inner(
         Err(resp) => return resp,
     };
 
-    let form = match extract_form_body(parts, body).await {
-        Ok(f) => f,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
+    let form = or_400!(extract_form_body(parts, body).await);
 
     let mut assignments: Vec<Assignment> = Vec::new();
     for field in state.vs.schema.scalar_fields() {
