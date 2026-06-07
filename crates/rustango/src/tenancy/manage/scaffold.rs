@@ -82,6 +82,7 @@ pub(super) fn startapp_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), T
         app_name: app_name.clone(),
         manage_bin: with_manage_bin.then_some(TENANCY_MANAGE_BIN),
         base_dir: into.map(std::path::PathBuf::from),
+        crate_root: None,
     };
     let cwd = std::env::current_dir().map_err(TenancyError::Io)?;
     let report =
