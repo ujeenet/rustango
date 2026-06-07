@@ -380,6 +380,7 @@ impl syn::parse::Parse for QInput {
 
 fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
     let q: QInput = syn::parse2(input)?;
+    let root = rustango_root();
     let field_str = q.field.to_string();
     let field_span = q.field.span();
     let (base, suffix) = match field_str.find("__") {
@@ -402,71 +403,71 @@ fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
     // ISNULL). Unknown suffixes fail the build.
     let expanded = match suffix {
         "" | "exact" => quote! {
-            ::rustango::core::Column::eq(#path::#base_ident, #value)
+            #root::core::Column::eq(#path::#base_ident, #value)
         },
         "ne" => quote! {
-            ::rustango::core::Column::ne(#path::#base_ident, #value)
+            #root::core::Column::ne(#path::#base_ident, #value)
         },
         "gt" => quote! {
-            ::rustango::core::Column::gt(#path::#base_ident, #value)
+            #root::core::Column::gt(#path::#base_ident, #value)
         },
         "gte" => quote! {
-            ::rustango::core::Column::gte(#path::#base_ident, #value)
+            #root::core::Column::gte(#path::#base_ident, #value)
         },
         "lt" => quote! {
-            ::rustango::core::Column::lt(#path::#base_ident, #value)
+            #root::core::Column::lt(#path::#base_ident, #value)
         },
         "lte" => quote! {
-            ::rustango::core::Column::lte(#path::#base_ident, #value)
+            #root::core::Column::lte(#path::#base_ident, #value)
         },
         "iexact" => quote! {
             // Django emulates `__iexact` as case-insensitive equality.
             // The non-wildcard `ILIKE value` is semantically identical
             // for plain strings; LIKE-metachars `%` `_` in the rhs would
             // accidentally match more — document the caveat.
-            ::rustango::core::Column::ilike(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
+            #root::core::Column::ilike(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
         },
         "contains" => quote! {
-            ::rustango::core::Column::like(
+            #root::core::Column::like(
                 #path::#base_ident,
                 ::std::format!("%{}%", #value),
             )
         },
         "icontains" => quote! {
-            ::rustango::core::Column::ilike(
+            #root::core::Column::ilike(
                 #path::#base_ident,
                 ::std::format!("%{}%", #value),
             )
         },
         "startswith" => quote! {
-            ::rustango::core::Column::like(
+            #root::core::Column::like(
                 #path::#base_ident,
                 ::std::format!("{}%", #value),
             )
         },
         "istartswith" => quote! {
-            ::rustango::core::Column::ilike(
+            #root::core::Column::ilike(
                 #path::#base_ident,
                 ::std::format!("{}%", #value),
             )
         },
         "endswith" => quote! {
-            ::rustango::core::Column::like(
+            #root::core::Column::like(
                 #path::#base_ident,
                 ::std::format!("%{}", #value),
             )
         },
         "iendswith" => quote! {
-            ::rustango::core::Column::ilike(
+            #root::core::Column::ilike(
                 #path::#base_ident,
                 ::std::format!("%{}", #value),
             )
         },
         "in" => quote! {
-            ::rustango::core::Column::is_in(#path::#base_ident, #value)
+            #root::core::Column::is_in(#path::#base_ident, #value)
         },
         "not_in" => quote! {
-            ::rustango::core::Column::not_in(#path::#base_ident, #value)
+            #root::core::Column::not_in(#path::#base_ident, #value)
         },
         "isnull" => {
             // Must be a bool literal at macro time so we can route to
@@ -484,9 +485,9 @@ fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
                 }
             };
             if b {
-                quote! { ::rustango::core::Column::is_null(#path::#base_ident) }
+                quote! { #root::core::Column::is_null(#path::#base_ident) }
             } else {
-                quote! { ::rustango::core::Column::is_not_null(#path::#base_ident) }
+                quote! { #root::core::Column::is_not_null(#path::#base_ident) }
             }
         }
         "between" => {
@@ -502,13 +503,13 @@ fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
             };
             let lo = &tuple.elems[0];
             let hi = &tuple.elems[1];
-            quote! { ::rustango::core::Column::between(#path::#base_ident, #lo, #hi) }
+            quote! { #root::core::Column::between(#path::#base_ident, #lo, #hi) }
         }
         "regex" => quote! {
-            ::rustango::core::Column::regex(#path::#base_ident, #value)
+            #root::core::Column::regex(#path::#base_ident, #value)
         },
         "iregex" => quote! {
-            ::rustango::core::Column::iregex(#path::#base_ident, #value)
+            #root::core::Column::iregex(#path::#base_ident, #value)
         },
         _ => {
             return Err(syn::Error::new(
@@ -9750,6 +9751,7 @@ impl FormFieldKind {
 }
 
 fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let root = rustango_root();
     let struct_name = &input.ident;
 
     let Data::Struct(data) = &input.data else {
@@ -9831,11 +9833,11 @@ fn expand_form(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     Ok(quote! {
-        impl ::rustango::forms::Form for #struct_name {
+        impl #root::forms::Form for #struct_name {
             fn parse(
                 data: &::std::collections::HashMap<::std::string::String, ::std::string::String>,
-            ) -> ::core::result::Result<Self, ::rustango::forms::FormErrors> {
-                let mut __errors = ::rustango::forms::FormErrors::default();
+            ) -> ::core::result::Result<Self, #root::forms::FormErrors> {
+                let mut __errors = #root::forms::FormErrors::default();
                 #( #field_blocks )*
                 #cross_field_call
                 if !__errors.is_empty() {
@@ -10190,6 +10192,7 @@ struct ViewSetPermsAttrs {
 }
 
 fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let root = rustango_root();
     let struct_name = &input.ident;
 
     // Must be a unit struct or an empty named struct.
@@ -10273,7 +10276,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let update_lits = perms.update.iter().map(|s| s.as_str());
         let destroy_lits = perms.destroy.iter().map(|s| s.as_str());
         quote! {
-            .permissions(::rustango::viewset::ViewSetPerms {
+            .permissions(#root::viewset::ViewSetPerms {
                 list:     ::std::vec![ #(#list_lits.to_owned()),* ],
                 retrieve: ::std::vec![ #(#retrieve_lits.to_owned()),* ],
                 create:   ::std::vec![ #(#create_lits.to_owned()),* ],
@@ -10287,9 +10290,9 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
         impl #struct_name {
             /// Build an `axum::Router` with the six standard REST endpoints
             /// for this ViewSet, mounted at `prefix`.
-            pub fn router(prefix: &str, pool: ::rustango::sql::sqlx::PgPool) -> ::axum::Router {
-                ::rustango::viewset::ViewSet::for_model(
-                    <#model_path as ::rustango::core::Model>::SCHEMA
+            pub fn router(prefix: &str, pool: #root::sql::sqlx::PgPool) -> ::axum::Router {
+                #root::viewset::ViewSet::for_model(
+                    <#model_path as #root::core::Model>::SCHEMA
                 )
                     #fields_call
                     #filter_fields_call
@@ -10597,6 +10600,7 @@ fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFie
 }
 
 fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let root = rustango_root();
     let struct_name = &input.ident;
     let struct_name_lit = struct_name.to_string();
 
@@ -10699,7 +10703,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                      call .get(&pool).await? or .select_related(\"{src_name}\") on the model first",
                 );
                 quote! {
-                    #ident: <#ty as ::rustango::serializer::ModelSerializer>::from_model(
+                    #ident: <#ty as #root::serializer::ModelSerializer>::from_model(
                         model.#src_ident.value().expect(#panic_msg),
                     )
                 }
@@ -10707,7 +10711,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 quote! {
                     #ident: match model.#src_ident.value() {
                         ::core::option::Option::Some(__loaded) =>
-                            <#ty as ::rustango::serializer::ModelSerializer>::from_model(__loaded),
+                            <#ty as #root::serializer::ModelSerializer>::from_model(__loaded),
                         ::core::option::Option::None =>
                             ::core::default::Default::default(),
                     }
@@ -10767,8 +10771,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 /// `FormErrors` keyed by the field name (plus any
                 /// non-field keys the cross-field method adds).
                 /// Returns `Ok(())` when all pass.
-                pub fn validate(&self) -> ::core::result::Result<(), ::rustango::forms::FormErrors> {
-                    let mut __errors = ::rustango::forms::FormErrors::default();
+                pub fn validate(&self) -> ::core::result::Result<(), #root::forms::FormErrors> {
+                    let mut __errors = #root::forms::FormErrors::default();
                     #( #validator_calls )*
                     #cross_validate_call
                     if __errors.is_empty() {
@@ -10797,10 +10801,10 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 /// `from_model` itself can't await an SQL query.
                 pub fn #setter(
                     &mut self,
-                    models: &[<#many_ty as ::rustango::serializer::ModelSerializer>::Model],
+                    models: &[<#many_ty as #root::serializer::ModelSerializer>::Model],
                 ) -> &mut Self {
                     self.#ident = models.iter()
-                        .map(<#many_ty as ::rustango::serializer::ModelSerializer>::from_model)
+                        .map(<#many_ty as #root::serializer::ModelSerializer>::from_model)
                         .collect();
                     self
                 }
@@ -10873,7 +10877,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 quote! {
                     .property(
                         #name_lit,
-                        <#ty as ::rustango::openapi::OpenApiSchema>::openapi_schema()
+                        <#ty as #root::openapi::OpenApiSchema>::openapi_schema()
                             #nullable_call,
                     )
                 }
@@ -10884,9 +10888,9 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 .map(|fi| fi.ident.to_string())
                 .collect();
             quote! {
-                impl ::rustango::openapi::OpenApiSchema for #struct_name {
-                    fn openapi_schema() -> ::rustango::openapi::Schema {
-                        ::rustango::openapi::Schema::object()
+                impl #root::openapi::OpenApiSchema for #struct_name {
+                    fn openapi_schema() -> #root::openapi::Schema {
+                        #root::openapi::Schema::object()
                             #( #property_calls )*
                             .required([ #( #required_lits ),* ])
                     }
@@ -10900,7 +10904,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     Ok(quote! {
-        impl ::rustango::serializer::ModelSerializer for #struct_name {
+        impl #root::serializer::ModelSerializer for #struct_name {
             type Model = #model_path;
 
             fn from_model(model: &Self::Model) -> Self {
