@@ -225,3 +225,26 @@ async fn through_accessor_returns_empty_for_country_with_no_users() {
     let posts = empty.posts_through().fetch_pool(&pool).await.unwrap();
     assert!(posts.is_empty());
 }
+
+#[tokio::test]
+async fn posts_through_count_returns_far_side_count() {
+    // Eloquent `$country->posts->count()` analog for the
+    // through-relation — `posts_through_count(&pool)` returns the
+    // number of far rows reachable from this country via users.
+    let pool = make_pool().await;
+    let (a_id, b_id) = seed(&pool).await;
+
+    let a = Country::find(a_id, &pool).await.unwrap().unwrap();
+    let b = Country::find(b_id, &pool).await.unwrap().unwrap();
+
+    // Country A: 2 users × 3 posts each = 6. Country B: 3 × 3 = 9.
+    assert_eq!(a.posts_through_count(&pool).await.unwrap(), 6);
+    assert_eq!(b.posts_through_count(&pool).await.unwrap(), 9);
+
+    let mut empty = Country {
+        id: Auto::default(),
+        name: "Empty".into(),
+    };
+    empty.save_pool(&pool).await.unwrap();
+    assert_eq!(empty.posts_through_count(&pool).await.unwrap(), 0);
+}
