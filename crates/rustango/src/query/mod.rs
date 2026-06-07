@@ -1001,6 +1001,80 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Eloquent `Builder::when($condition, $callback)` — apply
+    /// `f` to `self` only when `condition` is `true`, otherwise
+    /// return `self` unchanged. Sugars the otherwise-noisy
+    /// "conditionally compose a filter" pattern:
+    ///
+    /// ```ignore
+    /// let qs = Post::objects()
+    ///     .when(only_active, |qs| qs.filter("active", true))
+    ///     .when(category_id.is_some(), |qs| {
+    ///         qs.filter("category_id", category_id.unwrap())
+    ///     });
+    /// ```
+    ///
+    /// Equivalent to:
+    ///
+    /// ```ignore
+    /// let mut qs = Post::objects();
+    /// if only_active { qs = qs.filter("active", true); }
+    /// if let Some(id) = category_id { qs = qs.filter("category_id", id); }
+    /// ```
+    ///
+    /// The closure form preserves builder-style chaining when the
+    /// condition isn't a simple `bool` but the result of an
+    /// in-line predicate. Issue [#830](https://github.com/ujeenet/rustango/issues/830) follow-up.
+    #[must_use]
+    pub fn when<F>(self, condition: bool, f: F) -> Self
+    where
+        F: FnOnce(Self) -> Self,
+    {
+        if condition {
+            f(self)
+        } else {
+            self
+        }
+    }
+
+    /// Eloquent `Builder::unless($condition, $callback)` — inverse
+    /// of [`Self::when`]. Apply `f` only when `condition` is
+    /// `false`. Mirrors Eloquent's twin helper so `.unless(...)`
+    /// reads naturally in code that's clearer when the guard is
+    /// stated negatively (e.g. `qs.unless(is_admin, |q|
+    /// q.filter("public", true))`).
+    #[must_use]
+    pub fn unless<F>(self, condition: bool, f: F) -> Self
+    where
+        F: FnOnce(Self) -> Self,
+    {
+        if condition {
+            self
+        } else {
+            f(self)
+        }
+    }
+
+    /// Eloquent `Builder::tap($callback)` — run a side-effecting
+    /// callback against the queryset and return it unchanged. Lets
+    /// you slot logging / metrics / debug-print into a builder
+    /// chain without breaking the fluent shape:
+    ///
+    /// ```ignore
+    /// let rows = Post::objects()
+    ///     .filter("active", true)
+    ///     .tap(|qs| tracing::debug!(?qs, "about to fetch"))
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn tap<F>(self, f: F) -> Self
+    where
+        F: FnOnce(&Self),
+    {
+        f(&self);
+        self
+    }
+
     /// Filter to only rows that have NOT been soft-deleted.
     ///
     /// When `T` carries `#[rustango(soft_delete)]` on a nullable
