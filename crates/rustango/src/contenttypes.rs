@@ -186,7 +186,7 @@ impl ContentType {
         if wanted.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let all = Self::all(pool).await?;
+        let all = Self::all_ordered(pool).await?;
         let mut out =
             std::collections::HashMap::<(String, String), Self>::with_capacity(wanted.len());
         for ct in all {
@@ -198,13 +198,17 @@ impl ContentType {
         Ok(out)
     }
 
-    /// Tri-dialect counterpart of [`Self::all`] (v0.38) — every
-    /// registered ContentType ordered by `(app_label, model_name)`,
-    /// across any backend the [`crate::sql::Pool`] enum carries.
+    /// Every registered ContentType ordered by `(app_label,
+    /// model_name)`. Tri-dialect. The order-aware companion of the
+    /// macro-emitted [`Self::all`] (which returns unordered rows).
+    ///
+    /// Renamed from `all` to `all_ordered` 2026-06-07 because the
+    /// macro now emits `Model::all` on every model (Eloquent bare-
+    /// name parity — see issue #893).
     ///
     /// # Errors
     /// As [`Self::for_model`].
-    pub async fn all(pool: &crate::sql::Pool) -> Result<Vec<Self>, ExecError> {
+    pub async fn all_ordered(pool: &crate::sql::Pool) -> Result<Vec<Self>, ExecError> {
         let rows: Vec<Self> = Self::objects()
             .order_by(&[("app_label", false), ("model_name", false)])
             .fetch_pool(pool)

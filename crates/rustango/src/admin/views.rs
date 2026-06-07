@@ -1869,7 +1869,7 @@ async fn preload_gfk_cts(
     if model.generic_relations.is_empty() {
         return Vec::new();
     }
-    crate::contenttypes::ContentType::all(&state.pool)
+    crate::contenttypes::ContentType::all_ordered(&state.pool)
         .await
         .unwrap_or_default()
 }
