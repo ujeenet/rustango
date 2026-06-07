@@ -891,6 +891,8 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.default_related_name.as_deref(),
     );
     let m2m_accessors = m2m_accessor_tokens(struct_name, &container.m2m);
+    // Issue #817 — `#[rustango(through(...))]` accessors.
+    let through_accessors = through_accessor_tokens(struct_name, &container.through_relations);
     let generic_fk_accessors = generic_fk_accessor_tokens(
         struct_name,
         &container.generic_fks,
@@ -922,6 +924,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #column_module
         #reverse_helpers
         #m2m_accessors
+        #through_accessors
         #generic_fk_accessors
         #manager_trait
 
@@ -1467,6 +1470,84 @@ fn m2m_accessor_tokens(struct_name: &syn::Ident, m2m_relations: &[M2MAttr]) -> T
                     src_col: #src_col,
                     dst_col: #dst_col,
                 }
+            }
+        }
+    });
+    quote! {
+        impl #struct_name {
+            #( #methods )*
+        }
+    }
+}
+
+/// Emit `<name>_through(&self) -> QuerySet<Far>` accessors for each
+/// `#[rustango(through(...))]` attribute. Issue #817.
+///
+/// Each accessor builds a correlated subquery via
+/// `WhereExpr::InSubquery`: the inner `SelectQuery` reads from the
+/// intermediate table, filters on the FK column pointing at this
+/// model, and projects the intermediate PK. The outer queryset
+/// filters the far model by its FK-to-intermediate column being in
+/// that set.
+///
+/// The returned `QuerySet<Far>` is **chainable** — the subquery
+/// lives inside a `where_raw` clause so the user's later
+/// `.filter()` / `.order_by()` / `.limit()` compositions don't
+/// disturb it.
+///
+/// Tri-dialect: `IN (subquery)` is portable across PG / MySQL /
+/// SQLite — no LATERAL or backend-specific syntax involved.
+fn through_accessor_tokens(
+    struct_name: &syn::Ident,
+    through_relations: &[ThroughAttr],
+) -> TokenStream2 {
+    let root = rustango_root();
+    if through_relations.is_empty() {
+        return TokenStream2::new();
+    }
+    let methods = through_relations.iter().map(|rel| {
+        let method_name = format!("{}_through", rel.name);
+        let method_ident = syn::Ident::new(&method_name, struct_name.span());
+        let far = &rel.far;
+        let intermediate = &rel.intermediate;
+        let far_fk_column = rel.far_fk_column.as_str();
+        let intermediate_fk_column = rel.intermediate_fk_column.as_str();
+        let intermediate_pk_column = rel.intermediate_pk_column.as_str();
+        let doc = format!(
+            "Eloquent `hasManyThrough` accessor — returns a \
+             `QuerySet<{far}>` whose rows reach this `{struct_name}` \
+             instance through the intermediate `{intermediate}` table. \
+             Generated SQL shape: \
+             `… WHERE {far_fk_column} IN (SELECT \
+             {intermediate_pk_column} FROM <{intermediate}> WHERE \
+             {intermediate_fk_column} = self.pk)`. Chainable like any \
+             other QuerySet — compose `.filter()` / `.order_by()` / \
+             `.limit()` etc. on top.",
+        );
+        quote! {
+            #[doc = #doc]
+            pub fn #method_ident(&self) -> #root::query::QuerySet<#far> {
+                use #root::core::{Filter, Model as _, Op, SelectQuery, WhereExpr};
+                let intermediate_schema =
+                    <#intermediate as #root::core::Model>::SCHEMA;
+                let sub = SelectQuery {
+                    where_clause: WhereExpr::Predicate(Filter {
+                        column: #intermediate_fk_column,
+                        op: Op::Eq,
+                        value: self.__rustango_pk_value(),
+                    }),
+                    projection: ::core::option::Option::Some(
+                        ::std::vec![#intermediate_pk_column],
+                    ),
+                    ..SelectQuery::new(intermediate_schema)
+                };
+                #root::query::QuerySet::<#far>::new().where_raw(
+                    WhereExpr::InSubquery {
+                        column: #far_fk_column,
+                        negated: false,
+                        subquery: ::std::boxed::Box::new(sub),
+                    },
+                )
             }
         }
     });
@@ -6944,6 +7025,15 @@ struct ContainerAttrs {
     /// `fn() -> WhereExpr` path that the macro emits into
     /// `ModelSchema::global_scopes`. Multiple attributes accumulate.
     global_scopes: Vec<GlobalScopeAttr>,
+    /// Eloquent `hasManyThrough` / `hasOneThrough` declarations from
+    /// `#[rustango(through(name, far, far_fk_column, intermediate,
+    /// intermediate_fk_column, intermediate_pk_column))]` — issue
+    /// [#817](https://github.com/ujeenet/rustango/issues/817). Each
+    /// entry emits an inherent `<name>_through(&self)` accessor that
+    /// returns a `QuerySet<Far>` filtered via a correlated subquery
+    /// (`WHERE far_fk_column IN (SELECT intermediate_pk_column FROM
+    /// intermediate WHERE intermediate_fk_column = <my_pk>)`).
+    through_relations: Vec<ThroughAttr>,
 }
 
 /// Parsed `#[rustango(global_scope(name = "...", apply = fn_path))]`
@@ -6954,6 +7044,63 @@ struct ContainerAttrs {
 struct GlobalScopeAttr {
     name: String,
     apply: syn::Path,
+}
+
+/// Parsed `#[rustango(through(...))]` declaration. Issue
+/// [#817](https://github.com/ujeenet/rustango/issues/817) — Eloquent
+/// `hasManyThrough` / `hasOneThrough` parity.
+///
+/// `Country hasManyThrough Post via User` declares as:
+///
+/// ```ignore
+/// #[rustango(through(
+///     name                   = "posts",
+///     far                    = "Post",
+///     far_fk_column          = "author_id",
+///     intermediate           = "User",
+///     intermediate_fk_column = "country_id",
+/// ))]
+/// struct Country { ... }
+/// ```
+///
+/// The macro emits `Country::posts_through(&self) -> QuerySet<Post>`
+/// which returns a queryset filtered via a correlated subquery —
+/// `Post WHERE author_id IN (SELECT id FROM tr_user WHERE country_id
+/// = <my_pk>)`. The returned `QuerySet<Post>` is **chainable**:
+/// `.filter()` / `.order_by()` / `.limit()` etc. compose normally
+/// because the subquery lives inside a `WhereExpr::InSubquery` node
+/// and the outer queryset's pending list stays empty.
+///
+/// All four required arguments use **SQL column / table names**
+/// (not Rust field names) to sidestep the multi-hop-filter substrate
+/// gap. Once that substrate lands, a higher-level Rust-field-name
+/// shorthand can be added without breaking this surface.
+struct ThroughAttr {
+    /// Accessor method name. `name = "posts"` → emits `posts_through()`.
+    name: String,
+    /// Far model type identifier. `far = "Post"` → returns
+    /// `QuerySet<Post>`. Resolved verbatim against the scope where
+    /// the derive expands.
+    far: syn::Ident,
+    /// SQL column on the far model's table that references the
+    /// intermediate model's primary key. For `Post`'s
+    /// `author: ForeignKey<User>` the column is `"author_id"` (rustango's
+    /// default `<field>_id` convention) or whatever the user
+    /// declared via `#[rustango(db_column = "...")]`.
+    far_fk_column: String,
+    /// Intermediate model type identifier. Needed to look up its
+    /// `SCHEMA` so the subquery's `FROM` clause points at the
+    /// intermediate table. `intermediate = "User"`.
+    intermediate: syn::Ident,
+    /// SQL column on the intermediate's table that references the
+    /// source (this) model's primary key. For `User`'s
+    /// `country: ForeignKey<Country>` the column is `"country_id"`.
+    intermediate_fk_column: String,
+    /// SQL primary-key column on the intermediate's table — the
+    /// column the subquery projects. Optional; defaults to `"id"`
+    /// (rustango's default PK column name). Override when the
+    /// intermediate declares a custom PK column.
+    intermediate_pk_column: String,
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
@@ -7171,6 +7318,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         extra_permissions: Vec::new(),
         default_permissions: Vec::new(),
         global_scopes: Vec::new(),
+        through_relations: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -7492,6 +7640,142 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     ));
                 }
                 out.global_scopes.push(GlobalScopeAttr { name, apply });
+                return Ok(());
+            }
+            if meta.path.is_ident("through") {
+                // `#[rustango(through(name = "posts", far = "Post",
+                //  far_fk_column = "author_id", intermediate = "User",
+                //  intermediate_fk_column = "country_id"
+                //  [, intermediate_pk_column = "id"]))]` — issue #817.
+                let span = meta.path.span();
+                let mut accessor_name: Option<String> = None;
+                let mut far_ident: Option<syn::Ident> = None;
+                let mut far_fk_column: Option<String> = None;
+                let mut intermediate_ident: Option<syn::Ident> = None;
+                let mut intermediate_fk_column: Option<String> = None;
+                let mut intermediate_pk_column: Option<String> = None;
+                fn parse_nonempty_string(
+                    inner: &syn::meta::ParseNestedMeta<'_>,
+                    field: &str,
+                ) -> syn::Result<String> {
+                    let s: LitStr = inner.value()?.parse()?;
+                    let raw = s.value();
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        return Err(syn::Error::new(
+                            s.span(),
+                            format!("`through({field} = \"...\")` must not be empty"),
+                        ));
+                    }
+                    Ok(trimmed.to_owned())
+                }
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("name") {
+                        accessor_name = Some(parse_nonempty_string(&inner, "name")?);
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("far") {
+                        // Far model name accepted as a string literal
+                        // so the attribute fits inside the existing
+                        // `parse_nested_meta` shape; parsed back into a
+                        // `syn::Ident` so the emitted accessor can
+                        // reference the type directly.
+                        let s: LitStr = inner.value()?.parse()?;
+                        let raw = s.value();
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`through(far = \"...\")` must not be empty",
+                            ));
+                        }
+                        far_ident = Some(syn::Ident::new(trimmed, s.span()));
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("far_fk_column") {
+                        far_fk_column =
+                            Some(parse_nonempty_string(&inner, "far_fk_column")?);
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("intermediate") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let raw = s.value();
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`through(intermediate = \"...\")` must not be empty",
+                            ));
+                        }
+                        intermediate_ident = Some(syn::Ident::new(trimmed, s.span()));
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("intermediate_fk_column") {
+                        intermediate_fk_column =
+                            Some(parse_nonempty_string(&inner, "intermediate_fk_column")?);
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("intermediate_pk_column") {
+                        intermediate_pk_column =
+                            Some(parse_nonempty_string(&inner, "intermediate_pk_column")?);
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown `through` attribute (supported: \
+                         `name`, `far`, `far_fk_column`, \
+                         `intermediate`, `intermediate_fk_column`, \
+                         `intermediate_pk_column`)",
+                    ))
+                })?;
+                let Some(name) = accessor_name else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`through` requires `name = \"...\"`",
+                    ));
+                };
+                let Some(far) = far_ident else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`through` requires `far = \"FarModelType\"`",
+                    ));
+                };
+                let Some(far_fk_column) = far_fk_column else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`through` requires `far_fk_column = \"<column>\"`",
+                    ));
+                };
+                let Some(intermediate) = intermediate_ident else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`through` requires `intermediate = \"IntermediateModelType\"`",
+                    ));
+                };
+                let Some(intermediate_fk_column) = intermediate_fk_column else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`through` requires `intermediate_fk_column = \"<column>\"`",
+                    ));
+                };
+                let intermediate_pk_column =
+                    intermediate_pk_column.unwrap_or_else(|| "id".to_owned());
+                if out.through_relations.iter().any(|t| t.name == name) {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "duplicate `through(name = \"{name}\")` — \
+                             pick a unique accessor name"
+                        ),
+                    ));
+                }
+                out.through_relations.push(ThroughAttr {
+                    name,
+                    far,
+                    far_fk_column,
+                    intermediate,
+                    intermediate_fk_column,
+                    intermediate_pk_column,
+                });
                 return Ok(());
             }
             if meta.path.is_ident("audit") {
