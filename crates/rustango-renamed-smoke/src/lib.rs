@@ -49,6 +49,18 @@ mod gated {
         pub created_at: chrono::DateTime<chrono::Utc>,
     }
 
+    // Serializer covers the `derive_serializer` path-resolution
+    // branch — the macro emits `#root::serializer::ModelSerializer`
+    // impls plus a tuple-positional view. If the rename broke the
+    // serializer-side emit, this struct wouldn't compile.
+    #[cfg(feature = "serializer")]
+    #[derive(orm::Serializer, Default)]
+    #[serializer(model = RenamedDemo)]
+    pub struct RenamedDemoSerializer {
+        pub name: String,
+        pub views: i64,
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -61,6 +73,24 @@ mod gated {
             // test.
             assert_eq!(RenamedDemo::SCHEMA.table, "rrs_demo");
             assert!(RenamedDemo::SCHEMA.primary_key().is_some());
+        }
+
+        #[cfg(feature = "serializer")]
+        #[test]
+        fn serializer_resolves_through_renamed_dep() {
+            use orm::serializer::ModelSerializer;
+            let demo = RenamedDemo {
+                id: Auto::Set(7),
+                name: "ada".into(),
+                views: 42,
+                created_at: chrono::Utc::now(),
+            };
+            let s = RenamedDemoSerializer::from_model(&demo);
+            assert_eq!(s.name, "ada");
+            assert_eq!(s.views, 42);
+            let json = s.to_value();
+            assert_eq!(json["name"], "ada");
+            assert_eq!(json["views"], 42);
         }
     }
 }
