@@ -1331,6 +1331,7 @@ fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
         app_name: app_name.clone(),
         manage_bin: with_manage_bin.then_some(super::scaffold::SINGLE_TENANT_MANAGE_BIN),
         base_dir: into.map(std::path::PathBuf::from),
+        crate_root: None,
     };
     // Project root = current working directory. Most users run
     // `cargo run -- startapp …` from the project root,

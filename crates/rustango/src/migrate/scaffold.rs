@@ -46,6 +46,19 @@ pub struct StartAppOptions {
     /// `manage_bin` is set) `<project_root>/<base_dir>/bin/manage.rs`.
     /// `None` keeps the v0.7 default of `src/`.
     pub base_dir: Option<PathBuf>,
+    /// Crate-root identifier emitted into the scaffolded `use ...::sql`
+    /// statements. `None` defaults to `"rustango"`; consumers that
+    /// depend on a renamed dep (e.g. the future `rustango-orm` carve-
+    /// out, [#144](https://github.com/ujeenet/rustango/issues/144))
+    /// pass `Some("rustango_orm")` so the generated app compiles
+    /// against the renamed crate. Phase 2 of issue
+    /// [#145](https://github.com/ujeenet/rustango/issues/145).
+    ///
+    /// Note: only `use` paths are parameterized. The `#[rustango(...)]`
+    /// derive attribute name stays literal because the proc-macro
+    /// expects that token regardless of how the consumer renames the
+    /// dep — same shape `rustango-renamed-smoke` proves under #142.
+    pub crate_root: Option<String>,
 }
 
 /// Outcome of [`startapp`]: which files were written and which were
@@ -96,12 +109,19 @@ pub fn startapp(
 
     let mod_body = render_mod_template(&opts.app_name);
     let singular = singularize(&opts.app_name);
+    // Phase 2 of #145 — pick the crate root for `use ...::sql` paths.
+    // `None` (the default) emits today's `use rustango::...` lines so
+    // every existing call site stays bit-identical.
+    let crate_root = opts.crate_root.as_deref().unwrap_or("rustango");
     let entries: [(&str, String); 5] = [
         ("mod.rs", mod_body),
-        ("models.rs", render_models_template(&opts.app_name)),
+        (
+            "models.rs",
+            render_models_template(&opts.app_name, crate_root),
+        ),
         ("views.rs", VIEWS_TEMPLATE.into()),
         ("urls.rs", URLS_TEMPLATE.into()),
-        ("tests.rs", render_tests_template(&singular)),
+        ("tests.rs", render_tests_template(&singular, crate_root)),
     ];
     for (filename, body) in entries {
         let path = app_dir.join(filename);
@@ -357,7 +377,7 @@ fn render_mod_template(app_name: &str) -> String {
 /// `news` / `feed` / `cms` stay as-is). Users can rename either the
 /// struct or the `table = "..."` literal freely; the macro reads them
 /// independently.
-fn render_models_template(app_name: &str) -> String {
+fn render_models_template(app_name: &str, crate_root: &str) -> String {
     let singular = singularize(app_name);
     let struct_name = pascal_case(&singular);
     format!(
@@ -365,7 +385,7 @@ fn render_models_template(app_name: &str) -> String {
 //!
 //! Adding a struct here makes it admin-visible automatically: the
 //! macro populates the `inventory` registry that
-//! `rustango::admin::router(pool)` walks. The four standard CRUD
+//! `{crate_root}::admin::router(pool)` walks. The four standard CRUD
 //! permission codenames (`{singular}.add`, `.change`, `.delete`,
 //! `.view`) are seeded by `auto_create_permissions` during the
 //! first `migrate`, so non-superuser tenant users see this model
@@ -374,8 +394,8 @@ fn render_models_template(app_name: &str) -> String {
 //! Rename `{struct_name}` / `\"{singular}\"` to suit your domain;
 //! the table name and struct identifier are independent.
 
-use rustango::sql::Auto;
-use rustango::Model;
+use {crate_root}::sql::Auto;
+use {crate_root}::Model;
 
 #[derive(Model, Debug, Clone)]
 #[rustango(
@@ -485,11 +505,11 @@ pub fn api() -> Router<()> {
 
 /// Default `tests.rs` body — generated per-app so the inventory
 /// smoke test can reference the starter model's table by name.
-fn render_tests_template(singular_table: &str) -> String {
+fn render_tests_template(singular_table: &str, crate_root: &str) -> String {
     format!(
         "//! App-level integration tests.
 //!
-//! Run with `cargo test`. Uses `rustango::test_client::TestClient` to
+//! Run with `cargo test`. Uses `{crate_root}::test_client::TestClient` to
 //! exercise the app's router in-process — no network, no real socket.
 
 #[cfg(test)]
@@ -513,7 +533,7 @@ mod tests {{
     /// the literal below.
     #[test]
     fn starter_model_registered_in_inventory() {{
-        use rustango::core::ModelEntry;
+        use {crate_root}::core::ModelEntry;
         let tables: Vec<&'static str> = inventory::iter::<ModelEntry>
             .into_iter()
             .map(|e| e.schema.table)
@@ -692,7 +712,7 @@ mod tests {
 
     #[test]
     fn rendered_models_template_singularizes_app_name() {
-        let body = render_models_template("posts");
+        let body = render_models_template("posts", "rustango");
         assert!(
             body.contains("pub struct Post {"),
             "expected singular `Post` struct, got: {body}"
@@ -705,7 +725,7 @@ mod tests {
 
     #[test]
     fn rendered_models_template_includes_admin_config_and_created_at() {
-        let body = render_models_template("blog");
+        let body = render_models_template("blog", "rustango");
         assert!(
             body.contains("admin("),
             "expected admin(...) config block, got: {body}"
@@ -726,7 +746,7 @@ mod tests {
 
     #[test]
     fn rendered_tests_template_asserts_inventory_registration() {
-        let body = render_tests_template("post");
+        let body = render_tests_template("post", "rustango");
         assert!(
             body.contains("starter_model_registered_in_inventory"),
             "expected inventory smoke test, got: {body}"
@@ -735,6 +755,87 @@ mod tests {
             body.contains("\"post\""),
             "expected singular table literal in test, got: {body}"
         );
+    }
+
+    #[test]
+    fn rendered_models_template_threads_default_crate_root() {
+        // Phase 2 of #145 — without an explicit override the emit
+        // mentions `rustango::` exactly as it did pre-#145. This is
+        // the regression guard for every existing call site.
+        let body = render_models_template("posts", "rustango");
+        assert!(
+            body.contains("use rustango::sql::Auto;"),
+            "default crate root must emit `use rustango::sql::Auto;`, got: {body}"
+        );
+        assert!(
+            body.contains("use rustango::Model;"),
+            "default crate root must emit `use rustango::Model;`, got: {body}"
+        );
+    }
+
+    #[test]
+    fn rendered_models_template_threads_renamed_crate_root() {
+        // Phase 2 of #145 — passing `"rustango_orm"` produces source
+        // a bare-ORM consumer (post-#144) can compile against. The
+        // `#[rustango(...)]` derive attribute name stays literal —
+        // it's hard-coded in the proc-macro regardless of the
+        // consumer's Cargo.toml package rename. Same shape
+        // `rustango-renamed-smoke` proves under #142.
+        let body = render_models_template("posts", "rustango_orm");
+        assert!(
+            body.contains("use rustango_orm::sql::Auto;"),
+            "renamed crate root must propagate, got: {body}"
+        );
+        assert!(
+            body.contains("use rustango_orm::Model;"),
+            "renamed crate root must propagate, got: {body}"
+        );
+        assert!(
+            !body.contains("use rustango::"),
+            "after rename no bare `use rustango::` should remain, got: {body}"
+        );
+        assert!(
+            body.contains("#[rustango("),
+            "derive attribute name stays literal across renames, got: {body}"
+        );
+    }
+
+    #[test]
+    fn rendered_tests_template_threads_crate_root() {
+        // Default path stays bit-identical.
+        let default_body = render_tests_template("post", "rustango");
+        assert!(default_body.contains("use rustango::core::ModelEntry;"));
+
+        // Renamed path picks up the new root.
+        let renamed_body = render_tests_template("post", "rustango_orm");
+        assert!(renamed_body.contains("use rustango_orm::core::ModelEntry;"));
+        assert!(!renamed_body.contains("use rustango::"));
+    }
+
+    #[test]
+    fn startapp_threads_crate_root_through_models() {
+        // End-to-end: `startapp` with `crate_root: Some("rustango_orm")`
+        // produces an app whose `models.rs` compiles against the
+        // renamed crate. The integration check at the byte level so a
+        // future renderer refactor can't quietly drop the override.
+        let root = fresh_root("crate_root_e2e");
+        startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "blog".into(),
+                crate_root: Some("rustango_orm".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let body =
+            std::fs::read_to_string(root.join("src").join("blog").join("models.rs")).unwrap();
+        assert!(body.contains("use rustango_orm::sql::Auto;"));
+        assert!(body.contains("use rustango_orm::Model;"));
+        // Per-app `tests.rs` also picks up the rename.
+        let tests_body =
+            std::fs::read_to_string(root.join("src").join("blog").join("tests.rs")).unwrap();
+        assert!(tests_body.contains("use rustango_orm::core::ModelEntry;"));
     }
 
     #[test]

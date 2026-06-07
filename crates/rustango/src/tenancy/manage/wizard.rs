@@ -84,6 +84,7 @@ where
                 app_name: name.clone(),
                 manage_bin: None,
                 base_dir: None,
+                crate_root: None,
             };
             let report = crate::migrate::scaffold::startapp(Path::new("."), &opts)
                 .map_err(|e| super::TenancyError::Validation(format!("startapp `{name}`: {e}")))?;
