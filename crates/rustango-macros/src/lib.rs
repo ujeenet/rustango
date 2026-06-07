@@ -4400,6 +4400,101 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Fetch every row matching `<col> = val` for ANY of the
+            /// listed columns. Eloquent `Model::whereAny($cols, $val)`
+            /// parity. Empty `cols` returns no rows.
+            ///
+            /// Resolves each `&str` column to its SCHEMA-registered
+            /// `&'static str` once and builds a single OR-composed
+            /// `Q` expression (`col1 = ? OR col2 = ? OR …`).
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`]; `QueryError::UnknownField`
+            /// when any column is not declared on the model.
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_any(
+                cols: &[&str],
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                Self::__where_multi(cols, val, false, pool).await
+            }
+
+            /// Fetch every row matching `<col> = val` for ALL listed
+            /// columns. Eloquent `Model::whereAll($cols, $val)` parity.
+            /// Empty `cols` returns every row (vacuous AND).
+            ///
+            /// # Errors
+            /// As [`Self::where_any`].
+            pub async fn where_all(
+                cols: &[&str],
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                Self::__where_multi(cols, val, true, pool).await
+            }
+
+            /// Internal: build a Q expression composing `cols` via
+            /// AND (`all`) or OR (`!all`), then fetch. Backs
+            /// `where_any` / `where_all`.
+            #[doc(hidden)]
+            pub async fn __where_multi(
+                cols: &[&str],
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                all: bool,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                if cols.is_empty() {
+                    return if all {
+                        ::rustango::query::QuerySet::<Self>::default()
+                            .fetch_pool(pool)
+                            .await
+                    } else {
+                        ::core::result::Result::Ok(::std::vec::Vec::new())
+                    };
+                }
+                let _sql_val: ::rustango::core::SqlValue =
+                    ::core::convert::Into::into(val);
+                let mut _q: ::core::option::Option<::rustango::query::Q> =
+                    ::core::option::Option::None;
+                for col in cols {
+                    let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
+                        .field(col)
+                        .ok_or_else(|| {
+                            ::rustango::sql::ExecError::Query(
+                                ::rustango::core::QueryError::UnknownField {
+                                    model: <Self as ::rustango::core::Model>::SCHEMA.name,
+                                    field: ::std::string::ToString::to_string(col),
+                                },
+                            )
+                        })?
+                        .column;
+                    let _pred = ::rustango::query::Q::eq(
+                        _col_static,
+                        ::core::clone::Clone::clone(&_sql_val),
+                    );
+                    _q = ::core::option::Option::Some(match _q {
+                        ::core::option::Option::None => _pred,
+                        ::core::option::Option::Some(prev) => if all { prev & _pred } else { prev | _pred },
+                    });
+                }
+                ::rustango::query::QuerySet::<Self>::default()
+                    .where_(_q.expect("non-empty cols"))
+                    .fetch_pool(pool)
+                    .await
+            }
+
             /// Fetch up to `n` rows. Eloquent `Model::take($n)->get()`
             /// parity / Django `Model.objects.all()[:n]`. PK-ordered
             /// is NOT guaranteed without an explicit `order_by` —
