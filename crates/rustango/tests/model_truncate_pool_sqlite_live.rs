@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::truncate_pool(pool)` shortcut — Eloquent
+//! `Model::truncate(pool)` shortcut — Eloquent
 //! `Model::truncate()` / Django `Model.objects.all().delete()`
 //! parity.
 
@@ -43,15 +43,15 @@ async fn truncate_pool_clears_table() {
         };
         p.save_pool(&pool).await.unwrap();
     }
-    assert_eq!(Post::count_pool(&pool).await.unwrap(), 3);
+    assert_eq!(Post::count(&pool).await.unwrap(), 3);
 
-    Post::truncate_pool(&pool).await.unwrap();
-    assert_eq!(Post::count_pool(&pool).await.unwrap(), 0);
+    Post::truncate(&pool).await.unwrap();
+    assert_eq!(Post::count(&pool).await.unwrap(), 0);
 }
 
 #[tokio::test]
 async fn truncate_pool_on_empty_table_is_noop() {
     let pool = make_pool().await;
-    Post::truncate_pool(&pool).await.unwrap();
-    assert_eq!(Post::count_pool(&pool).await.unwrap(), 0);
+    Post::truncate(&pool).await.unwrap();
+    assert_eq!(Post::count(&pool).await.unwrap(), 0);
 }

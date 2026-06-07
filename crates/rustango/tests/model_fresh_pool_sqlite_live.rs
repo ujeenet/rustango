@@ -1,5 +1,5 @@
 #![cfg(feature = "sqlite")]
-//! Live SQLite tests for the macro-emitted `Model::fresh_pool(&pool)`
+//! Live SQLite tests for the macro-emitted `Model::fresh(&pool)`
 //! shortcut — Eloquent `Model::fresh()` parity. Non-mutating
 //! counterpart of `refresh_from_db_pool`.
 
@@ -57,7 +57,7 @@ async fn fresh_pool_returns_fresh_instance_without_mutating_self() {
         .await
         .unwrap();
 
-    let fresh = p1.fresh_pool(&pool).await.unwrap().unwrap();
+    let fresh = p1.fresh(&pool).await.unwrap().unwrap();
     assert_eq!(fresh.title, "fresh-title");
     assert_eq!(fresh.views, 99);
 
@@ -87,7 +87,7 @@ async fn fresh_pool_returns_none_when_row_deleted() {
         .await
         .unwrap();
 
-    let res = p.fresh_pool(&pool).await.unwrap();
+    let res = p.fresh(&pool).await.unwrap();
     assert!(res.is_none(), "deleted row → None (no RowNotFound error)");
 
     // p itself is unchanged.

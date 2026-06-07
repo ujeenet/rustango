@@ -58,9 +58,7 @@ async fn seed(pool: &Pool) {
 async fn where_not_like_pool_excludes_pattern() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::where_not_like_pool("title", "a%", &pool)
-        .await
-        .unwrap();
+    let r = Post::where_not_like("title", "a%", &pool).await.unwrap();
     // SQLite LIKE is case-insensitive — alpha excluded, the rest kept.
     let titles: Vec<&str> = r.iter().map(|r| r.title.as_str()).collect();
     assert_eq!(titles.len(), 3);
@@ -71,7 +69,7 @@ async fn where_not_like_pool_excludes_pattern() {
 async fn where_not_ilike_pool_excludes_pattern_case_insensitive() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::where_not_ilike_pool("title", "ALPHA", &pool)
+    let r = Post::where_not_ilike("title", "ALPHA", &pool)
         .await
         .unwrap();
     assert_eq!(r.len(), 3);
@@ -81,7 +79,7 @@ async fn where_not_ilike_pool_excludes_pattern_case_insensitive() {
 async fn where_not_between_pool_excludes_range() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::where_not_between_pool("views", 20_i64, 30_i64, &pool)
+    let r = Post::where_not_between("views", 20_i64, 30_i64, &pool)
         .await
         .unwrap();
     let titles: Vec<&str> = r.iter().map(|r| r.title.as_str()).collect();
@@ -100,7 +98,7 @@ async fn schema_meta_helpers_return_expected_values() {
 async fn get_key_returns_pk_value_as_sqlvalue() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let row = Post::find_pool(2_i64, &pool).await.unwrap().unwrap();
+    let row = Post::find(2_i64, &pool).await.unwrap().unwrap();
     match row.get_key() {
         SqlValue::I64(2) => {}
         other => panic!("expected SqlValue::I64(2), got {other:?}"),

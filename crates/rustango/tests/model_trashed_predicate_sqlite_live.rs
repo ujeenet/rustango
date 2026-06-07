@@ -57,10 +57,10 @@ async fn trashed_is_true_after_soft_delete_and_refetch() {
         deleted_at: None,
     };
     p.save_pool(&pool).await.unwrap();
-    p.soft_delete_pool(&pool).await.unwrap();
+    p.soft_delete(&pool).await.unwrap();
     // The local instance still has deleted_at=None; trashed() is a
     // pure in-memory predicate so we must refetch from DB.
-    let only_trashed = Post::only_trashed_pool(&pool).await.unwrap();
+    let only_trashed = Post::only_trashed(&pool).await.unwrap();
     assert_eq!(only_trashed.len(), 1);
     assert!(only_trashed[0].trashed());
 }

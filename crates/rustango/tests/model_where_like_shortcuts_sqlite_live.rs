@@ -56,9 +56,7 @@ async fn seed(pool: &Pool) {
 async fn where_like_pool_matches_explicit_wildcards() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::where_like_pool("title", "Rust%", &pool)
-        .await
-        .unwrap();
+    let rows = Post::where_like("title", "Rust%", &pool).await.unwrap();
     let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
     // SQLite's LIKE is case-insensitive by default — matches both
     // 'Rust*' and 'rust*' rows.
@@ -72,9 +70,7 @@ async fn where_like_pool_matches_explicit_wildcards() {
 async fn where_ilike_pool_is_case_insensitive() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::where_ilike_pool("title", "rust%", &pool)
-        .await
-        .unwrap();
+    let rows = Post::where_ilike("title", "rust%", &pool).await.unwrap();
     assert_eq!(rows.len(), 3);
 }
 
@@ -82,7 +78,7 @@ async fn where_ilike_pool_is_case_insensitive() {
 async fn where_starts_with_pool_auto_appends_percent() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::where_starts_with_pool("title", "Rust", &pool)
+    let rows = Post::where_starts_with("title", "Rust", &pool)
         .await
         .unwrap();
     // SQLite LIKE is case-insensitive → matches both Rust* + rust*.
@@ -93,7 +89,7 @@ async fn where_starts_with_pool_auto_appends_percent() {
 async fn where_ends_with_pool_auto_prepends_percent() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::where_ends_with_pool("title", "runtimes", &pool)
+    let rows = Post::where_ends_with("title", "runtimes", &pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -104,9 +100,7 @@ async fn where_ends_with_pool_auto_prepends_percent() {
 async fn where_contains_pool_wraps_both_sides() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::where_contains_pool("title", "ips", &pool)
-        .await
-        .unwrap();
+    let rows = Post::where_contains("title", "ips", &pool).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].title, "Postgres tips");
 }

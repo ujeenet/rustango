@@ -51,21 +51,21 @@ async fn seed(pool: &Pool) {
 async fn random_pool_returns_some_row_when_present() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::random_pool(&pool).await.unwrap();
+    let r = Post::random(&pool).await.unwrap();
     assert!(r.is_some());
 }
 
 #[tokio::test]
 async fn random_pool_returns_none_on_empty() {
     let pool = make_pool().await;
-    assert!(Post::random_pool(&pool).await.unwrap().is_none());
+    assert!(Post::random(&pool).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn random_n_pool_caps_at_table_size() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::random_n_pool(3, &pool).await.unwrap();
+    let r = Post::random_n(3, &pool).await.unwrap();
     assert_eq!(r.len(), 3);
 }
 
@@ -73,7 +73,7 @@ async fn random_n_pool_caps_at_table_size() {
 async fn oldest_pool_ascends_by_field() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::oldest_pool("views", &pool).await.unwrap();
+    let rows = Post::oldest("views", &pool).await.unwrap();
     let views: Vec<i64> = rows.iter().map(|r| r.views).collect();
     assert_eq!(views, vec![10, 20, 30, 40, 50]);
 }
@@ -82,7 +82,7 @@ async fn oldest_pool_ascends_by_field() {
 async fn newest_pool_descends_by_field() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::newest_pool("views", &pool).await.unwrap();
+    let rows = Post::newest("views", &pool).await.unwrap();
     let views: Vec<i64> = rows.iter().map(|r| r.views).collect();
     assert_eq!(views, vec![50, 40, 30, 20, 10]);
 }

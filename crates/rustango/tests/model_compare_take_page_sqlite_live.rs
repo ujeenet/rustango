@@ -51,7 +51,7 @@ async fn seed(pool: &Pool) {
 async fn where_gt_pool_filters_strict_greater() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::where_gt_pool("views", 30_i64, &pool).await.unwrap();
+    let r = Post::where_gt("views", 30_i64, &pool).await.unwrap();
     assert_eq!(r.len(), 2);
 }
 
@@ -59,7 +59,7 @@ async fn where_gt_pool_filters_strict_greater() {
 async fn where_gte_pool_filters_inclusive() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::where_gte_pool("views", 30_i64, &pool).await.unwrap();
+    let r = Post::where_gte("views", 30_i64, &pool).await.unwrap();
     assert_eq!(r.len(), 3);
 }
 
@@ -67,7 +67,7 @@ async fn where_gte_pool_filters_inclusive() {
 async fn where_lt_pool_filters_strict_less() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::where_lt_pool("views", 30_i64, &pool).await.unwrap();
+    let r = Post::where_lt("views", 30_i64, &pool).await.unwrap();
     assert_eq!(r.len(), 2);
 }
 
@@ -75,7 +75,7 @@ async fn where_lt_pool_filters_strict_less() {
 async fn where_lte_pool_filters_inclusive() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::where_lte_pool("views", 30_i64, &pool).await.unwrap();
+    let r = Post::where_lte("views", 30_i64, &pool).await.unwrap();
     assert_eq!(r.len(), 3);
 }
 
@@ -83,7 +83,7 @@ async fn where_lte_pool_filters_inclusive() {
 async fn where_ne_pool_excludes_value() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::where_ne_pool("views", 30_i64, &pool).await.unwrap();
+    let r = Post::where_ne("views", 30_i64, &pool).await.unwrap();
     assert_eq!(r.len(), 4);
 }
 
@@ -91,7 +91,7 @@ async fn where_ne_pool_excludes_value() {
 async fn take_pool_caps_at_n() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let r = Post::take_pool(2, &pool).await.unwrap();
+    let r = Post::take(2, &pool).await.unwrap();
     assert_eq!(r.len(), 2);
 }
 
@@ -99,9 +99,9 @@ async fn take_pool_caps_at_n() {
 async fn for_page_pool_pages_correctly() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let p1 = Post::for_page_pool(1, 2, &pool).await.unwrap();
-    let p2 = Post::for_page_pool(2, 2, &pool).await.unwrap();
-    let p3 = Post::for_page_pool(3, 2, &pool).await.unwrap();
+    let p1 = Post::for_page(1, 2, &pool).await.unwrap();
+    let p2 = Post::for_page(2, 2, &pool).await.unwrap();
+    let p3 = Post::for_page(3, 2, &pool).await.unwrap();
     assert_eq!(p1.len(), 2);
     assert_eq!(p2.len(), 2);
     assert_eq!(p3.len(), 1);

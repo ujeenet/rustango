@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::where_pool(col, val, pool)` shortcut — Eloquent
+//! `Model::where_(col, val, pool)` shortcut — Eloquent
 //! `Model::where($col, $val)->get()` / Django
 //! `Model.objects.filter(col=val).all()` parity.
 
@@ -55,7 +55,7 @@ async fn seed(pool: &Pool) {
 async fn where_pool_returns_matching_rows() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::where_pool("status", "draft", &pool).await.unwrap();
+    let rows = Post::where_("status", "draft", &pool).await.unwrap();
     assert_eq!(rows.len(), 2);
     for r in &rows {
         assert_eq!(r.status, "draft");
@@ -66,6 +66,6 @@ async fn where_pool_returns_matching_rows() {
 async fn where_pool_returns_empty_for_no_match() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::where_pool("status", "archived", &pool).await.unwrap();
+    let rows = Post::where_("status", "archived", &pool).await.unwrap();
     assert!(rows.is_empty());
 }

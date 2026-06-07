@@ -1,5 +1,5 @@
 #![cfg(feature = "sqlite")]
-//! Live SQLite tests for the macro-emitted `Model::find_pool(pk, pool)`
+//! Live SQLite tests for the macro-emitted `Model::find(pk, pool)`
 //! shortcut — Eloquent `Model::find()` / Django `Model.objects.get(pk=)`
 //! parity (non-throwing, returns `Option<Self>`).
 
@@ -42,7 +42,7 @@ async fn find_pool_returns_some_for_existing_pk() {
     p1.save_pool(&pool).await.unwrap();
     let pk = p1.id.get().copied().unwrap();
 
-    let found = Post::find_pool(pk, &pool).await.unwrap();
+    let found = Post::find(pk, &pool).await.unwrap();
     assert!(found.is_some());
     assert_eq!(found.unwrap().title, "first");
 }
@@ -51,7 +51,7 @@ async fn find_pool_returns_some_for_existing_pk() {
 async fn find_pool_returns_none_for_missing_pk() {
     let pool = make_pool().await;
     // No rows seeded.
-    let found = Post::find_pool(9999_i64, &pool).await.unwrap();
+    let found = Post::find(9999_i64, &pool).await.unwrap();
     assert!(found.is_none(), "non-existent PK returns None");
 }
 
@@ -70,6 +70,6 @@ async fn find_pool_disambiguates_between_rows() {
     b.save_pool(&pool).await.unwrap();
     let pk_b = b.id.get().copied().unwrap();
 
-    let found = Post::find_pool(pk_b, &pool).await.unwrap().unwrap();
+    let found = Post::find(pk_b, &pool).await.unwrap().unwrap();
     assert_eq!(found.title, "b");
 }

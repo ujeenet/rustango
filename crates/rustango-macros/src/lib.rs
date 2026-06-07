@@ -3213,6 +3213,245 @@ fn inherent_impl_tokens(
                 /// to avoid a unique-key violation. Issue #825.
             }
         };
+        // 2026-06-07 — field-name / shortcut collision guard.
+        //
+        // The macro emits both `pub const <field>: <field>_col = ...`
+        // (per-field typed-column const, used by the typed-builder
+        // surface as `Post::id.eq(...)`) AND `pub async fn <shortcut>(...)`
+        // for the Eloquent shortcuts (`count`, `sum`, `min` …). When a
+        // model has a field named e.g. `count`, both items would land
+        // in the same inherent impl with the same name, and the
+        // compiler rejects the derive with "duplicate definitions".
+        //
+        // Drop the conflicting shortcut for that model. Callers can
+        // still reach the same behavior via
+        // `QuerySet::<Model>::default().count_pool(&pool)`.
+        let column_names: ::std::collections::HashSet<String> = fields
+            .column_entries
+            .iter()
+            .map(|c| c.ident.to_string())
+            .collect();
+        let emit_if_no_field_collision = |name: &str, tokens: TokenStream2| -> TokenStream2 {
+            if column_names.contains(name) {
+                quote! {}
+            } else {
+                tokens
+            }
+        };
+        let count_method = emit_if_no_field_collision(
+            "count",
+            quote! {
+                /// Count rows of this model — `SELECT COUNT(*) FROM
+                /// <table>`. Eloquent `Model::count()` parity.
+                ///
+                /// Skipped on models that already declare a field named
+                /// `count`. Drop into `QuerySet::<Self>::default().count_pool(&pool)`
+                /// in that case.
+                ///
+                /// # Errors
+                /// As [`CounterPool::count_pool`].
+                ///
+                /// [`CounterPool::count_pool`]: rustango::sql::CounterPool::count_pool
+                pub async fn count(
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<i64, ::rustango::sql::ExecError> {
+                    use ::rustango::sql::CounterPool as _;
+                    ::rustango::query::QuerySet::<Self>::default()
+                        .count_pool(pool)
+                        .await
+                }
+            },
+        );
+        let value_method = emit_if_no_field_collision(
+            "value",
+            quote! {
+                /// Pluck a single scalar from the first row.
+                /// Eloquent `Model::query()->value($col)` parity.
+                ///
+                /// Skipped on models that already declare a field named
+                /// `value`. Drop into
+                /// `QuerySet::<Self>::default().values_list_flat(col).first::<U>(&pool)` instead.
+                ///
+                /// # Errors
+                /// As `ValuesFlatQuerySet::first`.
+                pub async fn value<U>(
+                    col: &str,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::core::option::Option<U>,
+                    ::rustango::sql::ExecError,
+                >
+                where
+                    U: ::rustango::sql::MaybePgScalar
+                        + ::rustango::sql::MaybeMyScalar
+                        + ::rustango::sql::MaybeSqliteScalar
+                        + ::core::marker::Send
+                        + ::core::marker::Unpin,
+                {
+                    let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
+                        .field(col)
+                        .ok_or_else(|| {
+                            ::rustango::sql::ExecError::Query(
+                                ::rustango::core::QueryError::UnknownField {
+                                    model: <Self as ::rustango::core::Model>::SCHEMA.name,
+                                    field: ::std::string::ToString::to_string(col),
+                                },
+                            )
+                        })?
+                        .column;
+                    ::rustango::query::QuerySet::<Self>::default()
+                        .values_list_flat(_col_static)
+                        .first::<U>(pool)
+                        .await
+                }
+            },
+        );
+        let sum_method = emit_if_no_field_collision(
+            "sum",
+            quote! {
+                /// `SUM(col)` over every row. Eloquent `Model::sum($col)`.
+                /// Skipped on models that already declare a field named
+                /// `sum`.
+                ///
+                /// # Errors
+                /// As [`::rustango::sql::fetch_aggregate_pool`].
+                pub async fn sum<U>(
+                    col: &str,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::core::option::Option<U>,
+                    ::rustango::sql::ExecError,
+                >
+                where
+                    (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
+                        + ::rustango::sql::MaybeMyFromRow
+                        + ::rustango::sql::MaybeSqliteFromRow
+                        + ::core::marker::Send
+                        + ::core::marker::Unpin,
+                {
+                    Self::__aggregate_one_pool::<U>(
+                        col,
+                        |c| ::rustango::core::AggregateExpr::Sum(c),
+                        pool,
+                    )
+                    .await
+                }
+            },
+        );
+        let avg_method = emit_if_no_field_collision(
+            "avg",
+            quote! {
+                /// `AVG(col)`. Eloquent `Model::avg($col)`. Skipped on
+                /// models that already declare a field named `avg`.
+                ///
+                /// # Errors
+                /// As [`::rustango::sql::fetch_aggregate_pool`].
+                pub async fn avg<U>(
+                    col: &str,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::core::option::Option<U>,
+                    ::rustango::sql::ExecError,
+                >
+                where
+                    (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
+                        + ::rustango::sql::MaybeMyFromRow
+                        + ::rustango::sql::MaybeSqliteFromRow
+                        + ::core::marker::Send
+                        + ::core::marker::Unpin,
+                {
+                    Self::__aggregate_one_pool::<U>(
+                        col,
+                        |c| ::rustango::core::AggregateExpr::Avg(c),
+                        pool,
+                    )
+                    .await
+                }
+            },
+        );
+        let min_method = emit_if_no_field_collision(
+            "min",
+            quote! {
+                /// `MIN(col)`. Eloquent `Model::min($col)`. Skipped on
+                /// models that already declare a field named `min`.
+                ///
+                /// # Errors
+                /// As [`::rustango::sql::fetch_aggregate_pool`].
+                pub async fn min<U>(
+                    col: &str,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::core::option::Option<U>,
+                    ::rustango::sql::ExecError,
+                >
+                where
+                    (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
+                        + ::rustango::sql::MaybeMyFromRow
+                        + ::rustango::sql::MaybeSqliteFromRow
+                        + ::core::marker::Send
+                        + ::core::marker::Unpin,
+                {
+                    Self::__aggregate_one_pool::<U>(
+                        col,
+                        |c| ::rustango::core::AggregateExpr::Min(c),
+                        pool,
+                    )
+                    .await
+                }
+            },
+        );
+        let max_method = emit_if_no_field_collision(
+            "max",
+            quote! {
+                /// `MAX(col)`. Eloquent `Model::max($col)`. Skipped on
+                /// models that already declare a field named `max`.
+                ///
+                /// # Errors
+                /// As [`::rustango::sql::fetch_aggregate_pool`].
+                pub async fn max<U>(
+                    col: &str,
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::core::option::Option<U>,
+                    ::rustango::sql::ExecError,
+                >
+                where
+                    (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
+                        + ::rustango::sql::MaybeMyFromRow
+                        + ::rustango::sql::MaybeSqliteFromRow
+                        + ::core::marker::Send
+                        + ::core::marker::Unpin,
+                {
+                    Self::__aggregate_one_pool::<U>(
+                        col,
+                        |c| ::rustango::core::AggregateExpr::Max(c),
+                        pool,
+                    )
+                    .await
+                }
+            },
+        );
+        let first_method = emit_if_no_field_collision(
+            "first",
+            quote! {
+                /// First row of this model. Eloquent `Model::first()`.
+                /// Skipped on models that already declare a field named
+                /// `first`. Drop into `QuerySet::<Self>::default().first(&pool)`.
+                ///
+                /// # Errors
+                /// As `QuerySet::first`.
+                pub async fn first(
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::core::option::Option<Self>,
+                    ::rustango::sql::ExecError,
+                > {
+                    ::rustango::query::QuerySet::<Self>::default()
+                        .first(pool)
+                        .await
+                }
+            },
+        );
         quote! {
             /// Re-SELECT this row by its primary key and overwrite
             /// every in-memory field with the freshly-fetched value.
@@ -3233,7 +3472,7 @@ fn inherent_impl_tokens(
             ///
             /// [`Model.refresh_from_db`]: https://docs.djangoproject.com/en/5.1/ref/models/instances/#django.db.models.Model.refresh_from_db
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn refresh_from_db_pool(
+            pub async fn refresh_from_db(
                 &mut self,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
@@ -3282,7 +3521,7 @@ fn inherent_impl_tokens(
             /// As [`UpdaterPool::execute_pool`].
             ///
             /// [`UpdaterPool::execute_pool`]: rustango::sql::UpdaterPool::execute_pool
-            pub async fn increment_pool(
+            pub async fn increment(
                 &self,
                 col: &str,
                 by: i64,
@@ -3335,7 +3574,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::increment_pool`].
-            pub async fn decrement_pool(
+            pub async fn decrement(
                 &self,
                 col: &str,
                 by: i64,
@@ -3389,7 +3628,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn fresh_pool(
+            pub async fn fresh(
                 &self,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
@@ -3418,30 +3657,7 @@ fn inherent_impl_tokens(
                 }
             }
 
-            /// Fetch the first row by primary-key ASC. Returns
-            /// `Ok(None)` when the table is empty. Thin wrapper over
-            /// `QuerySet::<Self>::default().first(pool)`. Eloquent
-            /// `Model::first()` parity.
-            ///
-            /// "First" means "first by primary key" when no
-            /// `.order_by(...)` is set on the queryset — matching
-            /// Django's `QuerySet.first()` fallback behavior. For
-            /// custom ordering, build the queryset explicitly.
-            ///
-            /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
-            ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn first_pool(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                ::rustango::query::QuerySet::<Self>::default()
-                    .first(pool)
-                    .await
-            }
+            #first_method
 
             /// Throwing counterpart of [`Self::first_pool`] —
             /// errors with `RowNotFound` when the table is empty.
@@ -3452,10 +3668,10 @@ fn inherent_impl_tokens(
             /// [`sqlx::Error::RowNotFound`] on empty tables.
             ///
             /// [`sqlx::Error::RowNotFound`]: rustango::sql::sqlx::Error::RowNotFound
-            pub async fn first_or_fail_pool(
+            pub async fn first_or_fail(
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
-                match Self::first_pool(pool).await? {
+                match Self::first(pool).await? {
                     ::core::option::Option::Some(_row) => ::core::result::Result::Ok(_row),
                     ::core::option::Option::None => ::core::result::Result::Err(
                         ::rustango::sql::ExecError::Driver(
@@ -3479,7 +3695,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As `ValuesFlatQuerySet::fetch`.
-            pub async fn pluck_pool<U>(
+            pub async fn pluck<U>(
                 col: &'static str,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<::std::vec::Vec<U>, ::rustango::sql::ExecError>
@@ -3513,7 +3729,7 @@ fn inherent_impl_tokens(
             /// As [`raw_execute_pool`].
             ///
             /// [`raw_execute_pool`]: rustango::sql::raw_execute_pool
-            pub async fn truncate_pool(
+            pub async fn truncate(
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
                 let _table = <Self as ::rustango::core::Model>::SCHEMA.table;
@@ -3541,7 +3757,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As `delete_pool`.
-            pub async fn destroy_pool<V>(
+            pub async fn destroy<V>(
                 pks: impl ::core::iter::IntoIterator<Item = V>,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
@@ -3591,7 +3807,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_pool(
+            pub async fn where_(
                 col: &str,
                 val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
@@ -3619,7 +3835,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_in_pool<V>(
+            pub async fn where_in<V>(
                 col: &str,
                 vals: impl ::core::iter::IntoIterator<Item = V>,
                 pool: &::rustango::sql::Pool,
@@ -3652,7 +3868,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_not_in_pool<V>(
+            pub async fn where_not_in<V>(
                 col: &str,
                 vals: impl ::core::iter::IntoIterator<Item = V>,
                 pool: &::rustango::sql::Pool,
@@ -3685,7 +3901,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_null_pool(
+            pub async fn where_null(
                 col: &str,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
@@ -3707,7 +3923,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_not_null_pool(
+            pub async fn where_not_null(
                 col: &str,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
@@ -3734,7 +3950,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn random_n_pool(
+            pub async fn random_n(
                 n: i64,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
@@ -3757,14 +3973,14 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn random_pool(
+            pub async fn random(
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
                 ::core::option::Option<Self>,
                 ::rustango::sql::ExecError,
             > {
                 ::core::result::Result::Ok(
-                    Self::random_n_pool(1, pool).await?.into_iter().next(),
+                    Self::random_n(1, pool).await?.into_iter().next(),
                 )
             }
 
@@ -3776,7 +3992,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn oldest_pool(
+            pub async fn oldest(
                 field: &str,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
@@ -3798,7 +4014,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn newest_pool(
+            pub async fn newest(
                 field: &str,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
@@ -3821,7 +4037,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_year_pool(
+            pub async fn where_year(
                 col: &str,
                 year: i64,
                 pool: &::rustango::sql::Pool,
@@ -3845,7 +4061,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_month_pool(
+            pub async fn where_month(
                 col: &str,
                 month: i64,
                 pool: &::rustango::sql::Pool,
@@ -3869,7 +4085,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_day_pool(
+            pub async fn where_day(
                 col: &str,
                 day: i64,
                 pool: &::rustango::sql::Pool,
@@ -3893,7 +4109,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_hour_pool(
+            pub async fn where_hour(
                 col: &str,
                 hour: i64,
                 pool: &::rustango::sql::Pool,
@@ -3917,7 +4133,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_minute_pool(
+            pub async fn where_minute(
                 col: &str,
                 minute: i64,
                 pool: &::rustango::sql::Pool,
@@ -3942,7 +4158,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_like_pool(
+            pub async fn where_like(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
                 pool: &::rustango::sql::Pool,
@@ -3969,7 +4185,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_ilike_pool(
+            pub async fn where_ilike(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
                 pool: &::rustango::sql::Pool,
@@ -3996,7 +4212,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_starts_with_pool(
+            pub async fn where_starts_with(
                 col: &str,
                 prefix: impl ::core::convert::Into<::std::string::String>,
                 pool: &::rustango::sql::Pool,
@@ -4023,7 +4239,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_ends_with_pool(
+            pub async fn where_ends_with(
                 col: &str,
                 suffix: impl ::core::convert::Into<::std::string::String>,
                 pool: &::rustango::sql::Pool,
@@ -4050,7 +4266,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_contains_pool(
+            pub async fn where_contains(
                 col: &str,
                 substr: impl ::core::convert::Into<::std::string::String>,
                 pool: &::rustango::sql::Pool,
@@ -4076,7 +4292,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_gt_pool(
+            pub async fn where_gt(
                 col: &str,
                 val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
@@ -4099,7 +4315,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_gte_pool(
+            pub async fn where_gte(
                 col: &str,
                 val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
@@ -4122,7 +4338,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_lt_pool(
+            pub async fn where_lt(
                 col: &str,
                 val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
@@ -4145,7 +4361,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_lte_pool(
+            pub async fn where_lte(
                 col: &str,
                 val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
@@ -4168,7 +4384,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_ne_pool(
+            pub async fn where_ne(
                 col: &str,
                 val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
@@ -4193,7 +4409,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn take_pool(
+            pub async fn take(
                 n: i64,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
@@ -4218,7 +4434,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn for_page_pool(
+            pub async fn for_page(
                 page: i64,
                 per_page: i64,
                 pool: &::rustango::sql::Pool,
@@ -4248,7 +4464,7 @@ fn inherent_impl_tokens(
             /// As [`UpdaterPool::execute_pool`].
             ///
             /// [`UpdaterPool::execute_pool`]: rustango::sql::UpdaterPool::execute_pool
-            pub async fn update_where_pool(
+            pub async fn update_where(
                 where_col: &str,
                 where_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 set_col: &str,
@@ -4274,7 +4490,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`::rustango::sql::delete_pool`].
-            pub async fn delete_where_pool(
+            pub async fn delete_where(
                 where_col: &str,
                 where_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
@@ -4314,7 +4530,7 @@ fn inherent_impl_tokens(
             /// As [`UpdaterPool::execute_pool`].
             ///
             /// [`UpdaterPool::execute_pool`]: rustango::sql::UpdaterPool::execute_pool
-            pub async fn update_all_pool(
+            pub async fn update_all(
                 set_col: &str,
                 set_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
@@ -4335,7 +4551,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_not_like_pool(
+            pub async fn where_not_like(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
                 pool: &::rustango::sql::Pool,
@@ -4362,7 +4578,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_not_ilike_pool(
+            pub async fn where_not_ilike(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
                 pool: &::rustango::sql::Pool,
@@ -4389,7 +4605,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_not_between_pool(
+            pub async fn where_not_between(
                 col: &str,
                 lo: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 hi: impl ::core::convert::Into<::rustango::core::SqlValue>,
@@ -4436,7 +4652,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn where_between_pool(
+            pub async fn where_between(
                 col: &str,
                 lo: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 hi: impl ::core::convert::Into<::rustango::core::SqlValue>,
@@ -4472,7 +4688,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As `QuerySet::first`.
-            pub async fn first_where_pool(
+            pub async fn first_where(
                 col: &str,
                 val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
@@ -4486,55 +4702,7 @@ fn inherent_impl_tokens(
                     .await
             }
 
-            /// Pluck a single scalar from the first row of the
-            /// table. Eloquent `Model::query()->value($col)` parity
-            /// (the un-filtered shorthand — pair with the existing
-            /// `Self::query()` builder for the filtered form).
-            ///
-            /// Thin wrapper over `QuerySet::<Self>::default()
-            /// .values_list_flat(col).first::<U>(pool)` — appends
-            /// `LIMIT 1` so the DB doesn't materialize rows past
-            /// the first. Useful for one-shot pickups like
-            /// `User::value_pool::<String>("email", &pool)` or
-            /// `Counter::value_pool::<i64>("hits", &pool)`.
-            ///
-            /// # Errors
-            /// As `ValuesFlatQuerySet::first`.
-            pub async fn value_pool<U>(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                U: ::rustango::sql::MaybePgScalar
-                    + ::rustango::sql::MaybeMyScalar
-                    + ::rustango::sql::MaybeSqliteScalar
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                // Resolve `col` (runtime arg) to the `&'static str`
-                // SCHEMA-registered column so the builder's
-                // `values_list_flat(&'static str)` signature is
-                // honored. Unknown fields surface as
-                // `QueryError::UnknownField`.
-                let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
-                    .field(col)
-                    .ok_or_else(|| {
-                        ::rustango::sql::ExecError::Query(
-                            ::rustango::core::QueryError::UnknownField {
-                                model: <Self as ::rustango::core::Model>::SCHEMA.name,
-                                field: ::std::string::ToString::to_string(col),
-                            },
-                        )
-                    })?
-                    .column;
-                ::rustango::query::QuerySet::<Self>::default()
-                    .values_list_flat(_col_static)
-                    .first::<U>(pool)
-                    .await
-            }
+            #value_method
 
             /// Fetch the row with the largest `field` value —
             /// `SELECT … ORDER BY <field> DESC LIMIT 1`. Returns
@@ -4551,7 +4719,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As `QuerySet::latest`.
-            pub async fn latest_pool(
+            pub async fn latest(
                 field: &str,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
@@ -4571,7 +4739,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::latest_pool`].
-            pub async fn earliest_pool(
+            pub async fn earliest(
                 field: &str,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
@@ -4583,23 +4751,7 @@ fn inherent_impl_tokens(
                     .await
             }
 
-            /// Count rows of this model — `SELECT COUNT(*) FROM
-            /// <table>`. Eloquent `Model::count()` parity. Thin
-            /// wrapper over `QuerySet::<Self>::default()
-            /// .count_pool(pool)`.
-            ///
-            /// # Errors
-            /// As [`CounterPool::count_pool`].
-            ///
-            /// [`CounterPool::count_pool`]: rustango::sql::CounterPool::count_pool
-            pub async fn count_pool(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<i64, ::rustango::sql::ExecError> {
-                use ::rustango::sql::CounterPool as _;
-                ::rustango::query::QuerySet::<Self>::default()
-                    .count_pool(pool)
-                    .await
-            }
+            #count_method
 
             /// `true` when the table contains at least one row.
             /// Eloquent `Model::query()->exists()` / Django
@@ -4610,7 +4762,7 @@ fn inherent_impl_tokens(
             /// As [`ExistsPool::exists_pool`].
             ///
             /// [`ExistsPool::exists_pool`]: rustango::sql::ExistsPool::exists_pool
-            pub async fn exists_pool(
+            pub async fn exists(
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<bool, ::rustango::sql::ExecError> {
                 use ::rustango::sql::ExistsPool as _;
@@ -4625,126 +4777,16 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::exists_pool`].
-            pub async fn doesnt_exist_pool(
+            pub async fn doesnt_exist(
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<bool, ::rustango::sql::ExecError> {
-                Self::exists_pool(pool).await.map(|e| !e)
+                Self::exists(pool).await.map(|e| !e)
             }
 
-            /// `SUM(col)` over every row. Returns `Ok(None)` when the
-            /// table is empty (matches SQL's `SUM(empty)` shape).
-            /// Eloquent `Model::sum($col)` parity.
-            ///
-            /// `col` is the Rust field ident; unknown columns surface
-            /// as `QueryError::UnknownField`. `U` is the decoded
-            /// type — `i64` for an integer column, `f64` for a
-            /// numeric, etc. Choose `Option<U>` if you prefer to
-            /// distinguish "no rows" from a `Default::default()`.
-            ///
-            /// # Errors
-            /// As [`::rustango::sql::fetch_aggregate_pool`].
-            pub async fn sum_pool<U>(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                    + ::rustango::sql::MaybeMyFromRow
-                    + ::rustango::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                Self::__aggregate_one_pool::<U>(
-                    col,
-                    |c| ::rustango::core::AggregateExpr::Sum(c),
-                    pool,
-                )
-                .await
-            }
-
-            /// `AVG(col)`. Returns `Ok(None)` when the table is empty.
-            /// Eloquent `Model::avg($col)` parity.
-            ///
-            /// # Errors
-            /// As [`::rustango::sql::fetch_aggregate_pool`].
-            pub async fn avg_pool<U>(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                    + ::rustango::sql::MaybeMyFromRow
-                    + ::rustango::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                Self::__aggregate_one_pool::<U>(
-                    col,
-                    |c| ::rustango::core::AggregateExpr::Avg(c),
-                    pool,
-                )
-                .await
-            }
-
-            /// `MIN(col)`. Returns `Ok(None)` when the table is empty.
-            /// Eloquent `Model::min($col)` parity.
-            ///
-            /// # Errors
-            /// As [`::rustango::sql::fetch_aggregate_pool`].
-            pub async fn min_pool<U>(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                    + ::rustango::sql::MaybeMyFromRow
-                    + ::rustango::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                Self::__aggregate_one_pool::<U>(
-                    col,
-                    |c| ::rustango::core::AggregateExpr::Min(c),
-                    pool,
-                )
-                .await
-            }
-
-            /// `MAX(col)`. Returns `Ok(None)` when the table is empty.
-            /// Eloquent `Model::max($col)` parity.
-            ///
-            /// # Errors
-            /// As [`::rustango::sql::fetch_aggregate_pool`].
-            pub async fn max_pool<U>(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                    + ::rustango::sql::MaybeMyFromRow
-                    + ::rustango::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                Self::__aggregate_one_pool::<U>(
-                    col,
-                    |c| ::rustango::core::AggregateExpr::Max(c),
-                    pool,
-                )
-                .await
-            }
+            #sum_method
+            #avg_method
+            #min_method
+            #max_method
 
             /// Internal: resolve `col` → SCHEMA `&'static str`, build a
             /// single-aggregate `AggregateQuery`, run it through
@@ -4809,7 +4851,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn all_pool(
+            pub async fn all(
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<::std::vec::Vec<Self>, ::rustango::sql::ExecError>
             {
@@ -4842,7 +4884,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn find_many_pool<V>(
+            pub async fn find_many<V>(
                 pks: impl ::core::iter::IntoIterator<Item = V>,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<
@@ -4880,7 +4922,7 @@ fn inherent_impl_tokens(
             /// As [`FetcherPool::fetch_pool`].
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
-            pub async fn find_pool(
+            pub async fn find(
                 pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<::core::option::Option<Self>, ::rustango::sql::ExecError>
@@ -4913,11 +4955,11 @@ fn inherent_impl_tokens(
             ///
             /// [`ExecError::Driver`]: rustango::sql::ExecError::Driver
             /// [`sqlx::Error::RowNotFound`]: rustango::sql::sqlx::Error::RowNotFound
-            pub async fn find_or_fail_pool(
+            pub async fn find_or_fail(
                 pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
-                match Self::find_pool(pk, pool).await? {
+                match Self::find(pk, pool).await? {
                     ::core::option::Option::Some(_row) => ::core::result::Result::Ok(_row),
                     ::core::option::Option::None => ::core::result::Result::Err(
                         ::rustango::sql::ExecError::Driver(
@@ -4941,7 +4983,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::find_pool`].
-            pub async fn find_or_pool<F>(
+            pub async fn find_or<F>(
                 pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
                 fallback: F,
@@ -4950,7 +4992,7 @@ fn inherent_impl_tokens(
                 F: ::core::ops::FnOnce() -> Self,
             {
                 ::core::result::Result::Ok(
-                    Self::find_pool(pk, pool).await?.unwrap_or_else(fallback),
+                    Self::find(pk, pool).await?.unwrap_or_else(fallback),
                 )
             }
 
@@ -4960,7 +5002,7 @@ fn inherent_impl_tokens(
             ///
             /// # Errors
             /// As [`Self::first_pool`].
-            pub async fn first_or_pool<F>(
+            pub async fn first_or<F>(
                 pool: &::rustango::sql::Pool,
                 fallback: F,
             ) -> ::core::result::Result<Self, ::rustango::sql::ExecError>
@@ -4968,7 +5010,7 @@ fn inherent_impl_tokens(
                 F: ::core::ops::FnOnce() -> Self,
             {
                 ::core::result::Result::Ok(
-                    Self::first_pool(pool).await?.unwrap_or_else(fallback),
+                    Self::first(pool).await?.unwrap_or_else(fallback),
                 )
             }
 
@@ -4981,12 +5023,12 @@ fn inherent_impl_tokens(
             /// # Errors
             /// As [`Self::where_pool`] plus the explicit
             /// `RowNotFound` / `MultipleRowsReturned` cases above.
-            pub async fn sole_pool(
+            pub async fn sole(
                 col: &str,
                 val: impl ::core::convert::Into<::rustango::core::SqlValue>,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
-                let mut _rows = Self::where_pool(col, val, pool).await?;
+                let mut _rows = Self::where_(col, val, pool).await?;
                 match _rows.len() {
                     0 => ::core::result::Result::Err(
                         ::rustango::sql::ExecError::Driver(
@@ -5589,7 +5631,7 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`::rustango::sql::update_pool`].
-                pub async fn soft_delete_pool(
+                pub async fn soft_delete(
                     &self,
                     pool: &::rustango::sql::Pool,
                 ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
@@ -5625,7 +5667,7 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`::rustango::sql::update_pool`].
-                pub async fn restore_pool(
+                pub async fn restore(
                     &self,
                     pool: &::rustango::sql::Pool,
                 ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
@@ -5665,7 +5707,7 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`Self::delete_pool`].
-                pub async fn force_delete_pool(
+                pub async fn force_delete(
                     &self,
                     pool: &::rustango::sql::Pool,
                 ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
@@ -5696,7 +5738,7 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`::rustango::sql::FetcherPool::fetch_pool`].
-                pub async fn active_pool(
+                pub async fn active(
                     pool: &::rustango::sql::Pool,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<Self>,
@@ -5720,7 +5762,7 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`::rustango::sql::FetcherPool::fetch_pool`].
-                pub async fn only_trashed_pool(
+                pub async fn only_trashed(
                     pool: &::rustango::sql::Pool,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<Self>,
@@ -5748,7 +5790,7 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`::rustango::sql::FetcherPool::fetch_pool`].
-                pub async fn with_trashed_pool(
+                pub async fn with_trashed(
                     pool: &::rustango::sql::Pool,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<Self>,
@@ -5761,85 +5803,6 @@ fn inherent_impl_tokens(
                         .await
                 }
 
-                // Bare-name soft-delete aliases (see the general
-                // bare-name alias block on `pk_methods` for context).
-
-                /// Eloquent `$model->delete()` (soft-delete model)
-                /// — bare-name alias for [`Self::soft_delete_pool`].
-                ///
-                /// # Errors
-                /// As [`Self::soft_delete_pool`].
-                pub async fn soft_delete(
-                    &self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                    Self::soft_delete_pool(self, pool).await
-                }
-
-                /// Eloquent `$model->restore()` — bare-name alias
-                /// for [`Self::restore_pool`].
-                ///
-                /// # Errors
-                /// As [`Self::restore_pool`].
-                pub async fn restore(
-                    &self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                    Self::restore_pool(self, pool).await
-                }
-
-                /// Eloquent `$model->forceDelete()` — bare-name alias
-                /// for [`Self::force_delete_pool`].
-                ///
-                /// # Errors
-                /// As [`Self::force_delete_pool`].
-                pub async fn force_delete(
-                    &self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                    Self::force_delete_pool(self, pool).await
-                }
-
-                /// Bare-name alias for [`Self::active_pool`].
-                ///
-                /// # Errors
-                /// As [`Self::active_pool`].
-                pub async fn active(
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<
-                    ::std::vec::Vec<Self>,
-                    ::rustango::sql::ExecError,
-                > {
-                    Self::active_pool(pool).await
-                }
-
-                /// Eloquent `Model::onlyTrashed()->get()` —
-                /// bare-name alias for [`Self::only_trashed_pool`].
-                ///
-                /// # Errors
-                /// As [`Self::only_trashed_pool`].
-                pub async fn only_trashed(
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<
-                    ::std::vec::Vec<Self>,
-                    ::rustango::sql::ExecError,
-                > {
-                    Self::only_trashed_pool(pool).await
-                }
-
-                /// Eloquent `Model::withTrashed()->get()` —
-                /// bare-name alias for [`Self::with_trashed_pool`].
-                ///
-                /// # Errors
-                /// As [`Self::with_trashed_pool`].
-                pub async fn with_trashed(
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<
-                    ::std::vec::Vec<Self>,
-                    ::rustango::sql::ExecError,
-                > {
-                    Self::with_trashed_pool(pool).await
-                }
             }
         } else {
             quote!()
@@ -5947,962 +5910,6 @@ fn inherent_impl_tokens(
                 ::core::convert::Into::into(::core::clone::Clone::clone(&self.#pk_ident))
             }
 
-            // =====================================================
-            // Bare-name aliases for Eloquent-shape shortcuts.
-            //
-            // The `_pool` suffix is a v0.42 artifact callers found
-            // noisy ("rustango bare-name preference", 2026-06-07).
-            // The shortcuts below ARE the user-facing API; the
-            // matching `_pool` versions are silent back-compat
-            // aliases retained so the existing test suite +
-            // downstream code continue to compile unchanged.
-            //
-            // Rules of thumb:
-            // - `where` is a Rust keyword → bare-name keeps the
-            //   trailing-underscore `where_pool` is just left as
-            //   the named entry (no `where_` alias added — callers
-            //   keep using `Self::query().filter(...)` for that
-            //   shape). Every other shortcut gets a bare alias.
-            // - `save` / `insert` / `delete` keep `_pool` for now
-            //   (~140 test call sites; rename is a separate PR).
-            // =====================================================
-
-            /// Eloquent `Model::find($pk)` — bare-name alias for
-            /// [`Self::find_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::find_pool`].
-            pub async fn find(
-                pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::find_pool(pk, pool).await
-            }
-
-            /// Eloquent `Model::findOrFail($pk)` — bare-name alias for
-            /// [`Self::find_or_fail_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::find_or_fail_pool`].
-            pub async fn find_or_fail(
-                pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
-                Self::find_or_fail_pool(pk, pool).await
-            }
-
-            /// Eloquent `Model::find([$id1, $id2, ...])` — bare-name
-            /// alias for [`Self::find_many_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::find_many_pool`].
-            pub async fn find_many<V>(
-                pks: impl ::core::iter::IntoIterator<Item = V>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                V: ::core::convert::Into<::rustango::core::SqlValue>,
-            {
-                Self::find_many_pool(pks, pool).await
-            }
-
-            /// Eloquent `Model::findOr($pk, fn() => …)` — bare-name
-            /// alias for [`Self::find_or_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::find_or_pool`].
-            pub async fn find_or<F>(
-                pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-                fallback: F,
-            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError>
-            where
-                F: ::core::ops::FnOnce() -> Self,
-            {
-                Self::find_or_pool(pk, pool, fallback).await
-            }
-
-            /// Eloquent `Model::first()` — bare-name alias for
-            /// [`Self::first_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::first_pool`].
-            pub async fn first(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::first_pool(pool).await
-            }
-
-            /// Eloquent `Model::firstOrFail()` — bare-name alias for
-            /// [`Self::first_or_fail_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::first_or_fail_pool`].
-            pub async fn first_or_fail(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
-                Self::first_or_fail_pool(pool).await
-            }
-
-            /// Eloquent `Model::firstOr(fn() => …)` — bare-name alias
-            /// for [`Self::first_or_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::first_or_pool`].
-            pub async fn first_or<F>(
-                pool: &::rustango::sql::Pool,
-                fallback: F,
-            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError>
-            where
-                F: ::core::ops::FnOnce() -> Self,
-            {
-                Self::first_or_pool(pool, fallback).await
-            }
-
-            /// Eloquent `Model::firstWhere($col, $val)` — bare-name
-            /// alias for [`Self::first_where_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::first_where_pool`].
-            pub async fn first_where(
-                col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::first_where_pool(col, val, pool).await
-            }
-
-            /// Eloquent `Model::all()` — bare-name alias for
-            /// [`Self::all_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::all_pool`].
-            pub async fn all(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::all_pool(pool).await
-            }
-
-            /// Eloquent `Model::count()` — bare-name alias for
-            /// [`Self::count_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::count_pool`].
-            pub async fn count(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<i64, ::rustango::sql::ExecError> {
-                Self::count_pool(pool).await
-            }
-
-            /// Eloquent `Model::exists()` — bare-name alias for
-            /// [`Self::exists_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::exists_pool`].
-            pub async fn exists(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<bool, ::rustango::sql::ExecError> {
-                Self::exists_pool(pool).await
-            }
-
-            /// Eloquent `Model::doesntExist()` — bare-name alias for
-            /// [`Self::doesnt_exist_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::doesnt_exist_pool`].
-            pub async fn doesnt_exist(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<bool, ::rustango::sql::ExecError> {
-                Self::doesnt_exist_pool(pool).await
-            }
-
-            /// Eloquent `Model::sole($col, $val)` — bare-name alias
-            /// for [`Self::sole_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::sole_pool`].
-            pub async fn sole(
-                col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
-                Self::sole_pool(col, val, pool).await
-            }
-
-            /// Eloquent `Model::query()->value($col)` — bare-name
-            /// alias for [`Self::value_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::value_pool`].
-            pub async fn value<U>(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                U: ::rustango::sql::MaybePgScalar
-                    + ::rustango::sql::MaybeMyScalar
-                    + ::rustango::sql::MaybeSqliteScalar
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                Self::value_pool::<U>(col, pool).await
-            }
-
-            /// Eloquent `Model::pluck($col)` — bare-name alias for
-            /// [`Self::pluck_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::pluck_pool`].
-            pub async fn pluck<U>(
-                col: &'static str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<::std::vec::Vec<U>, ::rustango::sql::ExecError>
-            where
-                U: ::rustango::sql::MaybePgScalar
-                    + ::rustango::sql::MaybeMyScalar
-                    + ::rustango::sql::MaybeSqliteScalar
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                Self::pluck_pool::<U>(col, pool).await
-            }
-
-            /// Eloquent `Model::sum($col)` — bare-name alias for
-            /// [`Self::sum_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::sum_pool`].
-            pub async fn sum<U>(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                    + ::rustango::sql::MaybeMyFromRow
-                    + ::rustango::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                Self::sum_pool::<U>(col, pool).await
-            }
-
-            /// Eloquent `Model::avg($col)` — bare-name alias for
-            /// [`Self::avg_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::avg_pool`].
-            pub async fn avg<U>(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                    + ::rustango::sql::MaybeMyFromRow
-                    + ::rustango::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                Self::avg_pool::<U>(col, pool).await
-            }
-
-            /// Eloquent `Model::min($col)` — bare-name alias for
-            /// [`Self::min_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::min_pool`].
-            pub async fn min<U>(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                    + ::rustango::sql::MaybeMyFromRow
-                    + ::rustango::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                Self::min_pool::<U>(col, pool).await
-            }
-
-            /// Eloquent `Model::max($col)` — bare-name alias for
-            /// [`Self::max_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::max_pool`].
-            pub async fn max<U>(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                    + ::rustango::sql::MaybeMyFromRow
-                    + ::rustango::sql::MaybeSqliteFromRow
-                    + ::core::marker::Send
-                    + ::core::marker::Unpin,
-            {
-                Self::max_pool::<U>(col, pool).await
-            }
-
-            /// Eloquent `Model::take($n)->get()` — bare-name alias
-            /// for [`Self::take_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::take_pool`].
-            pub async fn take(
-                n: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::take_pool(n, pool).await
-            }
-
-            /// Eloquent `Model::query()->forPage($p, $pp)->get()` —
-            /// bare-name alias for [`Self::for_page_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::for_page_pool`].
-            pub async fn for_page(
-                page: i64,
-                per_page: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::for_page_pool(page, per_page, pool).await
-            }
-
-            /// Eloquent `Model::oldest($field)->get()` — bare-name
-            /// alias for [`Self::oldest_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::oldest_pool`].
-            pub async fn oldest(
-                field: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::oldest_pool(field, pool).await
-            }
-
-            /// Eloquent `Model::latest($field)->get()` (multi-row) —
-            /// bare-name alias for [`Self::newest_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::newest_pool`].
-            pub async fn newest(
-                field: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::newest_pool(field, pool).await
-            }
-
-            /// Eloquent `Model::latest($field)->first()` — bare-name
-            /// alias for [`Self::latest_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::latest_pool`].
-            pub async fn latest(
-                field: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::latest_pool(field, pool).await
-            }
-
-            /// Eloquent `Model::oldest($field)->first()` — bare-name
-            /// alias for [`Self::earliest_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::earliest_pool`].
-            pub async fn earliest(
-                field: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::earliest_pool(field, pool).await
-            }
-
-            /// Eloquent `Model::inRandomOrder()->first()` — bare-name
-            /// alias for [`Self::random_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::random_pool`].
-            pub async fn random(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::random_pool(pool).await
-            }
-
-            /// Eloquent `Model::inRandomOrder()->limit($n)->get()` —
-            /// bare-name alias for [`Self::random_n_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::random_n_pool`].
-            pub async fn random_n(
-                n: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::random_n_pool(n, pool).await
-            }
-
-            /// Eloquent `Model::truncate()` — bare-name alias for
-            /// [`Self::truncate_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::truncate_pool`].
-            pub async fn truncate(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                Self::truncate_pool(pool).await
-            }
-
-            /// Eloquent `Model::query()->where(...)->get()` — bare-
-            /// name alias for [`Self::where_pool`]. (The
-            /// `_pool`-less spelling for `where` itself would be
-            /// `where_`, which Rust syntax already uses for the typed
-            /// queryset surface — callers are unlikely to confuse
-            /// the two.)
-            ///
-            /// # Errors
-            /// As [`Self::where_pool`].
-            pub async fn where_<W>(
-                col: &str,
-                val: W,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                W: ::core::convert::Into<::rustango::core::SqlValue>,
-            {
-                Self::where_pool(col, val, pool).await
-            }
-
-            /// Eloquent `Model::whereIn($col, $vals)` — bare-name
-            /// alias for [`Self::where_in_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_in_pool`].
-            pub async fn where_in<V>(
-                col: &str,
-                vals: impl ::core::iter::IntoIterator<Item = V>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                V: ::core::convert::Into<::rustango::core::SqlValue>,
-            {
-                Self::where_in_pool(col, vals, pool).await
-            }
-
-            /// Eloquent `Model::whereNotIn($col, $vals)` — bare-name
-            /// alias for [`Self::where_not_in_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_not_in_pool`].
-            pub async fn where_not_in<V>(
-                col: &str,
-                vals: impl ::core::iter::IntoIterator<Item = V>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            >
-            where
-                V: ::core::convert::Into<::rustango::core::SqlValue>,
-            {
-                Self::where_not_in_pool(col, vals, pool).await
-            }
-
-            /// Eloquent `Model::whereNull($col)` — bare-name alias
-            /// for [`Self::where_null_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_null_pool`].
-            pub async fn where_null(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_null_pool(col, pool).await
-            }
-
-            /// Eloquent `Model::whereNotNull($col)` — bare-name alias
-            /// for [`Self::where_not_null_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_not_null_pool`].
-            pub async fn where_not_null(
-                col: &str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_not_null_pool(col, pool).await
-            }
-
-            /// Eloquent `Model::whereBetween($col, [$lo, $hi])` —
-            /// bare-name alias for [`Self::where_between_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_between_pool`].
-            pub async fn where_between(
-                col: &str,
-                lo: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                hi: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_between_pool(col, lo, hi, pool).await
-            }
-
-            /// Eloquent `Model::whereNotBetween($col, [$lo, $hi])` —
-            /// bare-name alias for [`Self::where_not_between_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_not_between_pool`].
-            pub async fn where_not_between(
-                col: &str,
-                lo: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                hi: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_not_between_pool(col, lo, hi, pool).await
-            }
-
-            /// Eloquent `Model::whereLike($col, $pat)` — bare-name
-            /// alias for [`Self::where_like_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_like_pool`].
-            pub async fn where_like(
-                col: &str,
-                pattern: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_like_pool(col, pattern, pool).await
-            }
-
-            /// Eloquent `Model::whereLike($col, $pat)` (case-
-            /// insensitive) — bare-name alias for
-            /// [`Self::where_ilike_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_ilike_pool`].
-            pub async fn where_ilike(
-                col: &str,
-                pattern: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_ilike_pool(col, pattern, pool).await
-            }
-
-            /// Eloquent `Model::whereNotLike($col, $pat)` — bare-name
-            /// alias for [`Self::where_not_like_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_not_like_pool`].
-            pub async fn where_not_like(
-                col: &str,
-                pattern: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_not_like_pool(col, pattern, pool).await
-            }
-
-            /// Eloquent `Model::whereNotLike` (case-insensitive) —
-            /// bare-name alias for [`Self::where_not_ilike_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_not_ilike_pool`].
-            pub async fn where_not_ilike(
-                col: &str,
-                pattern: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_not_ilike_pool(col, pattern, pool).await
-            }
-
-            /// Django `__startswith` / Eloquent
-            /// `whereLike("col", "$prefix%")` — bare-name alias for
-            /// [`Self::where_starts_with_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_starts_with_pool`].
-            pub async fn where_starts_with(
-                col: &str,
-                prefix: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_starts_with_pool(col, prefix, pool).await
-            }
-
-            /// Django `__endswith` / Eloquent
-            /// `whereLike("col", "%$suffix")` — bare-name alias for
-            /// [`Self::where_ends_with_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_ends_with_pool`].
-            pub async fn where_ends_with(
-                col: &str,
-                suffix: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_ends_with_pool(col, suffix, pool).await
-            }
-
-            /// Django `__contains` / Eloquent
-            /// `whereLike("col", "%$str%")` — bare-name alias for
-            /// [`Self::where_contains_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_contains_pool`].
-            pub async fn where_contains(
-                col: &str,
-                substr: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_contains_pool(col, substr, pool).await
-            }
-
-            /// Eloquent `Model::whereYear($col, $y)` — bare-name
-            /// alias for [`Self::where_year_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_year_pool`].
-            pub async fn where_year(
-                col: &str,
-                year: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_year_pool(col, year, pool).await
-            }
-
-            /// Eloquent `Model::whereMonth($col, $m)` — bare-name
-            /// alias for [`Self::where_month_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_month_pool`].
-            pub async fn where_month(
-                col: &str,
-                month: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_month_pool(col, month, pool).await
-            }
-
-            /// Eloquent `Model::whereDay($col, $d)` — bare-name alias
-            /// for [`Self::where_day_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_day_pool`].
-            pub async fn where_day(
-                col: &str,
-                day: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_day_pool(col, day, pool).await
-            }
-
-            /// Eloquent `Model::whereHour($col, $h)` — bare-name
-            /// alias for [`Self::where_hour_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_hour_pool`].
-            pub async fn where_hour(
-                col: &str,
-                hour: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_hour_pool(col, hour, pool).await
-            }
-
-            /// Eloquent `Model::whereMinute($col, $m)` — bare-name
-            /// alias for [`Self::where_minute_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_minute_pool`].
-            pub async fn where_minute(
-                col: &str,
-                minute: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_minute_pool(col, minute, pool).await
-            }
-
-            /// Eloquent `Model::where($col, ">", $val)` — bare-name
-            /// alias for [`Self::where_gt_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_gt_pool`].
-            pub async fn where_gt(
-                col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_gt_pool(col, val, pool).await
-            }
-
-            /// Eloquent `Model::where($col, ">=", $val)` — bare-name
-            /// alias for [`Self::where_gte_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_gte_pool`].
-            pub async fn where_gte(
-                col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_gte_pool(col, val, pool).await
-            }
-
-            /// Eloquent `Model::where($col, "<", $val)` — bare-name
-            /// alias for [`Self::where_lt_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_lt_pool`].
-            pub async fn where_lt(
-                col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_lt_pool(col, val, pool).await
-            }
-
-            /// Eloquent `Model::where($col, "<=", $val)` — bare-name
-            /// alias for [`Self::where_lte_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_lte_pool`].
-            pub async fn where_lte(
-                col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_lte_pool(col, val, pool).await
-            }
-
-            /// Eloquent `Model::where($col, "!=", $val)` — bare-name
-            /// alias for [`Self::where_ne_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::where_ne_pool`].
-            pub async fn where_ne(
-                col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::where_ne_pool(col, val, pool).await
-            }
-
-            /// Eloquent
-            /// `Model::where($wc, $wv)->update([$sc => $sv])` —
-            /// bare-name alias for [`Self::update_where_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::update_where_pool`].
-            pub async fn update_where(
-                where_col: &str,
-                where_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                set_col: &str,
-                set_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                Self::update_where_pool(where_col, where_val, set_col, set_val, pool).await
-            }
-
-            /// Eloquent `Model::where($wc, $wv)->delete()` —
-            /// bare-name alias for [`Self::delete_where_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::delete_where_pool`].
-            pub async fn delete_where(
-                where_col: &str,
-                where_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                Self::delete_where_pool(where_col, where_val, pool).await
-            }
-
-            /// Eloquent `Model::query()->update([$col => $val])` —
-            /// bare-name alias for [`Self::update_all_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::update_all_pool`].
-            pub async fn update_all(
-                set_col: &str,
-                set_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                Self::update_all_pool(set_col, set_val, pool).await
-            }
-
-            // Instance helpers.
-
-            /// Eloquent `$model->fresh()` — bare-name alias for
-            /// [`Self::fresh_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::fresh_pool`].
-            pub async fn fresh(
-                &self,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<
-                ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
-            > {
-                Self::fresh_pool(self, pool).await
-            }
-
-            /// Django `Model.refresh_from_db()` — bare-name alias
-            /// for [`Self::refresh_from_db_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::refresh_from_db_pool`].
-            pub async fn refresh_from_db(
-                &mut self,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                Self::refresh_from_db_pool(self, pool).await
-            }
-
-            /// Eloquent `$model->increment($col, $by)` — bare-name
-            /// alias for [`Self::increment_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::increment_pool`].
-            pub async fn increment(
-                &self,
-                col: &str,
-                by: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                Self::increment_pool(self, col, by, pool).await
-            }
-
-            /// Eloquent `$model->decrement($col, $by)` — bare-name
-            /// alias for [`Self::decrement_pool`].
-            ///
-            /// # Errors
-            /// As [`Self::decrement_pool`].
-            pub async fn decrement(
-                &self,
-                col: &str,
-                by: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                Self::decrement_pool(self, col, by, pool).await
-            }
         }
     });
 

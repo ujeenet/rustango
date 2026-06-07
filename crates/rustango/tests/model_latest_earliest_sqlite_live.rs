@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::latest_pool(field, pool)` / `earliest_pool(field, pool)`
+//! `Model::latest(field, pool)` / `earliest_pool(field, pool)`
 //! shortcuts — Eloquent `Model::latest($field)->first()` /
 //! `oldest($field)->first()` parity.
 
@@ -50,7 +50,7 @@ async fn seed(pool: &Pool) {
 async fn latest_pool_picks_largest_field_value() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let row = Post::latest_pool("views", &pool).await.unwrap().unwrap();
+    let row = Post::latest("views", &pool).await.unwrap().unwrap();
     assert_eq!(row.title, "high", "latest by views should be 500");
 }
 
@@ -58,13 +58,13 @@ async fn latest_pool_picks_largest_field_value() {
 async fn earliest_pool_picks_smallest_field_value() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let row = Post::earliest_pool("views", &pool).await.unwrap().unwrap();
+    let row = Post::earliest("views", &pool).await.unwrap().unwrap();
     assert_eq!(row.title, "low", "earliest by views should be 10");
 }
 
 #[tokio::test]
 async fn latest_pool_returns_none_for_empty_table() {
     let pool = make_pool().await;
-    let row = Post::latest_pool("views", &pool).await.unwrap();
+    let row = Post::latest("views", &pool).await.unwrap();
     assert!(row.is_none());
 }

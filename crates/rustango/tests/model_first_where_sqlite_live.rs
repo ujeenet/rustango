@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::first_where_pool(col, val, pool)` shortcut — Eloquent
+//! `Model::first_where(col, val, pool)` shortcut — Eloquent
 //! `Model::firstWhere($col, $val)` / Django
 //! `Model.objects.filter(col=val).first()` parity.
 
@@ -55,7 +55,7 @@ async fn seed(pool: &Pool) {
 async fn first_where_pool_returns_some_for_match() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let row = Post::first_where_pool("status", "draft", &pool)
+    let row = Post::first_where("status", "draft", &pool)
         .await
         .unwrap()
         .unwrap();
@@ -67,7 +67,7 @@ async fn first_where_pool_picks_first_of_multiple_matches() {
     let pool = make_pool().await;
     seed(&pool).await;
     // Two rows with status="published"; first() defaults to PK ASC.
-    let row = Post::first_where_pool("status", "published", &pool)
+    let row = Post::first_where("status", "published", &pool)
         .await
         .unwrap()
         .unwrap();
@@ -78,7 +78,7 @@ async fn first_where_pool_picks_first_of_multiple_matches() {
 async fn first_where_pool_returns_none_for_no_match() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let row = Post::first_where_pool("status", "archived", &pool)
+    let row = Post::first_where("status", "archived", &pool)
         .await
         .unwrap();
     assert!(row.is_none());
