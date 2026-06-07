@@ -1,7 +1,7 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted aggregate-shortcut
-//! family: `Model::sum_pool` / `avg_pool` / `min_pool` / `max_pool`
-//! / `doesnt_exist_pool`. Eloquent `Model::sum($col)` /
+//! family: `Model::sum` / `avg` / `min` / `max` /
+//! `doesnt_exist`. Eloquent `Model::sum($col)` /
 //! `Model::avg($col)` / `Model::min($col)` / `Model::max($col)` /
 //! `Model::doesntExist()` parity.
 

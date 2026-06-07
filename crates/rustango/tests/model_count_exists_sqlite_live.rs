@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
-//! Live SQLite tests for the macro-emitted `Model::count_pool` /
-//! `Model::exists_pool` shortcuts — Eloquent `Model::count()` /
+//! Live SQLite tests for the macro-emitted `Model::count` /
+//! `Model::exists` shortcuts — Eloquent `Model::count()` /
 //! `Model::query()->exists()` parity.
 
 use rustango::sql::{sqlx, Auto, Pool};
