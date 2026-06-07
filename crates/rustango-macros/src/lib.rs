@@ -1516,8 +1516,10 @@ fn reverse_has_accessor_tokens(
     let methods = reverse_has_relations.iter().map(|rel| {
         let exists_name = format!("{}_exists_expr", rel.name);
         let not_exists_name = format!("{}_not_exists_expr", rel.name);
+        let count_name = format!("{}_count_pool", rel.name);
         let exists_ident = syn::Ident::new(&exists_name, struct_name.span());
         let not_exists_ident = syn::Ident::new(&not_exists_name, struct_name.span());
+        let count_ident = syn::Ident::new(&count_name, struct_name.span());
         let child = &rel.child;
         let child_fk_column = rel.child_fk_column.as_str();
         let self_pk_column = rel.self_pk_column.as_str();
@@ -1533,6 +1535,14 @@ fn reverse_has_accessor_tokens(
              <outer>.{self_pk_column})`. Drop into \
              `QuerySet::<{struct_name}>::where_raw(...)` to filter to \
              {struct_name}s with **no** matching child.",
+        );
+        let count_doc = format!(
+            "Eloquent `$model->{name}->count()` analog — returns \
+             the number of `{child}` rows whose `{child_fk_column}` \
+             matches this `{struct_name}` instance's primary key. \
+             Issued as `SELECT COUNT(*) FROM <{child}> WHERE \
+             {child_fk_column} = <self.pk>`.",
+            name = rel.name,
         );
         quote! {
             #[doc = #exists_doc]
@@ -1565,6 +1575,21 @@ fn reverse_has_accessor_tokens(
                     ..SelectQuery::new(child_schema)
                 };
                 WhereExpr::NotExists(::std::boxed::Box::new(inner))
+            }
+
+            #[doc = #count_doc]
+            pub async fn #count_ident(
+                &self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<
+                i64,
+                #root::sql::ExecError,
+            > {
+                use #root::sql::CounterPool as _;
+                #root::query::QuerySet::<#child>::new()
+                    .filter(#child_fk_column, self.__rustango_pk_value())
+                    .count_pool(pool)
+                    .await
             }
         }
     });
