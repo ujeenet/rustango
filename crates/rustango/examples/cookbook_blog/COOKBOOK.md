@@ -650,7 +650,13 @@ pub struct Post { ... }
 
 ### 2.22b `#[rustango(through(name, far, far_fk_column, intermediate, intermediate_fk_column))]` — Eloquent `hasManyThrough`
 
-**What**: Container-level attribute that emits a `<name>_through(&self) -> QuerySet<Far>` accessor traversing the source → intermediate → far chain in one queryset. The returned `QuerySet<Far>` is chainable — `.filter()` / `.order_by()` / `.limit()` compose normally on top.
+**What**: Container-level attribute that emits **three** items per relation traversing the source → intermediate → far chain:
+
+| Method | Type | Eloquent analog |
+|---|---|---|
+| `<name>_through(&self) -> QuerySet<Far>` | chainable accessor | `$model->relation` |
+| `<name>_through_fetch(&self, &pool) -> Vec<Far>` | bare-name hot path | `$model->relation->get()` |
+| `<name>_through_count(&self, &pool) -> i64` | scalar | `$model->relation->count()` |
 
 Generated SQL shape:
 
@@ -679,10 +685,11 @@ Built via `WhereExpr::InSubquery` — portable across PG / MySQL / SQLite, no LA
 )]
 pub struct Country { ... }
 
-// Direct fetch:
-let posts: Vec<Post> = country.posts_through().fetch_pool(&pool).await?;
+// Bare-name hot path — no _pool in user-visible code:
+let posts: Vec<Post> = country.posts_through_fetch(&pool).await?;
+let n: i64 = country.posts_through_count(&pool).await?;
 
-// Chainable:
+// Chainable when composition is needed:
 country.posts_through()
     .filter("title__startswith", "Hello ")
     .order_by(&[("id", true)])
@@ -696,21 +703,19 @@ Identifiers are **SQL column / table names** (not Rust field names) — sidestep
 
 ---
 
-### 2.22c `#[rustango(reverse_has(name, child, child_fk_column))]` — Eloquent `whereHas` / `whereDoesntHave`
+### 2.22c `#[rustango(reverse_has(name, child, child_fk_column))]` — Eloquent `whereHas` / `whereDoesntHave` + relation accessor
 
-**What**: Container-level attribute that emits two associated fns on the parent — `<name>_exists_expr() -> WhereExpr` and `<name>_not_exists_expr() -> WhereExpr` — returning a correlated `EXISTS` / `NOT EXISTS` subquery against the child table. Users drop the result into `QuerySet::where_raw(...)` to filter to parents that have (or don't have) at least one matching child.
+**What**: Container-level attribute that emits **five** items per relation — the full Eloquent `$model->relation` family for FK-reverse:
 
-Generated SQL shape:
+| Method | Type | Eloquent analog |
+|---|---|---|
+| `<name>(&self) -> QuerySet<Child>` | bare chainable accessor | `$model->relation` |
+| `<name>_fetch(&self, &pool) -> Vec<Child>` | bare hot path | `$model->relation->get()` |
+| `<name>_count(&self, &pool) -> i64` | scalar | `$model->relation->count()` |
+| `<name>_exists_expr()` | `WhereExpr` | `whereHas` |
+| `<name>_not_exists_expr()` | `WhereExpr` | `whereDoesntHave` |
 
-```sql
-SELECT <parent>.* FROM <parent>
-WHERE EXISTS (
-    SELECT 1 FROM <child>
-    WHERE <child>.<child_fk_column> = <parent>.<self_pk_column>
-)
-```
-
-Built via `WhereExpr::Exists` + `Expr::OuterRef` — portable across PG / MySQL / SQLite. The writer's scope-stack resolves `OuterRef(col)` to the outer queryset's table at SQL-emit time. Issue [#830](https://github.com/ujeenet/rustango/issues/830).
+Built via `WhereExpr::Exists` + `Expr::OuterRef` (whereHas branch) and `QuerySet::filter` (accessor / count / fetch branch) — both portable across PG / MySQL / SQLite. The writer's scope-stack resolves `OuterRef(col)` to the outer queryset's table at SQL-emit time. Issue [#830](https://github.com/ujeenet/rustango/issues/830).
 
 **Recipe** (`Post hasMany Comment`):
 
@@ -723,6 +728,17 @@ Built via `WhereExpr::Exists` + `Expr::OuterRef` — portable across PG / MySQL 
 )]
 pub struct Post { ... }
 
+// Bare-name hot paths — no _pool in user-visible code:
+let all: Vec<Comment> = post.comments_fetch(&pool).await?;
+let n: i64           = post.comments_count(&pool).await?;
+
+// Chainable when composition is needed:
+post.comments()
+    .filter("body__startswith", "hello")
+    .order_by(&[("id", true)])
+    .limit(10)
+    .fetch_pool(&pool).await?;
+
 // whereHas — posts with at least one comment:
 Post::objects()
     .where_raw(Post::comments_exists_expr())
@@ -732,21 +748,9 @@ Post::objects()
 Post::objects()
     .where_raw(Post::comments_not_exists_expr())
     .fetch_pool(&pool).await?;
-
-// Composes with outer-queryset filters:
-Post::objects()
-    .where_raw(Post::comments_exists_expr())
-    .filter("title__startswith", "Has")
-    .fetch_pool(&pool).await?;
 ```
 
 Same SQL-column-name convention as `through(...)` — sidesteps the multi-hop filter gap. Optional `self_pk_column = "..."` defaults to `"id"`.
-
-Each `reverse_has(...)` attribute also emits a third method — `<name>_count(&pool) -> i64` — for Eloquent `$model->relation->count()` parity. Runs `SELECT COUNT(*) FROM <child> WHERE <child_fk_column> = <self.pk>`:
-
-```rust
-let n: i64 = post.comments_count(&pool).await?;
-```
 
 **Status**: FK-reverse subset only — M2M / GFK `whereHas`, sub-predicate closures, `has(rel, '>', N)` count comparisons, and `withCount`-style annotate-by-relation remain follow-up slices.
 
