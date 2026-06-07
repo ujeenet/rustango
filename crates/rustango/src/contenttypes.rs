@@ -11,16 +11,17 @@
 //!
 //! - The `ContentType` model itself ships as a `#[derive(Model)]`
 //!   so it migrates / appears in the admin like any other table.
-//! - [`ensure_seeded`] walks `inventory::iter::<ModelEntry>()` and
+//! - [`ensure_seeded()`] walks `inventory::iter::<ModelEntry>()` and
 //!   inserts a row for every registered model that doesn't have one
 //!   yet. Idempotent — re-running on a populated DB is a no-op.
 //!   Wire into your bootstrap (e.g. inside `main()` after
 //!   `migrate(&pool, dir).await?`).
-//! - [`for_model`] resolves a model type to its `ContentType`
-//!   row (cached per pool — repeated calls hit a process-wide
-//!   `OnceCell`, not the DB).
-//! - [`all`] / [`by_id`] / [`by_natural_key`] cover the lookup
-//!   shapes the admin and audit views need.
+//! - [`ContentType::for_model`] resolves a model type to its
+//!   `ContentType` row (cached per pool — repeated calls hit a
+//!   process-wide `OnceCell`, not the DB).
+//! - [`ContentType::all_ordered`] / [`ContentType::by_id`] /
+//!   [`ContentType::by_natural_key`] cover the lookup shapes the
+//!   admin and audit views need.
 //!
 //! ## Why not infer at query time?
 //!
@@ -77,8 +78,9 @@ pub struct ContentType {
 /// [`crate::sql::Pool`] enum carries.
 impl ContentType {
     /// Backend-agnostic counterpart of [`Self::by_natural_key`].
-    /// Routes through [`FetcherPool::fetch_pool`] so the same call
-    /// works against `Pool::Postgres` / `Pool::Mysql` / `Pool::Sqlite`.
+    /// Routes through [`crate::sql::FetcherPool::fetch_pool`] so the
+    /// same call works against `Pool::Postgres` / `Pool::Mysql` /
+    /// `Pool::Sqlite`.
     /// Prefer this in framework code so sqlite/mysql apps don't get
     /// silently locked out of the contenttype catalog.
     ///
@@ -535,7 +537,7 @@ impl GenericForeignKey {
 }
 
 /// v0.37 — backend-agnostic counterpart of [`render_generic_fk_link`].
-/// Routes the ContentType lookup through [`ContentType::by_id_pool`]
+/// Routes the ContentType lookup through [`ContentType::by_id`]
 /// so admin detail views render generic-FK links on any backend.
 ///
 /// # Errors
