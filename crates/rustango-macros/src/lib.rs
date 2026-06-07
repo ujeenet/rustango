@@ -1519,12 +1519,14 @@ fn reverse_has_accessor_tokens(
         let count_name = format!("{}_count", rel.name);
         let fetch_name = format!("{}_fetch", rel.name);
         let first_name = format!("{}_first", rel.name);
+        let pluck_name = format!("{}_pluck", rel.name);
         let accessor_name = rel.name.as_str();
         let exists_ident = syn::Ident::new(&exists_name, struct_name.span());
         let not_exists_ident = syn::Ident::new(&not_exists_name, struct_name.span());
         let count_ident = syn::Ident::new(&count_name, struct_name.span());
         let fetch_ident = syn::Ident::new(&fetch_name, struct_name.span());
         let first_ident = syn::Ident::new(&first_name, struct_name.span());
+        let pluck_ident = syn::Ident::new(&pluck_name, struct_name.span());
         let accessor_ident = syn::Ident::new(accessor_name, struct_name.span());
         let child = &rel.child;
         let child_fk_column = rel.child_fk_column.as_str();
@@ -1604,6 +1606,31 @@ fn reverse_has_accessor_tokens(
                 #root::sql::ExecError,
             > {
                 self.#accessor_ident().first(pool).await
+            }
+
+            /// Eloquent `$model->relation->pluck($col)` — project a
+            /// single column from the child rows into a `Vec<U>`.
+            /// Skips the typed `Child` decode, which is cheaper when
+            /// you only need one column (e.g. `post.comments_pluck::<String>("body", &pool)`).
+            pub async fn #pluck_ident<U>(
+                &self,
+                col: &'static str,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<U>,
+                #root::sql::ExecError,
+            >
+            where
+                U: #root::sql::MaybePgScalar
+                    + #root::sql::MaybeMyScalar
+                    + #root::sql::MaybeSqliteScalar
+                    + ::core::marker::Send
+                    + ::core::marker::Unpin,
+            {
+                self.#accessor_ident()
+                    .values_list_flat(col)
+                    .fetch::<U>(pool)
+                    .await
             }
 
             #[doc = #exists_doc]
@@ -1691,10 +1718,12 @@ fn through_accessor_tokens(
         let count_name = format!("{}_through_count", rel.name);
         let fetch_name = format!("{}_through_fetch", rel.name);
         let first_name = format!("{}_through_first", rel.name);
+        let pluck_name = format!("{}_through_pluck", rel.name);
         let method_ident = syn::Ident::new(&method_name, struct_name.span());
         let count_ident = syn::Ident::new(&count_name, struct_name.span());
         let fetch_ident = syn::Ident::new(&fetch_name, struct_name.span());
         let first_ident = syn::Ident::new(&first_name, struct_name.span());
+        let pluck_ident = syn::Ident::new(&pluck_name, struct_name.span());
         let far = &rel.far;
         let intermediate = &rel.intermediate;
         let far_fk_column = rel.far_fk_column.as_str();
@@ -1790,6 +1819,30 @@ fn through_accessor_tokens(
                 #root::sql::ExecError,
             > {
                 self.#method_ident().first(pool).await
+            }
+
+            /// Pluck a single column from the far rows into `Vec<U>`
+            /// — cheaper than the typed `<Far>` decode when only one
+            /// scalar column is needed.
+            pub async fn #pluck_ident<U>(
+                &self,
+                col: &'static str,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<U>,
+                #root::sql::ExecError,
+            >
+            where
+                U: #root::sql::MaybePgScalar
+                    + #root::sql::MaybeMyScalar
+                    + #root::sql::MaybeSqliteScalar
+                    + ::core::marker::Send
+                    + ::core::marker::Unpin,
+            {
+                self.#method_ident()
+                    .values_list_flat(col)
+                    .fetch::<U>(pool)
+                    .await
             }
         }
     });

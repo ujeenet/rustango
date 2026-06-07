@@ -250,6 +250,19 @@ async fn posts_through_count_returns_far_side_count() {
 }
 
 #[tokio::test]
+async fn posts_through_pluck_returns_one_column_per_far() {
+    // Pluck a single column from the through-relation's far rows.
+    let pool = make_pool().await;
+    let (a_id, _) = seed(&pool).await;
+    let a = Country::find(a_id, &pool).await.unwrap().unwrap();
+    let titles: Vec<String> = a.posts_through_pluck("title", &pool).await.unwrap();
+    assert_eq!(titles.len(), 6);
+    for t in &titles {
+        assert!(t.starts_with("alice-") || t.starts_with("andrew-"));
+    }
+}
+
+#[tokio::test]
 async fn posts_through_first_returns_first_far_or_none() {
     // Eloquent `hasOneThrough` analog — `posts_through_first(&pool)`
     // returns Some(first far row) or None when no rows match.
