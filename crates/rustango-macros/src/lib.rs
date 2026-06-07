@@ -3768,6 +3768,181 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Inverse of [`Self::exists_pool`] — returns `true` when
+            /// the table has zero rows. Eloquent
+            /// `Model::doesntExist()` parity.
+            ///
+            /// # Errors
+            /// As [`Self::exists_pool`].
+            pub async fn doesnt_exist_pool(
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<bool, ::rustango::sql::ExecError> {
+                Self::exists_pool(pool).await.map(|e| !e)
+            }
+
+            /// `SUM(col)` over every row. Returns `Ok(None)` when the
+            /// table is empty (matches SQL's `SUM(empty)` shape).
+            /// Eloquent `Model::sum($col)` parity.
+            ///
+            /// `col` is the Rust field ident; unknown columns surface
+            /// as `QueryError::UnknownField`. `U` is the decoded
+            /// type — `i64` for an integer column, `f64` for a
+            /// numeric, etc. Choose `Option<U>` if you prefer to
+            /// distinguish "no rows" from a `Default::default()`.
+            ///
+            /// # Errors
+            /// As [`::rustango::sql::fetch_aggregate_pool`].
+            pub async fn sum_pool<U>(
+                col: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<U>,
+                ::rustango::sql::ExecError,
+            >
+            where
+                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
+                    + ::rustango::sql::MaybeMyFromRow
+                    + ::rustango::sql::MaybeSqliteFromRow
+                    + ::core::marker::Send
+                    + ::core::marker::Unpin,
+            {
+                Self::__aggregate_one_pool::<U>(
+                    col,
+                    |c| ::rustango::core::AggregateExpr::Sum(c),
+                    pool,
+                )
+                .await
+            }
+
+            /// `AVG(col)`. Returns `Ok(None)` when the table is empty.
+            /// Eloquent `Model::avg($col)` parity.
+            ///
+            /// # Errors
+            /// As [`::rustango::sql::fetch_aggregate_pool`].
+            pub async fn avg_pool<U>(
+                col: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<U>,
+                ::rustango::sql::ExecError,
+            >
+            where
+                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
+                    + ::rustango::sql::MaybeMyFromRow
+                    + ::rustango::sql::MaybeSqliteFromRow
+                    + ::core::marker::Send
+                    + ::core::marker::Unpin,
+            {
+                Self::__aggregate_one_pool::<U>(
+                    col,
+                    |c| ::rustango::core::AggregateExpr::Avg(c),
+                    pool,
+                )
+                .await
+            }
+
+            /// `MIN(col)`. Returns `Ok(None)` when the table is empty.
+            /// Eloquent `Model::min($col)` parity.
+            ///
+            /// # Errors
+            /// As [`::rustango::sql::fetch_aggregate_pool`].
+            pub async fn min_pool<U>(
+                col: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<U>,
+                ::rustango::sql::ExecError,
+            >
+            where
+                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
+                    + ::rustango::sql::MaybeMyFromRow
+                    + ::rustango::sql::MaybeSqliteFromRow
+                    + ::core::marker::Send
+                    + ::core::marker::Unpin,
+            {
+                Self::__aggregate_one_pool::<U>(
+                    col,
+                    |c| ::rustango::core::AggregateExpr::Min(c),
+                    pool,
+                )
+                .await
+            }
+
+            /// `MAX(col)`. Returns `Ok(None)` when the table is empty.
+            /// Eloquent `Model::max($col)` parity.
+            ///
+            /// # Errors
+            /// As [`::rustango::sql::fetch_aggregate_pool`].
+            pub async fn max_pool<U>(
+                col: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<U>,
+                ::rustango::sql::ExecError,
+            >
+            where
+                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
+                    + ::rustango::sql::MaybeMyFromRow
+                    + ::rustango::sql::MaybeSqliteFromRow
+                    + ::core::marker::Send
+                    + ::core::marker::Unpin,
+            {
+                Self::__aggregate_one_pool::<U>(
+                    col,
+                    |c| ::rustango::core::AggregateExpr::Max(c),
+                    pool,
+                )
+                .await
+            }
+
+            /// Internal: resolve `col` → SCHEMA `&'static str`, build a
+            /// single-aggregate `AggregateQuery`, run it through
+            /// `fetch_aggregate_pool::<(Option<U>,)>`, and unwrap the
+            /// first row's first column. Backs `sum_pool` / `avg_pool`
+            /// / `min_pool` / `max_pool`.
+            #[doc(hidden)]
+            pub async fn __aggregate_one_pool<U>(
+                col: &str,
+                build: fn(&'static str) -> ::rustango::core::AggregateExpr,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<U>,
+                ::rustango::sql::ExecError,
+            >
+            where
+                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
+                    + ::rustango::sql::MaybeMyFromRow
+                    + ::rustango::sql::MaybeSqliteFromRow
+                    + ::core::marker::Send
+                    + ::core::marker::Unpin,
+            {
+                let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
+                    .field(col)
+                    .ok_or_else(|| {
+                        ::rustango::sql::ExecError::Query(
+                            ::rustango::core::QueryError::UnknownField {
+                                model: <Self as ::rustango::core::Model>::SCHEMA.name,
+                                field: ::std::string::ToString::to_string(col),
+                            },
+                        )
+                    })?
+                    .column;
+                let _q = ::rustango::core::AggregateQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    where_clause: ::rustango::core::WhereExpr::And(::std::vec::Vec::new()),
+                    group_by: ::std::vec::Vec::new(),
+                    aggregates: ::std::vec![("v", build(_col_static))],
+                    aliases: ::std::vec::Vec::new(),
+                    having: ::core::option::Option::None,
+                    order_by: ::std::vec::Vec::new(),
+                    limit: ::core::option::Option::None,
+                    offset: ::core::option::Option::None,
+                };
+                let _rows: ::std::vec::Vec<(::core::option::Option<U>,)> =
+                    ::rustango::sql::fetch_aggregate_pool(pool, &_q).await?;
+                ::core::result::Result::Ok(_rows.into_iter().next().and_then(|t| t.0))
+            }
+
             /// Fetch every row of this model from `pool`. Eloquent
             /// `Model::all()` parity — a thin wrapper over
             /// `QuerySet::<Self>::default().fetch_pool(pool)`.
