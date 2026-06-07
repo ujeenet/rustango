@@ -4220,6 +4220,83 @@ fn inherent_impl_tokens(
                     ),
                 }
             }
+
+            /// Find by primary key or run `fallback` to produce a
+            /// default row to return. Eloquent
+            /// `Model::findOr($pk, fn() => …)` parity.
+            ///
+            /// Unlike [`Self::find_or_fail_pool`] (which raises on
+            /// miss), this is the "give me something sensible"
+            /// branch: typical use is "fetch the user's row, else
+            /// fall back to an anonymous/guest stub".
+            ///
+            /// `fallback` runs only when no row matches — the DB
+            /// round-trip happens unconditionally.
+            ///
+            /// # Errors
+            /// As [`Self::find_pool`].
+            pub async fn find_or_pool<F>(
+                pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+                fallback: F,
+            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError>
+            where
+                F: ::core::ops::FnOnce() -> Self,
+            {
+                ::core::result::Result::Ok(
+                    Self::find_pool(pk, pool).await?.unwrap_or_else(fallback),
+                )
+            }
+
+            /// Fetch the first row of the table, or run `fallback`
+            /// when the table is empty. Eloquent
+            /// `Model::firstOr(fn() => …)` parity.
+            ///
+            /// # Errors
+            /// As [`Self::first_pool`].
+            pub async fn first_or_pool<F>(
+                pool: &::rustango::sql::Pool,
+                fallback: F,
+            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError>
+            where
+                F: ::core::ops::FnOnce() -> Self,
+            {
+                ::core::result::Result::Ok(
+                    Self::first_pool(pool).await?.unwrap_or_else(fallback),
+                )
+            }
+
+            /// Fetch exactly one row matching `<col> = <val>`. Errors
+            /// when zero rows match (`ExecError::Driver(RowNotFound)`)
+            /// or more than one matches
+            /// (`ExecError::Query(QueryError::Sql(MultipleRowsReturned))`).
+            /// Eloquent `Model::sole($col, $val)` parity.
+            ///
+            /// # Errors
+            /// As [`Self::where_pool`] plus the explicit
+            /// `RowNotFound` / `MultipleRowsReturned` cases above.
+            pub async fn sole_pool(
+                col: &str,
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
+                let mut _rows = Self::where_pool(col, val, pool).await?;
+                match _rows.len() {
+                    0 => ::core::result::Result::Err(
+                        ::rustango::sql::ExecError::Driver(
+                            ::rustango::sql::sqlx::Error::RowNotFound,
+                        ),
+                    ),
+                    1 => ::core::result::Result::Ok(_rows.remove(0)),
+                    n => ::core::result::Result::Err(
+                        ::rustango::sql::ExecError::MultipleRowsReturned {
+                            op: "sole",
+                            table: <Self as ::rustango::core::Model>::SCHEMA.name,
+                            count: n,
+                        },
+                    ),
+                }
+            }
         }
     } else {
         quote!()

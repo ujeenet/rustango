@@ -22,6 +22,7 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
 - **`Model::sum_pool` / `Model::avg_pool` / `Model::min_pool` / `Model::max_pool`** — Eloquent `Model::sum/avg/min/max($col)` parity. Each is `Model::<aggregate>_pool::<U>(col, &pool) -> Option<U>`. Returns `Ok(None)` on an empty table. Backed by the existing `fetch_aggregate_pool` primitive — no schema change, no new core types. Emits on every model.
 - **`Model::doesnt_exist_pool(&pool) -> bool`** — Eloquent `Model::doesntExist()` parity. Inverse of `exists_pool`. Emits on every model.
 - **`Model::where_in_pool` / `where_not_in_pool` / `where_null_pool` / `where_not_null_pool` / `where_between_pool`** — Eloquent `whereIn` / `whereNotIn` / `whereNull` / `whereNotNull` / `whereBetween` parity. Each routes through the existing `.filter(col__suffix, …)` lookup-suffix machinery (`__in`, `__not_in`, `__isnull`, `__between`). Empty-list semantics: `where_in_pool` with no values returns zero rows; `where_not_in_pool` with no values returns every row. Emits on every model.
+- **`Model::find_or_pool` / `Model::first_or_pool` / `Model::sole_pool`** — Eloquent `findOr` / `firstOr` / `sole` parity. `find_or_pool(pk, &pool, fallback_fn)` and `first_or_pool(&pool, fallback_fn)` return the matched row or invoke the closure to produce a default. `sole_pool(col, val, &pool)` returns the exactly-one match or errors: `RowNotFound` on zero, `ExecError::MultipleRowsReturned { op: "sole", … }` on >1.
 
 ### Fixed
 
