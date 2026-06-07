@@ -9466,11 +9466,11 @@ impl DetectedKind {
                 quote!(Time),
                 quote!(<#root::__chrono::NaiveTime as ::std::default::Default>::default()),
             ),
-            Self::Uuid => (quote!(Uuid), quote!(::uuid::Uuid::nil())),
+            Self::Uuid => (quote!(Uuid), quote!(#root::__uuid::Uuid::nil())),
             Self::Json => (quote!(Json), quote!(#root::__serde_json::Value::Null)),
             Self::Decimal => (
                 quote!(Decimal),
-                quote!(<::rust_decimal::Decimal as ::std::default::Default>::default()),
+                quote!(<#root::__rust_decimal::Decimal as ::std::default::Default>::default()),
             ),
             Self::Binary => (quote!(Binary), quote!(::std::vec::Vec::<u8>::new())),
         }

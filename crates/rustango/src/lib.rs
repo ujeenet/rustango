@@ -1326,6 +1326,13 @@ pub use serde_json as __serde_json;
 #[doc(hidden)]
 pub use serde as __serde;
 
+/// Same rationale — `#[derive(Model)]` emits `rust_decimal::Decimal`
+/// at the Decimal-FK default-value site. **Not part of the public
+/// API.** #142 follow-up — closes the last hardcoded external path
+/// in the macro.
+#[doc(hidden)]
+pub use rust_decimal as __rust_decimal;
+
 /// `#[derive(Model)]` — populates the `inventory` registry the admin
 /// walks, generates `objects()` / typed columns / `insert` / `delete`
 /// / `save`.
