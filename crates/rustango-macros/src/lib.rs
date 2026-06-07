@@ -4508,6 +4508,83 @@ fn inherent_impl_tokens(
                 ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
                     Self::delete_pool(self, pool).await
                 }
+
+                /// Fetch every row whose `#[rustango(soft_delete)]`
+                /// column is `NULL` (a.k.a. the live, non-trashed
+                /// rows). Eloquent's default `Model::all()` behavior on
+                /// a soft-delete model (Eloquent auto-scopes trashed
+                /// rows out; rustango doesn't have auto-scoping yet —
+                /// see issue #820 — so this is the explicit shortcut).
+                ///
+                /// One-liner over `QuerySet::<Self>::default()
+                /// .active().fetch_pool(pool)`. Closes #821 partial.
+                ///
+                /// # Errors
+                /// As [`::rustango::sql::FetcherPool::fetch_pool`].
+                pub async fn active_pool(
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::std::vec::Vec<Self>,
+                    ::rustango::sql::ExecError,
+                > {
+                    use ::rustango::sql::FetcherPool as _;
+                    ::rustango::query::QuerySet::<Self>::default()
+                        .active()
+                        .fetch_pool(pool)
+                        .await
+                }
+
+                /// Fetch ONLY soft-deleted rows. Eloquent
+                /// `Model::onlyTrashed()->get()` parity — drives the
+                /// admin "Trash" page, restore flows, GDPR purge
+                /// scans, etc.
+                ///
+                /// One-liner over `QuerySet::<Self>::default()
+                /// .only_trashed().fetch_pool(pool)`. Closes #821
+                /// partial.
+                ///
+                /// # Errors
+                /// As [`::rustango::sql::FetcherPool::fetch_pool`].
+                pub async fn only_trashed_pool(
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::std::vec::Vec<Self>,
+                    ::rustango::sql::ExecError,
+                > {
+                    use ::rustango::sql::FetcherPool as _;
+                    ::rustango::query::QuerySet::<Self>::default()
+                        .only_trashed()
+                        .fetch_pool(pool)
+                        .await
+                }
+
+                /// Fetch every row, both live and soft-deleted.
+                /// Eloquent `Model::withTrashed()->get()` parity.
+                ///
+                /// Today every queryset already includes trashed rows
+                /// (rustango has no global-scope tracking yet — issue
+                /// #820), so this is functionally equivalent to
+                /// [`Self::all_pool`]. Exposed as a named shortcut so
+                /// soft-delete-aware code reads `Model::with_trashed_pool`
+                /// rather than `Model::all_pool` — keeps intent visible
+                /// in callers and stays correct when auto-scoping lands.
+                ///
+                /// Closes #821 partial.
+                ///
+                /// # Errors
+                /// As [`::rustango::sql::FetcherPool::fetch_pool`].
+                pub async fn with_trashed_pool(
+                    pool: &::rustango::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::std::vec::Vec<Self>,
+                    ::rustango::sql::ExecError,
+                > {
+                    use ::rustango::sql::FetcherPool as _;
+                    ::rustango::query::QuerySet::<Self>::default()
+                        .with_trashed()
+                        .fetch_pool(pool)
+                        .await
+                }
             }
         } else {
             quote!()

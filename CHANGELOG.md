@@ -15,6 +15,7 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
 - **`Locale::display_name()` / `native_name()` + Tera `language_display_name()` / `language_native_name()`** (#563) — 42-language picker primitives for bidi-aware UIs.
 - **`#[rustango(citext)]`** (#566 closing [#344](https://github.com/ujeenet/rustango/issues/344)) — Django `CITextField`. Per-dialect DDL emit: `CITEXT` (PG, with `dialect.ci_text_extension_sql()` exposing the `CREATE EXTENSION` prelude), `TEXT COLLATE NOCASE` (SQLite), `VARCHAR(N) COLLATE utf8mb4_general_ci` (MySQL).
 - **`#[rustango(db_table_comment = "...")]`** — Django `Meta.db_table_comment` (4.2+). Per-dialect DDL emit: PG post-table `COMMENT ON TABLE "<t>" IS '...'`, MySQL inline `COMMENT='...'` trailer after CREATE TABLE, SQLite no-op. Useful for data-lineage tooling that reads the table's catalog comment.
+- **`Model::active_pool` / `Model::only_trashed_pool` / `Model::with_trashed_pool`** (closing [#821](https://github.com/ujeenet/rustango/issues/821) partial) — macro-emitted Eloquent-shape soft-delete query shortcuts. `active_pool` returns only live rows (deleted_at IS NULL); `only_trashed_pool` returns only soft-deleted rows (drives admin Trash pages, restore flows, GDPR purge scans); `with_trashed_pool` returns every row (forward-compat marker for when auto-scoping #820 lands). All three only emit on models carrying `#[rustango(soft_delete)]`.
 
 ### Fixed
 
