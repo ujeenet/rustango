@@ -893,6 +893,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let m2m_accessors = m2m_accessor_tokens(struct_name, &container.m2m);
     // Issue #817 — `#[rustango(through(...))]` accessors.
     let through_accessors = through_accessor_tokens(struct_name, &container.through_relations);
+    // Issue #830 — `#[rustango(reverse_has(...))]` static accessors.
+    let reverse_has_accessors =
+        reverse_has_accessor_tokens(struct_name, &container.reverse_has_relations);
     let generic_fk_accessors = generic_fk_accessor_tokens(
         struct_name,
         &container.generic_fks,
@@ -925,6 +928,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #reverse_helpers
         #m2m_accessors
         #through_accessors
+        #reverse_has_accessors
         #generic_fk_accessors
         #manager_trait
 
@@ -1470,6 +1474,97 @@ fn m2m_accessor_tokens(struct_name: &syn::Ident, m2m_relations: &[M2MAttr]) -> T
                     src_col: #src_col,
                     dst_col: #dst_col,
                 }
+            }
+        }
+    });
+    quote! {
+        impl #struct_name {
+            #( #methods )*
+        }
+    }
+}
+
+/// Emit `<name>_exists_expr()` + `<name>_not_exists_expr()`
+/// associated functions for each `#[rustango(reverse_has(...))]`
+/// attribute. Issue #830.
+///
+/// The two emitted functions return ready-to-use `WhereExpr` nodes
+/// that downstream callers drop into
+/// `QuerySet::<Self>::where_raw(...)`:
+///
+/// - `<name>_exists_expr()` → `EXISTS (SELECT 1 FROM <child> WHERE
+///   <child_fk_column> = OuterRef("<self_pk_column>"))`. Eloquent
+///   `whereHas` parity (without the closure-style sub-predicate
+///   refinement — that's a follow-up; users can layer additional
+///   predicates by constructing the SelectQuery themselves and
+///   calling `where_raw(exists(query))` from `crate::core::subquery`).
+/// - `<name>_not_exists_expr()` → same but `NOT EXISTS`. Eloquent
+///   `whereDoesntHave` parity.
+///
+/// Tri-dialect: `EXISTS` / `NOT EXISTS` over a correlated subquery
+/// is portable across PG / MySQL / SQLite. The writer's scope-stack
+/// machinery threads the outer-table reference through automatically
+/// (`OuterRef(col)` resolves to `<outer>.<col>` at emit time).
+fn reverse_has_accessor_tokens(
+    struct_name: &syn::Ident,
+    reverse_has_relations: &[ReverseHasAttr],
+) -> TokenStream2 {
+    let root = rustango_root();
+    if reverse_has_relations.is_empty() {
+        return TokenStream2::new();
+    }
+    let methods = reverse_has_relations.iter().map(|rel| {
+        let exists_name = format!("{}_exists_expr", rel.name);
+        let not_exists_name = format!("{}_not_exists_expr", rel.name);
+        let exists_ident = syn::Ident::new(&exists_name, struct_name.span());
+        let not_exists_ident = syn::Ident::new(&not_exists_name, struct_name.span());
+        let child = &rel.child;
+        let child_fk_column = rel.child_fk_column.as_str();
+        let self_pk_column = rel.self_pk_column.as_str();
+        let exists_doc = format!(
+            "Eloquent `whereHas` analog — yields `EXISTS (SELECT 1 \
+             FROM <{child}> WHERE {child_fk_column} = <outer>.{self_pk_column})`. \
+             Drop into `QuerySet::<{struct_name}>::where_raw(...)` to \
+             filter to {struct_name}s with at least one matching child.",
+        );
+        let not_exists_doc = format!(
+            "Eloquent `whereDoesntHave` analog — yields `NOT EXISTS \
+             (SELECT 1 FROM <{child}> WHERE {child_fk_column} = \
+             <outer>.{self_pk_column})`. Drop into \
+             `QuerySet::<{struct_name}>::where_raw(...)` to filter to \
+             {struct_name}s with **no** matching child.",
+        );
+        quote! {
+            #[doc = #exists_doc]
+            pub fn #exists_ident() -> #root::core::WhereExpr {
+                use #root::core::{Expr, Model as _, Op, SelectQuery, WhereExpr};
+                let child_schema =
+                    <#child as #root::core::Model>::SCHEMA;
+                let inner = SelectQuery {
+                    where_clause: WhereExpr::ExprCompare {
+                        lhs: Expr::Column(#child_fk_column),
+                        op: Op::Eq,
+                        rhs: Expr::OuterRef(#self_pk_column),
+                    },
+                    ..SelectQuery::new(child_schema)
+                };
+                WhereExpr::Exists(::std::boxed::Box::new(inner))
+            }
+
+            #[doc = #not_exists_doc]
+            pub fn #not_exists_ident() -> #root::core::WhereExpr {
+                use #root::core::{Expr, Model as _, Op, SelectQuery, WhereExpr};
+                let child_schema =
+                    <#child as #root::core::Model>::SCHEMA;
+                let inner = SelectQuery {
+                    where_clause: WhereExpr::ExprCompare {
+                        lhs: Expr::Column(#child_fk_column),
+                        op: Op::Eq,
+                        rhs: Expr::OuterRef(#self_pk_column),
+                    },
+                    ..SelectQuery::new(child_schema)
+                };
+                WhereExpr::NotExists(::std::boxed::Box::new(inner))
             }
         }
     });
@@ -7034,6 +7129,15 @@ struct ContainerAttrs {
     /// (`WHERE far_fk_column IN (SELECT intermediate_pk_column FROM
     /// intermediate WHERE intermediate_fk_column = <my_pk>)`).
     through_relations: Vec<ThroughAttr>,
+    /// Eloquent `whereHas` / `whereDoesntHave` declarations from
+    /// `#[rustango(reverse_has(name, child, child_fk_column))]` —
+    /// issue [#830](https://github.com/ujeenet/rustango/issues/830).
+    /// Each entry emits two associated functions on the parent —
+    /// `<name>_exists_expr()` and `<name>_not_exists_expr()` —
+    /// returning a `WhereExpr::Exists` / `WhereExpr::NotExists`
+    /// over a correlated subquery against the child table. Users
+    /// drop the result into `QuerySet::where_raw(...)`.
+    reverse_has_relations: Vec<ReverseHasAttr>,
 }
 
 /// Parsed `#[rustango(global_scope(name = "...", apply = fn_path))]`
@@ -7101,6 +7205,62 @@ struct ThroughAttr {
     /// (rustango's default PK column name). Override when the
     /// intermediate declares a custom PK column.
     intermediate_pk_column: String,
+}
+
+/// Parsed `#[rustango(reverse_has(name = "...", child = "...",
+/// child_fk_column = "..."))]` declaration. Issue
+/// [#830](https://github.com/ujeenet/rustango/issues/830) — Eloquent
+/// `whereHas` / `whereDoesntHave` parity.
+///
+/// `Post hasMany Comment` declares as:
+///
+/// ```ignore
+/// #[rustango(reverse_has(
+///     name             = "comments",
+///     child            = "Comment",
+///     child_fk_column  = "post_id",
+/// ))]
+/// struct Post { ... }
+/// ```
+///
+/// The macro emits two associated functions on `Post`:
+///
+/// - `Post::comments_exists_expr() -> WhereExpr` — yields
+///   `EXISTS (SELECT … FROM comment WHERE comment.post_id =
+///   <outer>.<self_pk_column>)`.
+/// - `Post::comments_not_exists_expr() -> WhereExpr` — same shape
+///   but `NOT EXISTS`, the `whereDoesntHave` analog.
+///
+/// User code:
+///
+/// ```ignore
+/// // Posts with at least one comment:
+/// Post::objects().where_raw(Post::comments_exists_expr()).fetch_pool(&pool)
+/// // Posts with no comments:
+/// Post::objects().where_raw(Post::comments_not_exists_expr()).fetch_pool(&pool)
+/// ```
+///
+/// As with #817, all column / table identifiers are **SQL names**
+/// (not Rust field names) so the substrate is independent of the
+/// outstanding multi-hop filter resolver gap. The emitted
+/// `Expr::OuterRef("…")` resolves to the outer queryset's table at
+/// SQL-emit time via the writer's scope stack.
+struct ReverseHasAttr {
+    /// Accessor name. `name = "comments"` → emits
+    /// `comments_exists_expr()` + `comments_not_exists_expr()`.
+    name: String,
+    /// Child model type identifier. `child = "Comment"` — needed to
+    /// look up the child's `SCHEMA` so the subquery's `FROM` clause
+    /// points at the child table.
+    child: syn::Ident,
+    /// SQL column on the child's table that references this model's
+    /// primary key. For `Comment`'s `post: ForeignKey<Post>` the
+    /// column is `"post_id"`.
+    child_fk_column: String,
+    /// SQL primary-key column on **this** model's table — the column
+    /// the `OuterRef` resolves to. Optional; defaults to `"id"`
+    /// (rustango's default PK column name).
+    self_pk_column: String,
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
@@ -7319,6 +7479,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         default_permissions: Vec::new(),
         global_scopes: Vec::new(),
         through_relations: Vec::new(),
+        reverse_has_relations: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -7775,6 +7936,109 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     intermediate,
                     intermediate_fk_column,
                     intermediate_pk_column,
+                });
+                return Ok(());
+            }
+            if meta.path.is_ident("reverse_has") {
+                // `#[rustango(reverse_has(name = "comments",
+                //  child = "Comment", child_fk_column = "post_id"
+                //  [, self_pk_column = "id"]))]` — issue #830.
+                let span = meta.path.span();
+                let mut accessor_name: Option<String> = None;
+                let mut child_ident: Option<syn::Ident> = None;
+                let mut child_fk_column: Option<String> = None;
+                let mut self_pk_column: Option<String> = None;
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("name") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let raw = s.value();
+                        if raw.trim().is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`reverse_has(name = \"...\")` must not be empty",
+                            ));
+                        }
+                        accessor_name = Some(raw);
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("child") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let raw = s.value();
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`reverse_has(child = \"...\")` must not be empty",
+                            ));
+                        }
+                        child_ident = Some(syn::Ident::new(trimmed, s.span()));
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("child_fk_column") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let raw = s.value();
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`reverse_has(child_fk_column = \"...\")` must not be empty",
+                            ));
+                        }
+                        child_fk_column = Some(trimmed.to_owned());
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("self_pk_column") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let raw = s.value();
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`reverse_has(self_pk_column = \"...\")` must not be empty",
+                            ));
+                        }
+                        self_pk_column = Some(trimmed.to_owned());
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown `reverse_has` attribute (supported: \
+                         `name`, `child`, `child_fk_column`, \
+                         `self_pk_column`)",
+                    ))
+                })?;
+                let Some(name) = accessor_name else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`reverse_has` requires `name = \"...\"`",
+                    ));
+                };
+                let Some(child) = child_ident else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`reverse_has` requires `child = \"ChildModelType\"`",
+                    ));
+                };
+                let Some(child_fk_column) = child_fk_column else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`reverse_has` requires `child_fk_column = \"<column>\"`",
+                    ));
+                };
+                let self_pk_column = self_pk_column.unwrap_or_else(|| "id".to_owned());
+                if out.reverse_has_relations.iter().any(|r| r.name == name) {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "duplicate `reverse_has(name = \"{name}\")` — \
+                             pick a unique accessor name"
+                        ),
+                    ));
+                }
+                out.reverse_has_relations.push(ReverseHasAttr {
+                    name,
+                    child,
+                    child_fk_column,
+                    self_pk_column,
                 });
                 return Ok(());
             }
