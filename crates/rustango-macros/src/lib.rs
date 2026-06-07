@@ -21,9 +21,13 @@ use syn::{
 /// slice of the [orm-extract epic](https://github.com/ujeenet/rustango/issues/149).
 ///
 /// Returns one of:
-/// - `quote!(crate)` — the consumer IS the `rustango` crate itself
-///   (used when rustango's own internal `#[derive(Model)]` invocations
-///   compile against the local crate).
+/// - `quote!(::rustango)` — the consumer IS the `rustango` crate
+///   itself. We emit the absolute path `::rustango` (NOT `crate`)
+///   because examples and integration tests inside the rustango
+///   package compile as separate binaries — their own `crate::`
+///   namespace is the example/test file, not rustango's lib root.
+///   The absolute `::rustango` resolves correctly in both contexts
+///   (rustango lib code AND rustango/examples/*.rs).
 /// - `quote!(::ident)` — the consumer renamed the dep; emit the
 ///   user's chosen ident.
 /// - `quote!(::rustango)` — fallback when `proc-macro-crate` can't
@@ -33,7 +37,7 @@ use syn::{
 fn rustango_root() -> TokenStream2 {
     use proc_macro_crate::{crate_name, FoundCrate};
     match crate_name("rustango") {
-        Ok(FoundCrate::Itself) => quote!(crate),
+        Ok(FoundCrate::Itself) => quote!(::rustango),
         Ok(FoundCrate::Name(name)) => {
             let ident = proc_macro2::Ident::new(&name, proc_macro2::Span::call_site());
             quote!(::#ident)
