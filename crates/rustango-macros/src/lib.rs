@@ -4327,6 +4327,107 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Fetch every row where `<col> NOT LIKE <pattern>`.
+            /// Eloquent `Model::whereNotLike` parity. Pattern is
+            /// passed verbatim — caller controls `%` / `_`.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_not_like_pool(
+                col: &str,
+                pattern: impl ::core::convert::Into<::std::string::String>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__not_like", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(
+                        &_key,
+                        ::rustango::core::SqlValue::String(pattern.into()),
+                    )
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> NOT ILIKE <pattern>` —
+            /// case-insensitive `NOT LIKE` (PG native, MySQL /
+            /// SQLite emulated via `LOWER(col) NOT LIKE LOWER(pattern)`).
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_not_ilike_pool(
+                col: &str,
+                pattern: impl ::core::convert::Into<::std::string::String>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__not_ilike", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(
+                        &_key,
+                        ::rustango::core::SqlValue::String(pattern.into()),
+                    )
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> NOT BETWEEN lo AND hi`.
+            /// Eloquent `Model::whereNotBetween($col, [$lo, $hi])`
+            /// parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_not_between_pool(
+                col: &str,
+                lo: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                hi: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__not_between", col);
+                let _vals = ::rustango::core::SqlValue::List(::std::vec![
+                    ::core::convert::Into::into(lo),
+                    ::core::convert::Into::into(hi),
+                ]);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, _vals)
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Returns the SQL table name for this model. Eloquent
+            /// `$model->getTable()` parity.
+            #[must_use]
+            pub fn table_name() -> &'static str {
+                <Self as ::rustango::core::Model>::SCHEMA.table
+            }
+
+            /// Returns the SQL column name of this model's primary
+            /// key, or `None` when the model has no
+            /// `#[rustango(primary_key)]`. Eloquent
+            /// `$model->getKeyName()` parity.
+            #[must_use]
+            pub fn primary_key_column() -> ::core::option::Option<&'static str> {
+                <Self as ::rustango::core::Model>::SCHEMA
+                    .primary_key()
+                    .map(|f| f.column)
+            }
+
             /// Fetch every row where `<col> BETWEEN lo AND hi`
             /// (inclusive on both ends — same as SQL). Eloquent
             /// `Model::whereBetween($col, [$lo, $hi])->get()` parity.
@@ -5752,6 +5853,18 @@ fn inherent_impl_tokens(
             /// parity.
             pub fn is_not(&self, other: &Self) -> bool {
                 self.#pk_ident != other.#pk_ident
+            }
+
+            /// Returns this row's primary-key value as an
+            /// [`::rustango::core::SqlValue`]. Eloquent
+            /// `$model->getKey()` parity.
+            ///
+            /// Useful when you need to thread the PK through a
+            /// generic `Into<SqlValue>`-bound API without knowing the
+            /// concrete PK type (`i64` vs `Uuid` vs `String`).
+            #[must_use]
+            pub fn get_key(&self) -> ::rustango::core::SqlValue {
+                ::core::convert::Into::into(::core::clone::Clone::clone(&self.#pk_ident))
             }
         }
     });
