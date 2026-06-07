@@ -1588,9 +1588,14 @@ fn version_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
 
 // ============================================================ make:* generators
 
-fn parse_name_and_model(args: &[String]) -> Result<(String, Option<String>), MigrateError> {
+fn parse_name_and_model(args: &[String]) -> Result<(String, Option<String>, String), MigrateError> {
     let mut name: Option<String> = None;
     let mut model: Option<String> = None;
+    // Phase 2b of #145 — every `make:*` scaffolder emits `use rustango::…`
+    // in its template. A `rustango-orm` consumer (post-#144) needs the
+    // emit to read `use rustango_orm::…` instead. Default stays
+    // `"rustango"` so today's invocations stay bit-identical.
+    let mut crate_root: Option<String> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -1599,6 +1604,19 @@ fn parse_name_and_model(args: &[String]) -> Result<(String, Option<String>), Mig
                     Some(iter.next().cloned().ok_or_else(|| {
                         MigrateError::Validation("--model requires a value".into())
                     })?);
+            }
+            "--crate" => {
+                let v = iter
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| MigrateError::Validation("--crate requires a value".into()))?;
+                let trimmed = v.trim();
+                if trimmed.is_empty() {
+                    return Err(MigrateError::Validation(
+                        "--crate <name> must not be empty".into(),
+                    ));
+                }
+                crate_root = Some(trimmed.to_owned());
             }
             other if other.starts_with('-') => {
                 return Err(MigrateError::Validation(format!("unknown flag `{other}`")));
@@ -1621,7 +1639,7 @@ fn parse_name_and_model(args: &[String]) -> Result<(String, Option<String>), Mig
             "`{name}` is not a valid Rust type name (PascalCase, alphanumeric + underscore)"
         )));
     }
-    Ok((name, model))
+    Ok((name, model, crate_root.unwrap_or_else(|| "rustango".into())))
 }
 
 fn is_valid_type_name(name: &str) -> bool {
@@ -1708,13 +1726,13 @@ fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateE
             "make:viewset: auto-detected tenancy mode from Cargo.toml (pass `--no-tenant` to override)"
         )?;
     }
-    let (name, model) = parse_name_and_model(&filtered)?;
+    let (name, model, crate_root) = parse_name_and_model(&filtered)?;
     let snake = pascal_to_snake(&name);
     let model = model.unwrap_or_else(|| "Post".into());
     let body = if tenant_aware {
-        viewset_template_tenant(&name, &model, &snake)
+        viewset_template_tenant(&name, &model, &snake, &crate_root)
     } else {
-        viewset_template_pool(&name, &model, &snake)
+        viewset_template_pool(&name, &model, &snake, &crate_root)
     };
     write_generated(w, &format!("{snake}.rs"), body)
 }
@@ -1723,11 +1741,11 @@ fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateE
 /// `#[derive(ViewSet)]` shape with a mount-time `PgPool` —
 /// appropriate for single-tenant projects (api / fullstack
 /// templates).
-fn viewset_template_pool(name: &str, model: &str, snake: &str) -> String {
+fn viewset_template_pool(name: &str, model: &str, snake: &str, crate_root: &str) -> String {
     format!(
         r#"//! Auto-scaffolded by `manage make:viewset {name}`.
 
-use rustango::ViewSet;
+use {crate_root}::ViewSet;
 
 #[derive(ViewSet)]
 #[viewset(
@@ -1757,12 +1775,12 @@ pub struct {name};
 /// the scaffold demonstrates each knob — same shape Django's class-
 /// based admin generators emit, just with `// uncomment to enable`
 /// markers next to each one.
-fn viewset_template_tenant(name: &str, model: &str, snake: &str) -> String {
+fn viewset_template_tenant(name: &str, model: &str, snake: &str, crate_root: &str) -> String {
     format!(
         r#"//! Auto-scaffolded by `manage make:viewset {name} --tenant`.
 //!
 //! Tenant-aware viewset: each request resolves the connection via
-//! `rustango::extractors::Tenant`, so the same `router()` serves
+//! `{crate_root}::extractors::Tenant`, so the same `router()` serves
 //! every tenant under their own subdomain / schema / database.
 //!
 //! Since v0.30 (#80), `tenant_router` carries the full static-router
@@ -1770,8 +1788,8 @@ fn viewset_template_tenant(name: &str, model: &str, snake: &str) -> String {
 //! page_size / permissions_for_model all work in tenant mode too.
 
 use axum::Router;
-use rustango::core::Model as _;
-use rustango::viewset::ViewSet;
+use {crate_root}::core::Model as _;
+use {crate_root}::viewset::ViewSet;
 
 use crate::models::{model};
 
@@ -1866,12 +1884,28 @@ fn project_uses_tenancy() -> bool {
 /// `manage startapp <app>` first.
 fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let mut tenant_aware = false;
+    let mut crate_root: Option<String> = None;
     let mut filtered: Vec<String> = Vec::with_capacity(args.len());
-    for a in args {
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
         if a == "--tenant" || a == "--tenant-aware" {
             tenant_aware = true;
+        } else if a == "--crate" {
+            // Phase 2b of #145 — same shape as `parse_name_and_model`
+            // gained earlier in this PR; default stays `"rustango"`.
+            let v = iter
+                .next()
+                .cloned()
+                .ok_or_else(|| MigrateError::Validation("--crate requires a value".into()))?;
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                return Err(MigrateError::Validation(
+                    "--crate <name> must not be empty".into(),
+                ));
+            }
+            crate_root = Some(trimmed.to_owned());
         } else if a == "--help" || a == "-h" {
-            writeln!(w, "make:api_routes <app> [--tenant]")?;
+            writeln!(w, "make:api_routes <app> [--tenant] [--crate <name>]")?;
             writeln!(
                 w,
                 "  Scaffold src/<app>/api_routes.rs — the per-app router composer."
@@ -1885,6 +1919,11 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
                 "  viewset resolves its own per-request connection via the Tenant"
             )?;
             writeln!(w, "  extractor).")?;
+            writeln!(
+                w,
+                "  --crate <name> overrides the emitted `use …::sql::sqlx::PgPool;`"
+            )?;
+            writeln!(w, "  crate root (default: `rustango`).")?;
             return Ok(());
         } else if a.starts_with('-') {
             return Err(MigrateError::Validation(format!(
@@ -1894,6 +1933,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
             filtered.push(a.clone());
         }
     }
+    let crate_root = crate_root.unwrap_or_else(|| "rustango".into());
     let app = filtered.first().ok_or_else(|| {
         MigrateError::Validation(
             "app name is required (e.g. `manage make:api_routes regions`)".into(),
@@ -1930,7 +1970,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     let body = if tenant_aware {
         api_routes_template_tenant(app)
     } else {
-        api_routes_template_pool(app)
+        api_routes_template_pool(app, &crate_root)
     };
     std::fs::write(&path, body)?;
     writeln!(w, "wrote {}", path.display())?;
@@ -1984,7 +2024,7 @@ pub fn api() -> Router<()> {{
 /// Default template (no `--tenant`) — single-pool projects. The
 /// `pool` argument is threaded into per-model `router(prefix, pool)`
 /// calls; the macro-derived ViewSet captures it at mount time.
-fn api_routes_template_pool(app: &str) -> String {
+fn api_routes_template_pool(app: &str, crate_root: &str) -> String {
     format!(
         r#"//! Auto-scaffolded by `manage make:api_routes {app}`.
 //!
@@ -1997,7 +2037,7 @@ fn api_routes_template_pool(app: &str) -> String {
 //!   2. Add one `.merge(...)` line below.
 
 use axum::Router;
-use rustango::sql::sqlx::PgPool;
+use {crate_root}::sql::sqlx::PgPool;
 
 pub fn api(pool: PgPool) -> Router<()> {{
     let _pool = pool;
@@ -2009,13 +2049,13 @@ pub fn api(pool: PgPool) -> Router<()> {{
 }
 
 fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let (name, model) = parse_name_and_model(args)?;
+    let (name, model, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let model = model.unwrap_or_else(|| "Post".into());
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:serializer {name}`.
 
-use rustango::Serializer;
+use {crate_root}::Serializer;
 
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = {model})]
@@ -2031,13 +2071,13 @@ pub struct {name} {{
 }
 
 fn make_form_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let (name, _) = parse_name_and_model(args)?;
+    let (name, _, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:form {name}`.
 
-use rustango::forms::Form;
-use rustango::Form as DeriveForm;
+use {crate_root}::forms::Form;
+use {crate_root}::Form as DeriveForm;
 
 #[derive(DeriveForm)]
 pub struct {name} {{
@@ -2051,16 +2091,16 @@ pub struct {name} {{
 }
 
 fn make_job_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let (name, _) = parse_name_and_model(args)?;
+    let (name, _, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:job {name}`.
 //!
 //! Background job — run async work outside the request lifecycle.
-//! Pair with `rustango::scheduler::Scheduler` (cron-shape) or your queue layer.
+//! Pair with `{crate_root}::scheduler::Scheduler` (cron-shape) or your queue layer.
 
 use std::sync::Arc;
-use rustango::sql::sqlx::PgPool;
+use {crate_root}::sql::sqlx::PgPool;
 
 pub struct {name} {{
     pub pool: PgPool,
@@ -2086,15 +2126,15 @@ impl {name} {{
 }
 
 fn make_notification_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let (name, _) = parse_name_and_model(args)?;
+    let (name, _, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:notification {name}`.
 //!
 //! User-facing notification. For now this just builds an Email; once the
-//! `rustango::notifications` layer ships you'll add `via()` for multi-channel.
+//! `{crate_root}::notifications` layer ships you'll add `via()` for multi-channel.
 
-use rustango::email::Email;
+use {crate_root}::email::Email;
 
 pub struct {name} {{
     pub user_email: String,
@@ -2116,7 +2156,10 @@ impl {name} {{
 }
 
 fn make_middleware_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let (name, _) = parse_name_and_model(args)?;
+    // Middleware template has no `rustango::` references today — the
+    // `--crate` flag is still parsed/validated so the args shape stays
+    // uniform across the `make:*` family.
+    let (name, _, _crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:middleware {name}`.
@@ -2140,14 +2183,14 @@ pub async fn {snake}(req: Request<Body>, next: Next) -> Response<Body> {{
 }
 
 fn make_test_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let (name, _) = parse_name_and_model(args)?;
+    let (name, _, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:test {name}`.
 //!
 //! Integration test. Run with `cargo test --test {snake}`.
 
-use rustango::test_client::TestClient;
+use {crate_root}::test_client::TestClient;
 use axum::Router;
 use axum::routing::get;
 
@@ -4197,17 +4240,52 @@ mod gen_tests {
 
     #[test]
     fn parse_name_and_model_basic() {
-        let (n, m) = parse_name_and_model(&["PostViewSet".into()]).unwrap();
+        let (n, m, c) = parse_name_and_model(&["PostViewSet".into()]).unwrap();
         assert_eq!(n, "PostViewSet");
         assert_eq!(m, None);
+        // Phase 2b of #145 — `--crate` defaults to "rustango" so today's
+        // invocations stay bit-identical.
+        assert_eq!(c, "rustango");
     }
 
     #[test]
     fn parse_name_and_model_with_model_flag() {
         let args: Vec<String> = vec!["PostViewSet".into(), "--model".into(), "Post".into()];
-        let (n, m) = parse_name_and_model(&args).unwrap();
+        let (n, m, c) = parse_name_and_model(&args).unwrap();
         assert_eq!(n, "PostViewSet");
         assert_eq!(m, Some("Post".into()));
+        assert_eq!(c, "rustango");
+    }
+
+    #[test]
+    fn parse_name_and_model_with_crate_flag() {
+        // Phase 2b of #145 — passing `--crate rustango_orm` lets a
+        // bare-ORM consumer (post-#144) emit source compiled against
+        // the renamed dep. Whitespace trimmed; empty rejected at the
+        // `parse_name_and_model_rejects_empty_crate` test below.
+        let args: Vec<String> = vec!["PostSerializer".into(), "--crate".into(), "orm".into()];
+        let (n, m, c) = parse_name_and_model(&args).unwrap();
+        assert_eq!(n, "PostSerializer");
+        assert_eq!(m, None);
+        assert_eq!(c, "orm");
+    }
+
+    #[test]
+    fn parse_name_and_model_rejects_empty_crate() {
+        let args: Vec<String> = vec!["Post".into(), "--crate".into(), "".into()];
+        let err = parse_name_and_model(&args)
+            .err()
+            .expect("empty crate must fail");
+        assert!(format!("{err}").contains("must not be empty"));
+    }
+
+    #[test]
+    fn parse_name_and_model_rejects_missing_crate_value() {
+        let args: Vec<String> = vec!["Post".into(), "--crate".into()];
+        let err = parse_name_and_model(&args)
+            .err()
+            .expect("missing crate value must fail");
+        assert!(format!("{err}").contains("--crate requires a value"));
     }
 
     #[test]
@@ -4731,7 +4809,7 @@ mod gen_tests {
     /// the mount-time `pool` argument.
     #[test]
     fn viewset_template_pool_emits_derive_macro() {
-        let body = viewset_template_pool("PostViewSet", "Post", "post_view_set");
+        let body = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango");
         assert!(
             body.contains("#[derive(ViewSet)]"),
             "expected derive macro, got: {body}"
@@ -4744,6 +4822,50 @@ mod gen_tests {
             !body.contains("tenant_router"),
             "pool template must NOT reference tenant_router, got: {body}"
         );
+        // Phase 2b of #145 — default crate root preserves the
+        // pre-#145 `use rustango::ViewSet;` line bit-identically.
+        assert!(
+            body.contains("use rustango::ViewSet;"),
+            "default crate root must emit `use rustango::ViewSet;`, got: {body}"
+        );
+    }
+
+    #[test]
+    fn viewset_template_pool_threads_renamed_crate_root() {
+        // Phase 2b of #145 — passing `"rustango_orm"` produces source
+        // a bare-ORM consumer can compile (post-#144 carve-out).
+        // The `#[viewset(...)]` attribute name stays literal —
+        // proc-macro contract is independent of the consumer's
+        // Cargo.toml dep rename (same pattern #142 / renamed-smoke
+        // proves for `#[rustango(...)]`).
+        let body = viewset_template_pool("PostViewSet", "Post", "post_view_set", "rustango_orm");
+        assert!(
+            body.contains("use rustango_orm::ViewSet;"),
+            "renamed crate root must propagate to `use` line, got: {body}"
+        );
+        assert!(
+            !body.contains("use rustango::"),
+            "no bare `use rustango::` should remain after rename, got: {body}"
+        );
+        assert!(
+            body.contains("#[viewset("),
+            "derive attribute name stays literal across renames, got: {body}"
+        );
+    }
+
+    #[test]
+    fn viewset_template_tenant_threads_renamed_crate_root() {
+        let body = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango_orm");
+        assert!(body.contains("use rustango_orm::core::Model as _;"));
+        assert!(body.contains("use rustango_orm::viewset::ViewSet;"));
+        assert!(!body.contains("use rustango::"));
+    }
+
+    #[test]
+    fn api_routes_template_pool_threads_renamed_crate_root() {
+        let body = api_routes_template_pool("blog", "rustango_orm");
+        assert!(body.contains("use rustango_orm::sql::sqlx::PgPool;"));
+        assert!(!body.contains("use rustango::"));
     }
 
     /// `--tenant` template uses `ViewSet::for_model(...).tenant_router(...)`
@@ -4752,7 +4874,7 @@ mod gen_tests {
     /// (#80).
     #[test]
     fn viewset_template_tenant_uses_tenant_router() {
-        let body = viewset_template_tenant("PostViewSet", "Post", "post_view_set");
+        let body = viewset_template_tenant("PostViewSet", "Post", "post_view_set", "rustango");
         assert!(
             body.contains("ViewSet::for_model"),
             "expected runtime ViewSet::for_model builder, got: {body}"
@@ -4947,10 +5069,17 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     /// viewsets have something to capture at mount time.
     #[test]
     fn api_routes_template_pool_threads_pgpool() {
-        let body = api_routes_template_pool("blog");
+        let body = api_routes_template_pool("blog", "rustango");
         assert!(
             body.contains("pub fn api(pool: PgPool) -> Router<()>"),
             "expected pool-arg api fn, got: {body}"
+        );
+        // Phase 2b of #145 — default `--crate` argument keeps emit
+        // bit-identical to the pre-#145 shape so existing call sites
+        // (the api / fullstack scaffolder templates) are unaffected.
+        assert!(
+            body.contains("use rustango::sql::sqlx::PgPool;"),
+            "default crate root must emit `use rustango::sql::sqlx::PgPool;`, got: {body}"
         );
         assert!(
             body.contains("use rustango::sql::sqlx::PgPool;"),
