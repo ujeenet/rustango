@@ -1518,11 +1518,13 @@ fn reverse_has_accessor_tokens(
         let not_exists_name = format!("{}_not_exists_expr", rel.name);
         let count_name = format!("{}_count", rel.name);
         let fetch_name = format!("{}_fetch", rel.name);
+        let first_name = format!("{}_first", rel.name);
         let accessor_name = rel.name.as_str();
         let exists_ident = syn::Ident::new(&exists_name, struct_name.span());
         let not_exists_ident = syn::Ident::new(&not_exists_name, struct_name.span());
         let count_ident = syn::Ident::new(&count_name, struct_name.span());
         let fetch_ident = syn::Ident::new(&fetch_name, struct_name.span());
+        let first_ident = syn::Ident::new(&first_name, struct_name.span());
         let accessor_ident = syn::Ident::new(accessor_name, struct_name.span());
         let child = &rel.child;
         let child_fk_column = rel.child_fk_column.as_str();
@@ -1586,6 +1588,22 @@ fn reverse_has_accessor_tokens(
             > {
                 use #root::sql::FetcherPool as _;
                 self.#accessor_ident().fetch_pool(pool).await
+            }
+
+            /// Eloquent `$model->relation->first()` / `hasOne`
+            /// semantics — bare-name shortcut over
+            /// `self.<name>().first(&pool)`. Returns `None` when no
+            /// child rows match. Useful when the relation is
+            /// nominally many-to-one in shape but at most one row is
+            /// expected (latest comment, primary tag, etc.).
+            pub async fn #first_ident(
+                &self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<#child>,
+                #root::sql::ExecError,
+            > {
+                self.#accessor_ident().first(pool).await
             }
 
             #[doc = #exists_doc]
@@ -1672,9 +1690,11 @@ fn through_accessor_tokens(
         let method_name = format!("{}_through", rel.name);
         let count_name = format!("{}_through_count", rel.name);
         let fetch_name = format!("{}_through_fetch", rel.name);
+        let first_name = format!("{}_through_first", rel.name);
         let method_ident = syn::Ident::new(&method_name, struct_name.span());
         let count_ident = syn::Ident::new(&count_name, struct_name.span());
         let fetch_ident = syn::Ident::new(&fetch_name, struct_name.span());
+        let first_ident = syn::Ident::new(&first_name, struct_name.span());
         let far = &rel.far;
         let intermediate = &rel.intermediate;
         let far_fk_column = rel.far_fk_column.as_str();
@@ -1754,6 +1774,22 @@ fn through_accessor_tokens(
             > {
                 use #root::sql::FetcherPool as _;
                 self.#method_ident().fetch_pool(pool).await
+            }
+
+            /// Eloquent `hasOneThrough` analog — bare-name shortcut
+            /// over `self.<name>_through().first(&pool)`. Returns
+            /// `None` when no far rows are reachable through the
+            /// intermediate. Useful when at most one row is
+            /// expected (latest comment by country, primary tag,
+            /// etc.).
+            pub async fn #first_ident(
+                &self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<#far>,
+                #root::sql::ExecError,
+            > {
+                self.#method_ident().first(pool).await
             }
         }
     });

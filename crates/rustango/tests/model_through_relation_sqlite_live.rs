@@ -250,6 +250,27 @@ async fn posts_through_count_returns_far_side_count() {
 }
 
 #[tokio::test]
+async fn posts_through_first_returns_first_far_or_none() {
+    // Eloquent `hasOneThrough` analog — `posts_through_first(&pool)`
+    // returns Some(first far row) or None when no rows match.
+    let pool = make_pool().await;
+    let (a_id, _b_id) = seed(&pool).await;
+
+    let a = Country::find(a_id, &pool).await.unwrap().unwrap();
+    let first = a.posts_through_first(&pool).await.unwrap();
+    assert!(first.is_some());
+    let t = first.unwrap().title;
+    assert!(t.starts_with("alice-") || t.starts_with("andrew-"));
+
+    let mut empty = Country {
+        id: Auto::default(),
+        name: "Empty".into(),
+    };
+    empty.save_pool(&pool).await.unwrap();
+    assert!(empty.posts_through_first(&pool).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn posts_through_fetch_bare_name_hot_path() {
     // Bare-name hot path — `posts_through_fetch(&pool)` is the
     // suffix-free shortcut over `posts_through().fetch_pool(&pool)`.
