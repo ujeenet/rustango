@@ -1,0 +1,42 @@
+[package]
+name = "rustango-renamed-smoke"
+version = "0.0.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Smoke test for #142 — confirms #[derive(Model)] compiles when the rustango crate is renamed via the consumer's Cargo.toml `package = \"rustango\"` field."
+
+[lints]
+workspace = true
+
+[lib]
+name = "rustango_renamed_smoke"
+path = "src/lib.rs"
+
+# Mirror rustango's feature gates locally. The derive macro emits
+# `#[cfg(feature = "X")]` against the CONSUMER's feature flags, so
+# the smoke crate has to declare a matching `postgres` feature that
+# forwards to `orm/postgres` — otherwise the cfg-gated
+# `impl LoadRelated for #StructName` / `impl MaybePgFromRow for ...`
+# emissions silently get dropped, the trait bounds elsewhere go
+# unsatisfied, and `cargo check --workspace` fails.
+[features]
+default = ["postgres"]
+postgres = ["orm/postgres"]
+
+[dependencies]
+# The whole point of this crate — rename rustango locally so the
+# macro must resolve its emit paths through `proc-macro-crate`.
+# Use rustango's default features (postgres + admin + tenancy +
+# etc.) so the dep graph is complete; the smoke crate's own
+# `postgres` feature is just for matching the macro's cfg-gates.
+orm = { package = "rustango", path = "../rustango" }
+chrono = { workspace = true }
+# The macro emits `::tracing::warn!(...)` and `::sqlx::Row`, etc.
+# directly — not routed through `#root` (#142 follow-up). Real-world
+# consumers usually have these already; the smoke crate adds them.
+tracing = "0.1"
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
