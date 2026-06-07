@@ -1627,7 +1627,9 @@ fn through_accessor_tokens(
     }
     let methods = through_relations.iter().map(|rel| {
         let method_name = format!("{}_through", rel.name);
+        let count_name = format!("{}_through_count", rel.name);
         let method_ident = syn::Ident::new(&method_name, struct_name.span());
+        let count_ident = syn::Ident::new(&count_name, struct_name.span());
         let far = &rel.far;
         let intermediate = &rel.intermediate;
         let far_fk_column = rel.far_fk_column.as_str();
@@ -1643,6 +1645,15 @@ fn through_accessor_tokens(
              {intermediate_fk_column} = self.pk)`. Chainable like any \
              other QuerySet — compose `.filter()` / `.order_by()` / \
              `.limit()` etc. on top.",
+        );
+        let count_doc = format!(
+            "Eloquent `$model->{name}->count()` analog for the \
+             through-relation — returns the number of `{far}` rows \
+             reachable through `{intermediate}`. Equivalent to \
+             `self.{name}_through().count_pool(pool)` but spelled \
+             as a bare instance method for parity with the \
+             `reverse_has` `<name>_count` shape.",
+            name = rel.name,
         );
         quote! {
             #[doc = #doc]
@@ -1668,6 +1679,18 @@ fn through_accessor_tokens(
                         subquery: ::std::boxed::Box::new(sub),
                     },
                 )
+            }
+
+            #[doc = #count_doc]
+            pub async fn #count_ident(
+                &self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<
+                i64,
+                #root::sql::ExecError,
+            > {
+                use #root::sql::CounterPool as _;
+                self.#method_ident().count_pool(pool).await
             }
         }
     });
