@@ -4304,6 +4304,78 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Eloquent `Model::each(fn ($row) { ... }, $n)` —
+            /// per-row callback companion to [`Self::chunk`].
+            /// Streams every row in keyset-paginated batches of
+            /// `batch` size, calling `cb` once per row.
+            ///
+            /// Inherits the keyset-paginated scan of
+            /// [`Self::chunk_by_id`] (O(N) total, integer PK only —
+            /// non-integer PKs are silently a no-op).
+            ///
+            /// ```ignore
+            /// Post::each(500, &pool, |p| async move {
+            ///     reindex(p).await?;
+            ///     Ok(())
+            /// }).await?;
+            /// ```
+            ///
+            /// Return `Err(...)` from the callback to abort
+            /// iteration; the error bubbles up unchanged.
+            pub async fn each<F, Fut>(
+                batch: i64,
+                pool: &#root::sql::Pool,
+                mut cb: F,
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
+            where
+                F: ::core::ops::FnMut(Self) -> Fut,
+                Fut: ::core::future::Future<
+                    Output = ::core::result::Result<(), #root::sql::ExecError>,
+                >,
+            {
+                use #root::sql::FetcherPool as _;
+                let pk_col = match Self::primary_key_column() {
+                    ::core::option::Option::Some(c) => c,
+                    ::core::option::Option::None => {
+                        return ::core::result::Result::Ok(());
+                    }
+                };
+                let mut last_seen: i64 = i64::MIN;
+                loop {
+                    let key = ::std::format!("{}__gt", pk_col);
+                    let rows: ::std::vec::Vec<Self> =
+                        #root::query::QuerySet::<Self>::default()
+                            .filter(key.as_str(), last_seen)
+                            .order_by(&[(pk_col, false)])
+                            .limit(batch)
+                            .fetch_pool(pool)
+                            .await?;
+                    if rows.is_empty() {
+                        return ::core::result::Result::Ok(());
+                    }
+                    let len = rows.len() as i64;
+                    let max_pk = match rows
+                        .last()
+                        .map(|r| r.__rustango_pk_value())
+                    {
+                        ::core::option::Option::Some(
+                            #root::core::SqlValue::I64(v),
+                        ) => v,
+                        ::core::option::Option::Some(
+                            #root::core::SqlValue::I32(v),
+                        ) => i64::from(v),
+                        _ => return ::core::result::Result::Ok(()),
+                    };
+                    for row in rows {
+                        cb(row).await?;
+                    }
+                    if len < batch {
+                        return ::core::result::Result::Ok(());
+                    }
+                    last_seen = max_pk;
+                }
+            }
+
             /// Delete every row of this model — `TRUNCATE TABLE
             /// <table> RESTART IDENTITY CASCADE` on Postgres,
             /// `DELETE FROM <table>` on MySQL / SQLite (which don't

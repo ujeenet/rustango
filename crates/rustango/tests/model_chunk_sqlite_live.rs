@@ -109,6 +109,22 @@ async fn chunk_by_id_visits_every_row_via_keyset_pagination() {
 }
 
 #[tokio::test]
+async fn each_visits_every_row_individually() {
+    // Eloquent `Model::each(...)` — per-row callback. The
+    // emitted method walks every row exactly once.
+    let pool = make_pool().await;
+    seed(&pool, 12).await;
+    let count = AtomicI64::new(0);
+    Post::each(5, &pool, |_row| {
+        count.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    })
+    .await
+    .unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 12);
+}
+
+#[tokio::test]
 async fn chunk_by_id_empty_table_invokes_callback_zero_times() {
     let pool = make_pool().await;
     let calls = AtomicI64::new(0);
