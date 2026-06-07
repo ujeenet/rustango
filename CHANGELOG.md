@@ -43,6 +43,7 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
 ### Internal
 
 - **Eloquent-shortcut helper bodies moved to `crate::sql::model_shortcuts`.** The macro previously emitted `__resolve_col` / `__add_signed_expr` / `__aggregate_one_pool` / `__where_multi` / `__increment_one` / `__increment_all` bodies inline per `#[derive(Model)]` invocation — ~80 lines of helper source repeated for every model derive. Bodies now live in one regular Rust file as generic free functions over `T: Model`; the macro emits one-line forwarders. No behavior change, no public-API change (the helpers were always `#[doc(hidden)]`). Monomorphization keeps the binary identical.
+- **`proc-macro-crate` foundation for renameable crate-root resolution** ([#142](https://github.com/ujeenet/rustango/issues/142) Phase 1) — added the `proc-macro-crate = "3"` dep + a `rustango_root()` helper in `rustango-macros` that returns the consumer's local name for the `rustango` crate (handles `Itself` / renamed / fallback). The `#[main]` attribute now emits via `#root::__private_runtime::...` instead of hardcoded `::rustango::...`, proving the path-resolution chain works end-to-end. Follow-up PRs will migrate the remaining ~895 `::rustango::` sites + 6 other entry points (`derive_model`, `derive_viewset`, etc.) in chunks; the helper is ready for them. Unblocks the [orm-extract epic](https://github.com/ujeenet/rustango/issues/149).
 
 ### Fixed
 

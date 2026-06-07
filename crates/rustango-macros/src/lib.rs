@@ -14,6 +14,34 @@ use syn::{
     PathArguments, Type, TypePath,
 };
 
+/// Resolve the consumer's local name for the `rustango` crate so the
+/// macro-emitted code keeps compiling when a downstream `Cargo.toml`
+/// renames the dep (`[dependencies] orm = { package = "rustango", … }`)
+/// or when the standalone `rustango-orm` crate ships in a future
+/// slice of the [orm-extract epic](https://github.com/ujeenet/rustango/issues/149).
+///
+/// Returns one of:
+/// - `quote!(crate)` — the consumer IS the `rustango` crate itself
+///   (used when rustango's own internal `#[derive(Model)]` invocations
+///   compile against the local crate).
+/// - `quote!(::ident)` — the consumer renamed the dep; emit the
+///   user's chosen ident.
+/// - `quote!(::rustango)` — fallback when `proc-macro-crate` can't
+///   read the manifest (rare; preserves today's behavior).
+///
+/// Issue [#142](https://github.com/ujeenet/rustango/issues/142).
+fn rustango_root() -> TokenStream2 {
+    use proc_macro_crate::{crate_name, FoundCrate};
+    match crate_name("rustango") {
+        Ok(FoundCrate::Itself) => quote!(crate),
+        Ok(FoundCrate::Name(name)) => {
+            let ident = proc_macro2::Ident::new(&name, proc_macro2::Span::call_site());
+            quote!(::#ident)
+        }
+        Err(_) => quote!(::rustango),
+    }
+}
+
 /// Derive a `Model` impl. See crate docs for the supported attributes.
 #[proc_macro_derive(Model, attributes(rustango))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
@@ -272,13 +300,14 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // Parse optional `flavor = "current_thread"` / `flavor =
     // "multi_thread"` from the attribute args. Unknown args are
     // tolerated (forward-compat with tokio's own arg surface).
+    let root = rustango_root();
     let flavor = parse_flavor(&args);
     let builder_call = match flavor {
         Flavor::CurrentThread => quote! {
-            ::rustango::__private_runtime::tokio::runtime::Builder::new_current_thread()
+            #root::__private_runtime::tokio::runtime::Builder::new_current_thread()
         },
         Flavor::MultiThread => quote! {
-            ::rustango::__private_runtime::tokio::runtime::Builder::new_multi_thread()
+            #root::__private_runtime::tokio::runtime::Builder::new_multi_thread()
         },
     };
 
@@ -288,7 +317,7 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     input.sig.asyncness = None;
     input.block = syn::parse2(quote! {{
         {
-            use ::rustango::__private_runtime::tracing_subscriber::{self, EnvFilter};
+            use #root::__private_runtime::tracing_subscriber::{self, EnvFilter};
             // `try_init` so duplicate installers (e.g. tests already
             // holding a subscriber) don't panic.
             let _ = tracing_subscriber::fmt()
