@@ -23,6 +23,11 @@ rustango = { version = "0.42", default-features = false, features = ["mysql", "t
 
 # Multiple backends in one binary
 rustango = { version = "0.42", features = ["postgres", "sqlite"] }
+
+# Renaming the dep — `#[derive(Model)]` etc. resolve the crate root
+# via `proc-macro-crate` (issue #142), so importing under a custom
+# name works without any extra wiring.
+orm = { package = "rustango", version = "0.42" }
 ```
 
 ### What's new in v0.42.0 (May 2026) — Django-parity gap-closure batch
