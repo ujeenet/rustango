@@ -172,10 +172,10 @@ async fn empty_child_table_returns_zero_via_where_has() {
 }
 
 #[tokio::test]
-async fn comments_count_pool_returns_per_post_count() {
+async fn comments_count_returns_per_post_count() {
     // Eloquent `$post->comments->count()` analog — the emitted
-    // `comments_count_pool(&pool)` instance method returns the
-    // number of comment rows whose `post_id` matches this post.
+    // `comments_count(&pool)` instance method returns the number
+    // of comment rows whose `post_id` matches this post.
     let pool = make_pool().await;
     let (p1_id, p2_id, p3_id) = seed(&pool).await;
 
@@ -183,7 +183,7 @@ async fn comments_count_pool_returns_per_post_count() {
     let p2 = Post::find(p2_id, &pool).await.unwrap().unwrap();
     let p3 = Post::find(p3_id, &pool).await.unwrap().unwrap();
 
-    assert_eq!(p1.comments_count_pool(&pool).await.unwrap(), 3);
-    assert_eq!(p2.comments_count_pool(&pool).await.unwrap(), 1);
-    assert_eq!(p3.comments_count_pool(&pool).await.unwrap(), 0);
+    assert_eq!(p1.comments_count(&pool).await.unwrap(), 3);
+    assert_eq!(p2.comments_count(&pool).await.unwrap(), 1);
+    assert_eq!(p3.comments_count(&pool).await.unwrap(), 0);
 }

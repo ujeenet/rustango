@@ -742,10 +742,10 @@ Post::objects()
 
 Same SQL-column-name convention as `through(...)` — sidesteps the multi-hop filter gap. Optional `self_pk_column = "..."` defaults to `"id"`.
 
-Each `reverse_has(...)` attribute also emits a third method — `<name>_count_pool(&pool) -> i64` — for Eloquent `$model->relation->count()` parity. Runs `SELECT COUNT(*) FROM <child> WHERE <child_fk_column> = <self.pk>`:
+Each `reverse_has(...)` attribute also emits a third method — `<name>_count(&pool) -> i64` — for Eloquent `$model->relation->count()` parity. Runs `SELECT COUNT(*) FROM <child> WHERE <child_fk_column> = <self.pk>`:
 
 ```rust
-let n: i64 = post.comments_count_pool(&pool).await?;
+let n: i64 = post.comments_count(&pool).await?;
 ```
 
 **Status**: FK-reverse subset only — M2M / GFK `whereHas`, sub-predicate closures, `has(rel, '>', N)` count comparisons, and `withCount`-style annotate-by-relation remain follow-up slices.
