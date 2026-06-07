@@ -117,5 +117,26 @@ mod gated {
             assert_eq!(f.name, "ada");
             assert_eq!(f.views, 42);
         }
+
+        #[test]
+        fn q_macro_resolves_through_renamed_dep() {
+            // Q!() is a proc-macro that emits `Column::like(...)` /
+            // `eq(...)` / etc. against the model's typed column
+            // surface. Path resolution flows through `expand_q` ->
+            // `#root::core::Column::...` (migrated in #899).
+            // If the rename broke that path, this wouldn't compile.
+            //
+            // Q!() returns `TypedFilter<Model>`; call `.into_expr()`
+            // to get the dialect-neutral `WhereExpr`.
+            let q = orm::Q!(RenamedDemo.name__icontains = "ada");
+            let where_expr: orm::core::WhereExpr = q.into();
+            // The exact IR shape is an implementation detail; just
+            // assert we got a non-empty leaf — the rename is what
+            // we're testing, not the predicate writer.
+            assert!(!matches!(
+                where_expr,
+                orm::core::WhereExpr::And(ref v) if v.is_empty()
+            ));
+        }
     }
 }
