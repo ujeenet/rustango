@@ -1,0 +1,56 @@
+[package]
+name = "rustango-orm-macros"
+description = "ORM-only proc-macros for rustango — Model / Form / embed_migrations. Carve-out of rustango-macros for the standalone rustango-orm crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# Issue #143 — the orm-extract epic's first physical-move slice.
+#
+# Today this crate is a thin re-exporter over `rustango-macros`. We
+# expose ONLY `Model`, `Form`, and `embed_migrations!` — the three
+# proc-macros the ORM core actually needs. `Serializer`, `ViewSet`,
+# `Q!`, and `#[rustango::main]` stay in `rustango-macros` (they're
+# framework/runtime concerns, not ORM-core).
+#
+# The eventual physical move (issue #144 carve-out lands) will lift
+# the macro bodies into this crate's `src/lib.rs` and `rustango-macros`
+# will drop them. Until then the re-export shape gives downstream
+# `rustango-orm` consumers the exact API surface they'll get
+# post-split, without requiring a 3500-LOC mechanical move in one PR.
+#
+# Why a regular `[lib]` (not `proc-macro`) re-exporter works: Rust's
+# resolver walks `pub use` paths to find the proc-macro definition
+# in its original `proc-macro = true` crate. Consumers can
+# `use rustango_orm_macros::Model;` and `#[derive(Model)]` resolves
+# correctly through the rustango-macros side.
+[lib]
+name = "rustango_orm_macros"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Forward the consumer's `postgres` feature into rustango — when this
+# crate's tests run with `--all-features`, rustango compiles in PG
+# mode and the integration test gets the real `LoadRelated` /
+# `MaybePgFromRow` trait bounds that the macro emits.
+postgres = ["rustango/postgres"]
+
+[dependencies]
+rustango-macros = { workspace = true }
+
+[dev-dependencies]
+# Integration test calls `Post::SCHEMA.table` etc. — the schema /
+# typed-builder surface lives in `rustango` proper, not in the macro
+# crate. This dep only kicks in for the test binary.
+rustango = { workspace = true }
+
