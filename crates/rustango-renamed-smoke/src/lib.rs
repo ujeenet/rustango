@@ -90,6 +90,22 @@ mod gated {
         pub views: i32,
     }
 
+    // ViewSet covers the `derive_viewset` path-resolution branch —
+    // the macro emits `pub fn router(...) -> #root::__axum::Router`
+    // (the `__axum` re-export was added as a #142 follow-up so this
+    // emit no longer needs a hardcoded `::axum::` path). ViewSet
+    // derive is gated on `tenancy` in rustango; axum on `admin`.
+    // Both features are enabled by this crate's defaults.
+    #[cfg(all(feature = "admin", feature = "tenancy"))]
+    #[derive(orm::ViewSet)]
+    #[viewset(
+        model         = RenamedDemo,
+        fields        = "id, name, views",
+        page_size     = 20,
+    )]
+    #[allow(dead_code)]
+    pub struct RenamedDemoViewSet;
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -153,6 +169,20 @@ mod gated {
             let f = RenamedDemoForm::parse(&payload).expect("valid payload");
             assert_eq!(f.name, "ada");
             assert_eq!(f.views, 42);
+        }
+
+        #[cfg(all(feature = "admin", feature = "tenancy"))]
+        #[test]
+        fn viewset_router_method_resolves_through_renamed_dep() {
+            // ViewSet derive emits a `router(prefix, pool) ->
+            // #root::__axum::Router` method. We can't actually
+            // build the router without a real PgPool, but we can
+            // confirm the method's type signature compiles + the
+            // axum::Router return type resolves through the
+            // renamed crate. Reaching this assertion at all is
+            // the test — compilation proves the rename worked.
+            let _router_fn: fn(&str, orm::sql::sqlx::PgPool) -> orm::__axum::Router =
+                RenamedDemoViewSet::router;
         }
 
         #[test]

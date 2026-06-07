@@ -22,10 +22,12 @@ path = "src/lib.rs"
 # emissions silently get dropped, the trait bounds elsewhere go
 # unsatisfied, and `cargo check --workspace` fails.
 [features]
-default = ["postgres", "serializer", "forms"]
+default = ["postgres", "serializer", "forms", "admin", "tenancy"]
 postgres = ["orm/postgres"]
 serializer = ["orm/serializer"]
 forms = ["orm/forms"]
+admin = ["orm/admin"]
+tenancy = ["orm/tenancy"]
 
 [dependencies]
 # The whole point of this crate — rename rustango locally so the

@@ -10313,7 +10313,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
         impl #struct_name {
             /// Build an `axum::Router` with the six standard REST endpoints
             /// for this ViewSet, mounted at `prefix`.
-            pub fn router(prefix: &str, pool: #root::sql::sqlx::PgPool) -> ::axum::Router {
+            pub fn router(prefix: &str, pool: #root::sql::sqlx::PgPool) -> #root::__axum::Router {
                 #root::viewset::ViewSet::for_model(
                     <#model_path as #root::core::Model>::SCHEMA
                 )
