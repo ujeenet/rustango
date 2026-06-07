@@ -1671,8 +1671,10 @@ fn through_accessor_tokens(
     let methods = through_relations.iter().map(|rel| {
         let method_name = format!("{}_through", rel.name);
         let count_name = format!("{}_through_count", rel.name);
+        let fetch_name = format!("{}_through_fetch", rel.name);
         let method_ident = syn::Ident::new(&method_name, struct_name.span());
         let count_ident = syn::Ident::new(&count_name, struct_name.span());
+        let fetch_ident = syn::Ident::new(&fetch_name, struct_name.span());
         let far = &rel.far;
         let intermediate = &rel.intermediate;
         let far_fk_column = rel.far_fk_column.as_str();
@@ -1734,6 +1736,24 @@ fn through_accessor_tokens(
             > {
                 use #root::sql::CounterPool as _;
                 self.#method_ident().count_pool(pool).await
+            }
+
+            /// Eloquent `$model->relation->get()` for the
+            /// through-relation — bare-name hot-path over
+            /// `self.<name>_through().fetch_pool(&pool)`. Use this
+            /// when you don't need further `.filter()` /
+            /// `.order_by()` composition; falls back to the
+            /// chainable accessor when you do. Avoids the `_pool`
+            /// suffix on the most common call-site shape.
+            pub async fn #fetch_ident(
+                &self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<#far>,
+                #root::sql::ExecError,
+            > {
+                use #root::sql::FetcherPool as _;
+                self.#method_ident().fetch_pool(pool).await
             }
         }
     });
