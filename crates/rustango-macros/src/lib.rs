@@ -1527,6 +1527,10 @@ struct CollectedFields {
     /// `restore_on` inherent methods. At most one such column per
     /// model is allowed; collect_fields rejects duplicates.
     soft_delete_column: Option<String>,
+    /// Rust field ident of the `#[rustango(soft_delete)]` field —
+    /// companion to `soft_delete_column` for emitting predicates
+    /// that need to read the field off `&self` (e.g. `trashed()`).
+    soft_delete_field_ident: Option<syn::Ident>,
 }
 
 #[derive(Clone)]
@@ -1582,6 +1586,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         field_names: Vec::with_capacity(cap),
         fk_relations: Vec::new(),
         soft_delete_column: None,
+        soft_delete_field_ident: None,
     };
 
     for field in &named.named {
@@ -1607,6 +1612,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 ));
             }
             out.soft_delete_column = Some(info.column.clone());
+            out.soft_delete_field_ident = Some(info.ident.clone());
         }
         let column = info.column.as_str();
         let ident = info.ident;
@@ -4326,6 +4332,10 @@ fn inherent_impl_tokens(
         // deleted_at column to NOW()).
         let soft_delete_methods = if let Some(col) = fields.soft_delete_column.as_deref() {
             let col_lit = col;
+            let sd_field_ident = fields
+                .soft_delete_field_ident
+                .clone()
+                .expect("soft_delete_column without ident");
             quote! {
                 /// Soft-delete this row by setting its
                 /// `#[rustango(soft_delete)]` column to `NOW()`.
@@ -4507,6 +4517,18 @@ fn inherent_impl_tokens(
                     pool: &::rustango::sql::Pool,
                 ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
                     Self::delete_pool(self, pool).await
+                }
+
+                /// Returns `true` when this row is soft-deleted (its
+                /// `#[rustango(soft_delete)]` column is currently
+                /// set — Eloquent `$model->trashed()` parity).
+                ///
+                /// Pure in-memory predicate over `&self`; does not
+                /// hit the database. Useful in admin/template code
+                /// like `{% if post.trashed() %}…{% endif %}` and in
+                /// guard clauses on restore/force-delete flows.
+                pub fn trashed(&self) -> bool {
+                    ::core::option::Option::is_some(&self.#sd_field_ident)
                 }
 
                 /// Fetch every row whose `#[rustango(soft_delete)]`
