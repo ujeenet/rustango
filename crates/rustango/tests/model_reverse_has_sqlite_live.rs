@@ -199,6 +199,17 @@ async fn comments_accessor_returns_chainable_queryset() {
 }
 
 #[tokio::test]
+async fn comments_pluck_returns_one_column_per_child() {
+    // Eloquent `$post->comments->pluck('body')` analog.
+    let pool = make_pool().await;
+    let (p1_id, _, _) = seed(&pool).await;
+    let p1 = Post::find(p1_id, &pool).await.unwrap().unwrap();
+    let mut bodies: Vec<String> = p1.comments_pluck("body", &pool).await.unwrap();
+    bodies.sort();
+    assert_eq!(bodies, vec!["comment-0", "comment-1", "comment-2"]);
+}
+
+#[tokio::test]
 async fn comments_first_returns_first_child_or_none() {
     // Eloquent `$post->comments->first()` analog — `post.comments_first()`
     // returns Some(first child) or None.
