@@ -3566,9 +3566,11 @@ fn inherent_impl_tokens(
                 Self::__increment_all(col, -by, pool).await
             }
 
-            /// Internal: apply `col = col + by` (signed) on the row
-            /// whose primary key matches `self`. Backs the
-            /// `increment` / `decrement` instance methods.
+            /// Internal: forward to
+            /// [`::rustango::sql::model_shortcuts::increment_one_pool`].
+            /// One-line wrapper kept as a per-Model method so the
+            /// macro's emitted `increment` / `decrement` instance
+            /// calls don't have to thread `Self` through manually.
             #[doc(hidden)]
             pub async fn __increment_one(
                 this: &Self,
@@ -3576,72 +3578,48 @@ fn inherent_impl_tokens(
                 by: i64,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                use ::rustango::sql::UpdaterPool as _;
-                let _col_static: &'static str = Self::__resolve_col(col)?;
                 let _pk_val: ::rustango::core::SqlValue = ::core::convert::Into::into(
                     ::core::clone::Clone::clone(&this.#pk_ident),
                 );
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(::core::stringify!(#pk_ident), _pk_val)
-                    .update()
-                    .set_expr(col, Self::__add_signed_expr(_col_static, by))
-                    .execute_pool(pool)
-                    .await
+                ::rustango::sql::model_shortcuts::increment_one_pool::<Self>(
+                    ::core::stringify!(#pk_ident),
+                    _pk_val,
+                    col,
+                    by,
+                    pool,
+                )
+                .await
             }
 
-            /// Internal: apply `col = col + by` (signed) on every
-            /// row of the table. Backs the `increment_each` /
-            /// `decrement_each` bulk static methods.
+            /// Internal: forward to
+            /// [`::rustango::sql::model_shortcuts::increment_all_pool`].
             #[doc(hidden)]
             pub async fn __increment_all(
                 col: &str,
                 by: i64,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                use ::rustango::sql::UpdaterPool as _;
-                let _col_static: &'static str = Self::__resolve_col(col)?;
-                ::rustango::query::QuerySet::<Self>::default()
-                    .update()
-                    .set_expr(col, Self::__add_signed_expr(_col_static, by))
-                    .execute_pool(pool)
-                    .await
+                ::rustango::sql::model_shortcuts::increment_all_pool::<Self>(col, by, pool).await
             }
 
-            /// Internal: resolve a runtime `&str` column name to the
-            /// SCHEMA-registered `&'static str` for use with `F()`
-            /// expressions. Surfaces unknown columns as
-            /// `QueryError::UnknownField`.
+            /// Internal: forward to
+            /// [`::rustango::sql::model_shortcuts::resolve_col`].
             #[doc(hidden)]
             pub fn __resolve_col(
                 col: &str,
             ) -> ::core::result::Result<&'static str, ::rustango::sql::ExecError> {
-                ::core::result::Result::Ok(
-                    <Self as ::rustango::core::Model>::SCHEMA
-                        .field(col)
-                        .ok_or_else(|| {
-                            ::rustango::sql::ExecError::Query(
-                                ::rustango::core::QueryError::UnknownField {
-                                    model: <Self as ::rustango::core::Model>::SCHEMA.name,
-                                    field: ::std::string::ToString::to_string(col),
-                                },
-                            )
-                        })?
-                        .column,
-                )
+                ::rustango::sql::model_shortcuts::resolve_col::<Self>(col)
             }
 
-            /// Internal: build a `col + signed_by` expression
-            /// (subtract when `signed_by` is negative).
+            /// Internal: forward to
+            /// [`::rustango::sql::model_shortcuts::add_signed_expr`].
             #[doc(hidden)]
             #[must_use]
             pub fn __add_signed_expr(
                 col_static: &'static str,
                 signed_by: i64,
             ) -> ::rustango::core::Expr {
-                ::rustango::core::F(col_static)
-                    + ::rustango::core::Expr::Literal(
-                        ::rustango::core::SqlValue::I64(signed_by),
-                    )
+                ::rustango::sql::model_shortcuts::add_signed_expr(col_static, signed_by)
             }
 
             /// Re-SELECT this row by its primary key and return a
@@ -4489,34 +4467,7 @@ fn inherent_impl_tokens(
                 ::std::vec::Vec<Self>,
                 ::rustango::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
-                if cols.is_empty() {
-                    return if all {
-                        ::rustango::query::QuerySet::<Self>::default()
-                            .fetch_pool(pool)
-                            .await
-                    } else {
-                        ::core::result::Result::Ok(::std::vec::Vec::new())
-                    };
-                }
-                let _sql_val: ::rustango::core::SqlValue =
-                    ::core::convert::Into::into(val);
-                let mut _q: ::core::option::Option<::rustango::query::Q> =
-                    ::core::option::Option::None;
-                for col in cols {
-                    let _col_static: &'static str = Self::__resolve_col(col)?;
-                    let _pred = ::rustango::query::Q::eq(
-                        _col_static,
-                        ::core::clone::Clone::clone(&_sql_val),
-                    );
-                    _q = ::core::option::Option::Some(match _q {
-                        ::core::option::Option::None => _pred,
-                        ::core::option::Option::Some(prev) => if all { prev & _pred } else { prev | _pred },
-                    });
-                }
-                ::rustango::query::QuerySet::<Self>::default()
-                    .where_(_q.expect("non-empty cols"))
-                    .fetch_pool(pool)
+                ::rustango::sql::model_shortcuts::where_multi_pool::<Self>(cols, val, all, pool)
                     .await
             }
 
@@ -4908,11 +4859,9 @@ fn inherent_impl_tokens(
             #min_method
             #max_method
 
-            /// Internal: resolve `col` → SCHEMA `&'static str`, build a
-            /// single-aggregate `AggregateQuery`, run it through
-            /// `fetch_aggregate_pool::<(Option<U>,)>`, and unwrap the
-            /// first row's first column. Backs `sum_pool` / `avg_pool`
-            /// / `min_pool` / `max_pool`.
+            /// Internal: forward to
+            /// [`::rustango::sql::model_shortcuts::aggregate_one_pool`].
+            /// Backs `sum` / `avg` / `min` / `max`.
             #[doc(hidden)]
             pub async fn __aggregate_one_pool<U>(
                 col: &str,
@@ -4929,21 +4878,8 @@ fn inherent_impl_tokens(
                     + ::core::marker::Send
                     + ::core::marker::Unpin,
             {
-                let _col_static: &'static str = Self::__resolve_col(col)?;
-                let _q = ::rustango::core::AggregateQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
-                    where_clause: ::rustango::core::WhereExpr::And(::std::vec::Vec::new()),
-                    group_by: ::std::vec::Vec::new(),
-                    aggregates: ::std::vec![("v", build(_col_static))],
-                    aliases: ::std::vec::Vec::new(),
-                    having: ::core::option::Option::None,
-                    order_by: ::std::vec::Vec::new(),
-                    limit: ::core::option::Option::None,
-                    offset: ::core::option::Option::None,
-                };
-                let _rows: ::std::vec::Vec<(::core::option::Option<U>,)> =
-                    ::rustango::sql::fetch_aggregate_pool(pool, &_q).await?;
-                ::core::result::Result::Ok(_rows.into_iter().next().and_then(|t| t.0))
+                ::rustango::sql::model_shortcuts::aggregate_one_pool::<Self, U>(col, build, pool)
+                    .await
             }
 
             /// Fetch every row of this model from `pool`. Eloquent
