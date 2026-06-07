@@ -648,6 +648,106 @@ pub struct Post { ... }
 
 ---
 
+### 2.22b `#[rustango(through(name, far, far_fk_column, intermediate, intermediate_fk_column))]` — Eloquent `hasManyThrough`
+
+**What**: Container-level attribute that emits a `<name>_through(&self) -> QuerySet<Far>` accessor traversing the source → intermediate → far chain in one queryset. The returned `QuerySet<Far>` is chainable — `.filter()` / `.order_by()` / `.limit()` compose normally on top.
+
+Generated SQL shape:
+
+```sql
+SELECT <far>.* FROM <far>
+WHERE <far_fk_column> IN (
+    SELECT id FROM <intermediate> WHERE <intermediate_fk_column> = <my_pk>
+)
+```
+
+Built via `WhereExpr::InSubquery` — portable across PG / MySQL / SQLite, no LATERAL or backend-specific syntax. Issue [#817](https://github.com/ujeenet/rustango/issues/817).
+
+**Recipe** (`Country hasManyThrough Post via User`):
+
+```rust
+#[derive(Model)]
+#[rustango(
+    table = "country",
+    through(
+        name                   = "posts",
+        far                    = "Post",
+        far_fk_column          = "author_id",
+        intermediate           = "User",
+        intermediate_fk_column = "country_id",
+    ),
+)]
+pub struct Country { ... }
+
+// Direct fetch:
+let posts: Vec<Post> = country.posts_through().fetch_pool(&pool).await?;
+
+// Chainable:
+country.posts_through()
+    .filter("title__startswith", "Hello ")
+    .order_by(&[("id", true)])
+    .limit(10)
+    .fetch_pool(&pool).await?;
+```
+
+Identifiers are **SQL column / table names** (not Rust field names) — sidesteps the multi-hop filter substrate gap. A Rust-field-name shorthand can sit on top once that substrate lands without breaking this surface. Optional `intermediate_pk_column = "..."` defaults to `"id"`.
+
+**Verified by**: [`tests/model_through_relation_sqlite_live.rs`](crates/rustango/tests/model_through_relation_sqlite_live.rs)
+
+---
+
+### 2.22c `#[rustango(reverse_has(name, child, child_fk_column))]` — Eloquent `whereHas` / `whereDoesntHave`
+
+**What**: Container-level attribute that emits two associated fns on the parent — `<name>_exists_expr() -> WhereExpr` and `<name>_not_exists_expr() -> WhereExpr` — returning a correlated `EXISTS` / `NOT EXISTS` subquery against the child table. Users drop the result into `QuerySet::where_raw(...)` to filter to parents that have (or don't have) at least one matching child.
+
+Generated SQL shape:
+
+```sql
+SELECT <parent>.* FROM <parent>
+WHERE EXISTS (
+    SELECT 1 FROM <child>
+    WHERE <child>.<child_fk_column> = <parent>.<self_pk_column>
+)
+```
+
+Built via `WhereExpr::Exists` + `Expr::OuterRef` — portable across PG / MySQL / SQLite. The writer's scope-stack resolves `OuterRef(col)` to the outer queryset's table at SQL-emit time. Issue [#830](https://github.com/ujeenet/rustango/issues/830).
+
+**Recipe** (`Post hasMany Comment`):
+
+```rust
+#[derive(Model)]
+#[rustango(
+    table = "post",
+    reverse_has(name = "comments", child = "Comment",
+                child_fk_column = "post_id"),
+)]
+pub struct Post { ... }
+
+// whereHas — posts with at least one comment:
+Post::objects()
+    .where_raw(Post::comments_exists_expr())
+    .fetch_pool(&pool).await?;
+
+// whereDoesntHave — posts with no comments:
+Post::objects()
+    .where_raw(Post::comments_not_exists_expr())
+    .fetch_pool(&pool).await?;
+
+// Composes with outer-queryset filters:
+Post::objects()
+    .where_raw(Post::comments_exists_expr())
+    .filter("title__startswith", "Has")
+    .fetch_pool(&pool).await?;
+```
+
+Same SQL-column-name convention as `through(...)` — sidesteps the multi-hop filter gap. Optional `self_pk_column = "..."` defaults to `"id"`.
+
+**Status**: FK-reverse subset only — M2M / GFK `whereHas`, sub-predicate closures, `has(rel, '>', N)` count comparisons, and `withCount`-style annotate-by-relation remain follow-up slices.
+
+**Verified by**: [`tests/model_reverse_has_sqlite_live.rs`](crates/rustango/tests/model_reverse_has_sqlite_live.rs)
+
+---
+
 ### 2.27 `Auto<uuid::Uuid>` + `auto_uuid` — UUID PKs
 
 **What**: `#[rustango(auto_uuid)]` is sugar for `primary_key + auto + DEFAULT gen_random_uuid()`. Postgres' `pgcrypto` extension supplies the v4. Macro skips the column on INSERT; the returning value lands in `Auto<Uuid>`.
