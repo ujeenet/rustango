@@ -3812,6 +3812,127 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Fetch every row where `EXTRACT(YEAR FROM <col>) = year`.
+            /// Eloquent `Model::whereYear($col, $year)->get()` parity.
+            /// Routes through the existing `__year` lookup suffix
+            /// (issue #829).
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_year_pool(
+                col: &str,
+                year: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__year", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, ::rustango::core::SqlValue::I64(year))
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `EXTRACT(MONTH FROM <col>) = month`.
+            /// Eloquent `Model::whereMonth($col, $m)->get()` parity.
+            /// `month` is 1–12.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_month_pool(
+                col: &str,
+                month: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__month", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, ::rustango::core::SqlValue::I64(month))
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `EXTRACT(DAY FROM <col>) = day`.
+            /// Eloquent `Model::whereDay($col, $d)->get()` parity.
+            /// `day` is 1–31.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_day_pool(
+                col: &str,
+                day: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__day", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, ::rustango::core::SqlValue::I64(day))
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `EXTRACT(HOUR FROM <col>) = hour`.
+            /// Eloquent `Model::whereHour($col, $h)->get()` parity.
+            /// `hour` is 0–23.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_hour_pool(
+                col: &str,
+                hour: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__hour", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, ::rustango::core::SqlValue::I64(hour))
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `EXTRACT(MINUTE FROM <col>) = minute`.
+            /// Eloquent `Model::whereMinute($col, $m)->get()` parity.
+            /// `minute` is 0–59.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_minute_pool(
+                col: &str,
+                minute: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__minute", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, ::rustango::core::SqlValue::I64(minute))
+                    .fetch_pool(pool)
+                    .await
+            }
+
             /// Fetch every row where `<col> BETWEEN lo AND hi`
             /// (inclusive on both ends — same as SQL). Eloquent
             /// `Model::whereBetween($col, [$lo, $hi])->get()` parity.
