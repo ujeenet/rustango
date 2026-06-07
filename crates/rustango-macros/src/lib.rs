@@ -2225,6 +2225,7 @@ fn inherent_impl_tokens(
     indexes: &[IndexAttr],
     manager_fns: &[syn::Ident],
 ) -> TokenStream2 {
+    let root = rustango_root();
     // Audit-emit fragments threaded into write paths. Non-empty only
     // when the model carries `#[rustango(audit(...))]`. They reborrow
     // `_executor` (a `&mut PgConnection` for audited models — the
@@ -2236,7 +2237,7 @@ fn inherent_impl_tokens(
         quote!(_executor)
     };
     let executor_param = if audited_fields.is_some() {
-        quote!(_executor: &mut ::rustango::sql::sqlx::PgConnection)
+        quote!(_executor: &mut #root::sql::sqlx::PgConnection)
     } else {
         quote!(_executor: _E)
     };
@@ -2250,7 +2251,7 @@ fn inherent_impl_tokens(
     } else {
         quote! {
             where
-                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+                _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
         }
     };
     // For audited models the `_on` methods take `&mut PgConnection`, so
@@ -2355,21 +2356,21 @@ fn inherent_impl_tokens(
                 /// As [`Self::insert`].
                 pub async fn insert_pool(
                     &mut self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     let mut _columns: ::std::vec::Vec<&'static str> =
                         ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = ::rustango::core::InsertQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                    let _query = #root::core::InsertQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
                         columns: _columns,
                         values: _values,
                         returning: ::std::vec::Vec::new(),
                         on_conflict: ::core::option::Option::None,
                     };
-                    ::rustango::sql::insert_pool(pool, &_query).await
+                    #root::sql::insert_pool(pool, &_query).await
                 }
             }
         } else {
@@ -2381,24 +2382,24 @@ fn inherent_impl_tokens(
                 /// As [`Self::insert`].
                 pub async fn insert_pool(
                     &mut self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     let mut _columns: ::std::vec::Vec<&'static str> =
                         ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = ::rustango::core::InsertQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                    let _query = #root::core::InsertQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
                         columns: _columns,
                         values: _values,
                         returning: ::std::vec![ #( #returning_cols ),* ],
                         on_conflict: ::core::option::Option::None,
                     };
-                    let _result = ::rustango::sql::insert_returning_pool(
+                    let _result = #root::sql::insert_returning_pool(
                         pool, &_query,
                     ).await?;
-                    ::rustango::sql::apply_auto_pk(_result, self)
+                    #root::sql::apply_auto_pk(_result, self)
                 }
             }
         }
@@ -2408,22 +2409,22 @@ fn inherent_impl_tokens(
         quote! {
             /// Insert this row into its table against either backend.
             /// Equivalent to [`Self::insert`] but takes
-            /// [`::rustango::sql::Pool`].
+            /// [`#root::sql::Pool`].
             ///
             /// # Errors
             /// As [`Self::insert`].
             pub async fn insert_pool(
                 &self,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                let _query = ::rustango::core::InsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                let _query = #root::core::InsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     columns: ::std::vec![ #( #insert_columns ),* ],
                     values: ::std::vec![ #( #insert_values ),* ],
                     returning: ::std::vec::Vec::new(),
                     on_conflict: ::core::option::Option::None,
                 };
-                ::rustango::sql::insert_pool(pool, &_query).await
+                #root::sql::insert_pool(pool, &_query).await
             }
         }
     };
@@ -2472,25 +2473,25 @@ fn inherent_impl_tokens(
             let pairs = audit_pair_tokens.iter();
             let pk_str = audit_pk_to_string.clone();
             quote! {
-                let _audit_entry = ::rustango::audit::PendingEntry {
-                    entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                let _audit_entry = #root::audit::PendingEntry {
+                    entity_table: <Self as #root::core::Model>::SCHEMA.table,
                     entity_pk: #pk_str,
                     operation: #op_path,
-                    source: ::rustango::audit::current_source(),
-                    changes: ::rustango::audit::snapshot_changes(&[
+                    source: #root::audit::current_source(),
+                    changes: #root::audit::snapshot_changes(&[
                         #( #pairs ),*
                     ]),
                 };
-                ::rustango::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
             }
         } else {
             quote!()
         }
     };
-    let audit_insert_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Create));
-    let audit_delete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Delete));
-    let audit_softdelete_emit = make_op_emit(quote!(::rustango::audit::AuditOp::SoftDelete));
-    let audit_restore_emit = make_op_emit(quote!(::rustango::audit::AuditOp::Restore));
+    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create));
+    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete));
+    let audit_softdelete_emit = make_op_emit(quote!(#root::audit::AuditOp::SoftDelete));
+    let audit_restore_emit = make_op_emit(quote!(#root::audit::AuditOp::Restore));
 
     // `save_pool(&Pool)` — emitted for every model with a PK.
     // Audited Auto-PK models are deferred (the Auto::Unset →
@@ -2537,31 +2538,31 @@ fn inherent_impl_tokens(
                     /// As [`Self::save`].
                     pub async fn save_pool(
                         &mut self,
-                        pool: &::rustango::sql::Pool,
-                    ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                        let _query = ::rustango::core::UpdateQuery {
-                            model: <Self as ::rustango::core::Model>::SCHEMA,
+                        pool: &#root::sql::Pool,
+                    ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                        let _query = #root::core::UpdateQuery {
+                            model: <Self as #root::core::Model>::SCHEMA,
                             set: ::std::vec![ #( #assignments ),* ],
-                            where_clause: ::rustango::core::WhereExpr::Predicate(
-                                ::rustango::core::Filter {
+                            where_clause: #root::core::WhereExpr::Predicate(
+                                #root::core::Filter {
                                     column: #pk_column_lit,
-                                    op: ::rustango::core::Op::Eq,
-                                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    op: #root::core::Op::Eq,
+                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                         ::core::clone::Clone::clone(&self.#pk_ident)
                                     ),
                                 }
                             ),
                         };
-                        let _audit_entry = ::rustango::audit::PendingEntry {
-                            entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                        let _audit_entry = #root::audit::PendingEntry {
+                            entity_table: <Self as #root::core::Model>::SCHEMA.table,
                             entity_pk: #pk_str,
-                            operation: ::rustango::audit::AuditOp::Update,
-                            source: ::rustango::audit::current_source(),
-                            changes: ::rustango::audit::snapshot_changes(&[
+                            operation: #root::audit::AuditOp::Update,
+                            source: #root::audit::current_source(),
+                            changes: #root::audit::snapshot_changes(&[
                                 #( #pairs ),*
                             ]),
                         };
-                        let _ = ::rustango::audit::save_one_with_audit(
+                        let _ = #root::audit::save_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await?;
                         ::core::result::Result::Ok(())
@@ -2574,22 +2575,22 @@ fn inherent_impl_tokens(
                     ///
                     /// # Errors
                     /// As [`Self::save_pool`], plus
-                    /// [`::rustango::core::QueryError::UnknownField`] wrapped
+                    /// [`#root::core::QueryError::UnknownField`] wrapped
                     /// in `ExecError::Query` for unknown field names.
                     pub async fn save_partial(
                         &mut self,
                         fields: &[&str],
-                        pool: &::rustango::sql::Pool,
-                    ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                        pool: &#root::sql::Pool,
+                    ) -> ::core::result::Result<(), #root::sql::ExecError> {
                         if fields.is_empty() {
                             ::tracing::warn!(
                                 target: "rustango::save_partial",
-                                model = <Self as ::rustango::core::Model>::SCHEMA.name,
+                                model = <Self as #root::core::Model>::SCHEMA.name,
                                 "save_partial called with empty field list — no-op"
                             );
                             return ::core::result::Result::Ok(());
                         }
-                        let _schema = <Self as ::rustango::core::Model>::SCHEMA;
+                        let _schema = <Self as #root::core::Model>::SCHEMA;
                         let mut _wanted_cols: ::std::collections::HashSet<&'static str> =
                             ::std::collections::HashSet::with_capacity(fields.len());
                         for f in fields {
@@ -2599,8 +2600,8 @@ fn inherent_impl_tokens(
                                 }
                                 ::core::option::Option::None => {
                                     return ::core::result::Result::Err(
-                                        ::rustango::sql::ExecError::Query(
-                                            ::rustango::core::QueryError::UnknownField {
+                                        #root::sql::ExecError::Query(
+                                            #root::core::QueryError::UnknownField {
                                                 model: _schema.name,
                                                 field: (*f).to_owned(),
                                             }
@@ -2609,9 +2610,9 @@ fn inherent_impl_tokens(
                                 }
                             }
                         }
-                        let _full: ::std::vec::Vec<::rustango::core::Assignment> =
+                        let _full: ::std::vec::Vec<#root::core::Assignment> =
                             ::std::vec![ #( #assignments ),* ];
-                        let _filtered: ::std::vec::Vec<::rustango::core::Assignment> = _full
+                        let _filtered: ::std::vec::Vec<#root::core::Assignment> = _full
                             .into_iter()
                             .filter(|a| _wanted_cols.contains(a.column))
                             .collect();
@@ -2623,14 +2624,14 @@ fn inherent_impl_tokens(
                             );
                             return ::core::result::Result::Ok(());
                         }
-                        let _query = ::rustango::core::UpdateQuery {
+                        let _query = #root::core::UpdateQuery {
                             model: _schema,
                             set: _filtered,
-                            where_clause: ::rustango::core::WhereExpr::Predicate(
-                                ::rustango::core::Filter {
+                            where_clause: #root::core::WhereExpr::Predicate(
+                                #root::core::Filter {
                                     column: #pk_column_lit,
-                                    op: ::rustango::core::Op::Eq,
-                                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    op: #root::core::Op::Eq,
+                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                         ::core::clone::Clone::clone(&self.#pk_ident)
                                     ),
                                 }
@@ -2644,14 +2645,14 @@ fn inherent_impl_tokens(
                                 .into_iter()
                                 .filter(|(col, _)| _wanted_cols.contains(col))
                                 .collect();
-                        let _audit_entry = ::rustango::audit::PendingEntry {
+                        let _audit_entry = #root::audit::PendingEntry {
                             entity_table: _schema.table,
                             entity_pk: #pk_str2,
-                            operation: ::rustango::audit::AuditOp::Update,
-                            source: ::rustango::audit::current_source(),
-                            changes: ::rustango::audit::snapshot_changes(&_narrowed),
+                            operation: #root::audit::AuditOp::Update,
+                            source: #root::audit::current_source(),
+                            changes: #root::audit::snapshot_changes(&_narrowed),
                         };
-                        let _ = ::rustango::audit::save_one_with_audit(
+                        let _ = #root::audit::save_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await?;
                         ::core::result::Result::Ok(())
@@ -2671,17 +2672,17 @@ fn inherent_impl_tokens(
                     /// Lowers to [`Self::save_partial`] under the hood;
                     /// audit narrowing + every other semantic is identical.
                     ///
-                    /// [`Column`]: ::rustango::core::Column
+                    /// [`Column`]: #root::core::Column
                     ///
                     /// # Errors
                     /// As [`Self::save_partial`].
                     pub async fn save_partial_typed<
-                        L: ::rustango::core::TypedFieldList<Self>,
+                        L: #root::core::TypedFieldList<Self>,
                     >(
                         &mut self,
                         fields: L,
-                        pool: &::rustango::sql::Pool,
-                    ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                        pool: &#root::sql::Pool,
+                    ) -> ::core::result::Result<(), #root::sql::ExecError> {
                         let _names = fields.rust_field_names();
                         let _refs: ::std::vec::Vec<&str> =
                             _names.iter().copied().collect();
@@ -2692,7 +2693,7 @@ fn inherent_impl_tokens(
         } else {
             let dispatch_unset = if fields.pk_is_auto {
                 quote! {
-                    if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
+                    if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
                         return self.insert_pool(pool).await;
                     }
                 }
@@ -2708,23 +2709,23 @@ fn inherent_impl_tokens(
                 /// As [`Self::save`].
                 pub async fn save_pool(
                     &mut self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     #dispatch_unset
-                    let _query = ::rustango::core::UpdateQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                    let _query = #root::core::UpdateQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
                         set: ::std::vec![ #( #assignments ),* ],
-                        where_clause: ::rustango::core::WhereExpr::Predicate(
-                            ::rustango::core::Filter {
+                        where_clause: #root::core::WhereExpr::Predicate(
+                            #root::core::Filter {
                                 column: #pk_column_lit,
-                                op: ::rustango::core::Op::Eq,
-                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                op: #root::core::Op::Eq,
+                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                     ::core::clone::Clone::clone(&self.#pk_ident)
                                 ),
                             }
                         ),
                     };
-                    let _ = ::rustango::sql::update_pool(pool, &_query).await?;
+                    let _ = #root::sql::update_pool(pool, &_query).await?;
                     ::core::result::Result::Ok(())
                 }
 
@@ -2734,7 +2735,7 @@ fn inherent_impl_tokens(
                 ///
                 /// `fields` are Rust-side struct field names; the macro
                 /// resolves each to its SQL column. Unknown field
-                /// names return [`::rustango::core::QueryError::UnknownField`]
+                /// names return [`#root::core::QueryError::UnknownField`]
                 /// wrapped in `ExecError::Query`. An empty list is a
                 /// no-op (returns `Ok(())` and logs a `tracing::warn!`),
                 /// matching Django's "nothing to do" semantic.
@@ -2747,7 +2748,7 @@ fn inherent_impl_tokens(
                 ///   columns you didn't touch.
                 ///
                 /// Auto-PK models with an unset PK return
-                /// [`::rustango::core::QueryError::UnknownField`] with
+                /// [`#root::core::QueryError::UnknownField`] with
                 /// field name `<pk>` — `save_partial` is an
                 /// UPDATE-only path. Call [`Self::insert_pool`]
                 /// (or [`Self::save_pool`] which dispatches based on
@@ -2759,17 +2760,17 @@ fn inherent_impl_tokens(
                 pub async fn save_partial(
                     &mut self,
                     fields: &[&str],
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     if fields.is_empty() {
                         ::tracing::warn!(
                             target: "rustango::save_partial",
-                            model = <Self as ::rustango::core::Model>::SCHEMA.name,
+                            model = <Self as #root::core::Model>::SCHEMA.name,
                             "save_partial called with empty field list — no-op"
                         );
                         return ::core::result::Result::Ok(());
                     }
-                    let _schema = <Self as ::rustango::core::Model>::SCHEMA;
+                    let _schema = <Self as #root::core::Model>::SCHEMA;
                     // Validate field names against the schema.
                     let mut _wanted_cols: ::std::collections::HashSet<&'static str> =
                         ::std::collections::HashSet::with_capacity(fields.len());
@@ -2780,8 +2781,8 @@ fn inherent_impl_tokens(
                             }
                             ::core::option::Option::None => {
                                 return ::core::result::Result::Err(
-                                    ::rustango::sql::ExecError::Query(
-                                        ::rustango::core::QueryError::UnknownField {
+                                    #root::sql::ExecError::Query(
+                                        #root::core::QueryError::UnknownField {
                                             model: _schema.name,
                                             field: (*f).to_owned(),
                                         }
@@ -2792,9 +2793,9 @@ fn inherent_impl_tokens(
                     }
                     // Build the full assignment vec, then keep only the
                     // assignments whose column is in `_wanted_cols`.
-                    let _full: ::std::vec::Vec<::rustango::core::Assignment> =
+                    let _full: ::std::vec::Vec<#root::core::Assignment> =
                         ::std::vec![ #( #assignments ),* ];
-                    let _filtered: ::std::vec::Vec<::rustango::core::Assignment> = _full
+                    let _filtered: ::std::vec::Vec<#root::core::Assignment> = _full
                         .into_iter()
                         .filter(|a| _wanted_cols.contains(a.column))
                         .collect();
@@ -2810,20 +2811,20 @@ fn inherent_impl_tokens(
                         );
                         return ::core::result::Result::Ok(());
                     }
-                    let _query = ::rustango::core::UpdateQuery {
+                    let _query = #root::core::UpdateQuery {
                         model: _schema,
                         set: _filtered,
-                        where_clause: ::rustango::core::WhereExpr::Predicate(
-                            ::rustango::core::Filter {
+                        where_clause: #root::core::WhereExpr::Predicate(
+                            #root::core::Filter {
                                 column: #pk_column_lit,
-                                op: ::rustango::core::Op::Eq,
-                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                op: #root::core::Op::Eq,
+                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                     ::core::clone::Clone::clone(&self.#pk_ident)
                                 ),
                             }
                         ),
                     };
-                    let _ = ::rustango::sql::update_pool(pool, &_query).await?;
+                    let _ = #root::sql::update_pool(pool, &_query).await?;
                     ::core::result::Result::Ok(())
                 }
 
@@ -2842,17 +2843,17 @@ fn inherent_impl_tokens(
                 /// tuple is reduced to a `&[&str]` slice of Rust-side
                 /// field names and forwarded.
                 ///
-                /// [`Column`]: ::rustango::core::Column
+                /// [`Column`]: #root::core::Column
                 ///
                 /// # Errors
                 /// As [`Self::save_partial`].
                 pub async fn save_partial_typed<
-                    L: ::rustango::core::TypedFieldList<Self>,
+                    L: #root::core::TypedFieldList<Self>,
                 >(
                     &mut self,
                     fields: L,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     let _names = fields.rust_field_names();
                     let _refs: ::std::vec::Vec<&str> =
                         _names.iter().copied().collect();
@@ -2920,33 +2921,33 @@ fn inherent_impl_tokens(
                 /// As [`Self::insert`].
                 pub async fn insert_pool(
                     &mut self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     let mut _columns: ::std::vec::Vec<&'static str> =
                         ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes )*
-                    let _query = ::rustango::core::InsertQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                    let _query = #root::core::InsertQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
                         columns: _columns,
                         values: _values,
                         returning: ::std::vec![ #( #returning_cols ),* ],
                         on_conflict: ::core::option::Option::None,
                     };
-                    let _audit_entry = ::rustango::audit::PendingEntry {
-                        entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                    let _audit_entry = #root::audit::PendingEntry {
+                        entity_table: <Self as #root::core::Model>::SCHEMA.table,
                         entity_pk: #pk_str,
-                        operation: ::rustango::audit::AuditOp::Create,
-                        source: ::rustango::audit::current_source(),
-                        changes: ::rustango::audit::snapshot_changes(&[
+                        operation: #root::audit::AuditOp::Create,
+                        source: #root::audit::current_source(),
+                        changes: #root::audit::snapshot_changes(&[
                             #( #pairs ),*
                         ]),
                     };
-                    let _result = ::rustango::audit::insert_one_with_audit(
+                    let _result = #root::audit::insert_one_with_audit(
                         pool, &_query, &_audit_entry,
                     ).await?;
-                    ::rustango::sql::apply_auto_pk(_result, self)
+                    #root::sql::apply_auto_pk(_result, self)
                 }
             }
         } else {
@@ -3014,11 +3015,11 @@ fn inherent_impl_tokens(
                         .collect()
                 };
             let before_pairs_pg: Vec<proc_macro2::TokenStream> =
-                mk_before_pairs(quote!(::rustango::sql::try_get_returning));
+                mk_before_pairs(quote!(#root::sql::try_get_returning));
             let before_pairs_my: Vec<proc_macro2::TokenStream> =
-                mk_before_pairs(quote!(::rustango::sql::try_get_returning_my));
+                mk_before_pairs(quote!(#root::sql::try_get_returning_my));
             let before_pairs_sqlite: Vec<proc_macro2::TokenStream> =
-                mk_before_pairs(quote!(::rustango::sql::try_get_returning_sqlite));
+                mk_before_pairs(quote!(#root::sql::try_get_returning_sqlite));
             let pg_select_cols: String = tracked
                 .iter()
                 .map(|c| format!("\"{}\"", c.column.replace('"', "\"\"")))
@@ -3041,7 +3042,7 @@ fn inherent_impl_tokens(
             let assignments = &fields.update_assignments;
             let unset_dispatch = if fields.has_auto {
                 quote! {
-                    if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
+                    if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
                         return self.insert_pool(pool).await;
                     }
                 }
@@ -3064,17 +3065,17 @@ fn inherent_impl_tokens(
                 /// As [`Self::save`].
                 pub async fn save_pool(
                     &mut self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     #unset_dispatch
-                    let _query = ::rustango::core::UpdateQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                    let _query = #root::core::UpdateQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
                         set: ::std::vec![ #( #assignments ),* ],
-                        where_clause: ::rustango::core::WhereExpr::Predicate(
-                            ::rustango::core::Filter {
+                        where_clause: #root::core::WhereExpr::Predicate(
+                            #root::core::Filter {
                                 column: #pk_column_lit,
-                                op: ::rustango::core::Op::Eq,
-                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                op: #root::core::Op::Eq,
+                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                     ::core::clone::Clone::clone(&self.#pk_ident)
                                 ),
                             }
@@ -3082,14 +3083,14 @@ fn inherent_impl_tokens(
                     };
                     let _after_pairs: ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
                         ::std::vec![ #( #after_pairs_pg ),* ];
-                    ::rustango::audit::save_one_with_diff(
+                    #root::audit::save_one_with_diff(
                         pool,
                         &_query,
                         #pk_column_lit,
-                        ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
                             #pk_value_for_bind,
                         ),
-                        <Self as ::rustango::core::Model>::SCHEMA.table,
+                        <Self as #root::core::Model>::SCHEMA.table,
                         #pk_str,
                         _after_pairs,
                         #pg_select_cols,
@@ -3130,30 +3131,30 @@ fn inherent_impl_tokens(
                     /// As [`Self::delete`].
                     pub async fn delete_pool(
                         &self,
-                        pool: &::rustango::sql::Pool,
-                    ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                        let _query = ::rustango::core::DeleteQuery {
-                            model: <Self as ::rustango::core::Model>::SCHEMA,
-                            where_clause: ::rustango::core::WhereExpr::Predicate(
-                                ::rustango::core::Filter {
+                        pool: &#root::sql::Pool,
+                    ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                        let _query = #root::core::DeleteQuery {
+                            model: <Self as #root::core::Model>::SCHEMA,
+                            where_clause: #root::core::WhereExpr::Predicate(
+                                #root::core::Filter {
                                     column: #pk_column_lit,
-                                    op: ::rustango::core::Op::Eq,
-                                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    op: #root::core::Op::Eq,
+                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                         ::core::clone::Clone::clone(&self.#pk_ident)
                                     ),
                                 }
                             ),
                         };
-                        let _audit_entry = ::rustango::audit::PendingEntry {
-                            entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                        let _audit_entry = #root::audit::PendingEntry {
+                            entity_table: <Self as #root::core::Model>::SCHEMA.table,
                             entity_pk: #pk_str,
-                            operation: ::rustango::audit::AuditOp::Delete,
-                            source: ::rustango::audit::current_source(),
-                            changes: ::rustango::audit::snapshot_changes(&[
+                            operation: #root::audit::AuditOp::Delete,
+                            source: #root::audit::current_source(),
+                            changes: #root::audit::snapshot_changes(&[
                                 #( #pairs ),*
                             ]),
                         };
-                        ::rustango::audit::delete_one_with_audit(
+                        #root::audit::delete_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await
                     }
@@ -3162,27 +3163,27 @@ fn inherent_impl_tokens(
                 quote! {
                     /// Delete the row identified by this instance's primary key
                     /// against either backend. Equivalent to [`Self::delete`] but
-                    /// takes [`::rustango::sql::Pool`] and dispatches per backend.
+                    /// takes [`#root::sql::Pool`] and dispatches per backend.
                     ///
                     /// # Errors
                     /// As [`Self::delete`].
                     pub async fn delete_pool(
                         &self,
-                        pool: &::rustango::sql::Pool,
-                    ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                        let _query = ::rustango::core::DeleteQuery {
-                            model: <Self as ::rustango::core::Model>::SCHEMA,
-                            where_clause: ::rustango::core::WhereExpr::Predicate(
-                                ::rustango::core::Filter {
+                        pool: &#root::sql::Pool,
+                    ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                        let _query = #root::core::DeleteQuery {
+                            model: <Self as #root::core::Model>::SCHEMA,
+                            where_clause: #root::core::WhereExpr::Predicate(
+                                #root::core::Filter {
                                     column: #pk_column_lit,
-                                    op: ::rustango::core::Op::Eq,
-                                    value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                    op: #root::core::Op::Eq,
+                                    value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                         ::core::clone::Clone::clone(&self.#pk_ident)
                                     ),
                                 }
                             ),
                         };
-                        ::rustango::sql::delete_pool(pool, &_query).await
+                        #root::sql::delete_pool(pool, &_query).await
                     }
                 }
             }
@@ -3216,7 +3217,7 @@ fn inherent_impl_tokens(
             })
             .collect();
         let pk_clone_token = if fields.pk_is_auto {
-            quote! { #pk_ident: ::rustango::sql::Auto::Unset }
+            quote! { #pk_ident: #root::sql::Auto::Unset }
         } else {
             quote! { #pk_ident: ::core::clone::Clone::clone(&self.#pk_ident) }
         };
@@ -3283,10 +3284,10 @@ fn inherent_impl_tokens(
                 ///
                 /// [`CounterPool::count_pool`]: rustango::sql::CounterPool::count_pool
                 pub async fn count(
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<i64, ::rustango::sql::ExecError> {
-                    use ::rustango::sql::CounterPool as _;
-                    ::rustango::query::QuerySet::<Self>::default()
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<i64, #root::sql::ExecError> {
+                    use #root::sql::CounterPool as _;
+                    #root::query::QuerySet::<Self>::default()
                         .count_pool(pool)
                         .await
                 }
@@ -3306,20 +3307,20 @@ fn inherent_impl_tokens(
                 /// As `ValuesFlatQuerySet::first`.
                 pub async fn value<U>(
                     col: &str,
-                    pool: &::rustango::sql::Pool,
+                    pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
                     ::core::option::Option<U>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 >
                 where
-                    U: ::rustango::sql::MaybePgScalar
-                        + ::rustango::sql::MaybeMyScalar
-                        + ::rustango::sql::MaybeSqliteScalar
+                    U: #root::sql::MaybePgScalar
+                        + #root::sql::MaybeMyScalar
+                        + #root::sql::MaybeSqliteScalar
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
                     let _col_static: &'static str = Self::__resolve_col(col)?;
-                    ::rustango::query::QuerySet::<Self>::default()
+                    #root::query::QuerySet::<Self>::default()
                         .values_list_flat(_col_static)
                         .first::<U>(pool)
                         .await
@@ -3334,24 +3335,24 @@ fn inherent_impl_tokens(
                 /// `sum`.
                 ///
                 /// # Errors
-                /// As [`::rustango::sql::fetch_aggregate_pool`].
+                /// As [`#root::sql::fetch_aggregate_pool`].
                 pub async fn sum<U>(
                     col: &str,
-                    pool: &::rustango::sql::Pool,
+                    pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
                     ::core::option::Option<U>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 >
                 where
-                    (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                        + ::rustango::sql::MaybeMyFromRow
-                        + ::rustango::sql::MaybeSqliteFromRow
+                    (::core::option::Option<U>,): #root::sql::MaybePgFromRow
+                        + #root::sql::MaybeMyFromRow
+                        + #root::sql::MaybeSqliteFromRow
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
                     Self::__aggregate_one_pool::<U>(
                         col,
-                        |c| ::rustango::core::AggregateExpr::Sum(c),
+                        |c| #root::core::AggregateExpr::Sum(c),
                         pool,
                     )
                     .await
@@ -3365,24 +3366,24 @@ fn inherent_impl_tokens(
                 /// models that already declare a field named `avg`.
                 ///
                 /// # Errors
-                /// As [`::rustango::sql::fetch_aggregate_pool`].
+                /// As [`#root::sql::fetch_aggregate_pool`].
                 pub async fn avg<U>(
                     col: &str,
-                    pool: &::rustango::sql::Pool,
+                    pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
                     ::core::option::Option<U>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 >
                 where
-                    (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                        + ::rustango::sql::MaybeMyFromRow
-                        + ::rustango::sql::MaybeSqliteFromRow
+                    (::core::option::Option<U>,): #root::sql::MaybePgFromRow
+                        + #root::sql::MaybeMyFromRow
+                        + #root::sql::MaybeSqliteFromRow
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
                     Self::__aggregate_one_pool::<U>(
                         col,
-                        |c| ::rustango::core::AggregateExpr::Avg(c),
+                        |c| #root::core::AggregateExpr::Avg(c),
                         pool,
                     )
                     .await
@@ -3396,24 +3397,24 @@ fn inherent_impl_tokens(
                 /// models that already declare a field named `min`.
                 ///
                 /// # Errors
-                /// As [`::rustango::sql::fetch_aggregate_pool`].
+                /// As [`#root::sql::fetch_aggregate_pool`].
                 pub async fn min<U>(
                     col: &str,
-                    pool: &::rustango::sql::Pool,
+                    pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
                     ::core::option::Option<U>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 >
                 where
-                    (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                        + ::rustango::sql::MaybeMyFromRow
-                        + ::rustango::sql::MaybeSqliteFromRow
+                    (::core::option::Option<U>,): #root::sql::MaybePgFromRow
+                        + #root::sql::MaybeMyFromRow
+                        + #root::sql::MaybeSqliteFromRow
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
                     Self::__aggregate_one_pool::<U>(
                         col,
-                        |c| ::rustango::core::AggregateExpr::Min(c),
+                        |c| #root::core::AggregateExpr::Min(c),
                         pool,
                     )
                     .await
@@ -3427,24 +3428,24 @@ fn inherent_impl_tokens(
                 /// models that already declare a field named `max`.
                 ///
                 /// # Errors
-                /// As [`::rustango::sql::fetch_aggregate_pool`].
+                /// As [`#root::sql::fetch_aggregate_pool`].
                 pub async fn max<U>(
                     col: &str,
-                    pool: &::rustango::sql::Pool,
+                    pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
                     ::core::option::Option<U>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 >
                 where
-                    (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                        + ::rustango::sql::MaybeMyFromRow
-                        + ::rustango::sql::MaybeSqliteFromRow
+                    (::core::option::Option<U>,): #root::sql::MaybePgFromRow
+                        + #root::sql::MaybeMyFromRow
+                        + #root::sql::MaybeSqliteFromRow
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
                     Self::__aggregate_one_pool::<U>(
                         col,
-                        |c| ::rustango::core::AggregateExpr::Max(c),
+                        |c| #root::core::AggregateExpr::Max(c),
                         pool,
                     )
                     .await
@@ -3461,12 +3462,12 @@ fn inherent_impl_tokens(
                 /// # Errors
                 /// As `QuerySet::first`.
                 pub async fn first(
-                    pool: &::rustango::sql::Pool,
+                    pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
                     ::core::option::Option<Self>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 > {
-                    ::rustango::query::QuerySet::<Self>::default()
+                    #root::query::QuerySet::<Self>::default()
                         .first(pool)
                         .await
                 }
@@ -3494,14 +3495,14 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn refresh_from_db(
                 &mut self,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                use ::rustango::sql::FetcherPool as _;
-                let _pk_val: ::rustango::core::SqlValue = ::core::convert::Into::into(
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                use #root::sql::FetcherPool as _;
+                let _pk_val: #root::core::SqlValue = ::core::convert::Into::into(
                     ::core::clone::Clone::clone(&self.#pk_ident),
                 );
                 let mut _rows: ::std::vec::Vec<Self> =
-                    ::rustango::query::QuerySet::<Self>::default()
+                    #root::query::QuerySet::<Self>::default()
                         .filter(::core::stringify!(#pk_ident), _pk_val)
                         .limit(1)
                         .fetch_pool(pool)
@@ -3512,8 +3513,8 @@ fn inherent_impl_tokens(
                         ::core::result::Result::Ok(())
                     }
                     ::core::option::Option::None => ::core::result::Result::Err(
-                        ::rustango::sql::ExecError::Driver(
-                            ::rustango::sql::sqlx::Error::RowNotFound,
+                        #root::sql::ExecError::Driver(
+                            #root::sql::sqlx::Error::RowNotFound,
                         ),
                     ),
                 }
@@ -3545,8 +3546,8 @@ fn inherent_impl_tokens(
                 &self,
                 col: &str,
                 by: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 Self::__increment_one(self, col, by, pool).await
             }
 
@@ -3562,8 +3563,8 @@ fn inherent_impl_tokens(
                 &self,
                 col: &str,
                 by: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 Self::__increment_one(self, col, -by, pool).await
             }
 
@@ -3579,8 +3580,8 @@ fn inherent_impl_tokens(
             pub async fn increment_each(
                 col: &str,
                 by: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 Self::__increment_all(col, by, pool).await
             }
 
@@ -3591,13 +3592,13 @@ fn inherent_impl_tokens(
             pub async fn decrement_each(
                 col: &str,
                 by: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 Self::__increment_all(col, -by, pool).await
             }
 
             /// Internal: forward to
-            /// [`::rustango::sql::model_shortcuts::increment_one_pool`].
+            /// [`#root::sql::model_shortcuts::increment_one_pool`].
             /// One-line wrapper kept as a per-Model method so the
             /// macro's emitted `increment` / `decrement` instance
             /// calls don't have to thread `Self` through manually.
@@ -3606,12 +3607,12 @@ fn inherent_impl_tokens(
                 this: &Self,
                 col: &str,
                 by: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                let _pk_val: ::rustango::core::SqlValue = ::core::convert::Into::into(
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                let _pk_val: #root::core::SqlValue = ::core::convert::Into::into(
                     ::core::clone::Clone::clone(&this.#pk_ident),
                 );
-                ::rustango::sql::model_shortcuts::increment_one_pool::<Self>(
+                #root::sql::model_shortcuts::increment_one_pool::<Self>(
                     ::core::stringify!(#pk_ident),
                     _pk_val,
                     col,
@@ -3622,34 +3623,34 @@ fn inherent_impl_tokens(
             }
 
             /// Internal: forward to
-            /// [`::rustango::sql::model_shortcuts::increment_all_pool`].
+            /// [`#root::sql::model_shortcuts::increment_all_pool`].
             #[doc(hidden)]
             pub async fn __increment_all(
                 col: &str,
                 by: i64,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                ::rustango::sql::model_shortcuts::increment_all_pool::<Self>(col, by, pool).await
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                #root::sql::model_shortcuts::increment_all_pool::<Self>(col, by, pool).await
             }
 
             /// Internal: forward to
-            /// [`::rustango::sql::model_shortcuts::resolve_col`].
+            /// [`#root::sql::model_shortcuts::resolve_col`].
             #[doc(hidden)]
             pub fn __resolve_col(
                 col: &str,
-            ) -> ::core::result::Result<&'static str, ::rustango::sql::ExecError> {
-                ::rustango::sql::model_shortcuts::resolve_col::<Self>(col)
+            ) -> ::core::result::Result<&'static str, #root::sql::ExecError> {
+                #root::sql::model_shortcuts::resolve_col::<Self>(col)
             }
 
             /// Internal: forward to
-            /// [`::rustango::sql::model_shortcuts::add_signed_expr`].
+            /// [`#root::sql::model_shortcuts::add_signed_expr`].
             #[doc(hidden)]
             #[must_use]
             pub fn __add_signed_expr(
                 col_static: &'static str,
                 signed_by: i64,
-            ) -> ::rustango::core::Expr {
-                ::rustango::sql::model_shortcuts::add_signed_expr(col_static, signed_by)
+            ) -> #root::core::Expr {
+                #root::sql::model_shortcuts::add_signed_expr(col_static, signed_by)
             }
 
             /// Re-SELECT this row by its primary key and return a
@@ -3673,17 +3674,17 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn fresh(
                 &self,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
-                let _pk_val: ::rustango::core::SqlValue = ::core::convert::Into::into(
+                use #root::sql::FetcherPool as _;
+                let _pk_val: #root::core::SqlValue = ::core::convert::Into::into(
                     ::core::clone::Clone::clone(&self.#pk_ident),
                 );
                 let _rows: ::std::vec::Vec<Self> =
-                    ::rustango::query::QuerySet::<Self>::default()
+                    #root::query::QuerySet::<Self>::default()
                         .filter(::core::stringify!(#pk_ident), _pk_val)
                         .limit(1)
                         .fetch_pool(pool)
@@ -3712,13 +3713,13 @@ fn inherent_impl_tokens(
             ///
             /// [`sqlx::Error::RowNotFound`]: rustango::sql::sqlx::Error::RowNotFound
             pub async fn first_or_fail(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<Self, #root::sql::ExecError> {
                 match Self::first(pool).await? {
                     ::core::option::Option::Some(_row) => ::core::result::Result::Ok(_row),
                     ::core::option::Option::None => ::core::result::Result::Err(
-                        ::rustango::sql::ExecError::Driver(
-                            ::rustango::sql::sqlx::Error::RowNotFound,
+                        #root::sql::ExecError::Driver(
+                            #root::sql::sqlx::Error::RowNotFound,
                         ),
                     ),
                 }
@@ -3740,16 +3741,16 @@ fn inherent_impl_tokens(
             /// As `ValuesFlatQuerySet::fetch`.
             pub async fn pluck<U>(
                 col: &'static str,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<::std::vec::Vec<U>, ::rustango::sql::ExecError>
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<::std::vec::Vec<U>, #root::sql::ExecError>
             where
-                U: ::rustango::sql::MaybePgScalar
-                    + ::rustango::sql::MaybeMyScalar
-                    + ::rustango::sql::MaybeSqliteScalar
+                U: #root::sql::MaybePgScalar
+                    + #root::sql::MaybeMyScalar
+                    + #root::sql::MaybeSqliteScalar
                     + ::core::marker::Send
                     + ::core::marker::Unpin,
             {
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .values_list_flat(col)
                     .fetch::<U>(pool)
                     .await
@@ -3773,9 +3774,9 @@ fn inherent_impl_tokens(
             ///
             /// [`raw_execute_pool`]: rustango::sql::raw_execute_pool
             pub async fn truncate(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                let _table = <Self as ::rustango::core::Model>::SCHEMA.table;
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                let _table = <Self as #root::core::Model>::SCHEMA.table;
                 let _dialect = pool.dialect();
                 let _quoted = _dialect.quote_ident(_table);
                 let _sql = if _dialect.name() == "postgres" {
@@ -3783,7 +3784,7 @@ fn inherent_impl_tokens(
                 } else {
                     ::std::format!("DELETE FROM {}", _quoted)
                 };
-                ::rustango::sql::raw_execute_pool(pool, &_sql, ::std::vec::Vec::new()).await
+                #root::sql::raw_execute_pool(pool, &_sql, ::std::vec::Vec::new()).await
             }
 
             /// Bulk-delete every row whose primary key is in
@@ -3802,34 +3803,34 @@ fn inherent_impl_tokens(
             /// As `delete_pool`.
             pub async fn destroy<V>(
                 pks: impl ::core::iter::IntoIterator<Item = V>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError>
             where
-                V: ::core::convert::Into<::rustango::core::SqlValue>,
+                V: ::core::convert::Into<#root::core::SqlValue>,
             {
-                let _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                let _values: ::std::vec::Vec<#root::core::SqlValue> =
                     pks.into_iter().map(::core::convert::Into::into).collect();
                 if _values.is_empty() {
                     return ::core::result::Result::Ok(0);
                 }
-                let _query = ::rustango::core::DeleteQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
-                    where_clause: ::rustango::core::WhereExpr::Predicate(
-                        ::rustango::core::Filter {
-                            column: <Self as ::rustango::core::Model>::SCHEMA
+                let _query = #root::core::DeleteQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
+                    where_clause: #root::core::WhereExpr::Predicate(
+                        #root::core::Filter {
+                            column: <Self as #root::core::Model>::SCHEMA
                                 .primary_key()
                                 .ok_or_else(|| {
-                                    ::rustango::sql::ExecError::Sql(
-                                        ::rustango::sql::SqlError::MissingPrimaryKey,
+                                    #root::sql::ExecError::Sql(
+                                        #root::sql::SqlError::MissingPrimaryKey,
                                     )
                                 })?
                                 .column,
-                            op: ::rustango::core::Op::In,
-                            value: ::rustango::core::SqlValue::List(_values),
+                            op: #root::core::Op::In,
+                            value: #root::core::SqlValue::List(_values),
                         },
                     ),
                 };
-                ::rustango::sql::delete_pool(pool, &_query).await
+                #root::sql::delete_pool(pool, &_query).await
             }
 
             /// Fetch every row where `<col> = <val>`. Eloquent
@@ -3852,14 +3853,14 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_(
                 col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
-                ::rustango::query::QuerySet::<Self>::default()
+                use #root::sql::FetcherPool as _;
+                #root::query::QuerySet::<Self>::default()
                     .filter(col, val)
                     .fetch_pool(pool)
                     .await
@@ -3881,23 +3882,23 @@ fn inherent_impl_tokens(
             pub async fn where_in<V>(
                 col: &str,
                 vals: impl ::core::iter::IntoIterator<Item = V>,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             >
             where
-                V: ::core::convert::Into<::rustango::core::SqlValue>,
+                V: ::core::convert::Into<#root::core::SqlValue>,
             {
-                use ::rustango::sql::FetcherPool as _;
-                let _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                use #root::sql::FetcherPool as _;
+                let _values: ::std::vec::Vec<#root::core::SqlValue> =
                     vals.into_iter().map(::core::convert::Into::into).collect();
                 if _values.is_empty() {
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
                 let _key = ::std::format!("{}__in", col);
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(&_key, ::rustango::core::SqlValue::List(_values))
+                #root::query::QuerySet::<Self>::default()
+                    .filter(&_key, #root::core::SqlValue::List(_values))
                     .fetch_pool(pool)
                     .await
             }
@@ -3914,25 +3915,25 @@ fn inherent_impl_tokens(
             pub async fn where_not_in<V>(
                 col: &str,
                 vals: impl ::core::iter::IntoIterator<Item = V>,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             >
             where
-                V: ::core::convert::Into<::rustango::core::SqlValue>,
+                V: ::core::convert::Into<#root::core::SqlValue>,
             {
-                use ::rustango::sql::FetcherPool as _;
-                let _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                use #root::sql::FetcherPool as _;
+                let _values: ::std::vec::Vec<#root::core::SqlValue> =
                     vals.into_iter().map(::core::convert::Into::into).collect();
                 if _values.is_empty() {
-                    return ::rustango::query::QuerySet::<Self>::default()
+                    return #root::query::QuerySet::<Self>::default()
                         .fetch_pool(pool)
                         .await;
                 }
                 let _key = ::std::format!("{}__not_in", col);
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(&_key, ::rustango::core::SqlValue::List(_values))
+                #root::query::QuerySet::<Self>::default()
+                    .filter(&_key, #root::core::SqlValue::List(_values))
                     .fetch_pool(pool)
                     .await
             }
@@ -3946,15 +3947,15 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_null(
                 col: &str,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__isnull", col);
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(&_key, ::rustango::core::SqlValue::Bool(true))
+                #root::query::QuerySet::<Self>::default()
+                    .filter(&_key, #root::core::SqlValue::Bool(true))
                     .fetch_pool(pool)
                     .await
             }
@@ -3968,15 +3969,15 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_not_null(
                 col: &str,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__isnull", col);
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(&_key, ::rustango::core::SqlValue::Bool(false))
+                #root::query::QuerySet::<Self>::default()
+                    .filter(&_key, #root::core::SqlValue::Bool(false))
                     .fetch_pool(pool)
                     .await
             }
@@ -3995,13 +3996,13 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn random_n(
                 n: i64,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
-                ::rustango::query::QuerySet::<Self>::default()
+                use #root::sql::FetcherPool as _;
+                #root::query::QuerySet::<Self>::default()
                     .order_random()
                     .limit(n)
                     .fetch_pool(pool)
@@ -4017,10 +4018,10 @@ fn inherent_impl_tokens(
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn random(
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
                 ::core::result::Result::Ok(
                     Self::random_n(1, pool).await?.into_iter().next(),
@@ -4037,13 +4038,13 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn oldest(
                 field: &str,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
-                ::rustango::query::QuerySet::<Self>::default()
+                use #root::sql::FetcherPool as _;
+                #root::query::QuerySet::<Self>::default()
                     .order_by(&[(field, false)])
                     .fetch_pool(pool)
                     .await
@@ -4059,13 +4060,13 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn newest(
                 field: &str,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
-                ::rustango::query::QuerySet::<Self>::default()
+                use #root::sql::FetcherPool as _;
+                #root::query::QuerySet::<Self>::default()
                     .order_by(&[(field, true)])
                     .fetch_pool(pool)
                     .await
@@ -4083,15 +4084,15 @@ fn inherent_impl_tokens(
             pub async fn where_year(
                 col: &str,
                 year: i64,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__year", col);
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(&_key, ::rustango::core::SqlValue::I64(year))
+                #root::query::QuerySet::<Self>::default()
+                    .filter(&_key, #root::core::SqlValue::I64(year))
                     .fetch_pool(pool)
                     .await
             }
@@ -4107,15 +4108,15 @@ fn inherent_impl_tokens(
             pub async fn where_month(
                 col: &str,
                 month: i64,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__month", col);
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(&_key, ::rustango::core::SqlValue::I64(month))
+                #root::query::QuerySet::<Self>::default()
+                    .filter(&_key, #root::core::SqlValue::I64(month))
                     .fetch_pool(pool)
                     .await
             }
@@ -4131,15 +4132,15 @@ fn inherent_impl_tokens(
             pub async fn where_day(
                 col: &str,
                 day: i64,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__day", col);
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(&_key, ::rustango::core::SqlValue::I64(day))
+                #root::query::QuerySet::<Self>::default()
+                    .filter(&_key, #root::core::SqlValue::I64(day))
                     .fetch_pool(pool)
                     .await
             }
@@ -4155,15 +4156,15 @@ fn inherent_impl_tokens(
             pub async fn where_hour(
                 col: &str,
                 hour: i64,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__hour", col);
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(&_key, ::rustango::core::SqlValue::I64(hour))
+                #root::query::QuerySet::<Self>::default()
+                    .filter(&_key, #root::core::SqlValue::I64(hour))
                     .fetch_pool(pool)
                     .await
             }
@@ -4179,15 +4180,15 @@ fn inherent_impl_tokens(
             pub async fn where_minute(
                 col: &str,
                 minute: i64,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__minute", col);
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(&_key, ::rustango::core::SqlValue::I64(minute))
+                #root::query::QuerySet::<Self>::default()
+                    .filter(&_key, #root::core::SqlValue::I64(minute))
                     .fetch_pool(pool)
                     .await
             }
@@ -4204,17 +4205,17 @@ fn inherent_impl_tokens(
             pub async fn where_like(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__like", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(
                         &_key,
-                        ::rustango::core::SqlValue::String(pattern.into()),
+                        #root::core::SqlValue::String(pattern.into()),
                     )
                     .fetch_pool(pool)
                     .await
@@ -4231,17 +4232,17 @@ fn inherent_impl_tokens(
             pub async fn where_ilike(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__ilike", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(
                         &_key,
-                        ::rustango::core::SqlValue::String(pattern.into()),
+                        #root::core::SqlValue::String(pattern.into()),
                     )
                     .fetch_pool(pool)
                     .await
@@ -4258,17 +4259,17 @@ fn inherent_impl_tokens(
             pub async fn where_starts_with(
                 col: &str,
                 prefix: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__startswith", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(
                         &_key,
-                        ::rustango::core::SqlValue::String(prefix.into()),
+                        #root::core::SqlValue::String(prefix.into()),
                     )
                     .fetch_pool(pool)
                     .await
@@ -4285,17 +4286,17 @@ fn inherent_impl_tokens(
             pub async fn where_ends_with(
                 col: &str,
                 suffix: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__endswith", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(
                         &_key,
-                        ::rustango::core::SqlValue::String(suffix.into()),
+                        #root::core::SqlValue::String(suffix.into()),
                     )
                     .fetch_pool(pool)
                     .await
@@ -4312,17 +4313,17 @@ fn inherent_impl_tokens(
             pub async fn where_contains(
                 col: &str,
                 substr: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__contains", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(
                         &_key,
-                        ::rustango::core::SqlValue::String(substr.into()),
+                        #root::core::SqlValue::String(substr.into()),
                     )
                     .fetch_pool(pool)
                     .await
@@ -4337,15 +4338,15 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_gt(
                 col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__gt", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(&_key, val)
                     .fetch_pool(pool)
                     .await
@@ -4360,15 +4361,15 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_gte(
                 col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__gte", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(&_key, val)
                     .fetch_pool(pool)
                     .await
@@ -4383,15 +4384,15 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_lt(
                 col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__lt", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(&_key, val)
                     .fetch_pool(pool)
                     .await
@@ -4406,15 +4407,15 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_lte(
                 col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__lte", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(&_key, val)
                     .fetch_pool(pool)
                     .await
@@ -4429,15 +4430,15 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_ne(
                 col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__ne", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(&_key, val)
                     .fetch_pool(pool)
                     .await
@@ -4458,11 +4459,11 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_any(
                 cols: &[&str],
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
                 Self::__where_multi(cols, val, false, pool).await
             }
@@ -4475,11 +4476,11 @@ fn inherent_impl_tokens(
             /// As [`Self::where_any`].
             pub async fn where_all(
                 cols: &[&str],
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
                 Self::__where_multi(cols, val, true, pool).await
             }
@@ -4490,14 +4491,14 @@ fn inherent_impl_tokens(
             #[doc(hidden)]
             pub async fn __where_multi(
                 cols: &[&str],
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
                 all: bool,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                ::rustango::sql::model_shortcuts::where_multi_pool::<Self>(cols, val, all, pool)
+                #root::sql::model_shortcuts::where_multi_pool::<Self>(cols, val, all, pool)
                     .await
             }
 
@@ -4512,13 +4513,13 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn take(
                 n: i64,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
-                ::rustango::query::QuerySet::<Self>::default()
+                use #root::sql::FetcherPool as _;
+                #root::query::QuerySet::<Self>::default()
                     .limit(n)
                     .fetch_pool(pool)
                     .await
@@ -4538,14 +4539,14 @@ fn inherent_impl_tokens(
             pub async fn for_page(
                 page: i64,
                 per_page: i64,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _offset = if page > 1 { (page - 1) * per_page } else { 0 };
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .limit(per_page)
                     .offset(_offset)
                     .fetch_pool(pool)
@@ -4567,13 +4568,13 @@ fn inherent_impl_tokens(
             /// [`UpdaterPool::execute_pool`]: rustango::sql::UpdaterPool::execute_pool
             pub async fn update_where(
                 where_col: &str,
-                where_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                where_val: impl ::core::convert::Into<#root::core::SqlValue>,
                 set_col: &str,
-                set_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                use ::rustango::sql::UpdaterPool as _;
-                ::rustango::query::QuerySet::<Self>::default()
+                set_val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                use #root::sql::UpdaterPool as _;
+                #root::query::QuerySet::<Self>::default()
                     .filter(where_col, where_val)
                     .update()
                     .set(set_col, set_val)
@@ -4590,33 +4591,33 @@ fn inherent_impl_tokens(
             /// builder + `Self::query().filter(...).delete().execute_pool(&pool)`.
             ///
             /// # Errors
-            /// As [`::rustango::sql::delete_pool`].
+            /// As [`#root::sql::delete_pool`].
             pub async fn delete_where(
                 where_col: &str,
-                where_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                let _query = ::rustango::core::DeleteQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
-                    where_clause: ::rustango::core::WhereExpr::Predicate(
-                        ::rustango::core::Filter {
-                            column: <Self as ::rustango::core::Model>::SCHEMA
+                where_val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                let _query = #root::core::DeleteQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
+                    where_clause: #root::core::WhereExpr::Predicate(
+                        #root::core::Filter {
+                            column: <Self as #root::core::Model>::SCHEMA
                                 .field(where_col)
                                 .ok_or_else(|| {
-                                    ::rustango::sql::ExecError::Query(
-                                        ::rustango::core::QueryError::UnknownField {
-                                            model: <Self as ::rustango::core::Model>::SCHEMA.name,
+                                    #root::sql::ExecError::Query(
+                                        #root::core::QueryError::UnknownField {
+                                            model: <Self as #root::core::Model>::SCHEMA.name,
                                             field: ::std::string::ToString::to_string(where_col),
                                         },
                                     )
                                 })?
                                 .column,
-                            op: ::rustango::core::Op::Eq,
+                            op: #root::core::Op::Eq,
                             value: ::core::convert::Into::into(where_val),
                         },
                     ),
                 };
-                ::rustango::sql::delete_pool(pool, &_query).await
+                #root::sql::delete_pool(pool, &_query).await
             }
 
             /// Bulk-update — set `set_col = set_val` on EVERY row of
@@ -4633,11 +4634,11 @@ fn inherent_impl_tokens(
             /// [`UpdaterPool::execute_pool`]: rustango::sql::UpdaterPool::execute_pool
             pub async fn update_all(
                 set_col: &str,
-                set_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                use ::rustango::sql::UpdaterPool as _;
-                ::rustango::query::QuerySet::<Self>::default()
+                set_val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                use #root::sql::UpdaterPool as _;
+                #root::query::QuerySet::<Self>::default()
                     .update()
                     .set(set_col, set_val)
                     .execute_pool(pool)
@@ -4655,17 +4656,17 @@ fn inherent_impl_tokens(
             pub async fn where_not_like(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__not_like", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(
                         &_key,
-                        ::rustango::core::SqlValue::String(pattern.into()),
+                        #root::core::SqlValue::String(pattern.into()),
                     )
                     .fetch_pool(pool)
                     .await
@@ -4682,17 +4683,17 @@ fn inherent_impl_tokens(
             pub async fn where_not_ilike(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__not_ilike", col);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(
                         &_key,
-                        ::rustango::core::SqlValue::String(pattern.into()),
+                        #root::core::SqlValue::String(pattern.into()),
                     )
                     .fetch_pool(pool)
                     .await
@@ -4708,20 +4709,20 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_not_between(
                 col: &str,
-                lo: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                hi: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                lo: impl ::core::convert::Into<#root::core::SqlValue>,
+                hi: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__not_between", col);
-                let _vals = ::rustango::core::SqlValue::List(::std::vec![
+                let _vals = #root::core::SqlValue::List(::std::vec![
                     ::core::convert::Into::into(lo),
                     ::core::convert::Into::into(hi),
                 ]);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(&_key, _vals)
                     .fetch_pool(pool)
                     .await
@@ -4731,7 +4732,7 @@ fn inherent_impl_tokens(
             /// `$model->getTable()` parity.
             #[must_use]
             pub fn table_name() -> &'static str {
-                <Self as ::rustango::core::Model>::SCHEMA.table
+                <Self as #root::core::Model>::SCHEMA.table
             }
 
             /// Returns the SQL column name of this model's primary
@@ -4740,7 +4741,7 @@ fn inherent_impl_tokens(
             /// `$model->getKeyName()` parity.
             #[must_use]
             pub fn primary_key_column() -> ::core::option::Option<&'static str> {
-                <Self as ::rustango::core::Model>::SCHEMA
+                <Self as #root::core::Model>::SCHEMA
                     .primary_key()
                     .map(|f| f.column)
             }
@@ -4755,20 +4756,20 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn where_between(
                 col: &str,
-                lo: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                hi: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                lo: impl ::core::convert::Into<#root::core::SqlValue>,
+                hi: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                use ::rustango::sql::FetcherPool as _;
+                use #root::sql::FetcherPool as _;
                 let _key = ::std::format!("{}__between", col);
-                let _vals = ::rustango::core::SqlValue::List(::std::vec![
+                let _vals = #root::core::SqlValue::List(::std::vec![
                     ::core::convert::Into::into(lo),
                     ::core::convert::Into::into(hi),
                 ]);
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(&_key, _vals)
                     .fetch_pool(pool)
                     .await
@@ -4791,13 +4792,13 @@ fn inherent_impl_tokens(
             /// As `QuerySet::first`.
             pub async fn first_where(
                 col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .filter(col, val)
                     .first(pool)
                     .await
@@ -4822,12 +4823,12 @@ fn inherent_impl_tokens(
             /// As `QuerySet::latest`.
             pub async fn latest(
                 field: &str,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .latest(field, pool)
                     .await
             }
@@ -4842,12 +4843,12 @@ fn inherent_impl_tokens(
             /// As [`Self::latest_pool`].
             pub async fn earliest(
                 field: &str,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::core::option::Option<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                ::rustango::query::QuerySet::<Self>::default()
+                #root::query::QuerySet::<Self>::default()
                     .earliest(field, pool)
                     .await
             }
@@ -4864,10 +4865,10 @@ fn inherent_impl_tokens(
             ///
             /// [`ExistsPool::exists_pool`]: rustango::sql::ExistsPool::exists_pool
             pub async fn exists(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<bool, ::rustango::sql::ExecError> {
-                use ::rustango::sql::ExistsPool as _;
-                ::rustango::query::QuerySet::<Self>::default()
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<bool, #root::sql::ExecError> {
+                use #root::sql::ExistsPool as _;
+                #root::query::QuerySet::<Self>::default()
                     .exists_pool(pool)
                     .await
             }
@@ -4879,8 +4880,8 @@ fn inherent_impl_tokens(
             /// # Errors
             /// As [`Self::exists_pool`].
             pub async fn doesnt_exist(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<bool, ::rustango::sql::ExecError> {
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<bool, #root::sql::ExecError> {
                 Self::exists(pool).await.map(|e| !e)
             }
 
@@ -4890,25 +4891,25 @@ fn inherent_impl_tokens(
             #max_method
 
             /// Internal: forward to
-            /// [`::rustango::sql::model_shortcuts::aggregate_one_pool`].
+            /// [`#root::sql::model_shortcuts::aggregate_one_pool`].
             /// Backs `sum` / `avg` / `min` / `max`.
             #[doc(hidden)]
             pub async fn __aggregate_one_pool<U>(
                 col: &str,
-                build: fn(&'static str) -> ::rustango::core::AggregateExpr,
-                pool: &::rustango::sql::Pool,
+                build: fn(&'static str) -> #root::core::AggregateExpr,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::core::option::Option<U>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             >
             where
-                (::core::option::Option<U>,): ::rustango::sql::MaybePgFromRow
-                    + ::rustango::sql::MaybeMyFromRow
-                    + ::rustango::sql::MaybeSqliteFromRow
+                (::core::option::Option<U>,): #root::sql::MaybePgFromRow
+                    + #root::sql::MaybeMyFromRow
+                    + #root::sql::MaybeSqliteFromRow
                     + ::core::marker::Send
                     + ::core::marker::Unpin,
             {
-                ::rustango::sql::model_shortcuts::aggregate_one_pool::<Self, U>(col, build, pool)
+                #root::sql::model_shortcuts::aggregate_one_pool::<Self, U>(col, build, pool)
                     .await
             }
 
@@ -4928,11 +4929,11 @@ fn inherent_impl_tokens(
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn all(
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<::std::vec::Vec<Self>, ::rustango::sql::ExecError>
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<::std::vec::Vec<Self>, #root::sql::ExecError>
             {
-                use ::rustango::sql::FetcherPool as _;
-                ::rustango::query::QuerySet::<Self>::default()
+                use #root::sql::FetcherPool as _;
+                #root::query::QuerySet::<Self>::default()
                     .fetch_pool(pool)
                     .await
             }
@@ -4962,23 +4963,23 @@ fn inherent_impl_tokens(
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn find_many<V>(
                 pks: impl ::core::iter::IntoIterator<Item = V>,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<Self>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             >
             where
-                V: ::core::convert::Into<::rustango::core::SqlValue>,
+                V: ::core::convert::Into<#root::core::SqlValue>,
             {
-                use ::rustango::sql::FetcherPool as _;
-                let _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                use #root::sql::FetcherPool as _;
+                let _values: ::std::vec::Vec<#root::core::SqlValue> =
                     pks.into_iter().map(::core::convert::Into::into).collect();
                 if _values.is_empty() {
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
                 let _key = ::std::format!("{}__in", ::core::stringify!(#pk_ident));
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(&_key, ::rustango::core::SqlValue::List(_values))
+                #root::query::QuerySet::<Self>::default()
+                    .filter(&_key, #root::core::SqlValue::List(_values))
                     .fetch_pool(pool)
                     .await
             }
@@ -4999,14 +5000,14 @@ fn inherent_impl_tokens(
             ///
             /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
             pub async fn find(
-                pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<::core::option::Option<Self>, ::rustango::sql::ExecError>
+                pk: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<::core::option::Option<Self>, #root::sql::ExecError>
             {
-                use ::rustango::sql::FetcherPool as _;
-                let _pk_val: ::rustango::core::SqlValue = pk.into();
+                use #root::sql::FetcherPool as _;
+                let _pk_val: #root::core::SqlValue = pk.into();
                 let mut _rows: ::std::vec::Vec<Self> =
-                    ::rustango::query::QuerySet::<Self>::default()
+                    #root::query::QuerySet::<Self>::default()
                         .filter(::core::stringify!(#pk_ident), _pk_val)
                         .limit(1)
                         .fetch_pool(pool)
@@ -5032,14 +5033,14 @@ fn inherent_impl_tokens(
             /// [`ExecError::Driver`]: rustango::sql::ExecError::Driver
             /// [`sqlx::Error::RowNotFound`]: rustango::sql::sqlx::Error::RowNotFound
             pub async fn find_or_fail(
-                pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
+                pk: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<Self, #root::sql::ExecError> {
                 match Self::find(pk, pool).await? {
                     ::core::option::Option::Some(_row) => ::core::result::Result::Ok(_row),
                     ::core::option::Option::None => ::core::result::Result::Err(
-                        ::rustango::sql::ExecError::Driver(
-                            ::rustango::sql::sqlx::Error::RowNotFound,
+                        #root::sql::ExecError::Driver(
+                            #root::sql::sqlx::Error::RowNotFound,
                         ),
                     ),
                 }
@@ -5060,10 +5061,10 @@ fn inherent_impl_tokens(
             /// # Errors
             /// As [`Self::find_pool`].
             pub async fn find_or<F>(
-                pk: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
+                pk: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
                 fallback: F,
-            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError>
+            ) -> ::core::result::Result<Self, #root::sql::ExecError>
             where
                 F: ::core::ops::FnOnce() -> Self,
             {
@@ -5079,9 +5080,9 @@ fn inherent_impl_tokens(
             /// # Errors
             /// As [`Self::first_pool`].
             pub async fn first_or<F>(
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
                 fallback: F,
-            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError>
+            ) -> ::core::result::Result<Self, #root::sql::ExecError>
             where
                 F: ::core::ops::FnOnce() -> Self,
             {
@@ -5101,21 +5102,21 @@ fn inherent_impl_tokens(
             /// `RowNotFound` / `MultipleRowsReturned` cases above.
             pub async fn sole(
                 col: &str,
-                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<Self, ::rustango::sql::ExecError> {
+                val: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<Self, #root::sql::ExecError> {
                 let mut _rows = Self::where_(col, val, pool).await?;
                 match _rows.len() {
                     0 => ::core::result::Result::Err(
-                        ::rustango::sql::ExecError::Driver(
-                            ::rustango::sql::sqlx::Error::RowNotFound,
+                        #root::sql::ExecError::Driver(
+                            #root::sql::sqlx::Error::RowNotFound,
                         ),
                     ),
                     1 => ::core::result::Result::Ok(_rows.remove(0)),
                     n => ::core::result::Result::Err(
-                        ::rustango::sql::ExecError::MultipleRowsReturned {
+                        #root::sql::ExecError::MultipleRowsReturned {
                             op: "sole",
-                            table: <Self as ::rustango::core::Model>::SCHEMA.name,
+                            table: <Self as #root::core::Model>::SCHEMA.name,
                             count: n,
                         },
                     ),
@@ -5143,22 +5144,22 @@ fn inherent_impl_tokens(
             /// As [`Self::insert_pool`].
             pub async fn insert_tx(
                 &mut self,
-                tx: &mut ::rustango::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                tx: &mut #root::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 let mut _columns: ::std::vec::Vec<&'static str> =
                     ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                     ::std::vec::Vec::new();
                 #( #pushes )*
-                let _query = ::rustango::core::InsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                let _query = #root::core::InsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     columns: _columns,
                     values: _values,
                     returning: ::std::vec![ #( #returning_cols ),* ],
                     on_conflict: ::core::option::Option::None,
                 };
-                let _result = ::rustango::sql::insert_returning_tx(tx, &_query).await?;
-                ::rustango::sql::apply_auto_pk(_result, self)
+                let _result = #root::sql::insert_returning_tx(tx, &_query).await?;
+                #root::sql::apply_auto_pk(_result, self)
             }
         }
     } else {
@@ -5171,16 +5172,16 @@ fn inherent_impl_tokens(
             /// As [`Self::insert_pool`].
             pub async fn insert_tx(
                 &self,
-                tx: &mut ::rustango::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                let _query = ::rustango::core::InsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                tx: &mut #root::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                let _query = #root::core::InsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     columns: ::std::vec![ #( #insert_columns ),* ],
                     values: ::std::vec![ #( #insert_values ),* ],
                     returning: ::std::vec::Vec::new(),
                     on_conflict: ::core::option::Option::None,
                 };
-                ::rustango::sql::insert_tx(tx, &_query).await
+                #root::sql::insert_tx(tx, &_query).await
             }
         }
     };
@@ -5190,7 +5191,7 @@ fn inherent_impl_tokens(
         let assignments = &fields.update_assignments;
         let dispatch_unset = if fields.pk_is_auto {
             quote! {
-                if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
+                if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
                     return self.insert_tx(tx).await;
                 }
             }
@@ -5206,23 +5207,23 @@ fn inherent_impl_tokens(
             /// As [`Self::save_pool`].
             pub async fn save_tx(
                 &mut self,
-                tx: &mut ::rustango::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                tx: &mut #root::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 #dispatch_unset
-                let _query = ::rustango::core::UpdateQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                let _query = #root::core::UpdateQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     set: ::std::vec![ #( #assignments ),* ],
-                    where_clause: ::rustango::core::WhereExpr::Predicate(
-                        ::rustango::core::Filter {
+                    where_clause: #root::core::WhereExpr::Predicate(
+                        #root::core::Filter {
                             column: #pk_column_lit,
-                            op: ::rustango::core::Op::Eq,
-                            value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                            op: #root::core::Op::Eq,
+                            value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                 ::core::clone::Clone::clone(&self.#pk_ident)
                             ),
                         }
                     ),
                 };
-                let _ = ::rustango::sql::update_tx(tx, &_query).await?;
+                let _ = #root::sql::update_tx(tx, &_query).await?;
                 ::core::result::Result::Ok(())
             }
         }
@@ -5243,21 +5244,21 @@ fn inherent_impl_tokens(
                 /// As [`Self::delete_pool`].
                 pub async fn delete_tx(
                     &self,
-                    tx: &mut ::rustango::sql::PoolTx<'_>,
-                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                    let _query = ::rustango::core::DeleteQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
-                        where_clause: ::rustango::core::WhereExpr::Predicate(
-                            ::rustango::core::Filter {
+                    tx: &mut #root::sql::PoolTx<'_>,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    let _query = #root::core::DeleteQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
+                        where_clause: #root::core::WhereExpr::Predicate(
+                            #root::core::Filter {
                                 column: #pk_column_lit,
-                                op: ::rustango::core::Op::Eq,
-                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                op: #root::core::Op::Eq,
+                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                     ::core::clone::Clone::clone(&self.#pk_ident)
                                 ),
                             }
                         ),
                     };
-                    ::rustango::sql::delete_tx(tx, &_query).await
+                    #root::sql::delete_tx(tx, &_query).await
                 }
             }
         } else {
@@ -5303,7 +5304,7 @@ fn inherent_impl_tokens(
                 quote! {
                     (
                         #column_lit,
-                        match ::rustango::sql::sqlx::Row::try_get::<#value_ty, _>(
+                        match #root::sql::sqlx::Row::try_get::<#value_ty, _>(
                             &_audit_before_row, #column_lit,
                         ) {
                             ::core::result::Result::Ok(v) => {
@@ -5331,12 +5332,12 @@ fn inherent_impl_tokens(
                 let _audit_select_sql = ::std::format!(
                     r#"SELECT {} FROM "{}" WHERE "{}" = $1"#,
                     #select_cols_lit,
-                    <Self as ::rustango::core::Model>::SCHEMA.table,
+                    <Self as #root::core::Model>::SCHEMA.table,
                     #pk_column_lit_for_select,
                 );
                 let _audit_before_pairs:
                     ::std::option::Option<::std::vec::Vec<(&'static str, ::serde_json::Value)>> =
-                    match ::rustango::sql::sqlx::query(&_audit_select_sql)
+                    match #root::sql::sqlx::query(&_audit_select_sql)
                         .bind(#pk_value_for_bind)
                         .fetch_optional(&mut *_executor)
                         .await
@@ -5352,17 +5353,17 @@ fn inherent_impl_tokens(
                     let _audit_after:
                         ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
                         ::std::vec![ #( #after_pairs ),* ];
-                    let _audit_entry = ::rustango::audit::PendingEntry {
-                        entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                    let _audit_entry = #root::audit::PendingEntry {
+                        entity_table: <Self as #root::core::Model>::SCHEMA.table,
                         entity_pk: #pk_str,
-                        operation: ::rustango::audit::AuditOp::Update,
-                        source: ::rustango::audit::current_source(),
-                        changes: ::rustango::audit::diff_changes(
+                        operation: #root::audit::AuditOp::Update,
+                        source: #root::audit::current_source(),
+                        changes: #root::audit::diff_changes(
                             &_audit_before,
                             &_audit_after,
                         ),
                     };
-                    ::rustango::audit::emit_one(&mut *_executor, &_audit_entry).await?;
+                    #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
                 }
             };
             (pre, post)
@@ -5396,22 +5397,22 @@ fn inherent_impl_tokens(
             }
         });
         quote! {
-            let _audit_source = ::rustango::audit::current_source();
+            let _audit_source = #root::audit::current_source();
             let mut _audit_entries:
-                ::std::vec::Vec<::rustango::audit::PendingEntry> =
+                ::std::vec::Vec<#root::audit::PendingEntry> =
                     ::std::vec::Vec::with_capacity(rows.len());
             for _row in rows.iter() {
-                _audit_entries.push(::rustango::audit::PendingEntry {
-                    entity_table: <Self as ::rustango::core::Model>::SCHEMA.table,
+                _audit_entries.push(#root::audit::PendingEntry {
+                    entity_table: <Self as #root::core::Model>::SCHEMA.table,
                     entity_pk: #row_pk_str,
-                    operation: ::rustango::audit::AuditOp::Create,
+                    operation: #root::audit::AuditOp::Create,
                     source: _audit_source.clone(),
-                    changes: ::rustango::audit::snapshot_changes(&[
+                    changes: #root::audit::snapshot_changes(&[
                         #( #row_pairs ),*
                     ]),
                 });
             }
-            ::rustango::audit::emit_many(&mut *_executor, &_audit_entries).await?;
+            #root::audit::emit_many(&mut *_executor, &_audit_entries).await?;
         }
     } else {
         quote!()
@@ -5443,9 +5444,9 @@ fn inherent_impl_tokens(
             .map(String::as_str)
             .collect::<Vec<_>>();
         let conflict_clause = if fields.upsert_update_columns.is_empty() {
-            quote!(::rustango::core::ConflictClause::DoNothing)
+            quote!(#root::core::ConflictClause::DoNothing)
         } else {
-            quote!(::rustango::core::ConflictClause::DoUpdate {
+            quote!(#root::core::ConflictClause::DoUpdate {
                 target: ::std::vec![ #( #upsert_target_lits ),* ],
                 update_columns: ::std::vec![ #( #upsert_cols ),* ],
             })
@@ -5466,13 +5467,13 @@ fn inherent_impl_tokens(
             /// `insert` or the QuerySet update builder.
             ///
             /// # Errors
-            /// Returns [`::rustango::sql::ExecError`] for SQL-writing
+            /// Returns [`#root::sql::ExecError`] for SQL-writing
             /// or driver failures.
             #[cfg(feature = "postgres")]
             pub async fn save(
                 &mut self,
-                pool: &::rustango::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                pool: &#root::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 #pool_to_save_on
             }
 
@@ -5490,27 +5491,27 @@ fn inherent_impl_tokens(
             pub async fn save_on #executor_generics (
                 &mut self,
                 #executor_param,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
             #executor_where
             {
-                if matches!(self.#pk_ident, ::rustango::sql::Auto::Unset) {
+                if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
                     return self.insert_on(#executor_passes_to_data_write).await;
                 }
                 #audit_update_pre
-                let _query = ::rustango::core::UpdateQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                let _query = #root::core::UpdateQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     set: ::std::vec![ #( #assignments ),* ],
-                    where_clause: ::rustango::core::WhereExpr::Predicate(
-                        ::rustango::core::Filter {
+                    where_clause: #root::core::WhereExpr::Predicate(
+                        #root::core::Filter {
                             column: #pk_column_lit,
-                            op: ::rustango::core::Op::Eq,
-                            value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                            op: #root::core::Op::Eq,
+                            value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                 ::core::clone::Clone::clone(&self.#pk_ident)
                             ),
                         }
                     ),
                 };
-                let _ = ::rustango::sql::__macro_internals::update_on(
+                let _ = #root::sql::__macro_internals::update_on(
                     #executor_passes_to_data_write,
                     &_query,
                 ).await?;
@@ -5519,7 +5520,7 @@ fn inherent_impl_tokens(
             }
 
             /// Per-call override for the audit source. Runs
-            /// [`Self::save_on`] inside an [`::rustango::audit::with_source`]
+            /// [`Self::save_on`] inside an [`#root::audit::with_source`]
             /// scope so the resulting audit entry records `source`
             /// instead of the task-local default. Useful for seed
             /// scripts and one-off CLI tools that don't sit inside an
@@ -5532,11 +5533,11 @@ fn inherent_impl_tokens(
             pub async fn save_on_with #executor_generics (
                 &mut self,
                 #executor_param,
-                source: ::rustango::audit::AuditSource,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+                source: #root::audit::AuditSource,
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
             #executor_where
             {
-                ::rustango::audit::with_source(source, self.save_on(_executor)).await
+                #root::audit::with_source(source, self.save_on(_executor)).await
             }
 
             /// Insert this row or update it in-place if the primary key already
@@ -5551,8 +5552,8 @@ fn inherent_impl_tokens(
             #[cfg(feature = "postgres")]
             pub async fn upsert(
                 &mut self,
-                pool: &::rustango::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                pool: &#root::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 #pool_to_upsert_on
             }
 
@@ -5565,22 +5566,22 @@ fn inherent_impl_tokens(
             pub async fn upsert_on #executor_generics (
                 &mut self,
                 #executor_param,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
             #executor_where
             {
                 let mut _columns: ::std::vec::Vec<&'static str> =
                     ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                     ::std::vec::Vec::new();
                 #( #upsert_pushes )*
-                let query = ::rustango::core::InsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                let query = #root::core::InsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     columns: _columns,
                     values: _values,
                     returning: ::std::vec![ #( #upsert_returning ),* ],
                     on_conflict: ::core::option::Option::Some(#conflict_clause),
                 };
-                let _returning_row_v = ::rustango::sql::__macro_internals::insert_returning_on(
+                let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
                 ).await?;
@@ -5620,32 +5621,32 @@ fn inherent_impl_tokens(
                 pub async fn soft_delete_on #executor_generics (
                     &self,
                     #executor_param,
-                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
+                ) -> ::core::result::Result<u64, #root::sql::ExecError>
                 #executor_where
                 {
-                    let _query = ::rustango::core::UpdateQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                    let _query = #root::core::UpdateQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
                         set: ::std::vec![
-                            ::rustango::core::Assignment {
+                            #root::core::Assignment {
                                 column: #col_lit,
-                                value: ::core::convert::Into::<::rustango::core::Expr>::into(
-                                    ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                value: ::core::convert::Into::<#root::core::Expr>::into(
+                                    ::core::convert::Into::<#root::core::SqlValue>::into(
                                         ::chrono::Utc::now()
                                     )
                                 ),
                             },
                         ],
-                        where_clause: ::rustango::core::WhereExpr::Predicate(
-                            ::rustango::core::Filter {
+                        where_clause: #root::core::WhereExpr::Predicate(
+                            #root::core::Filter {
                                 column: #pk_column_lit,
-                                op: ::rustango::core::Op::Eq,
-                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                op: #root::core::Op::Eq,
+                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                     ::core::clone::Clone::clone(&self.#pk_ident)
                                 ),
                             }
                         ),
                     };
-                    let _affected = ::rustango::sql::__macro_internals::update_on(
+                    let _affected = #root::sql::__macro_internals::update_on(
                         #executor_passes_to_data_write,
                         &_query,
                     ).await?;
@@ -5662,30 +5663,30 @@ fn inherent_impl_tokens(
                 pub async fn restore_on #executor_generics (
                     &self,
                     #executor_param,
-                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
+                ) -> ::core::result::Result<u64, #root::sql::ExecError>
                 #executor_where
                 {
-                    let _query = ::rustango::core::UpdateQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                    let _query = #root::core::UpdateQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
                         set: ::std::vec![
-                            ::rustango::core::Assignment {
+                            #root::core::Assignment {
                                 column: #col_lit,
-                                value: ::core::convert::Into::<::rustango::core::Expr>::into(
-                                    ::rustango::core::SqlValue::Null
+                                value: ::core::convert::Into::<#root::core::Expr>::into(
+                                    #root::core::SqlValue::Null
                                 ),
                             },
                         ],
-                        where_clause: ::rustango::core::WhereExpr::Predicate(
-                            ::rustango::core::Filter {
+                        where_clause: #root::core::WhereExpr::Predicate(
+                            #root::core::Filter {
                                 column: #pk_column_lit,
-                                op: ::rustango::core::Op::Eq,
-                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                op: #root::core::Op::Eq,
+                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                     ::core::clone::Clone::clone(&self.#pk_ident)
                                 ),
                             }
                         ),
                     };
-                    let _affected = ::rustango::sql::__macro_internals::update_on(
+                    let _affected = #root::sql::__macro_internals::update_on(
                         #executor_passes_to_data_write,
                         &_query,
                     ).await?;
@@ -5694,7 +5695,7 @@ fn inherent_impl_tokens(
                 }
 
                 /// Tri-dialect counterpart of [`Self::soft_delete_on`]
-                /// — takes [`::rustango::sql::Pool`] and dispatches per
+                /// — takes [`#root::sql::Pool`] and dispatches per
                 /// backend. Eloquent `Model::delete()` semantics on
                 /// soft-delete-enabled models (closes #821 partial).
                 ///
@@ -5706,34 +5707,34 @@ fn inherent_impl_tokens(
                 /// reading `IS NULL` on the same column.
                 ///
                 /// # Errors
-                /// As [`::rustango::sql::update_pool`].
+                /// As [`#root::sql::update_pool`].
                 pub async fn soft_delete(
                     &self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                    let _query = ::rustango::core::UpdateQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    let _query = #root::core::UpdateQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
                         set: ::std::vec![
-                            ::rustango::core::Assignment {
+                            #root::core::Assignment {
                                 column: #col_lit,
-                                value: ::core::convert::Into::<::rustango::core::Expr>::into(
-                                    ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                value: ::core::convert::Into::<#root::core::Expr>::into(
+                                    ::core::convert::Into::<#root::core::SqlValue>::into(
                                         ::chrono::Utc::now()
                                     )
                                 ),
                             },
                         ],
-                        where_clause: ::rustango::core::WhereExpr::Predicate(
-                            ::rustango::core::Filter {
+                        where_clause: #root::core::WhereExpr::Predicate(
+                            #root::core::Filter {
                                 column: #pk_column_lit,
-                                op: ::rustango::core::Op::Eq,
-                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                op: #root::core::Op::Eq,
+                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                     ::core::clone::Clone::clone(&self.#pk_ident)
                                 ),
                             }
                         ),
                     };
-                    ::rustango::sql::update_pool(pool, &_query).await
+                    #root::sql::update_pool(pool, &_query).await
                 }
 
                 /// Tri-dialect counterpart of [`Self::restore_on`].
@@ -5742,32 +5743,32 @@ fn inherent_impl_tokens(
                 /// `Model::restore()` parity.
                 ///
                 /// # Errors
-                /// As [`::rustango::sql::update_pool`].
+                /// As [`#root::sql::update_pool`].
                 pub async fn restore(
                     &self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                    let _query = ::rustango::core::UpdateQuery {
-                        model: <Self as ::rustango::core::Model>::SCHEMA,
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    let _query = #root::core::UpdateQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
                         set: ::std::vec![
-                            ::rustango::core::Assignment {
+                            #root::core::Assignment {
                                 column: #col_lit,
-                                value: ::core::convert::Into::<::rustango::core::Expr>::into(
-                                    ::rustango::core::SqlValue::Null
+                                value: ::core::convert::Into::<#root::core::Expr>::into(
+                                    #root::core::SqlValue::Null
                                 ),
                             },
                         ],
-                        where_clause: ::rustango::core::WhereExpr::Predicate(
-                            ::rustango::core::Filter {
+                        where_clause: #root::core::WhereExpr::Predicate(
+                            #root::core::Filter {
                                 column: #pk_column_lit,
-                                op: ::rustango::core::Op::Eq,
-                                value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                                op: #root::core::Op::Eq,
+                                value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                     ::core::clone::Clone::clone(&self.#pk_ident)
                                 ),
                             }
                         ),
                     };
-                    ::rustango::sql::update_pool(pool, &_query).await
+                    #root::sql::update_pool(pool, &_query).await
                 }
 
                 /// Hard-delete this row, ignoring the soft-delete
@@ -5785,8 +5786,8 @@ fn inherent_impl_tokens(
                 /// As [`Self::delete_pool`].
                 pub async fn force_delete(
                     &self,
-                    pool: &::rustango::sql::Pool,
-                ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     Self::delete_pool(self, pool).await
                 }
 
@@ -5813,15 +5814,15 @@ fn inherent_impl_tokens(
                 /// .active().fetch_pool(pool)`. Closes #821 partial.
                 ///
                 /// # Errors
-                /// As [`::rustango::sql::FetcherPool::fetch_pool`].
+                /// As [`#root::sql::FetcherPool::fetch_pool`].
                 pub async fn active(
-                    pool: &::rustango::sql::Pool,
+                    pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<Self>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 > {
-                    use ::rustango::sql::FetcherPool as _;
-                    ::rustango::query::QuerySet::<Self>::default()
+                    use #root::sql::FetcherPool as _;
+                    #root::query::QuerySet::<Self>::default()
                         .active()
                         .fetch_pool(pool)
                         .await
@@ -5837,15 +5838,15 @@ fn inherent_impl_tokens(
                 /// partial.
                 ///
                 /// # Errors
-                /// As [`::rustango::sql::FetcherPool::fetch_pool`].
+                /// As [`#root::sql::FetcherPool::fetch_pool`].
                 pub async fn only_trashed(
-                    pool: &::rustango::sql::Pool,
+                    pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<Self>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 > {
-                    use ::rustango::sql::FetcherPool as _;
-                    ::rustango::query::QuerySet::<Self>::default()
+                    use #root::sql::FetcherPool as _;
+                    #root::query::QuerySet::<Self>::default()
                         .only_trashed()
                         .fetch_pool(pool)
                         .await
@@ -5865,15 +5866,15 @@ fn inherent_impl_tokens(
                 /// Closes #821 partial.
                 ///
                 /// # Errors
-                /// As [`::rustango::sql::FetcherPool::fetch_pool`].
+                /// As [`#root::sql::FetcherPool::fetch_pool`].
                 pub async fn with_trashed(
-                    pool: &::rustango::sql::Pool,
+                    pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<Self>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 > {
-                    use ::rustango::sql::FetcherPool as _;
-                    ::rustango::query::QuerySet::<Self>::default()
+                    use #root::sql::FetcherPool as _;
+                    #root::query::QuerySet::<Self>::default()
                         .with_trashed()
                         .fetch_pool(pool)
                         .await
@@ -5889,13 +5890,13 @@ fn inherent_impl_tokens(
             /// Returns the number of rows affected (0 or 1).
             ///
             /// # Errors
-            /// Returns [`::rustango::sql::ExecError`] for SQL-writing or
+            /// Returns [`#root::sql::ExecError`] for SQL-writing or
             /// driver failures.
             #[cfg(feature = "postgres")]
             pub async fn delete(
                 &self,
-                pool: &::rustango::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                pool: &#root::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 #pool_to_delete_on
             }
 
@@ -5909,22 +5910,22 @@ fn inherent_impl_tokens(
             pub async fn delete_on #executor_generics (
                 &self,
                 #executor_param,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
+            ) -> ::core::result::Result<u64, #root::sql::ExecError>
             #executor_where
             {
-                let query = ::rustango::core::DeleteQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
-                    where_clause: ::rustango::core::WhereExpr::Predicate(
-                        ::rustango::core::Filter {
+                let query = #root::core::DeleteQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
+                    where_clause: #root::core::WhereExpr::Predicate(
+                        #root::core::Filter {
                             column: #pk_column_lit,
-                            op: ::rustango::core::Op::Eq,
-                            value: ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                            op: #root::core::Op::Eq,
+                            value: ::core::convert::Into::<#root::core::SqlValue>::into(
                                 ::core::clone::Clone::clone(&self.#pk_ident)
                             ),
                         }
                     ),
                 };
-                let _affected = ::rustango::sql::__macro_internals::delete_on(
+                let _affected = #root::sql::__macro_internals::delete_on(
                     #executor_passes_to_data_write,
                     &query,
                 ).await?;
@@ -5941,11 +5942,11 @@ fn inherent_impl_tokens(
             pub async fn delete_on_with #executor_generics (
                 &self,
                 #executor_param,
-                source: ::rustango::audit::AuditSource,
-            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError>
+                source: #root::audit::AuditSource,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError>
             #executor_where
             {
-                ::rustango::audit::with_source(source, self.delete_on(_executor)).await
+                #root::audit::with_source(source, self.delete_on(_executor)).await
             }
             #pool_delete_method
             #pool_insert_method
@@ -5975,14 +5976,14 @@ fn inherent_impl_tokens(
             }
 
             /// Returns this row's primary-key value as an
-            /// [`::rustango::core::SqlValue`]. Eloquent
+            /// [`#root::core::SqlValue`]. Eloquent
             /// `$model->getKey()` parity.
             ///
             /// Useful when you need to thread the PK through a
             /// generic `Into<SqlValue>`-bound API without knowing the
             /// concrete PK type (`i64` vs `Uuid` vs `String`).
             #[must_use]
-            pub fn get_key(&self) -> ::rustango::core::SqlValue {
+            pub fn get_key(&self) -> #root::core::SqlValue {
                 ::core::convert::Into::into(::core::clone::Clone::clone(&self.#pk_ident))
             }
 
@@ -6000,13 +6001,13 @@ fn inherent_impl_tokens(
             /// back via `RETURNING` and stores it on `self`.
             ///
             /// # Errors
-            /// Returns [`::rustango::sql::ExecError`] for SQL-writing or
+            /// Returns [`#root::sql::ExecError`] for SQL-writing or
             /// driver failures.
             #[cfg(feature = "postgres")]
             pub async fn insert(
                 &mut self,
-                pool: &::rustango::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                pool: &#root::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 #pool_to_insert_on
             }
 
@@ -6019,22 +6020,22 @@ fn inherent_impl_tokens(
             pub async fn insert_on #executor_generics (
                 &mut self,
                 #executor_param,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
             #executor_where
             {
                 let mut _columns: ::std::vec::Vec<&'static str> =
                     ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
                     ::std::vec::Vec::new();
                 #( #pushes )*
-                let query = ::rustango::core::InsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                let query = #root::core::InsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     columns: _columns,
                     values: _values,
                     returning: ::std::vec![ #( #returning_cols ),* ],
                     on_conflict: ::core::option::Option::None,
                 };
-                let _returning_row_v = ::rustango::sql::__macro_internals::insert_returning_on(
+                let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
                     #executor_passes_to_data_write,
                     &query,
                 ).await?;
@@ -6053,11 +6054,11 @@ fn inherent_impl_tokens(
             pub async fn insert_on_with #executor_generics (
                 &mut self,
                 #executor_param,
-                source: ::rustango::audit::AuditSource,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+                source: #root::audit::AuditSource,
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
             #executor_where
             {
-                ::rustango::audit::with_source(source, self.insert_on(_executor)).await
+                #root::audit::with_source(source, self.insert_on(_executor)).await
             }
         }
     } else {
@@ -6067,13 +6068,13 @@ fn inherent_impl_tokens(
             /// Insert this row into its table.
             ///
             /// # Errors
-            /// Returns [`::rustango::sql::ExecError`] for SQL-writing or
+            /// Returns [`#root::sql::ExecError`] for SQL-writing or
             /// driver failures.
             #[cfg(feature = "postgres")]
             pub async fn insert(
                 &self,
-                pool: &::rustango::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                pool: &#root::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 self.insert_on(pool).await
             }
 
@@ -6086,18 +6087,18 @@ fn inherent_impl_tokens(
             pub async fn insert_on<'_c, _E>(
                 &self,
                 _executor: _E,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
             where
-                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+                _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
             {
-                let query = ::rustango::core::InsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                let query = #root::core::InsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     columns: ::std::vec![ #( #insert_columns ),* ],
                     values: ::std::vec![ #( #insert_values ),* ],
                     returning: ::std::vec::Vec::new(),
                     on_conflict: ::core::option::Option::None,
                 };
-                ::rustango::sql::__macro_internals::insert_on(_executor, &query).await
+                #root::sql::__macro_internals::insert_on(_executor, &query).await
             }
         }
     };
@@ -6126,13 +6127,13 @@ fn inherent_impl_tokens(
             /// before this returns.
             ///
             /// # Errors
-            /// Returns [`::rustango::sql::ExecError`] for validation,
+            /// Returns [`#root::sql::ExecError`] for validation,
             /// SQL-writing, mixed-Auto rejection, or driver failures.
             #[cfg(feature = "postgres")]
             pub async fn bulk_insert(
                 rows: &mut [Self],
-                pool: &::rustango::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                pool: &#root::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 #pool_to_bulk_insert_on
             }
 
@@ -6145,7 +6146,7 @@ fn inherent_impl_tokens(
             pub async fn bulk_insert_on #executor_generics (
                 rows: &mut [Self],
                 #executor_param,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
             #executor_where
             {
                 if rows.is_empty() {
@@ -6153,16 +6154,16 @@ fn inherent_impl_tokens(
                 }
                 let _first_unset = matches!(
                     rows[0].#first_auto_ident,
-                    ::rustango::sql::Auto::Unset
+                    #root::sql::Auto::Unset
                 );
                 #( #uniformity )*
 
                 let mut _all_rows: ::std::vec::Vec<
-                    ::std::vec::Vec<::rustango::core::SqlValue>,
+                    ::std::vec::Vec<#root::core::SqlValue>,
                 > = ::std::vec::Vec::with_capacity(rows.len());
                 let _columns: ::std::vec::Vec<&'static str> = if _first_unset {
                     for _row in rows.iter() {
-                        let mut _row_vals: ::std::vec::Vec<::rustango::core::SqlValue> =
+                        let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
                             ::std::vec::Vec::new();
                         #( #pushes_no_auto )*
                         _all_rows.push(_row_vals);
@@ -6170,7 +6171,7 @@ fn inherent_impl_tokens(
                     ::std::vec![ #( #cols_no_auto ),* ]
                 } else {
                     for _row in rows.iter() {
-                        let mut _row_vals: ::std::vec::Vec<::rustango::core::SqlValue> =
+                        let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
                             ::std::vec::Vec::new();
                         #( #pushes_all )*
                         _all_rows.push(_row_vals);
@@ -6178,21 +6179,21 @@ fn inherent_impl_tokens(
                     ::std::vec![ #( #cols_all ),* ]
                 };
 
-                let _query = ::rustango::core::BulkInsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                let _query = #root::core::BulkInsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     columns: _columns,
                     rows: _all_rows,
                     returning: ::std::vec![ #( #returning_cols ),* ],
                     on_conflict: ::core::option::Option::None,
                 };
-                let _returned = ::rustango::sql::__macro_internals::bulk_insert_on(
+                let _returned = #root::sql::__macro_internals::bulk_insert_on(
                     #executor_passes_to_data_write,
                     &_query,
                 ).await?;
                 if _returned.len() != rows.len() {
                     return ::core::result::Result::Err(
-                        ::rustango::sql::ExecError::Sql(
-                            ::rustango::sql::SqlError::BulkInsertReturningMismatch {
+                        #root::sql::ExecError::Sql(
+                            #root::sql::SqlError::BulkInsertReturningMismatch {
                                 expected: rows.len(),
                                 actual: _returned.len(),
                             }
@@ -6217,13 +6218,13 @@ fn inherent_impl_tokens(
             /// Empty slice is a no-op.
             ///
             /// # Errors
-            /// Returns [`::rustango::sql::ExecError`] for validation,
+            /// Returns [`#root::sql::ExecError`] for validation,
             /// SQL-writing, or driver failures.
             #[cfg(feature = "postgres")]
             pub async fn bulk_insert(
                 rows: &[Self],
-                pool: &::rustango::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                pool: &#root::sql::sqlx::PgPool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 Self::bulk_insert_on(rows, pool).await
             }
 
@@ -6236,30 +6237,30 @@ fn inherent_impl_tokens(
             pub async fn bulk_insert_on<'_c, _E>(
                 rows: &[Self],
                 _executor: _E,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError>
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
             where
-                _E: ::rustango::sql::sqlx::Executor<'_c, Database = ::rustango::sql::sqlx::Postgres>,
+                _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
             {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
                 let mut _all_rows: ::std::vec::Vec<
-                    ::std::vec::Vec<::rustango::core::SqlValue>,
+                    ::std::vec::Vec<#root::core::SqlValue>,
                 > = ::std::vec::Vec::with_capacity(rows.len());
                 for _row in rows.iter() {
-                    let mut _row_vals: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #pushes_all )*
                     _all_rows.push(_row_vals);
                 }
-                let _query = ::rustango::core::BulkInsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                let _query = #root::core::BulkInsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     columns: ::std::vec![ #( #cols_all ),* ],
                     rows: _all_rows,
                     returning: ::std::vec::Vec::new(),
                     on_conflict: ::core::option::Option::None,
                 };
-                let _ = ::rustango::sql::__macro_internals::bulk_insert_on(_executor, &_query).await?;
+                let _ = #root::sql::__macro_internals::bulk_insert_on(_executor, &_query).await?;
                 ::core::result::Result::Ok(())
             }
         }
@@ -6292,7 +6293,7 @@ fn inherent_impl_tokens(
             /// / T1.5.
             ///
             /// Per-row values are extracted and lowered into a
-            /// [`::rustango::core::BulkInsertQuery`] with
+            /// [`#root::core::BulkInsertQuery`] with
             /// `on_conflict = DoUpdate { target, update_columns }`. The
             /// writer dispatches per-dialect:
             /// * Postgres / SQLite: `INSERT … ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col`
@@ -6311,39 +6312,39 @@ fn inherent_impl_tokens(
             /// Empty slice is a no-op.
             ///
             /// # Errors
-            /// Returns [`::rustango::sql::ExecError`] for validation,
+            /// Returns [`#root::sql::ExecError`] for validation,
             /// SQL-writing, or driver failures.
             pub async fn bulk_upsert_pool(
                 rows: &[Self],
                 target: &[&'static str],
                 update_cols: &[&'static str],
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
                 let mut _all_rows: ::std::vec::Vec<
-                    ::std::vec::Vec<::rustango::core::SqlValue>,
+                    ::std::vec::Vec<#root::core::SqlValue>,
                 > = ::std::vec::Vec::with_capacity(rows.len());
                 for _row in rows.iter() {
-                    let mut _row_vals: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #upsert_pushes )*
                     _all_rows.push(_row_vals);
                 }
-                let _query = ::rustango::core::BulkInsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                let _query = #root::core::BulkInsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     columns: ::std::vec![ #( #upsert_cols ),* ],
                     rows: _all_rows,
                     returning: ::std::vec::Vec::new(),
                     on_conflict: ::core::option::Option::Some(
-                        ::rustango::core::ConflictClause::DoUpdate {
+                        #root::core::ConflictClause::DoUpdate {
                             target: target.to_vec(),
                             update_columns: update_cols.to_vec(),
                         }
                     ),
                 };
-                ::rustango::sql::bulk_insert_pool(pool, &_query).await
+                #root::sql::bulk_insert_pool(pool, &_query).await
             }
 
             /// Tri-dialect `bulk_create(ignore_conflicts=True)` — silently
@@ -6357,30 +6358,30 @@ fn inherent_impl_tokens(
             /// As [`Self::bulk_upsert_pool`].
             pub async fn bulk_insert_or_ignore_pool(
                 rows: &[Self],
-                pool: &::rustango::sql::Pool,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
                 let mut _all_rows: ::std::vec::Vec<
-                    ::std::vec::Vec<::rustango::core::SqlValue>,
+                    ::std::vec::Vec<#root::core::SqlValue>,
                 > = ::std::vec::Vec::with_capacity(rows.len());
                 for _row in rows.iter() {
-                    let mut _row_vals: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
                         ::std::vec::Vec::new();
                     #( #upsert_pushes )*
                     _all_rows.push(_row_vals);
                 }
-                let _query = ::rustango::core::BulkInsertQuery {
-                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                let _query = #root::core::BulkInsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
                     columns: ::std::vec![ #( #upsert_cols ),* ],
                     rows: _all_rows,
                     returning: ::std::vec::Vec::new(),
                     on_conflict: ::core::option::Option::Some(
-                        ::rustango::core::ConflictClause::DoNothing
+                        #root::core::ConflictClause::DoNothing
                     ),
                 };
-                ::rustango::sql::bulk_insert_pool(pool, &_query).await
+                #root::sql::bulk_insert_pool(pool, &_query).await
             }
         }
     };
@@ -6392,8 +6393,8 @@ fn inherent_impl_tokens(
             /// (`<parent>::<child>_set`) emitted from sibling models'
             /// FK fields. Not part of the public API.
             #[doc(hidden)]
-            pub fn __rustango_pk_value(&self) -> ::rustango::core::SqlValue {
-                ::core::convert::Into::<::rustango::core::SqlValue>::into(
+            pub fn __rustango_pk_value(&self) -> #root::core::SqlValue {
+                ::core::convert::Into::<#root::core::SqlValue>::into(
                     ::core::clone::Clone::clone(&self.#pk_ident)
                 )
             }
@@ -6402,9 +6403,9 @@ fn inherent_impl_tokens(
 
     let has_pk_value_impl = primary_key.map(|(pk_ident, _)| {
         quote! {
-            impl ::rustango::sql::HasPkValue for #struct_name {
-                fn __rustango_pk_value_impl(&self) -> ::rustango::core::SqlValue {
-                    ::core::convert::Into::<::rustango::core::SqlValue>::into(
+            impl #root::sql::HasPkValue for #struct_name {
+                fn __rustango_pk_value_impl(&self) -> #root::core::SqlValue {
+                    ::core::convert::Into::<#root::core::SqlValue>::into(
                         ::core::clone::Clone::clone(&self.#pk_ident)
                     )
                 }
@@ -6431,7 +6432,7 @@ fn inherent_impl_tokens(
             .iter()
             .map(|(ident, column)| {
                 quote! {
-                    self.#ident = ::rustango::sql::try_get_returning_sqlite(
+                    self.#ident = #root::sql::try_get_returning_sqlite(
                         _returning_row, #column
                     )?;
                 }
@@ -6460,9 +6461,9 @@ fn inherent_impl_tokens(
                 .as_ref()
                 .expect("first_auto_value_ty set whenever first_auto_ident is");
             quote! {
-                let _converted = <#value_ty as ::rustango::sql::MysqlAutoIdSet>
+                let _converted = <#value_ty as #root::sql::MysqlAutoIdSet>
                     ::rustango_from_mysql_auto_id(_id)?;
-                self.#first = ::rustango::sql::Auto::Set(_converted);
+                self.#first = #root::sql::Auto::Set(_converted);
                 ::core::result::Result::Ok(())
             }
         } else {
@@ -6472,24 +6473,24 @@ fn inherent_impl_tokens(
             }
         };
         quote! {
-            impl ::rustango::sql::AssignAutoPkPool for #struct_name {
+            impl #root::sql::AssignAutoPkPool for #struct_name {
                 fn __rustango_assign_from_pg_row(
                     &mut self,
-                    _returning_row: &::rustango::sql::PgReturningRow,
-                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    _returning_row: &#root::sql::PgReturningRow,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     #( #auto_assigns )*
                     ::core::result::Result::Ok(())
                 }
                 fn __rustango_assign_from_mysql_id(
                     &mut self,
                     _id: i64,
-                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     #mysql_body
                 }
                 fn __rustango_assign_from_sqlite_row(
                     &mut self,
-                    _returning_row: &::rustango::sql::SqliteReturningRow,
-                ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
+                    _returning_row: &#root::sql::SqliteReturningRow,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     #( #auto_assigns_sqlite )*
                     ::core::result::Result::Ok(())
                 }
@@ -6507,9 +6508,9 @@ fn inherent_impl_tokens(
         #[doc(hidden)]
         #[cfg(feature = "postgres")]
         pub fn __rustango_from_aliased_row(
-            row: &::rustango::sql::sqlx::postgres::PgRow,
+            row: &#root::sql::sqlx::postgres::PgRow,
             prefix: &str,
-        ) -> ::core::result::Result<Self, ::rustango::sql::sqlx::Error> {
+        ) -> ::core::result::Result<Self, #root::sql::sqlx::Error> {
             ::core::result::Result::Ok(Self {
                 #( #from_aliased_row_inits ),*
             })
@@ -6518,7 +6519,7 @@ fn inherent_impl_tokens(
     // v0.23.0-batch8 — MySQL counterpart, gated through the
     // cfg-aware macro_rules so PG-only builds expand to nothing.
     let aliased_row_helper_my = quote! {
-        ::rustango::__impl_my_aliased_row_decoder!(#struct_name, |row, prefix| {
+        #root::__impl_my_aliased_row_decoder!(#struct_name, |row, prefix| {
             #( #from_aliased_row_inits ),*
         });
     };
@@ -6526,7 +6527,7 @@ fn inherent_impl_tokens(
     // v0.27 Phase 3 — SQLite counterpart, same hygiene-aware closure
     // pattern + cfg gate on the `sqlite` feature.
     let aliased_row_helper_sqlite = quote! {
-        ::rustango::__impl_sqlite_aliased_row_decoder!(#struct_name, |row, prefix| {
+        #root::__impl_sqlite_aliased_row_decoder!(#struct_name, |row, prefix| {
             #( #from_aliased_row_inits ),*
         });
     };
@@ -6556,8 +6557,8 @@ fn inherent_impl_tokens(
             quote! {
                 #[doc = #doc]
                 #[must_use]
-                pub fn #fn_ident() -> ::rustango::query::QuerySet<#struct_name> {
-                    ::rustango::query::QuerySet::new()
+                pub fn #fn_ident() -> #root::query::QuerySet<#struct_name> {
+                    #root::query::QuerySet::new()
                 }
             }
         })
@@ -6567,8 +6568,8 @@ fn inherent_impl_tokens(
         impl #struct_name {
             /// Start a new `QuerySet` over this model. Django shape.
             #[must_use]
-            pub fn objects() -> ::rustango::query::QuerySet<#struct_name> {
-                ::rustango::query::QuerySet::new()
+            pub fn objects() -> #root::query::QuerySet<#struct_name> {
+                #root::query::QuerySet::new()
             }
 
             /// Eloquent-shape alias of [`Self::objects`]. Returns
@@ -6585,8 +6586,8 @@ fn inherent_impl_tokens(
             /// Both names point at the same underlying constructor;
             /// neither is preferred.
             #[must_use]
-            pub fn query() -> ::rustango::query::QuerySet<#struct_name> {
-                ::rustango::query::QuerySet::new()
+            pub fn query() -> #root::query::QuerySet<#struct_name> {
+                #root::query::QuerySet::new()
             }
 
             #( #extra_manager_fns )*
