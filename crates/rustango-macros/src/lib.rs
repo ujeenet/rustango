@@ -1517,9 +1517,13 @@ fn reverse_has_accessor_tokens(
         let exists_name = format!("{}_exists_expr", rel.name);
         let not_exists_name = format!("{}_not_exists_expr", rel.name);
         let count_name = format!("{}_count", rel.name);
+        let fetch_name = format!("{}_fetch", rel.name);
+        let accessor_name = rel.name.as_str();
         let exists_ident = syn::Ident::new(&exists_name, struct_name.span());
         let not_exists_ident = syn::Ident::new(&not_exists_name, struct_name.span());
         let count_ident = syn::Ident::new(&count_name, struct_name.span());
+        let fetch_ident = syn::Ident::new(&fetch_name, struct_name.span());
+        let accessor_ident = syn::Ident::new(accessor_name, struct_name.span());
         let child = &rel.child;
         let child_fk_column = rel.child_fk_column.as_str();
         let self_pk_column = rel.self_pk_column.as_str();
@@ -1544,7 +1548,46 @@ fn reverse_has_accessor_tokens(
              {child_fk_column} = <self.pk>`.",
             name = rel.name,
         );
+        let accessor_doc = format!(
+            "Eloquent `$model->{name}` accessor — returns a \
+             `QuerySet<{child}>` filtered to rows whose \
+             `{child_fk_column}` matches this `{struct_name}` \
+             instance's primary key. **Chainable**: compose `.filter()` \
+             / `.order_by()` / `.limit()` etc. on top, then call \
+             `.fetch_pool(&pool)` (the QuerySet trait method) when \
+             done. For the simple \"fetch all\" hot path with no \
+             further composition, prefer the bare-name \
+             `{name}_fetch(&pool)` companion.",
+            name = rel.name,
+        );
+        let fetch_doc = format!(
+            "Eloquent `$model->{name}->get()` — bare-name hot-path \
+             over `{name}(&self).fetch_pool(&pool)`. Use this when \
+             you don't need further `.filter()` / `.order_by()` \
+             composition; falls back to the chainable accessor when \
+             you do. Avoids the `_pool` suffix on the most common \
+             call-site shape.",
+            name = rel.name,
+        );
         quote! {
+            #[doc = #accessor_doc]
+            pub fn #accessor_ident(&self) -> #root::query::QuerySet<#child> {
+                #root::query::QuerySet::<#child>::new()
+                    .filter(#child_fk_column, self.__rustango_pk_value())
+            }
+
+            #[doc = #fetch_doc]
+            pub async fn #fetch_ident(
+                &self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<#child>,
+                #root::sql::ExecError,
+            > {
+                use #root::sql::FetcherPool as _;
+                self.#accessor_ident().fetch_pool(pool).await
+            }
+
             #[doc = #exists_doc]
             pub fn #exists_ident() -> #root::core::WhereExpr {
                 use #root::core::{Expr, Model as _, Op, SelectQuery, WhereExpr};
