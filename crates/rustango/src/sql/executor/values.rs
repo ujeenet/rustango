@@ -394,4 +394,39 @@ impl<T: crate::core::Model> crate::query::ValuesFlatQuerySet<T> {
         let q = self.compile()?;
         fetch_values_flat::<U>(pool, &q).await
     }
+
+    /// Execute the projection and return the first row's cell, or
+    /// `None` when the queryset is empty. Eloquent `Builder::value()`
+    /// parity — the one-row-one-column shortcut.
+    ///
+    /// ```ignore
+    /// // Eloquent: $name = User::where('id', 1)->value('name');
+    /// // rustango:
+    /// let name: Option<String> = User::query()
+    ///     .filter("id", 1_i64)
+    ///     .values_list_flat("name")
+    ///     .first::<String>(&pool).await?;
+    /// ```
+    ///
+    /// Equivalent to `.fetch::<U>(pool).await?.into_iter().next()`.
+    /// The full-fetch path materializes every matching row; this
+    /// helper appends `LIMIT 1` to the underlying queryset so a
+    /// large result set doesn't pay for rows the caller won't read.
+    ///
+    /// # Errors
+    /// As [`Self::fetch`].
+    pub async fn first<U>(self, pool: &Pool) -> Result<Option<U>, ExecError>
+    where
+        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+    {
+        // Re-build with a LIMIT 1 on the underlying queryset so the
+        // DB doesn't materialize rows past the first one. `compile()`
+        // consumes `self.qs`, so we need to take the limit detour
+        // through the builder.
+        let col = self.col;
+        let qs = self.qs.limit(1);
+        let q = crate::query::ValuesFlatQuerySet { qs, col }.compile()?;
+        let rows = fetch_values_flat::<U>(pool, &q).await?;
+        Ok(rows.into_iter().next())
+    }
 }
