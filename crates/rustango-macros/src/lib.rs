@@ -4229,6 +4229,81 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Eloquent `Model::chunkById($n, fn (...))` — same
+            /// per-batch callback shape as [`Self::chunk`], but uses
+            /// **keyset pagination** (`WHERE pk > last_seen LIMIT n`)
+            /// instead of OFFSET. O(N) total scan vs OFFSET's O(N²)
+            /// — the right choice for multi-million-row sweeps.
+            ///
+            /// Requires the primary key to be a signed integer type
+            /// (`i64` / `i32`); the keyset comparison rides on
+            /// `__rustango_pk_value()` lowering through
+            /// `SqlValue::I64` / `SqlValue::I32`. Skipped on
+            /// non-integer PKs (UUID, String) — those should use
+            /// the OFFSET-shaped [`Self::chunk`] or a hand-rolled
+            /// keyset loop.
+            ///
+            /// Callback errors abort iteration; the error bubbles up
+            /// unchanged. Empty table → callback invoked zero times.
+            pub async fn chunk_by_id<F, Fut>(
+                n: i64,
+                pool: &#root::sql::Pool,
+                mut cb: F,
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
+            where
+                F: ::core::ops::FnMut(::std::vec::Vec<Self>) -> Fut,
+                Fut: ::core::future::Future<
+                    Output = ::core::result::Result<(), #root::sql::ExecError>,
+                >,
+            {
+                use #root::sql::FetcherPool as _;
+                let pk_col = match Self::primary_key_column() {
+                    ::core::option::Option::Some(c) => c,
+                    ::core::option::Option::None => {
+                        return ::core::result::Result::Ok(());
+                    }
+                };
+                // Track the largest PK seen so the next batch picks
+                // up from there. `i64::MIN` as the sentinel — the
+                // very first iteration's `> MIN` matches every row,
+                // so the loop entry is uniform with subsequent
+                // iterations.
+                let mut last_seen: i64 = i64::MIN;
+                loop {
+                    let key = ::std::format!("{}__gt", pk_col);
+                    let rows: ::std::vec::Vec<Self> =
+                        #root::query::QuerySet::<Self>::default()
+                            .filter(key.as_str(), last_seen)
+                            .order_by(&[(pk_col, false)])
+                            .limit(n)
+                            .fetch_pool(pool)
+                            .await?;
+                    if rows.is_empty() {
+                        return ::core::result::Result::Ok(());
+                    }
+                    let len = rows.len() as i64;
+                    // Capture the last row's PK BEFORE moving rows
+                    // into the callback.
+                    let max_pk = match rows
+                        .last()
+                        .map(|r| r.__rustango_pk_value())
+                    {
+                        ::core::option::Option::Some(
+                            #root::core::SqlValue::I64(v),
+                        ) => v,
+                        ::core::option::Option::Some(
+                            #root::core::SqlValue::I32(v),
+                        ) => i64::from(v),
+                        _ => return ::core::result::Result::Ok(()),
+                    };
+                    cb(rows).await?;
+                    if len < n {
+                        return ::core::result::Result::Ok(());
+                    }
+                    last_seen = max_pk;
+                }
+            }
+
             /// Delete every row of this model — `TRUNCATE TABLE
             /// <table> RESTART IDENTITY CASCADE` on Postgres,
             /// `DELETE FROM <table>` on MySQL / SQLite (which don't
