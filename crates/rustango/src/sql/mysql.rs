@@ -1360,6 +1360,7 @@ mod tests {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         }))
     }
 }

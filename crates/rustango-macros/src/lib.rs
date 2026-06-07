@@ -855,6 +855,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .map(|(c, d)| (c.as_str(), *d)),
         &container.extra_permissions,
         &container.default_permissions,
+        &container.global_scopes,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -1861,6 +1862,7 @@ fn model_impl_tokens(
     get_latest_by: Option<(&str, bool)>,
     extra_permissions: &[(String, String)],
     default_permissions: &[String],
+    global_scopes: &[GlobalScopeAttr],
 ) -> TokenStream2 {
     let root = rustango_root();
     let display_tokens = if let Some(name) = display {
@@ -2012,6 +2014,21 @@ fn model_impl_tokens(
         quote! { (#col_lit, #desc) }
     });
 
+    // Issue #820 — `global_scopes` slice literal. Empty when no
+    // `#[rustango(global_scope(...))]` attribute was supplied. The
+    // `apply` path is re-emitted verbatim so it resolves in the
+    // consumer's scope; the name is stored as a string literal.
+    let global_scope_tokens = global_scopes.iter().map(|s| {
+        let name = s.name.as_str();
+        let apply = &s.apply;
+        quote! {
+            #root::core::GlobalScope {
+                name: #name,
+                apply: #apply,
+            }
+        }
+    });
+
     let m2m_tokens = m2m_relations.iter().map(|rel| {
         let name = rel.name.as_str();
         let to = rel.to.as_str();
@@ -2064,6 +2081,7 @@ fn model_impl_tokens(
                 get_latest_by: #get_latest_by_tokens,
                 extra_permissions: &[ #(#extra_permission_tokens),* ],
                 default_permissions: &[ #(#default_permission_tokens),* ],
+                global_scopes: &[ #(#global_scope_tokens),* ],
             };
         }
     }
@@ -6920,6 +6938,22 @@ struct ContainerAttrs {
     /// plural form. Threaded into `ModelSchema::verbose_name_plural`.
     /// When unset, `display_label_plural()` auto-suffixes `s`.
     verbose_name_plural: Option<String>,
+    /// Eloquent-shape **global scopes** from `#[rustango(global_scope(name
+    /// = "...", apply = path::to::fn))]` — issue #820. Each entry pairs
+    /// a name (used by `QuerySet::without_global_scope`) with a
+    /// `fn() -> WhereExpr` path that the macro emits into
+    /// `ModelSchema::global_scopes`. Multiple attributes accumulate.
+    global_scopes: Vec<GlobalScopeAttr>,
+}
+
+/// Parsed `#[rustango(global_scope(name = "...", apply = fn_path))]`
+/// declaration. Each entry becomes one `core::GlobalScope` in the
+/// emitted schema literal; `apply` resolves at macro-expand time
+/// against the consumer's scope so the function must be in scope at
+/// the use site. Issue #820.
+struct GlobalScopeAttr {
+    name: String,
+    apply: syn::Path,
 }
 
 /// Parsed form of one index declaration (field-level or container-level).
@@ -7136,6 +7170,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         get_latest_by: None,
         extra_permissions: Vec::new(),
         default_permissions: Vec::new(),
+        global_scopes: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -7399,6 +7434,64 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     ));
                 }
                 out.default_order = parsed;
+                return Ok(());
+            }
+            if meta.path.is_ident("global_scope") {
+                // `#[rustango(global_scope(name = "active", apply =
+                //  path::to::fn))]` — issue #820. The apply function
+                // path resolves at macro-expand time in the consumer's
+                // scope; the macro re-emits it verbatim into the
+                // `ModelSchema::global_scopes` slice literal.
+                let span = meta.path.span();
+                let mut scope_name: Option<String> = None;
+                let mut apply_path: Option<syn::Path> = None;
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("name") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let raw = s.value();
+                        if raw.trim().is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`global_scope(name = \"...\")` must not be empty",
+                            ));
+                        }
+                        scope_name = Some(raw);
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("apply") {
+                        let p: syn::Path = inner.value()?.parse()?;
+                        apply_path = Some(p);
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown `global_scope` attribute (supported: \
+                         `name`, `apply`)",
+                    ))
+                })?;
+                let Some(name) = scope_name else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`global_scope` requires `name = \"...\"`",
+                    ));
+                };
+                let Some(apply) = apply_path else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`global_scope` requires `apply = fn_path`",
+                    ));
+                };
+                if out.global_scopes.iter().any(|s| s.name == name) {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "duplicate global scope name `{name}` — \
+                             pick a unique identifier so \
+                             `QuerySet::without_global_scope(\"{name}\")` \
+                             is unambiguous"
+                        ),
+                    ));
+                }
+                out.global_scopes.push(GlobalScopeAttr { name, apply });
                 return Ok(());
             }
             if meta.path.is_ident("audit") {

@@ -688,6 +688,7 @@ mod composite_fk_snapshot_tests {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         };
         &MS
     }
@@ -766,6 +767,7 @@ mod composite_fk_snapshot_tests {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         };
         static UNMANAGED: ModelSchema = ModelSchema {
             name: "Unmanaged",
@@ -799,6 +801,7 @@ mod composite_fk_snapshot_tests {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         };
         let snap = SchemaSnapshot::from_models(&[&MANAGED, &UNMANAGED]);
         let table_names: Vec<&str> = snap.tables.iter().map(|t| t.name.as_str()).collect();
@@ -870,6 +873,7 @@ mod composite_fk_snapshot_tests {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         };
         let snap = TableSnapshot::from_schema(&MS);
         let json = serde_json::to_string(&snap).expect("serialize");
@@ -992,6 +996,7 @@ mod generated_as_and_db_comment_capture {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         };
         &MS
     }
