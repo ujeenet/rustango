@@ -156,6 +156,21 @@ mod gated {
         }
 
         #[test]
+        fn embed_migrations_macro_resolves_through_renamed_dep() {
+            // embed_migrations!() is a proc-macro that walks a
+            // directory at compile time and emits a slice of
+            // (name, content) pairs. Path resolution flows through
+            // `expand_embed_migrations` (the macro entry point has
+            // no `::rustango::` sites itself — confirmed in #142
+            // Phase 2 audit — so this test mainly proves the entry
+            // point's signature works under the rename).
+            const EMBEDDED: &[(&str, &str)] = orm::embed_migrations!("./migrations");
+            assert_eq!(EMBEDDED.len(), 1);
+            assert_eq!(EMBEDDED[0].0, "0001_initial");
+            assert!(EMBEDDED[0].1.contains("\"forward\""));
+        }
+
+        #[test]
         fn q_macro_resolves_through_renamed_dep() {
             // Q!() is a proc-macro that emits `Column::like(...)` /
             // `eq(...)` / etc. against the model's typed column
