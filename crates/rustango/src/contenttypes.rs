@@ -142,7 +142,7 @@ impl ContentType {
         Self::by_natural_key(pool, app, &name).await
     }
 
-    /// Batch counterpart of [`Self::by_natural_key_pool`] — issue #35.
+    /// Batch counterpart of [`Self::by_natural_key`] — issue #35.
     /// Resolves a list of `(app_label, model_name)` pairs to their
     /// `ContentType` rows in a **single** DB round trip, returning a
     /// `HashMap` keyed by the natural pair (cloned strings). Pairs
@@ -150,7 +150,7 @@ impl ContentType {
     /// the map (no error — same shape Django's `get_for_models`
     /// gives back when a model isn't migrated yet).
     ///
-    /// Implemented as `all_pool` + a Rust-side filter — the
+    /// Implemented as `all_ordered` + a Rust-side filter — the
     /// `rustango_content_types` table is O(dozens) of rows in
     /// realistic apps, so one un-filtered fetch is cheaper than N
     /// round trips OR a complex composite-key `WHERE`. If your
@@ -169,7 +169,7 @@ impl ContentType {
     /// ```
     ///
     /// # Errors
-    /// As [`Self::all_pool`].
+    /// As [`Self::all_ordered`].
     pub async fn get_for_models<A, B, I>(
         pool: &crate::sql::Pool,
         pairs: I,
@@ -251,14 +251,14 @@ pub fn clear_cache() {
 }
 
 impl ContentType {
-    /// Cached counterpart of [`Self::by_natural_key_pool`] — issue #35.
+    /// Cached counterpart of [`Self::by_natural_key`] — issue #35.
     /// First call for a given `(app_label, model_name)` hits the DB;
     /// subsequent calls return the cached row. `Ok(None)` results
     /// are **not** cached (so a follow-up `ensure_seeded` doesn't
     /// leave you with a stale negative).
     ///
     /// # Errors
-    /// As [`Self::by_natural_key_pool`].
+    /// As [`Self::by_natural_key`].
     pub async fn get_by_natural_key(
         pool: &crate::sql::Pool,
         app_label: &str,
