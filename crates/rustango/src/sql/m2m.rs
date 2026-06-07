@@ -7,31 +7,36 @@
 //!
 //! ```ignore
 //! // Fetch all tag IDs for a post:
-//! let tag_ids = post.tags_m2m().all_pool(&pool).await?;
+//! let tag_ids = post.tags_m2m().all(&pool).await?;
 //!
 //! // Add a tag:
-//! post.tags_m2m().add_pool(42, &pool).await?;
+//! post.tags_m2m().add(42, &pool).await?;
 //!
 //! // Remove a tag:
-//! post.tags_m2m().remove_pool(42, &pool).await?;
+//! post.tags_m2m().remove(42, &pool).await?;
 //!
 //! // Replace all tags:
-//! post.tags_m2m().set_pool(&[1, 2, 3], &pool).await?;
+//! post.tags_m2m().set(&[1, 2, 3], &pool).await?;
 //!
 //! // Clear all tags:
-//! post.tags_m2m().clear_pool(&pool).await?;
+//! post.tags_m2m().clear(&pool).await?;
 //!
 //! // Check membership:
-//! let has = post.tags_m2m().contains_pool(42, &pool).await?;
+//! let has = post.tags_m2m().contains(42, &pool).await?;
 //! ```
 //!
-//! ## Backend coverage (v0.35 tri-dialect)
+//! ## Backend coverage (v0.43 bare-name)
 //!
-//! Every method has a `*_pool(&Pool, …)` form that dispatches per-backend
-//! through [`crate::sql::Pool`]. The legacy `&PgPool` signatures are
-//! one-line shims that delegate to the `_pool` variant via
-//! `Pool::Postgres(pool.clone())` — kept for source-compat with v0.34
-//! and earlier.
+//! Each CRUD method now ships under a **bare name** (`all`, `add`,
+//! `remove`, `set`, `clear`, `contains`) that takes a `&Pool` and
+//! dispatches per-backend through [`crate::sql::Pool`]. The legacy
+//! `_pool` aliases (`all_pool` etc.) stay as `#[deprecated]`
+//! forwarders so existing call sites still compile — they emit one
+//! warning each and will be removed in a future major version.
+//!
+//! The pre-#891 `&PgPool`-typed wrappers (`fn all(&self, &PgPool)`
+//! etc.) have been removed; the v0.34-era source-compat window
+//! lapsed when v0.35 shipped the tri-dialect Pool.
 
 use super::error::ExecError;
 use super::Pool;
@@ -58,7 +63,7 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures.
-    pub async fn all_pool(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
+    pub async fn all(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
         let dialect = pool.dialect();
         let sql = format!(
             "SELECT {dst} FROM {through} WHERE {src} = {p1}",
@@ -78,7 +83,7 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures.
-    pub async fn add_pool(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
+    pub async fn add(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
         let dialect = pool.dialect();
         let (insert_kw, suffix) = match dialect.name() {
             "mysql" => ("INSERT IGNORE INTO", ""),
@@ -112,7 +117,7 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures.
-    pub async fn remove_pool(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
+    pub async fn remove(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
         let dialect = pool.dialect();
         let sql = format!(
             "DELETE FROM {through} WHERE {src} = {p1} AND {dst} = {p2}",
@@ -144,7 +149,7 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures.
-    pub async fn set_pool(&self, ids: &[i64], pool: &Pool) -> Result<(), ExecError> {
+    pub async fn set(&self, ids: &[i64], pool: &Pool) -> Result<(), ExecError> {
         let dialect = pool.dialect();
         let del_sql = format!(
             "DELETE FROM {through} WHERE {src} = {p1}",
@@ -209,7 +214,7 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures.
-    pub async fn clear_pool(&self, pool: &Pool) -> Result<(), ExecError> {
+    pub async fn clear(&self, pool: &Pool) -> Result<(), ExecError> {
         let dialect = pool.dialect();
         let sql = format!(
             "DELETE FROM {through} WHERE {src} = {p1}",
@@ -237,7 +242,7 @@ impl M2MManager {
     ///
     /// # Errors
     /// Driver failures.
-    pub async fn contains_pool(&self, dst_id: i64, pool: &Pool) -> Result<bool, ExecError> {
+    pub async fn contains(&self, dst_id: i64, pool: &Pool) -> Result<bool, ExecError> {
         let dialect = pool.dialect();
         let sql = format!(
             "SELECT 1 AS hit FROM {through} WHERE {src} = {p1} AND {dst} = {p2} LIMIT 1",
@@ -261,62 +266,41 @@ impl M2MManager {
     }
 }
 
-// ============================================================ legacy PG-typed shims
+// ============================================================ deprecated _pool aliases
 
-/// PG-typed back-compat wrappers around the tri-dialect `_pool`
-/// methods above. Each forwards through `Pool::Postgres(pool.clone())`
-/// — Pool wraps an `Arc` internally so the conversion is a reference
-/// bump.
-#[cfg(feature = "postgres")]
+/// Source-compat shims for callers still using the pre-#891
+/// `_pool`-suffixed names. Each forwards verbatim to the bare-name
+/// method above. Slated for removal in the next major version —
+/// the deprecation attribute is the canary.
 impl M2MManager {
-    /// Return all destination PKs linked to the source instance.
-    ///
-    /// # Errors
-    /// Driver failures.
-    pub async fn all(&self, pool: &sqlx::PgPool) -> Result<Vec<i64>, ExecError> {
-        self.all_pool(&Pool::Postgres(pool.clone())).await
+    #[deprecated(note = "renamed to `all` — drop the `_pool` suffix")]
+    pub async fn all_pool(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
+        self.all(pool).await
     }
 
-    /// Add `dst_id` to the junction table.
-    ///
-    /// # Errors
-    /// Driver failures.
-    pub async fn add(&self, dst_id: i64, pool: &sqlx::PgPool) -> Result<(), ExecError> {
-        self.add_pool(dst_id, &Pool::Postgres(pool.clone())).await
+    #[deprecated(note = "renamed to `add` — drop the `_pool` suffix")]
+    pub async fn add_pool(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
+        self.add(dst_id, pool).await
     }
 
-    /// Remove `dst_id` from the junction table.
-    ///
-    /// # Errors
-    /// Driver failures.
-    pub async fn remove(&self, dst_id: i64, pool: &sqlx::PgPool) -> Result<(), ExecError> {
-        self.remove_pool(dst_id, &Pool::Postgres(pool.clone()))
-            .await
+    #[deprecated(note = "renamed to `remove` — drop the `_pool` suffix")]
+    pub async fn remove_pool(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
+        self.remove(dst_id, pool).await
     }
 
-    /// Replace the full set of linked destination PKs with `ids`.
-    ///
-    /// # Errors
-    /// Driver failures.
-    pub async fn set(&self, ids: &[i64], pool: &sqlx::PgPool) -> Result<(), ExecError> {
-        self.set_pool(ids, &Pool::Postgres(pool.clone())).await
+    #[deprecated(note = "renamed to `set` — drop the `_pool` suffix")]
+    pub async fn set_pool(&self, ids: &[i64], pool: &Pool) -> Result<(), ExecError> {
+        self.set(ids, pool).await
     }
 
-    /// Remove all junction rows for the source instance.
-    ///
-    /// # Errors
-    /// Driver failures.
-    pub async fn clear(&self, pool: &sqlx::PgPool) -> Result<(), ExecError> {
-        self.clear_pool(&Pool::Postgres(pool.clone())).await
+    #[deprecated(note = "renamed to `clear` — drop the `_pool` suffix")]
+    pub async fn clear_pool(&self, pool: &Pool) -> Result<(), ExecError> {
+        self.clear(pool).await
     }
 
-    /// Return `true` if `dst_id` is linked to the source instance.
-    ///
-    /// # Errors
-    /// Driver failures.
-    pub async fn contains(&self, dst_id: i64, pool: &sqlx::PgPool) -> Result<bool, ExecError> {
-        self.contains_pool(dst_id, &Pool::Postgres(pool.clone()))
-            .await
+    #[deprecated(note = "renamed to `contains` — drop the `_pool` suffix")]
+    pub async fn contains_pool(&self, dst_id: i64, pool: &Pool) -> Result<bool, ExecError> {
+        self.contains(dst_id, pool).await
     }
 }
 
