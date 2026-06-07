@@ -60,7 +60,7 @@ use crate::sql::Pool;
 use super::error::MigrateError;
 
 /// Parsed args for the `inspectdb` verb.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct InspectdbArgs {
     /// Schema name to scan. PG default `"public"`. On MySQL it's the
     /// database name (defaults to the connection's current DB when
@@ -68,13 +68,37 @@ pub(super) struct InspectdbArgs {
     pub schema: String,
     /// When `Some(name)`, only emit that one table.
     pub table: Option<String>,
+    /// Crate-root identifier the emitted `use ...::sql::Auto;` /
+    /// `use ...::Model;` statements should reference. Defaults to
+    /// `"rustango"`. Issue [#145](https://github.com/ujeenet/rustango/issues/145)
+    /// Phase 1 — first prep step for the rustango-orm extract.
+    ///
+    /// Consumers that depend on the framework facade (`rustango = "…"`)
+    /// take the default; the future `rustango-orm` CLI binding will
+    /// pass `--crate rustango_orm` so the emitted source compiles
+    /// against the bare ORM dep. The argument is parsed verbatim, so
+    /// renamed deps (`use foo as rustango_alias;`) work too — pass
+    /// the *crate name as the consumer's Cargo.toml uses it*.
+    pub crate_root: String,
 }
 
-/// Parse `[--schema <name>] [--table <name>]` into `InspectdbArgs`.
+impl Default for InspectdbArgs {
+    fn default() -> Self {
+        Self {
+            schema: String::new(),
+            table: None,
+            crate_root: "rustango".to_owned(),
+        }
+    }
+}
+
+/// Parse `[--schema <name>] [--table <name>] [--crate <name>]` into
+/// `InspectdbArgs`.
 pub(super) fn parse_inspectdb_args(args: &[String]) -> Result<InspectdbArgs, MigrateError> {
     let mut out = InspectdbArgs {
         schema: "public".to_owned(),
         table: None,
+        crate_root: "rustango".to_owned(),
     };
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
@@ -91,9 +115,28 @@ pub(super) fn parse_inspectdb_args(args: &[String]) -> Result<InspectdbArgs, Mig
                     .ok_or_else(|| MigrateError::Validation("`--table` requires a value".into()))?;
                 out.table = Some(v.clone());
             }
+            "--crate" => {
+                // Issue #145 Phase 1 — let `rustango-orm` (and any other
+                // consumer that renames the dep in their Cargo.toml)
+                // emit `use <crate>::sql::Auto;` / `use <crate>::Model;`
+                // with the right crate root. Default stays `"rustango"`
+                // so today's invocations emit bit-identical output.
+                let v = iter
+                    .next()
+                    .ok_or_else(|| MigrateError::Validation("`--crate` requires a value".into()))?;
+                let trimmed = v.trim();
+                if trimmed.is_empty() {
+                    return Err(MigrateError::Validation(
+                        "`--crate <name>` must not be empty".into(),
+                    ));
+                }
+                out.crate_root = trimmed.to_owned();
+            }
             "--help" | "-h" => {
                 return Err(MigrateError::Validation(
-                    "USAGE: manage inspectdb [--schema <name>] [--table <name>]".into(),
+                    "USAGE: manage inspectdb [--schema <name>] [--table <name>] \
+                     [--crate <name>]"
+                        .into(),
                 ));
             }
             other => {
@@ -132,7 +175,7 @@ pub(super) async fn inspectdb_cmd<W: Write>(
         )?;
         return Ok(());
     }
-    write_header(w, &parsed.schema, dialect_name)?;
+    write_header(w, &parsed.schema, dialect_name, &parsed.crate_root)?;
     for table in &tables {
         let columns = list_columns(pool, &parsed.schema, table).await?;
         let pk_columns = list_pk_columns(pool, &parsed.schema, table).await?;
@@ -149,7 +192,12 @@ pub(super) async fn inspectdb_cmd<W: Write>(
     Ok(())
 }
 
-fn write_header<W: Write>(w: &mut W, schema: &str, dialect: &str) -> std::io::Result<()> {
+fn write_header<W: Write>(
+    w: &mut W,
+    schema: &str,
+    dialect: &str,
+    crate_root: &str,
+) -> std::io::Result<()> {
     let schema_label = if dialect == "sqlite" {
         "<sqlite file>".to_owned()
     } else {
@@ -172,8 +220,8 @@ fn write_header<W: Write>(w: &mut W, schema: &str, dialect: &str) -> std::io::Re
         escape_for_comment(&schema_label),
         dialect,
     )?;
-    writeln!(w, "use rustango::sql::Auto;")?;
-    writeln!(w, "use rustango::Model;\n")?;
+    writeln!(w, "use {crate_root}::sql::Auto;")?;
+    writeln!(w, "use {crate_root}::Model;\n")?;
     Ok(())
 }
 
@@ -1289,6 +1337,9 @@ mod tests {
         let a = parse_inspectdb_args(&[]).unwrap();
         assert_eq!(a.schema, "public");
         assert!(a.table.is_none());
+        // Issue #145 — `--crate` defaults to `"rustango"` so today's
+        // invocations emit `use rustango::sql::Auto;` bit-identically.
+        assert_eq!(a.crate_root, "rustango");
     }
 
     #[test]
@@ -1305,9 +1356,66 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_picks_up_crate_root() {
+        // Issue #145 Phase 1 — the `rustango-orm` CLI (future #144)
+        // will pass `--crate rustango_orm` so the emitted source
+        // compiles in a crate that depends on the bare ORM dep.
+        let a = parse_inspectdb_args(&["--crate".into(), "rustango_orm".into()]).unwrap();
+        assert_eq!(a.crate_root, "rustango_orm");
+
+        // Renamed-dep consumers can pass an arbitrary identifier —
+        // matches the pattern `rustango-renamed-smoke` exercises for
+        // proc-macro renames. The arg is trimmed but otherwise
+        // passed through unchanged.
+        let renamed = parse_inspectdb_args(&["--crate".into(), "  orm  ".into()]).unwrap();
+        assert_eq!(renamed.crate_root, "orm");
+    }
+
+    #[test]
     fn parse_args_rejects_missing_value() {
         assert!(parse_inspectdb_args(&["--schema".into()]).is_err());
         assert!(parse_inspectdb_args(&["--table".into()]).is_err());
+        // `--crate` with no value also fails — matches `--schema` shape.
+        assert!(parse_inspectdb_args(&["--crate".into()]).is_err());
+    }
+
+    #[test]
+    fn parse_args_rejects_empty_crate_root() {
+        // Empty `--crate ""` would emit `use ::sql::Auto;` which won't
+        // compile — fail at parse time with a clear error.
+        let err = parse_inspectdb_args(&["--crate".into(), "".into()])
+            .err()
+            .expect("empty crate name must error");
+        assert!(format!("{err}").contains("must not be empty"));
+    }
+
+    #[test]
+    fn header_emits_default_crate_root_bit_identically() {
+        // Issue #145 — when `--crate` is unset the default
+        // `"rustango"` flows through, and the emitted header matches
+        // the pre-#145 output token-for-token. No downstream codegen
+        // regression for callers that don't opt in.
+        let mut buf = Vec::<u8>::new();
+        write_header(&mut buf, "public", "postgres", "rustango").unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("use rustango::sql::Auto;"));
+        assert!(out.contains("use rustango::Model;"));
+        assert!(!out.contains("rustango_orm"));
+    }
+
+    #[test]
+    fn header_threads_renamed_crate_root_into_use_statements() {
+        // The whole point of #145 Phase 1: passing `rustango_orm`
+        // produces source a `rustango-orm`-only consumer can compile.
+        let mut buf = Vec::<u8>::new();
+        write_header(&mut buf, "public", "postgres", "rustango_orm").unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("use rustango_orm::sql::Auto;"));
+        assert!(out.contains("use rustango_orm::Model;"));
+        // And the unparameterized `rustango::…` form is gone — proves
+        // a downstream `cargo build` against only `rustango-orm`
+        // won't see an unresolved-import error.
+        assert!(!out.contains("use rustango::"));
     }
 
     #[test]
