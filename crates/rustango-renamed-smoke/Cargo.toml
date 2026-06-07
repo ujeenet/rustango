@@ -51,5 +51,5 @@ postgres = ["orm/postgres"]
 #   through orm — no direct dep needed.
 # - `uuid` — routed through `__uuid` — no direct dep needed.
 # - `rust_decimal` — 1 site; not yet routed (future follow-up).
-orm = { package = "rustango", path = "../rustango" }
+orm = { package = "rustango", path = "../rustango", version = "0.42.0" }
 chrono = { workspace = true }

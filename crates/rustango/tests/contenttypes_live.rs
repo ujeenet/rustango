@@ -260,7 +260,9 @@ async fn all_returns_seeded_rows_ordered() {
     contenttypes::ensure_seeded(&pool.clone().into())
         .await
         .expect("seed");
-    let rows = ContentType::all(&pool.clone().into()).await.expect("all");
+    let rows = ContentType::all_ordered(&pool.clone().into())
+        .await
+        .expect("all");
     assert!(rows.len() >= 2, "at least two seeded models");
     // Confirm sort order: app_label asc, model_name asc.
     let mut last: Option<(String, String)> = None;
