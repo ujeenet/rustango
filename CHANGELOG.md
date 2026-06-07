@@ -19,6 +19,8 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
 - **`Model::trashed(&self) -> bool`** — Eloquent `$model->trashed()` parity. Pure in-memory predicate that returns whether the row's `#[rustango(soft_delete)]` column is set. Useful in templates (`{% if post.trashed() %}…{% endif %}`) and guard clauses on restore / force-delete flows. Macro emits only on soft-delete-enabled models.
 - **`Model::is(&self, other) -> bool` + `Model::is_not(&self, other) -> bool`** — Eloquent `$model->is($other)` / `$model->isNot($other)` parity. Pure in-memory primary-key equality between two `&Self` instances; the model/table check is automatic (typed argument). Emits on every model with a primary key.
 - **`Model::value_pool::<U>(col, &pool) -> Option<U>`** — Eloquent `Model::query()->value($col)` parity. Single-scalar-from-first-row shortcut built on the existing `values_list_flat(col).first::<U>(pool)` chain (#877). Unknown fields surface as `QueryError::UnknownField`. Emits on every model.
+- **`Model::sum_pool` / `Model::avg_pool` / `Model::min_pool` / `Model::max_pool`** — Eloquent `Model::sum/avg/min/max($col)` parity. Each is `Model::<aggregate>_pool::<U>(col, &pool) -> Option<U>`. Returns `Ok(None)` on an empty table. Backed by the existing `fetch_aggregate_pool` primitive — no schema change, no new core types. Emits on every model.
+- **`Model::doesnt_exist_pool(&pool) -> bool`** — Eloquent `Model::doesntExist()` parity. Inverse of `exists_pool`. Emits on every model.
 
 ### Fixed
 
