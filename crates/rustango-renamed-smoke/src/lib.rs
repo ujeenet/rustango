@@ -49,6 +49,22 @@ mod gated {
         pub created_at: chrono::DateTime<chrono::Utc>,
     }
 
+    // Foreign-key model — exercises the `ForeignKey<T>` emission
+    // path through the rename. The macro emits per-FK accessor
+    // methods (`.author_get_pool(...)` / `.author_set(...)`) plus
+    // `LoadRelated::__rustango_load_related` for `select_related`
+    // hydration. If the renamed-crate path resolution broke any of
+    // these emit sites, this struct wouldn't compile.
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "rrs_demo_child")]
+    pub struct RenamedDemoChild {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 80)]
+        pub label: String,
+        pub parent: orm::sql::ForeignKey<RenamedDemo>,
+    }
+
     // Serializer covers the `derive_serializer` path-resolution
     // branch — the macro emits `#root::serializer::ModelSerializer`
     // impls plus a tuple-positional view. If the rename broke the
@@ -86,6 +102,27 @@ mod gated {
             // test.
             assert_eq!(RenamedDemo::SCHEMA.table, "rrs_demo");
             assert!(RenamedDemo::SCHEMA.primary_key().is_some());
+        }
+
+        #[test]
+        fn fk_model_schema_resolves_through_renamed_dep() {
+            // The FK-bearing model exercises a different macro
+            // emit path (`load_related_impl_tokens`, the per-FK
+            // accessor emission, and the relation registration in
+            // ModelSchema). If any of those used hardcoded
+            // ::rustango:: paths, this struct wouldn't compile.
+            assert_eq!(RenamedDemoChild::SCHEMA.table, "rrs_demo_child");
+            // Confirm the FK relation registered correctly — the
+            // `parent` field carries a `Relation::Fk` because the
+            // macro saw `ForeignKey<RenamedDemo>` at derive time.
+            let parent_field = RenamedDemoChild::SCHEMA
+                .field("parent")
+                .expect("parent field exists");
+            assert!(
+                matches!(parent_field.relation, Some(orm::core::Relation::Fk { .. })),
+                "expected parent field's relation to be Fk, got {:?}",
+                parent_field.relation
+            );
         }
 
         #[cfg(feature = "serializer")]
