@@ -31,14 +31,25 @@ postgres = ["orm/postgres"]
 # Use rustango's default features (postgres + admin + tenancy +
 # etc.) so the dep graph is complete; the smoke crate's own
 # `postgres` feature is just for matching the macro's cfg-gates.
+#
+# This crate intentionally declares ZERO direct deps on
+# `serde` / `serde_json` / `tracing` — every macro emit that used
+# to need them now routes through `rustango::__serde` /
+# `__serde_json` / `__tracing` (#142 follow-up). If a regression
+# re-introduces a hardcoded `::serde::...` etc. emit, this
+# crate's build will break, which is the whole point of keeping
+# it here.
+#
+# Still on the list as direct deps:
+# - `chrono` — referenced in user-typed struct fields
+#   (`pub created_at: chrono::DateTime<chrono::Utc>`); not just
+#   macro-emitted. Real apps using DateTime columns need chrono
+#   as a direct dep anyway. The macro-side `__chrono` re-export
+#   still removes the dep requirement when the user only uses
+#   chrono via the macro's `auto_now` write paths.
+# - `sqlx` — still emitted as `#root::sql::sqlx::...` so routed
+#   through orm — no direct dep needed.
+# - `uuid` — routed through `__uuid` — no direct dep needed.
+# - `rust_decimal` — 1 site; not yet routed (future follow-up).
 orm = { package = "rustango", path = "../rustango" }
 chrono = { workspace = true }
-# The macro emits `::sqlx::Row` etc. directly — not routed through
-# `#root` (#142 follow-up). Real-world consumers usually have these
-# already; the smoke crate adds them. `tracing` is no longer in
-# this list — the 4 `::tracing::warn!` emits in the macro now
-# route through `rustango::__tracing::` so the smoke crate doesn't
-# need a direct tracing dep.
-sqlx = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }

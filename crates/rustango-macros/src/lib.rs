@@ -1400,7 +1400,7 @@ fn generic_fk_accessor_tokens(
                 &self,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
-                ::core::option::Option<::serde_json::Value>,
+                ::core::option::Option<#root::__serde_json::Value>,
                 #root::sql::ExecError,
             > {
                 let gfk = #root::contenttypes::GenericForeignKey::new(
@@ -1794,7 +1794,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                     column: #column,
                     value: ::core::convert::Into::<#root::core::Expr>::into(
                         ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::chrono::Utc::now()
+                            #root::__chrono::Utc::now()
                         )
                     ),
                 }
@@ -2462,8 +2462,8 @@ fn inherent_impl_tokens(
                     quote! {
                         (
                             #column_lit,
-                            ::serde_json::to_value(&self.#ident)
-                                .unwrap_or(::serde_json::Value::Null),
+                            #root::__serde_json::to_value(&self.#ident)
+                                .unwrap_or(#root::__serde_json::Value::Null),
                         )
                     }
                 })
@@ -2649,9 +2649,9 @@ fn inherent_impl_tokens(
                             ),
                         };
                         // Narrow the audit snapshot to the same column set.
-                        let _all_pairs: ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                        let _all_pairs: ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
                             ::std::vec![ #( #pairs2 ),* ];
-                        let _narrowed: ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                        let _narrowed: ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
                             _all_pairs
                                 .into_iter()
                                 .filter(|(col, _)| _wanted_cols.contains(col))
@@ -3015,10 +3015,10 @@ fn inherent_impl_tokens(
                                         _audit_before_row, #column_lit,
                                     ) {
                                         ::core::result::Result::Ok(v) => {
-                                            ::serde_json::to_value(&v)
-                                                .unwrap_or(::serde_json::Value::Null)
+                                            #root::__serde_json::to_value(&v)
+                                                .unwrap_or(#root::__serde_json::Value::Null)
                                         }
-                                        ::core::result::Result::Err(_) => ::serde_json::Value::Null,
+                                        ::core::result::Result::Err(_) => #root::__serde_json::Value::Null,
                                     },
                                 )
                             }
@@ -3092,7 +3092,7 @@ fn inherent_impl_tokens(
                             }
                         ),
                     };
-                    let _after_pairs: ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                    let _after_pairs: ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
                         ::std::vec![ #( #after_pairs_pg ),* ];
                     #root::audit::save_one_with_diff(
                         pool,
@@ -5319,10 +5319,10 @@ fn inherent_impl_tokens(
                             &_audit_before_row, #column_lit,
                         ) {
                             ::core::result::Result::Ok(v) => {
-                                ::serde_json::to_value(&v)
-                                    .unwrap_or(::serde_json::Value::Null)
+                                #root::__serde_json::to_value(&v)
+                                    .unwrap_or(#root::__serde_json::Value::Null)
                             }
-                            ::core::result::Result::Err(_) => ::serde_json::Value::Null,
+                            ::core::result::Result::Err(_) => #root::__serde_json::Value::Null,
                         },
                     )
                 }
@@ -5333,8 +5333,8 @@ fn inherent_impl_tokens(
                 quote! {
                     (
                         #column_lit,
-                        ::serde_json::to_value(&self.#ident)
-                            .unwrap_or(::serde_json::Value::Null),
+                        #root::__serde_json::to_value(&self.#ident)
+                            .unwrap_or(#root::__serde_json::Value::Null),
                     )
                 }
             });
@@ -5347,7 +5347,7 @@ fn inherent_impl_tokens(
                     #pk_column_lit_for_select,
                 );
                 let _audit_before_pairs:
-                    ::std::option::Option<::std::vec::Vec<(&'static str, ::serde_json::Value)>> =
+                    ::std::option::Option<::std::vec::Vec<(&'static str, #root::__serde_json::Value)>> =
                     match #root::sql::sqlx::query(&_audit_select_sql)
                         .bind(#pk_value_for_bind)
                         .fetch_optional(&mut *_executor)
@@ -5362,7 +5362,7 @@ fn inherent_impl_tokens(
             let post = quote! {
                 if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
                     let _audit_after:
-                        ::std::vec::Vec<(&'static str, ::serde_json::Value)> =
+                        ::std::vec::Vec<(&'static str, #root::__serde_json::Value)> =
                         ::std::vec![ #( #after_pairs ),* ];
                     let _audit_entry = #root::audit::PendingEntry {
                         entity_table: <Self as #root::core::Model>::SCHEMA.table,
@@ -5402,8 +5402,8 @@ fn inherent_impl_tokens(
             quote! {
                 (
                     #column_lit,
-                    ::serde_json::to_value(&_row.#ident)
-                        .unwrap_or(::serde_json::Value::Null),
+                    #root::__serde_json::to_value(&_row.#ident)
+                        .unwrap_or(#root::__serde_json::Value::Null),
                 )
             }
         });
@@ -5642,7 +5642,7 @@ fn inherent_impl_tokens(
                                 column: #col_lit,
                                 value: ::core::convert::Into::<#root::core::Expr>::into(
                                     ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        ::chrono::Utc::now()
+                                        #root::__chrono::Utc::now()
                                     )
                                 ),
                             },
@@ -5730,7 +5730,7 @@ fn inherent_impl_tokens(
                                 column: #col_lit,
                                 value: ::core::convert::Into::<#root::core::Expr>::into(
                                     ::core::convert::Into::<#root::core::SqlValue>::into(
-                                        ::chrono::Utc::now()
+                                        #root::__chrono::Utc::now()
                                     )
                                 ),
                             },
@@ -9445,6 +9445,7 @@ impl DetectedKind {
     /// but we still need a value-typed fallback to keep the match
     /// total.
     fn sqlvalue_match_arm(self) -> (TokenStream2, TokenStream2) {
+        let root = rustango_root();
         match self {
             Self::I16 => (quote!(I16), quote!(0i16)),
             Self::I32 => (quote!(I32), quote!(0i32)),
@@ -9455,18 +9456,18 @@ impl DetectedKind {
             Self::String => (quote!(String), quote!(::std::string::String::new())),
             Self::DateTime => (
                 quote!(DateTime),
-                quote!(<::chrono::DateTime<::chrono::Utc> as ::std::default::Default>::default()),
+                quote!(<#root::__chrono::DateTime<#root::__chrono::Utc> as ::std::default::Default>::default()),
             ),
             Self::Date => (
                 quote!(Date),
-                quote!(<::chrono::NaiveDate as ::std::default::Default>::default()),
+                quote!(<#root::__chrono::NaiveDate as ::std::default::Default>::default()),
             ),
             Self::Time => (
                 quote!(Time),
-                quote!(<::chrono::NaiveTime as ::std::default::Default>::default()),
+                quote!(<#root::__chrono::NaiveTime as ::std::default::Default>::default()),
             ),
             Self::Uuid => (quote!(Uuid), quote!(::uuid::Uuid::nil())),
-            Self::Json => (quote!(Json), quote!(::serde_json::Value::Null)),
+            Self::Json => (quote!(Json), quote!(#root::__serde_json::Value::Null)),
             Self::Decimal => (
                 quote!(Decimal),
                 quote!(<::rust_decimal::Decimal as ::std::default::Default>::default()),
@@ -10936,13 +10937,13 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl ::serde::Serialize for #struct_name {
+        impl #root::__serde::Serialize for #struct_name {
             fn serialize<S>(&self, serializer: S)
                 -> ::core::result::Result<S::Ok, S::Error>
             where
-                S: ::serde::Serializer,
+                S: #root::__serde::Serializer,
             {
-                use ::serde::ser::SerializeStruct;
+                use #root::__serde::ser::SerializeStruct;
                 let mut __state = serializer.serialize_struct(
                     #struct_name_lit,
                     #output_field_count,

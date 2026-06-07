@@ -1306,6 +1306,26 @@ pub use uuid as __uuid;
 #[doc(hidden)]
 pub use tracing as __tracing;
 
+/// Same rationale as [`__tracing`] / [`__uuid`] — `#[derive(Model)]`
+/// emits `chrono::Utc::now()` at `auto_now_add` / `auto_now` write
+/// paths; routing through this re-export means downstream consumers
+/// don't need a direct `chrono` dep just to derive Model.
+/// **Not part of the public API.** #142 follow-up.
+#[doc(hidden)]
+pub use chrono as __chrono;
+
+/// Same rationale — `#[derive(Model)]` emits `serde_json::Value` /
+/// `serde_json::to_value` at the audit / diff write paths.
+/// **Not part of the public API.** #142 follow-up.
+#[doc(hidden)]
+pub use serde_json as __serde_json;
+
+/// Same rationale — `#[derive(Serializer)]` emits `serde::Serialize`
+/// / `serde::Serializer` trait impls.
+/// **Not part of the public API.** #142 follow-up.
+#[doc(hidden)]
+pub use serde as __serde;
+
 /// `#[derive(Model)]` — populates the `inventory` registry the admin
 /// walks, generates `objects()` / typed columns / `insert` / `delete`
 /// / `save`.
