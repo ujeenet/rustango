@@ -199,6 +199,23 @@ async fn comments_accessor_returns_chainable_queryset() {
 }
 
 #[tokio::test]
+async fn comments_first_returns_first_child_or_none() {
+    // Eloquent `$post->comments->first()` analog — `post.comments_first()`
+    // returns Some(first child) or None.
+    let pool = make_pool().await;
+    let (p1_id, _p2_id, p3_id) = seed(&pool).await;
+    let p1 = Post::find(p1_id, &pool).await.unwrap().unwrap();
+    let p3 = Post::find(p3_id, &pool).await.unwrap().unwrap();
+
+    let first = p1.comments_first(&pool).await.unwrap();
+    assert!(first.is_some());
+    assert!(first.unwrap().body.starts_with("comment-"));
+
+    // p3 has no comments → None.
+    assert!(p3.comments_first(&pool).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn comments_fetch_bare_name_hot_path() {
     // Bare-name hot path — `post.comments_fetch(&pool)` is the
     // suffix-free shortcut over `post.comments().fetch_pool(&pool)`.
