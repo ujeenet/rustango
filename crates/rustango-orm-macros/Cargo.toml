@@ -1,6 +1,7 @@
 [package]
 name = "rustango-orm-macros"
 description = "ORM-only proc-macros for rustango — Model / Form / embed_migrations. Carve-out of rustango-macros for the standalone rustango-orm crate."
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
