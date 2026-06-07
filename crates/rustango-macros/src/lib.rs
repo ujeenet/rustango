@@ -4235,6 +4235,98 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Bulk-update — set `set_col = set_val` on every row
+            /// matching `where_col = where_val`. Returns affected row
+            /// count. Eloquent
+            /// `Model::where($where_col, $where_val)->update([$set_col => $set_val])`
+            /// parity.
+            ///
+            /// For multi-column updates drop into the queryset
+            /// builder: `Self::query().filter(...).update().set(...).set(...).execute_pool(&pool)`.
+            ///
+            /// # Errors
+            /// As [`UpdaterPool::execute_pool`].
+            ///
+            /// [`UpdaterPool::execute_pool`]: rustango::sql::UpdaterPool::execute_pool
+            pub async fn update_where_pool(
+                where_col: &str,
+                where_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                set_col: &str,
+                set_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                use ::rustango::sql::UpdaterPool as _;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(where_col, where_val)
+                    .update()
+                    .set(set_col, set_val)
+                    .execute_pool(pool)
+                    .await
+            }
+
+            /// Bulk-delete — remove every row matching
+            /// `where_col = where_val`. Returns affected row count.
+            /// Eloquent
+            /// `Model::where($where_col, $where_val)->delete()` parity.
+            ///
+            /// For more complex filters drop into the queryset
+            /// builder + `Self::query().filter(...).delete().execute_pool(&pool)`.
+            ///
+            /// # Errors
+            /// As [`::rustango::sql::delete_pool`].
+            pub async fn delete_where_pool(
+                where_col: &str,
+                where_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                let _query = ::rustango::core::DeleteQuery {
+                    model: <Self as ::rustango::core::Model>::SCHEMA,
+                    where_clause: ::rustango::core::WhereExpr::Predicate(
+                        ::rustango::core::Filter {
+                            column: <Self as ::rustango::core::Model>::SCHEMA
+                                .field(where_col)
+                                .ok_or_else(|| {
+                                    ::rustango::sql::ExecError::Query(
+                                        ::rustango::core::QueryError::UnknownField {
+                                            model: <Self as ::rustango::core::Model>::SCHEMA.name,
+                                            field: ::std::string::ToString::to_string(where_col),
+                                        },
+                                    )
+                                })?
+                                .column,
+                            op: ::rustango::core::Op::Eq,
+                            value: ::core::convert::Into::into(where_val),
+                        },
+                    ),
+                };
+                ::rustango::sql::delete_pool(pool, &_query).await
+            }
+
+            /// Bulk-update — set `set_col = set_val` on EVERY row of
+            /// this model's table. **No WHERE clause** — use with
+            /// care. Eloquent `Model::query()->update([$col => $val])`
+            /// parity.
+            ///
+            /// Use for backfills, one-shot reset flows, etc. The
+            /// returned count is rows affected.
+            ///
+            /// # Errors
+            /// As [`UpdaterPool::execute_pool`].
+            ///
+            /// [`UpdaterPool::execute_pool`]: rustango::sql::UpdaterPool::execute_pool
+            pub async fn update_all_pool(
+                set_col: &str,
+                set_val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                use ::rustango::sql::UpdaterPool as _;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .update()
+                    .set(set_col, set_val)
+                    .execute_pool(pool)
+                    .await
+            }
+
             /// Fetch every row where `<col> BETWEEN lo AND hi`
             /// (inclusive on both ends — same as SQL). Eloquent
             /// `Model::whereBetween($col, [$lo, $hi])->get()` parity.
