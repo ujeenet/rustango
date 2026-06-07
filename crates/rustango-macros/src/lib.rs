@@ -3635,6 +3635,56 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Pluck a single scalar from the first row of the
+            /// table. Eloquent `Model::query()->value($col)` parity
+            /// (the un-filtered shorthand — pair with the existing
+            /// `Self::query()` builder for the filtered form).
+            ///
+            /// Thin wrapper over `QuerySet::<Self>::default()
+            /// .values_list_flat(col).first::<U>(pool)` — appends
+            /// `LIMIT 1` so the DB doesn't materialize rows past
+            /// the first. Useful for one-shot pickups like
+            /// `User::value_pool::<String>("email", &pool)` or
+            /// `Counter::value_pool::<i64>("hits", &pool)`.
+            ///
+            /// # Errors
+            /// As `ValuesFlatQuerySet::first`.
+            pub async fn value_pool<U>(
+                col: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<U>,
+                ::rustango::sql::ExecError,
+            >
+            where
+                U: ::rustango::sql::MaybePgScalar
+                    + ::rustango::sql::MaybeMyScalar
+                    + ::rustango::sql::MaybeSqliteScalar
+                    + ::core::marker::Send
+                    + ::core::marker::Unpin,
+            {
+                // Resolve `col` (runtime arg) to the `&'static str`
+                // SCHEMA-registered column so the builder's
+                // `values_list_flat(&'static str)` signature is
+                // honored. Unknown fields surface as
+                // `QueryError::UnknownField`.
+                let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
+                    .field(col)
+                    .ok_or_else(|| {
+                        ::rustango::sql::ExecError::Query(
+                            ::rustango::core::QueryError::UnknownField {
+                                model: <Self as ::rustango::core::Model>::SCHEMA.name,
+                                field: ::std::string::ToString::to_string(col),
+                            },
+                        )
+                    })?
+                    .column;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .values_list_flat(_col_static)
+                    .first::<U>(pool)
+                    .await
+            }
+
             /// Fetch the row with the largest `field` value —
             /// `SELECT … ORDER BY <field> DESC LIMIT 1`. Returns
             /// `Ok(None)` for an empty table. Eloquent
@@ -4683,6 +4733,24 @@ fn inherent_impl_tokens(
             #tx_insert_method
             #tx_save_method
             #soft_delete_methods
+
+            /// Returns `true` when `other` represents the same DB
+            /// row as `self` — i.e. their primary keys compare
+            /// equal. Eloquent `$model->is($other)` parity.
+            ///
+            /// Because both arguments are typed `&Self`, the
+            /// model/table check is automatic — `Post::is` cannot
+            /// be invoked against a `Comment` at compile time. Only
+            /// the PK has to be compared at runtime.
+            pub fn is(&self, other: &Self) -> bool {
+                self.#pk_ident == other.#pk_ident
+            }
+
+            /// Inverse of [`Self::is`]. Eloquent `$model->isNot($other)`
+            /// parity.
+            pub fn is_not(&self, other: &Self) -> bool {
+                self.#pk_ident != other.#pk_ident
+            }
         }
     });
 
