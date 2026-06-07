@@ -1296,6 +1296,16 @@ pub use rustango_macros as macros;
 #[doc(hidden)]
 pub use uuid as __uuid;
 
+/// Re-exported so `#[derive(Model)]`-emitted `tracing::warn!` calls
+/// (currently 4 sites in `save_partial` / similar) resolve through
+/// the rustango facade — downstream consumers don't need a direct
+/// `tracing` dep just to derive Model. **Not part of the public
+/// API** — names here may change between minors.
+///
+/// #142 follow-up surfaced by [#902](https://github.com/ujeenet/rustango/pull/902).
+#[doc(hidden)]
+pub use tracing as __tracing;
+
 /// `#[derive(Model)]` — populates the `inventory` registry the admin
 /// walks, generates `objects()` / typed columns / `insert` / `delete`
 /// / `save`.

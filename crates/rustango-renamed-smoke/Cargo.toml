@@ -33,10 +33,12 @@ postgres = ["orm/postgres"]
 # `postgres` feature is just for matching the macro's cfg-gates.
 orm = { package = "rustango", path = "../rustango" }
 chrono = { workspace = true }
-# The macro emits `::tracing::warn!(...)` and `::sqlx::Row`, etc.
-# directly — not routed through `#root` (#142 follow-up). Real-world
-# consumers usually have these already; the smoke crate adds them.
-tracing = "0.1"
+# The macro emits `::sqlx::Row` etc. directly — not routed through
+# `#root` (#142 follow-up). Real-world consumers usually have these
+# already; the smoke crate adds them. `tracing` is no longer in
+# this list — the 4 `::tracing::warn!` emits in the macro now
+# route through `rustango::__tracing::` so the smoke crate doesn't
+# need a direct tracing dep.
 sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
