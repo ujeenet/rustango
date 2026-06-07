@@ -14,6 +14,8 @@ mod error;
 mod executor;
 mod foreign_key;
 pub mod m2m;
+#[doc(hidden)]
+pub mod model_shortcuts;
 #[cfg(feature = "mysql")]
 mod mysql;
 mod pool;
