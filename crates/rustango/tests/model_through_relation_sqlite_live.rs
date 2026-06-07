@@ -248,3 +248,14 @@ async fn posts_through_count_returns_far_side_count() {
     empty.save_pool(&pool).await.unwrap();
     assert_eq!(empty.posts_through_count(&pool).await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn posts_through_fetch_bare_name_hot_path() {
+    // Bare-name hot path — `posts_through_fetch(&pool)` is the
+    // suffix-free shortcut over `posts_through().fetch_pool(&pool)`.
+    let pool = make_pool().await;
+    let (a_id, _b_id) = seed(&pool).await;
+    let a = Country::find(a_id, &pool).await.unwrap().unwrap();
+    let posts = a.posts_through_fetch(&pool).await.unwrap();
+    assert_eq!(posts.len(), 6);
+}
