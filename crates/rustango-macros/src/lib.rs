@@ -659,6 +659,7 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
 }
 
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let root = rustango_root();
     let struct_name = &input.ident;
 
     let Data::Struct(data) = &input.data else {
@@ -919,9 +920,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #generic_fk_accessors
         #manager_trait
 
-        ::rustango::core::inventory::submit! {
-            ::rustango::core::ModelEntry {
-                schema: <#struct_name as ::rustango::core::Model>::SCHEMA,
+        #root::core::inventory::submit! {
+            #root::core::ModelEntry {
+                schema: <#struct_name as #root::core::Model>::SCHEMA,
                 // `module_path!()` evaluates at the registration site,
                 // so a Model declared in `crate::blog::models` records
                 // `"<crate>::blog::models"` and `resolved_app_label()`
@@ -943,6 +944,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 /// trait bound on `fetch_on` is universally satisfied — users
 /// never have to think about implementing it.
 fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation]) -> TokenStream2 {
+    let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
         let fk_col = rel.fk_column.as_str();
@@ -953,12 +955,12 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         let assign = if rel.nullable {
             quote! {
                 self.#field_ident = ::core::option::Option::Some(
-                    ::rustango::sql::ForeignKey::loaded(_pk, _parent),
+                    #root::sql::ForeignKey::loaded(_pk, _parent),
                 );
             }
         } else {
             quote! {
-                self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+                self.#field_ident = #root::sql::ForeignKey::loaded(_pk, _parent);
             }
         };
         quote! {
@@ -971,7 +973,7 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
                 // invariant break — surfacing the panic in dev
                 // catches it before users hit silent PK=0 corruption.
                 let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
-                    ::rustango::core::SqlValue::#variant_ident(v) => v,
+                    #root::core::SqlValue::#variant_ident(v) => v,
                     _other => {
                         ::core::debug_assert!(
                             false,
@@ -992,14 +994,14 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
     });
     quote! {
         #[cfg(feature = "postgres")]
-        impl ::rustango::sql::LoadRelated for #struct_name {
+        impl #root::sql::LoadRelated for #struct_name {
             #[allow(unused_variables)]
             fn __rustango_load_related(
                 &mut self,
-                row: &::rustango::sql::sqlx::postgres::PgRow,
+                row: &#root::sql::sqlx::postgres::PgRow,
                 field_name: &str,
                 alias: &str,
-            ) -> ::core::result::Result<bool, ::rustango::sql::sqlx::Error> {
+            ) -> ::core::result::Result<bool, #root::sql::sqlx::Error> {
                 match field_name {
                     #( #arms )*
                     _ => ::core::result::Result::Ok(false),
@@ -1020,6 +1022,7 @@ fn load_related_impl_my_tokens(
     struct_name: &syn::Ident,
     fk_relations: &[FkRelation],
 ) -> TokenStream2 {
+    let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
         let fk_col = rel.fk_column.as_str();
@@ -1028,12 +1031,12 @@ fn load_related_impl_my_tokens(
         let assign = if rel.nullable {
             quote! {
                 __self.#field_ident = ::core::option::Option::Some(
-                    ::rustango::sql::ForeignKey::loaded(_pk, _parent),
+                    #root::sql::ForeignKey::loaded(_pk, _parent),
                 );
             }
         } else {
             quote! {
-                __self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+                __self.#field_ident = #root::sql::ForeignKey::loaded(_pk, _parent);
             }
         };
         // `self` IS hygiene-tracked through macro_rules — emitted from
@@ -1047,7 +1050,7 @@ fn load_related_impl_my_tokens(
                 // See note in `load_related_impl_tokens` (PG twin) —
                 // the same loud-in-debug invariant guard.
                 let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
-                    ::rustango::core::SqlValue::#variant_ident(v) => v,
+                    #root::core::SqlValue::#variant_ident(v) => v,
                     _other => {
                         ::core::debug_assert!(
                             false,
@@ -1067,7 +1070,7 @@ fn load_related_impl_my_tokens(
         }
     });
     quote! {
-        ::rustango::__impl_my_load_related!(#struct_name, |__self, row, field_name, alias| {
+        #root::__impl_my_load_related!(#struct_name, |__self, row, field_name, alias| {
             #( #arms )*
         });
     }
@@ -1080,6 +1083,7 @@ fn load_related_impl_sqlite_tokens(
     struct_name: &syn::Ident,
     fk_relations: &[FkRelation],
 ) -> TokenStream2 {
+    let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let parent_ty = &rel.parent_type;
         let fk_col = rel.fk_column.as_str();
@@ -1088,12 +1092,12 @@ fn load_related_impl_sqlite_tokens(
         let assign = if rel.nullable {
             quote! {
                 __self.#field_ident = ::core::option::Option::Some(
-                    ::rustango::sql::ForeignKey::loaded(_pk, _parent),
+                    #root::sql::ForeignKey::loaded(_pk, _parent),
                 );
             }
         } else {
             quote! {
-                __self.#field_ident = ::rustango::sql::ForeignKey::loaded(_pk, _parent);
+                __self.#field_ident = #root::sql::ForeignKey::loaded(_pk, _parent);
             }
         };
         quote! {
@@ -1101,7 +1105,7 @@ fn load_related_impl_sqlite_tokens(
                 let _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_sqlite_row(row, alias)?;
                 let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
-                    ::rustango::core::SqlValue::#variant_ident(v) => v,
+                    #root::core::SqlValue::#variant_ident(v) => v,
                     _other => {
                         ::core::debug_assert!(
                             false,
@@ -1121,7 +1125,7 @@ fn load_related_impl_sqlite_tokens(
         }
     });
     quote! {
-        ::rustango::__impl_sqlite_load_related!(#struct_name, |__self, row, field_name, alias| {
+        #root::__impl_sqlite_load_related!(#struct_name, |__self, row, field_name, alias| {
             #( #arms )*
         });
     }
@@ -1135,6 +1139,7 @@ fn load_related_impl_sqlite_tokens(
 /// Always emitted (with `_ => None` for FK-less models) so the
 /// trait bound on `fetch_with_prefetch` is universally satisfied.
 fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation]) -> TokenStream2 {
+    let root = rustango_root();
     let arms = fk_relations.iter().map(|rel| {
         let fk_col = rel.fk_column.as_str();
         let field_ident = syn::Ident::new(fk_col, proc_macro2::Span::call_site());
@@ -1148,7 +1153,7 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
                 quote! {
                     #fk_col => self.#field_ident
                         .as_ref()
-                        .map(|fk| ::rustango::sql::ForeignKey::pk(fk)),
+                        .map(|fk| #root::sql::ForeignKey::pk(fk)),
                 }
             } else {
                 quote! {
@@ -1180,14 +1185,14 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
             quote! {
                 #fk_col => self.#field_ident
                     .as_ref()
-                    .map(|fk| ::core::convert::Into::<::rustango::core::SqlValue>::into(
-                        ::rustango::sql::ForeignKey::pk(fk)
+                    .map(|fk| ::core::convert::Into::<#root::core::SqlValue>::into(
+                        #root::sql::ForeignKey::pk(fk)
                     )),
             }
         } else {
             quote! {
                 #fk_col => ::core::option::Option::Some(
-                    ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                    ::core::convert::Into::<#root::core::SqlValue>::into(
                         self.#field_ident.pk()
                     )
                 ),
@@ -1195,7 +1200,7 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         }
     });
     quote! {
-        impl ::rustango::sql::FkPkAccess for #struct_name {
+        impl #root::sql::FkPkAccess for #struct_name {
             #[allow(unused_variables)]
             fn __rustango_fk_pk(&self, field_name: &str) -> ::core::option::Option<i64> {
                 match field_name {
@@ -1207,7 +1212,7 @@ fn fk_pk_access_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
             fn __rustango_fk_pk_value(
                 &self,
                 field_name: &str,
-            ) -> ::core::option::Option<::rustango::core::SqlValue> {
+            ) -> ::core::option::Option<#root::core::SqlValue> {
                 match field_name {
                     #( #value_arms )*
                     _ => ::core::option::Option::None,
@@ -1235,6 +1240,7 @@ fn reverse_helper_tokens(
     fk_relations: &[FkRelation],
     default_related_name: Option<&str>,
 ) -> TokenStream2 {
+    let root = rustango_root();
     if fk_relations.is_empty() {
         return TokenStream2::new();
     }
@@ -1273,7 +1279,7 @@ fn reverse_helper_tokens(
         );
         let pool_doc = format!(
             "Tri-dialect counterpart of [`Self::{pg_suffix}`] — takes \
-             [`::rustango::sql::Pool`] and dispatches per backend so the \
+             [`#root::sql::Pool`] and dispatches per backend so the \
              reverse-FK fetch works on PG / MySQL / SQLite under one method. \
              Use this from framework code that holds a `&Pool` (admin, \
              tenancy resolver, viewset handlers); reach for the executor- \
@@ -1285,24 +1291,24 @@ fn reverse_helper_tokens(
                 #[doc = #doc]
                 ///
                 /// # Errors
-                /// Returns [`::rustango::sql::ExecError`] for SQL-writing
+                /// Returns [`#root::sql::ExecError`] for SQL-writing
                 /// or driver failures.
                 pub async fn #pg_method_ident<'_c, _E>(
                     &self,
                     _executor: _E,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<#child_ident>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 >
                 where
-                    _E: ::rustango::sql::sqlx::Executor<
+                    _E: #root::sql::sqlx::Executor<
                         '_c,
-                        Database = ::rustango::sql::sqlx::Postgres,
+                        Database = #root::sql::sqlx::Postgres,
                     >,
                 {
-                    let _pk: ::rustango::core::SqlValue = self.__rustango_pk_value();
-                    ::rustango::query::QuerySet::<#child_ident>::new()
-                        .filter_op(#fk_col, ::rustango::core::Op::Eq, _pk)
+                    let _pk: #root::core::SqlValue = self.__rustango_pk_value();
+                    #root::query::QuerySet::<#child_ident>::new()
+                        .filter_op(#fk_col, #root::core::Op::Eq, _pk)
                         .fetch_on(_executor)
                         .await
                 }
@@ -1312,19 +1318,19 @@ fn reverse_helper_tokens(
                 #[doc = #pool_doc]
                 ///
                 /// # Errors
-                /// Returns [`::rustango::sql::ExecError`] for SQL-writing
+                /// Returns [`#root::sql::ExecError`] for SQL-writing
                 /// or driver failures.
                 pub async fn #pool_method_ident(
                     &self,
-                    pool: &::rustango::sql::Pool,
+                    pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<#child_ident>,
-                    ::rustango::sql::ExecError,
+                    #root::sql::ExecError,
                 > {
-                    use ::rustango::sql::FetcherPool as _;
-                    let _pk: ::rustango::core::SqlValue = self.__rustango_pk_value();
-                    ::rustango::query::QuerySet::<#child_ident>::new()
-                        .filter_op(#fk_col, ::rustango::core::Op::Eq, _pk)
+                    use #root::sql::FetcherPool as _;
+                    let _pk: #root::core::SqlValue = self.__rustango_pk_value();
+                    #root::query::QuerySet::<#child_ident>::new()
+                        .filter_op(#fk_col, #root::core::Op::Eq, _pk)
                         .fetch_pool(pool)
                         .await
                 }
@@ -1352,6 +1358,7 @@ fn generic_fk_accessor_tokens(
     generic_fks: &[GenericFkAttr],
     column_entries: &[ColumnEntry],
 ) -> TokenStream2 {
+    let root = rustango_root();
     if generic_fks.is_empty() {
         return TokenStream2::new();
     }
@@ -1391,12 +1398,12 @@ fn generic_fk_accessor_tokens(
             )]
             pub async fn #accessor_ident(
                 &self,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
                 ::core::option::Option<::serde_json::Value>,
-                ::rustango::sql::ExecError,
+                #root::sql::ExecError,
             > {
-                let gfk = ::rustango::contenttypes::GenericForeignKey::new(
+                let gfk = #root::contenttypes::GenericForeignKey::new(
                     self.#ct_ident as i64,
                     self.#pk_ident as i64,
                 );
@@ -1414,12 +1421,12 @@ fn generic_fk_accessor_tokens(
                 #name_literal,
                 "\", ...))]`."
             )]
-            pub async fn #setter_ident<T: ::rustango::core::Model>(
+            pub async fn #setter_ident<T: #root::core::Model>(
                 &mut self,
-                pool: &::rustango::sql::Pool,
+                pool: &#root::sql::Pool,
                 target_pk: i64,
-            ) -> ::core::result::Result<(), ::rustango::sql::ExecError> {
-                let gfk = ::rustango::contenttypes::GenericForeignKey::for_target::<T>(
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                let gfk = #root::contenttypes::GenericForeignKey::for_target::<T>(
                     pool,
                     target_pk,
                 ).await?;
@@ -1437,6 +1444,7 @@ fn generic_fk_accessor_tokens(
 }
 
 fn m2m_accessor_tokens(struct_name: &syn::Ident, m2m_relations: &[M2MAttr]) -> TokenStream2 {
+    let root = rustango_root();
     if m2m_relations.is_empty() {
         return TokenStream2::new();
     }
@@ -1447,8 +1455,8 @@ fn m2m_accessor_tokens(struct_name: &syn::Ident, m2m_relations: &[M2MAttr]) -> T
         let src_col = rel.src.as_str();
         let dst_col = rel.dst.as_str();
         quote! {
-            pub fn #method_ident(&self) -> ::rustango::sql::M2MManager {
-                ::rustango::sql::M2MManager {
+            pub fn #method_ident(&self) -> #root::sql::M2MManager {
+                #root::sql::M2MManager {
                     src_pk: self.__rustango_pk_value(),
                     through: #through,
                     src_col: #src_col,
@@ -1474,7 +1482,7 @@ struct ColumnEntry {
     name: String,
     /// SQL-side column name (e.g. `"user_id"`).
     column: String,
-    /// `::rustango::core::FieldType::I64` etc.
+    /// `#root::core::FieldType::I64` etc.
     field_type_tokens: TokenStream2,
 }
 
@@ -1589,6 +1597,7 @@ struct FkRelation {
 }
 
 fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<CollectedFields> {
+    let root = rustango_root();
     let cap = named.named.len();
     let mut out = CollectedFields {
         field_schemas: Vec::with_capacity(cap),
@@ -1666,7 +1675,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         }
         out.insert_columns.push(quote!(#column));
         out.insert_values.push(quote! {
-            ::core::convert::Into::<::rustango::core::SqlValue>::into(
+            ::core::convert::Into::<#root::core::SqlValue>::into(
                 ::core::clone::Clone::clone(&self.#ident)
             )
         });
@@ -1689,7 +1698,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 out.auto_field_idents
                     .push((ident.clone(), info.column.clone()));
                 out.auto_assigns.push(quote! {
-                    self.#ident = ::rustango::sql::try_get_returning(_returning_row, #column)?;
+                    self.#ident = #root::sql::try_get_returning(_returning_row, #column)?;
                 });
             }
             if info.default_uuid_v7 {
@@ -1699,23 +1708,23 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 // column is ALWAYS present in the INSERT statement —
                 // no RETURNING / no DB DEFAULT needed.
                 out.insert_pushes.push(quote! {
-                    if matches!(&self.#ident, ::rustango::sql::Auto::Unset) {
-                        self.#ident = ::rustango::sql::Auto::Set(
-                            ::rustango::__uuid::Uuid::now_v7(),
+                    if matches!(&self.#ident, #root::sql::Auto::Unset) {
+                        self.#ident = #root::sql::Auto::Set(
+                            #root::__uuid::Uuid::now_v7(),
                         );
                     }
-                    if let ::rustango::sql::Auto::Set(_v) = &self.#ident {
+                    if let #root::sql::Auto::Set(_v) = &self.#ident {
                         _columns.push(#column);
-                        _values.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                        _values.push(::core::convert::Into::<#root::core::SqlValue>::into(
                             ::core::clone::Clone::clone(_v)
                         ));
                     }
                 });
             } else {
                 out.insert_pushes.push(quote! {
-                    if let ::rustango::sql::Auto::Set(_v) = &self.#ident {
+                    if let #root::sql::Auto::Set(_v) = &self.#ident {
                         _columns.push(#column);
-                        _values.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                        _values.push(::core::convert::Into::<#root::core::SqlValue>::into(
                             ::core::clone::Clone::clone(_v)
                         ));
                     }
@@ -1725,7 +1734,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // never in the Unset path (we drop them from `columns`).
             out.bulk_columns_all.push(quote!(#column));
             out.bulk_pushes_all.push(quote! {
-                _row_vals.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
                     ::core::clone::Clone::clone(&_row.#ident)
                 ));
             });
@@ -1735,10 +1744,10 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             let ident_clone = ident.clone();
             out.bulk_auto_uniformity.push(quote! {
                 for _r in rows.iter().skip(1) {
-                    if matches!(_r.#ident_clone, ::rustango::sql::Auto::Unset) != _first_unset {
+                    if matches!(_r.#ident_clone, #root::sql::Auto::Unset) != _first_unset {
                         return ::core::result::Result::Err(
-                            ::rustango::sql::ExecError::Sql(
-                                ::rustango::sql::SqlError::BulkAutoMixed
+                            #root::sql::ExecError::Sql(
+                                #root::sql::SqlError::BulkAutoMixed
                             )
                         );
                     }
@@ -1747,7 +1756,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         } else {
             out.insert_pushes.push(quote! {
                 _columns.push(#column);
-                _values.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                _values.push(::core::convert::Into::<#root::core::SqlValue>::into(
                     ::core::clone::Clone::clone(&self.#ident)
                 ));
             });
@@ -1755,7 +1764,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             out.bulk_columns_no_auto.push(quote!(#column));
             out.bulk_columns_all.push(quote!(#column));
             let push_expr = quote! {
-                _row_vals.push(::core::convert::Into::<::rustango::core::SqlValue>::into(
+                _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
                     ::core::clone::Clone::clone(&_row.#ident)
                 ));
             };
@@ -1781,10 +1790,10 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // wall-clock at write time, regardless of what value the
             // user left in the struct field.
             out.update_assignments.push(quote! {
-                ::rustango::core::Assignment {
+                #root::core::Assignment {
                     column: #column,
-                    value: ::core::convert::Into::<::rustango::core::Expr>::into(
-                        ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                    value: ::core::convert::Into::<#root::core::Expr>::into(
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
                             ::chrono::Utc::now()
                         )
                     ),
@@ -1793,10 +1802,10 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             out.upsert_update_columns.push(quote!(#column));
         } else {
             out.update_assignments.push(quote! {
-                ::rustango::core::Assignment {
+                #root::core::Assignment {
                     column: #column,
-                    value: ::core::convert::Into::<::rustango::core::Expr>::into(
-                        ::core::convert::Into::<::rustango::core::SqlValue>::into(
+                    value: ::core::convert::Into::<#root::core::Expr>::into(
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
                             ::core::clone::Clone::clone(&self.#ident)
                         )
                     ),
@@ -1849,6 +1858,7 @@ fn model_impl_tokens(
     extra_permissions: &[(String, String)],
     default_permissions: &[String],
 ) -> TokenStream2 {
+    let root = rustango_root();
     let display_tokens = if let Some(name) = display {
         quote!(::core::option::Option::Some(#name))
     } else {
@@ -1876,8 +1886,8 @@ fn model_impl_tokens(
     // anywhere) keep the v0.24.x behavior. Container-attr parser
     // already validated the value is "registry" or "tenant".
     let scope_tokens = match scope.map(|s| s.to_ascii_lowercase()).as_deref() {
-        Some("registry") => quote!(::rustango::core::ModelScope::Registry),
-        _ => quote!(::rustango::core::ModelScope::Tenant),
+        Some("registry") => quote!(#root::core::ModelScope::Registry),
+        _ => quote!(#root::core::ModelScope::Tenant),
     };
     let verbose_name_tokens = optional_str(verbose_name);
     let verbose_name_plural_tokens = optional_str(verbose_name_plural);
@@ -1910,13 +1920,13 @@ fn model_impl_tokens(
         // variant — kept at the codegen layer so the IR doesn't
         // carry the string form.
         let method_variant = match idx.method.as_str() {
-            "gin" => quote!(::rustango::core::IndexMethod::Gin),
-            "gist" => quote!(::rustango::core::IndexMethod::Gist),
-            "brin" => quote!(::rustango::core::IndexMethod::Brin),
-            "spgist" => quote!(::rustango::core::IndexMethod::SpGist),
-            "hash" => quote!(::rustango::core::IndexMethod::Hash),
-            "bloom" => quote!(::rustango::core::IndexMethod::Bloom),
-            _ => quote!(::rustango::core::IndexMethod::BTree),
+            "gin" => quote!(#root::core::IndexMethod::Gin),
+            "gist" => quote!(#root::core::IndexMethod::Gist),
+            "brin" => quote!(#root::core::IndexMethod::Brin),
+            "spgist" => quote!(#root::core::IndexMethod::SpGist),
+            "hash" => quote!(#root::core::IndexMethod::Hash),
+            "bloom" => quote!(#root::core::IndexMethod::Bloom),
+            _ => quote!(#root::core::IndexMethod::BTree),
         };
         let where_clause = match &idx.where_clause {
             Some(s) => quote!(::core::option::Option::Some(#s)),
@@ -1924,7 +1934,7 @@ fn model_impl_tokens(
         };
         let include_lits: Vec<&str> = idx.include.iter().map(String::as_str).collect();
         quote! {
-            ::rustango::core::IndexSchema {
+            #root::core::IndexSchema {
                 name: #name,
                 columns: &[ #(#cols),* ],
                 unique: #unique,
@@ -1938,7 +1948,7 @@ fn model_impl_tokens(
         let name = c.name.as_str();
         let expr = c.expr.as_str();
         quote! {
-            ::rustango::core::CheckConstraint {
+            #root::core::CheckConstraint {
                 name: #name,
                 expr: #expr,
             }
@@ -1957,7 +1967,7 @@ fn model_impl_tokens(
             None => quote!(::core::option::Option::None),
         };
         quote! {
-            ::rustango::core::ExclusionConstraint {
+            #root::core::ExclusionConstraint {
                 name: #name,
                 using: #using,
                 elements: &[ #(#element_tokens),* ],
@@ -1971,7 +1981,7 @@ fn model_impl_tokens(
         let from_cols: Vec<&str> = rel.from.iter().map(String::as_str).collect();
         let on_cols: Vec<&str> = rel.on.iter().map(String::as_str).collect();
         quote! {
-            ::rustango::core::CompositeFkRelation {
+            #root::core::CompositeFkRelation {
                 name: #name,
                 to: #to,
                 from: &[ #(#from_cols),* ],
@@ -1984,7 +1994,7 @@ fn model_impl_tokens(
         let ct_col = rel.ct_column.as_str();
         let pk_col = rel.pk_column.as_str();
         quote! {
-            ::rustango::core::GenericRelation {
+            #root::core::GenericRelation {
                 name: #name,
                 ct_column: #ct_col,
                 pk_column: #pk_col,
@@ -2006,7 +2016,7 @@ fn model_impl_tokens(
         let dst = rel.dst.as_str();
         let auto_create = rel.auto_create;
         quote! {
-            ::rustango::core::M2MRelation {
+            #root::core::M2MRelation {
                 name: #name,
                 to: #to,
                 through: #through,
@@ -2017,8 +2027,8 @@ fn model_impl_tokens(
         }
     });
     quote! {
-        impl ::rustango::core::Model for #struct_name {
-            const SCHEMA: &'static ::rustango::core::ModelSchema = &::rustango::core::ModelSchema {
+        impl #root::core::Model for #struct_name {
+            const SCHEMA: &'static #root::core::ModelSchema = &#root::core::ModelSchema {
                 name: #model_name,
                 table: #table,
                 fields: &[ #(#field_schemas),* ],
@@ -2059,6 +2069,7 @@ fn model_impl_tokens(
 /// schema. `None` when the user wrote no `#[rustango(admin(...))]`;
 /// otherwise a static reference to a populated `AdminConfig`.
 fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
+    let root = rustango_root();
     let Some(admin) = admin else {
         return quote!(::core::option::Option::None);
     };
@@ -2106,7 +2117,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     let fieldset_tokens = fieldsets.iter().map(|(title, fields)| {
         let title = title.as_str();
         let field_lits = fields.iter().map(|s| s.as_str());
-        quote!(::rustango::core::Fieldset {
+        quote!(#root::core::Fieldset {
             title: #title,
             fields: &[ #( #field_lits ),* ],
         })
@@ -2132,7 +2143,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     let prepopulated_tokens = prepopulated.iter().map(|(target, sources)| {
         let target = target.as_str();
         let source_lits = sources.iter().map(|s| s.as_str());
-        quote!(::rustango::core::PrepopulatedField {
+        quote!(#root::core::PrepopulatedField {
             target: #target,
             sources: &[ #( #source_lits ),* ],
         })
@@ -2154,15 +2165,15 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
 
     // #352 — list_select_related accepts "all" | "none" | "field, field, …".
     let list_select_related_tokens = match admin.list_select_related.as_deref() {
-        None | Some("all") => quote!(::rustango::core::ListSelectRelated::All),
-        Some("none") => quote!(::rustango::core::ListSelectRelated::None),
+        None | Some("all") => quote!(#root::core::ListSelectRelated::All),
+        Some("none") => quote!(#root::core::ListSelectRelated::None),
         Some(raw) => {
             let names: Vec<&str> = raw
                 .split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .collect();
-            quote!(::rustango::core::ListSelectRelated::Only(&[ #( #names ),* ]))
+            quote!(#root::core::ListSelectRelated::Only(&[ #( #names ),* ]))
         }
     };
 
@@ -2193,7 +2204,7 @@ fn admin_config_tokens(admin: Option<&AdminAttrs>) -> TokenStream2 {
     });
 
     quote! {
-        ::core::option::Option::Some(&::rustango::core::AdminConfig {
+        ::core::option::Option::Some(&#root::core::AdminConfig {
             list_display: &[ #( #list_display_lits ),* ],
             search_fields: &[ #( #search_fields_lits ),* ],
             list_per_page: #list_per_page,
@@ -6631,10 +6642,11 @@ fn inherent_impl_tokens(
 /// `auto_assigns` but reading from `_returning_row` and writing to
 /// `_row_mut` instead of `self`.
 fn bulk_auto_assigns_for_row(fields: &CollectedFields) -> TokenStream2 {
+    let root = rustango_root();
     let lines = fields.auto_field_idents.iter().map(|(ident, column)| {
         let col_lit = column.as_str();
         quote! {
-            _row_mut.#ident = ::rustango::sql::sqlx::Row::try_get(
+            _row_mut.#ident = #root::sql::sqlx::Row::try_get(
                 _returning_row,
                 #col_lit,
             )?;
@@ -6663,6 +6675,7 @@ fn column_module_tokens(
     struct_name: &syn::Ident,
     entries: &[ColumnEntry],
 ) -> TokenStream2 {
+    let root = rustango_root();
     let items = entries.iter().map(|e| {
         let col_ty = column_type_ident(&e.ident);
         let value_ty = &e.value_ty;
@@ -6673,12 +6686,12 @@ fn column_module_tokens(
             #[derive(::core::clone::Clone, ::core::marker::Copy)]
             pub struct #col_ty;
 
-            impl ::rustango::core::Column for #col_ty {
+            impl #root::core::Column for #col_ty {
                 type Model = super::#struct_name;
                 type Value = #value_ty;
                 const NAME: &'static str = #name;
                 const COLUMN: &'static str = #column;
-                const FIELD_TYPE: ::rustango::core::FieldType = #field_type_tokens;
+                const FIELD_TYPE: #root::core::FieldType = #field_type_tokens;
             }
         }
     });
@@ -6709,9 +6722,10 @@ fn column_module_ident(struct_name: &syn::Ident) -> syn::Ident {
 }
 
 fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2]) -> TokenStream2 {
+    let root = rustango_root();
     // The Postgres impl is always emitted — every rustango build pulls in
     // sqlx-postgres via the default `postgres` feature. The MySQL impl is
-    // routed through `::rustango::__impl_my_from_row!`, a cfg-gated
+    // routed through `#root::__impl_my_from_row!`, a cfg-gated
     // macro_rules whose body collapses to nothing when rustango is built
     // without the `mysql` feature. No user-facing feature shim required.
     //
@@ -6721,23 +6735,23 @@ fn from_row_impl_tokens(struct_name: &syn::Ident, from_row_inits: &[TokenStream2
     // entry is already in `field: expr` shape, the existing tokens slot in.
     quote! {
         #[cfg(feature = "postgres")]
-        impl<'r> ::rustango::sql::sqlx::FromRow<'r, ::rustango::sql::sqlx::postgres::PgRow>
+        impl<'r> #root::sql::sqlx::FromRow<'r, #root::sql::sqlx::postgres::PgRow>
             for #struct_name
         {
             fn from_row(
-                row: &'r ::rustango::sql::sqlx::postgres::PgRow,
-            ) -> ::core::result::Result<Self, ::rustango::sql::sqlx::Error> {
+                row: &'r #root::sql::sqlx::postgres::PgRow,
+            ) -> ::core::result::Result<Self, #root::sql::sqlx::Error> {
                 ::core::result::Result::Ok(Self {
                     #( #from_row_inits ),*
                 })
             }
         }
 
-        ::rustango::__impl_my_from_row!(#struct_name, |row| {
+        #root::__impl_my_from_row!(#struct_name, |row| {
             #( #from_row_inits ),*
         });
 
-        ::rustango::__impl_sqlite_from_row!(#struct_name, |row| {
+        #root::__impl_sqlite_from_row!(#struct_name, |row| {
             #( #from_row_inits ),*
         });
     }
@@ -8883,7 +8897,7 @@ struct FieldInfo<'a> {
     /// The original field type, e.g. `i64` or `Option<String>`. Emitted as
     /// the `Column::Value` associated type for typed-column tokens.
     value_ty: &'a Type,
-    /// `FieldType` variant tokens (`::rustango::core::FieldType::I64`).
+    /// `FieldType` variant tokens (`#root::core::FieldType::I64`).
     field_type_tokens: TokenStream2,
     schema: TokenStream2,
     from_row_init: TokenStream2,
@@ -9001,6 +9015,7 @@ fn validate_sql_identifier(name: &str, kind: &str, span: proc_macro2::Span) -> s
 }
 
 fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInfo<'a>> {
+    let root = rustango_root();
     let attrs = parse_field_attrs(field)?;
     let ident = field
         .ident
@@ -9186,12 +9201,12 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
                 other => unreachable!("on_delete `{other}` should have been rejected at parse"),
             };
             quote!(::core::option::Option::Some(
-                ::rustango::core::OnDeleteAction::#variant
+                #root::core::OnDeleteAction::#variant
             ))
         }
     };
     let schema = quote! {
-        ::rustango::core::FieldSchema {
+        #root::core::FieldSchema {
             name: #name,
             column: #column_lit,
             ty: #field_type_tokens,
@@ -9218,10 +9233,10 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     };
 
     let from_row_init = quote! {
-        #ident: ::rustango::sql::sqlx::Row::try_get(row, #column_lit)?
+        #ident: #root::sql::sqlx::Row::try_get(row, #column_lit)?
     };
     let from_aliased_row_init = quote! {
-        #ident: ::rustango::sql::sqlx::Row::try_get(
+        #ident: #root::sql::sqlx::Row::try_get(
             row,
             ::std::format!("{}__{}", prefix, #column_lit).as_str(),
         )?
@@ -9323,6 +9338,7 @@ fn relation_tokens(
     fk_inner: Option<&syn::Type>,
     table: &str,
 ) -> syn::Result<TokenStream2> {
+    let root = rustango_root();
     if let Some(inner) = fk_inner {
         if attrs.fk.is_some() || attrs.o2o.is_some() {
             return Err(syn::Error::new_spanned(
@@ -9333,8 +9349,8 @@ fn relation_tokens(
         }
         let on = attrs.on.as_deref().unwrap_or("id");
         return Ok(quote! {
-            ::core::option::Option::Some(::rustango::core::Relation::Fk {
-                to: <#inner as ::rustango::core::Model>::SCHEMA.table,
+            ::core::option::Option::Some(#root::core::Relation::Fk {
+                to: <#inner as #root::core::Model>::SCHEMA.table,
                 on: #on,
             })
         });
@@ -9353,14 +9369,14 @@ fn relation_tokens(
             // inside Self::SCHEMA's own initializer.
             let resolved = if to == "self" { table } else { to };
             Ok(quote! {
-                ::core::option::Option::Some(::rustango::core::Relation::Fk { to: #resolved, on: #on })
+                ::core::option::Option::Some(#root::core::Relation::Fk { to: #resolved, on: #on })
             })
         }
         (None, Some(to)) => {
             let on = attrs.on.as_deref().unwrap_or("id");
             let resolved = if to == "self" { table } else { to };
             Ok(quote! {
-                ::core::option::Option::Some(::rustango::core::Relation::O2O { to: #resolved, on: #on })
+                ::core::option::Option::Some(#root::core::Relation::O2O { to: #resolved, on: #on })
             })
         }
         (None, None) => {
@@ -9398,21 +9414,22 @@ enum DetectedKind {
 
 impl DetectedKind {
     fn variant_tokens(self) -> TokenStream2 {
+        let root = rustango_root();
         match self {
-            Self::I16 => quote!(::rustango::core::FieldType::I16),
-            Self::I32 => quote!(::rustango::core::FieldType::I32),
-            Self::I64 => quote!(::rustango::core::FieldType::I64),
-            Self::F32 => quote!(::rustango::core::FieldType::F32),
-            Self::F64 => quote!(::rustango::core::FieldType::F64),
-            Self::Bool => quote!(::rustango::core::FieldType::Bool),
-            Self::String => quote!(::rustango::core::FieldType::String),
-            Self::DateTime => quote!(::rustango::core::FieldType::DateTime),
-            Self::Date => quote!(::rustango::core::FieldType::Date),
-            Self::Time => quote!(::rustango::core::FieldType::Time),
-            Self::Uuid => quote!(::rustango::core::FieldType::Uuid),
-            Self::Json => quote!(::rustango::core::FieldType::Json),
-            Self::Decimal => quote!(::rustango::core::FieldType::Decimal),
-            Self::Binary => quote!(::rustango::core::FieldType::Binary),
+            Self::I16 => quote!(#root::core::FieldType::I16),
+            Self::I32 => quote!(#root::core::FieldType::I32),
+            Self::I64 => quote!(#root::core::FieldType::I64),
+            Self::F32 => quote!(#root::core::FieldType::F32),
+            Self::F64 => quote!(#root::core::FieldType::F64),
+            Self::Bool => quote!(#root::core::FieldType::Bool),
+            Self::String => quote!(#root::core::FieldType::String),
+            Self::DateTime => quote!(#root::core::FieldType::DateTime),
+            Self::Date => quote!(#root::core::FieldType::Date),
+            Self::Time => quote!(#root::core::FieldType::Time),
+            Self::Uuid => quote!(#root::core::FieldType::Uuid),
+            Self::Json => quote!(#root::core::FieldType::Json),
+            Self::Decimal => quote!(#root::core::FieldType::Decimal),
+            Self::Binary => quote!(#root::core::FieldType::Binary),
         }
     }
 
