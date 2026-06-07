@@ -3927,6 +3927,7 @@ mod tests {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         }))
     }
 
@@ -4039,6 +4040,7 @@ mod tests {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         }))
     }
 
@@ -4433,6 +4435,7 @@ mod tests {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         }));
         assert!(default_order_by(no_pk).is_empty());
     }
@@ -4693,6 +4696,7 @@ mod tests {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         }));
         let pk = uuid_schema.primary_key().unwrap();
         let raw = "550e8400-e29b-41d4-a716-446655440000";
@@ -4765,6 +4769,7 @@ mod tests {
             proxy: false,
             get_latest_by: None,
             extra_permissions: &[],
+            global_scopes: &[],
         }));
         let pk = str_schema.primary_key().unwrap();
         match coerce_pk(pk, "hello-world") {

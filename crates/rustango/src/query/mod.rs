@@ -69,6 +69,21 @@ pub struct QuerySet<T: Model> {
     /// chained after `.none()` keep accumulating filters / orderings,
     /// matching Django's "an immutable empty queryset" semantic.
     is_none: bool,
+    /// Issue #820 — Eloquent `withoutGlobalScope($name)`. Names from
+    /// `T::SCHEMA.global_scopes` whose auto-applied filters should be
+    /// skipped on this queryset. Empty (default) keeps every scope
+    /// active. Populated by [`Self::without_global_scope`]. When
+    /// [`Self::disable_all_global_scopes`] is also set, this list is
+    /// ignored (the wholesale opt-out wins).
+    disabled_global_scopes: Vec<&'static str>,
+    /// Issue #820 — Eloquent `withoutGlobalScopes()`. When `true`,
+    /// every scope on `T::SCHEMA.global_scopes` is skipped (this
+    /// queryset behaves like the model carries no scopes). Set by
+    /// [`Self::without_global_scopes`]. Once true the
+    /// [`Self::disabled_global_scopes`] per-name list becomes
+    /// redundant — left intact so re-chaining `without_global_scope`
+    /// after `without_global_scopes` doesn't surprise the caller.
+    disable_all_global_scopes: bool,
     _model: PhantomData<fn() -> T>,
 }
 
@@ -175,7 +190,78 @@ impl<T: Model> QuerySet<T> {
             lock_mode: None,
             compound: Vec::new(),
             is_none: false,
+            disabled_global_scopes: Vec::new(),
+            disable_all_global_scopes: false,
             _model: PhantomData,
+        }
+    }
+
+    /// Issue #820 — Eloquent `Model::query()->withoutGlobalScope($name)`.
+    /// Suppress one named entry from
+    /// [`crate::core::ModelSchema::global_scopes`] on this queryset.
+    /// Repeated calls accumulate — pass each name to suppress.
+    ///
+    /// Unknown names are silently ignored (matches Eloquent + lets
+    /// downstream code add scopes without breaking call sites that
+    /// pre-emptively opt out of names that don't exist yet).
+    ///
+    /// No-op when the model declares no global scopes.
+    #[must_use]
+    pub fn without_global_scope(mut self, name: &'static str) -> Self {
+        if !self.disabled_global_scopes.contains(&name) {
+            self.disabled_global_scopes.push(name);
+        }
+        self
+    }
+
+    /// Issue #820 — Eloquent `Model::query()->withoutGlobalScopes()`.
+    /// Suppress *every* scope from
+    /// [`crate::core::ModelSchema::global_scopes`] on this queryset
+    /// — useful for admin or migration code paths that need to see
+    /// soft-deleted / unpublished / cross-tenant rows the application
+    /// hides by default.
+    ///
+    /// Composes with later [`Self::without_global_scope`] calls
+    /// without changing the wholesale opt-out (once disabled,
+    /// everything stays disabled on that queryset).
+    #[must_use]
+    pub fn without_global_scopes(mut self) -> Self {
+        self.disable_all_global_scopes = true;
+        self
+    }
+
+    /// Issue #820 — fold the schema-declared global scopes into the
+    /// pending filter list, respecting per-queryset opt-outs. Called
+    /// at the top of every `compile*` entry point so the WHERE walks
+    /// the scope expressions through the same resolver as any other
+    /// typed filter.
+    ///
+    /// The method **prepends** scope filters in declared order so the
+    /// final WHERE reads `scope_a AND scope_b AND <user filters>`.
+    /// `AND` is commutative; the order matters only for predicate-
+    /// trace readability in `EXPLAIN`.
+    ///
+    /// No-op when the model carries no scopes or when
+    /// `disable_all_global_scopes` is set.
+    fn apply_global_scopes(&mut self) {
+        if self.disable_all_global_scopes {
+            return;
+        }
+        let schema = T::SCHEMA;
+        if schema.global_scopes.is_empty() {
+            return;
+        }
+        let mut prefixed: Vec<PendingFilter> = Vec::new();
+        for scope in schema.global_scopes {
+            if self.disabled_global_scopes.contains(&scope.name) {
+                continue;
+            }
+            let expr = (scope.apply)();
+            prefixed.push(PendingFilter::Expr(expr));
+        }
+        if !prefixed.is_empty() {
+            prefixed.append(&mut self.pending);
+            self.pending = prefixed;
         }
     }
 
@@ -984,7 +1070,14 @@ impl<T: Model> QuerySet<T> {
     /// Returns [`QueryError::UnknownField`] if a filter names a field not
     /// present on the model, and [`QueryError::TypeMismatch`] if the bound
     /// value's type does not match the field's declared type.
-    pub fn compile(self) -> Result<SelectQuery, QueryError> {
+    pub fn compile(mut self) -> Result<SelectQuery, QueryError> {
+        // Issue #820 — Eloquent global scopes. Fold the schema-declared
+        // auto-applied filters into the pending list (respecting any
+        // `without_global_scope` / `without_global_scopes` opt-outs)
+        // BEFORE we hand `self.pending` to the resolver. From here on
+        // the resolver doesn't know or care which filters were scopes
+        // and which were user-provided.
+        self.apply_global_scopes();
         let model: &'static ModelSchema = T::SCHEMA;
         let where_clause = resolve_pending(model, self.pending)?;
         let mut joins = lower_select_related(model, &self.select_related)?;
@@ -1170,7 +1263,13 @@ impl<T: Model> QuerySet<T> {
     ///
     /// # Errors
     /// As [`QuerySet::compile`].
-    pub fn compile_delete(self) -> Result<DeleteQuery, QueryError> {
+    pub fn compile_delete(mut self) -> Result<DeleteQuery, QueryError> {
+        // Issue #820 — fold global scopes into the WHERE so a
+        // `Post.objects().delete_pool(&pool)` honors the same
+        // auto-applied filter that `Post.objects().fetch_pool(&pool)`
+        // does (e.g. a `published_only` scope means a wholesale delete
+        // still won't reach unpublished rows).
+        self.apply_global_scopes();
         let model: &'static ModelSchema = T::SCHEMA;
         let where_clause = resolve_pending(model, self.pending)?;
         // #331 — `.none().delete()` is a guaranteed no-op. Append an
@@ -1369,7 +1468,11 @@ impl<T: Model> UpdateBuilder<T> {
     /// Returns [`QueryError::UnknownField`] if any `set` or filter names an
     /// unknown field, and [`QueryError::TypeMismatch`] if any bound value's
     /// type doesn't match the field's declared type.
-    pub fn compile(self) -> Result<UpdateQuery, QueryError> {
+    pub fn compile(mut self) -> Result<UpdateQuery, QueryError> {
+        // Issue #820 — same rationale as the SELECT / DELETE paths:
+        // an `.update().set(...)` shouldn't escape the model's global
+        // scopes any more than a plain `.fetch_pool` would.
+        self.qs.apply_global_scopes();
         let model: &'static ModelSchema = T::SCHEMA;
 
         let assignments = self
@@ -2481,13 +2584,18 @@ impl<T: Model> AggregateBuilder<T> {
     ///   per-row).
     ///
     /// Explicit `.group_by(...)` always wins.
-    pub fn compile(self) -> Result<AggregateQuery, QueryError> {
+    pub fn compile(mut self) -> Result<AggregateQuery, QueryError> {
         // Surface any builder-time deferred error first (e.g. an
         // `Op::In` against an annotation alias) so the user sees the
         // real cause rather than a downstream compile failure.
         if let Some(e) = self.deferred_error {
             return Err(e);
         }
+        // Issue #820 — fold global scopes into the WHERE so aggregates
+        // honor the same auto-applied filter (e.g. `.count_pool()`
+        // against a `published_only`-scoped model counts published
+        // rows only, not the table's full row count).
+        self.qs.apply_global_scopes();
         let model = T::SCHEMA;
         let where_clause = resolve_pending(model, self.qs.pending)?;
         // Walk each AggregateExpr for column-name typos. Today this

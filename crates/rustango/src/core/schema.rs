@@ -562,6 +562,51 @@ pub struct ModelSchema {
     /// archive:Can archive")]` — comma-separated `codename:label`
     /// pairs, same shape as the existing `choices = "..."` attribute.
     pub extra_permissions: &'static [(&'static str, &'static str)],
+    /// Eloquent-shape **global scopes** — filters auto-applied to every
+    /// [`crate::query::QuerySet`] built for this model. Issue #820.
+    /// Each entry pairs a name (used by
+    /// [`crate::query::QuerySet::without_global_scope`]) with a
+    /// constructor function that returns a [`crate::core::WhereExpr`]
+    /// at query-build time.
+    ///
+    /// Empty slice means "no auto-applied filters" (every QuerySet
+    /// starts unfiltered, like Django). Non-empty means every
+    /// queryset is implicitly `qs.filter(<scope_expr>)` unless the
+    /// caller chains
+    /// [`crate::query::QuerySet::without_global_scope`] or
+    /// [`crate::query::QuerySet::without_global_scopes`].
+    ///
+    /// Set via repeated `#[rustango(global_scope(name = "...", apply =
+    /// fn_path))]` attributes on the struct. The `fn_path` must
+    /// resolve to a `fn() -> WhereExpr` in scope when the macro
+    /// expands. Substrate for soft-delete auto-hiding and tenant-
+    /// isolation patterns.
+    pub global_scopes: &'static [GlobalScope],
+}
+
+/// A single auto-applied query filter — declared via
+/// `#[rustango(global_scope(name = "...", apply = fn))]` on the
+/// model struct and folded into every [`crate::query::QuerySet`]
+/// built for that model. Issue #820.
+///
+/// The `apply` function is invoked at query compile time so it can
+/// pull in any state (e.g. `chrono::Utc::now()` for a "published
+/// before now" scope). Keep it cheap — it runs once per `compile()`
+/// call.
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalScope {
+    /// Identifier used by
+    /// [`crate::query::QuerySet::without_global_scope`] to opt out of
+    /// this specific scope on a per-query basis. Should be unique
+    /// among the model's `global_scopes` slice; rustango doesn't
+    /// enforce uniqueness today but a duplicate name makes the
+    /// escape hatch ambiguous.
+    pub name: &'static str,
+    /// Constructor invoked at query-compile time. Returns the
+    /// `WhereExpr` that gets `AND`-ed into the WHERE clause. The
+    /// signature is `fn() -> WhereExpr` (not a closure) so the
+    /// declaration fits in a `const`-friendly slice.
+    pub apply: fn() -> crate::core::WhereExpr,
 }
 
 impl ModelSchema {
