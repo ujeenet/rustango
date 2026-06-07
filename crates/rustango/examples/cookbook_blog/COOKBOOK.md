@@ -742,9 +742,59 @@ Post::objects()
 
 Same SQL-column-name convention as `through(...)` — sidesteps the multi-hop filter gap. Optional `self_pk_column = "..."` defaults to `"id"`.
 
+Each `reverse_has(...)` attribute also emits a third method — `<name>_count_pool(&pool) -> i64` — for Eloquent `$model->relation->count()` parity. Runs `SELECT COUNT(*) FROM <child> WHERE <child_fk_column> = <self.pk>`:
+
+```rust
+let n: i64 = post.comments_count_pool(&pool).await?;
+```
+
 **Status**: FK-reverse subset only — M2M / GFK `whereHas`, sub-predicate closures, `has(rel, '>', N)` count comparisons, and `withCount`-style annotate-by-relation remain follow-up slices.
 
 **Verified by**: [`tests/model_reverse_has_sqlite_live.rs`](crates/rustango/tests/model_reverse_has_sqlite_live.rs)
+
+---
+
+### 2.22d `#[rustango(global_scope(name, apply))]` — Eloquent global scopes
+
+**What**: Container-level attribute that declares an auto-applied filter — every `QuerySet` built for that model implicitly carries the scope's `WHERE` without the caller chaining `.filter(...)`. The substrate Eloquent uses for soft-delete hiding, tenant isolation, "published only" lenses, etc. Issue [#820](https://github.com/ujeenet/rustango/issues/820).
+
+Scopes fold in at **every compile entry** — SELECT (`fetch_pool` / `Model::all`), DELETE (`compile_delete`), aggregate (`count_pool` / `Model::count`), UPDATE. `ValuesQuerySet` / dates / etc. inherit via their delegating `compile()`.
+
+**Recipe**:
+
+```rust
+use rustango::core::{Filter, Op, SqlValue, WhereExpr};
+
+fn active_only() -> WhereExpr {
+    WhereExpr::Predicate(Filter {
+        column: "is_active",
+        op: Op::Eq,
+        value: SqlValue::Bool(true),
+    })
+}
+
+#[derive(Model)]
+#[rustango(
+    table = "post",
+    global_scope(name = "active", apply = active_only),
+)]
+pub struct Post { … }
+
+// Auto-applied — emits `WHERE is_active = true`:
+Post::objects().fetch_pool(&pool).await?;
+Post::all(&pool).await?;     // bare-name shortcut, also scoped
+Post::count(&pool).await?;   // aggregate also scoped
+
+// Per-name opt-out (Eloquent withoutGlobalScope):
+Post::objects().without_global_scope("active").fetch_pool(&pool).await?;
+
+// Wholesale opt-out (Eloquent withoutGlobalScopes):
+Post::objects().without_global_scopes().fetch_pool(&pool).await?;
+```
+
+Repeated `#[rustango(global_scope(...))]` attributes accumulate; duplicate names are rejected at macro-parse time. The `apply` value is a function path (resolves in the consumer's scope at macro expansion).
+
+**Verified by**: [`tests/model_global_scope_sqlite_live.rs`](crates/rustango/tests/model_global_scope_sqlite_live.rs)
 
 ---
 
