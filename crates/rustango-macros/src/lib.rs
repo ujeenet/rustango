@@ -4165,6 +4165,70 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Eloquent `Model::chunk($n, fn ($chunk) { ... })` —
+            /// stream every row of this model in batches of `n`,
+            /// invoking the callback once per batch. Stable PK-ASC
+            /// ordering so the LIMIT/OFFSET pagination is
+            /// deterministic across drivers.
+            ///
+            /// The callback is async — it can do further DB work
+            /// (writes, related-row lookups, queue dispatch) per
+            /// batch. Return `Err(...)` from the callback to abort
+            /// the iteration early; the error bubbles up.
+            ///
+            /// **When to use**: bulk processing flows that can't
+            /// fit the whole table in memory — sending newsletters,
+            /// running data migrations, computing summary
+            /// statistics. For small / known-bounded tables, plain
+            /// `Self::all(&pool)` is simpler.
+            ///
+            /// **Caveat**: ascending OFFSET pagination is O(N²) on
+            /// large tables. For multi-million-row scans prefer
+            /// keyset-by-PK (the standard "WHERE id > last_seen"
+            /// shape) over `chunk(...)`.
+            ///
+            /// Skipped on models without a primary key — chunking
+            /// needs a stable order to avoid skipping / repeating
+            /// rows across batches.
+            pub async fn chunk<F, Fut>(
+                n: i64,
+                pool: &#root::sql::Pool,
+                mut cb: F,
+            ) -> ::core::result::Result<(), #root::sql::ExecError>
+            where
+                F: ::core::ops::FnMut(::std::vec::Vec<Self>) -> Fut,
+                Fut: ::core::future::Future<
+                    Output = ::core::result::Result<(), #root::sql::ExecError>,
+                >,
+            {
+                use #root::sql::FetcherPool as _;
+                let pk_col = match Self::primary_key_column() {
+                    ::core::option::Option::Some(c) => c,
+                    ::core::option::Option::None => {
+                        return ::core::result::Result::Ok(());
+                    }
+                };
+                let mut offset: i64 = 0;
+                loop {
+                    let rows: ::std::vec::Vec<Self> =
+                        #root::query::QuerySet::<Self>::default()
+                            .order_by(&[(pk_col, false)])
+                            .limit(n)
+                            .offset(offset)
+                            .fetch_pool(pool)
+                            .await?;
+                    if rows.is_empty() {
+                        return ::core::result::Result::Ok(());
+                    }
+                    let len = rows.len() as i64;
+                    cb(rows).await?;
+                    if len < n {
+                        return ::core::result::Result::Ok(());
+                    }
+                    offset += n;
+                }
+            }
+
             /// Delete every row of this model — `TRUNCATE TABLE
             /// <table> RESTART IDENTITY CASCADE` on Postgres,
             /// `DELETE FROM <table>` on MySQL / SQLite (which don't
