@@ -3288,17 +3288,7 @@ fn inherent_impl_tokens(
                         + ::core::marker::Send
                         + ::core::marker::Unpin,
                 {
-                    let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
-                        .field(col)
-                        .ok_or_else(|| {
-                            ::rustango::sql::ExecError::Query(
-                                ::rustango::core::QueryError::UnknownField {
-                                    model: <Self as ::rustango::core::Model>::SCHEMA.name,
-                                    field: ::std::string::ToString::to_string(col),
-                                },
-                            )
-                        })?
-                        .column;
+                    let _col_static: &'static str = Self::__resolve_col(col)?;
                     ::rustango::query::QuerySet::<Self>::default()
                         .values_list_flat(_col_static)
                         .first::<U>(pool)
@@ -3527,86 +3517,131 @@ fn inherent_impl_tokens(
                 by: i64,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
-                use ::rustango::sql::UpdaterPool as _;
-                // Resolve `col` to the `&'static str` column name via
-                // the schema so `F(col_static)` can construct an
-                // `Expr::Column`. Unknown fields surface as
-                // `QueryError::UnknownField` at `compile()` time
-                // (we still go through `set_expr` for the rhs so the
-                // builder's normal validation chain runs); we also
-                // up-front-validate here to fail fast.
-                let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
-                    .field(col)
-                    .ok_or_else(|| {
-                        ::rustango::sql::ExecError::Query(
-                            ::rustango::core::QueryError::UnknownField {
-                                model: <Self as ::rustango::core::Model>::SCHEMA.name,
-                                field: ::std::string::ToString::to_string(col),
-                            },
-                        )
-                    })?
-                    .column;
-                let _pk_val: ::rustango::core::SqlValue = ::core::convert::Into::into(
-                    ::core::clone::Clone::clone(&self.#pk_ident),
-                );
-                ::rustango::query::QuerySet::<Self>::default()
-                    .filter(::core::stringify!(#pk_ident), _pk_val)
-                    .update()
-                    .set_expr(
-                        col,
-                        ::rustango::core::F(_col_static)
-                            + ::rustango::core::Expr::Literal(
-                                ::rustango::core::SqlValue::I64(by),
-                            ),
-                    )
-                    .execute_pool(pool)
-                    .await
+                Self::__increment_one(self, col, by, pool).await
             }
 
-            /// Sibling of [`Self::increment_pool`] — atomically
-            /// decrement by `by`. Eloquent `Model::decrement($col,
-            /// $by)` parity.
-            ///
-            /// Equivalent to `increment_pool(col, -by, pool)`. Keeping
-            /// both spellings improves call-site readability:
-            /// `counter.decrement_pool("retries", 1, &pool)` reads
-            /// better than `counter.increment_pool("retries", -1, &pool)`.
+            /// Sibling of [`Self::increment`] — atomically
+            /// decrement this row's `col` by `by`. Eloquent
+            /// `$model->decrement($col, $by)` parity. Equivalent to
+            /// `self.increment(col, -by, &pool)`; the separate name
+            /// keeps call sites readable.
             ///
             /// # Errors
-            /// As [`Self::increment_pool`].
+            /// As [`Self::increment`].
             pub async fn decrement(
                 &self,
                 col: &str,
                 by: i64,
                 pool: &::rustango::sql::Pool,
             ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                Self::__increment_one(self, col, -by, pool).await
+            }
+
+            /// Bulk-increment: add `by` to `col` on every row of the
+            /// table. Eloquent `Model::query()->increment($col, $by)`
+            /// parity. Use for counters, score adjustments, view
+            /// rollups.
+            ///
+            /// # Errors
+            /// As [`UpdaterPool::execute_pool`].
+            ///
+            /// [`UpdaterPool::execute_pool`]: rustango::sql::UpdaterPool::execute_pool
+            pub async fn increment_each(
+                col: &str,
+                by: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                Self::__increment_all(col, by, pool).await
+            }
+
+            /// Sibling of [`Self::increment_each`] — bulk-decrement.
+            ///
+            /// # Errors
+            /// As [`Self::increment_each`].
+            pub async fn decrement_each(
+                col: &str,
+                by: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                Self::__increment_all(col, -by, pool).await
+            }
+
+            /// Internal: apply `col = col + by` (signed) on the row
+            /// whose primary key matches `self`. Backs the
+            /// `increment` / `decrement` instance methods.
+            #[doc(hidden)]
+            pub async fn __increment_one(
+                this: &Self,
+                col: &str,
+                by: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
                 use ::rustango::sql::UpdaterPool as _;
-                let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
-                    .field(col)
-                    .ok_or_else(|| {
-                        ::rustango::sql::ExecError::Query(
-                            ::rustango::core::QueryError::UnknownField {
-                                model: <Self as ::rustango::core::Model>::SCHEMA.name,
-                                field: ::std::string::ToString::to_string(col),
-                            },
-                        )
-                    })?
-                    .column;
+                let _col_static: &'static str = Self::__resolve_col(col)?;
                 let _pk_val: ::rustango::core::SqlValue = ::core::convert::Into::into(
-                    ::core::clone::Clone::clone(&self.#pk_ident),
+                    ::core::clone::Clone::clone(&this.#pk_ident),
                 );
                 ::rustango::query::QuerySet::<Self>::default()
                     .filter(::core::stringify!(#pk_ident), _pk_val)
                     .update()
-                    .set_expr(
-                        col,
-                        ::rustango::core::F(_col_static)
-                            - ::rustango::core::Expr::Literal(
-                                ::rustango::core::SqlValue::I64(by),
-                            ),
-                    )
+                    .set_expr(col, Self::__add_signed_expr(_col_static, by))
                     .execute_pool(pool)
                     .await
+            }
+
+            /// Internal: apply `col = col + by` (signed) on every
+            /// row of the table. Backs the `increment_each` /
+            /// `decrement_each` bulk static methods.
+            #[doc(hidden)]
+            pub async fn __increment_all(
+                col: &str,
+                by: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<u64, ::rustango::sql::ExecError> {
+                use ::rustango::sql::UpdaterPool as _;
+                let _col_static: &'static str = Self::__resolve_col(col)?;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .update()
+                    .set_expr(col, Self::__add_signed_expr(_col_static, by))
+                    .execute_pool(pool)
+                    .await
+            }
+
+            /// Internal: resolve a runtime `&str` column name to the
+            /// SCHEMA-registered `&'static str` for use with `F()`
+            /// expressions. Surfaces unknown columns as
+            /// `QueryError::UnknownField`.
+            #[doc(hidden)]
+            pub fn __resolve_col(
+                col: &str,
+            ) -> ::core::result::Result<&'static str, ::rustango::sql::ExecError> {
+                ::core::result::Result::Ok(
+                    <Self as ::rustango::core::Model>::SCHEMA
+                        .field(col)
+                        .ok_or_else(|| {
+                            ::rustango::sql::ExecError::Query(
+                                ::rustango::core::QueryError::UnknownField {
+                                    model: <Self as ::rustango::core::Model>::SCHEMA.name,
+                                    field: ::std::string::ToString::to_string(col),
+                                },
+                            )
+                        })?
+                        .column,
+                )
+            }
+
+            /// Internal: build a `col + signed_by` expression
+            /// (subtract when `signed_by` is negative).
+            #[doc(hidden)]
+            #[must_use]
+            pub fn __add_signed_expr(
+                col_static: &'static str,
+                signed_by: i64,
+            ) -> ::rustango::core::Expr {
+                ::rustango::core::F(col_static)
+                    + ::rustango::core::Expr::Literal(
+                        ::rustango::core::SqlValue::I64(signed_by),
+                    )
             }
 
             /// Re-SELECT this row by its primary key and return a
@@ -4469,17 +4504,7 @@ fn inherent_impl_tokens(
                 let mut _q: ::core::option::Option<::rustango::query::Q> =
                     ::core::option::Option::None;
                 for col in cols {
-                    let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
-                        .field(col)
-                        .ok_or_else(|| {
-                            ::rustango::sql::ExecError::Query(
-                                ::rustango::core::QueryError::UnknownField {
-                                    model: <Self as ::rustango::core::Model>::SCHEMA.name,
-                                    field: ::std::string::ToString::to_string(col),
-                                },
-                            )
-                        })?
-                        .column;
+                    let _col_static: &'static str = Self::__resolve_col(col)?;
                     let _pred = ::rustango::query::Q::eq(
                         _col_static,
                         ::core::clone::Clone::clone(&_sql_val),
@@ -4904,17 +4929,7 @@ fn inherent_impl_tokens(
                     + ::core::marker::Send
                     + ::core::marker::Unpin,
             {
-                let _col_static: &'static str = <Self as ::rustango::core::Model>::SCHEMA
-                    .field(col)
-                    .ok_or_else(|| {
-                        ::rustango::sql::ExecError::Query(
-                            ::rustango::core::QueryError::UnknownField {
-                                model: <Self as ::rustango::core::Model>::SCHEMA.name,
-                                field: ::std::string::ToString::to_string(col),
-                            },
-                        )
-                    })?
-                    .column;
+                let _col_static: &'static str = Self::__resolve_col(col)?;
                 let _q = ::rustango::core::AggregateQuery {
                     model: <Self as ::rustango::core::Model>::SCHEMA,
                     where_clause: ::rustango::core::WhereExpr::And(::std::vec::Vec::new()),
