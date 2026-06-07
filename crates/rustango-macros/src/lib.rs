@@ -1516,7 +1516,7 @@ fn reverse_has_accessor_tokens(
     let methods = reverse_has_relations.iter().map(|rel| {
         let exists_name = format!("{}_exists_expr", rel.name);
         let not_exists_name = format!("{}_not_exists_expr", rel.name);
-        let count_name = format!("{}_count_pool", rel.name);
+        let count_name = format!("{}_count", rel.name);
         let exists_ident = syn::Ident::new(&exists_name, struct_name.span());
         let not_exists_ident = syn::Ident::new(&not_exists_name, struct_name.span());
         let count_ident = syn::Ident::new(&count_name, struct_name.span());
