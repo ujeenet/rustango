@@ -61,6 +61,19 @@ mod gated {
         pub views: i64,
     }
 
+    // Form covers the `derive_form` path-resolution branch —
+    // the macro emits `#root::forms::Form` impls + per-field
+    // validator chains. If the rename broke the form-side emit,
+    // this struct wouldn't compile.
+    #[cfg(feature = "forms")]
+    #[derive(orm::Form, Debug)]
+    pub struct RenamedDemoForm {
+        #[form(min_length = 1, max_length = 80)]
+        pub name: String,
+        #[form(min = 0)]
+        pub views: i32,
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -91,6 +104,18 @@ mod gated {
             let json = s.to_value();
             assert_eq!(json["name"], "ada");
             assert_eq!(json["views"], 42);
+        }
+
+        #[cfg(feature = "forms")]
+        #[test]
+        fn form_resolves_through_renamed_dep() {
+            use orm::forms::Form;
+            let mut payload = ::std::collections::HashMap::new();
+            payload.insert("name".to_string(), "ada".to_string());
+            payload.insert("views".to_string(), "42".to_string());
+            let f = RenamedDemoForm::parse(&payload).expect("valid payload");
+            assert_eq!(f.name, "ada");
+            assert_eq!(f.views, 42);
         }
     }
 }
