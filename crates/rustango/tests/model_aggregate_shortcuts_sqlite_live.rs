@@ -51,13 +51,13 @@ async fn seed(pool: &Pool) {
 async fn aggregate_quartet_on_seeded_table() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let s = Post::sum_pool::<i64>("views", &pool).await.unwrap();
+    let s = Post::sum::<i64>("views", &pool).await.unwrap();
     assert_eq!(s, Some(60));
-    let mn = Post::min_pool::<i64>("views", &pool).await.unwrap();
+    let mn = Post::min::<i64>("views", &pool).await.unwrap();
     assert_eq!(mn, Some(10));
-    let mx = Post::max_pool::<i64>("views", &pool).await.unwrap();
+    let mx = Post::max::<i64>("views", &pool).await.unwrap();
     assert_eq!(mx, Some(30));
-    let av = Post::avg_pool::<f64>("views", &pool).await.unwrap();
+    let av = Post::avg::<f64>("views", &pool).await.unwrap();
     assert!(av.is_some());
     assert!((av.unwrap() - 20.0).abs() < 0.0001);
 }
@@ -65,26 +65,26 @@ async fn aggregate_quartet_on_seeded_table() {
 #[tokio::test]
 async fn aggregate_returns_none_on_empty_table() {
     let pool = make_pool().await;
-    assert_eq!(Post::sum_pool::<i64>("views", &pool).await.unwrap(), None);
-    assert_eq!(Post::min_pool::<i64>("views", &pool).await.unwrap(), None);
-    assert_eq!(Post::max_pool::<i64>("views", &pool).await.unwrap(), None);
-    assert_eq!(Post::avg_pool::<f64>("views", &pool).await.unwrap(), None);
+    assert_eq!(Post::sum::<i64>("views", &pool).await.unwrap(), None);
+    assert_eq!(Post::min::<i64>("views", &pool).await.unwrap(), None);
+    assert_eq!(Post::max::<i64>("views", &pool).await.unwrap(), None);
+    assert_eq!(Post::avg::<f64>("views", &pool).await.unwrap(), None);
 }
 
 #[tokio::test]
 async fn doesnt_exist_pool_is_inverse_of_exists() {
     let pool = make_pool().await;
-    assert!(Post::doesnt_exist_pool(&pool).await.unwrap());
-    assert!(!Post::exists_pool(&pool).await.unwrap());
+    assert!(Post::doesnt_exist(&pool).await.unwrap());
+    assert!(!Post::exists(&pool).await.unwrap());
     seed(&pool).await;
-    assert!(!Post::doesnt_exist_pool(&pool).await.unwrap());
-    assert!(Post::exists_pool(&pool).await.unwrap());
+    assert!(!Post::doesnt_exist(&pool).await.unwrap());
+    assert!(Post::exists(&pool).await.unwrap());
 }
 
 #[tokio::test]
 async fn aggregate_unknown_field_errors() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let err = Post::sum_pool::<i64>("nope", &pool).await.unwrap_err();
+    let err = Post::sum::<i64>("nope", &pool).await.unwrap_err();
     assert!(err.to_string().contains("nope"));
 }

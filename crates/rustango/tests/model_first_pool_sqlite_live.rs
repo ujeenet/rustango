@@ -46,7 +46,7 @@ async fn first_pool_returns_some_for_populated_table() {
     };
     p2.save_pool(&pool).await.unwrap();
 
-    let row = Post::first_pool(&pool).await.unwrap();
+    let row = Post::first(&pool).await.unwrap();
     assert!(row.is_some());
     // PK-ASC default: lowest id wins.
     assert_eq!(row.unwrap().title, "alpha");
@@ -55,14 +55,14 @@ async fn first_pool_returns_some_for_populated_table() {
 #[tokio::test]
 async fn first_pool_returns_none_for_empty_table() {
     let pool = make_pool().await;
-    let row = Post::first_pool(&pool).await.unwrap();
+    let row = Post::first(&pool).await.unwrap();
     assert!(row.is_none());
 }
 
 #[tokio::test]
 async fn first_or_fail_pool_errors_on_empty_table() {
     let pool = make_pool().await;
-    match Post::first_or_fail_pool(&pool).await {
+    match Post::first_or_fail(&pool).await {
         Err(ExecError::Driver(rustango::sql::sqlx::Error::RowNotFound)) => {} // ok
         other => panic!("expected RowNotFound, got: {other:?}"),
     }

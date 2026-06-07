@@ -35,7 +35,7 @@ async fn make_pool() -> Pool {
 #[tokio::test]
 async fn count_pool_returns_row_count() {
     let pool = make_pool().await;
-    assert_eq!(Post::count_pool(&pool).await.unwrap(), 0);
+    assert_eq!(Post::count(&pool).await.unwrap(), 0);
 
     for t in ["a", "b", "c"] {
         let mut p = Post {
@@ -44,13 +44,13 @@ async fn count_pool_returns_row_count() {
         };
         p.save_pool(&pool).await.unwrap();
     }
-    assert_eq!(Post::count_pool(&pool).await.unwrap(), 3);
+    assert_eq!(Post::count(&pool).await.unwrap(), 3);
 }
 
 #[tokio::test]
 async fn exists_pool_returns_false_for_empty_table() {
     let pool = make_pool().await;
-    assert!(!Post::exists_pool(&pool).await.unwrap());
+    assert!(!Post::exists(&pool).await.unwrap());
 }
 
 #[tokio::test]
@@ -61,5 +61,5 @@ async fn exists_pool_returns_true_after_insert() {
         title: "x".into(),
     };
     p.save_pool(&pool).await.unwrap();
-    assert!(Post::exists_pool(&pool).await.unwrap());
+    assert!(Post::exists(&pool).await.unwrap());
 }

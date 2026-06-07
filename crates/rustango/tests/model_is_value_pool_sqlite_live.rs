@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for `Model::is` / `Model::is_not` (Eloquent
-//! `$model->is($other)`) + `Model::value_pool::<U>(col, &pool)`
+//! `$model->is($other)`) + `Model::value::<U>(col, &pool)`
 //! (Eloquent `Model::query()->value($col)`).
 
 use rustango::sql::{sqlx, Auto, Pool};
@@ -49,9 +49,9 @@ async fn seed(pool: &Pool) {
 async fn is_returns_true_for_same_pk_and_false_otherwise() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let alpha = Post::find_pool(1_i64, &pool).await.unwrap().unwrap();
-    let alpha_again = Post::find_pool(1_i64, &pool).await.unwrap().unwrap();
-    let beta = Post::find_pool(2_i64, &pool).await.unwrap().unwrap();
+    let alpha = Post::find(1_i64, &pool).await.unwrap().unwrap();
+    let alpha_again = Post::find(1_i64, &pool).await.unwrap().unwrap();
+    let beta = Post::find(2_i64, &pool).await.unwrap().unwrap();
     assert!(alpha.is(&alpha_again));
     assert!(!alpha.is(&beta));
     assert!(alpha.is_not(&beta));
@@ -62,9 +62,9 @@ async fn is_returns_true_for_same_pk_and_false_otherwise() {
 async fn value_pool_returns_scalar_from_first_row() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let title: Option<String> = Post::value_pool::<String>("title", &pool).await.unwrap();
+    let title: Option<String> = Post::value::<String>("title", &pool).await.unwrap();
     assert_eq!(title.as_deref(), Some("alpha"));
-    let views: Option<i64> = Post::value_pool::<i64>("views", &pool).await.unwrap();
+    let views: Option<i64> = Post::value::<i64>("views", &pool).await.unwrap();
     assert_eq!(views, Some(10));
 }
 
@@ -72,7 +72,7 @@ async fn value_pool_returns_scalar_from_first_row() {
 async fn value_pool_unknown_field_errors() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let err = Post::value_pool::<String>("nope", &pool).await.unwrap_err();
+    let err = Post::value::<String>("nope", &pool).await.unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("nope"),

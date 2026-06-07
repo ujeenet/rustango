@@ -71,7 +71,7 @@ async fn refresh_from_db_picks_up_external_update() {
     assert_eq!(post.views, 10);
 
     // Refresh — fields should overwrite.
-    post.refresh_from_db_pool(&pool).await.unwrap();
+    post.refresh_from_db(&pool).await.unwrap();
     assert_eq!(post.title, "Edited externally");
     assert_eq!(post.views, 99);
     // PK preserved.
@@ -99,7 +99,7 @@ async fn refresh_from_db_errors_when_row_was_deleted() {
         .await
         .unwrap();
 
-    let result = post.refresh_from_db_pool(&pool).await;
+    let result = post.refresh_from_db(&pool).await;
     assert!(
         result.is_err(),
         "refresh on deleted row must surface RowNotFound"
@@ -158,7 +158,7 @@ async fn replicate_then_modify_then_save_does_not_touch_original() {
     copy.save_pool(&pool).await.unwrap();
 
     // Re-read the original to confirm it's untouched.
-    original.refresh_from_db_pool(&pool).await.unwrap();
+    original.refresh_from_db(&pool).await.unwrap();
     assert_eq!(original.title, "Source");
     assert_eq!(original.views, 1);
     assert_eq!(original.id.get().copied(), Some(original_pk));

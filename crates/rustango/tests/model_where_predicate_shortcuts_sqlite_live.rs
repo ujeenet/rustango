@@ -60,7 +60,7 @@ async fn seed(pool: &Pool) {
 async fn where_in_pool_filters_matching_rows() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::where_in_pool("status", ["draft", "published"], &pool)
+    let rows = Post::where_in("status", ["draft", "published"], &pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
@@ -70,7 +70,7 @@ async fn where_in_pool_filters_matching_rows() {
 async fn where_in_pool_empty_returns_no_rows() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows: Vec<Post> = Post::where_in_pool::<&str>("status", Vec::<&str>::new(), &pool)
+    let rows: Vec<Post> = Post::where_in::<&str>("status", Vec::<&str>::new(), &pool)
         .await
         .unwrap();
     assert!(rows.is_empty());
@@ -80,7 +80,7 @@ async fn where_in_pool_empty_returns_no_rows() {
 async fn where_not_in_pool_excludes_listed_values() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::where_not_in_pool("status", ["archived"], &pool)
+    let rows = Post::where_not_in("status", ["archived"], &pool)
         .await
         .unwrap();
     // 'archived' excluded; NULL doesn't match NOT IN under SQL semantics
@@ -95,7 +95,7 @@ async fn where_not_in_pool_excludes_listed_values() {
 async fn where_not_in_pool_empty_returns_all_rows() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows: Vec<Post> = Post::where_not_in_pool::<&str>("status", Vec::<&str>::new(), &pool)
+    let rows: Vec<Post> = Post::where_not_in::<&str>("status", Vec::<&str>::new(), &pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 4);
@@ -105,10 +105,10 @@ async fn where_not_in_pool_empty_returns_all_rows() {
 async fn where_null_and_not_null_split_rows() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let nulls = Post::where_null_pool("status", &pool).await.unwrap();
+    let nulls = Post::where_null("status", &pool).await.unwrap();
     assert_eq!(nulls.len(), 1);
     assert_eq!(nulls[0].title, "d");
-    let non_nulls = Post::where_not_null_pool("status", &pool).await.unwrap();
+    let non_nulls = Post::where_not_null("status", &pool).await.unwrap();
     assert_eq!(non_nulls.len(), 3);
 }
 
@@ -116,7 +116,7 @@ async fn where_null_and_not_null_split_rows() {
 async fn where_between_pool_inclusive_bounds() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Post::where_between_pool("views", 20_i64, 40_i64, &pool)
+    let rows = Post::where_between("views", 20_i64, 40_i64, &pool)
         .await
         .unwrap();
     let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();

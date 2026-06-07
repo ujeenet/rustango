@@ -3,9 +3,9 @@
 //! methods on the `_pool` family — closes #821's `restore` /
 //! `forceDelete` parity items.
 //!
-//! * `Self::soft_delete_pool(pool)` — set `deleted_at` to NOW().
-//! * `Self::restore_pool(pool)` — clear `deleted_at` back to NULL.
-//! * `Self::force_delete_pool(pool)` — alias of `delete_pool`
+//! * `Self::soft_delete(pool)` — set `deleted_at` to NOW().
+//! * `Self::restore(pool)` — clear `deleted_at` back to NULL.
+//! * `Self::force_delete(pool)` — alias of `delete_pool`
 //!   (hard DELETE, ignores soft-delete column).
 
 use chrono::{DateTime, Utc};
@@ -58,11 +58,11 @@ async fn soft_delete_pool_marks_row_trashed_but_keeps_in_table() {
     let pk = seed_one(&pool).await;
 
     // Seed row is alive.
-    let row: Post = Post::find_or_fail_pool(pk, &pool).await.unwrap();
+    let row: Post = Post::find_or_fail(pk, &pool).await.unwrap();
     assert!(row.deleted_at.is_none());
 
     // Soft-delete.
-    let affected = row.soft_delete_pool(&pool).await.unwrap();
+    let affected = row.soft_delete(&pool).await.unwrap();
     assert_eq!(affected, 1);
 
     // Row still exists in the table; `active()` excludes it.
@@ -87,8 +87,8 @@ async fn restore_pool_clears_deleted_at_back_to_null() {
     let pool = make_pool().await;
     let pk = seed_one(&pool).await;
 
-    let row = Post::find_or_fail_pool(pk, &pool).await.unwrap();
-    row.soft_delete_pool(&pool).await.unwrap();
+    let row = Post::find_or_fail(pk, &pool).await.unwrap();
+    row.soft_delete(&pool).await.unwrap();
 
     // Re-fetch the trashed version, then restore.
     let trashed: Post = QuerySet::<Post>::default()
@@ -98,7 +98,7 @@ async fn restore_pool_clears_deleted_at_back_to_null() {
         .unwrap()
         .pop()
         .expect("trashed row present");
-    let affected = trashed.restore_pool(&pool).await.unwrap();
+    let affected = trashed.restore(&pool).await.unwrap();
     assert_eq!(affected, 1);
 
     // Back to active.
@@ -116,8 +116,8 @@ async fn force_delete_pool_actually_removes_the_row() {
     let pool = make_pool().await;
     let pk = seed_one(&pool).await;
 
-    let row = Post::find_or_fail_pool(pk, &pool).await.unwrap();
-    let affected = row.force_delete_pool(&pool).await.unwrap();
+    let row = Post::find_or_fail(pk, &pool).await.unwrap();
+    let affected = row.force_delete(&pool).await.unwrap();
     assert_eq!(affected, 1);
 
     // Row is gone for real — not even `with_trashed` brings it back.

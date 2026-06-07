@@ -51,14 +51,14 @@ async fn find_or_pool_returns_row_when_found() {
         status: "live".into(),
     };
     p.save_pool(&pool).await.unwrap();
-    let r = Post::find_or_pool(1_i64, &pool, anon).await.unwrap();
+    let r = Post::find_or(1_i64, &pool, anon).await.unwrap();
     assert_eq!(r.title, "real");
 }
 
 #[tokio::test]
 async fn find_or_pool_returns_fallback_when_missing() {
     let pool = make_pool().await;
-    let r = Post::find_or_pool(999_i64, &pool, anon).await.unwrap();
+    let r = Post::find_or(999_i64, &pool, anon).await.unwrap();
     assert_eq!(r.title, "anonymous");
     assert_eq!(r.status, "ghost");
 }
@@ -72,14 +72,14 @@ async fn first_or_pool_returns_first_when_present() {
         status: "live".into(),
     };
     p.save_pool(&pool).await.unwrap();
-    let r = Post::first_or_pool(&pool, anon).await.unwrap();
+    let r = Post::first_or(&pool, anon).await.unwrap();
     assert_eq!(r.title, "first");
 }
 
 #[tokio::test]
 async fn first_or_pool_returns_fallback_on_empty() {
     let pool = make_pool().await;
-    let r = Post::first_or_pool(&pool, anon).await.unwrap();
+    let r = Post::first_or(&pool, anon).await.unwrap();
     assert_eq!(r.title, "anonymous");
 }
 
@@ -94,14 +94,14 @@ async fn sole_pool_returns_row_on_unique_match() {
         };
         p.save_pool(&pool).await.unwrap();
     }
-    let r = Post::sole_pool("status", "published", &pool).await.unwrap();
+    let r = Post::sole("status", "published", &pool).await.unwrap();
     assert_eq!(r.title, "b");
 }
 
 #[tokio::test]
 async fn sole_pool_errors_on_zero_match() {
     let pool = make_pool().await;
-    let err = Post::sole_pool("status", "nope", &pool).await.unwrap_err();
+    let err = Post::sole("status", "nope", &pool).await.unwrap_err();
     assert!(matches!(err, ExecError::Driver(sqlx::Error::RowNotFound)));
 }
 
@@ -116,7 +116,7 @@ async fn sole_pool_errors_on_multi_match() {
         };
         p.save_pool(&pool).await.unwrap();
     }
-    let err = Post::sole_pool("status", "draft", &pool).await.unwrap_err();
+    let err = Post::sole("status", "draft", &pool).await.unwrap_err();
     match err {
         ExecError::MultipleRowsReturned { op, count, .. } => {
             assert_eq!(op, "sole");

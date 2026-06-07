@@ -57,7 +57,7 @@ async fn seed(pool: &Pool) -> (i64, i64, i64) {
     };
     c.save_pool(pool).await.unwrap();
     // Soft-delete beta.
-    b.soft_delete_pool(pool).await.unwrap();
+    b.soft_delete(pool).await.unwrap();
     (
         a.id.get().copied().unwrap(),
         b.id.get().copied().unwrap(),
@@ -69,7 +69,7 @@ async fn seed(pool: &Pool) -> (i64, i64, i64) {
 async fn active_pool_returns_only_live_rows() {
     let pool = make_pool().await;
     let (a_id, _b_id, c_id) = seed(&pool).await;
-    let mut rows = Post::active_pool(&pool).await.unwrap();
+    let mut rows = Post::active(&pool).await.unwrap();
     rows.sort_by_key(|r| r.id.get().copied().unwrap());
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].id.get().copied().unwrap(), a_id);
@@ -83,7 +83,7 @@ async fn active_pool_returns_only_live_rows() {
 async fn only_trashed_pool_returns_only_soft_deleted_rows() {
     let pool = make_pool().await;
     let (_a_id, b_id, _c_id) = seed(&pool).await;
-    let rows = Post::only_trashed_pool(&pool).await.unwrap();
+    let rows = Post::only_trashed(&pool).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id.get().copied().unwrap(), b_id);
     assert!(rows[0].deleted_at.is_some());
@@ -93,7 +93,7 @@ async fn only_trashed_pool_returns_only_soft_deleted_rows() {
 async fn with_trashed_pool_returns_every_row() {
     let pool = make_pool().await;
     let _ids = seed(&pool).await;
-    let rows = Post::with_trashed_pool(&pool).await.unwrap();
+    let rows = Post::with_trashed(&pool).await.unwrap();
     assert_eq!(rows.len(), 3);
     let trashed = rows.iter().filter(|r| r.deleted_at.is_some()).count();
     assert_eq!(trashed, 1);

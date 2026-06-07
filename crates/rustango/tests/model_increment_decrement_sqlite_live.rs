@@ -1,7 +1,7 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::increment_pool(col, by, pool)` /
-//! `Model::decrement_pool(col, by, pool)` shortcuts — Eloquent
+//! `Model::increment(col, by, pool)` /
+//! `Model::decrement(col, by, pool)` shortcuts — Eloquent
 //! `Model::increment` / `decrement` parity.
 
 use rustango::sql::{sqlx, Auto, Pool};
@@ -52,13 +52,13 @@ async fn seed(pool: &Pool) -> i64 {
 async fn increment_pool_bumps_by_n() {
     let pool = make_pool().await;
     let pk = seed(&pool).await;
-    let row = Post::find_or_fail_pool(pk, &pool).await.unwrap();
+    let row = Post::find_or_fail(pk, &pool).await.unwrap();
 
-    let n = row.increment_pool("views", 5, &pool).await.unwrap();
+    let n = row.increment("views", 5, &pool).await.unwrap();
     assert_eq!(n, 1);
 
     // Re-fetch to confirm persisted value.
-    let fresh = Post::find_or_fail_pool(pk, &pool).await.unwrap();
+    let fresh = Post::find_or_fail(pk, &pool).await.unwrap();
     assert_eq!(fresh.views, 15);
     // Other columns untouched.
     assert_eq!(fresh.likes, 5);
@@ -68,12 +68,12 @@ async fn increment_pool_bumps_by_n() {
 async fn decrement_pool_subtracts() {
     let pool = make_pool().await;
     let pk = seed(&pool).await;
-    let row = Post::find_or_fail_pool(pk, &pool).await.unwrap();
+    let row = Post::find_or_fail(pk, &pool).await.unwrap();
 
-    let n = row.decrement_pool("views", 3, &pool).await.unwrap();
+    let n = row.decrement("views", 3, &pool).await.unwrap();
     assert_eq!(n, 1);
 
-    let fresh = Post::find_or_fail_pool(pk, &pool).await.unwrap();
+    let fresh = Post::find_or_fail(pk, &pool).await.unwrap();
     assert_eq!(fresh.views, 7);
 }
 
@@ -81,9 +81,9 @@ async fn decrement_pool_subtracts() {
 async fn increment_pool_unknown_field_errors() {
     let pool = make_pool().await;
     let pk = seed(&pool).await;
-    let row = Post::find_or_fail_pool(pk, &pool).await.unwrap();
+    let row = Post::find_or_fail(pk, &pool).await.unwrap();
 
-    let res = row.increment_pool("nope", 1, &pool).await;
+    let res = row.increment("nope", 1, &pool).await;
     assert!(res.is_err(), "unknown field must surface as error");
 }
 
@@ -91,10 +91,10 @@ async fn increment_pool_unknown_field_errors() {
 async fn increment_pool_does_not_mutate_self() {
     let pool = make_pool().await;
     let pk = seed(&pool).await;
-    let row = Post::find_or_fail_pool(pk, &pool).await.unwrap();
+    let row = Post::find_or_fail(pk, &pool).await.unwrap();
     let original_views = row.views;
 
-    row.increment_pool("views", 100, &pool).await.unwrap();
+    row.increment("views", 100, &pool).await.unwrap();
     // self stays stale — caller must refresh_from_db_pool / fresh_pool.
     assert_eq!(row.views, original_views);
 }

@@ -61,13 +61,13 @@ async fn seed(pool: &Pool) {
 async fn update_where_pool_updates_matching_rows() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let n = Post::update_where_pool("status", "draft", "status", "archived", &pool)
+    let n = Post::update_where("status", "draft", "status", "archived", &pool)
         .await
         .unwrap();
     assert_eq!(n, 2);
-    let drafts = Post::where_pool("status", "draft", &pool).await.unwrap();
+    let drafts = Post::where_("status", "draft", &pool).await.unwrap();
     assert_eq!(drafts.len(), 0);
-    let archived = Post::where_pool("status", "archived", &pool).await.unwrap();
+    let archived = Post::where_("status", "archived", &pool).await.unwrap();
     assert_eq!(archived.len(), 2);
 }
 
@@ -75,7 +75,7 @@ async fn update_where_pool_updates_matching_rows() {
 async fn update_where_pool_returns_zero_when_no_match() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let n = Post::update_where_pool("status", "nope", "status", "x", &pool)
+    let n = Post::update_where("status", "nope", "status", "x", &pool)
         .await
         .unwrap();
     assert_eq!(n, 0);
@@ -85,11 +85,9 @@ async fn update_where_pool_returns_zero_when_no_match() {
 async fn delete_where_pool_removes_matching_rows() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let n = Post::delete_where_pool("status", "draft", &pool)
-        .await
-        .unwrap();
+    let n = Post::delete_where("status", "draft", &pool).await.unwrap();
     assert_eq!(n, 2);
-    let remaining = Post::all_pool(&pool).await.unwrap();
+    let remaining = Post::all(&pool).await.unwrap();
     assert_eq!(remaining.len(), 2);
     for r in &remaining {
         assert_eq!(r.status, "published");
@@ -100,9 +98,7 @@ async fn delete_where_pool_removes_matching_rows() {
 async fn delete_where_pool_errors_on_unknown_field() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let err = Post::delete_where_pool("nope", "x", &pool)
-        .await
-        .unwrap_err();
+    let err = Post::delete_where("nope", "x", &pool).await.unwrap_err();
     assert!(err.to_string().contains("nope"));
 }
 
@@ -110,10 +106,8 @@ async fn delete_where_pool_errors_on_unknown_field() {
 async fn update_all_pool_updates_every_row() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let n = Post::update_all_pool("status", "frozen", &pool)
-        .await
-        .unwrap();
+    let n = Post::update_all("status", "frozen", &pool).await.unwrap();
     assert_eq!(n, 4);
-    let frozen = Post::where_pool("status", "frozen", &pool).await.unwrap();
+    let frozen = Post::where_("status", "frozen", &pool).await.unwrap();
     assert_eq!(frozen.len(), 4);
 }

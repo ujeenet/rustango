@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite test for the macro-emitted
-//! `Model::pluck_pool::<U>(col, pool)` shortcut — Eloquent
+//! `Model::pluck::<U>(col, pool)` shortcut — Eloquent
 //! `Model::pluck($column)` / Django
 //! `Model.objects.values_list('col', flat=True)` parity.
 
@@ -50,7 +50,7 @@ async fn seed(pool: &Pool) {
 async fn pluck_pool_strings() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let titles: Vec<String> = Post::pluck_pool::<String>("title", &pool).await.unwrap();
+    let titles: Vec<String> = Post::pluck::<String>("title", &pool).await.unwrap();
     assert_eq!(titles.len(), 3);
     assert!(titles.contains(&"alpha".to_owned()));
     assert!(titles.contains(&"beta".to_owned()));
@@ -61,7 +61,7 @@ async fn pluck_pool_strings() {
 async fn pluck_pool_integers() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let mut counts: Vec<i64> = Post::pluck_pool::<i64>("views", &pool).await.unwrap();
+    let mut counts: Vec<i64> = Post::pluck::<i64>("views", &pool).await.unwrap();
     counts.sort();
     assert_eq!(counts, vec![10, 50, 250]);
 }
@@ -69,6 +69,6 @@ async fn pluck_pool_integers() {
 #[tokio::test]
 async fn pluck_pool_empty_table_returns_empty_vec() {
     let pool = make_pool().await;
-    let titles: Vec<String> = Post::pluck_pool::<String>("title", &pool).await.unwrap();
+    let titles: Vec<String> = Post::pluck::<String>("title", &pool).await.unwrap();
     assert!(titles.is_empty());
 }

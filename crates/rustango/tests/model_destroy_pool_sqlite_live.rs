@@ -1,5 +1,5 @@
 #![cfg(feature = "sqlite")]
-//! Live SQLite tests for `Model::destroy_pool(pks, pool)` —
+//! Live SQLite tests for `Model::destroy(pks, pool)` —
 //! Eloquent `Model::destroy([...])` / Django
 //! `Model.objects.filter(pk__in=[...]).delete()` parity.
 
@@ -51,7 +51,7 @@ async fn destroy_pool_deletes_listed_rows() {
     let pool = make_pool().await;
     let pks = seed_five(&pool).await;
     let to_delete = vec![pks[0], pks[2], pks[4]]; // 3 rows
-    let n = Post::destroy_pool(to_delete, &pool).await.unwrap();
+    let n = Post::destroy(to_delete, &pool).await.unwrap();
     assert_eq!(n, 3);
 
     let remaining: Vec<Post> = QuerySet::<Post>::default().fetch_pool(&pool).await.unwrap();
@@ -65,7 +65,7 @@ async fn destroy_pool_deletes_listed_rows() {
 async fn destroy_pool_empty_list_is_noop() {
     let pool = make_pool().await;
     seed_five(&pool).await;
-    let n = Post::destroy_pool(Vec::<i64>::new(), &pool).await.unwrap();
+    let n = Post::destroy(Vec::<i64>::new(), &pool).await.unwrap();
     assert_eq!(n, 0);
 
     let remaining: Vec<Post> = QuerySet::<Post>::default().fetch_pool(&pool).await.unwrap();
@@ -76,8 +76,6 @@ async fn destroy_pool_empty_list_is_noop() {
 async fn destroy_pool_missing_pk_returns_count_of_actually_deleted() {
     let pool = make_pool().await;
     let pks = seed_five(&pool).await;
-    let n = Post::destroy_pool(vec![pks[0], 99999_i64], &pool)
-        .await
-        .unwrap();
+    let n = Post::destroy(vec![pks[0], 99999_i64], &pool).await.unwrap();
     assert_eq!(n, 1, "only the real row matched");
 }

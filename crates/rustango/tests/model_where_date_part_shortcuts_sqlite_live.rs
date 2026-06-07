@@ -58,7 +58,7 @@ async fn seed(pool: &Pool) {
 async fn where_year_pool_filters_by_year() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Event::where_year_pool("at", 2024, &pool).await.unwrap();
+    let rows = Event::where_year("at", 2024, &pool).await.unwrap();
     let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
     assert_eq!(labels.len(), 2);
     assert!(labels.contains(&"a"));
@@ -69,7 +69,7 @@ async fn where_year_pool_filters_by_year() {
 async fn where_month_pool_filters_by_month() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Event::where_month_pool("at", 1, &pool).await.unwrap();
+    let rows = Event::where_month("at", 1, &pool).await.unwrap();
     let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
     // a (Jan 2024) + c (Jan 2025) — both January.
     assert_eq!(labels.len(), 2);
@@ -81,7 +81,7 @@ async fn where_month_pool_filters_by_month() {
 async fn where_day_pool_filters_by_day() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Event::where_day_pool("at", 15, &pool).await.unwrap();
+    let rows = Event::where_day("at", 15, &pool).await.unwrap();
     let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
     assert_eq!(labels.len(), 2);
     assert!(labels.contains(&"a"));
@@ -92,7 +92,7 @@ async fn where_day_pool_filters_by_day() {
 async fn where_hour_pool_filters_by_hour() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Event::where_hour_pool("at", 10, &pool).await.unwrap();
+    let rows = Event::where_hour("at", 10, &pool).await.unwrap();
     let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
     assert_eq!(labels.len(), 1);
     assert_eq!(labels[0], "b");
@@ -102,7 +102,7 @@ async fn where_hour_pool_filters_by_hour() {
 async fn where_minute_pool_filters_by_minute() {
     let pool = make_pool().await;
     seed(&pool).await;
-    let rows = Event::where_minute_pool("at", 30, &pool).await.unwrap();
+    let rows = Event::where_minute("at", 30, &pool).await.unwrap();
     let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
     assert_eq!(labels.len(), 2);
     assert!(labels.contains(&"a"));

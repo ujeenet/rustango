@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::find_many_pool(pks, pool)` shortcut — Eloquent
+//! `Model::find_many(pks, pool)` shortcut — Eloquent
 //! `Model::find([1, 2, 3])` (list arg) / Django
 //! `Model.objects.filter(pk__in=[...])` parity.
 
@@ -51,7 +51,7 @@ async fn find_many_pool_returns_listed_rows() {
     let pool = make_pool().await;
     let pks = seed_five(&pool).await;
     let want = vec![pks[0], pks[2], pks[4]];
-    let rows = Post::find_many_pool(want, &pool).await.unwrap();
+    let rows = Post::find_many(want, &pool).await.unwrap();
     assert_eq!(rows.len(), 3);
     let titles: std::collections::HashSet<&str> = rows.iter().map(|p| p.title.as_str()).collect();
     assert!(titles.contains("a"));
@@ -63,7 +63,7 @@ async fn find_many_pool_returns_listed_rows() {
 async fn find_many_pool_skips_missing_pks() {
     let pool = make_pool().await;
     let pks = seed_five(&pool).await;
-    let rows = Post::find_many_pool(vec![pks[0], 99999_i64, pks[1]], &pool)
+    let rows = Post::find_many(vec![pks[0], 99999_i64, pks[1]], &pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2, "missing PK silently dropped");
@@ -73,8 +73,6 @@ async fn find_many_pool_skips_missing_pks() {
 async fn find_many_pool_empty_input_returns_empty_vec() {
     let pool = make_pool().await;
     seed_five(&pool).await;
-    let rows = Post::find_many_pool(Vec::<i64>::new(), &pool)
-        .await
-        .unwrap();
+    let rows = Post::find_many(Vec::<i64>::new(), &pool).await.unwrap();
     assert!(rows.is_empty());
 }
