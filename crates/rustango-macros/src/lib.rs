@@ -3722,6 +3722,96 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Fetch up to `n` rows in random order. Eloquent
+            /// `Model::inRandomOrder()->limit($n)->get()` /
+            /// `Model::query()->inRandomOrder()->get()->take($n)`
+            /// parity. **Performance caveat**: random ordering
+            /// forces a full table scan + per-row random key sort;
+            /// the optimizer cannot use an index. Prefer a
+            /// `pk >= rand_offset LIMIT N` walk for huge tables.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn random_n_pool(
+                n: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .order_random()
+                    .limit(n)
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch one row in random order. Eloquent
+            /// `Model::inRandomOrder()->first()` parity. Same
+            /// performance caveat as [`Self::random_n_pool`].
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn random_pool(
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::core::option::Option<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                ::core::result::Result::Ok(
+                    Self::random_n_pool(1, pool).await?.into_iter().next(),
+                )
+            }
+
+            /// Fetch every row ordered ASC by `field`. Eloquent
+            /// `Model::oldest($field)->get()` parity — the multi-row
+            /// counterpart of [`Self::earliest_pool`].
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn oldest_pool(
+                field: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .order_by(&[(field, false)])
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row ordered DESC by `field`. Eloquent
+            /// `Model::latest($field)->get()` parity — the multi-row
+            /// counterpart of [`Self::latest_pool`].
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn newest_pool(
+                field: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .order_by(&[(field, true)])
+                    .fetch_pool(pool)
+                    .await
+            }
+
             /// Fetch every row where `<col> BETWEEN lo AND hi`
             /// (inclusive on both ends — same as SQL). Eloquent
             /// `Model::whereBetween($col, [$lo, $hi])->get()` parity.
