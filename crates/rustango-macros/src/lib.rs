@@ -4069,6 +4069,172 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Fetch every row where `<col> > val`. Eloquent
+            /// `Model::where($col, ">", $val)->get()` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_gt_pool(
+                col: &str,
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__gt", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, val)
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> >= val`. Eloquent
+            /// `Model::where($col, ">=", $val)->get()` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_gte_pool(
+                col: &str,
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__gte", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, val)
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> < val`. Eloquent
+            /// `Model::where($col, "<", $val)->get()` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_lt_pool(
+                col: &str,
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__lt", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, val)
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> <= val`. Eloquent
+            /// `Model::where($col, "<=", $val)->get()` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_lte_pool(
+                col: &str,
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__lte", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, val)
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> <> val`. Eloquent
+            /// `Model::where($col, "!=", $val)->get()` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_ne_pool(
+                col: &str,
+                val: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__ne", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, val)
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch up to `n` rows. Eloquent `Model::take($n)->get()`
+            /// parity / Django `Model.objects.all()[:n]`. PK-ordered
+            /// is NOT guaranteed without an explicit `order_by` —
+            /// drop into `Self::query()` for that.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn take_pool(
+                n: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                ::rustango::query::QuerySet::<Self>::default()
+                    .limit(n)
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch the page-th window of `per_page` rows
+            /// (1-indexed). Eloquent
+            /// `Model::query()->forPage($page, $perPage)->get()`
+            /// parity. The DB scans an `OFFSET (page - 1) * per_page
+            /// LIMIT per_page`; for large offsets this is O(N) —
+            /// prefer keyset pagination via PK on hot paths.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn for_page_pool(
+                page: i64,
+                per_page: i64,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _offset = if page > 1 { (page - 1) * per_page } else { 0 };
+                ::rustango::query::QuerySet::<Self>::default()
+                    .limit(per_page)
+                    .offset(_offset)
+                    .fetch_pool(pool)
+                    .await
+            }
+
             /// Fetch every row where `<col> BETWEEN lo AND hi`
             /// (inclusive on both ends — same as SQL). Eloquent
             /// `Model::whereBetween($col, [$lo, $hi])->get()` parity.
