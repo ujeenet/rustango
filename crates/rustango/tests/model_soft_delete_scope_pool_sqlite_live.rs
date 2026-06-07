@@ -1,7 +1,7 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted soft-delete query
-//! shortcuts — `Model::active_pool`, `Model::only_trashed_pool`,
-//! `Model::with_trashed_pool`. Eloquent
+//! shortcuts — `Model::active`, `Model::only_trashed`,
+//! `Model::with_trashed`. Eloquent
 //! `Model::onlyTrashed()->get()` / `Model::withTrashed()->get()`
 //! parity. Closes #821 partial.
 
