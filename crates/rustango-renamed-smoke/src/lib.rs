@@ -16,33 +16,51 @@
 //!
 //! The crate doesn't need to do anything at runtime — just compile.
 //! If it builds, the test passes.
+//!
+//! The body is gated on this crate's own `postgres` feature for
+//! two reasons:
+//!
+//! 1. The macro emits `#[cfg(feature = "postgres")] impl LoadRelated
+//!    for #StructName` etc. against the CONSUMER's feature flags.
+//!    Without the postgres feature on the consumer side, those impls
+//!    get silently dropped and the trait bounds elsewhere go
+//!    unsatisfied.
+//! 2. The litmus `cargo build --no-default-features --features
+//!    sqlite,tenancy` run from the workspace root must keep passing.
+//!    Under those flags this crate's `postgres` feature is OFF, so
+//!    the body compiles to nothing and the smoke crate is
+//!    effectively absent from the litmus build.
 
 #![allow(dead_code)]
 
-use orm::sql::Auto;
-use orm::Model;
+#[cfg(feature = "postgres")]
+mod gated {
+    use orm::sql::Auto;
+    use orm::Model;
 
-#[derive(Model, Debug, Clone)]
-#[rustango(table = "rrs_demo")]
-pub struct RenamedDemo {
-    #[rustango(primary_key)]
-    pub id: Auto<i64>,
-    #[rustango(max_length = 80)]
-    pub name: String,
-    pub views: i64,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
+    #[derive(Model, Debug, Clone)]
+    #[rustango(table = "rrs_demo")]
+    pub struct RenamedDemo {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 80)]
+        pub name: String,
+        pub views: i64,
+        pub created_at: chrono::DateTime<chrono::Utc>,
+    }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use orm::core::Model as _;
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use orm::core::Model as _;
 
-    #[test]
-    fn schema_resolves_through_renamed_dep() {
-        // If the macro's path resolution broke, this wouldn't even
-        // compile. Reaching this assertion at all is the test.
-        assert_eq!(RenamedDemo::SCHEMA.table, "rrs_demo");
-        assert!(RenamedDemo::SCHEMA.primary_key().is_some());
+        #[test]
+        fn schema_resolves_through_renamed_dep() {
+            // If the macro's path resolution broke, this wouldn't
+            // even compile. Reaching this assertion at all is the
+            // test.
+            assert_eq!(RenamedDemo::SCHEMA.table, "rrs_demo");
+            assert!(RenamedDemo::SCHEMA.primary_key().is_some());
+        }
     }
 }

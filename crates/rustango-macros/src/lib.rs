@@ -2594,7 +2594,7 @@ fn inherent_impl_tokens(
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<(), #root::sql::ExecError> {
                         if fields.is_empty() {
-                            ::tracing::warn!(
+                            #root::__tracing::warn!(
                                 target: "rustango::save_partial",
                                 model = <Self as #root::core::Model>::SCHEMA.name,
                                 "save_partial called with empty field list — no-op"
@@ -2628,7 +2628,7 @@ fn inherent_impl_tokens(
                             .filter(|a| _wanted_cols.contains(a.column))
                             .collect();
                         if _filtered.is_empty() {
-                            ::tracing::warn!(
+                            #root::__tracing::warn!(
                                 target: "rustango::save_partial",
                                 model = _schema.name,
                                 "save_partial: every named field maps to a non-assignable column — no-op"
@@ -2774,7 +2774,7 @@ fn inherent_impl_tokens(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     if fields.is_empty() {
-                        ::tracing::warn!(
+                        #root::__tracing::warn!(
                             target: "rustango::save_partial",
                             model = <Self as #root::core::Model>::SCHEMA.name,
                             "save_partial called with empty field list — no-op"
@@ -2815,7 +2815,7 @@ fn inherent_impl_tokens(
                         // non-assignable slots (PK column, computed/
                         // virtual fields, relations without an
                         // assignment). Same no-op semantic as Django.
-                        ::tracing::warn!(
+                        #root::__tracing::warn!(
                             target: "rustango::save_partial",
                             model = _schema.name,
                             "save_partial: every named field maps to a non-assignable column — no-op"
