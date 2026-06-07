@@ -23,6 +23,7 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
 - **`Model::doesnt_exist_pool(&pool) -> bool`** — Eloquent `Model::doesntExist()` parity. Inverse of `exists_pool`. Emits on every model.
 - **`Model::where_in_pool` / `where_not_in_pool` / `where_null_pool` / `where_not_null_pool` / `where_between_pool`** — Eloquent `whereIn` / `whereNotIn` / `whereNull` / `whereNotNull` / `whereBetween` parity. Each routes through the existing `.filter(col__suffix, …)` lookup-suffix machinery (`__in`, `__not_in`, `__isnull`, `__between`). Empty-list semantics: `where_in_pool` with no values returns zero rows; `where_not_in_pool` with no values returns every row. Emits on every model.
 - **`Model::find_or_pool` / `Model::first_or_pool` / `Model::sole_pool`** — Eloquent `findOr` / `firstOr` / `sole` parity. `find_or_pool(pk, &pool, fallback_fn)` and `first_or_pool(&pool, fallback_fn)` return the matched row or invoke the closure to produce a default. `sole_pool(col, val, &pool)` returns the exactly-one match or errors: `RowNotFound` on zero, `ExecError::MultipleRowsReturned { op: "sole", … }` on >1.
+- **`Model::random_pool` / `random_n_pool` / `oldest_pool` / `newest_pool`** — Eloquent `inRandomOrder()->first()` / `inRandomOrder()->limit($n)->get()` / `oldest($field)->get()` / `latest($field)->get()` parity. Each is a thin wrapper over the existing `QuerySet` ordering primitives (`.order_random()` + `.limit()` / `.order_by(field, false/true)`). Random ordering carries the standard full-scan caveat.
 
 ### Fixed
 
