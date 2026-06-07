@@ -31,6 +31,11 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
 - **`Model::update_where_pool` / `Model::delete_where_pool` / `Model::update_all_pool`** — Eloquent `Model::where($col, $val)->update([$col2 => $val2])` / `Model::where($col, $val)->delete()` / `Model::query()->update([$col => $val])` parity. Bulk mutation shortcuts: `update_where_pool` sets one column on filtered rows, `delete_where_pool` removes them, `update_all_pool` sets one column on every row of the table. Multi-column updates drop into the queryset-builder + `.update().set(...).set(...)` chain.
 - **`Model::where_not_like_pool` / `where_not_ilike_pool` / `where_not_between_pool`** — Eloquent `whereNotLike` / `whereNotILike` / `whereNotBetween` parity. Negated companions to the LIKE / BETWEEN shortcuts shipped earlier. Route through the existing `__not_like` / `__not_ilike` / `__not_between` lookup suffixes.
 - **`Model::table_name() -> &'static str` + `Model::primary_key_column() -> Option<&'static str>` + `Model::get_key(&self) -> SqlValue`** — Eloquent `getTable()` / `getKeyName()` / `getKey()` parity. Cheap inline introspection helpers for templating, logging, and adapter glue that needs the raw schema names + primary-key value without re-reading the SCHEMA constant.
+- **Bare-name aliases for every Eloquent shortcut** — drops the `_pool` suffix on the user-facing API. `Post::find(id, &pool)` / `Post::where_in(col, vals, &pool)` / `post.increment("views", 1, &pool)` etc. now all work. The `_pool` versions are retained as silent back-compat aliases so the existing test suite + downstream code continue compiling. New Eloquent-shape methods added to the macro from now on emit bare names directly (no `_pool` alias). `ContentType::all` (manual, ordered) renamed to `all_ordered` to avoid colliding with the macro-emitted bare-name `all`.
+
+### Changed
+
+- `crate::contenttypes::ContentType::all` renamed to `ContentType::all_ordered` (sole caller updated in `admin::views`). The macro-emitted `Model::all` is now the canonical "every row, unordered" shortcut on every model.
 
 ### Fixed
 
