@@ -3606,6 +3606,151 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Fetch every row where `<col> IN (vals)`. Eloquent
+            /// `Model::whereIn($col, $vals)->get()` parity. Empty
+            /// `vals` returns no rows (matches SQL's empty-IN
+            /// semantics).
+            ///
+            /// `vals` accepts any iterable whose items are
+            /// `Into<SqlValue>` — `Vec<i64>`, `&[&str]`, `[Uuid; N]`,
+            /// etc.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_in_pool<V>(
+                col: &str,
+                vals: impl ::core::iter::IntoIterator<Item = V>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            >
+            where
+                V: ::core::convert::Into<::rustango::core::SqlValue>,
+            {
+                use ::rustango::sql::FetcherPool as _;
+                let _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    vals.into_iter().map(::core::convert::Into::into).collect();
+                if _values.is_empty() {
+                    return ::core::result::Result::Ok(::std::vec::Vec::new());
+                }
+                let _key = ::std::format!("{}__in", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, ::rustango::core::SqlValue::List(_values))
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> NOT IN (vals)`. Eloquent
+            /// `Model::whereNotIn($col, $vals)->get()` parity. Empty
+            /// `vals` returns every row (matches SQL's empty-NOT-IN
+            /// semantics — vacuously true for every row).
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_not_in_pool<V>(
+                col: &str,
+                vals: impl ::core::iter::IntoIterator<Item = V>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            >
+            where
+                V: ::core::convert::Into<::rustango::core::SqlValue>,
+            {
+                use ::rustango::sql::FetcherPool as _;
+                let _values: ::std::vec::Vec<::rustango::core::SqlValue> =
+                    vals.into_iter().map(::core::convert::Into::into).collect();
+                if _values.is_empty() {
+                    return ::rustango::query::QuerySet::<Self>::default()
+                        .fetch_pool(pool)
+                        .await;
+                }
+                let _key = ::std::format!("{}__not_in", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, ::rustango::core::SqlValue::List(_values))
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> IS NULL`. Eloquent
+            /// `Model::whereNull($col)->get()` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_null_pool(
+                col: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__isnull", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, ::rustango::core::SqlValue::Bool(true))
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> IS NOT NULL`. Eloquent
+            /// `Model::whereNotNull($col)->get()` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_not_null_pool(
+                col: &str,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__isnull", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, ::rustango::core::SqlValue::Bool(false))
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> BETWEEN lo AND hi`
+            /// (inclusive on both ends — same as SQL). Eloquent
+            /// `Model::whereBetween($col, [$lo, $hi])->get()` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_between_pool(
+                col: &str,
+                lo: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                hi: impl ::core::convert::Into<::rustango::core::SqlValue>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__between", col);
+                let _vals = ::rustango::core::SqlValue::List(::std::vec![
+                    ::core::convert::Into::into(lo),
+                    ::core::convert::Into::into(hi),
+                ]);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(&_key, _vals)
+                    .fetch_pool(pool)
+                    .await
+            }
+
             /// Fetch the first row where `<col> = <val>`. Returns
             /// `Ok(None)` when no row matches. Eloquent
             /// `Model::firstWhere($col, $val)` / Django

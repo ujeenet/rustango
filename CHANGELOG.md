@@ -21,6 +21,7 @@ Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that la
 - **`Model::value_pool::<U>(col, &pool) -> Option<U>`** — Eloquent `Model::query()->value($col)` parity. Single-scalar-from-first-row shortcut built on the existing `values_list_flat(col).first::<U>(pool)` chain (#877). Unknown fields surface as `QueryError::UnknownField`. Emits on every model.
 - **`Model::sum_pool` / `Model::avg_pool` / `Model::min_pool` / `Model::max_pool`** — Eloquent `Model::sum/avg/min/max($col)` parity. Each is `Model::<aggregate>_pool::<U>(col, &pool) -> Option<U>`. Returns `Ok(None)` on an empty table. Backed by the existing `fetch_aggregate_pool` primitive — no schema change, no new core types. Emits on every model.
 - **`Model::doesnt_exist_pool(&pool) -> bool`** — Eloquent `Model::doesntExist()` parity. Inverse of `exists_pool`. Emits on every model.
+- **`Model::where_in_pool` / `where_not_in_pool` / `where_null_pool` / `where_not_null_pool` / `where_between_pool`** — Eloquent `whereIn` / `whereNotIn` / `whereNull` / `whereNotNull` / `whereBetween` parity. Each routes through the existing `.filter(col__suffix, …)` lookup-suffix machinery (`__in`, `__not_in`, `__isnull`, `__between`). Empty-list semantics: `where_in_pool` with no values returns zero rows; `where_not_in_pool` with no values returns every row. Emits on every model.
 
 ### Fixed
 
