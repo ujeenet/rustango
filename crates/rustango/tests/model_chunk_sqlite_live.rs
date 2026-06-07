@@ -86,6 +86,42 @@ async fn chunk_empty_table_invokes_callback_zero_times() {
 }
 
 #[tokio::test]
+async fn chunk_by_id_visits_every_row_via_keyset_pagination() {
+    // Same row-count guarantee as `chunk` but using keyset
+    // pagination (`WHERE id > last LIMIT n`) — O(N) total scan
+    // vs OFFSET's O(N²).
+    let pool = make_pool().await;
+    seed(&pool, 25).await;
+    let sizes = std::sync::Mutex::new(Vec::<usize>::new());
+    Post::chunk_by_id(7, &pool, |batch| {
+        // Inside each batch, PKs are strictly ascending — proves
+        // the keyset ordering holds.
+        let pks: Vec<i64> = batch.iter().map(|p| p.id.get().copied().unwrap()).collect();
+        for w in pks.windows(2) {
+            assert!(w[0] < w[1], "non-ascending PKs in batch: {pks:?}");
+        }
+        sizes.lock().unwrap().push(batch.len());
+        async { Ok(()) }
+    })
+    .await
+    .unwrap();
+    assert_eq!(sizes.into_inner().unwrap(), vec![7, 7, 7, 4]);
+}
+
+#[tokio::test]
+async fn chunk_by_id_empty_table_invokes_callback_zero_times() {
+    let pool = make_pool().await;
+    let calls = AtomicI64::new(0);
+    Post::chunk_by_id(10, &pool, |_batch| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async { Ok(()) }
+    })
+    .await
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn chunk_propagates_callback_error() {
     let pool = make_pool().await;
     seed(&pool, 5).await;
