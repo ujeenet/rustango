@@ -1333,6 +1333,17 @@ pub use serde as __serde;
 #[doc(hidden)]
 pub use rust_decimal as __rust_decimal;
 
+/// Same rationale — `#[derive(ViewSet)]` emits an `axum::Router`-
+/// returning method. Gated on `feature = "admin"` since that's the
+/// feature that pulls `dep:axum` into rustango's dep graph
+/// (transitively via `manage`). ViewSet consumers always enable
+/// `admin` (they're building HTTP routes), so this gating matches
+/// the practical use case.
+/// **Not part of the public API.** #142 follow-up.
+#[cfg(feature = "admin")]
+#[doc(hidden)]
+pub use axum as __axum;
+
 /// `#[derive(Model)]` — populates the `inventory` registry the admin
 /// walks, generates `objects()` / typed columns / `insert` / `delete`
 /// / `save`.
