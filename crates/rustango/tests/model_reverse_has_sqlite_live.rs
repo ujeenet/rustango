@@ -172,6 +172,48 @@ async fn empty_child_table_returns_zero_via_where_has() {
 }
 
 #[tokio::test]
+async fn comments_accessor_returns_chainable_queryset() {
+    // Eloquent `$post->comments` analog — bare-name accessor
+    // returns a `QuerySet<Comment>` pre-filtered to this post's
+    // children. Chainable like any other queryset.
+    let pool = make_pool().await;
+    let (p1_id, _p2_id, _p3_id) = seed(&pool).await;
+    let p1 = Post::find(p1_id, &pool).await.unwrap().unwrap();
+
+    let all = p1.comments().fetch_pool(&pool).await.unwrap();
+    assert_eq!(all.len(), 3);
+    for c in &all {
+        // Every fetched comment's FK matches this post's id.
+        assert_eq!(c.post_id.pk(), p1_id);
+    }
+
+    // Chain `.filter()` on top of the accessor.
+    let filtered = p1
+        .comments()
+        .filter("body", "comment-1")
+        .fetch_pool(&pool)
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].body, "comment-1");
+}
+
+#[tokio::test]
+async fn comments_fetch_bare_name_hot_path() {
+    // Bare-name hot path — `post.comments_fetch(&pool)` is the
+    // suffix-free shortcut over `post.comments().fetch_pool(&pool)`.
+    // Same rows, no `_pool` in the user-visible spelling.
+    let pool = make_pool().await;
+    let (p1_id, _, _) = seed(&pool).await;
+    let p1 = Post::find(p1_id, &pool).await.unwrap().unwrap();
+    let rows = p1.comments_fetch(&pool).await.unwrap();
+    assert_eq!(rows.len(), 3);
+    for c in &rows {
+        assert_eq!(c.post_id.pk(), p1_id);
+    }
+}
+
+#[tokio::test]
 async fn comments_count_returns_per_post_count() {
     // Eloquent `$post->comments->count()` analog — the emitted
     // `comments_count(&pool)` instance method returns the number
