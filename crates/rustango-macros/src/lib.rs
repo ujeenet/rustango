@@ -3933,6 +3933,142 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Fetch every row where `<col> LIKE <pattern>` —
+            /// caller-supplied pattern (must include `%` / `_`
+            /// wildcards manually). Eloquent `Model::whereLike`
+            /// parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_like_pool(
+                col: &str,
+                pattern: impl ::core::convert::Into<::std::string::String>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__like", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(
+                        &_key,
+                        ::rustango::core::SqlValue::String(pattern.into()),
+                    )
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col> ILIKE <pattern>` —
+            /// case-insensitive LIKE (PG native, MySQL/SQLite
+            /// emulated via `LOWER(col) LIKE LOWER(pattern)`).
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_ilike_pool(
+                col: &str,
+                pattern: impl ::core::convert::Into<::std::string::String>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__ilike", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(
+                        &_key,
+                        ::rustango::core::SqlValue::String(pattern.into()),
+                    )
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col>` starts with `prefix`
+            /// (auto-appends `%`). Django `__startswith` / Eloquent
+            /// `whereLike("col", "$prefix%")` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_starts_with_pool(
+                col: &str,
+                prefix: impl ::core::convert::Into<::std::string::String>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__startswith", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(
+                        &_key,
+                        ::rustango::core::SqlValue::String(prefix.into()),
+                    )
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col>` ends with `suffix`
+            /// (auto-prepends `%`). Django `__endswith` / Eloquent
+            /// `whereLike("col", "%$suffix")` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_ends_with_pool(
+                col: &str,
+                suffix: impl ::core::convert::Into<::std::string::String>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__endswith", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(
+                        &_key,
+                        ::rustango::core::SqlValue::String(suffix.into()),
+                    )
+                    .fetch_pool(pool)
+                    .await
+            }
+
+            /// Fetch every row where `<col>` contains `substr`
+            /// (auto-wraps with `%`). Django `__contains` /
+            /// Eloquent `whereLike("col", "%$substr%")` parity.
+            ///
+            /// # Errors
+            /// As [`FetcherPool::fetch_pool`].
+            ///
+            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            pub async fn where_contains_pool(
+                col: &str,
+                substr: impl ::core::convert::Into<::std::string::String>,
+                pool: &::rustango::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                ::rustango::sql::ExecError,
+            > {
+                use ::rustango::sql::FetcherPool as _;
+                let _key = ::std::format!("{}__contains", col);
+                ::rustango::query::QuerySet::<Self>::default()
+                    .filter(
+                        &_key,
+                        ::rustango::core::SqlValue::String(substr.into()),
+                    )
+                    .fetch_pool(pool)
+                    .await
+            }
+
             /// Fetch every row where `<col> BETWEEN lo AND hi`
             /// (inclusive on both ends — same as SQL). Eloquent
             /// `Model::whereBetween($col, [$lo, $hi])->get()` parity.
