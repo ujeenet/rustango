@@ -441,6 +441,118 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         Ok(stmt.sql)
     }
 
+    /// Eloquent `Builder::sum($col)` on a filtered queryset —
+    /// `SELECT SUM(col) FROM <table> WHERE …`. Returns `Ok(None)`
+    /// when the filtered result set is empty.
+    ///
+    /// Differs from `Model::sum(col, &pool)` (already shipped)
+    /// which sums over every row of the table; this method respects
+    /// the queryset's accumulated filters.
+    ///
+    /// # Errors
+    /// As [`crate::sql::fetch_aggregate_pool`]; plus
+    /// [`ExecError::Query(QueryError::UnknownField)`] when `col`
+    /// isn't declared on the model.
+    pub async fn sum<U>(self, col: &str, pool: &Pool) -> Result<Option<U>, ExecError>
+    where
+        (Option<U>,): crate::sql::MaybePgFromRow
+            + crate::sql::MaybeMyFromRow
+            + crate::sql::MaybeSqliteFromRow
+            + Send
+            + Unpin,
+    {
+        self.queryset_aggregate_one::<U>(col, crate::core::AggregateExpr::Sum, pool)
+            .await
+    }
+
+    /// Eloquent `Builder::avg($col)` on a filtered queryset.
+    ///
+    /// # Errors
+    /// As [`Self::sum`].
+    pub async fn avg<U>(self, col: &str, pool: &Pool) -> Result<Option<U>, ExecError>
+    where
+        (Option<U>,): crate::sql::MaybePgFromRow
+            + crate::sql::MaybeMyFromRow
+            + crate::sql::MaybeSqliteFromRow
+            + Send
+            + Unpin,
+    {
+        self.queryset_aggregate_one::<U>(col, crate::core::AggregateExpr::Avg, pool)
+            .await
+    }
+
+    /// Eloquent `Builder::min($col)` on a filtered queryset.
+    ///
+    /// # Errors
+    /// As [`Self::sum`].
+    pub async fn min<U>(self, col: &str, pool: &Pool) -> Result<Option<U>, ExecError>
+    where
+        (Option<U>,): crate::sql::MaybePgFromRow
+            + crate::sql::MaybeMyFromRow
+            + crate::sql::MaybeSqliteFromRow
+            + Send
+            + Unpin,
+    {
+        self.queryset_aggregate_one::<U>(col, crate::core::AggregateExpr::Min, pool)
+            .await
+    }
+
+    /// Eloquent `Builder::max($col)` on a filtered queryset.
+    ///
+    /// # Errors
+    /// As [`Self::sum`].
+    pub async fn max<U>(self, col: &str, pool: &Pool) -> Result<Option<U>, ExecError>
+    where
+        (Option<U>,): crate::sql::MaybePgFromRow
+            + crate::sql::MaybeMyFromRow
+            + crate::sql::MaybeSqliteFromRow
+            + Send
+            + Unpin,
+    {
+        self.queryset_aggregate_one::<U>(col, crate::core::AggregateExpr::Max, pool)
+            .await
+    }
+
+    /// Internal: shared aggregate-on-queryset helper for `sum` /
+    /// `avg` / `min` / `max`. Validates the column against the
+    /// model schema, lifts the queryset's filters into the
+    /// aggregate's WHERE clause, then runs through
+    /// `fetch_aggregate_pool` and extracts the single column value.
+    async fn queryset_aggregate_one<U>(
+        self,
+        col: &str,
+        build: fn(&'static str) -> crate::core::AggregateExpr,
+        pool: &Pool,
+    ) -> Result<Option<U>, ExecError>
+    where
+        (Option<U>,): crate::sql::MaybePgFromRow
+            + crate::sql::MaybeMyFromRow
+            + crate::sql::MaybeSqliteFromRow
+            + Send
+            + Unpin,
+    {
+        let col_static = crate::sql::model_shortcuts::resolve_col::<T>(col)?;
+        // Lower this queryset to a SELECT to grab its WHERE clause,
+        // then hand-build the AggregateQuery so the aggregate's
+        // projection is exactly `<build>(col)` (no extra columns) —
+        // matches the shape `aggregate_one_pool` uses table-wide so
+        // the `Vec<(Option<U>,)>` decode lines up.
+        let select_q = self.compile()?;
+        let aggregate_q = crate::core::AggregateQuery {
+            model: <T as crate::core::Model>::SCHEMA,
+            where_clause: select_q.where_clause,
+            group_by: Vec::new(),
+            aggregates: vec![("v", build(col_static))],
+            aliases: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+        };
+        let rows: Vec<(Option<U>,)> = crate::sql::fetch_aggregate_pool(pool, &aggregate_q).await?;
+        Ok(rows.into_iter().next().and_then(|t| t.0))
+    }
+
     /// Like [`Self::to_sql`] but returns the full
     /// [`crate::sql::CompiledStatement`] (SQL + bound parameters).
     /// Use this when you need the binds — e.g. logging both halves
