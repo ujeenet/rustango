@@ -19,6 +19,10 @@ use sqlx::query::Query;
 use super::ExecError;
 use crate::core::{SelectQuery, SqlValue};
 use crate::sql::Pool;
+use crate::sql::{
+    MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
+    UpdaterPool as _,
+};
 
 #[cfg(feature = "postgres")]
 use super::{bind_match, bind_query};
@@ -642,6 +646,75 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         let q = self.compile()?;
         let stmt = pool.dialect().compile_select(&q)?;
         Ok(stmt)
+    }
+}
+
+impl<T> crate::query::QuerySet<T>
+where
+    T: crate::core::Model
+        + Send
+        + Unpin
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated,
+{
+    /// Eloquent `Builder::increment($col, $by)` — bulk
+    /// `UPDATE … SET col = col + by WHERE <queryset filters>`.
+    /// Returns rows affected.
+    ///
+    /// Sugar over
+    /// `self.update().set_expr(col, F(col) + Literal(by)).execute_pool(pool)`.
+    /// Negative `by` decrements; use [`Self::decrement`] for a
+    /// call-site that reads symmetrically.
+    ///
+    /// Differs from `Model::increment_each(col, by, &pool)` (already
+    /// shipped) in that the queryset's accumulated filters narrow
+    /// which rows get the bump — i.e. you can increment a counter
+    /// on a subset of rows rather than the whole table.
+    ///
+    /// ```ignore
+    /// // Eloquent: Post::where('published', true)->increment('views');
+    /// // rustango:
+    /// Post::objects()
+    ///     .filter("published", true)
+    ///     .increment("views", 1, &pool)
+    ///     .await?;
+    /// ```
+    ///
+    /// # Errors
+    /// As [`UpdaterPool::execute_pool`], plus
+    /// [`ExecError::Query(QueryError::UnknownField)`] when `col`
+    /// is not a declared field on `T`.
+    pub async fn increment(self, col: &str, by: i64, pool: &Pool) -> Result<u64, ExecError> {
+        let col_static = crate::sql::model_shortcuts::resolve_col::<T>(col)?;
+        self.update()
+            .set_expr(
+                col,
+                crate::sql::model_shortcuts::add_signed_expr(col_static, by),
+            )
+            .execute_pool(pool)
+            .await
+    }
+
+    /// Sibling of [`Self::increment`] — bulk-decrement.
+    /// Equivalent to `self.increment(col, -by, &pool)`; the separate
+    /// name keeps call sites readable.
+    ///
+    /// ```ignore
+    /// // Eloquent: User::where('vip', true)->decrement('credits', 10);
+    /// User::objects()
+    ///     .filter("vip", true)
+    ///     .decrement("credits", 10, &pool)
+    ///     .await?;
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Self::increment`].
+    pub async fn decrement(self, col: &str, by: i64, pool: &Pool) -> Result<u64, ExecError> {
+        self.increment(col, -by, pool).await
     }
 }
 
