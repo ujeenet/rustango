@@ -23,7 +23,7 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver", "template_views"]
+default = ["postgres", "manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver", "template_views"]
 postgres = ["sqlx/postgres"]
 
 # Unified `cargo run` / `cargo run -- <verb>` dispatcher. Pulls the
@@ -214,6 +214,10 @@ scheduler = ["dep:tokio"]
 # Secrets manager (`rustango::secrets`) — Secrets trait + EnvSecrets +
 # InMemorySecrets. Vault / AWS / GCP plug in via the trait.
 secrets = ["dep:async-trait"]
+# Attribute casts (#819) — `Cast<C>` field wrapper + `CastValue` trait;
+# the `EncryptedString` built-in pulls XChaCha20-Poly1305 + base64 + a
+# SHA-256 key derivation (`rand` for the per-write nonce).
+casts = ["dep:chacha20poly1305", "dep:base64", "dep:rand", "dep:sha2"]
 
 # TOTP / 2FA (`rustango::totp`) — RFC 6238 time-based one-time passwords
 # for second-factor authentication. SHA-1 (Google Authenticator default).
@@ -385,6 +389,7 @@ tera           = { workspace = true, optional = true }
 # `tenancy` feature deps — optional.
 argon2           = { workspace = true, optional = true }
 async-trait      = { workspace = true, optional = true }
+chacha20poly1305 = { workspace = true, optional = true }
 cookie           = { workspace = true, optional = true }
 hmac             = { workspace = true, optional = true }
 password-hash    = { workspace = true, optional = true }
