@@ -410,6 +410,50 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     {
         self.values_list_flat(col).fetch::<U>(pool).await
     }
+
+    /// Eloquent `Builder::toSql()` — render this queryset to its SQL
+    /// string in the pool's dialect, without executing.
+    ///
+    /// Placeholders use the dialect-specific syntax (`$1` / `$2` on
+    /// PG, `?` on MySQL / SQLite). Bind values are NOT included in
+    /// the returned string — use [`Self::to_compiled`] if you need
+    /// the parameter list too.
+    ///
+    /// Useful for debugging, logging, snapshot tests, and copying
+    /// the SQL into a database client to run by hand.
+    ///
+    /// ```ignore
+    /// let sql = Post::objects()
+    ///     .filter("published", true)
+    ///     .order_by(&[("created_at", true)])
+    ///     .limit(10)
+    ///     .to_sql(&pool)?;
+    /// // -> "SELECT … FROM \"post\" WHERE \"published\" = $1 …"
+    /// ```
+    ///
+    /// # Errors
+    /// Returns [`ExecError::Query`] if the queryset compile step
+    /// fails (e.g. unknown field, type mismatch) and
+    /// [`ExecError::Sql`] from the dialect's writer.
+    pub fn to_sql(self, pool: &Pool) -> Result<String, ExecError> {
+        let q = self.compile()?;
+        let stmt = pool.dialect().compile_select(&q)?;
+        Ok(stmt.sql)
+    }
+
+    /// Like [`Self::to_sql`] but returns the full
+    /// [`crate::sql::CompiledStatement`] (SQL + bound parameters).
+    /// Use this when you need the binds — e.g. logging both halves
+    /// of a parameterized query or building a snapshot test that
+    /// asserts on exact placeholder shape.
+    ///
+    /// # Errors
+    /// As [`Self::to_sql`].
+    pub fn to_compiled(self, pool: &Pool) -> Result<crate::sql::CompiledStatement, ExecError> {
+        let q = self.compile()?;
+        let stmt = pool.dialect().compile_select(&q)?;
+        Ok(stmt)
+    }
 }
 
 impl<T: crate::core::Model> crate::query::ValuesFlatQuerySet<T> {
