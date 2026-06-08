@@ -86,15 +86,21 @@ impl<'d> Sql<'d> {
     }
 
     /// Push `value` to the param list and emit the dialect's
-    /// placeholder for the new slot. For Postgres + a NULL value, also
-    /// emit `::TYPE` when the column type is known — see
-    /// [`Dialect::null_cast`].
+    /// placeholder for the new slot. For Postgres, also emit `::TYPE`
+    /// (from [`Dialect::null_cast`]) when:
+    /// - the value is `NULL` — types the otherwise-ambiguous parameter; or
+    /// - the value is a [`SqlValue::RangeLiteral`] (#343) — a range column
+    ///   value binds as a text literal, and PG won't assignment-cast
+    ///   `text` → `int4range`/`daterange`/… in `INSERT`/`UPDATE SET`, so
+    ///   the explicit `$N::<rangetype>` cast is required. (Range *operators*
+    ///   take their type from the operator context and emit a bare
+    ///   placeholder via a separate path, so they're unaffected.)
     pub(super) fn push_param_typed(&mut self, value: SqlValue, cast: Option<&'static str>) {
-        let is_null = matches!(value, SqlValue::Null);
+        let needs_cast = matches!(value, SqlValue::Null | SqlValue::RangeLiteral(_));
         self.params.push(value);
         let p = self.d.placeholder(self.params.len());
         self.sql.push_str(&p);
-        if is_null {
+        if needs_cast {
             if let Some(ty) = cast {
                 self.sql.push_str("::");
                 self.sql.push_str(ty);
@@ -3603,8 +3609,29 @@ fn write_filter(
             // Both shapes route through the same writer because the
             // SQL emission is identical (`<col> <op> <placeholder>`).
             require_op(b.d, filter.op)?;
+            // #343 — when the filtered column is a typed `Range<T>`
+            // (`FieldType::Range`) and the RHS is a *range literal*, cast
+            // the bound text to the column's range type so PG resolves
+            // the operator (`int4range @> $1::int4range`); without it PG
+            // errors `operator does not exist: int4range @> text`. A
+            // scalar RHS is element-containment (`int4range @> integer`)
+            // and must stay un-cast; a non-`Range` column (the legacy
+            // "declare the range as String + raw migration" shape) keeps
+            // the bare placeholder.
+            let range_cast = if matches!(filter.value, SqlValue::RangeLiteral(_)) {
+                model
+                    .and_then(|m| m.field_by_column(filter.column))
+                    .filter(|f| matches!(f.ty, crate::core::FieldType::Range(_)))
+                    .and_then(|f| b.d.cast_type(f.ty))
+            } else {
+                None
+            };
             b.params.push(filter.value.clone());
-            let p = b.d.placeholder(b.params.len());
+            let mut p = b.d.placeholder(b.params.len());
+            if let Some(ty) = range_cast {
+                p.push_str("::");
+                p.push_str(ty);
+            }
             let op_str: &'static str = match filter.op {
                 Op::RangeContains => "@>",
                 Op::RangeContainedBy => "<@",

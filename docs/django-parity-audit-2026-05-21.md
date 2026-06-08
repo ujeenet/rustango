@@ -23,7 +23,7 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 1. ORM — models / fields / Meta | 22 | 1 | 1 | 0 |
 | 2. QuerySet API | 38 | 1 | 1 | 0 |
 | 3. Field types & options | 32 | 0 | 2 | 1 |
-| 4. Postgres-specific fields | 3 | 0 | 2 | 0 |
+| 4. Postgres-specific fields | 4 | 0 | 1 | 0 |
 | 5. Migrations | 15 | 0 | 0 | 1 |
 | 6. Admin (ModelAdmin) | 35 | 1 | 0 | 1 |
 | 7. Forms / Formsets | 14 | 1 | 0 | 0 |
@@ -193,7 +193,7 @@ Summary: **32 SHIPPED / 0 PARTIAL / 2 MISSING / 1 N/A** in this section. Gaps cl
 | `JSONField` | (now built-in) | SHIPPED | See section 3 | |
 | `ArrayField` | [ArrayField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#arrayfield) | SHIPPED | `Array<T>` typed field wrapper (#341) — `Array<String>`/`Array<i32>`/`Array<i64>` map to `text[]`/`integer[]`/`bigint[]` DDL via `FieldType::Array(ArrayElem)`; INSERT binds a single-param PG array, SELECT decodes back to `Array<T>`; composes with the already-shipped `array_contains`/`array_contained_by`/`array_overlap` operators. PG-only by language semantics (degrades to `TEXT` + erroring decode on MySQL/SQLite, like trigram/FTS). See `crates/rustango/src/sql/array.rs` + `tests/array_field{,_pg_live}.rs`. | |
 | `HStoreField` | [HStoreField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#hstorefield) | MISSING | n/a (#342) | |
-| `RangeField` (Int / Date / DateTime / Decimal) | [RangeField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#range-fields) | MISSING | n/a — `SqlValue::RangeLiteral` exists but no typed field (#343) | |
+| `RangeField` (Int / Date / DateTime / Decimal) | [RangeField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#range-fields) | SHIPPED | `Range<T>` typed field wrapper (#343) — `Range<i32>`/`Range<i64>`/`Range<Decimal>`/`Range<NaiveDate>`/`Range<DateTime<Utc>>` map to `int4range`/`int8range`/`numrange`/`daterange`/`tstzrange` via `FieldType::Range(RangeElem)`; INSERT binds a `RangeLiteral` (`[lower,upper)`), SELECT decodes through sqlx `PgRange<T>`; composes with the shipped `range_contains`/`range_overlap`/… operators. PG-only by language semantics (degrades to `TEXT` on MySQL/SQLite). See `crates/rustango/src/sql/range.rs` + `tests/range_field{,_pg_live}.rs`. | |
 | `CITextField` | [CITextField](https://docs.djangoproject.com/en/6.0/ref/contrib/postgres/fields/#citext-fields) | SHIPPED | `#[rustango(citext)]` (#344) — DDL emits `CITEXT` on PG (with `CREATE EXTENSION IF NOT EXISTS citext;` prelude available via `dialect.ci_text_extension_sql()`), `TEXT COLLATE NOCASE` on SQLite, `VARCHAR(N)/TEXT COLLATE utf8mb4_general_ci` on MySQL. Column-level case-insensitivity propagates to `=` / `LIKE` / `ORDER BY` without query-side `LOWER(...)` wrapping. | |
 
 Summary: **2 SHIPPED / 1 PARTIAL / 2 MISSING / 0 N/A**.
@@ -695,7 +695,7 @@ Summary: **22 SHIPPED / 0 PARTIAL / 1 MISSING / 0 N/A**.
 | `flatpages` | [flatpages](https://docs.djangoproject.com/en/6.0/ref/contrib/flatpages/) | SHIPPED | `flatpages::*` (v0.22) | |
 | `redirects` | [redirects](https://docs.djangoproject.com/en/6.0/ref/contrib/redirects/) | SHIPPED | `redirects::*` (v0.22) | |
 | `admindocs` | [admindocs](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/admindocs/) | N/A | Rust doc-comments + cargo doc | |
-| `postgres` (ArrayField, JSONField, RangeField, HStoreField, CITextField) | (sec 4) | PARTIAL | JSONField + CITextField shipped (#344); ArrayField shipped via `Array<T>` typed field (#341); Range partial via `RangeLiteral` (no typed field wrapper yet, #343); HStore MISSING (#442) | |
+| `postgres` (ArrayField, JSONField, RangeField, HStoreField, CITextField) | (sec 4) | PARTIAL | JSONField + CITextField shipped (#344); ArrayField shipped via `Array<T>` (#341); RangeField shipped via `Range<T>` (#343); HStore MISSING (#442) | |
 | `gis` (GeoDjango) | [gis](https://docs.djangoproject.com/en/6.0/ref/contrib/gis/) | MISSING | [#58](https://github.com/ujeenet/rustango/issues/58) | |
 | `gis.geos` (geometry types) | (above) | MISSING | (above) (#443) | |
 | `gis.gdal` (raster) | (above) | MISSING | (above) (#444) | |

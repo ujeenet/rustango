@@ -10841,6 +10841,16 @@ enum DetectedKind {
     ArrayInt,
     /// `Array<i64>` → PG `bigint[]` (#341).
     ArrayBigInt,
+    /// `Range<i32>` → PG `int4range` (#343).
+    RangeInt,
+    /// `Range<i64>` → PG `int8range` (#343).
+    RangeBigInt,
+    /// `Range<Decimal>` → PG `numrange` (#343).
+    RangeNumeric,
+    /// `Range<NaiveDate>` → PG `daterange` (#343).
+    RangeDate,
+    /// `Range<DateTime<Utc>>` → PG `tstzrange` (#343).
+    RangeDateTime,
 }
 
 impl DetectedKind {
@@ -10869,6 +10879,21 @@ impl DetectedKind {
             }
             Self::ArrayBigInt => {
                 quote!(#root::core::FieldType::Array(#root::core::ArrayElem::BigInt))
+            }
+            Self::RangeInt => {
+                quote!(#root::core::FieldType::Range(#root::core::RangeElem::Int))
+            }
+            Self::RangeBigInt => {
+                quote!(#root::core::FieldType::Range(#root::core::RangeElem::BigInt))
+            }
+            Self::RangeNumeric => {
+                quote!(#root::core::FieldType::Range(#root::core::RangeElem::Numeric))
+            }
+            Self::RangeDate => {
+                quote!(#root::core::FieldType::Range(#root::core::RangeElem::Date))
+            }
+            Self::RangeDateTime => {
+                quote!(#root::core::FieldType::Range(#root::core::RangeElem::DateTime))
             }
         }
     }
@@ -10919,6 +10944,12 @@ impl DetectedKind {
             Self::ArrayText | Self::ArrayInt | Self::ArrayBigInt => {
                 (quote!(Array), quote!(::std::vec::Vec::new()))
             }
+            // Ranges (#343) likewise can't be a FK PK — never reached.
+            Self::RangeInt
+            | Self::RangeBigInt
+            | Self::RangeNumeric
+            | Self::RangeDate
+            | Self::RangeDateTime => (quote!(RangeLiteral), quote!(::std::string::String::new())),
         }
     }
 }
@@ -11099,6 +11130,41 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
                         ty,
                         "unsupported `Array<T>` element — only `Array<String>` (→ text[]), \
                          `Array<i32>` (→ integer[]), and `Array<i64>` (→ bigint[]) are supported (#341)",
+                    ));
+                }
+            };
+            return Ok(DetectedType {
+                kind,
+                nullable: false,
+                auto: false,
+                fk_inner: None,
+            });
+        }
+        // `Range<i32>` / `Range<i64>` / `Range<Decimal>` /
+        // `Range<NaiveDate>` / `Range<DateTime<…>>` → PG `int4range` /
+        // `int8range` / `numrange` / `daterange` / `tstzrange` (Django
+        // `RangeField` family, #343).
+        "Range" => {
+            let (inner, _) = generic_pair(ty, &last.arguments, "Range")?;
+            let elem = match inner {
+                Type::Path(TypePath { path, qself: None }) => {
+                    path.segments.last().map(|s| s.ident.to_string())
+                }
+                _ => None,
+            };
+            let kind = match elem.as_deref() {
+                Some("i32") => DetectedKind::RangeInt,
+                Some("i64") => DetectedKind::RangeBigInt,
+                Some("Decimal") => DetectedKind::RangeNumeric,
+                Some("NaiveDate") => DetectedKind::RangeDate,
+                Some("DateTime") => DetectedKind::RangeDateTime,
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "unsupported `Range<T>` element — only `Range<i32>` (→ int4range), \
+                         `Range<i64>` (→ int8range), `Range<Decimal>` (→ numrange), \
+                         `Range<NaiveDate>` (→ daterange), and `Range<DateTime<Utc>>` \
+                         (→ tstzrange) are supported (#343)",
                     ));
                 }
             };

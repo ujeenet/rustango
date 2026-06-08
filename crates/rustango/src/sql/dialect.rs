@@ -356,6 +356,12 @@ pub trait Dialect {
             FieldType::Array(crate::core::ArrayElem::Text) => "text[]",
             FieldType::Array(crate::core::ArrayElem::Int) => "integer[]",
             FieldType::Array(crate::core::ArrayElem::BigInt) => "bigint[]",
+            // PG range CAST targets (#343).
+            FieldType::Range(crate::core::RangeElem::Int) => "int4range",
+            FieldType::Range(crate::core::RangeElem::BigInt) => "int8range",
+            FieldType::Range(crate::core::RangeElem::Numeric) => "numrange",
+            FieldType::Range(crate::core::RangeElem::Date) => "daterange",
+            FieldType::Range(crate::core::RangeElem::DateTime) => "tstzrange",
         })
     }
 
@@ -394,6 +400,8 @@ pub trait Dialect {
             // `bigint[]` (#341). `max_length` is ignored (arrays carry
             // no length cap at the type level).
             FieldType::Array(elem) => format!("{}[]", elem.pg_element_type()),
+            // Native PG range column (#343).
+            FieldType::Range(elem) => elem.pg_range_type().to_owned(),
         }
     }
 

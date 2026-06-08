@@ -1515,6 +1515,8 @@ fn field_type_label(ty: crate::core::FieldType) -> &'static str {
         T::Binary => "binary",
         // #341 — PG array columns.
         T::Array(_) => "array",
+        // #343 — PG range columns.
+        T::Range(_) => "range",
     }
 }
 

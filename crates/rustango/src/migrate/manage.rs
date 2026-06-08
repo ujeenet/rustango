@@ -2982,6 +2982,12 @@ fn json_to_sql_value(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(SqlValue::Array(items))
         }
+        // #343 — PG range column from a fixture: a range-literal string
+        // (`"[1,10)"`), bound as-is and implicit-cast by PG.
+        FieldType::Range(_) => v
+            .as_str()
+            .map(|s| SqlValue::RangeLiteral(s.to_owned()))
+            .ok_or_else(|| format!("expected range-literal string for Range column, got {v}")),
     }
 }
 

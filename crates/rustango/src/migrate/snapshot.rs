@@ -520,6 +520,12 @@ pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
         FieldType::Array(crate::core::ArrayElem::Text) => "array_text",
         FieldType::Array(crate::core::ArrayElem::Int) => "array_int",
         FieldType::Array(crate::core::ArrayElem::BigInt) => "array_bigint",
+        // #343 — stable snapshot names for PG range element kinds.
+        FieldType::Range(crate::core::RangeElem::Int) => "range_int",
+        FieldType::Range(crate::core::RangeElem::BigInt) => "range_bigint",
+        FieldType::Range(crate::core::RangeElem::Numeric) => "range_numeric",
+        FieldType::Range(crate::core::RangeElem::Date) => "range_date",
+        FieldType::Range(crate::core::RangeElem::DateTime) => "range_datetime",
     }
 }
 

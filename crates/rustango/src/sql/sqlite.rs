@@ -187,6 +187,8 @@ impl Dialect for Sqlite {
             // SQLite has no array type — `Array<T>` (#341) is PG-only.
             // Degrade the CAST target to TEXT affinity.
             FieldType::Array(_) => "TEXT",
+            // Ditto for PG range columns (#343).
+            FieldType::Range(_) => "TEXT",
         })
     }
 
@@ -213,6 +215,8 @@ impl Dialect for Sqlite {
             // PG-only by language semantics. Degrade to `TEXT`; the
             // bind / decode paths error on SQLite.
             FieldType::Array(_) => "TEXT".into(),
+            // Ditto for PG range columns (#343).
+            FieldType::Range(_) => "TEXT".into(),
         }
     }
 
