@@ -133,6 +133,24 @@ pub enum Expr {
     ///
     /// [`SelectQuery`]: crate::core::SelectQuery
     Subquery(Box<super::query::SelectQuery>),
+    /// Scalar **aggregate** subquery — `(SELECT COUNT(*) FROM … WHERE …)`.
+    /// Issue #830 slice 3. Like [`Self::Subquery`] but the inner query is
+    /// an [`AggregateQuery`] so its projection is a single aggregate
+    /// (`COUNT(*)`, `SUM(col)`, …) rather than the child model's columns.
+    ///
+    /// Backs the count-comparator shortcut
+    /// [`crate::query::QuerySet::where_has_count`], which embeds a
+    /// correlated `(SELECT COUNT(*) FROM <child> WHERE <child_fk> =
+    /// <outer>.<pk>) <op> n` predicate. The writer pushes the inner
+    /// model's scope frame so any [`Self::OuterRef`] inside correlates
+    /// to the enclosing parent query — identically across PG / MySQL /
+    /// SQLite.
+    ///
+    /// Build via [`crate::core::subquery::reverse_has_count`] rather than
+    /// constructing this variant directly.
+    ///
+    /// [`AggregateQuery`]: crate::core::AggregateQuery
+    AggregateSubquery(Box<super::query::AggregateQuery>),
     /// Reference to an outer query's column from inside a correlated
     /// subquery (issue #5). Emitted as `"<outer_table>"."<col>"`; the
     /// outer table is threaded through the writer at emit time so

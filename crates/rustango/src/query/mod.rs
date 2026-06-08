@@ -1388,6 +1388,52 @@ impl<T: Model> QuerySet<T> {
         self.where_raw(wrapped)
     }
 
+    /// Filter to rows whose **count** of related rows (via the
+    /// reverse-FK relation named `name`) satisfies `<count> <op> n` —
+    /// Eloquent `has($rel, $op, $n)` / Django
+    /// `.annotate(c=Count(<rel>)).filter(c__<op>=n)`. Issue #830
+    /// slice 3.
+    ///
+    /// Emits a correlated scalar-aggregate subquery in the WHERE
+    /// clause: `(SELECT COUNT(*) FROM <child> WHERE <child_fk> =
+    /// <outer>.<self_pk>) <op> n`. The subquery's `OuterRef` is rewritten
+    /// to the parent's table qualifier by the writer's scope stack, so
+    /// the SQL is portable across PG / MySQL / SQLite.
+    ///
+    /// `op` is one of the binary comparison operators
+    /// ([`Op::Eq`] / [`Op::Ne`] / [`Op::Lt`] / [`Op::Lte`] /
+    /// [`Op::Gt`] / [`Op::Gte`]); other operators emit a dialect error
+    /// at compile time. For the common "has at least one" / "has none"
+    /// cases prefer [`Self::where_has`] / [`Self::where_doesnt_have`],
+    /// which emit a cheaper `EXISTS` / `NOT EXISTS`.
+    ///
+    /// Unknown relation names surface as [`QueryError::UnknownField`]
+    /// at compile time, identically to [`Self::where_has`].
+    ///
+    /// ```ignore
+    /// // Eloquent: Author::has('books', '>', 3)->get();
+    /// let prolific = Author::objects()
+    ///     .where_has_count("books", Op::Gt, 3)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn where_has_count(self, name: &str, op: Op, n: i64) -> Self {
+        match T::reverse_relations().iter().find(|r| r.name == name) {
+            Some(rel) => {
+                let lhs = crate::core::subquery::reverse_has_count(rel);
+                self.where_raw(WhereExpr::ExprCompare {
+                    lhs,
+                    op,
+                    rhs: Expr::Literal(SqlValue::I64(n)),
+                })
+            }
+            None => self.with_pending_error(QueryError::UnknownField {
+                model: T::SCHEMA.name,
+                field: name.to_string(),
+            }),
+        }
+    }
+
     /// Eloquent `Builder::whereColumn($col1, $col2)` — emits
     /// `<col1> = <col2>`, comparing two columns instead of column
     /// vs literal. Equality is the overwhelming majority of uses;
@@ -2818,7 +2864,12 @@ fn validate_expr_columns_in_model(
         // in the outer queryset (the caller already validated it
         // there). `AliasedColumn` (issue #80) carries its own table
         // alias and is validated by the JOIN writer at emit time.
-        Expr::Subquery(_) | Expr::OuterRef(_) | Expr::AliasedColumn { .. } => Ok(()),
+        // `AggregateSubquery` (issue #830) validates against its own
+        // child model at construction; nothing resolves against this one.
+        Expr::Subquery(_)
+        | Expr::AggregateSubquery(_)
+        | Expr::OuterRef(_)
+        | Expr::AliasedColumn { .. } => Ok(()),
         // Window (issue #7) — partition_by + order_by + arg columns
         // reference the model. Walk them.
         Expr::Window(w) => {

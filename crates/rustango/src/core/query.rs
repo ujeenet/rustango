@@ -442,7 +442,14 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
         // against the outer schema when it embeds this subquery.
         // `AliasedColumn` (issue #80) carries its own table alias so
         // it doesn't resolve against the passed-in model.
-        Expr::Subquery(_) | Expr::OuterRef(_) | Expr::AliasedColumn { .. } => Ok(()),
+        // `AggregateSubquery` (issue #830) wraps an AggregateQuery over
+        // the *child* model; its columns resolve there, and any
+        // `OuterRef` names an outer column validated when the outer
+        // query embeds it — nothing to check against this model.
+        Expr::Subquery(_)
+        | Expr::AggregateSubquery(_)
+        | Expr::OuterRef(_)
+        | Expr::AliasedColumn { .. } => Ok(()),
         // Window (issue #7) — args / partition_by / order_by all
         // reference the outer model's columns. Validate them.
         Expr::Window(w) => {
@@ -1505,4 +1512,24 @@ pub struct AggregateQuery {
     pub order_by: Vec<OrderItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+/// PartialEq for `AggregateQuery` — needed so [`crate::core::Expr`]
+/// (which embeds `Box<AggregateQuery>` for issue #830 correlated
+/// count-comparator subqueries) can keep its `#[derive(PartialEq)]`.
+/// Same treatment as [`SelectQuery`]: `ModelSchema` doesn't implement
+/// `PartialEq`, so `model` is compared by pointer identity — two
+/// queries against the same (singleton) schema register equal.
+impl PartialEq for AggregateQuery {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.model, other.model)
+            && self.where_clause == other.where_clause
+            && self.group_by == other.group_by
+            && self.aggregates == other.aggregates
+            && self.aliases == other.aliases
+            && self.having == other.having
+            && self.order_by == other.order_by
+            && self.limit == other.limit
+            && self.offset == other.offset
+    }
 }
