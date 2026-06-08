@@ -99,3 +99,30 @@ fn range_into_sqlvalue_is_range_literal() {
     let v: SqlValue = Range::closed_open(1_i32, 10).into();
     assert!(matches!(v, SqlValue::RangeLiteral(ref s) if s == "[1,10)"));
 }
+
+#[test]
+fn insert_casts_range_literal_to_its_pg_type() {
+    // Regression for the CI failure: PG rejects `INSERT … VALUES ($1)`
+    // when $1 is bound as text but the column is `int4range` (no
+    // assignment cast). The writer must emit `$N::int4range`.
+    use rustango::core::InsertQuery;
+    let q = InsertQuery {
+        model: Event::SCHEMA,
+        columns: vec!["seats", "valid_on"],
+        values: vec![
+            SqlValue::RangeLiteral("[1,10)".into()),
+            SqlValue::RangeLiteral("[2025-01-01,2025-02-01)".into()),
+        ],
+        returning: vec![],
+        on_conflict: None,
+    };
+    let sql = Postgres.compile_insert(&q).unwrap().sql;
+    assert!(
+        sql.contains("$1::int4range"),
+        "missing int4range cast: {sql}"
+    );
+    assert!(
+        sql.contains("$2::daterange"),
+        "missing daterange cast: {sql}"
+    );
+}

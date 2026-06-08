@@ -86,15 +86,21 @@ impl<'d> Sql<'d> {
     }
 
     /// Push `value` to the param list and emit the dialect's
-    /// placeholder for the new slot. For Postgres + a NULL value, also
-    /// emit `::TYPE` when the column type is known — see
-    /// [`Dialect::null_cast`].
+    /// placeholder for the new slot. For Postgres, also emit `::TYPE`
+    /// (from [`Dialect::null_cast`]) when:
+    /// - the value is `NULL` — types the otherwise-ambiguous parameter; or
+    /// - the value is a [`SqlValue::RangeLiteral`] (#343) — a range column
+    ///   value binds as a text literal, and PG won't assignment-cast
+    ///   `text` → `int4range`/`daterange`/… in `INSERT`/`UPDATE SET`, so
+    ///   the explicit `$N::<rangetype>` cast is required. (Range *operators*
+    ///   take their type from the operator context and emit a bare
+    ///   placeholder via a separate path, so they're unaffected.)
     pub(super) fn push_param_typed(&mut self, value: SqlValue, cast: Option<&'static str>) {
-        let is_null = matches!(value, SqlValue::Null);
+        let needs_cast = matches!(value, SqlValue::Null | SqlValue::RangeLiteral(_));
         self.params.push(value);
         let p = self.d.placeholder(self.params.len());
         self.sql.push_str(&p);
-        if is_null {
+        if needs_cast {
             if let Some(ty) = cast {
                 self.sql.push_str("::");
                 self.sql.push_str(ty);
