@@ -5666,6 +5666,62 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Look up multiple rows by primary key, **failing** if
+            /// any requested PK is missing. Eloquent
+            /// `Model::findOrFail([1, 2, 3])` parity. Returns rows in
+            /// inventory order (NOT request order — same as
+            /// [`Self::find_many`]).
+            ///
+            /// Empty `pks` returns an empty `Vec` (no rows requested
+            /// → nothing to fail on).
+            ///
+            /// Differs from [`Self::find_many`] in that this method
+            /// requires every PK to resolve. If even one is missing,
+            /// the call surfaces `sqlx::Error::RowNotFound` (wrapped
+            /// in `ExecError::Driver`). Rows are deduped at the SQL
+            /// layer, so passing the same PK twice in `pks` counts as
+            /// one expected row.
+            ///
+            /// # Errors
+            /// As [`Self::find_many`], plus `RowNotFound` when the
+            /// returned row count is less than the count of distinct
+            /// requested PKs.
+            pub async fn find_many_or_fail<V>(
+                pks: impl ::core::iter::IntoIterator<Item = V>,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<Self>,
+                #root::sql::ExecError,
+            >
+            where
+                V: ::core::convert::Into<#root::core::SqlValue>,
+            {
+                let _values: ::std::vec::Vec<#root::core::SqlValue> =
+                    pks.into_iter().map(::core::convert::Into::into).collect();
+                if _values.is_empty() {
+                    return ::core::result::Result::Ok(::std::vec::Vec::new());
+                }
+                // Dedup the requested PK list before counting so
+                // duplicate-PK requests don't false-fail (the SQL
+                // `IN (...)` clause naturally dedups too).
+                let mut _seen: ::std::collections::HashSet<
+                    ::std::string::String,
+                > = ::std::collections::HashSet::new();
+                for v in &_values {
+                    _seen.insert(v.to_display_string());
+                }
+                let _expected = _seen.len();
+                let _rows = Self::find_many(_values, pool).await?;
+                if _rows.len() < _expected {
+                    return ::core::result::Result::Err(
+                        #root::sql::ExecError::Driver(
+                            #root::sql::sqlx::Error::RowNotFound,
+                        ),
+                    );
+                }
+                ::core::result::Result::Ok(_rows)
+            }
+
             /// Find by primary key or run `fallback` to produce a
             /// default row to return. Eloquent
             /// `Model::findOr($pk, fn() => …)` parity.
