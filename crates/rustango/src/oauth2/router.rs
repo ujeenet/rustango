@@ -27,6 +27,7 @@
 //! let app = axum::Router::new().merge(oauth2_router(
 //!     registry,
 //!     b"flow-signing-secret-keep-me-safe".to_vec(),
+//!     true, // Secure flow cookie (HTTPS); use false only for local HTTP dev
 //!     Arc::new(|user, _tokens| Box::pin(async move {
 //!         // Persist or look up your user record by user.email / user.provider_user_id
 //!         tracing::info!(email = ?user.email, "logged in");
@@ -82,22 +83,31 @@ struct RouterState {
     registry: OAuth2Registry,
     flow_secret: Arc<Vec<u8>>,
     on_success: OnAuthSuccess,
+    /// Audit H2 — when true, the flow cookie (which carries the PKCE
+    /// verifier + CSRF `state`) is marked `Secure` so it's only sent
+    /// over HTTPS. Set `false` only for local plain-HTTP dev.
+    secure: bool,
 }
 
 /// Build the router.
 ///
 /// `flow_secret` signs the per-flow cookie — keep it stable and out of
 /// source. 32+ bytes from a CSPRNG is plenty.
+///
+/// `secure` marks the flow cookie `Secure` (HTTPS-only). Pass `true`
+/// in production; `false` only for local plain-HTTP development.
 #[must_use]
 pub fn oauth2_router(
     registry: OAuth2Registry,
     flow_secret: Vec<u8>,
+    secure: bool,
     on_success: OnAuthSuccess,
 ) -> Router {
     let state = RouterState {
         registry,
         flow_secret: Arc::new(flow_secret),
         on_success,
+        secure,
     };
     Router::new()
         .route("/auth/{tenant}/{provider}/login", get(login_handler))
@@ -123,8 +133,10 @@ async fn login_handler(
 
     let (auth_url, flow) = provider.begin();
     let sealed = seal_flow(&flow, &state.flow_secret);
+    let secure = if state.secure { "; Secure" } else { "" };
     // 5-minute window — if the user takes longer to log in we issue a fresh flow.
-    let cookie = format!("{FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300");
+    let cookie =
+        format!("{FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300{secure}");
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -188,10 +200,11 @@ async fn callback_handler(
     match (state.on_success)(user, tokens).await {
         Ok(redirect) => {
             // Wipe the flow cookie on the way out.
+            let secure = if state.secure { "; Secure" } else { "" };
             let mut resp = redirect.into_response();
             resp.headers_mut().insert(
                 header::SET_COOKIE,
-                format!("{FLOW_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+                format!("{FLOW_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}")
                     .parse()
                     .expect("valid clear cookie"),
             );
@@ -228,7 +241,7 @@ mod tests {
     async fn login_route_redirects_with_cookie_and_location() {
         let registry = OAuth2Registry::new();
         registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
-        let app = oauth2_router(registry, b"signing".to_vec(), dummy_success());
+        let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
 
         let resp = app
             .oneshot(
@@ -257,12 +270,18 @@ mod tests {
         assert!(cookie.starts_with(&format!("{FLOW_COOKIE}=")));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("SameSite=Lax"));
+        // Audit H2 — flow cookie is Secure when the router is built with
+        // `secure = true` (carries the PKCE verifier + CSRF state).
+        assert!(
+            cookie.contains("; Secure"),
+            "flow cookie must be Secure: {cookie}"
+        );
     }
 
     #[tokio::test]
     async fn login_unknown_provider_returns_404() {
         let registry = OAuth2Registry::new();
-        let app = oauth2_router(registry, b"signing".to_vec(), dummy_success());
+        let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -279,7 +298,7 @@ mod tests {
     async fn callback_propagates_provider_error_param() {
         let registry = OAuth2Registry::new();
         registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
-        let app = oauth2_router(registry, b"signing".to_vec(), dummy_success());
+        let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
 
         let resp = app
             .oneshot(
@@ -302,7 +321,7 @@ mod tests {
     async fn callback_without_cookie_rejects() {
         let registry = OAuth2Registry::new();
         registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
-        let app = oauth2_router(registry, b"signing".to_vec(), dummy_success());
+        let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -323,7 +342,7 @@ mod tests {
     async fn callback_with_tampered_cookie_rejects() {
         let registry = OAuth2Registry::new();
         registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
-        let app = oauth2_router(registry, b"signing".to_vec(), dummy_success());
+        let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
         let resp = app
             .oneshot(
                 Request::builder()

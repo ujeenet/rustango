@@ -519,6 +519,14 @@ pub struct SecuritySettings {
     /// real-IP / Host validation chain. Two-element vec; ignored if
     /// not exactly length 2.
     pub secure_proxy_ssl_header: Vec<String>,
+    /// Django-parity `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` —
+    /// when `true`, the framework's auth cookies (admin session, OAuth
+    /// flow, operator + tenant console) carry the `Secure` attribute so
+    /// browsers only send them over HTTPS. `None` is treated as `true`
+    /// by consumers (secure by default); set `false` in
+    /// `dev_settings.toml` for local plain-HTTP development.
+    /// `manage check --deploy` flags `false` on the prod tier.
+    pub secure_cookies: Option<bool>,
 }
 
 /// URL-prefix overrides for the framework's built-in routes (#87,
