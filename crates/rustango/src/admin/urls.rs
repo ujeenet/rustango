@@ -201,6 +201,13 @@ pub(crate) struct Config {
     /// (no auth, or basic-auth via the separate
     /// `protect_with_basic_auth` wrapper).
     pub(crate) session_secret: Option<crate::session::SessionSecret>,
+    /// Audit H2 — when true, the admin session cookie carries the
+    /// `Secure` attribute (HTTPS-only). Defaults to `false` for the
+    /// bare `Builder::new` path (local/dev, often plain HTTP);
+    /// `Builder::from_settings` defaults it to `true` (reads
+    /// `security.secure_cookies`, secure-by-default). Toggle directly
+    /// via [`Builder::secure_cookies`].
+    pub(crate) secure_cookies: bool,
 }
 
 impl Builder {
@@ -296,7 +303,23 @@ impl Builder {
             builder = builder.read_only(admin.read_only_tables.iter().cloned());
         }
 
+        // 4. Cookie security — secure-by-default on the config path
+        //    (audit H2). `security.secure_cookies = false` opts out for
+        //    local plain-HTTP dev (set in dev_settings.toml).
+        builder = builder.secure_cookies(settings.security.secure_cookies.unwrap_or(true));
+
         builder
+    }
+
+    /// Audit H2 — set whether the admin session cookie carries the
+    /// `Secure` attribute (HTTPS-only). `Builder::new` defaults to
+    /// `false` (bare/dev path); `from_settings` defaults to `true`.
+    /// Leave it `false` only for local plain-HTTP development —
+    /// browsers will not send a `Secure` cookie over HTTP.
+    #[must_use]
+    pub fn secure_cookies(mut self, secure: bool) -> Self {
+        self.config.secure_cookies = secure;
+        self
     }
 
     /// URL prefix the admin Router is mounted under (#59,
@@ -1026,6 +1049,33 @@ mod scope_filter_tests {
         assert_eq!(b.config.subtitle.as_deref(), Some("Things"));
         assert_eq!(b.config.brand_logo_url.as_deref(), Some("/brand/logo.png"));
         assert_eq!(b.config.theme_mode.as_deref(), Some("light"));
+    }
+
+    #[tokio::test]
+    async fn builder_new_defaults_secure_cookies_false() {
+        // Bare/dev path stays plain (often local HTTP) until opted in.
+        let b = Builder::new(lazy_pg_pool());
+        assert!(!b.config.secure_cookies);
+        // Explicit opt-in flips it.
+        let b = Builder::new(lazy_pg_pool()).secure_cookies(true);
+        assert!(b.config.secure_cookies);
+    }
+
+    #[cfg(feature = "config")]
+    #[tokio::test]
+    async fn from_settings_defaults_secure_cookies_true() {
+        // Audit H2 — the config-driven path is secure-by-default; only
+        // an explicit `security.secure_cookies = false` opts out.
+        use crate::config::Settings;
+        let settings = Settings::default();
+        assert!(settings.security.secure_cookies.is_none());
+        let b = Builder::from_settings(lazy_pg_pool(), &settings);
+        assert!(b.config.secure_cookies, "secure by default on config path");
+
+        let mut insecure = Settings::default();
+        insecure.security.secure_cookies = Some(false);
+        let b = Builder::from_settings(lazy_pg_pool(), &insecure);
+        assert!(!b.config.secure_cookies, "explicit opt-out honored");
     }
 
     #[cfg(feature = "config")]

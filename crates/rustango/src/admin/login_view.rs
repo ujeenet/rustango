@@ -169,9 +169,14 @@ async fn login_submit(
         },
     );
     let cookie = format!(
-        "{name}={val}; Path=/; HttpOnly; SameSite=Lax",
+        "{name}={val}; Path=/; HttpOnly; SameSite=Lax{secure}",
         name = SESSION_COOKIE,
         val = cookie_value,
+        secure = if state.config.secure_cookies {
+            "; Secure"
+        } else {
+            ""
+        },
     );
     let redirect_to = if state.config.admin_prefix.is_empty() {
         "/".to_owned()
@@ -349,8 +354,13 @@ async fn logout_submit(State(state): State<AppState>, headers: axum::http::Heade
         .unwrap_or((None, None));
 
     let cookie = format!(
-        "{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        "{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}",
         name = SESSION_COOKIE,
+        secure = if state.config.secure_cookies {
+            "; Secure"
+        } else {
+            ""
+        },
     );
     let mut resp = Redirect::to(&format!("{}/login", state.config.admin_prefix)).into_response();
     if let Ok(v) = HeaderValue::from_str(&cookie) {
