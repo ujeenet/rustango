@@ -2506,6 +2506,35 @@ where
         Ok(rows.into_iter().next())
     }
 
+    /// Eloquent `Builder::find($pk)` — fetch the row matching the
+    /// queryset's accumulated filters **and** the model's PK = `pk`,
+    /// or `None` when no row matches.
+    ///
+    /// Sugar over `self.where_key(pk).first(pool)`. The key
+    /// difference from `Model::find(pk, &pool)` is that this method
+    /// honors **pre-applied scopes** — e.g. a global scope, default
+    /// manager filter, or chained `.filter(...)` calls still narrow
+    /// the lookup. Eloquent's typical pattern:
+    ///
+    /// ```ignore
+    /// // Eloquent: Post::published()->find($id);
+    /// // rustango:
+    /// let post = Post::objects()
+    ///     .filter("published", true)
+    ///     .find(42_i64, &pool).await?;
+    /// // -> Some(post) only when the row with id=42 is *also* published.
+    /// ```
+    ///
+    /// Models without `#[rustango(primary_key)]` surface as
+    /// [`ExecError::Query(QueryError::UnknownField)`] (field `"<pk>"`)
+    /// via the deferred-error path.
+    ///
+    /// # Errors
+    /// As [`FetcherPool::fetch_pool`].
+    pub async fn find(self, pk: impl Into<SqlValue>, pool: &Pool) -> Result<Option<T>, ExecError> {
+        self.where_key(pk).first(pool).await
+    }
+
     /// Django `QuerySet.latest()` — picks the largest row by the
     /// column set in `Meta.get_latest_by`. The model must declare
     /// `#[rustango(get_latest_by = "<col>")]`; without it this
