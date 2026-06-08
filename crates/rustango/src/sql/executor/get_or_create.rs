@@ -152,3 +152,80 @@ where
         }),
     }
 }
+
+impl<T> crate::query::QuerySet<T>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    /// Chainable form of [`get_or_create`]. Sugar for
+    /// `get_or_create(self, create_fn, pool)` so call sites read as
+    /// `Post::objects().filter(...).get_or_create(|pool| ..., &pool)`.
+    ///
+    /// Returns `(row, created)` where `created` is `true` when the
+    /// closure was invoked.
+    ///
+    /// # Errors
+    /// As [`get_or_create`].
+    pub async fn get_or_create<F, Fut>(
+        self,
+        create_fn: F,
+        pool: &Pool,
+    ) -> Result<(T, bool), ExecError>
+    where
+        F: FnOnce(Pool) -> Fut,
+        Fut: std::future::Future<Output = Result<T, ExecError>>,
+    {
+        get_or_create(self, create_fn, pool).await
+    }
+
+    /// Eloquent `Model::firstOrCreate($attributes, $values)` alias
+    /// for [`Self::get_or_create`]. Identical semantics; the
+    /// separate name keeps Laravel muscle-memory call sites
+    /// readable.
+    ///
+    /// # Errors
+    /// As [`Self::get_or_create`].
+    pub async fn first_or_create<F, Fut>(
+        self,
+        create_fn: F,
+        pool: &Pool,
+    ) -> Result<(T, bool), ExecError>
+    where
+        F: FnOnce(Pool) -> Fut,
+        Fut: std::future::Future<Output = Result<T, ExecError>>,
+    {
+        self.get_or_create(create_fn, pool).await
+    }
+
+    /// Chainable form of [`update_or_create`]. Sugar for
+    /// `update_or_create(self, update_fn, create_fn, pool)`.
+    ///
+    /// Returns `(row, created)` where `created` is `true` when the
+    /// `create_fn` closure was invoked (i.e. no row matched the
+    /// queryset).
+    ///
+    /// # Errors
+    /// As [`update_or_create`].
+    pub async fn update_or_create<UF, UFut, CF, CFut>(
+        self,
+        update_fn: UF,
+        create_fn: CF,
+        pool: &Pool,
+    ) -> Result<(T, bool), ExecError>
+    where
+        UF: FnOnce(Pool, T) -> UFut,
+        UFut: std::future::Future<Output = Result<T, ExecError>>,
+        CF: FnOnce(Pool) -> CFut,
+        CFut: std::future::Future<Output = Result<T, ExecError>>,
+    {
+        update_or_create(self, update_fn, create_fn, pool).await
+    }
+}
