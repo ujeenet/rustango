@@ -1255,6 +1255,50 @@ the new methods.
 3.45 (WhereExpr::Not), 3.49 (_pool executor variants) queued for
 Slice 3b.*
 
+### 3.50 QuerySet inspection + introspection (v0.43)
+
+Recent Eloquent-shape builder helpers covering the common
+"inspect or branch a queryset" patterns:
+
+```rust
+// .when(cond, |qs| ...) / .unless(cond, |qs| ...) / .tap(|&qs| ...)
+let qs = Post::objects()
+    .when(only_active, |q| q.filter("active", true))
+    .unless(is_admin, |q| q.filter("public", true))
+    .tap(|q| tracing::debug!(?q, "before fetch"));
+
+// .reorder(&[(col, asc)]) — replace ORDER BY instead of appending
+let qs = Post::objects()
+    .with_default_order()
+    .reorder(&[("views", true)]);
+
+// QuerySet: Clone — divergent branches from a shared base
+let base    = Post::objects().filter("status__ne", "archived");
+let drafts  = base.clone().filter("status", "draft");
+let pub_now = base.filter("status", "published");
+
+// .pluck::<U>(col, &pool) — single-column projection on a filtered qs
+let titles: Vec<String> = Post::objects()
+    .filter("published", true)
+    .pluck::<String>("title", &pool).await?;
+
+// .is_empty(&pool) — inverse of exists_pool
+if Post::objects().filter("category_id", 7).is_empty(&pool).await? {
+    return Ok(Response::empty());
+}
+
+// .to_sql(&pool) / .to_compiled(&pool) — render SQL without executing
+let sql = Post::objects().filter("published", true).to_sql(&pool)?;
+// -> "SELECT … FROM \"post\" WHERE \"published\" = $1"
+```
+
+**Verified by**: `tests/queryset_when_unless_tap.rs`,
+`tests/queryset_reorder_sqlite_live.rs`,
+`tests/queryset_clone_sqlite_live.rs`,
+`tests/queryset_pluck_sqlite_live.rs`,
+`tests/queryset_is_empty_sqlite_live.rs`,
+`tests/queryset_to_sql_sqlite_live.rs`.
+
 ## Chapter 4 — Migrations
 
 5 live recipes against docker PG verifying the migration lifecycle.
