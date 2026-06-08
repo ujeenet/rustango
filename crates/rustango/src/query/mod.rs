@@ -341,6 +341,16 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Eloquent `Builder::lockForUpdate()` — bare-name alias of
+    /// [`Self::select_for_update`] matching Laravel muscle memory.
+    /// Same `FOR UPDATE` semantics: must run inside a transaction
+    /// (PG / MySQL); SQLite no-ops because it has no row-level lock
+    /// syntax.
+    #[must_use]
+    pub fn lock_for_update(self) -> Self {
+        self.select_for_update()
+    }
+
     /// PG / MySQL 8+: append `SKIP LOCKED` to the lock clause —
     /// "claim next available row" pattern. Rows currently locked by
     /// another transaction are silently filtered out instead of
