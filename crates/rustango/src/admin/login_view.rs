@@ -182,6 +182,30 @@ async fn login_submit(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // Audit M1 — per-account brute-force lockout, on by default. The key
+    // is scoped (`admin:<id>`) so it can't collide with operator/tenant
+    // ids, and uses the resolved id (not the raw username) so an attacker
+    // can't lock arbitrary accounts. A locked account short-circuits
+    // before the password verify.
+    #[cfg(feature = "cache")]
+    if crate::account_lockout::shared()
+        .is_locked(&format!("admin:{id}"))
+        .await
+    {
+        send_user_login_failed(UserLoginFailedContext {
+            source: "admin",
+            attempted_username: Some(form.username.clone()),
+            reason: AuthFailureReason::InvalidCredentials,
+            request: meta.clone(),
+        })
+        .await;
+        return login_response(
+            &state,
+            &headers,
+            Some("Too many failed attempts. Please try again later."),
+        );
+    }
+
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
     let password_ok = crate::passwords::verify(&form.password, stored_hash).unwrap_or(false);
@@ -201,6 +225,13 @@ async fn login_submit(
         return login_response(&state, &headers, Some("Invalid credentials."));
     }
     if !password_ok {
+        // Audit M1 — count this failure toward the per-account lockout.
+        #[cfg(feature = "cache")]
+        {
+            let _ = crate::account_lockout::shared()
+                .record_failure(&format!("admin:{id}"))
+                .await;
+        }
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
             attempted_username: Some(form.username.clone()),
@@ -210,6 +241,12 @@ async fn login_submit(
         .await;
         return login_response(&state, &headers, Some("Invalid credentials."));
     }
+
+    // Audit M1 — successful login clears the failure counter + any lock.
+    #[cfg(feature = "cache")]
+    crate::account_lockout::shared()
+        .clear(&format!("admin:{id}"))
+        .await;
 
     let cookie_value = session::encode(
         &secret,

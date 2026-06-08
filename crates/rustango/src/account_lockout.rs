@@ -217,6 +217,33 @@ impl Lockout {
     }
 }
 
+/// Process-wide default lockout, lazily initialized to an in-memory
+/// tracker with the default policy (5 attempts → 15-min lock).
+static SHARED_LOCKOUT: std::sync::OnceLock<Lockout> = std::sync::OnceLock::new();
+
+/// The framework's built-in login flows (admin / operator / tenant /
+/// JWT API) consult this so per-account brute-force protection is
+/// **on by default** (audit M1) without the app wiring anything.
+///
+/// Backed by an in-memory cache, so it protects a **single process**.
+/// For a horizontally-scaled deployment, install a shared-cache
+/// (Redis / DB) tracker at boot via [`configure_shared`] — same
+/// single-instance caveat as the in-memory JTI blacklist + rate
+/// limiter.
+#[must_use]
+pub fn shared() -> &'static Lockout {
+    SHARED_LOCKOUT.get_or_init(|| Lockout::new(Arc::new(crate::cache::InMemoryCache::new())))
+}
+
+/// Install the process-wide [`shared`] lockout (first call wins).
+/// Call once at boot to back it with a shared cache and/or apply a
+/// policy from `[auth]` settings. Returns `false` if [`shared`] was
+/// already initialized (e.g. a login fired first), mirroring the
+/// first-wins semantics of the JWT lifecycle singleton.
+pub fn configure_shared(lockout: Lockout) -> bool {
+    SHARED_LOCKOUT.set(lockout).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +378,34 @@ mod tests {
         assert!(l.is_locked_by_id(99).await);
         l.clear_by_id(99).await;
         assert!(!l.is_locked_by_id(99).await);
+    }
+
+    #[tokio::test]
+    async fn scoped_keys_isolate_domains_and_tenants() {
+        // The built-in login handlers (M1) use scoped string keys so the
+        // same numeric id in different domains/tenants never collides.
+        let l = lockout(2);
+        l.record_failure("tenant:acme:5").await;
+        l.record_failure("tenant:acme:5").await;
+        assert!(l.is_locked("tenant:acme:5").await);
+        assert!(
+            !l.is_locked("tenant:beta:5").await,
+            "a different tenant's user 5 must be unaffected"
+        );
+        assert!(
+            !l.is_locked("op:5").await,
+            "the operator domain must be unaffected"
+        );
+        assert!(
+            !l.is_locked("admin:5").await,
+            "the bare-admin domain must be unaffected"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_default_is_usable() {
+        // Smoke: the process-global default exists and answers. Unique
+        // key so parallel tests can't perturb the assertion.
+        assert!(!shared().is_locked("smoke:unique-unused-key").await);
     }
 }

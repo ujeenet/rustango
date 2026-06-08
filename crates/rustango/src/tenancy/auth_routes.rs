@@ -242,6 +242,19 @@ async fn login(
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
     };
 
+    // Audit M1 — per-account brute-force lockout, on by default. Key is
+    // scoped by tenant slug + resolved user id so it can't collide with
+    // another tenant's same-numbered user (or the operator/admin
+    // domains). A locked account short-circuits before the verify.
+    let uid = user.id.get().copied().unwrap_or(0);
+    #[cfg(feature = "cache")]
+    let lock_key = format!("tenant:{}:{}", t.org.slug, uid);
+    #[cfg(feature = "cache")]
+    if crate::account_lockout::shared().is_locked(&lock_key).await {
+        send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
+    }
+
     // Verify before the active check so active vs inactive accounts take
     // the same time (audit H1).
     let ok = crate::tenancy::password::verify(&body.password, &user.password_hash)
@@ -258,11 +271,22 @@ async fn login(
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
     }
     if !ok {
+        // Audit M1 — count this failure toward the per-account lockout.
+        #[cfg(feature = "cache")]
+        {
+            let _ = crate::account_lockout::shared()
+                .record_failure(&lock_key)
+                .await;
+        }
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
     }
 
-    let user_id = user.id.get().copied().unwrap_or(0);
+    // Audit M1 — successful login clears the failure counter + any lock.
+    #[cfg(feature = "cache")]
+    crate::account_lockout::shared().clear(&lock_key).await;
+
+    let user_id = uid;
     send_user_logged_in(UserLoggedInContext {
         source: "jwt",
         user_id,
