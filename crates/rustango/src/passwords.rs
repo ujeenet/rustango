@@ -63,6 +63,31 @@ pub fn verify(password: &str, stored_hash: &str) -> Result<bool, PasswordError> 
         .is_ok())
 }
 
+/// A valid Argon2id PHC hash of a fixed throwaway password, computed
+/// once on first use (same `Argon2::default()` cost as a real stored
+/// hash). Backs [`verify_dummy`].
+fn dummy_hash() -> &'static str {
+    use std::sync::OnceLock;
+    static DUMMY: OnceLock<String> = OnceLock::new();
+    DUMMY
+        .get_or_init(|| {
+            hash("rustango-timing-equalization-dummy")
+                .expect("argon2id hashing of a fixed dummy input cannot fail")
+        })
+        .as_str()
+}
+
+/// Spend a password-verification's worth of work and discard the
+/// result. Call this on the **user-not-found** (and inactive) branch of
+/// a login flow so a request takes roughly the same time whether or not
+/// the username exists. Without it, an unknown user returns before the
+/// expensive Argon2 verify while a real user pays for it — a timing
+/// side-channel that lets an attacker enumerate valid accounts
+/// (audit H1).
+pub fn verify_dummy(password: &str) {
+    let _ = verify(password, dummy_hash());
+}
+
 // ------------------------------------------------------------------ Strength check
 
 /// One thing wrong with a candidate password.
@@ -159,6 +184,17 @@ mod tests {
     fn verify_invalid_hash_errors() {
         let r = verify("anything", "not-a-valid-hash");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn dummy_hash_is_valid_and_verify_dummy_does_real_work() {
+        // Audit H1 — the dummy hash must be a valid PHC string, else
+        // verify() would early-return Err and skip the argon2 cost,
+        // defeating the timing equalization. A real verify against it
+        // rejects arbitrary input (random salt over a fixed secret).
+        assert!(!verify("whatever-an-attacker-types", dummy_hash()).unwrap());
+        // Smoke: the public entry point never panics.
+        verify_dummy("whatever-an-attacker-types");
     }
 
     #[test]

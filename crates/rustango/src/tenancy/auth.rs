@@ -122,10 +122,12 @@ pub struct User {
 
 /// Look up an operator by username and verify the password.
 ///
-/// Returns `Ok(Some(operator))` on success, `Ok(None)` for an
-/// unknown username OR a wrong password (one return path → no
-/// timing oracle on whether the username exists). `Ok(None)` on an
-/// inactive (`active = false`) operator.
+/// Returns `Ok(Some(operator))` on success, `Ok(None)` for an unknown
+/// username, a wrong password, OR an inactive (`active = false`)
+/// operator — always the same `Ok(None)`. The unknown-username path
+/// runs a dummy Argon2 verify ([`password::verify_dummy`]) and the
+/// active check happens *after* the real verify, so response timing
+/// doesn't reveal whether the account exists (audit H1).
 ///
 /// # Errors
 /// Returns [`TenancyError::Driver`]/[`TenancyError::Exec`] for SQL
@@ -164,12 +166,15 @@ pub async fn authenticate_operator_pool(
         .fetch_pool(registry)
         .await?;
     let Some(op) = rows.into_iter().next() else {
+        // H1: spend a verify's worth of work on the unknown-user path
+        // so timing doesn't reveal whether the account exists.
+        password::verify_dummy(password);
         return Ok(None);
     };
-    if !op.active {
-        return Ok(None);
-    }
-    if !password::verify(password, &op.password_hash)? {
+    // Verify before the active check so active vs inactive accounts
+    // take the same time (audit H1).
+    let password_ok = password::verify(password, &op.password_hash)?;
+    if !op.active || !password_ok {
         return Ok(None);
     }
     Ok(Some(op))
@@ -212,6 +217,8 @@ pub async fn authenticate_user(
     .fetch_optional(&mut *conn)
     .await?;
     let Some(row) = user_rows else {
+        // H1: equalize timing for the unknown-user path.
+        password::verify_dummy(password);
         return Ok(None);
     };
     let user = User {
@@ -229,10 +236,8 @@ pub async fn authenticate_user(
             .ok()
             .flatten(),
     };
-    if !user.active {
-        return Ok(None);
-    }
-    if !password::verify(password, &user.password_hash)? {
+    let password_ok = password::verify(password, &user.password_hash)?;
+    if !user.active || !password_ok {
         return Ok(None);
     }
     Ok(Some(user))
@@ -269,12 +274,12 @@ pub async fn authenticate_user_pool(
         .fetch_pool(pool)
         .await?;
     let Some(user) = rows.into_iter().next() else {
+        // H1: equalize timing for the unknown-user path.
+        password::verify_dummy(password);
         return Ok(None);
     };
-    if !user.active {
-        return Ok(None);
-    }
-    if !password::verify(password, &user.password_hash)? {
+    let password_ok = password::verify(password, &user.password_hash)?;
+    if !user.active || !password_ok {
         return Ok(None);
     }
     Ok(Some(user))

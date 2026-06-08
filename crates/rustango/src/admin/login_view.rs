@@ -119,6 +119,9 @@ async fn login_submit(
         .flatten();
 
     let Some(row) = row else {
+        // H1: spend a verify's worth of work on the unknown-user path
+        // so timing doesn't reveal whether the username exists.
+        crate::passwords::verify_dummy(&form.password);
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
             attempted_username: Some(form.username.clone()),
@@ -139,6 +142,10 @@ async fn login_submit(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // Verify before the active check so active vs inactive accounts take
+    // the same time (audit H1).
+    let password_ok = crate::passwords::verify(&form.password, stored_hash).unwrap_or(false);
+
     if !is_active {
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
@@ -153,7 +160,7 @@ async fn login_submit(
         // Inactive signal above still records the real reason for audit.
         return Html(render_login_form(&state, Some("Invalid credentials."))).into_response();
     }
-    if !crate::passwords::verify(&form.password, stored_hash).unwrap_or(false) {
+    if !password_ok {
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
             attempted_username: Some(form.username.clone()),

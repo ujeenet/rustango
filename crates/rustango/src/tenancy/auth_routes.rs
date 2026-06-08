@@ -235,9 +235,17 @@ async fn login(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
 
     let Some(user) = users.into_iter().next() else {
+        // H1: spend a verify's worth of work on the unknown-user path so
+        // timing doesn't reveal whether the username exists.
+        crate::tenancy::password::verify_dummy(&body.password);
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
     };
+
+    // Verify before the active check so active vs inactive accounts take
+    // the same time (audit H1).
+    let ok = crate::tenancy::password::verify(&body.password, &user.password_hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
 
     if !user.active {
         send_user_login_failed(fire_failed(AuthFailureReason::Inactive)).await;
@@ -249,9 +257,6 @@ async fn login(
         // a valid token for this user, so it's not an enumeration vector).
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
     }
-
-    let ok = crate::tenancy::password::verify(&body.password, &user.password_hash)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
     if !ok {
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
         return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
