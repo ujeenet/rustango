@@ -121,6 +121,8 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
         FieldType::Decimal | FieldType::Binary => v.as_str().unwrap_or("").to_owned(),
         // #341 — PG array: render the JSON form compactly.
         FieldType::Array(_) => v.to_string(),
+        // #343 — PG range: literal string (or compact JSON fallback).
+        FieldType::Range(_) => v.as_str().map_or_else(|| v.to_string(), str::to_owned),
     }
 }
 
@@ -336,6 +338,10 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         FieldType::Array(_) => format!(
             r#"<input type="text" name="{name}" id="{name}" value="{val}" placeholder="comma, separated, values"{required}{readonly}>"#
         ),
+        // #343 — PG range: a range-literal text input (`[lower,upper)`).
+        FieldType::Range(_) => format!(
+            r#"<input type="text" name="{name}" id="{name}" value="{val}" placeholder="[lower,upper)"{required}{readonly}>"#
+        ),
     }
 }
 
@@ -509,6 +515,8 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
         FieldType::Array(_) => serde_json::to_string(v)
             .map(|s| escape(&s))
             .unwrap_or_default(),
+        // #343 — PG range: literal string in the list cell.
+        FieldType::Range(_) => escape(v.as_str().unwrap_or("")),
     }
 }
 
@@ -581,6 +589,8 @@ pub(crate) fn read_joined_value_as_html_json(
         FieldType::Json => None,
         // #341 — arrays aren't a meaningful select_related join target.
         FieldType::Array(_) => None,
+        // #343 — ranges aren't a meaningful select_related join target.
+        FieldType::Range(_) => None,
     };
     text.map(|s| escape(&s))
 }

@@ -1201,6 +1201,12 @@ fn pg_type_for_ty_name(ty: &str) -> String {
         "array_text" => "text[]".into(),
         "array_int" => "integer[]".into(),
         "array_bigint" => "bigint[]".into(),
+        // #343 — PG range element kinds.
+        "range_int" => "int4range".into(),
+        "range_bigint" => "int8range".into(),
+        "range_numeric" => "numrange".into(),
+        "range_date" => "daterange".into(),
+        "range_datetime" => "tstzrange".into(),
         other => other.to_uppercase(),
     }
 }
@@ -1429,6 +1435,12 @@ fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -
         "array_text" => Some(FieldType::Array(crate::core::ArrayElem::Text)),
         "array_int" => Some(FieldType::Array(crate::core::ArrayElem::Int)),
         "array_bigint" => Some(FieldType::Array(crate::core::ArrayElem::BigInt)),
+        // #343 — PG range element kinds.
+        "range_int" => Some(FieldType::Range(crate::core::RangeElem::Int)),
+        "range_bigint" => Some(FieldType::Range(crate::core::RangeElem::BigInt)),
+        "range_numeric" => Some(FieldType::Range(crate::core::RangeElem::Numeric)),
+        "range_date" => Some(FieldType::Range(crate::core::RangeElem::Date)),
+        "range_datetime" => Some(FieldType::Range(crate::core::RangeElem::DateTime)),
         _ => None,
     };
     // v0.13.2: `auto = true` historically meant "PK SERIAL/BIGSERIAL"

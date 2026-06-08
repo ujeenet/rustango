@@ -239,8 +239,9 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
         | FieldType::Json
         | FieldType::Decimal
         | FieldType::Binary
-        // #341 — an array can't be a primary key.
-        | FieldType::Array(_) => Err(FormError::UnsupportedPk {
+        // #341 / #343 — an array or range can't be a primary key.
+        | FieldType::Array(_)
+        | FieldType::Range(_) => Err(FormError::UnsupportedPk {
             field: field.name.to_owned(),
             ty: field.ty.as_str(),
         }),
@@ -406,6 +407,9 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
                     .map_err(|e| make_parse_err("array<i64>", &e)),
             }
         }
+        // #343 — PG range column from a form field: the raw input is a
+        // range literal (`[1,10)`), bound as-is and implicit-cast by PG.
+        FieldType::Range(_) => Ok(SqlValue::RangeLiteral(raw.to_owned())),
     }
 }
 

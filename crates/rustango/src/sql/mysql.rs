@@ -142,9 +142,11 @@ impl Dialect for MySql {
             // MySQL has no `CAST AS JSON` form — `JSON_EXTRACT` /
             // string parsing are the substitutes. UUID has no CAST
             // target either (it's CHAR(36) in DDL but the user would
-            // cast to CHAR in expression form). Arrays (#341) are
-            // PG-only by language — no MySQL CAST target.
-            FieldType::Uuid | FieldType::Json | FieldType::Array(_) => return None,
+            // cast to CHAR in expression form). Arrays (#341) / ranges
+            // (#343) are PG-only by language — no MySQL CAST target.
+            FieldType::Uuid | FieldType::Json | FieldType::Array(_) | FieldType::Range(_) => {
+                return None
+            }
         })
     }
 
@@ -194,6 +196,8 @@ impl Dialect for MySql {
             // is PG-only by language semantics. Degrade to `TEXT` so the
             // DDL stays emittable; the bind / decode paths error on MySQL.
             FieldType::Array(_) => "TEXT".into(),
+            // Ditto for PG range columns (#343).
+            FieldType::Range(_) => "TEXT".into(),
         }
     }
 

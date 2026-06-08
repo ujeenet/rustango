@@ -23,7 +23,7 @@ pub use case::{case, value, CaseBuilder};
 pub use column::{Column, TypedAssignment, TypedExpr, TypedFieldList, TypedFilter};
 pub use error::QueryError;
 pub use expr::{BinOp, CaseBranch, Expr, JsonPathStep, ScalarFn, F};
-pub use field_type::{ArrayElem, FieldType};
+pub use field_type::{ArrayElem, FieldType, RangeElem};
 pub use query::{
     AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery, ColumnFilter,
     CompoundBranch, ConflictClause, CountQuery, DeleteQuery, DistinctMode, Filter, InsertQuery,

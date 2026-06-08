@@ -21,6 +21,7 @@ pub mod model_shortcuts;
 mod mysql;
 mod pool;
 mod postgres;
+mod range;
 #[cfg(feature = "sqlite")]
 mod sqlite;
 mod writers;
@@ -34,6 +35,7 @@ pub use backend::{
 pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
 pub use error::{is_mysql_dup_index_error, ExecError, SqlError};
+pub use range::Range;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
 #[cfg(feature = "mysql")]
 pub use executor::row_to_json_my;

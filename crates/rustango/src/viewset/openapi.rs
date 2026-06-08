@@ -273,6 +273,9 @@ fn field_type_to_schema(t: FieldType) -> Schema {
             };
             Schema::array_of(items)
         }
+        // #343 — PG range column: serialized as a range-literal string
+        // (`"[1,10)"`), so a `string` schema is the honest shape.
+        FieldType::Range(_) => Schema::string(),
     }
 }
 

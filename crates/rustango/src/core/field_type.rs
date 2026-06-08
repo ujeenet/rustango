@@ -48,6 +48,45 @@ pub enum FieldType {
     /// semantics**: MySQL / SQLite have no array column type, so the DDL
     /// writer degrades to `TEXT` and the bind / decode paths error there.
     Array(ArrayElem),
+    /// Native PostgreSQL range — Django's `RangeField` family (#343).
+    /// Rust type: [`crate::sql::Range<T>`]. The element kind selects the
+    /// column type (`int4range` / `int8range` / `numrange` / `daterange`
+    /// / `tstzrange`). **PG-only by language semantics** like
+    /// [`Self::Array`]: MySQL / SQLite degrade to `TEXT` and the decode
+    /// path errors there.
+    Range(RangeElem),
+}
+
+/// Element type of a [`FieldType::Range`] column (#343). Selects the
+/// PostgreSQL range column type emitted by the migration writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RangeElem {
+    /// `int4range` — element `i32` ([`crate::sql::Range<i32>`]).
+    /// Django `IntegerRangeField`.
+    Int,
+    /// `int8range` — element `i64` ([`crate::sql::Range<i64>`]).
+    /// Django `BigIntegerRangeField`.
+    BigInt,
+    /// `numrange` — element `rust_decimal::Decimal`. Django `DecimalRangeField`.
+    Numeric,
+    /// `daterange` — element `chrono::NaiveDate`. Django `DateRangeField`.
+    Date,
+    /// `tstzrange` — element `chrono::DateTime<Utc>`. Django `DateTimeRangeField`.
+    DateTime,
+}
+
+impl RangeElem {
+    /// PostgreSQL range type name.
+    #[must_use]
+    pub const fn pg_range_type(self) -> &'static str {
+        match self {
+            Self::Int => "int4range",
+            Self::BigInt => "int8range",
+            Self::Numeric => "numrange",
+            Self::Date => "daterange",
+            Self::DateTime => "tstzrange",
+        }
+    }
 }
 
 /// Element type of a [`FieldType::Array`] column (#341). Selects the
@@ -100,6 +139,11 @@ impl FieldType {
             Self::Array(ArrayElem::Text) => "Array<String>",
             Self::Array(ArrayElem::Int) => "Array<i32>",
             Self::Array(ArrayElem::BigInt) => "Array<i64>",
+            Self::Range(RangeElem::Int) => "Range<i32>",
+            Self::Range(RangeElem::BigInt) => "Range<i64>",
+            Self::Range(RangeElem::Numeric) => "Range<Decimal>",
+            Self::Range(RangeElem::Date) => "Range<NaiveDate>",
+            Self::Range(RangeElem::DateTime) => "Range<DateTime<Utc>>",
         }
     }
 }
