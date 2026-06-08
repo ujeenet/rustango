@@ -241,7 +241,13 @@ async fn login(
 
     if !user.active {
         send_user_login_failed(fire_failed(AuthFailureReason::Inactive)).await;
-        return Err((StatusCode::FORBIDDEN, "account inactive").into_response());
+        // Audit M4 — at the login endpoint, an inactive account must
+        // look identical to an unknown user / wrong password (same 401
+        // + message) so the API can't be used to enumerate accounts.
+        // The Inactive signal above still records the real reason. The
+        // `me` handler keeps its 403 (the caller already proved it holds
+        // a valid token for this user, so it's not an enumeration vector).
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials").into_response());
     }
 
     let ok = crate::tenancy::password::verify(&body.password, &user.password_hash)
