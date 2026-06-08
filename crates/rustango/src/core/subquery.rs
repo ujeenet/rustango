@@ -62,7 +62,8 @@
 //! executed. Build the subquery first, propagate `?`, then embed.
 
 use super::expr::Expr;
-use super::query::{SelectQuery, WhereExpr};
+use super::query::{Op, SelectQuery, WhereExpr};
+use super::schema::ReverseRelation;
 
 /// `EXISTS (subquery)` — true when the subquery returns at least one
 /// row. Mirrors Django's [`Exists`] expression and is by far the most
@@ -115,6 +116,44 @@ pub fn not_in_subquery(column: &'static str, subquery: SelectQuery) -> WhereExpr
 #[must_use]
 pub fn subquery(inner: SelectQuery) -> Expr {
     Expr::Subquery(Box::new(inner))
+}
+
+/// Build the correlated `EXISTS (SELECT 1 FROM <child_table> WHERE
+/// <child_fk_column> = <outer>.<self_pk_column>)` predicate for the
+/// given [`ReverseRelation`] — issue #830 sub-piece backing
+/// [`crate::query::QuerySet::where_has`].
+///
+/// The inner `SelectQuery` projects nothing (the dialect writer
+/// reads no rows out — `EXISTS` only cares about row presence) and
+/// joins via `OuterRef(self_pk_column)`. The writer's scope stack
+/// rewrites `OuterRef` to the parent queryset's table qualifier at
+/// emit time, so the SQL stays unambiguous across dialects.
+#[must_use]
+pub fn reverse_has_exists(rel: &ReverseRelation) -> WhereExpr {
+    let inner = SelectQuery {
+        where_clause: WhereExpr::ExprCompare {
+            lhs: Expr::Column(rel.child_fk_column),
+            op: Op::Eq,
+            rhs: Expr::OuterRef(rel.self_pk_column),
+        },
+        ..SelectQuery::new(rel.child_schema)
+    };
+    WhereExpr::Exists(Box::new(inner))
+}
+
+/// `NOT EXISTS (subquery)` counterpart of [`reverse_has_exists`].
+/// Backs [`crate::query::QuerySet::where_doesnt_have`].
+#[must_use]
+pub fn reverse_has_not_exists(rel: &ReverseRelation) -> WhereExpr {
+    let inner = SelectQuery {
+        where_clause: WhereExpr::ExprCompare {
+            lhs: Expr::Column(rel.child_fk_column),
+            op: Op::Eq,
+            rhs: Expr::OuterRef(rel.self_pk_column),
+        },
+        ..SelectQuery::new(rel.child_schema)
+    };
+    WhereExpr::NotExists(Box::new(inner))
 }
 
 /// `OuterRef("col")` — reference a column from the enclosing query

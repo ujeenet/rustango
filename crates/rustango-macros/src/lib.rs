@@ -856,6 +856,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &container.extra_permissions,
         &container.default_permissions,
         &container.global_scopes,
+        &container.reverse_has_relations,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -2239,6 +2240,7 @@ fn model_impl_tokens(
     extra_permissions: &[(String, String)],
     default_permissions: &[String],
     global_scopes: &[GlobalScopeAttr],
+    reverse_has_relations: &[ReverseHasAttr],
 ) -> TokenStream2 {
     let root = rustango_root();
     let display_tokens = if let Some(name) = display {
@@ -2423,6 +2425,35 @@ fn model_impl_tokens(
             }
         }
     });
+    // Issue #830 sub-piece: emit `Model::reverse_relations()` override
+    // when the model declares `#[rustango(reverse_has(...))]`. Each
+    // entry uses `<Child as Model>::SCHEMA.table` so the literal stays
+    // a const expression. Models without reverse_has fall through to
+    // the trait's empty default — no override emitted.
+    let reverse_relations_override = if reverse_has_relations.is_empty() {
+        quote!()
+    } else {
+        let entries = reverse_has_relations.iter().map(|rel| {
+            let name = rel.name.as_str();
+            let child = &rel.child;
+            let child_fk_column = rel.child_fk_column.as_str();
+            let self_pk_column = rel.self_pk_column.as_str();
+            quote! {
+                #root::core::ReverseRelation {
+                    name: #name,
+                    child_schema: <#child as #root::core::Model>::SCHEMA,
+                    child_fk_column: #child_fk_column,
+                    self_pk_column: #self_pk_column,
+                }
+            }
+        });
+        quote! {
+            fn reverse_relations() -> &'static [#root::core::ReverseRelation] {
+                const RELS: &[#root::core::ReverseRelation] = &[ #(#entries),* ];
+                RELS
+            }
+        }
+    };
     quote! {
         impl #root::core::Model for #struct_name {
             const SCHEMA: &'static #root::core::ModelSchema = &#root::core::ModelSchema {
@@ -2459,6 +2490,8 @@ fn model_impl_tokens(
                 default_permissions: &[ #(#default_permission_tokens),* ],
                 global_scopes: &[ #(#global_scope_tokens),* ],
             };
+
+            #reverse_relations_override
         }
     }
 }

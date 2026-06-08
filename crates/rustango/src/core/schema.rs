@@ -229,6 +229,42 @@ pub struct GenericRelation {
     pub pk_column: &'static str,
 }
 
+/// Reverse-FK existence metadata declared via
+/// `#[rustango(reverse_has(name, child, child_fk_column))]`. Captures
+/// the (child table, child FK column, self PK column) triple that
+/// makes a correlated `EXISTS (SELECT 1 FROM child WHERE
+/// child_fk_column = <outer>.self_pk_column)` query writable from the
+/// parent's queryset.
+///
+/// **Why runtime metadata, not just macro emit:** the macro already
+/// emits per-instance `<name>_exists_expr()` helpers, but the
+/// queryset-level shortcuts (`QuerySet::where_has(name)` /
+/// `where_doesnt_have(name)` — issue #830) need to resolve a relation
+/// name **without** a concrete `self` value at the call site. Lifting
+/// the same triple into `ModelSchema` lets the queryset look it up
+/// by name. Sub-issue of #830.
+#[derive(Debug, Clone, Copy)]
+pub struct ReverseRelation {
+    /// Relation accessor name as declared in
+    /// `reverse_has(name = "books")`. Used for lookup from queryset
+    /// shortcuts.
+    pub name: &'static str,
+    /// `ModelSchema` of the **child** model — the `FROM` clause of
+    /// the correlated subquery. Macro fills this in from
+    /// `<Child as Model>::SCHEMA` so the embeddable
+    /// [`super::query::SelectQuery`] can be constructed without
+    /// re-resolving the child type at runtime.
+    pub child_schema: &'static ModelSchema,
+    /// SQL column on the child table that references this model's
+    /// primary key. For `Book::author_id: ForeignKey<Author>` the
+    /// column is `"author_id"`.
+    pub child_fk_column: &'static str,
+    /// SQL primary-key column on **this** model's table — the
+    /// `OuterRef("…")` target. Defaults to `"id"` when
+    /// `reverse_has(...)` doesn't specify `self_pk_column`.
+    pub self_pk_column: &'static str,
+}
+
 /// Multi-column ("composite") foreign key relation, declared at the
 /// model level rather than the field level — single-column FKs stay
 /// in [`FieldSchema::relation`], composite FKs live here so each
@@ -1097,6 +1133,20 @@ impl ModelSchema {
 /// reach the model's metadata without an instance.
 pub trait Model: Sized + Send + Sync + 'static {
     const SCHEMA: &'static ModelSchema;
+
+    /// Reverse-FK existence relations declared via
+    /// `#[rustango(reverse_has(name, child, child_fk_column))]`. The
+    /// macro overrides this to return the populated slice; models
+    /// with no reverse-has declarations inherit the empty default.
+    ///
+    /// Used by [`crate::query::QuerySet::where_has`] /
+    /// [`crate::query::QuerySet::where_doesnt_have`] to resolve a
+    /// relation name into the correlated-subquery triple
+    /// `(child_table, child_fk_column, self_pk_column)` without
+    /// needing a concrete `self`. Issue #830 sub-piece.
+    fn reverse_relations() -> &'static [ReverseRelation] {
+        &[]
+    }
 }
 
 /// Inventory entry submitted by the `#[derive(Model)]` macro for each model.

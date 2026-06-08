@@ -1234,6 +1234,69 @@ impl<T: Model> QuerySet<T> {
         self.where_raw(crate::core::subquery::not_in_subquery(column, subquery))
     }
 
+    /// Filter to rows that have at least one related row via the
+    /// reverse-FK relation named `name` — Django
+    /// `filter(<name>__isnull=False)` shape via
+    /// `T::reverse_relations()` metadata.
+    ///
+    /// `name` must match a declared
+    /// `#[rustango(reverse_has(name = "...", child = Child,
+    /// child_fk_column = "..."))]` on `T`. The method emits a
+    /// correlated `EXISTS (SELECT 1 FROM <child_table> WHERE
+    /// <child_fk_column> = <outer>.<self_pk_column>)` predicate that
+    /// the writer's scope-stack threads through PG / MySQL / SQLite
+    /// identically.
+    ///
+    /// Unknown relation names surface as
+    /// [`QueryError::UnknownField`] (field set to the unknown name)
+    /// at `compile()` time via the deferred-error path.
+    ///
+    /// ```ignore
+    /// // Requires Author declared with
+    /// // `#[rustango(reverse_has(name = "books", child = Book,
+    /// //            child_fk_column = "author_id"))]`.
+    /// let with_books = Author::objects()
+    ///     .where_has("books")
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    ///
+    /// Issue #830 — first slice (existence only). Builds on the
+    /// existing per-instance `<name>_exists_expr()` accessor by
+    /// lifting the relation triple into runtime `Model` metadata so
+    /// callers don't need a concrete `self` to resolve it.
+    #[must_use]
+    pub fn where_has(self, name: &str) -> Self {
+        match T::reverse_relations().iter().find(|r| r.name == name) {
+            Some(rel) => self.where_raw(crate::core::subquery::reverse_has_exists(rel)),
+            None => self.with_pending_error(QueryError::UnknownField {
+                model: T::SCHEMA.name,
+                field: name.to_string(),
+            }),
+        }
+    }
+
+    /// Opposite of [`Self::where_has`] — filter to rows that have
+    /// **no** related row via the named reverse-FK relation. Emits
+    /// `NOT EXISTS (subquery)`. Same relation-resolution semantics +
+    /// error shape.
+    ///
+    /// ```ignore
+    /// // Authors with zero books.
+    /// let empty = Author::objects()
+    ///     .where_doesnt_have("books")
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn where_doesnt_have(self, name: &str) -> Self {
+        match T::reverse_relations().iter().find(|r| r.name == name) {
+            Some(rel) => self.where_raw(crate::core::subquery::reverse_has_not_exists(rel)),
+            None => self.with_pending_error(QueryError::UnknownField {
+                model: T::SCHEMA.name,
+                field: name.to_string(),
+            }),
+        }
+    }
+
     /// Eloquent `Builder::whereColumn($col1, $col2)` — emits
     /// `<col1> = <col2>`, comparing two columns instead of column
     /// vs literal. Equality is the overwhelming majority of uses;
