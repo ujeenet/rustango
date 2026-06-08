@@ -1095,6 +1095,53 @@ impl<T: Model> QuerySet<T> {
         self.filter_op(field, Op::Eq, value)
     }
 
+    /// Eloquent `Builder::whereKey($pk)` — filter on the model's
+    /// primary-key column without spelling its name. Reads the PK
+    /// field from `T::SCHEMA.primary_key()`.
+    ///
+    /// ```ignore
+    /// // Eloquent: Post::query()->whereKey(42)->first();
+    /// // rustango:
+    /// let post = Post::objects()
+    ///     .where_key(42_i64)
+    ///     .first_pool(&pool).await?;
+    /// ```
+    ///
+    /// Models without `#[rustango(primary_key)]` surface as
+    /// [`QueryError::UnknownField`] (field `"<pk>"`) at compile time.
+    #[must_use]
+    pub fn where_key(self, pk: impl Into<SqlValue>) -> Self {
+        match T::SCHEMA.primary_key() {
+            Some(f) => self.filter_op(f.name, Op::Eq, pk),
+            None => self.with_pending_error(QueryError::UnknownField {
+                model: T::SCHEMA.name,
+                field: "<pk>".to_string(),
+            }),
+        }
+    }
+
+    /// Eloquent `Builder::whereKeyNot($pk)` — opposite of
+    /// [`Self::where_key`]; matches every row whose PK ≠ `pk`.
+    ///
+    /// ```ignore
+    /// // Eloquent: Post::query()->whereKeyNot(1)->get();
+    /// let others = Post::objects()
+    ///     .where_key_not(1_i64)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    ///
+    /// Errors as [`Self::where_key`] when the model carries no PK.
+    #[must_use]
+    pub fn where_key_not(self, pk: impl Into<SqlValue>) -> Self {
+        match T::SCHEMA.primary_key() {
+            Some(f) => self.filter_op(f.name, Op::Ne, pk),
+            None => self.with_pending_error(QueryError::UnknownField {
+                model: T::SCHEMA.name,
+                field: "<pk>".to_string(),
+            }),
+        }
+    }
+
     /// Append a typed predicate or boolean expression built via the
     /// [`Column`](crate::core::Column) API. Accepts either a single
     /// [`TypedFilter`](crate::core::TypedFilter) (`User::id.gt(10)`)
