@@ -42,6 +42,40 @@ pub enum FieldType {
     /// `TIME`, MySQL `TIME(6)`, SQLite `TIME` (text affinity, `HH:MM:SS`
     /// shape). Rust type: `chrono::NaiveTime`.
     Time,
+    /// Native PostgreSQL array — Django's `ArrayField` (#341). Rust type:
+    /// [`crate::sql::Array<T>`]. The element kind selects the column type
+    /// (`text[]` / `integer[]` / `bigint[]`). **PG-only by language
+    /// semantics**: MySQL / SQLite have no array column type, so the DDL
+    /// writer degrades to `TEXT` and the bind / decode paths error there.
+    Array(ArrayElem),
+}
+
+/// Element type of a [`FieldType::Array`] column (#341). Selects the
+/// PostgreSQL array column type emitted by the migration writer. Kept a
+/// small `Copy` enum so [`FieldType`] stays `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArrayElem {
+    /// `text[]` — element type `String` ([`crate::sql::Array<String>`]).
+    /// Django `ArrayField(CharField/TextField)`.
+    Text,
+    /// `integer[]` — element type `i32` ([`crate::sql::Array<i32>`]).
+    /// Django `ArrayField(IntegerField)`.
+    Int,
+    /// `bigint[]` — element type `i64` ([`crate::sql::Array<i64>`]).
+    /// Django `ArrayField(BigIntegerField)`.
+    BigInt,
+}
+
+impl ArrayElem {
+    /// Scalar SQL element type (the part before `[]`). Postgres spelling.
+    #[must_use]
+    pub const fn pg_element_type(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Int => "integer",
+            Self::BigInt => "bigint",
+        }
+    }
 }
 
 impl FieldType {
@@ -63,6 +97,9 @@ impl FieldType {
             Self::Decimal => "rust_decimal::Decimal",
             Self::Binary => "Vec<u8>",
             Self::Time => "NaiveTime",
+            Self::Array(ArrayElem::Text) => "Array<String>",
+            Self::Array(ArrayElem::Int) => "Array<i32>",
+            Self::Array(ArrayElem::BigInt) => "Array<i64>",
         }
     }
 }

@@ -184,6 +184,9 @@ impl Dialect for Sqlite {
             | FieldType::Json => "TEXT",
             FieldType::Decimal => "NUMERIC",
             FieldType::Binary => "BLOB",
+            // SQLite has no array type — `Array<T>` (#341) is PG-only.
+            // Degrade the CAST target to TEXT affinity.
+            FieldType::Array(_) => "TEXT",
         })
     }
 
@@ -206,6 +209,10 @@ impl Dialect for Sqlite {
             FieldType::Decimal => "NUMERIC".into(),
             // `BLOB` storage class — round-trips `Vec<u8>` directly.
             FieldType::Binary => "BLOB".into(),
+            // SQLite has no native array type — `Array<T>` (#341) is
+            // PG-only by language semantics. Degrade to `TEXT`; the
+            // bind / decode paths error on SQLite.
+            FieldType::Array(_) => "TEXT".into(),
         }
     }
 

@@ -1197,6 +1197,10 @@ fn pg_type_for_ty_name(ty: &str) -> String {
         "json" => "JSONB".into(),
         "decimal" => "NUMERIC".into(),
         "binary" => "BYTEA".into(),
+        // #341 — PG array element kinds.
+        "array_text" => "text[]".into(),
+        "array_int" => "integer[]".into(),
+        "array_bigint" => "bigint[]".into(),
         other => other.to_uppercase(),
     }
 }
@@ -1420,6 +1424,11 @@ fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -
         "json" => Some(FieldType::Json),
         "decimal" => Some(FieldType::Decimal),
         "binary" => Some(FieldType::Binary),
+        // #341 — PG array element kinds; route through `column_type`
+        // (→ `text[]` / `integer[]` / `bigint[]` on PG).
+        "array_text" => Some(FieldType::Array(crate::core::ArrayElem::Text)),
+        "array_int" => Some(FieldType::Array(crate::core::ArrayElem::Int)),
+        "array_bigint" => Some(FieldType::Array(crate::core::ArrayElem::BigInt)),
         _ => None,
     };
     // v0.13.2: `auto = true` historically meant "PK SERIAL/BIGSERIAL"

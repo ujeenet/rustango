@@ -133,6 +133,12 @@ where
                 .try_get::<chrono::NaiveTime, _>(field.column)
                 .map(|t| json!(t.to_string()))
                 .unwrap_or(Value::Null),
+            // #341 — PG array columns. This cross-backend JSON path is
+            // generic over the row type and has no `Vec<T>: Decode`
+            // bound, so it can't decode the array here; emit null.
+            // (Typed `#[derive(Model)]` fetch decodes arrays via
+            // `Array<T>`; this affects only the dynamic admin/JSON view.)
+            FieldType::Array(_) => Value::Null,
         };
         map.insert(field.name.to_owned(), value);
     }
@@ -268,6 +274,8 @@ pub fn row_to_json_sqlite(
                         .map(|s| json!(s))
                         .unwrap_or(Value::Null)
                 }),
+            // #341 — arrays are PG-only; never present on SQLite.
+            FieldType::Array(_) => Value::Null,
         };
         map.insert(field.name.to_owned(), value);
     }

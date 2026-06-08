@@ -516,6 +516,10 @@ pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
         FieldType::Json => "json",
         FieldType::Decimal => "decimal",
         FieldType::Binary => "binary",
+        // #341 — stable snapshot names for PG array element kinds.
+        FieldType::Array(crate::core::ArrayElem::Text) => "array_text",
+        FieldType::Array(crate::core::ArrayElem::Int) => "array_int",
+        FieldType::Array(crate::core::ArrayElem::BigInt) => "array_bigint",
     }
 }
 

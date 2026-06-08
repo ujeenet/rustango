@@ -119,6 +119,8 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
         // Decimal round-trips as a string via `row_to_json` to
         // preserve precision; Binary likewise (hex-encoded).
         FieldType::Decimal | FieldType::Binary => v.as_str().unwrap_or("").to_owned(),
+        // #341 — PG array: render the JSON form compactly.
+        FieldType::Array(_) => v.to_string(),
     }
 }
 
@@ -329,6 +331,11 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         FieldType::Binary => format!(
             r#"<input type="text" name="{name}" id="{name}" value="{val}" pattern="[0-9a-f]*" inputmode="latin"{readonly} style="font-family:monospace">"#
         ),
+        // #341 — PG array: comma-separated text input (the form parser
+        // splits on `,`). Placeholder hints the expected shape.
+        FieldType::Array(_) => format!(
+            r#"<input type="text" name="{name}" id="{name}" value="{val}" placeholder="comma, separated, values"{required}{readonly}>"#
+        ),
     }
 }
 
@@ -498,6 +505,10 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
                 .map(|s| escape(&s))
                 .unwrap_or_default()
         }
+        // #341 — PG array: compact JSON form in the list cell.
+        FieldType::Array(_) => serde_json::to_string(v)
+            .map(|s| escape(&s))
+            .unwrap_or_default(),
     }
 }
 
@@ -568,6 +579,8 @@ pub(crate) fn read_joined_value_as_html_json(
             }
         }),
         FieldType::Json => None,
+        // #341 — arrays aren't a meaningful select_related join target.
+        FieldType::Array(_) => None,
     };
     text.map(|s| escape(&s))
 }

@@ -238,7 +238,9 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
         | FieldType::Time
         | FieldType::Json
         | FieldType::Decimal
-        | FieldType::Binary => Err(FormError::UnsupportedPk {
+        | FieldType::Binary
+        // #341 — an array can't be a primary key.
+        | FieldType::Array(_) => Err(FormError::UnsupportedPk {
             field: field.name.to_owned(),
             ty: field.ty.as_str(),
         }),
@@ -375,6 +377,35 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
             .or_else(|_| chrono::NaiveTime::parse_from_str(raw, "%H:%M"))
             .map(SqlValue::Time)
             .map_err(|e| make_parse_err("Time", &e)),
+        // #341 — PG array column from a form field: comma-separated
+        // input (`a, b, c`). Empty / whitespace-only input → empty array.
+        FieldType::Array(elem) => {
+            let parts: Vec<&str> = if raw.trim().is_empty() {
+                Vec::new()
+            } else {
+                raw.split(',').map(str::trim).collect()
+            };
+            match elem {
+                crate::core::ArrayElem::Text => Ok(SqlValue::Array(
+                    parts
+                        .into_iter()
+                        .map(|s| SqlValue::String(s.to_owned()))
+                        .collect(),
+                )),
+                crate::core::ArrayElem::Int => parts
+                    .into_iter()
+                    .map(|s| s.parse::<i32>().map(SqlValue::I32))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(SqlValue::Array)
+                    .map_err(|e| make_parse_err("array<i32>", &e)),
+                crate::core::ArrayElem::BigInt => parts
+                    .into_iter()
+                    .map(|s| s.parse::<i64>().map(SqlValue::I64))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(SqlValue::Array)
+                    .map_err(|e| make_parse_err("array<i64>", &e)),
+            }
+        }
     }
 }
 

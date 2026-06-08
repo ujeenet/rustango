@@ -2957,6 +2957,31 @@ fn json_to_sql_value(
                 .collect();
             Ok(SqlValue::Binary(bytes))
         }
+        // #341 — PG array column from a fixture JSON array.
+        FieldType::Array(elem) => {
+            let arr = v
+                .as_array()
+                .ok_or_else(|| format!("expected JSON array for Array column, got {v}"))?;
+            let items = arr
+                .iter()
+                .map(|el| match elem {
+                    crate::core::ArrayElem::Text => el
+                        .as_str()
+                        .map(|s| SqlValue::String(s.to_owned()))
+                        .ok_or_else(|| format!("expected string array element, got {el}")),
+                    crate::core::ArrayElem::Int => el
+                        .as_i64()
+                        .and_then(|n| i32::try_from(n).ok())
+                        .map(SqlValue::I32)
+                        .ok_or_else(|| format!("expected i32 array element, got {el}")),
+                    crate::core::ArrayElem::BigInt => el
+                        .as_i64()
+                        .map(SqlValue::I64)
+                        .ok_or_else(|| format!("expected i64 array element, got {el}")),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(SqlValue::Array(items))
+        }
     }
 }
 

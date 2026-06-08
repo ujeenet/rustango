@@ -263,6 +263,16 @@ fn field_type_to_schema(t: FieldType) -> Schema {
         FieldType::Json => Schema::default(), // free-form
         FieldType::Decimal => Schema::decimal(),
         FieldType::Binary => Schema::binary(),
+        // #341 — PG array column: `type: array` with element-typed items.
+        FieldType::Array(elem) => {
+            use crate::core::ArrayElem;
+            let items = match elem {
+                ArrayElem::Text => Schema::string(),
+                ArrayElem::Int => Schema::int32(),
+                ArrayElem::BigInt => Schema::integer(),
+            };
+            Schema::array_of(items)
+        }
     }
 }
 

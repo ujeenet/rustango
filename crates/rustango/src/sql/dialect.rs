@@ -352,6 +352,10 @@ pub trait Dialect {
             FieldType::Decimal => "NUMERIC",
             FieldType::Binary => "BYTEA",
             FieldType::Time => "TIME",
+            // PG array CAST targets (#341).
+            FieldType::Array(crate::core::ArrayElem::Text) => "text[]",
+            FieldType::Array(crate::core::ArrayElem::Int) => "integer[]",
+            FieldType::Array(crate::core::ArrayElem::BigInt) => "bigint[]",
         })
     }
 
@@ -386,6 +390,10 @@ pub trait Dialect {
             FieldType::Json => "JSONB".into(),
             FieldType::Decimal => "NUMERIC".into(),
             FieldType::Binary => "BYTEA".into(),
+            // Native PG array column — `text[]` / `integer[]` /
+            // `bigint[]` (#341). `max_length` is ignored (arrays carry
+            // no length cap at the type level).
+            FieldType::Array(elem) => format!("{}[]", elem.pg_element_type()),
         }
     }
 
