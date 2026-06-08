@@ -97,6 +97,15 @@ pub fn verify(plaintext: &str, phc_hash: &str) -> Result<bool, TenancyError> {
         .is_ok())
 }
 
+/// Spend a verification's worth of work against a fixed dummy hash and
+/// discard the result. Call on the user-not-found / inactive branch of
+/// a login flow so timing doesn't reveal whether an account exists
+/// (audit H1). Delegates to [`crate::passwords::verify_dummy`] — same
+/// `Argon2::default()` cost as [`verify`] above.
+pub fn verify_dummy(plaintext: &str) {
+    crate::passwords::verify_dummy(plaintext);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
