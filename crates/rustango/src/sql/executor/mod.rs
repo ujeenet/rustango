@@ -2535,6 +2535,50 @@ where
         self.where_key(pk).first(pool).await
     }
 
+    /// Eloquent `Builder::firstOrFail()` — fetch the first row by
+    /// the current ordering, or surface
+    /// [`sqlx::Error::RowNotFound`] when the queryset is empty.
+    ///
+    /// Wrapper over [`Self::first`] that converts `None` to an
+    /// error — same shape as the table-wide
+    /// `Model::first_or_fail(&pool)`, but honors **pre-applied
+    /// scopes** (so e.g. `Post::objects().filter("published", true)
+    /// .first_or_fail(&pool)` errors only when no published post
+    /// exists, not when no post exists at all).
+    ///
+    /// # Errors
+    /// As [`Self::first`]; additionally
+    /// [`ExecError::Driver(sqlx::Error::RowNotFound)`] when the
+    /// queryset returns no rows.
+    pub async fn first_or_fail(self, pool: &Pool) -> Result<T, ExecError> {
+        match self.first(pool).await? {
+            Some(row) => Ok(row),
+            None => Err(ExecError::Driver(sqlx::Error::RowNotFound)),
+        }
+    }
+
+    /// Eloquent `Builder::findOrFail($pk)` — scoped PK lookup that
+    /// errors when no row matches. Sugar over
+    /// `self.where_key(pk).first_or_fail(pool)`.
+    ///
+    /// Like [`Self::find`] but errors on miss; like
+    /// [`Self::first_or_fail`] but adds the PK filter.
+    /// Mirrors Eloquent's `Post::published()->findOrFail(\$id)`.
+    ///
+    /// ```ignore
+    /// let post = Post::objects()
+    ///     .filter("published", true)
+    ///     .find_or_fail(42_i64, &pool).await?;
+    /// // -> Ok(post) when row 42 is published;
+    /// //    Err(RowNotFound) when missing or not published.
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Self::first_or_fail`].
+    pub async fn find_or_fail(self, pk: impl Into<SqlValue>, pool: &Pool) -> Result<T, ExecError> {
+        self.where_key(pk).first_or_fail(pool).await
+    }
+
     /// Django `QuerySet.latest()` — picks the largest row by the
     /// column set in `Meta.get_latest_by`. The model must declare
     /// `#[rustango(get_latest_by = "<col>")]`; without it this
