@@ -12,6 +12,12 @@
 //!   `.fetch(&pool)`.
 
 #[cfg(feature = "postgres")]
+use super::bind_query_as;
+#[cfg(feature = "mysql")]
+use super::bind_query_as_my;
+#[cfg(feature = "sqlite")]
+use super::bind_query_as_sqlite;
+#[cfg(feature = "postgres")]
 use sqlx::postgres::{PgArguments, PgRow};
 #[cfg(feature = "postgres")]
 use sqlx::query::Query;
@@ -331,6 +337,59 @@ where
     }
 }
 
+/// Execute a two-column [`SelectQuery`] and decode each row into
+/// `(K, V)` via sqlx's tuple `FromRow` impl. Backs
+/// [`crate::query::QuerySet::pluck_pairs`].
+///
+/// # Errors
+/// SQL compilation or driver failure, including a decode error if
+/// either `K` or `V` doesn't match the column's SQL type on the live
+/// database.
+pub async fn fetch_values_pairs<K, V>(
+    pool: &Pool,
+    query: &SelectQuery,
+) -> Result<Vec<(K, V)>, ExecError>
+where
+    K: Send + Unpin,
+    V: Send + Unpin,
+    (K, V): MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+{
+    let stmt = pool.dialect().compile_select(query)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q: sqlx::query::QueryAs<'_, sqlx::Postgres, (K, V), PgArguments> =
+                sqlx::query_as::<_, (K, V)>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as(q, v);
+            }
+            Ok(q.fetch_all(pg).await?)
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q: sqlx::query::QueryAs<'_, sqlx::MySql, (K, V), sqlx::mysql::MySqlArguments> =
+                sqlx::query_as::<_, (K, V)>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as_my(q, v);
+            }
+            Ok(q.fetch_all(my).await?)
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => {
+            let mut q: sqlx::query::QueryAs<
+                '_,
+                sqlx::Sqlite,
+                (K, V),
+                sqlx::sqlite::SqliteArguments<'_>,
+            > = sqlx::query_as::<_, (K, V)>(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_as_sqlite(q, v);
+            }
+            Ok(q.fetch_all(sq).await?)
+        }
+    }
+}
+
 #[cfg(feature = "postgres")]
 fn bind_query_scalar_pg<U>(
     q: sqlx::query::QueryScalar<'_, sqlx::Postgres, U, PgArguments>,
@@ -448,6 +507,52 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             })
         })?;
         self.pluck::<K>(pk_col, pool).await
+    }
+
+    /// Eloquent `Builder::pluck($value, $key)` — project two columns
+    /// from this (possibly-filtered) queryset and decode each row
+    /// into `(K, V)`.
+    ///
+    /// Returns `Vec<(K, V)>` — the universal carrier shape; collect
+    /// into a `BTreeMap` / `HashMap` at the call site when you want
+    /// lookup semantics. `(K, V)` is decoded via sqlx's tuple
+    /// `FromRow` impl, so both components only need the same
+    /// `Decode + Type` plumbing the [`Self::pluck`] / [`Self::value`]
+    /// scalars already require.
+    ///
+    /// ```ignore
+    /// // Eloquent: Post::where('published', true)->pluck('title', 'id');
+    /// // -> {1: "Hello", 2: "World"}
+    /// // rustango:
+    /// let pairs: Vec<(i64, String)> = Post::objects()
+    ///     .filter("published", true)
+    ///     .pluck_pairs::<i64, String>("id", "title", &pool).await?;
+    /// // Lookup map:
+    /// let map: std::collections::BTreeMap<_, _> = pairs.into_iter().collect();
+    /// ```
+    ///
+    /// `key_col` comes first (matches the tuple's element order) —
+    /// note Eloquent's argument order is `(value, key)`; this method
+    /// uses the natural `(key, value)` shape to keep call sites
+    /// readable left-to-right.
+    ///
+    /// # Errors
+    /// As [`crate::sql::FetcherPool::fetch_pool`], plus per-cell
+    /// type-mismatch errors when `K` / `V` don't match the columns'
+    /// SQL types.
+    pub async fn pluck_pairs<K, V>(
+        self,
+        key_col: &'static str,
+        value_col: &'static str,
+        pool: &Pool,
+    ) -> Result<Vec<(K, V)>, ExecError>
+    where
+        K: Send + Unpin,
+        V: Send + Unpin,
+        (K, V): MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
+    {
+        let q = self.values_list(&[key_col, value_col]).compile()?;
+        fetch_values_pairs::<K, V>(pool, &q).await
     }
 
     /// Eloquent `Builder::value($col)` — fetch a single column from
