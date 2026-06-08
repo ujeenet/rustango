@@ -56,16 +56,39 @@ pub(crate) fn protected_router(state: AppState) -> Router {
 
 // ============================================================ Login form (GET)
 
-async fn login_form(State(state): State<AppState>) -> Html<String> {
-    Html(render_login_form(&state, None))
+async fn login_form(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    login_response(&state, &headers, None)
 }
 
-fn render_login_form(state: &AppState, error: Option<&str>) -> String {
+/// Build the login-page response, seeding a double-submit CSRF token
+/// (audit M3): the cookie is set on the GET (if not already present) and
+/// the matching token is embedded as a hidden form field, so the POST
+/// can be validated in [`login_submit`] without relying on outer
+/// middleware placement.
+fn login_response(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    error: Option<&str>,
+) -> Response {
+    use crate::forms::csrf;
+    let (token, set_cookie) = csrf::ensure_token(headers, csrf::CSRF_COOKIE);
+    let html = render_login_form(state, error, &csrf::csrf_input_html(&token));
+    let mut resp = Html(html).into_response();
+    if let Some(cookie) = set_cookie {
+        if let Ok(v) = HeaderValue::from_str(&cookie) {
+            resp.headers_mut().append(header::SET_COOKIE, v);
+        }
+    }
+    resp
+}
+
+fn render_login_form(state: &AppState, error: Option<&str>, csrf_input: &str) -> String {
     let admin_prefix = &state.config.admin_prefix;
     let ctx = serde_json::json!({
         "title": "Sign in",
         "action": format!("{admin_prefix}/login"),
         "error": error,
+        "csrf_input": csrf_input,
         "admin_title": state
             .config
             .title
@@ -83,6 +106,11 @@ fn render_login_form(state: &AppState, error: Option<&str>) -> String {
 struct LoginInput {
     username: String,
     password: String,
+    /// Double-submit CSRF token (audit M3). Optional so a missing field
+    /// is handled as a failed check (re-render) rather than a 422 form
+    /// rejection.
+    #[serde(rename = "_csrf", default)]
+    csrf_token: Option<String>,
 }
 
 async fn login_submit(
@@ -103,6 +131,18 @@ async fn login_submit(
         )
             .into_response();
     };
+
+    // Audit M3 — validate the double-submit CSRF token before touching
+    // the database or verifying credentials. A cross-site forged POST
+    // can't read the SameSite=Lax CSRF cookie to echo it back, so it
+    // fails here. The token is seeded + embedded by `login_response`.
+    if !crate::forms::csrf::verify_form_token(&headers, form.csrf_token.as_deref()) {
+        return login_response(
+            &state,
+            &headers,
+            Some("Your session expired or the form was invalid. Please try again."),
+        );
+    }
 
     // Schema-driven lookup so we don't depend on tenancy's
     // typed query helpers — the bare admin compiles without `tenancy`.
@@ -129,7 +169,7 @@ async fn login_submit(
             request: meta.clone(),
         })
         .await;
-        return Html(render_login_form(&state, Some("Invalid credentials."))).into_response();
+        return login_response(&state, &headers, Some("Invalid credentials."));
     };
     let id = row.get("id").and_then(|v| v.as_i64()).unwrap_or_default();
     let stored_hash = row
@@ -158,7 +198,7 @@ async fn login_submit(
         // Return the same generic message as unknown-user / wrong-password
         // so the login form can't be used to enumerate accounts. The
         // Inactive signal above still records the real reason for audit.
-        return Html(render_login_form(&state, Some("Invalid credentials."))).into_response();
+        return login_response(&state, &headers, Some("Invalid credentials."));
     }
     if !password_ok {
         send_user_login_failed(UserLoginFailedContext {
@@ -168,7 +208,7 @@ async fn login_submit(
             request: meta.clone(),
         })
         .await;
-        return Html(render_login_form(&state, Some("Invalid credentials."))).into_response();
+        return login_response(&state, &headers, Some("Invalid credentials."));
     }
 
     let cookie_value = session::encode(
@@ -498,4 +538,88 @@ fn read_session_cookie(req: &Request<Body>, secret: &AdminSessionSecret) -> Opti
         }
     }
     None
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    use super::*;
+    use crate::sql::sqlx::PgPool;
+    use crate::sql::Pool;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt as _;
+
+    // A lazily-connected pool — these tests exercise the CSRF gate,
+    // which runs BEFORE any DB access, so the pool is never queried.
+    fn test_state() -> AppState {
+        let pool = Pool::Postgres(
+            PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused")
+                .expect("connect_lazy never fails"),
+        );
+        let mut config = super::super::urls::Config::default();
+        config.session_secret = Some(crate::session::SessionSecret::from_bytes(vec![7u8; 32]));
+        AppState {
+            pool,
+            config: Arc::new(config),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_login_seeds_csrf_cookie_and_form_token() {
+        let resp = public_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set_cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("GET should seed a CSRF cookie")
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains("rustango_csrf="), "{set_cookie}");
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(
+            body.contains(r#"name="_csrf""#),
+            "form must carry the token"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_login_without_csrf_token_is_rejected() {
+        let resp = public_router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("username=alice&password=secret"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Re-render (200), NOT a 303 redirect — and no session cookie.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let issued_session = resp.headers().get_all(header::SET_COOKIE).iter().any(|c| {
+            c.to_str()
+                .map(|s| s.contains(SESSION_COOKIE))
+                .unwrap_or(false)
+        });
+        assert!(
+            !issued_session,
+            "a CSRF-less POST must not establish a session"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert!(std::str::from_utf8(&body).unwrap().contains("try again"));
+    }
 }
