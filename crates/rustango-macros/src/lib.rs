@@ -2781,6 +2781,39 @@ fn inherent_impl_tokens(
                     };
                     #root::sql::insert_pool(pool, &_query).await
                 }
+
+                /// Eloquent `Model::insertOrIgnore()` — same shape
+                /// as the auto-PK branch above. Returns `Ok(true)`
+                /// when inserted, `Ok(false)` when a conflict caused
+                /// the INSERT to silently skip.
+                ///
+                /// # Errors
+                /// As [`Self::insert`].
+                pub async fn insert_or_ignore(
+                    &mut self,
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<bool, #root::sql::ExecError> {
+                    let mut _columns: ::std::vec::Vec<&'static str> =
+                        ::std::vec::Vec::new();
+                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #( #pushes )*
+                    let _query = #root::core::InsertQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
+                        columns: _columns,
+                        values: _values,
+                        returning: ::std::vec::Vec::new(),
+                        on_conflict: ::core::option::Option::Some(
+                            #root::core::ConflictClause::DoNothing,
+                        ),
+                    };
+                    let dialect = pool.dialect();
+                    let stmt = dialect.compile_insert(&_query)?;
+                    let rows = #root::sql::raw_execute_pool(
+                        pool, &stmt.sql, stmt.params,
+                    ).await?;
+                    ::core::result::Result::Ok(rows > 0)
+                }
             }
         } else {
             quote! {
@@ -2810,6 +2843,48 @@ fn inherent_impl_tokens(
                     ).await?;
                     #root::sql::apply_auto_pk(_result, self)
                 }
+
+                /// Eloquent `Model::insertOrIgnore()` — INSERT this
+                /// row or silently skip on unique-constraint
+                /// violation. Returns `Ok(true)` when a row was
+                /// inserted, `Ok(false)` when a conflict caused the
+                /// INSERT to silently skip.
+                ///
+                /// **Caveat on auto-PK models**: when the row is
+                /// skipped (conflict), this instance's `Auto<T>`
+                /// fields stay `Unset` — no PK is back-populated
+                /// because the server didn't auto-assign one. For
+                /// "insert then read back the PK or the existing
+                /// row's PK", use the `upsert` family or
+                /// `get_or_create`.
+                ///
+                /// # Errors
+                /// As [`Self::insert`].
+                pub async fn insert_or_ignore(
+                    &mut self,
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<bool, #root::sql::ExecError> {
+                    let mut _columns: ::std::vec::Vec<&'static str> =
+                        ::std::vec::Vec::new();
+                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #( #pushes )*
+                    let _query = #root::core::InsertQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
+                        columns: _columns,
+                        values: _values,
+                        returning: ::std::vec::Vec::new(),
+                        on_conflict: ::core::option::Option::Some(
+                            #root::core::ConflictClause::DoNothing,
+                        ),
+                    };
+                    let dialect = pool.dialect();
+                    let stmt = dialect.compile_insert(&_query)?;
+                    let rows = #root::sql::raw_execute_pool(
+                        pool, &stmt.sql, stmt.params,
+                    ).await?;
+                    ::core::result::Result::Ok(rows > 0)
+                }
             }
         }
     } else {
@@ -2834,6 +2909,44 @@ fn inherent_impl_tokens(
                     on_conflict: ::core::option::Option::None,
                 };
                 #root::sql::insert_pool(pool, &_query).await
+            }
+
+            /// Eloquent `Model::insertOrIgnore()` — INSERT this row
+            /// or silently skip on unique-constraint violation. Maps
+            /// to per-dialect "INSERT ... DO NOTHING on conflict":
+            /// PG `INSERT … ON CONFLICT DO NOTHING`, SQLite
+            /// `INSERT … ON CONFLICT DO NOTHING` (3.24+), MySQL
+            /// `INSERT IGNORE INTO …`.
+            ///
+            /// Returns `Ok(true)` when a row was inserted,
+            /// `Ok(false)` when a conflict caused the INSERT to
+            /// silently skip.
+            ///
+            /// Use for "create-if-absent" patterns where you don't
+            /// need the row back. For "find-or-create with the row
+            /// returned", use the queryset-level
+            /// `crate::sql::get_or_create` free function.
+            ///
+            /// # Errors
+            /// As [`Self::insert`], plus any dialect-specific
+            /// translation error from the ConflictClause writer.
+            pub async fn insert_or_ignore(
+                &self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<bool, #root::sql::ExecError> {
+                let _query = #root::core::InsertQuery {
+                    model: <Self as #root::core::Model>::SCHEMA,
+                    columns: ::std::vec![ #( #insert_columns ),* ],
+                    values: ::std::vec![ #( #insert_values ),* ],
+                    returning: ::std::vec::Vec::new(),
+                    on_conflict: ::core::option::Option::Some(
+                        #root::core::ConflictClause::DoNothing,
+                    ),
+                };
+                let dialect = pool.dialect();
+                let stmt = dialect.compile_insert(&_query)?;
+                let rows = #root::sql::raw_execute_pool(pool, &stmt.sql, stmt.params).await?;
+                ::core::result::Result::Ok(rows > 0)
             }
         }
     };
