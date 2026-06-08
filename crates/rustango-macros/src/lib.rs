@@ -11291,6 +11291,18 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
                 fk_inner: None,
             });
         }
+        // `Cast<C>` → attribute cast (#819). The column is plain `TEXT`
+        // (the `CastValue` impl bridges logical↔stored); the field's own
+        // sqlx `Decode` / `Into<SqlValue>` handle the transform, so the
+        // schema just needs `FieldType::String`.
+        "Cast" => {
+            return Ok(DetectedType {
+                kind: DetectedKind::String,
+                nullable: false,
+                auto: false,
+                fk_inner: None,
+            });
+        }
         // `HStore` → PG `hstore` (Django `HStoreField`, #342). No generic
         // parameter — always a string→string map.
         "HStore" => {

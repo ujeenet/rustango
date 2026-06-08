@@ -76,6 +76,9 @@ sha2    = "0.10"
 subtle  = "2"      # constant-time eq for MAC verify
 cookie  = "0.18"
 rand    = "0.8"    # session-secret auto-gen fallback
+# XChaCha20-Poly1305 AEAD for the `encrypted` attribute cast (#819).
+# 24-byte nonce → random per-write nonces are reuse-safe.
+chacha20poly1305 = "0.10"
 
 # Interactive manage CLI
 dotenvy   = "0.15"

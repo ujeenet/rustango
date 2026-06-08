@@ -544,6 +544,11 @@ pub mod jsonapi;
 ))]
 pub(crate) mod crypto;
 
+/// Attribute casts (#819) — `Cast<C>` field wrapper + `CastValue` trait,
+/// with the `EncryptedString` AEAD-at-rest built-in.
+#[cfg(feature = "casts")]
+pub mod casts;
+
 /// Lowercase-hex codec — pure, no external deps. Lives outside
 /// [`crate::crypto`] so always-on call sites (`pagination` cursor
 /// encoding, `row_to_json` Binary arms) can share one
