@@ -89,7 +89,7 @@ pub use executor::LoadRelatedMy;
 #[cfg(feature = "sqlite")]
 pub use executor::LoadRelatedSqlite;
 pub use foreign_key::ForeignKey;
-pub use m2m::M2MManager;
+pub use m2m::{GenericM2MManager, M2MManager};
 #[cfg(feature = "mysql")]
 pub use mysql::MySql;
 #[cfg(all(feature = "sqlite", feature = "manage"))]
