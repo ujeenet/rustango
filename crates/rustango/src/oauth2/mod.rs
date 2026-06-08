@@ -8,6 +8,20 @@
 //! default flow. That trade buys uniform handling across both protocol
 //! shapes and avoids pulling a JWT/JWKS stack into the dep tree.
 //!
+//! ## Security notes (audit L2)
+//!
+//! * **CSRF is covered by the `state` parameter** (CSPRNG-generated,
+//!   sealed into the flow cookie, constant-time compared on callback).
+//! * **No OIDC `nonce`** is sent. With the userinfo-over-TLS model the
+//!   `id_token` is never trusted, so a `nonce` (which binds a session to
+//!   an `id_token`) has nothing to bind to; `state` carries the CSRF
+//!   guarantee. If you switch to trusting the `id_token`, add + verify a
+//!   `nonce`.
+//! * **`redirect_uri` is not re-validated locally** — it's fixed per
+//!   provider at registration and enforced by the provider's allowlist.
+//!   Keep the registered `redirect_uri` exact (no open wildcards) on the
+//!   provider side.
+//!
 //! ## Quick start (built-in provider)
 //!
 //! ```ignore

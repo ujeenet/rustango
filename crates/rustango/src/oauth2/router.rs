@@ -156,10 +156,19 @@ async fn callback_handler(
     headers: HeaderMap,
 ) -> Response {
     if let Some(err) = params.error.as_deref() {
-        let desc = params.error_description.as_deref().unwrap_or("");
+        // Audit L3 — the `error` / `error_description` query params are
+        // attacker-influenceable (anyone can craft a callback URL). Don't
+        // reflect them into the response body; log server-side and return
+        // a fixed generic message instead.
+        tracing::warn!(
+            provider = %provider_name,
+            error = %err,
+            error_description = params.error_description.as_deref().unwrap_or(""),
+            "oauth2 provider returned an error on callback",
+        );
         return (
             StatusCode::BAD_REQUEST,
-            format!("provider returned error: {err} {desc}"),
+            "authentication failed at the identity provider",
         )
             .into_response();
     }
@@ -295,7 +304,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callback_propagates_provider_error_param() {
+    async fn callback_provider_error_returns_generic_400_without_reflection() {
+        // Audit L3 — the provider error params must NOT be echoed into
+        // the response body (attacker-influenceable); a fixed generic
+        // message is returned instead.
         let registry = OAuth2Registry::new();
         registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
         let app = oauth2_router(registry, b"signing".to_vec(), true, dummy_success());
@@ -314,7 +326,11 @@ mod tests {
             .await
             .unwrap();
         let body = std::str::from_utf8(&body).unwrap();
-        assert!(body.contains("access_denied"));
+        assert!(
+            !body.contains("access_denied") && !body.contains("user_cancelled"),
+            "provider error params must not be reflected: {body}"
+        );
+        assert!(body.contains("authentication failed"));
     }
 
     #[tokio::test]

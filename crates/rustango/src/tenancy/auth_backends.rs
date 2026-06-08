@@ -172,7 +172,11 @@ pub struct ApiKey {
     /// `rustango_users.id`
     #[rustango(fk = "rustango_users", on = "id", on_delete = "cascade")]
     pub user_id: i64,
-    /// 8-char hex prefix — public, used to look up the row.
+    /// 8-char hex prefix — public, used to look up the row. Stored in
+    /// plaintext by design (it's the lookup index). Audit L4: this is an
+    /// accepted, minor exposure — a DB leak reveals which prefixes exist
+    /// but NOT the secret (the secret half is argon2id-hashed in
+    /// `key_hash`), so a stolen prefix can't authenticate on its own.
     #[rustango(max_length = 8)]
     pub key_prefix: String,
     /// argon2id hash of the 32-char secret. Never returned to callers.
