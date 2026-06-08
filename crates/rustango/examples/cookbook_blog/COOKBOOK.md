@@ -630,7 +630,7 @@ syn `parse_nested_meta` API). Removed the broken trailing-flag block;
 
 ### 2.22 `#[rustango(m2m(name, to, through, src, dst))]` — M2M through
 
-**What**: Container-level attribute that emits a junction-table accessor `<name>_m2m()`. The macro doesn't auto-create the through table; you create it by adding a regular junction model + migration. Reads/writes go through the junction table directly.
+**What**: Container-level attribute that emits a junction-table accessor `<name>_m2m()` returning an `M2MManager`. The macro doesn't auto-create the through table; you create it by adding a regular junction model + migration. Reads/writes go through the junction table directly.
 
 **Recipe** ([models.rs](src/apps/blog/models.rs)):
 
@@ -642,7 +642,17 @@ syn `parse_nested_meta` API). Removed the broken trailing-flag block;
         src = "post_id", dst = "tag_id"),
 )]
 pub struct Post { ... }
+
+// CRUD on the junction — bare-name methods (v0.43+):
+post.tags_m2m().all(&pool).await?;                  // -> Vec<i64>
+post.tags_m2m().add(42, &pool).await?;
+post.tags_m2m().remove(42, &pool).await?;
+post.tags_m2m().set(&[1, 2, 3], &pool).await?;
+post.tags_m2m().clear(&pool).await?;
+let has = post.tags_m2m().contains(42, &pool).await?;
 ```
+
+The `_pool` aliases (`all_pool` / `add_pool` / etc.) stay as `#[deprecated]` forwarders for source-compat with pre-#941 code — they emit one warning each.
 
 **Verified by**: `m2m_through_junction_table_round_trips`
 
