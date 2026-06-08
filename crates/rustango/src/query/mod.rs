@@ -1158,6 +1158,52 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
+    /// Eloquent `Builder::whereExists($closure)` — AND-join an
+    /// `EXISTS (subquery)` predicate onto this queryset's WHERE.
+    ///
+    /// `subquery` is an already-compiled [`SelectQuery`] — build it
+    /// with the inner model's `objects()` chain and call `.compile()`
+    /// to propagate any column-typo errors at the inner queryset.
+    /// Use [`crate::core::subquery::outer_ref`] to correlate against
+    /// columns of the outer model.
+    ///
+    /// ```ignore
+    /// use rustango::core::Column as _;
+    /// use rustango::core::subquery::outer_ref;
+    ///
+    /// // Authors who have at least one book.
+    /// let with_books = Book::objects()
+    ///     .where_(Book::author_id.eq_expr(outer_ref("id")))
+    ///     .compile()?;
+    /// let authors = Author::objects()
+    ///     .where_exists(with_books)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    ///
+    /// Sugar over `self.where_raw(subquery::exists(subquery))`.
+    #[must_use]
+    pub fn where_exists(self, subquery: SelectQuery) -> Self {
+        self.where_raw(crate::core::subquery::exists(subquery))
+    }
+
+    /// Eloquent `Builder::whereNotExists($closure)` — AND-join a
+    /// `NOT EXISTS (subquery)` predicate. Inverse of
+    /// [`Self::where_exists`]; canonical "find rows in A with no
+    /// related row in B" shape.
+    ///
+    /// ```ignore
+    /// let no_books = Book::objects()
+    ///     .where_(Book::author_id.eq_expr(outer_ref("id")))
+    ///     .compile()?;
+    /// let empty = Author::objects()
+    ///     .where_not_exists(no_books)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn where_not_exists(self, subquery: SelectQuery) -> Self {
+        self.where_raw(crate::core::subquery::not_exists(subquery))
+    }
+
     /// Append a typed predicate or boolean expression built via the
     /// [`Column`](crate::core::Column) API. Accepts either a single
     /// [`TypedFilter`](crate::core::TypedFilter) (`User::id.gt(10)`)
