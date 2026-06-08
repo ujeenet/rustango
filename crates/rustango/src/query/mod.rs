@@ -815,6 +815,22 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Eloquent `Builder::inRandomOrder()` alias for
+    /// [`Self::order_random`] — appends a per-row random sort key.
+    /// Same performance caveat (full scan + sort, no index use).
+    ///
+    /// ```ignore
+    /// // Eloquent: Post::query()->inRandomOrder()->take(5)->get();
+    /// let five = Post::objects()
+    ///     .in_random_order()
+    ///     .take(5)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn in_random_order(self) -> Self {
+        self.order_random()
+    }
+
     /// v0.45 — discard any previously-set `order_by` and apply
     /// `items` as the new ordering. Used by `earliest` and
     /// `latest` which declare their own sort. Clears every
