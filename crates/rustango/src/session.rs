@@ -24,6 +24,10 @@ use sha2::Sha256;
 /// fail loudly over silently downgrading to an ephemeral random key.
 #[derive(Debug)]
 pub enum SessionSecretError {
+    /// The env var isn't set at all. Returned only by the strict
+    /// [`SessionSecret::require_from_env`] (the lenient loaders treat an
+    /// unset var as "generate a random key").
+    Missing,
     /// The env var didn't decode as base64.
     BadBase64 { cause: String },
     /// Decoded successfully but the resulting key is fewer than 32
@@ -34,6 +38,11 @@ pub enum SessionSecretError {
 impl core::fmt::Display for SessionSecretError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Missing => write!(
+                f,
+                "RUSTANGO_SESSION_SECRET is not set \
+                 (generate one with: openssl rand -base64 32)"
+            ),
             Self::BadBase64 { cause } => write!(
                 f,
                 "RUSTANGO_SESSION_SECRET is not valid base64: {cause} \
@@ -191,15 +200,7 @@ impl SessionSecret {
     /// fewer than 32.
     pub fn try_from_env() -> Result<Self, SessionSecretError> {
         if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
-            return match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
-                Ok(bytes) if bytes.len() >= 32 => Ok(Self(bytes)),
-                Ok(bytes) => Err(SessionSecretError::TooShort {
-                    actual: bytes.len(),
-                }),
-                Err(e) => Err(SessionSecretError::BadBase64 {
-                    cause: e.to_string(),
-                }),
-            };
+            return Self::decode_b64(&raw);
         }
         tracing::warn!(
             "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
@@ -208,6 +209,39 @@ impl SessionSecret {
         let mut buf = vec![0u8; 32];
         OsRng.fill_bytes(&mut buf);
         Ok(Self(buf))
+    }
+
+    /// **Strict** variant for production boot: requires
+    /// `RUSTANGO_SESSION_SECRET` to be present, valid base64, and ≥ 32
+    /// bytes. Unlike [`Self::try_from_env`], an *unset* var is an error
+    /// ([`SessionSecretError::Missing`]) rather than a silent random
+    /// key — an ephemeral key breaks multi-instance deployments and
+    /// masks a missing-secret misconfiguration. Used by
+    /// [`load_session_secret_for_tier`] on the prod tier.
+    ///
+    /// # Errors
+    /// [`SessionSecretError::Missing`] when unset; `BadBase64` /
+    /// `TooShort` per [`Self::try_from_env`].
+    pub fn require_from_env() -> Result<Self, SessionSecretError> {
+        match std::env::var("RUSTANGO_SESSION_SECRET") {
+            Ok(raw) => Self::decode_b64(&raw),
+            Err(_) => Err(SessionSecretError::Missing),
+        }
+    }
+
+    /// Decode + validate a base64 secret string. Shared by
+    /// [`Self::try_from_env`] / [`Self::require_from_env`] and unit-
+    /// testable without touching the process environment.
+    fn decode_b64(raw: &str) -> Result<Self, SessionSecretError> {
+        match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
+            Ok(bytes) if bytes.len() >= 32 => Ok(Self(bytes)),
+            Ok(bytes) => Err(SessionSecretError::TooShort {
+                actual: bytes.len(),
+            }),
+            Err(e) => Err(SessionSecretError::BadBase64 {
+                cause: e.to_string(),
+            }),
+        }
     }
 
     /// Construct from raw bytes — useful for tests + callers that
@@ -223,6 +257,56 @@ impl SessionSecret {
     pub(crate) fn key(&self) -> &[u8] {
         &self.0
     }
+}
+
+/// `true` for tier strings that mean "production" (case-insensitive
+/// `prod` / `production`). Anything else (dev, staging, test, unset) is
+/// treated as non-production.
+#[must_use]
+pub fn is_prod_tier(tier: &str) -> bool {
+    matches!(
+        tier.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
+}
+
+/// Tier-aware session-secret loader (audit M2).
+///
+/// * **prod** tier → [`SessionSecret::require_from_env`]: the secret
+///   MUST be a valid `RUSTANGO_SESSION_SECRET`. On any error (missing,
+///   bad base64, too short) this **panics** — a production server
+///   refuses to start rather than silently signing cookies + JWTs with
+///   an ephemeral per-process random key (which breaks multi-instance
+///   deployments and masks the misconfiguration).
+/// * **dev / staging / anything else** → [`SessionSecret::from_env_or_disk`]:
+///   restart-stable local development without requiring the env var.
+///
+/// `tier` is typically `RUSTANGO_ENV`; callers read it via
+/// [`tier_from_env`].
+///
+/// # Panics
+/// On the prod tier when `RUSTANGO_SESSION_SECRET` is missing/invalid.
+#[must_use]
+pub fn load_session_secret_for_tier(tier: &str, disk_path: &std::path::Path) -> SessionSecret {
+    if is_prod_tier(tier) {
+        match SessionSecret::require_from_env() {
+            Ok(secret) => secret,
+            Err(e) => panic!(
+                "refusing to start on the prod tier (RUSTANGO_ENV={tier}): {e}. \
+                 Set RUSTANGO_SESSION_SECRET to a stable base64-encoded 32+ byte \
+                 key shared across all instances."
+            ),
+        }
+    } else {
+        SessionSecret::from_env_or_disk(disk_path)
+    }
+}
+
+/// Read the deployment tier from `RUSTANGO_ENV`, defaulting to `"dev"`
+/// when unset (matches `crate::config` tier resolution).
+#[must_use]
+pub fn tier_from_env() -> String {
+    std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "dev".to_owned())
 }
 
 /// Restrict the persisted session-secret file to 0600 on Unix so
@@ -278,5 +362,50 @@ mod tests {
     fn from_bytes_round_trip() {
         let secret = SessionSecret::from_bytes(vec![0xab; 40]);
         assert_eq!(secret.key().len(), 40);
+    }
+
+    #[test]
+    fn decode_b64_accepts_valid_32_byte_key() {
+        let raw = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        assert!(SessionSecret::decode_b64(&raw).is_ok());
+    }
+
+    #[test]
+    fn decode_b64_rejects_short_key() {
+        let raw = base64::engine::general_purpose::STANDARD.encode([7u8; 16]);
+        assert!(matches!(
+            SessionSecret::decode_b64(&raw),
+            Err(SessionSecretError::TooShort { actual: 16 })
+        ));
+    }
+
+    #[test]
+    fn decode_b64_rejects_bad_base64() {
+        assert!(matches!(
+            SessionSecret::decode_b64("!!! not base64 !!!"),
+            Err(SessionSecretError::BadBase64 { .. })
+        ));
+    }
+
+    #[test]
+    fn is_prod_tier_matches_prod_and_production_case_insensitively() {
+        assert!(is_prod_tier("prod"));
+        assert!(is_prod_tier("production"));
+        assert!(is_prod_tier("PROD"));
+        assert!(is_prod_tier("  Production  "));
+        assert!(!is_prod_tier("dev"));
+        assert!(!is_prod_tier("staging"));
+        assert!(!is_prod_tier(""));
+    }
+
+    #[test]
+    fn dev_tier_loads_without_requiring_env() {
+        // The dev tier must never require RUSTANGO_SESSION_SECRET — it
+        // falls back to a disk-persisted (or ephemeral) >=32-byte key.
+        let dir = std::env::temp_dir().join(format!("rustango_sess_test_{}", std::process::id()));
+        let path = dir.join("k.key");
+        let s = load_session_secret_for_tier("dev", &path);
+        assert!(s.key().len() >= 32);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
