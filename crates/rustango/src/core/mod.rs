@@ -34,7 +34,7 @@ pub use schema::{
     infer_app_label_from_module_path, AdminConfig, CheckConstraint, CompositeFkRelation,
     ExclusionConstraint, FieldSchema, Fieldset, GenericRelation, GlobalScope, IndexMethod,
     IndexSchema, ListSelectRelated, M2MRelation, Model, ModelEntry, ModelSchema, ModelScope,
-    OnDeleteAction, PrepopulatedField, Relation,
+    OnDeleteAction, PrepopulatedField, Relation, ReverseRelation,
 };
 pub use validate::validate_value;
 pub use value::SqlValue;
