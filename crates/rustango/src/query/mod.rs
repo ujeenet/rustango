@@ -1234,6 +1234,48 @@ impl<T: Model> QuerySet<T> {
         self.where_raw(crate::core::subquery::not_in_subquery(column, subquery))
     }
 
+    /// Eloquent `Builder::whereColumn($col1, $col2)` — emits
+    /// `<col1> = <col2>`, comparing two columns instead of column
+    /// vs literal. Equality is the overwhelming majority of uses;
+    /// for any other comparison, see [`Self::where_column_op`].
+    ///
+    /// Both column names are validated by the schema at
+    /// `compile()`-time via the existing
+    /// [`WhereExpr::ExprCompare`](crate::core::WhereExpr::ExprCompare)
+    /// path.
+    ///
+    /// ```ignore
+    /// // Eloquent: User::whereColumn('first_name', 'last_name');
+    /// User::objects()
+    ///     .where_column("first_name", "last_name")
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn where_column(self, col1: &'static str, col2: &'static str) -> Self {
+        self.where_column_op(col1, Op::Eq, col2)
+    }
+
+    /// Eloquent `Builder::whereColumn($col1, $op, $col2)` — column-
+    /// vs-column comparison with an explicit operator. Use the
+    /// shorter [`Self::where_column`] when the op is `Eq`.
+    ///
+    /// ```ignore
+    /// use rustango::core::Op;
+    /// // start_date < end_date — Eloquent: whereColumn('start_date', '<', 'end_date')
+    /// Reservation::objects()
+    ///     .where_column_op("start_date", Op::Lt, "end_date")
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn where_column_op(self, col1: &'static str, op: Op, col2: &'static str) -> Self {
+        use crate::core::F;
+        self.where_raw(WhereExpr::ExprCompare {
+            lhs: F(col1).into(),
+            op,
+            rhs: F(col2).into(),
+        })
+    }
+
     /// Append a typed predicate or boolean expression built via the
     /// [`Column`](crate::core::Column) API. Accepts either a single
     /// [`TypedFilter`](crate::core::TypedFilter) (`User::id.gt(10)`)
