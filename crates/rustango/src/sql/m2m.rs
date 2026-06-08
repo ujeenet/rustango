@@ -498,8 +498,11 @@ impl GenericM2MManager {
     pub async fn contains(&self, dst_id: i64, pool: &Pool) -> Result<bool, ExecError> {
         let dialect = pool.dialect();
         let ct = self.ct_id(pool).await?;
+        // Select the (bigint) `dst` column rather than a literal `1`:
+        // Postgres types a bare `SELECT 1` as `int4`, which the
+        // `i64`/`int8`-typed decoder in `fetch_i64_col_pool` rejects.
         let sql = format!(
-            "SELECT 1 AS hit FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2} AND {dst} = {p3} LIMIT 1",
+            "SELECT {dst} FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2} AND {dst} = {p3} LIMIT 1",
             through = dialect.quote_ident(self.through),
             pk = dialect.quote_ident(self.pk_col),
             ctc = dialect.quote_ident(self.ct_col),
