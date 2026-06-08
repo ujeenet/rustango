@@ -147,7 +147,11 @@ async fn login_submit(
             request: meta.clone(),
         })
         .await;
-        return Html(render_login_form(&state, Some("Account is disabled."))).into_response();
+        // Audit M4 — do NOT reveal that the account exists-but-disabled.
+        // Return the same generic message as unknown-user / wrong-password
+        // so the login form can't be used to enumerate accounts. The
+        // Inactive signal above still records the real reason for audit.
+        return Html(render_login_form(&state, Some("Invalid credentials."))).into_response();
     }
     if !crate::passwords::verify(&form.password, stored_hash).unwrap_or(false) {
         send_user_login_failed(UserLoginFailedContext {
