@@ -411,6 +411,35 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         self.values_list_flat(col).fetch::<U>(pool).await
     }
 
+    /// Eloquent `Builder::value($col)` — fetch a single column from
+    /// the first row of this (possibly-filtered) queryset, or
+    /// `None` when the queryset is empty.
+    ///
+    /// Sugar over `self.values_list_flat(col).first::<U>(pool)`. The
+    /// DB sees `LIMIT 1` so a large result set doesn't pay for rows
+    /// the caller won't read.
+    ///
+    /// ```ignore
+    /// // Eloquent: $email = User::where('id', 1)->value('email');
+    /// // rustango:
+    /// let email: Option<String> = User::objects()
+    ///     .filter("id", 1_i64)
+    ///     .value::<String>("email", &pool).await?;
+    /// ```
+    ///
+    /// Differs from `Model::value(col, &pool)` (already shipped)
+    /// because the queryset's accumulated filters / ordering /
+    /// limits narrow which row's column is returned.
+    ///
+    /// # Errors
+    /// As [`crate::query::ValuesFlatQuerySet::first`].
+    pub async fn value<U>(self, col: &'static str, pool: &Pool) -> Result<Option<U>, ExecError>
+    where
+        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+    {
+        self.values_list_flat(col).first::<U>(pool).await
+    }
+
     /// Eloquent `Builder::toSql()` — render this queryset to its SQL
     /// string in the pool's dialect, without executing.
     ///
