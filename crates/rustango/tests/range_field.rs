@@ -126,3 +126,20 @@ fn insert_casts_range_literal_to_its_pg_type() {
         "missing daterange cast: {sql}"
     );
 }
+
+#[test]
+fn range_contains_on_typed_range_column_casts_rhs() {
+    // `Range<T>` column + range-literal RHS → `seats @> $1::int4range`
+    // so PG resolves the operator. (A non-range column keeps the bare
+    // placeholder — covered by `range_ops_emission`.)
+    use rustango::core::Column as _;
+    let q = Event::objects()
+        .where_(Event::seats.range_contains("[5,6)"))
+        .compile()
+        .unwrap();
+    let sql = Postgres.compile_select(&q).unwrap().sql;
+    assert!(
+        sql.contains(r#""seats" @> $1::int4range"#),
+        "missing range-op cast: {sql}"
+    );
+}

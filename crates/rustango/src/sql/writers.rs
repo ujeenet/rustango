@@ -3609,8 +3609,29 @@ fn write_filter(
             // Both shapes route through the same writer because the
             // SQL emission is identical (`<col> <op> <placeholder>`).
             require_op(b.d, filter.op)?;
+            // #343 — when the filtered column is a typed `Range<T>`
+            // (`FieldType::Range`) and the RHS is a *range literal*, cast
+            // the bound text to the column's range type so PG resolves
+            // the operator (`int4range @> $1::int4range`); without it PG
+            // errors `operator does not exist: int4range @> text`. A
+            // scalar RHS is element-containment (`int4range @> integer`)
+            // and must stay un-cast; a non-`Range` column (the legacy
+            // "declare the range as String + raw migration" shape) keeps
+            // the bare placeholder.
+            let range_cast = if matches!(filter.value, SqlValue::RangeLiteral(_)) {
+                model
+                    .and_then(|m| m.field_by_column(filter.column))
+                    .filter(|f| matches!(f.ty, crate::core::FieldType::Range(_)))
+                    .and_then(|f| b.d.cast_type(f.ty))
+            } else {
+                None
+            };
             b.params.push(filter.value.clone());
-            let p = b.d.placeholder(b.params.len());
+            let mut p = b.d.placeholder(b.params.len());
+            if let Some(ty) = range_cast {
+                p.push_str("::");
+                p.push_str(ty);
+            }
             let op_str: &'static str = match filter.op {
                 Op::RangeContains => "@>",
                 Op::RangeContainedBy => "<@",
