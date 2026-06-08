@@ -2097,6 +2097,18 @@ pub trait ExistsPool<T: Model + Send> {
         pool: &Pool,
     ) -> impl std::future::Future<Output = Result<bool, ExecError>> + Send;
 
+    /// `Ok(true)` when the queryset matches zero rows, `Ok(false)`
+    /// otherwise — inverse of [`Self::exists_pool`]. Reads naturally
+    /// in negation-flavored code (`if qs.is_empty(&pool).await? {
+    /// ... }`) where `!qs.exists_pool(...).await?` is awkward.
+    ///
+    /// # Errors
+    /// As [`Self::exists_pool`].
+    fn is_empty(
+        self,
+        pool: &Pool,
+    ) -> impl std::future::Future<Output = Result<bool, ExecError>> + Send;
+
     /// `Ok(true)` when a row with `pk = pk_value` is contained in the
     /// queryset. #330. Looks up the PK column from `T::SCHEMA`; errors
     /// when the model has no primary key (very rare — view-backed
@@ -2116,6 +2128,11 @@ impl<T: Model + Send> ExistsPool<T> for QuerySet<T> {
     async fn exists_pool(self, pool: &Pool) -> Result<bool, ExecError> {
         let count = self.count_pool(pool).await?;
         Ok(count > 0)
+    }
+
+    async fn is_empty(self, pool: &Pool) -> Result<bool, ExecError> {
+        let count = self.count_pool(pool).await?;
+        Ok(count == 0)
     }
 
     async fn contains_pk(
