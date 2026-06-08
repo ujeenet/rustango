@@ -415,6 +415,41 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         self.values_list_flat(col).fetch::<U>(pool).await
     }
 
+    /// Eloquent `Collection::modelKeys()` / Laravel
+    /// `$query->pluck($model->getKeyName())` shortcut — pluck the
+    /// primary-key column on this (possibly-filtered) queryset and
+    /// decode into `Vec<K>`.
+    ///
+    /// Sugar over `self.pluck::<K>(pk_column, &pool)` where
+    /// `pk_column` is read from the model's schema, so the call site
+    /// doesn't need to spell the PK name.
+    ///
+    /// ```ignore
+    /// // Eloquent: Post::where('published', true)->pluck('id');
+    /// // rustango:
+    /// let ids: Vec<i64> = Post::objects()
+    ///     .filter("published", true)
+    ///     .pks::<i64>(&pool).await?;
+    /// ```
+    ///
+    /// # Errors
+    /// Returns
+    /// [`ExecError::Query(QueryError::UnknownField)`] (with field
+    /// `"<pk>"`) when the model carries no `#[rustango(primary_key)]`,
+    /// otherwise as [`Self::pluck`].
+    pub async fn pks<K>(self, pool: &Pool) -> Result<Vec<K>, ExecError>
+    where
+        K: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+    {
+        let pk_col = T::SCHEMA.primary_key().map(|f| f.column).ok_or_else(|| {
+            ExecError::Query(crate::core::QueryError::UnknownField {
+                model: T::SCHEMA.name,
+                field: "<pk>".to_string(),
+            })
+        })?;
+        self.pluck::<K>(pk_col, pool).await
+    }
+
     /// Eloquent `Builder::value($col)` — fetch a single column from
     /// the first row of this (possibly-filtered) queryset, or
     /// `None` when the queryset is empty.
