@@ -27,6 +27,7 @@ fn select(where_clause: WhereExpr) -> SelectQuery {
         where_clause,
         search: None,
         joins: vec![],
+        subquery_joins: Vec::new(),
         order_by: vec![],
         limit: None,
         offset: None,

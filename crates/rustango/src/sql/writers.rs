@@ -390,7 +390,7 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
             return write_distinct_on_via_window(b, query, cols);
         }
     }
-    let qualify = !query.joins.is_empty();
+    let qualify = !query.joins.is_empty() || !query.subquery_joins.is_empty();
 
     b.sql.push_str("SELECT ");
     // PG native DISTINCT / DISTINCT ON. `.distinct()` (DistinctMode::All)
@@ -502,6 +502,64 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
         let on_result = write_where_expr(b, &join.on, Some(join.alias), Some(join.target));
         b.current_qualify_alias = prior_qualify;
         on_result?;
+    }
+
+    // Derived-table joins — `JOIN [LATERAL] (<subquery>) AS alias ON …`
+    // (Eloquent joinSub / joinLateral, issue #828). Emitted after the
+    // model joins. No projected columns — a filtering / correlation join.
+    for sj in &query.subquery_joins {
+        use crate::core::JoinKind;
+        let kind_kw = match sj.kind {
+            JoinKind::Inner => "INNER JOIN",
+            JoinKind::Left => "LEFT JOIN",
+            // The QuerySet builders only construct Inner / Left; reject
+            // anything else rather than emit a derived-table RIGHT/FULL
+            // JOIN whose semantics nobody asked for.
+            JoinKind::Right => {
+                return Err(SqlError::JoinKindNotSupported {
+                    kind: "RIGHT (subquery)",
+                    dialect: b.d.name(),
+                });
+            }
+            JoinKind::Full => {
+                return Err(SqlError::JoinKindNotSupported {
+                    kind: "FULL (subquery)",
+                    dialect: b.d.name(),
+                });
+            }
+        };
+        b.sql.push(' ');
+        b.sql.push_str(kind_kw);
+        if sj.lateral {
+            // PG + MySQL ≥ 8.0.14 only; SQLite has no LATERAL.
+            if b.d.name() == "sqlite" {
+                return Err(SqlError::LateralJoinNotSupported {
+                    dialect: b.d.name(),
+                });
+            }
+            b.sql.push_str(" LATERAL");
+        }
+        b.sql.push_str(" (");
+        // `write_select` pushes/pops the subquery's own scope frame, so a
+        // correlated `OuterRef` inside a LATERAL subquery resolves to the
+        // enclosing query; explicit `AliasedColumn` refs to the outer
+        // table work regardless (LATERAL exposes earlier FROM items).
+        write_select(b, &sj.subquery)?;
+        b.sql.push_str(") AS ");
+        b.write_ident(sj.alias);
+        // Empty `on` → `ON true` (the LATERAL shape, where the
+        // correlation lives in the subquery's WHERE). Non-empty → the
+        // caller's predicate, with unqualified columns resolving to the
+        // derived table's alias.
+        if sj.on.is_empty() {
+            b.sql.push_str(" ON true");
+        } else {
+            b.sql.push_str(" ON ");
+            let prior_qualify = b.current_qualify_alias.replace(sj.alias);
+            let on_result = write_where_expr(b, &sj.on, Some(sj.alias), None);
+            b.current_qualify_alias = prior_qualify;
+            on_result?;
+        }
     }
 
     write_where_with_search(

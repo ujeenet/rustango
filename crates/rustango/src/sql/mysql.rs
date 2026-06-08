@@ -948,6 +948,7 @@ mod tests {
         let q = SelectQuery {
             model,
             joins: vec![],
+            subquery_joins: vec![],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "name",
                 op: Op::ILike,
@@ -977,6 +978,7 @@ mod tests {
         let q = SelectQuery {
             model,
             joins: vec![],
+            subquery_joins: vec![],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "name",
                 op: Op::NotILike,
@@ -1002,6 +1004,7 @@ mod tests {
         let q = SelectQuery {
             model,
             joins: vec![],
+            subquery_joins: vec![],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "email",
                 op: Op::IsDistinctFrom,
@@ -1027,6 +1030,7 @@ mod tests {
         let q = SelectQuery {
             model,
             joins: vec![],
+            subquery_joins: vec![],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "email",
                 op: Op::IsNotDistinctFrom,
@@ -1054,6 +1058,7 @@ mod tests {
         let q = SelectQuery {
             model,
             joins: vec![],
+            subquery_joins: vec![],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "meta",
                 op: Op::JsonContains,
@@ -1080,6 +1085,7 @@ mod tests {
         let q = SelectQuery {
             model,
             joins: vec![],
+            subquery_joins: vec![],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "meta",
                 op: Op::JsonContainedBy,
@@ -1106,6 +1112,7 @@ mod tests {
         let q = SelectQuery {
             model,
             joins: vec![],
+            subquery_joins: vec![],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "meta",
                 op: Op::JsonHasKey,
@@ -1133,6 +1140,7 @@ mod tests {
         let q = SelectQuery {
             model,
             joins: vec![],
+            subquery_joins: vec![],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "meta",
                 op: Op::JsonHasAnyKey,
@@ -1164,6 +1172,7 @@ mod tests {
         let q = SelectQuery {
             model,
             joins: vec![],
+            subquery_joins: vec![],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "meta",
                 op: Op::JsonHasAllKeys,
@@ -1256,6 +1265,7 @@ mod tests {
         let q = SelectQuery {
             model,
             joins: vec![],
+            subquery_joins: vec![],
             where_clause: WhereExpr::Predicate(Filter {
                 column: "name",
                 op: Op::Eq,

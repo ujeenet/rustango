@@ -250,6 +250,16 @@ pub enum SqlError {
         kind: &'static str,
         dialect: &'static str,
     },
+
+    /// A `JOIN LATERAL (...)` (Eloquent `joinLateral`, issue #828) was
+    /// emitted against a dialect without `LATERAL` support. PostgreSQL
+    /// and MySQL ≥ 8.0.14 support it; SQLite does not. Rewrite as a
+    /// correlated subquery / window function, or use a non-lateral
+    /// `join_sub` against a pre-aggregated derived table.
+    #[error(
+        "`JOIN LATERAL` is not supported by the `{dialect}` dialect (PostgreSQL / MySQL only)"
+    )]
+    LateralJoinNotSupported { dialect: &'static str },
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.
