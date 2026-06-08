@@ -2109,6 +2109,17 @@ pub trait ExistsPool<T: Model + Send> {
         pool: &Pool,
     ) -> impl std::future::Future<Output = Result<bool, ExecError>> + Send;
 
+    /// Eloquent `Builder::doesntExist()` alias for [`Self::is_empty`]
+    /// — `Ok(true)` when no row matches the queryset's filters. One-
+    /// line muscle-memory alias; identical semantics + cost.
+    ///
+    /// # Errors
+    /// As [`Self::is_empty`].
+    fn doesnt_exist(
+        self,
+        pool: &Pool,
+    ) -> impl std::future::Future<Output = Result<bool, ExecError>> + Send;
+
     /// `Ok(true)` when a row with `pk = pk_value` is contained in the
     /// queryset. #330. Looks up the PK column from `T::SCHEMA`; errors
     /// when the model has no primary key (very rare — view-backed
@@ -2133,6 +2144,10 @@ impl<T: Model + Send> ExistsPool<T> for QuerySet<T> {
     async fn is_empty(self, pool: &Pool) -> Result<bool, ExecError> {
         let count = self.count_pool(pool).await?;
         Ok(count == 0)
+    }
+
+    async fn doesnt_exist(self, pool: &Pool) -> Result<bool, ExecError> {
+        self.is_empty(pool).await
     }
 
     async fn contains_pk(
