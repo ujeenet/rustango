@@ -865,7 +865,7 @@ pub(super) use bind_match_mysql;
 pub(super) use bind_match_sqlite;
 
 #[cfg(feature = "postgres")]
-fn bind_query_as<T>(
+pub(super) fn bind_query_as<T>(
     q: QueryAs<'_, sqlx::Postgres, T, PgArguments>,
     value: SqlValue,
 ) -> QueryAs<'_, sqlx::Postgres, T, PgArguments> {
@@ -1782,7 +1782,7 @@ where
 
 /// MySQL-typed `QueryAs` binding helper, symmetric with [`bind_query_as`].
 #[cfg(feature = "mysql")]
-fn bind_query_as_my<T>(
+pub(super) fn bind_query_as_my<T>(
     q: sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments>,
     value: SqlValue,
 ) -> sqlx::query::QueryAs<'_, sqlx::MySql, T, sqlx::mysql::MySqlArguments> {
@@ -1791,7 +1791,7 @@ fn bind_query_as_my<T>(
 
 /// SQLite-typed `QueryAs` binding helper, symmetric with [`bind_query_as`].
 #[cfg(feature = "sqlite")]
-fn bind_query_as_sqlite<'a, T>(
+pub(super) fn bind_query_as_sqlite<'a, T>(
     q: sqlx::query::QueryAs<'a, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'a>>,
     value: SqlValue,
 ) -> sqlx::query::QueryAs<'a, sqlx::Sqlite, T, sqlx::sqlite::SqliteArguments<'a>> {
