@@ -5749,6 +5749,35 @@ fn inherent_impl_tokens(
                 )
             }
 
+            /// Same as [`Self::find_or`] but also returns a `bool`
+            /// indicating whether the row was found in the DB
+            /// (`true`) or freshly built from `fallback` (`false`).
+            /// Eloquent `Model::findOrNew($pk, [attrs])` parity —
+            /// in PHP the returned model also exposes `->exists`;
+            /// here that's surfaced as the second tuple element.
+            ///
+            /// Useful for edit-or-create form handlers where the
+            /// caller needs to know whether to PATCH or POST when
+            /// the user submits the form.
+            ///
+            /// # Errors
+            /// As [`Self::find`].
+            pub async fn find_or_new<F>(
+                pk: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
+                fallback: F,
+            ) -> ::core::result::Result<(Self, bool), #root::sql::ExecError>
+            where
+                F: ::core::ops::FnOnce() -> Self,
+            {
+                match Self::find(pk, pool).await? {
+                    ::core::option::Option::Some(_row) => ::core::result::Result::Ok((_row, true)),
+                    ::core::option::Option::None => {
+                        ::core::result::Result::Ok((fallback(), false))
+                    }
+                }
+            }
+
             /// Fetch the first row of the table, or run `fallback`
             /// when the table is empty. Eloquent
             /// `Model::firstOr(fn() => …)` parity.
