@@ -3,7 +3,7 @@
 use super::FieldType;
 
 /// Error raised while building or compiling a `QuerySet`.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum QueryError {
     #[error("model `{model}` has no field `{field}`")]
     UnknownField { model: &'static str, field: String },
