@@ -619,6 +619,37 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Single-column shortcut for `ORDER BY <col> DESC`. Appends to the
+    /// existing ORDER BY list (use [`Self::reorder`] first to replace).
+    ///
+    /// Eloquent ships this as `Builder::latest($column)` but rustango's
+    /// [`Self::latest`] is the Django-style async fetcher — so the
+    /// chainable form lives here under the explicit name.
+    ///
+    /// ```ignore
+    /// Post::objects().order_by_desc("created_at").fetch_pool(&pool).await?;
+    /// // SELECT ... FROM post ORDER BY created_at DESC
+    /// ```
+    #[must_use]
+    pub fn order_by_desc(self, column: &str) -> Self {
+        self.order_by(&[(column, true)])
+    }
+
+    /// Single-column shortcut for `ORDER BY <col> ASC`. Appends to the
+    /// existing ORDER BY list.
+    ///
+    /// Counterpart of [`Self::order_by_desc`]; mirrors Eloquent's
+    /// `Builder::oldest($column)`.
+    ///
+    /// ```ignore
+    /// Post::objects().order_by_asc("created_at").fetch_pool(&pool).await?;
+    /// // SELECT ... FROM post ORDER BY created_at ASC
+    /// ```
+    #[must_use]
+    pub fn order_by_asc(self, column: &str) -> Self {
+        self.order_by(&[(column, false)])
+    }
+
     /// Apply the schema-declared `default_order` for `T`. Issue #291
     /// / T2.5. Each entry from `#[rustango(default_order = "...")]`
     /// gets pre-pended to the queryset's pending ORDER BY list, so a
