@@ -2579,6 +2579,40 @@ where
         self.where_key(pk).first_or_fail(pool).await
     }
 
+    /// Eloquent `Builder::sole()` — fetch the **single** row matching
+    /// this queryset's accumulated filters. Errors when zero match
+    /// ([`sqlx::Error::RowNotFound`]) or more than one matches
+    /// ([`ExecError::MultipleRowsReturned`]).
+    ///
+    /// Scoped counterpart of `Model::sole(col, val, &pool)` — honors
+    /// pre-applied filters / global scopes / chained `.filter(...)`
+    /// calls. Uses `LIMIT 2` so the >1 case is detected without
+    /// scanning the whole result set.
+    ///
+    /// ```ignore
+    /// // Eloquent: Post::where('slug', $slug)->sole();
+    /// let post = Post::objects()
+    ///     .filter("slug", "hello-world".to_string())
+    ///     .sole(&pool).await?;
+    /// ```
+    ///
+    /// # Errors
+    /// As [`FetcherPool::fetch_pool`]; additionally
+    /// [`ExecError::Driver(sqlx::Error::RowNotFound)`] on empty
+    /// result, [`ExecError::MultipleRowsReturned`] on >1 matches.
+    pub async fn sole(self, pool: &Pool) -> Result<T, ExecError> {
+        let mut rows = self.limit(2).fetch_pool(pool).await?;
+        match rows.len() {
+            0 => Err(ExecError::Driver(sqlx::Error::RowNotFound)),
+            1 => Ok(rows.remove(0)),
+            n => Err(ExecError::MultipleRowsReturned {
+                op: "sole",
+                table: T::SCHEMA.name,
+                count: n,
+            }),
+        }
+    }
+
     /// Django `QuerySet.latest()` — picks the largest row by the
     /// column set in `Meta.get_latest_by`. The model must declare
     /// `#[rustango(get_latest_by = "<col>")]`; without it this
