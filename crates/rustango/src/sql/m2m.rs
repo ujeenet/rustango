@@ -266,6 +266,258 @@ impl M2MManager {
     }
 }
 
+// ============================================================ polymorphic (generic) M2M
+
+/// Manages the rows in a **polymorphic** junction table for one source
+/// instance — Eloquent's `morphToMany` / `morphedByMany` (issue #818).
+///
+/// Unlike [`M2MManager`], the pivot carries a ContentType discriminator
+/// so two unrelated models (e.g. `Post` and `Video`) can share one
+/// junction (`taggables(tag_id, taggable_id, taggable_type)`) and one
+/// related set (`Tag`). Every query is scoped to the owning model's
+/// `content_type_id`, resolved from [`Self::src_schema`] via
+/// [`crate::contenttypes::ContentType::get_for_schema`] (cached).
+///
+/// Constructed by the macro-generated `<name>_m2m()` method on any model
+/// declaring `#[rustango(generic_m2m(...))]` — do not build directly.
+pub struct GenericM2MManager {
+    /// PK value of the owning model instance (the `pk_col` value).
+    pub src_pk: SqlValue,
+    /// Schema of the owning model — used to resolve its `content_type_id`
+    /// (the `ct_col` value) at call time.
+    pub src_schema: &'static crate::core::ModelSchema,
+    /// SQL name of the polymorphic junction table (e.g. `"taggables"`).
+    pub through: &'static str,
+    /// Junction column holding the owning instance's PK (e.g. `"taggable_id"`).
+    pub pk_col: &'static str,
+    /// Junction column holding the owning model's `content_type_id`
+    /// discriminator (e.g. `"taggable_type"`).
+    pub ct_col: &'static str,
+    /// Junction column holding the related model's PK (e.g. `"tag_id"`).
+    pub dst_col: &'static str,
+}
+
+impl GenericM2MManager {
+    fn src_pk_i64(&self) -> i64 {
+        match &self.src_pk {
+            SqlValue::I64(v) => *v,
+            SqlValue::I32(v) => i64::from(*v),
+            _ => 0,
+        }
+    }
+
+    /// Resolve the owning model's `content_type_id`, erroring clearly
+    /// when the content type hasn't been seeded.
+    async fn ct_id(&self, pool: &Pool) -> Result<i64, ExecError> {
+        crate::contenttypes::ContentType::get_for_schema(pool, self.src_schema)
+            .await?
+            .and_then(|ct| ct.id.get().copied())
+            .ok_or(ExecError::ContentTypeNotRegistered {
+                table: self.src_schema.table,
+            })
+    }
+
+    /// Fire `m2m_changed` for a junction mutation (reuses the monomorphic
+    /// signal context; `src_col` reports the polymorphic `pk_col`).
+    async fn signal(&self, action: crate::signals::m2m::M2mAction, dst_pks: Vec<i64>) {
+        crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
+            action,
+            through: self.through,
+            src_col: self.pk_col,
+            dst_col: self.dst_col,
+            src_pk: self.src_pk_i64(),
+            dst_pks,
+        })
+        .await;
+    }
+
+    /// Related PKs linked to this instance (scoped to its content type).
+    ///
+    /// # Errors
+    /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
+    pub async fn all(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
+        let dialect = pool.dialect();
+        let ct = self.ct_id(pool).await?;
+        let sql = format!(
+            "SELECT {dst} FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2}",
+            through = dialect.quote_ident(self.through),
+            pk = dialect.quote_ident(self.pk_col),
+            ctc = dialect.quote_ident(self.ct_col),
+            dst = dialect.quote_ident(self.dst_col),
+            p1 = dialect.placeholder(1),
+            p2 = dialect.placeholder(2),
+        );
+        let binds = vec![SqlValue::I64(self.src_pk_i64()), SqlValue::I64(ct)];
+        fetch_i64_col_pool(pool, &sql, binds, self.dst_col).await
+    }
+
+    /// Link `dst_id` to this instance. No-op if already present.
+    ///
+    /// # Errors
+    /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
+    pub async fn add(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
+        let dialect = pool.dialect();
+        let ct = self.ct_id(pool).await?;
+        let (insert_kw, suffix) = match dialect.name() {
+            "mysql" => ("INSERT IGNORE INTO", ""),
+            _ => ("INSERT INTO", " ON CONFLICT DO NOTHING"),
+        };
+        let sql = format!(
+            "{insert_kw} {through} ({pk}, {ctc}, {dst}) VALUES ({p1}, {p2}, {p3}){suffix}",
+            through = dialect.quote_ident(self.through),
+            pk = dialect.quote_ident(self.pk_col),
+            ctc = dialect.quote_ident(self.ct_col),
+            dst = dialect.quote_ident(self.dst_col),
+            p1 = dialect.placeholder(1),
+            p2 = dialect.placeholder(2),
+            p3 = dialect.placeholder(3),
+        );
+        let binds = vec![
+            SqlValue::I64(self.src_pk_i64()),
+            SqlValue::I64(ct),
+            SqlValue::I64(dst_id),
+        ];
+        super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        self.signal(crate::signals::m2m::M2mAction::Add, vec![dst_id])
+            .await;
+        Ok(())
+    }
+
+    /// Unlink `dst_id` from this instance. No-op if not present.
+    ///
+    /// # Errors
+    /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
+    pub async fn remove(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
+        let dialect = pool.dialect();
+        let ct = self.ct_id(pool).await?;
+        let sql = format!(
+            "DELETE FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2} AND {dst} = {p3}",
+            through = dialect.quote_ident(self.through),
+            pk = dialect.quote_ident(self.pk_col),
+            ctc = dialect.quote_ident(self.ct_col),
+            dst = dialect.quote_ident(self.dst_col),
+            p1 = dialect.placeholder(1),
+            p2 = dialect.placeholder(2),
+            p3 = dialect.placeholder(3),
+        );
+        let binds = vec![
+            SqlValue::I64(self.src_pk_i64()),
+            SqlValue::I64(ct),
+            SqlValue::I64(dst_id),
+        ];
+        super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        self.signal(crate::signals::m2m::M2mAction::Remove, vec![dst_id])
+            .await;
+        Ok(())
+    }
+
+    /// Replace the full linked set with `ids` — atomic DELETE + INSERT in
+    /// one transaction, scoped to this instance's content type.
+    ///
+    /// # Errors
+    /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
+    pub async fn set(&self, ids: &[i64], pool: &Pool) -> Result<(), ExecError> {
+        let dialect = pool.dialect();
+        let ct = self.ct_id(pool).await?;
+        let src_pk = self.src_pk_i64();
+        let del_sql = format!(
+            "DELETE FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2}",
+            through = dialect.quote_ident(self.through),
+            pk = dialect.quote_ident(self.pk_col),
+            ctc = dialect.quote_ident(self.ct_col),
+            p1 = dialect.placeholder(1),
+            p2 = dialect.placeholder(2),
+        );
+        let ins = if ids.is_empty() {
+            None
+        } else {
+            let mut sql = format!(
+                "INSERT INTO {through} ({pk}, {ctc}, {dst}) VALUES ",
+                through = dialect.quote_ident(self.through),
+                pk = dialect.quote_ident(self.pk_col),
+                ctc = dialect.quote_ident(self.ct_col),
+                dst = dialect.quote_ident(self.dst_col),
+            );
+            let mut binds = Vec::with_capacity(ids.len() * 3);
+            for (i, dst_id) in ids.iter().enumerate() {
+                if i > 0 {
+                    sql.push_str(", ");
+                }
+                let p1 = dialect.placeholder(i * 3 + 1);
+                let p2 = dialect.placeholder(i * 3 + 2);
+                let p3 = dialect.placeholder(i * 3 + 3);
+                sql.push_str(&format!("({p1}, {p2}, {p3})"));
+                binds.push(SqlValue::I64(src_pk));
+                binds.push(SqlValue::I64(ct));
+                binds.push(SqlValue::I64(*dst_id));
+            }
+            Some((sql, binds))
+        };
+        let mut tx = crate::sql::transaction_pool(pool).await?;
+        crate::sql::raw_execute_tx(
+            &mut tx,
+            &del_sql,
+            vec![SqlValue::I64(src_pk), SqlValue::I64(ct)],
+        )
+        .await?;
+        if let Some((ins_sql, binds)) = ins {
+            crate::sql::raw_execute_tx(&mut tx, &ins_sql, binds).await?;
+        }
+        tx.commit().await.map_err(ExecError::Driver)?;
+        self.signal(crate::signals::m2m::M2mAction::Set, ids.to_vec())
+            .await;
+        Ok(())
+    }
+
+    /// Unlink every related row for this instance (scoped to its CT).
+    ///
+    /// # Errors
+    /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
+    pub async fn clear(&self, pool: &Pool) -> Result<(), ExecError> {
+        let dialect = pool.dialect();
+        let ct = self.ct_id(pool).await?;
+        let sql = format!(
+            "DELETE FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2}",
+            through = dialect.quote_ident(self.through),
+            pk = dialect.quote_ident(self.pk_col),
+            ctc = dialect.quote_ident(self.ct_col),
+            p1 = dialect.placeholder(1),
+            p2 = dialect.placeholder(2),
+        );
+        let binds = vec![SqlValue::I64(self.src_pk_i64()), SqlValue::I64(ct)];
+        super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        self.signal(crate::signals::m2m::M2mAction::Clear, Vec::new())
+            .await;
+        Ok(())
+    }
+
+    /// `true` if `dst_id` is linked to this instance (within its CT).
+    ///
+    /// # Errors
+    /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
+    pub async fn contains(&self, dst_id: i64, pool: &Pool) -> Result<bool, ExecError> {
+        let dialect = pool.dialect();
+        let ct = self.ct_id(pool).await?;
+        let sql = format!(
+            "SELECT 1 AS hit FROM {through} WHERE {pk} = {p1} AND {ctc} = {p2} AND {dst} = {p3} LIMIT 1",
+            through = dialect.quote_ident(self.through),
+            pk = dialect.quote_ident(self.pk_col),
+            ctc = dialect.quote_ident(self.ct_col),
+            dst = dialect.quote_ident(self.dst_col),
+            p1 = dialect.placeholder(1),
+            p2 = dialect.placeholder(2),
+            p3 = dialect.placeholder(3),
+        );
+        let binds = vec![
+            SqlValue::I64(self.src_pk_i64()),
+            SqlValue::I64(ct),
+            SqlValue::I64(dst_id),
+        ];
+        let rows = fetch_i64_col_pool(pool, &sql, binds, "hit").await?;
+        Ok(!rows.is_empty())
+    }
+}
+
 // ============================================================ deprecated _pool aliases
 
 /// Source-compat shims for callers still using the pre-#891

@@ -300,6 +300,14 @@ pub enum ExecError {
     #[error("model `{table}` has no `#[rustango(primary_key)]` field — required for FK lookup")]
     MissingPrimaryKey { table: &'static str },
 
+    /// A polymorphic relation (generic FK / generic M2M, issues #818 /
+    /// #64) needed the owning model's `content_type_id`, but no
+    /// `rustango_content_types` row exists for `{table}`. Content types
+    /// are normally auto-seeded at migrate time; run the contenttypes
+    /// seed (or `migrate`) so the discriminator can be resolved.
+    #[error("no content type registered for model `{table}` — seed `rustango_content_types` (run migrate)")]
+    ContentTypeNotRegistered { table: &'static str },
+
     /// `get_or_create` / `update_or_create` (v0.45) was called with a
     /// filter that matches more than one row. Django's
     /// `MultipleObjectsReturned`. Tighten the filter or use

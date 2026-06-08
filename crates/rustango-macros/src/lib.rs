@@ -892,6 +892,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         container.default_related_name.as_deref(),
     );
     let m2m_accessors = m2m_accessor_tokens(struct_name, &container.m2m);
+    let generic_m2m_accessors = generic_m2m_accessor_tokens(struct_name, &container.generic_m2m);
     // Issue #817 — `#[rustango(through(...))]` accessors.
     let through_accessors = through_accessor_tokens(struct_name, &container.through_relations);
     // Issue #830 — `#[rustango(reverse_has(...))]` static accessors.
@@ -928,6 +929,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #column_module
         #reverse_helpers
         #m2m_accessors
+        #generic_m2m_accessors
         #through_accessors
         #reverse_has_accessors
         #generic_fk_accessors
@@ -1474,6 +1476,42 @@ fn m2m_accessor_tokens(struct_name: &syn::Ident, m2m_relations: &[M2MAttr]) -> T
                     through: #through,
                     src_col: #src_col,
                     dst_col: #dst_col,
+                }
+            }
+        }
+    });
+    quote! {
+        impl #struct_name {
+            #( #methods )*
+        }
+    }
+}
+
+/// Emit `<name>_m2m(&self) -> GenericM2MManager` inherent methods for
+/// every `#[rustango(generic_m2m(...))]` (polymorphic M2M, issue #818).
+fn generic_m2m_accessor_tokens(
+    struct_name: &syn::Ident,
+    relations: &[GenericM2MAttr],
+) -> TokenStream2 {
+    let root = rustango_root();
+    if relations.is_empty() {
+        return TokenStream2::new();
+    }
+    let methods = relations.iter().map(|rel| {
+        let method_ident = syn::Ident::new(&format!("{}_m2m", rel.name), struct_name.span());
+        let through = rel.through.as_str();
+        let pk_col = rel.pk_column.as_str();
+        let ct_col = rel.ct_column.as_str();
+        let related_col = rel.related_column.as_str();
+        quote! {
+            pub fn #method_ident(&self) -> #root::sql::GenericM2MManager {
+                #root::sql::GenericM2MManager {
+                    src_pk: self.__rustango_pk_value(),
+                    src_schema: <Self as #root::core::Model>::SCHEMA,
+                    through: #through,
+                    pk_col: #pk_col,
+                    ct_col: #ct_col,
+                    dst_col: #related_col,
                 }
             }
         }
@@ -7764,6 +7802,11 @@ struct ContainerAttrs {
     /// `#[rustango(m2m(name = "tags", to = "app_tags", through = "post_tags",
     ///                 src = "post_id", dst = "tag_id"))]`.
     m2m: Vec<M2MAttr>,
+    /// Polymorphic M2M relations declared via
+    /// `#[rustango(generic_m2m(name = "tags", through = "taggables",
+    ///   pk_column = "taggable_id", ct_column = "taggable_type",
+    ///   related_column = "tag_id"))]` (issue #818).
+    generic_m2m: Vec<GenericM2MAttr>,
     /// Composite indexes declared via
     /// `#[rustango(index("col1, col2"))]` or
     /// `#[rustango(index("col1, col2", unique, name = "my_idx"))]`.
@@ -8137,6 +8180,24 @@ struct M2MAttr {
     auto_create: bool,
 }
 
+/// Parsed form of one `#[rustango(generic_m2m(...))]` declaration —
+/// polymorphic many-to-many (Eloquent `morphToMany`, issue #818). The
+/// junction carries a ContentType discriminator so unrelated models
+/// share one pivot + related set.
+struct GenericM2MAttr {
+    /// Accessor suffix: `tags` → generates `tags_m2m()`.
+    name: String,
+    /// Polymorphic junction table (e.g. `"taggables"`).
+    through: String,
+    /// Junction column holding the owning instance PK (e.g. `"taggable_id"`).
+    pk_column: String,
+    /// Junction column holding the owning model's `content_type_id`
+    /// discriminator (e.g. `"taggable_type"`).
+    ct_column: String,
+    /// Junction column holding the related model PK (e.g. `"tag_id"`).
+    related_column: String,
+}
+
 /// Parsed shape of `#[rustango(audit(track = "name, body", source =
 /// "user"))]`. `track` is a comma-separated list of field names whose
 /// before/after values land in the JSONB `changes` column. `source`
@@ -8234,6 +8295,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         // out-of-the-box admin invisibility regression (#62).
         permissions: true,
         m2m: Vec::new(),
+        generic_m2m: Vec::new(),
         indexes: Vec::new(),
         checks: Vec::new(),
         excludes: Vec::new(),
@@ -9665,6 +9727,55 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     return Err(meta.error("m2m requires `dst = \"...\"`"));
                 }
                 out.m2m.push(m2m);
+                return Ok(());
+            }
+            if meta.path.is_ident("generic_m2m") {
+                let mut gm = GenericM2MAttr {
+                    name: String::new(),
+                    through: String::new(),
+                    pk_column: String::new(),
+                    ct_column: String::new(),
+                    related_column: String::new(),
+                };
+                meta.parse_nested_meta(|inner| {
+                    let field = |inner: &syn::meta::ParseNestedMeta| -> syn::Result<String> {
+                        let s: LitStr = inner.value()?.parse()?;
+                        Ok(s.value())
+                    };
+                    if inner.path.is_ident("name") {
+                        gm.name = field(&inner)?;
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("through") {
+                        gm.through = field(&inner)?;
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("pk_column") {
+                        gm.pk_column = field(&inner)?;
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("ct_column") {
+                        gm.ct_column = field(&inner)?;
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("related_column") {
+                        gm.related_column = field(&inner)?;
+                        return Ok(());
+                    }
+                    Err(inner.error("unknown generic_m2m attribute (supported: `name`, `through`, `pk_column`, `ct_column`, `related_column`)"))
+                })?;
+                for (val, label) in [
+                    (&gm.name, "name"),
+                    (&gm.through, "through"),
+                    (&gm.pk_column, "pk_column"),
+                    (&gm.ct_column, "ct_column"),
+                    (&gm.related_column, "related_column"),
+                ] {
+                    if val.is_empty() {
+                        return Err(meta.error(format!("generic_m2m requires `{label} = \"...\"`")));
+                    }
+                }
+                out.generic_m2m.push(gm);
                 return Ok(());
             }
             Err(meta.error("unknown rustango container attribute"))

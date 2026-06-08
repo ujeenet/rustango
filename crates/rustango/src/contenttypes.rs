@@ -308,6 +308,29 @@ impl ContentType {
         let name = T::SCHEMA.name.to_ascii_lowercase();
         Self::get_by_natural_key(pool, app, &name).await
     }
+
+    /// [`Self::get_for_model`] keyed by a `&ModelSchema` instead of a
+    /// generic `T` — used where the model type is only known at runtime
+    /// (e.g. the polymorphic-M2M manager, issue #818, resolves the
+    /// owning model's content type from the schema it was built with).
+    /// Cached, same as `get_for_model`.
+    ///
+    /// # Errors
+    /// As [`Self::get_for_model`].
+    pub async fn get_for_schema(
+        pool: &crate::sql::Pool,
+        schema: &'static crate::core::ModelSchema,
+    ) -> Result<Option<Self>, ExecError> {
+        let entry = inventory::iter::<ModelEntry>
+            .into_iter()
+            .find(|e| e.schema.table == schema.table)
+            .ok_or_else(|| ExecError::MissingPrimaryKey {
+                table: schema.table,
+            })?;
+        let app = entry.resolved_app_label().unwrap_or("project");
+        let name = schema.name.to_ascii_lowercase();
+        Self::get_by_natural_key(pool, app, &name).await
+    }
 }
 
 // ============================================================ #89 part B — fetch helpers
