@@ -4299,7 +4299,10 @@ fn inherent_impl_tokens(
             pub async fn first_or_fail(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<Self, #root::sql::ExecError> {
-                match Self::first(pool).await? {
+                // Route through the queryset rather than `Self::first`,
+                // which is suppressed on models with a field named
+                // `first` (field/shortcut collision guard).
+                match #root::query::QuerySet::<Self>::default().first(pool).await? {
                     ::core::option::Option::Some(_row) => ::core::result::Result::Ok(_row),
                     ::core::option::Option::None => ::core::result::Result::Err(
                         #root::sql::ExecError::Driver(
@@ -5371,7 +5374,17 @@ fn inherent_impl_tokens(
                 (::std::vec::Vec<Self>, i64),
                 #root::sql::ExecError,
             > {
-                let total = Self::count(pool).await?;
+                // Route through the queryset rather than `Self::count`:
+                // the `count` inherent method is suppressed on models
+                // that declare a field named `count` (field/shortcut
+                // collision guard), and `paginate` must still compile
+                // for those models.
+                let total = {
+                    use #root::sql::CounterPool as _;
+                    #root::query::QuerySet::<Self>::default()
+                        .count_pool(pool)
+                        .await?
+                };
                 let rows = Self::for_page(page, per_page, pool).await?;
                 ::core::result::Result::Ok((rows, total))
             }
@@ -6056,8 +6069,14 @@ fn inherent_impl_tokens(
             where
                 F: ::core::ops::FnOnce() -> Self,
             {
+                // Route through the queryset rather than `Self::first`,
+                // which is suppressed on models with a field named
+                // `first` (field/shortcut collision guard).
                 ::core::result::Result::Ok(
-                    Self::first(pool).await?.unwrap_or_else(fallback),
+                    #root::query::QuerySet::<Self>::default()
+                        .first(pool)
+                        .await?
+                        .unwrap_or_else(fallback),
                 )
             }
 
