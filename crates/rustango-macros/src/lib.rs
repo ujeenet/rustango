@@ -10835,6 +10835,12 @@ enum DetectedKind {
     Json,
     Decimal,
     Binary,
+    /// `Array<String>` → PG `text[]` (#341).
+    ArrayText,
+    /// `Array<i32>` → PG `integer[]` (#341).
+    ArrayInt,
+    /// `Array<i64>` → PG `bigint[]` (#341).
+    ArrayBigInt,
 }
 
 impl DetectedKind {
@@ -10855,6 +10861,15 @@ impl DetectedKind {
             Self::Json => quote!(#root::core::FieldType::Json),
             Self::Decimal => quote!(#root::core::FieldType::Decimal),
             Self::Binary => quote!(#root::core::FieldType::Binary),
+            Self::ArrayText => {
+                quote!(#root::core::FieldType::Array(#root::core::ArrayElem::Text))
+            }
+            Self::ArrayInt => {
+                quote!(#root::core::FieldType::Array(#root::core::ArrayElem::Int))
+            }
+            Self::ArrayBigInt => {
+                quote!(#root::core::FieldType::Array(#root::core::ArrayElem::BigInt))
+            }
         }
     }
 
@@ -10898,6 +10913,12 @@ impl DetectedKind {
                 quote!(<#root::__rust_decimal::Decimal as ::std::default::Default>::default()),
             ),
             Self::Binary => (quote!(Binary), quote!(::std::vec::Vec::<u8>::new())),
+            // Arrays (#341) can never be a foreign-key primary key, so
+            // this arm is never reached at runtime — but the match must
+            // stay total. A bare empty `SqlValue::Array` is the dummy.
+            Self::ArrayText | Self::ArrayInt | Self::ArrayBigInt => {
+                (quote!(Array), quote!(::std::vec::Vec::new()))
+            }
         }
     }
 }
@@ -11055,8 +11076,38 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
             }
             return Err(syn::Error::new_spanned(
                 ty,
-                "unsupported `Vec<T>` field — only `Vec<u8>` (→ Binary) is supported",
+                "unsupported `Vec<T>` field — only `Vec<u8>` (→ Binary) is supported; \
+                 for a PostgreSQL array column use `Array<String>` / `Array<i32>` / `Array<i64>`",
             ));
+        }
+        // `Array<String>` / `Array<i32>` / `Array<i64>` → PG `text[]` /
+        // `integer[]` / `bigint[]` (Django `ArrayField`, #341).
+        "Array" => {
+            let (inner, _) = generic_pair(ty, &last.arguments, "Array")?;
+            let elem = match inner {
+                Type::Path(TypePath { path, qself: None }) => {
+                    path.segments.last().map(|s| s.ident.to_string())
+                }
+                _ => None,
+            };
+            let kind = match elem.as_deref() {
+                Some("String") => DetectedKind::ArrayText,
+                Some("i32") => DetectedKind::ArrayInt,
+                Some("i64") => DetectedKind::ArrayBigInt,
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "unsupported `Array<T>` element — only `Array<String>` (→ text[]), \
+                         `Array<i32>` (→ integer[]), and `Array<i64>` (→ bigint[]) are supported (#341)",
+                    ));
+                }
+            };
+            return Ok(DetectedType {
+                kind,
+                nullable: false,
+                auto: false,
+                fk_inner: None,
+            });
         }
         other => {
             return Err(syn::Error::new_spanned(

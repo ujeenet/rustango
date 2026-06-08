@@ -6,6 +6,7 @@
 //! ships Postgres only; `SQLite` and `MySQL` slot in as additional
 //! `Dialect` arms in v0.2+.
 
+mod array;
 mod auto;
 mod backend;
 mod compiled;
@@ -24,6 +25,7 @@ mod postgres;
 mod sqlite;
 mod writers;
 
+pub use array::Array;
 pub use auto::Auto;
 pub use backend::{
     apply_auto_pk, try_get_returning, try_get_returning_my, try_get_returning_sqlite,

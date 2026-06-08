@@ -142,8 +142,9 @@ impl Dialect for MySql {
             // MySQL has no `CAST AS JSON` form — `JSON_EXTRACT` /
             // string parsing are the substitutes. UUID has no CAST
             // target either (it's CHAR(36) in DDL but the user would
-            // cast to CHAR in expression form).
-            FieldType::Uuid | FieldType::Json => return None,
+            // cast to CHAR in expression form). Arrays (#341) are
+            // PG-only by language — no MySQL CAST target.
+            FieldType::Uuid | FieldType::Json | FieldType::Array(_) => return None,
         })
     }
 
@@ -189,6 +190,10 @@ impl Dialect for MySql {
             // `TIME(6)` for microsecond precision — matches the
             // `DATETIME(6)` choice elsewhere in this writer.
             FieldType::Time => "TIME(6)".into(),
+            // MySQL has no native array column type — `Array<T>` (#341)
+            // is PG-only by language semantics. Degrade to `TEXT` so the
+            // DDL stays emittable; the bind / decode paths error on MySQL.
+            FieldType::Array(_) => "TEXT".into(),
         }
     }
 

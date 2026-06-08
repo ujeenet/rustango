@@ -1513,6 +1513,8 @@ fn field_type_label(ty: crate::core::FieldType) -> &'static str {
         T::Json => "json",
         T::Decimal => "decimal",
         T::Binary => "binary",
+        // #341 — PG array columns.
+        T::Array(_) => "array",
     }
 }
 
