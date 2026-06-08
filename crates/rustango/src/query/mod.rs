@@ -942,6 +942,21 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Eloquent `Builder::take($n)` — alias of [`Self::limit`].
+    /// Cap the result to at most `n` rows.
+    #[must_use]
+    pub fn take(self, n: i64) -> Self {
+        self.limit(n)
+    }
+
+    /// Eloquent `Builder::skip($n)` — alias of [`Self::offset`].
+    /// Skip the first `n` matching rows. Pair with `.take(...)` /
+    /// `.limit(...)` for manual paging.
+    #[must_use]
+    pub fn skip(self, n: i64) -> Self {
+        self.offset(n)
+    }
+
     /// Append a `WHERE field <op> value` predicate using the
     /// **explicit-op** shape. This is the lower-level form used by
     /// callers that already know which `Op` they want; for the
