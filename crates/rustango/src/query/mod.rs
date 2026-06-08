@@ -28,11 +28,13 @@ pub use q::Q;
 /// * [`Self::where_`] — typed (`User::id.gt(10)`); the column is already
 ///   resolved, so it bypasses the schema lookup at compile time.
 ///
-/// `Clone` is derived so a half-built queryset can be reused as a
-/// base for divergent branches — Eloquent `Builder::clone()` /
-/// `Builder::tap(fn ($q) { ... })` parity. The clone is a deep copy
-/// of every accumulated filter / order / limit; no shared state.
-#[derive(Clone)]
+/// Implements `Clone` manually so a half-built queryset can be
+/// reused as a base for divergent branches — Eloquent
+/// `Builder::clone()` / `Builder::tap(fn ($q) { ... })` parity.
+/// Manual impl (rather than `#[derive(Clone)]`) avoids the
+/// auto-derive's spurious `T: Clone` bound; `T` here is a
+/// `Model` (compile-time `&'static SCHEMA` reference) and never
+/// needs to itself be cloned.
 pub struct QuerySet<T: Model> {
     pending: Vec<PendingFilter>,
     limit: Option<i64>,
@@ -180,6 +182,26 @@ struct RawExprAssignment {
 impl<T: Model> Default for QuerySet<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<T: Model> Clone for QuerySet<T> {
+    fn clone(&self) -> Self {
+        Self {
+            pending: self.pending.clone(),
+            limit: self.limit,
+            offset: self.offset,
+            distinct: self.distinct.clone(),
+            select_related: self.select_related.clone(),
+            ad_hoc_joins: self.ad_hoc_joins.clone(),
+            order_by: self.order_by.clone(),
+            lock_mode: self.lock_mode.clone(),
+            compound: self.compound.clone(),
+            is_none: self.is_none,
+            disabled_global_scopes: self.disabled_global_scopes.clone(),
+            disable_all_global_scopes: self.disable_all_global_scopes,
+            _model: std::marker::PhantomData,
+        }
     }
 }
 
