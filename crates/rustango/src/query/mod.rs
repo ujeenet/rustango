@@ -27,6 +27,12 @@ pub use q::Q;
 ///   `compile` time.
 /// * [`Self::where_`] — typed (`User::id.gt(10)`); the column is already
 ///   resolved, so it bypasses the schema lookup at compile time.
+///
+/// `Clone` is derived so a half-built queryset can be reused as a
+/// base for divergent branches — Eloquent `Builder::clone()` /
+/// `Builder::tap(fn ($q) { ... })` parity. The clone is a deep copy
+/// of every accumulated filter / order / limit; no shared state.
+#[derive(Clone)]
 pub struct QuerySet<T: Model> {
     pending: Vec<PendingFilter>,
     limit: Option<i64>,
@@ -113,6 +119,7 @@ enum PendingOrderItem {
 /// Filter accumulator entry — keeps insertion order across string-keyed and
 /// typed filter calls. Each entry contributes one node to the final
 /// `WhereExpr::And` clause.
+#[derive(Clone)]
 enum PendingFilter {
     /// String-keyed; resolved against the schema at `compile` time.
     Raw(RawFilter),
