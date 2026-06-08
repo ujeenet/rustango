@@ -517,6 +517,10 @@ pub struct SelectQuery {
     pub where_clause: WhereExpr,
     pub search: Option<SearchClause>,
     pub joins: Vec<Join>,
+    /// Derived-table joins — `JOIN [LATERAL] (<subquery>) AS alias ON …`
+    /// (Eloquent `joinSub` / `joinLateral`, issue #828). Emitted in the
+    /// `FROM` clause after the model [`Self::joins`]. Empty by default.
+    pub subquery_joins: Vec<SubqueryJoin>,
     /// `ORDER BY` clauses, in the order they should appear in SQL.
     /// Slice 9.0b + issue #76. Emitted after WHERE / JOIN / GROUP BY
     /// but before LIMIT / OFFSET. Empty = no `ORDER BY`.
@@ -597,6 +601,7 @@ impl SelectQuery {
             where_clause: WhereExpr::And(Vec::new()),
             search: None,
             joins: Vec::new(),
+            subquery_joins: Vec::new(),
             order_by: Vec::new(),
             limit: None,
             offset: None,
@@ -799,6 +804,7 @@ impl PartialEq for SelectQuery {
             && self.where_clause == other.where_clause
             && self.search == other.search
             && self.joins == other.joins
+            && self.subquery_joins == other.subquery_joins
             && self.order_by == other.order_by
             && self.limit == other.limit
             && self.offset == other.offset
@@ -1024,6 +1030,47 @@ pub struct Join {
     pub kind: JoinKind,
     pub on: WhereExpr,
     pub project: Vec<&'static str>,
+}
+
+/// A JOIN whose right-hand side is a **derived table** (a subquery)
+/// rather than a model table — Eloquent's `joinSub` / `leftJoinSub`, and
+/// (with `lateral = true`) `joinLateral` / `leftJoinLateral`. Issue #828.
+///
+/// The writer emits `<kind> JOIN [LATERAL] (<subquery>) AS "<alias>" ON
+/// <on>`. The derived table's columns are referenced from `on` (and from
+/// the outer query) via [`Expr::AliasedColumn`] (`"<alias>"."<col>"`) —
+/// there's no model schema to resolve unqualified names against, so the
+/// `on` predicate must qualify every column.
+///
+/// Unlike [`Join`], a `SubqueryJoin` contributes **no** columns to the
+/// SELECT projection: it's a filtering / correlation join, so a typed
+/// fetch still decodes the base model. Read derived values with an
+/// explicit `.values()` projection if needed.
+///
+/// `lateral` requests the `LATERAL` keyword, which lets the subquery
+/// reference columns from earlier `FROM` items (e.g. the outer table) —
+/// the "top-N rows per group" shape. **PG + MySQL ≥ 8.0.14 only**; the
+/// writer raises [`crate::sql::SqlError::LateralJoinNotSupported`] on
+/// SQLite.
+///
+/// [`Expr::AliasedColumn`]: crate::core::Expr::AliasedColumn
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubqueryJoin {
+    /// The derived table — a compiled `SELECT`.
+    pub subquery: Box<SelectQuery>,
+    /// Alias the derived table is exposed under (`AS "<alias>"`).
+    pub alias: &'static str,
+    /// `INNER` or `LEFT` (the only kinds meaningful for a derived-table
+    /// join; the QuerySet builders only construct these two).
+    pub kind: JoinKind,
+    /// Join predicate. References the derived table as `"<alias>"."<col>"`
+    /// and the outer table by its own name — both via
+    /// [`Expr::AliasedColumn`]. For a `LATERAL` join the correlation
+    /// usually lives in the subquery's own `WHERE`, so `on` is left empty
+    /// (`WhereExpr::And(vec![])`) and the writer emits `ON true`.
+    pub on: WhereExpr,
+    /// Emit the `LATERAL` keyword (PG / MySQL only).
+    pub lateral: bool,
 }
 
 /// `(col1 ILIKE %q% OR col2 ILIKE %q% …)` — single-parameter case-insensitive

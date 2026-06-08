@@ -219,6 +219,7 @@ fn select_rows_pool_with_related_is_callable() {
         let q = SelectQuery {
             model: <User as Model>::SCHEMA,
             joins: vec![],
+            subquery_joins: Vec::new(),
             where_clause: rustango::core::WhereExpr::And(vec![]),
             search: None,
             order_by: vec![],

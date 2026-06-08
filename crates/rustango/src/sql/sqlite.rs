@@ -708,6 +708,7 @@ mod tests {
             }]),
             order_by: vec![],
             joins: vec![],
+            subquery_joins: vec![],
             limit: None,
             offset: None,
             search: None,

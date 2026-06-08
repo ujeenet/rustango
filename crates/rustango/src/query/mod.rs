@@ -54,6 +54,11 @@ pub struct QuerySet<T: Model> {
     /// time so explicit user-driven joins sit alongside the automatic
     /// FK ones in the SELECT list.
     ad_hoc_joins: Vec<crate::core::Join>,
+    /// Derived-table joins registered via [`Self::join_sub`] /
+    /// [`Self::join_lateral`] (Eloquent `joinSub` / `joinLateral`, issue
+    /// #828). Carried straight onto the compiled
+    /// [`SelectQuery::subquery_joins`].
+    subquery_joins: Vec<crate::core::SubqueryJoin>,
     /// Unified pending `ORDER BY` list (slice 9.0b + issue #76).
     /// Carries `Field { name, desc, nulls }` entries from
     /// `.order_by(...)` / `.order_by_with_nulls(...)` plus `Expr { … }`
@@ -194,6 +199,7 @@ impl<T: Model> Clone for QuerySet<T> {
             distinct: self.distinct.clone(),
             select_related: self.select_related.clone(),
             ad_hoc_joins: self.ad_hoc_joins.clone(),
+            subquery_joins: self.subquery_joins.clone(),
             order_by: self.order_by.clone(),
             lock_mode: self.lock_mode.clone(),
             compound: self.compound.clone(),
@@ -215,6 +221,7 @@ impl<T: Model> QuerySet<T> {
             distinct: None,
             select_related: Vec::new(),
             ad_hoc_joins: Vec::new(),
+            subquery_joins: Vec::new(),
             order_by: Vec::new(),
             lock_mode: None,
             compound: Vec::new(),
@@ -975,6 +982,114 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// `INNER JOIN (<subquery>) AS <alias> ON <on>` — join against a
+    /// **derived table**. Eloquent's `joinSub`. Issue #828.
+    ///
+    /// `sub` is a compiled `SelectQuery` (`Other::objects().….compile()?`).
+    /// `on` references the derived table as `"<alias>"."<col>"` and the
+    /// outer table by its own name — both via
+    /// [`crate::core::joins::aliased`]. The derived table contributes no
+    /// columns to the SELECT, so a typed fetch still returns the base
+    /// model (this is a filtering / relating join). Portable across
+    /// PG / MySQL / SQLite.
+    ///
+    /// ```ignore
+    /// use rustango::core::joins::aliased;
+    /// use rustango::core::{Op, WhereExpr};
+    ///
+    /// // Customers who have placed at least one order.
+    /// let recent = Order::objects()
+    ///     .values(&["customer_id"])      // derived table: distinct customer ids
+    ///     .compile()?;
+    /// let with_orders = Customer::objects()
+    ///     .join_sub(recent, "o", WhereExpr::ExprCompare {
+    ///         lhs: aliased("o", "customer_id"),
+    ///         op: Op::Eq,
+    ///         rhs: aliased("customer", "id"),
+    ///     })
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn join_sub(self, sub: SelectQuery, alias: &'static str, on: WhereExpr) -> Self {
+        self.push_subquery_join(
+            sub,
+            alias,
+            crate::core::JoinKind::Inner,
+            on,
+            /*lateral=*/ false,
+        )
+    }
+
+    /// `LEFT JOIN (<subquery>) AS <alias> ON <on>` — left-join counterpart
+    /// of [`Self::join_sub`] (Eloquent `leftJoinSub`). Issue #828.
+    #[must_use]
+    pub fn left_join_sub(self, sub: SelectQuery, alias: &'static str, on: WhereExpr) -> Self {
+        self.push_subquery_join(
+            sub,
+            alias,
+            crate::core::JoinKind::Left,
+            on,
+            /*lateral=*/ false,
+        )
+    }
+
+    /// `INNER JOIN LATERAL (<subquery>) AS <alias> ON <on>` — Eloquent
+    /// `joinLateral`. Issue #828. The subquery may reference columns from
+    /// the outer query (the "top-N rows per group" shape); put that
+    /// correlation in the subquery's own `WHERE` (via
+    /// [`crate::core::joins::aliased`] against the outer table) and pass
+    /// `WhereExpr::And(vec![])` as `on` to emit `ON true`.
+    ///
+    /// **PostgreSQL / MySQL ≥ 8.0.14 only** — SQLite has no `LATERAL` and
+    /// the writer raises [`crate::sql::SqlError::LateralJoinNotSupported`]
+    /// at compile time.
+    #[must_use]
+    pub fn join_lateral(self, sub: SelectQuery, alias: &'static str, on: WhereExpr) -> Self {
+        self.push_subquery_join(
+            sub,
+            alias,
+            crate::core::JoinKind::Inner,
+            on,
+            /*lateral=*/ true,
+        )
+    }
+
+    /// `LEFT JOIN LATERAL (<subquery>) AS <alias> ON <on>` — left-join
+    /// counterpart of [`Self::join_lateral`] (Eloquent `leftJoinLateral`).
+    /// Keeps every outer row even when the lateral subquery yields none
+    /// (the natural shape for "latest order per customer, customers
+    /// without orders included"). **PG / MySQL only.** Issue #828.
+    #[must_use]
+    pub fn left_join_lateral(self, sub: SelectQuery, alias: &'static str, on: WhereExpr) -> Self {
+        self.push_subquery_join(
+            sub,
+            alias,
+            crate::core::JoinKind::Left,
+            on,
+            /*lateral=*/ true,
+        )
+    }
+
+    /// Shared builder for the four derived-table join methods.
+    #[must_use]
+    fn push_subquery_join(
+        mut self,
+        sub: SelectQuery,
+        alias: &'static str,
+        kind: crate::core::JoinKind,
+        on: WhereExpr,
+        lateral: bool,
+    ) -> Self {
+        self.subquery_joins.push(crate::core::SubqueryJoin {
+            subquery: Box::new(sub),
+            alias,
+            kind,
+            on,
+            lateral,
+        });
+        self
+    }
+
     /// Cap the number of returned rows. `None` removes any previously set limit.
     #[must_use]
     pub fn limit(mut self, n: i64) -> Self {
@@ -1713,6 +1828,7 @@ impl<T: Model> QuerySet<T> {
             where_clause,
             search: None,
             joins,
+            subquery_joins: self.subquery_joins,
             order_by,
             limit,
             offset: self.offset,
