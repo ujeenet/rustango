@@ -5286,6 +5286,34 @@ fn inherent_impl_tokens(
                     .await
             }
 
+            /// Eloquent `Model::paginate($per_page, $page)` — fetch
+            /// one page of rows AND the total row count in one
+            /// call. Returns `(rows, total)`. Two queries: a
+            /// LIMIT/OFFSET SELECT for the page + a `SELECT COUNT(*)`
+            /// for the total.
+            ///
+            /// Useful for paginated UIs that need both the visible
+            /// rows AND a "Page X of Y" / total-count widget. For
+            /// large tables prefer keyset pagination + cached count;
+            /// every call to `paginate` re-counts the full table.
+            ///
+            /// Same 1-indexed `page` convention as [`Self::for_page`].
+            ///
+            /// # Errors
+            /// As [`Self::for_page`] and [`Self::count`].
+            pub async fn paginate(
+                page: i64,
+                per_page: i64,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<
+                (::std::vec::Vec<Self>, i64),
+                #root::sql::ExecError,
+            > {
+                let total = Self::count(pool).await?;
+                let rows = Self::for_page(page, per_page, pool).await?;
+                ::core::result::Result::Ok((rows, total))
+            }
+
             /// Bulk-update — set `set_col = set_val` on every row
             /// matching `where_col = where_val`. Returns affected row
             /// count. Eloquent
