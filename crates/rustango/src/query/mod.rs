@@ -1204,6 +1204,36 @@ impl<T: Model> QuerySet<T> {
         self.where_raw(crate::core::subquery::not_exists(subquery))
     }
 
+    /// Eloquent `Builder::whereIn($column, $closure)` with a
+    /// subquery rather than an inline value list — emits
+    /// `<column> IN (subquery)`.
+    ///
+    /// `subquery` is an already-compiled [`SelectQuery`] that should
+    /// project a single column whose values are matched against
+    /// `column` on the outer model. Sugar over
+    /// `self.where_raw(subquery::in_subquery(col, subquery))`.
+    ///
+    /// ```ignore
+    /// let public_cat_ids = Category::objects()
+    ///     .filter("is_public", true)
+    ///     .values_list_flat("id")
+    ///     .compile()?;
+    /// let visible = Post::objects()
+    ///     .where_in_subquery("category_id", public_cat_ids)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn where_in_subquery(self, column: &'static str, subquery: SelectQuery) -> Self {
+        self.where_raw(crate::core::subquery::in_subquery(column, subquery))
+    }
+
+    /// Eloquent `Builder::whereNotIn($column, $closure)` — inverse of
+    /// [`Self::where_in_subquery`]. Emits `<column> NOT IN (subquery)`.
+    #[must_use]
+    pub fn where_not_in_subquery(self, column: &'static str, subquery: SelectQuery) -> Self {
+        self.where_raw(crate::core::subquery::not_in_subquery(column, subquery))
+    }
+
     /// Append a typed predicate or boolean expression built via the
     /// [`Column`](crate::core::Column) API. Accepts either a single
     /// [`TypedFilter`](crate::core::TypedFilter) (`User::id.gt(10)`)
