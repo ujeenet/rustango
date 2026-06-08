@@ -5919,6 +5919,45 @@ fn inherent_impl_tokens(
                 }
             }
 
+            /// Eloquent `Model::findOrCreate(pk, defaults)` — like
+            /// [`Self::find_or_new`] but **persists** the new row
+            /// when the PK isn't found. Returns `(row, exists: bool)`
+            /// — `exists=true` when the PK was found,
+            /// `false` when a fresh row was inserted.
+            ///
+            /// ```ignore
+            /// let (post, found) = Post::find_or_insert(
+            ///     pk,
+            ///     &pool,
+            ///     || Post { id: Auto::default(), title: "new".into() },
+            /// ).await?;
+            /// // `found` true → returned existing row;
+            /// // `found` false → fallback was inserted, `post.id` populated.
+            /// ```
+            ///
+            /// **Caveat**: two concurrent calls that both miss the
+            /// find can both INSERT, violating uniqueness. Wrap in a
+            /// transaction or rely on a UNIQUE constraint + handle
+            /// the conflict error if you need race-free semantics.
+            ///
+            /// # Errors
+            /// As [`Self::find`] and [`Self::save_pool`].
+            pub async fn find_or_insert<F>(
+                pk: impl ::core::convert::Into<#root::core::SqlValue>,
+                pool: &#root::sql::Pool,
+                fallback: F,
+            ) -> ::core::result::Result<(Self, bool), #root::sql::ExecError>
+            where
+                F: ::core::ops::FnOnce() -> Self,
+            {
+                if let ::core::option::Option::Some(_row) = Self::find(pk, pool).await? {
+                    return ::core::result::Result::Ok((_row, true));
+                }
+                let mut _new = fallback();
+                _new.save_pool(pool).await?;
+                ::core::result::Result::Ok((_new, false))
+            }
+
             /// Fetch the first row of the table, or run `fallback`
             /// when the table is empty. Eloquent
             /// `Model::firstOr(fn() => …)` parity.
