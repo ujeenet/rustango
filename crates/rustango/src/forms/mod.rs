@@ -239,9 +239,10 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
         | FieldType::Json
         | FieldType::Decimal
         | FieldType::Binary
-        // #341 / #343 — an array or range can't be a primary key.
+        // #341 / #343 / #342 — array / range / hstore can't be a PK.
         | FieldType::Array(_)
-        | FieldType::Range(_) => Err(FormError::UnsupportedPk {
+        | FieldType::Range(_)
+        | FieldType::HStore => Err(FormError::UnsupportedPk {
             field: field.name.to_owned(),
             ty: field.ty.as_str(),
         }),
@@ -410,6 +411,13 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
         // #343 — PG range column from a form field: the raw input is a
         // range literal (`[1,10)`), bound as-is and implicit-cast by PG.
         FieldType::Range(_) => Ok(SqlValue::RangeLiteral(raw.to_owned())),
+        // #342 — PG hstore column from a form field: a JSON object
+        // (`{"k":"v"}`, null values allowed) parsed into key→value pairs.
+        FieldType::HStore => {
+            let map: std::collections::BTreeMap<String, Option<String>> = serde_json::from_str(raw)
+                .map_err(|e| make_parse_err("hstore (JSON object)", &e))?;
+            Ok(SqlValue::HStore(map.into_iter().collect()))
+        }
     }
 }
 

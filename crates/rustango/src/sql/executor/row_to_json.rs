@@ -142,6 +142,8 @@ where
             // #343 — PG range columns. Same story as arrays: no generic
             // `Range<T>: Decode` bound on this path; typed fetch decodes.
             FieldType::Range(_) => Value::Null,
+            // #342 — PG hstore columns; same generic-decode story.
+            FieldType::HStore => Value::Null,
         };
         map.insert(field.name.to_owned(), value);
     }
@@ -281,6 +283,8 @@ pub fn row_to_json_sqlite(
             FieldType::Array(_) => Value::Null,
             // #343 — ranges are PG-only; never present on SQLite.
             FieldType::Range(_) => Value::Null,
+            // #342 — hstore is PG-only; never present on SQLite.
+            FieldType::HStore => Value::Null,
         };
         map.insert(field.name.to_owned(), value);
     }

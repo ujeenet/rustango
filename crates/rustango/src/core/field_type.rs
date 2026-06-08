@@ -55,6 +55,12 @@ pub enum FieldType {
     /// [`Self::Array`]: MySQL / SQLite degrade to `TEXT` and the decode
     /// path errors there.
     Range(RangeElem),
+    /// Native PostgreSQL `hstore` — Django's `HStoreField` (#342). A flat
+    /// string→string map. Rust type: [`crate::sql::HStore`]. **PG-only by
+    /// language semantics** like [`Self::Array`] / [`Self::Range`]; MySQL
+    /// / SQLite degrade to `TEXT` and the decode path errors there.
+    /// Requires the `hstore` extension on the database.
+    HStore,
 }
 
 /// Element type of a [`FieldType::Range`] column (#343). Selects the
@@ -144,6 +150,7 @@ impl FieldType {
             Self::Range(RangeElem::Numeric) => "Range<Decimal>",
             Self::Range(RangeElem::Date) => "Range<NaiveDate>",
             Self::Range(RangeElem::DateTime) => "Range<DateTime<Utc>>",
+            Self::HStore => "HStore",
         }
     }
 }

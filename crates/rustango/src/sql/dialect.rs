@@ -362,6 +362,8 @@ pub trait Dialect {
             FieldType::Range(crate::core::RangeElem::Numeric) => "numrange",
             FieldType::Range(crate::core::RangeElem::Date) => "daterange",
             FieldType::Range(crate::core::RangeElem::DateTime) => "tstzrange",
+            // PG hstore CAST target (#342).
+            FieldType::HStore => "hstore",
         })
     }
 
@@ -402,6 +404,9 @@ pub trait Dialect {
             FieldType::Array(elem) => format!("{}[]", elem.pg_element_type()),
             // Native PG range column (#343).
             FieldType::Range(elem) => elem.pg_range_type().to_owned(),
+            // Native PG hstore column (#342). Requires the `hstore`
+            // extension on the database.
+            FieldType::HStore => "hstore".into(),
         }
     }
 

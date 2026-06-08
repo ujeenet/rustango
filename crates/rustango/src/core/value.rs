@@ -70,6 +70,13 @@ pub enum SqlValue {
     /// shape (sticking to the same "PG handles the cast" pattern as
     /// our other text-bound types like Json).
     RangeLiteral(String),
+    /// PG `hstore` map — a flat list of `(key, value)` pairs where the
+    /// value is nullable (`"k" => NULL`). Issue #342. Backend-neutral at
+    /// this layer (a `Vec` of pairs); the PG bind path reconstructs a
+    /// native `sqlx::postgres::types::PgHstore`, MySQL / SQLite reject
+    /// (no `hstore` type). Built from [`crate::sql::HStore`] via
+    /// `Into<SqlValue>`.
+    HStore(Vec<(String, Option<String>)>),
 }
 
 impl SqlValue {
@@ -106,6 +113,16 @@ impl SqlValue {
                 format!("array[{}]", inner.join(", "))
             }
             Self::RangeLiteral(s) => format!("range{s}"),
+            Self::HStore(pairs) => {
+                let inner: Vec<String> = pairs
+                    .iter()
+                    .map(|(k, v)| match v {
+                        Some(v) => format!("{k}=>{v}"),
+                        None => format!("{k}=>NULL"),
+                    })
+                    .collect();
+                format!("hstore{{{}}}", inner.join(", "))
+            }
         }
     }
 
@@ -113,7 +130,11 @@ impl SqlValue {
     #[must_use]
     pub fn field_type(&self) -> Option<FieldType> {
         Some(match self {
-            Self::Null | Self::List(_) | Self::Array(_) | Self::RangeLiteral(_) => return None,
+            Self::Null
+            | Self::List(_)
+            | Self::Array(_)
+            | Self::RangeLiteral(_)
+            | Self::HStore(_) => return None,
             Self::I16(_) => FieldType::I16,
             Self::I32(_) => FieldType::I32,
             Self::I64(_) => FieldType::I64,

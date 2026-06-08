@@ -729,6 +729,11 @@ macro_rules! bind_match {
             // PG range literal — text-bound, implicit-cast by PG to
             // the column's range type. Issue #31.
             SqlValue::RangeLiteral(s) => $q.bind(s),
+            // PG hstore — bind as a native `PgHstore` (issue #342). No
+            // text-literal escaping; sqlx encodes the map directly.
+            SqlValue::HStore(pairs) => {
+                $q.bind(sqlx::postgres::types::PgHstore(pairs.into_iter().collect()))
+            }
             // PG single-parameter array (issue #30). v1 supports
             // I32/I64/String/Bool elements; other element kinds
             // panic at bind time. Homogeneous-element arrays are
@@ -810,6 +815,9 @@ macro_rules! bind_match_mysql {
             SqlValue::RangeLiteral(_) => unreachable!(
                 "MySQL has no range type; `write_range_op` rejects before bind. Issue #31."
             ),
+            SqlValue::HStore(_) => {
+                unreachable!("MySQL has no hstore type; `HStore` columns are PG-only. Issue #342.")
+            }
         }
     };
 }
@@ -851,6 +859,9 @@ macro_rules! bind_match_sqlite {
             SqlValue::RangeLiteral(_) => unreachable!(
                 "SQLite has no range type; `write_range_op` rejects before bind. Issue #31."
             ),
+            SqlValue::HStore(_) => {
+                unreachable!("SQLite has no hstore type; `HStore` columns are PG-only. Issue #342.")
+            }
         }
     };
 }

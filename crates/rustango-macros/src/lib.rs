@@ -10851,6 +10851,8 @@ enum DetectedKind {
     RangeDate,
     /// `Range<DateTime<Utc>>` → PG `tstzrange` (#343).
     RangeDateTime,
+    /// `HStore` → PG `hstore` (#342).
+    HStore,
 }
 
 impl DetectedKind {
@@ -10895,6 +10897,7 @@ impl DetectedKind {
             Self::RangeDateTime => {
                 quote!(#root::core::FieldType::Range(#root::core::RangeElem::DateTime))
             }
+            Self::HStore => quote!(#root::core::FieldType::HStore),
         }
     }
 
@@ -10950,6 +10953,8 @@ impl DetectedKind {
             | Self::RangeNumeric
             | Self::RangeDate
             | Self::RangeDateTime => (quote!(RangeLiteral), quote!(::std::string::String::new())),
+            // HStore (#342) can't be a FK PK — never reached.
+            Self::HStore => (quote!(HStore), quote!(::std::vec::Vec::new())),
         }
     }
 }
@@ -11170,6 +11175,16 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
             };
             return Ok(DetectedType {
                 kind,
+                nullable: false,
+                auto: false,
+                fk_inner: None,
+            });
+        }
+        // `HStore` → PG `hstore` (Django `HStoreField`, #342). No generic
+        // parameter — always a string→string map.
+        "HStore" => {
+            return Ok(DetectedType {
+                kind: DetectedKind::HStore,
                 nullable: false,
                 auto: false,
                 fk_inner: None,

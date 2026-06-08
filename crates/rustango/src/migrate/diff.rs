@@ -1207,6 +1207,8 @@ fn pg_type_for_ty_name(ty: &str) -> String {
         "range_numeric" => "numrange".into(),
         "range_date" => "daterange".into(),
         "range_datetime" => "tstzrange".into(),
+        // #342 — PG hstore.
+        "hstore" => "hstore".into(),
         other => other.to_uppercase(),
     }
 }
@@ -1441,6 +1443,8 @@ fn sql_type_with_dialect(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -
         "range_numeric" => Some(FieldType::Range(crate::core::RangeElem::Numeric)),
         "range_date" => Some(FieldType::Range(crate::core::RangeElem::Date)),
         "range_datetime" => Some(FieldType::Range(crate::core::RangeElem::DateTime)),
+        // #342 — PG hstore.
+        "hstore" => Some(FieldType::HStore),
         _ => None,
     };
     // v0.13.2: `auto = true` historically meant "PK SERIAL/BIGSERIAL"

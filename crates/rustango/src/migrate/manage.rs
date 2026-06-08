@@ -2988,6 +2988,22 @@ fn json_to_sql_value(
             .as_str()
             .map(|s| SqlValue::RangeLiteral(s.to_owned()))
             .ok_or_else(|| format!("expected range-literal string for Range column, got {v}")),
+        // #342 — PG hstore column from a fixture: a JSON object whose
+        // values are strings or null.
+        FieldType::HStore => {
+            let obj = v
+                .as_object()
+                .ok_or_else(|| format!("expected JSON object for HStore column, got {v}"))?;
+            let pairs = obj
+                .iter()
+                .map(|(k, val)| match val {
+                    serde_json::Value::String(s) => Ok((k.clone(), Some(s.clone()))),
+                    serde_json::Value::Null => Ok((k.clone(), None)),
+                    other => Err(format!("hstore value must be string or null, got {other}")),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(SqlValue::HStore(pairs))
+        }
     }
 }
 
