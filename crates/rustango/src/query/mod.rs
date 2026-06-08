@@ -552,6 +552,34 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Eloquent `Builder::reorder([col, asc?])` — **replace** the
+    /// accumulated `ORDER BY` list (instead of appending like
+    /// [`Self::order_by`]). Useful when overriding a default
+    /// ordering inherited from a base queryset / manager:
+    ///
+    /// ```ignore
+    /// let qs = Post::objects()
+    ///     .with_default_order()                          // model's default
+    ///     .reorder(&[("created_at", true)]);             // wipes default
+    /// ```
+    ///
+    /// Equivalent to `.clear_order_by().order_by(items)`.
+    /// Eloquent's `Builder::reorder()` with no args clears every
+    /// sort key — call with an empty slice for the same shape:
+    /// `.reorder(&[])`.
+    #[must_use]
+    pub fn reorder(mut self, items: &[(&str, bool)]) -> Self {
+        self.order_by.clear();
+        for (field, desc) in items {
+            self.order_by.push(PendingOrderItem::Field {
+                name: (*field).to_owned(),
+                desc: *desc,
+                nulls: crate::core::NullsOrder::Default,
+            });
+        }
+        self
+    }
+
     /// Apply the schema-declared `default_order` for `T`. Issue #291
     /// / T2.5. Each entry from `#[rustango(default_order = "...")]`
     /// gets pre-pended to the queryset's pending ORDER BY list, so a
