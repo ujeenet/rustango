@@ -1309,6 +1309,44 @@ let sql = Post::objects().filter("published", true).to_sql(&pool)?;
 `tests/queryset_is_empty_sqlite_live.rs`,
 `tests/queryset_to_sql_sqlite_live.rs`.
 
+### 3.51 Eloquent shortcut batch — find_or_new / find_many_or_fail / insert_or_ignore / aggregates / locking (v0.43)
+
+```rust
+// Find-or-default in one call. Returns (row, exists: bool) so
+// edit-or-create form handlers know which path was taken.
+let (post, exists) = Post::find_or_new(form.id, &pool, || Post {
+    id: Auto::default(),
+    title: form.title.clone(),
+}).await?;
+
+// Find by multiple PKs, error if any missing. Dedups duplicate
+// PKs before counting.
+let posts: Vec<Post> = Post::find_many_or_fail([1, 2, 3], &pool).await?;
+
+// INSERT or silently skip on unique-constraint violation.
+// PG/SQLite: `ON CONFLICT DO NOTHING`. MySQL: `INSERT IGNORE`.
+let inserted: bool = post.insert_or_ignore(&pool).await?;
+
+// Aggregate scalars on a filtered queryset (table-wide versions
+// are `Model::sum` / `Model::avg` / etc.):
+let total: Option<i64> = Post::objects()
+    .filter("published", true)
+    .sum::<i64>("views", &pool).await?;
+let avg: Option<f64>  = Post::objects().avg::<f64>("views", &pool).await?;
+
+// Row locking — Eloquent muscle-memory alias:
+let row = Post::objects()
+    .filter("id", 42)
+    .lock_for_update()                 // == select_for_update()
+    .first(&pool).await?;
+```
+
+**Verified by**: [`tests/model_find_or_new_sqlite_live.rs`](crates/rustango/tests/model_find_or_new_sqlite_live.rs),
+[`tests/model_find_many_or_fail_sqlite_live.rs`](crates/rustango/tests/model_find_many_or_fail_sqlite_live.rs),
+[`tests/model_insert_or_ignore_sqlite_live.rs`](crates/rustango/tests/model_insert_or_ignore_sqlite_live.rs),
+[`tests/queryset_aggregates_sqlite_live.rs`](crates/rustango/tests/queryset_aggregates_sqlite_live.rs),
+[`tests/queryset_lock_for_update_emission.rs`](crates/rustango/tests/queryset_lock_for_update_emission.rs).
+
 ## Chapter 4 — Migrations
 
 5 live recipes against docker PG verifying the migration lifecycle.
