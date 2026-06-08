@@ -529,6 +529,26 @@ pub fn ensure_token(
     (token, Some(cookie))
 }
 
+/// Validate a server-rendered form POST against the double-submit CSRF
+/// cookie. Returns `true` iff [`CSRF_COOKIE`] is present in `headers`
+/// and matches `submitted` (the `_csrf` form field) in constant time.
+///
+/// For handlers that render their own form and seed the token via
+/// [`ensure_token`] + [`csrf_input_html`] (so the GET response sets the
+/// cookie and the form carries the matching token), rather than relying
+/// on the [`CsrfLayer`] middleware. Using the layer *and* seeding the
+/// token in the handler would set two conflicting cookies.
+#[must_use]
+pub fn verify_form_token(headers: &axum::http::HeaderMap, submitted: Option<&str>) -> bool {
+    match (
+        read_csrf_cookie_from_headers(headers, CSRF_COOKIE),
+        submitted,
+    ) {
+        (Some(cookie), Some(form)) => constant_time_eq(cookie.as_bytes(), form.as_bytes()),
+        _ => false,
+    }
+}
+
 /// Constant-time byte-slice equality. Avoids a leaky `==` even
 /// though the bodies of the comparison aren't really secret in this
 /// scheme — best practice.
@@ -806,6 +826,26 @@ mod tests {
         assert_eq!(html, r#"<input type="hidden" name="_csrf" value="abc123">"#);
         // The `name` attribute matches the middleware-expected constant.
         assert!(html.contains(&format!(r#"name="{CSRF_FORM_FIELD}""#)));
+    }
+
+    #[test]
+    fn verify_form_token_matches_cookie_constant_time() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("{CSRF_COOKIE}=tok-abc123; other=x")
+                .parse()
+                .unwrap(),
+        );
+        // Cookie present + form token equal → ok.
+        assert!(verify_form_token(&headers, Some("tok-abc123")));
+        // Mismatch → reject.
+        assert!(!verify_form_token(&headers, Some("tok-different")));
+        // Missing form token → reject.
+        assert!(!verify_form_token(&headers, None));
+        // Missing cookie entirely → reject.
+        let empty = axum::http::HeaderMap::new();
+        assert!(!verify_form_token(&empty, Some("tok-abc123")));
     }
 
     #[test]
