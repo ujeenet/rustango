@@ -88,6 +88,13 @@ struct HmacAuthConfig {
     resolver: KeyResolver,
     tolerance_secs: u64,
     body_limit: usize,
+    /// Audit M5 — optional replay defense. When set, each authentic
+    /// request's signature is recorded in the cache (TTL = the tolerance
+    /// window) and a repeat within that window is rejected. The X-Date
+    /// window alone only *bounds* replay; this closes it. Opt-in because
+    /// it needs a shared cache and the `cache` feature.
+    #[cfg(feature = "cache")]
+    nonce_store: Option<Arc<dyn crate::cache::Cache>>,
 }
 
 impl HmacAuthLayer {
@@ -98,6 +105,8 @@ impl HmacAuthLayer {
                 resolver,
                 tolerance_secs: DEFAULT_TOLERANCE_SECS,
                 body_limit: DEFAULT_BODY_LIMIT,
+                #[cfg(feature = "cache")]
+                nonce_store: None,
             }),
         }
     }
@@ -106,6 +115,22 @@ impl HmacAuthLayer {
     #[must_use]
     pub fn tolerance_secs(mut self, secs: u64) -> Self {
         Arc::make_mut(&mut self.inner).tolerance_secs = secs;
+        self
+    }
+
+    /// Audit M5 — enable replay protection backed by a shared
+    /// [`crate::cache::Cache`]. After a request's signature verifies, it
+    /// is recorded for `tolerance_secs`; a replay carrying the same
+    /// signature within that window is rejected with 401. Use a shared
+    /// backend (Redis / DB) across instances; an in-process cache only
+    /// protects a single replica.
+    ///
+    /// Defense-in-depth on top of the X-Date window — without it, a
+    /// captured signed request is replayable until the window expires.
+    #[cfg(feature = "cache")]
+    #[must_use]
+    pub fn nonce_store(mut self, store: Arc<dyn crate::cache::Cache>) -> Self {
+        Arc::make_mut(&mut self.inner).nonce_store = Some(store);
         self
     }
 
@@ -205,6 +230,35 @@ async fn verify_request(
     if expected_sig.ct_eq(&parsed.signature).unwrap_u8() == 0 {
         return Err(deny("signature mismatch"));
     }
+
+    // Audit M5 — replay defense (only after the signature is proven, so
+    // an unauthenticated attacker can't flood the cache). The signature
+    // is unique per (method, path, query, date, body), so a replay
+    // carries the identical signature; record it for the tolerance
+    // window and reject a repeat. exists+set isn't atomic — two truly
+    // concurrent identical requests could race — but that window is
+    // sub-millisecond and this is defense-in-depth over X-Date.
+    #[cfg(feature = "cache")]
+    if let Some(store) = &cfg.nonce_store {
+        let nonce_key = format!(
+            "hmac_nonce:{}",
+            base64::engine::general_purpose::STANDARD.encode(&parsed.signature)
+        );
+        match store.exists(&nonce_key).await {
+            Ok(true) => return Err(deny("replayed request")),
+            Ok(false) => {
+                let ttl = std::time::Duration::from_secs(cfg.tolerance_secs);
+                // Fail open on a cache write error — the X-Date window
+                // still bounds replay; don't make auth depend on the
+                // cache being writable.
+                let _ = store.set(&nonce_key, "1", Some(ttl)).await;
+            }
+            // Fail open on a cache read error (availability over the
+            // narrow in-window replay risk); the X-Date check still ran.
+            Err(_) => {}
+        }
+    }
+
     Ok(Request::from_parts(parts, Body::from(bytes)))
 }
 
@@ -465,6 +519,31 @@ mod tests {
             .unwrap();
         let resp = svc.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 401);
+    }
+
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn nonce_store_rejects_replay_within_window() {
+        use crate::cache::InMemoryCache;
+        let store = std::sync::Arc::new(InMemoryCache::new());
+        let layer = HmacAuthLayer::new(resolver_for("k1", b"secret")).nonce_store(store);
+        // One signed request, replayed verbatim (identical signature).
+        let (date, auth) = sign_now("k1", b"secret", "POST", "/r", "", b"hello");
+        let mk = || {
+            Request::builder()
+                .method("POST")
+                .uri("/r")
+                .header(HEADER_DATE, date.clone())
+                .header(HEADER_AUTH, auth.clone())
+                .body(Body::from("hello"))
+                .unwrap()
+        };
+        // First delivery: accepted (signature valid, nonce unseen).
+        let svc = layer.clone().layer(app().into_service::<Body>());
+        assert_eq!(svc.oneshot(mk()).await.unwrap().status(), 200);
+        // Replay: same signature, now seen → rejected (shared store).
+        let svc = layer.layer(app().into_service::<Body>());
+        assert_eq!(svc.oneshot(mk()).await.unwrap().status(), 401);
     }
 
     #[tokio::test]
