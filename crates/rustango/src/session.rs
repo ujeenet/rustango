@@ -309,6 +309,18 @@ pub fn tier_from_env() -> String {
     std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "dev".to_owned())
 }
 
+/// Whether auth cookies should carry the `Secure` attribute for the
+/// current deployment tier (audit H2): `true` on the prod tier
+/// (`RUSTANGO_ENV`), `false` otherwise. Lets HTTPS production
+/// deployments get `Secure` cookies automatically while local
+/// plain-HTTP development (and the localhost impersonation-handoff
+/// flow) keeps working. Used by the tenancy operator + tenant console
+/// cookies, which have no per-Builder config knob.
+#[must_use]
+pub fn secure_cookies_for_tier() -> bool {
+    is_prod_tier(&tier_from_env())
+}
+
 /// Restrict the persisted session-secret file to 0600 on Unix so
 /// other users on the host can't read the signing key. Windows ACL
 /// hardening is separate (DPAPI / restricted DACL).
