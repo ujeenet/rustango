@@ -5646,6 +5646,29 @@ fn inherent_impl_tokens(
                 Self::exists(pool).await.map(|e| !e)
             }
 
+            /// Eloquent `Model::query()->whereKey($pk)->exists()` —
+            /// `true` when a row with primary key `pk` exists in
+            /// the table. Sugar over
+            /// `QuerySet::<Self>::default().contains_pk(pool, pk)`.
+            ///
+            /// Differs from [`Self::exists`] (which checks "any row
+            /// in the table") by checking a specific PK existence.
+            /// Cheaper than `Self::find(pk, &pool).await?.is_some()`
+            /// because the row is never materialized — the SQL is
+            /// `SELECT COUNT(*) > 0 FROM <table> WHERE pk = ?`.
+            ///
+            /// # Errors
+            /// As [`#root::sql::ExistsPool::contains_pk`].
+            pub async fn contains_pk(
+                pk: impl ::core::convert::Into<#root::core::SqlValue> + ::core::marker::Send,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<bool, #root::sql::ExecError> {
+                use #root::sql::ExistsPool as _;
+                #root::query::QuerySet::<Self>::default()
+                    .contains_pk(pool, pk)
+                    .await
+            }
+
             #sum_method
             #avg_method
             #min_method
