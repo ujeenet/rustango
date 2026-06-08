@@ -79,6 +79,14 @@ impl Default for Config {
     }
 }
 
+/// Minimum HMAC key length (bytes) accepted for JWT signing. 32 bytes
+/// matches the SHA-256 block/output size and `SessionSecret`'s own
+/// floor. Shorter keys — in particular the **empty** key produced when
+/// `RUSTANGO_SESSION_SECRET` is unset and no explicit `session_secret`
+/// is given — are publicly guessable and would let anyone forge tokens
+/// (audit C1 / GHSA-3g36-xq5c-8j45).
+const MIN_HMAC_KEY_LEN: usize = 32;
+
 impl Config {
     fn build_jwt(&self) -> JwtLifecycle {
         let secret = self.session_secret.clone().unwrap_or_else(|| {
@@ -86,6 +94,18 @@ impl Config {
                 .unwrap_or_default()
                 .into_bytes()
         });
+        // Fail closed: never sign JWTs with an empty / too-short key.
+        // A misconfigured deployment must refuse to start rather than
+        // silently mint forgeable access + refresh tokens.
+        assert!(
+            secret.len() >= MIN_HMAC_KEY_LEN,
+            "JWT signing key is {} bytes; need >= {MIN_HMAC_KEY_LEN}. Set \
+             RUSTANGO_SESSION_SECRET to a base64-encoded 32+ byte value \
+             (e.g. `openssl rand -base64 32`) or pass an explicit \
+             auth_routes::Config::session_secret. Refusing to start with a \
+             guessable key (would allow JWT forgery).",
+            secret.len(),
+        );
         JwtLifecycle::new(secret)
             .with_access_ttl(self.access_ttl_secs)
             .with_refresh_ttl(self.refresh_ttl_secs)
@@ -412,21 +432,37 @@ mod tests {
     }
 
     #[test]
-    fn config_falls_back_to_env_secret_when_unset() {
-        // The build_jwt path reads from RUSTANGO_SESSION_SECRET when
-        // session_secret is None. We only verify it doesn't panic;
-        // signing+verification happens against an empty key here
-        // (since tests don't set the env), which is exercised by the
-        // live integration tests with a real secret.
-        let _ = Config::default().build_jwt();
+    #[should_panic(expected = "JWT signing key")]
+    fn build_jwt_panics_on_empty_secret() {
+        // Audit C1: an empty key is publicly guessable and would let
+        // anyone forge tokens. build_jwt must fail closed. Use an
+        // explicit empty session_secret (not the env var) so the test
+        // is deterministic regardless of the ambient environment.
+        let cfg = Config {
+            session_secret: Some(Vec::new()),
+            ..Default::default()
+        };
+        let _ = cfg.build_jwt();
+    }
+
+    #[test]
+    #[should_panic(expected = "JWT signing key")]
+    fn build_jwt_panics_on_short_secret() {
+        // A sub-32-byte key is rejected too — not just the empty case.
+        let cfg = Config {
+            session_secret: Some(b"too-short-key".to_vec()),
+            ..Default::default()
+        };
+        let _ = cfg.build_jwt();
     }
 
     #[test]
     fn config_uses_explicit_secret_when_set() {
         let cfg = Config {
-            session_secret: Some(b"super-secret-key-for-tests".to_vec()),
+            session_secret: Some(b"super-secret-key-for-tests-32b!!".to_vec()),
             ..Default::default()
         };
+        assert!(cfg.session_secret.as_ref().unwrap().len() >= 32);
         let jwt = cfg.build_jwt();
         let token = jwt.issue_pair(42);
         let claims = jwt.verify_access(&token.access).expect("access valid");
@@ -435,7 +471,13 @@ mod tests {
 
     #[test]
     fn jwt_router_mounts_all_four_endpoints() {
-        let r = jwt_router(Config::default());
+        // Pass a valid 32-byte secret — build_jwt now fails closed on a
+        // short/empty key, so the smoke test must supply a real one.
+        let cfg = Config {
+            session_secret: Some(b"router-smoke-test-secret-32-byte".to_vec()),
+            ..Default::default()
+        };
+        let r = jwt_router(cfg);
         // Smoke: building the router doesn't panic. The actual route
         // registration is exercised via integration tests that send
         // requests against the constructed router.
