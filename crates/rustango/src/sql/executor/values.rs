@@ -465,6 +465,54 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             .await
     }
 
+    /// Eloquent `Builder::paginate($per_page, $page)` on a
+    /// **filtered** queryset — fetch one page of rows AND the
+    /// filtered total in a single call. Returns `(rows, total)`.
+    ///
+    /// Counterpart of the table-wide `Model::paginate`: this
+    /// version respects the queryset's accumulated filters so the
+    /// `total` reflects "matching rows" rather than "every row of
+    /// the table".
+    ///
+    /// Two queries under the hood: `SELECT COUNT(*) FROM … WHERE …`
+    /// for the total, then `SELECT … FROM … WHERE … LIMIT N OFFSET
+    /// M` for the page. The queryset is cloned for the count step
+    /// so the page-fetch's filter chain stays intact — both halves
+    /// see the same WHERE.
+    ///
+    /// 1-indexed `page` so `paginate(1, 10)` returns rows 0..10,
+    /// `paginate(2, 10)` returns rows 10..20, etc. — matches
+    /// Eloquent and `Model::for_page`.
+    ///
+    /// # Errors
+    /// As [`crate::sql::CounterPool::count_pool`] and
+    /// [`crate::sql::FetcherPool::fetch_pool`].
+    pub async fn paginate(
+        self,
+        page: i64,
+        per_page: i64,
+        pool: &Pool,
+    ) -> Result<(Vec<T>, i64), ExecError>
+    where
+        T: crate::core::Model
+            + crate::sql::MaybePgFromRow
+            + crate::sql::MaybeMyFromRow
+            + crate::sql::MaybeSqliteFromRow
+            + crate::sql::LoadRelated
+            + crate::sql::MaybeMyLoadRelated
+            + crate::sql::MaybeSqliteLoadRelated
+            + Send
+            + Unpin,
+    {
+        use crate::sql::{CounterPool as _, FetcherPool as _};
+        let total = <crate::query::QuerySet<T> as ::core::clone::Clone>::clone(&self)
+            .count_pool(pool)
+            .await?;
+        let offset = if page > 1 { (page - 1) * per_page } else { 0 };
+        let rows = self.limit(per_page).offset(offset).fetch_pool(pool).await?;
+        Ok((rows, total))
+    }
+
     /// Eloquent `Builder::avg($col)` on a filtered queryset.
     ///
     /// # Errors
