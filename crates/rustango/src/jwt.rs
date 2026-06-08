@@ -190,8 +190,14 @@ pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
 }
 
 /// Decode + verify an HS256 JWT. Checks signature, `exp`, and `nbf`.
-/// Does NOT check `iss` / `aud` — callers should validate those
-/// against expected values from the returned claims.
+///
+/// Does NOT check `iss` / `aud` — if you set them when issuing, you
+/// **MUST** validate them yourself against expected values on the
+/// returned claims; a valid signature alone does not prove the token
+/// was minted for *your* service/audience (audit L1). There is also no
+/// clock-skew leeway: `exp`/`nbf` are compared against the exact current
+/// second. If your issuer and verifier clocks can drift, add a small
+/// tolerance via [`decode_at`] with an adjusted `now`.
 ///
 /// # Errors
 /// See [`JwtError`].

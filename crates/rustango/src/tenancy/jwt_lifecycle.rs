@@ -138,6 +138,15 @@ impl JwtLifecycle {
     /// rustango processes have independent blacklists and a token
     /// revoked on instance A can still be replayed on instance B
     /// within the token's TTL window.
+    ///
+    /// **Production guidance (audit L5):** the default
+    /// [`InMemoryJtiStore`] is single-process and loses all revocations
+    /// on restart. Any deployment with more than one replica — or that
+    /// needs revocations to survive a restart — MUST install a shared,
+    /// durable store here (Redis / database), keyed by `jti` with the
+    /// entry's TTL set to the token's remaining lifetime. Otherwise
+    /// `/logout` (revoke) is best-effort and a revoked token may still be
+    /// accepted elsewhere until it expires naturally.
     #[must_use]
     pub fn with_jti_store(mut self, store: Arc<dyn JtiStore>) -> Self {
         self.jti_store = store;
