@@ -380,6 +380,38 @@ impl<T: crate::core::Model> crate::query::ValuesListQuerySet<T> {
     }
 }
 
+impl<T: crate::core::Model> crate::query::QuerySet<T> {
+    /// Eloquent `Builder::pluck($col)` — single-column projection
+    /// on this queryset, decoded into `Vec<U>`. Sugar over
+    /// `self.values_list_flat(col).fetch::<U>(pool).await`.
+    ///
+    /// ```ignore
+    /// // Eloquent: Post::where('published', true)->pluck('title');
+    /// // rustango:
+    /// let titles: Vec<String> = Post::objects()
+    ///     .filter("published", true)
+    ///     .pluck::<String>("title", &pool).await?;
+    /// ```
+    ///
+    /// `U` must be decodable from the column's SQL type on every
+    /// dialect the binary targets — common picks: `i64` / `i32` /
+    /// `String` / `bool` / `f64`.
+    ///
+    /// Differs from `Model::pluck(col, &pool)` (already shipped) in
+    /// that the static-method form scans every row of the table;
+    /// this method's queryset can carry filters / ordering / limits
+    /// so you can pluck a column from a narrowed result set.
+    ///
+    /// # Errors
+    /// As [`crate::query::ValuesFlatQuerySet::fetch`].
+    pub async fn pluck<U>(self, col: &'static str, pool: &Pool) -> Result<Vec<U>, ExecError>
+    where
+        U: MaybePgScalar + MaybeMyScalar + MaybeSqliteScalar + Send + Unpin,
+    {
+        self.values_list_flat(col).fetch::<U>(pool).await
+    }
+}
+
 impl<T: crate::core::Model> crate::query::ValuesFlatQuerySet<T> {
     /// Execute the single-column projection and decode each row's cell
     /// into `U`.
