@@ -62,7 +62,7 @@
 //! executed. Build the subquery first, propagate `?`, then embed.
 
 use super::expr::Expr;
-use super::query::{Op, SelectQuery, WhereExpr};
+use super::query::{AggregateExpr, AggregateQuery, Op, SelectQuery, WhereExpr};
 use super::schema::ReverseRelation;
 
 /// `EXISTS (subquery)` — true when the subquery returns at least one
@@ -154,6 +154,41 @@ pub fn reverse_has_not_exists(rel: &ReverseRelation) -> WhereExpr {
         ..SelectQuery::new(rel.child_schema)
     };
     WhereExpr::NotExists(Box::new(inner))
+}
+
+/// Build the correlated `(SELECT COUNT(*) FROM <child_table> WHERE
+/// <child_fk_column> = <outer>.<self_pk_column>)` scalar-aggregate
+/// subquery for the given [`ReverseRelation`] — issue #830 slice 3,
+/// backing [`crate::query::QuerySet::where_has_count`].
+///
+/// The returned [`Expr`] is an [`Expr::AggregateSubquery`] suitable as
+/// the left-hand side of a count-comparison predicate (`… > 3`). The
+/// inner [`AggregateQuery`] projects `COUNT(*)` (no `GROUP BY`, so it
+/// yields exactly one row) and correlates to the parent via
+/// `OuterRef(self_pk_column)`; the writer's scope stack rewrites that
+/// `OuterRef` to the enclosing query's table qualifier at emit time,
+/// identically across PG / MySQL / SQLite.
+#[must_use]
+pub fn reverse_has_count(rel: &ReverseRelation) -> Expr {
+    let inner = AggregateQuery {
+        model: rel.child_schema,
+        where_clause: WhereExpr::ExprCompare {
+            lhs: Expr::Column(rel.child_fk_column),
+            op: Op::Eq,
+            rhs: Expr::OuterRef(rel.self_pk_column),
+        },
+        group_by: Vec::new(),
+        // A correlated `COUNT(*)` — the alias is inert in a scalar
+        // subquery (the outer context reads the single value, not the
+        // name) but the aggregate writer requires one.
+        aggregates: vec![("c", AggregateExpr::Count(None))],
+        aliases: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+    };
+    Expr::AggregateSubquery(Box::new(inner))
 }
 
 /// `OuterRef("col")` — reference a column from the enclosing query

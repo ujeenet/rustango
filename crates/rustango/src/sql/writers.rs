@@ -1297,6 +1297,26 @@ fn write_expr(
             b.sql.push(')');
             Ok(())
         }
+        Expr::AggregateSubquery(inner) => {
+            // `(SELECT COUNT(*) FROM … WHERE … = OuterRef)` — a
+            // correlated scalar-aggregate subquery (issue #830 slice 3).
+            // `write_aggregate` pushes the child model's scope frame so
+            // the inner WHERE's `OuterRef` resolves to the enclosing
+            // parent query. The aggregate call sits in the subquery's own
+            // projection (emitted directly by `write_aggregate_inner`,
+            // not the gated `Expr::Aggregate` path), so reset the
+            // aggregate gate across the boundary exactly like
+            // `Expr::Subquery` does — the outer's HAVING permission must
+            // not leak in.
+            b.sql.push('(');
+            let prev = b.aggregate_allowed;
+            b.aggregate_allowed = false;
+            let r = write_aggregate(b, inner);
+            b.aggregate_allowed = prev;
+            r?;
+            b.sql.push(')');
+            Ok(())
+        }
         Expr::OuterRef(col) => {
             // Resolve against the immediate enclosing scope. The top
             // frame is the *current* query (the subquery emitting
