@@ -12,9 +12,8 @@ use crate::extractors::TenantContext;
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::PgPool;
 use crate::tenancy::{
-    admin::TenantAdminBuilder,
-    operator_console::{self, SessionSecret},
-    ChainResolver, DefaultTenantDb, HeaderResolver, SubdomainResolver, TenantPools,
+    admin::TenantAdminBuilder, operator_console, ChainResolver, DefaultTenantDb, HeaderResolver,
+    SubdomainResolver, TenantPools,
 };
 
 /// Stateless API router that the user supplies. The Builder injects
@@ -393,12 +392,17 @@ impl<DB: Database> Builder<DB> {
         // restart (#69). Production should still set
         // `RUSTANGO_SESSION_SECRET`. Two distinct paths so a
         // tenant cookie and an operator cookie can't be confused.
-        let session_secret_for_tenant = SessionSecret::from_env_or_disk(std::path::Path::new(
-            "./var/.rustango_tenant_session.key",
-        ));
-        let operator_secret = SessionSecret::from_env_or_disk(std::path::Path::new(
-            "./var/.rustango_operator_session.key",
-        ));
+        // Audit M2 — prod tier requires a valid RUSTANGO_SESSION_SECRET
+        // and fails closed; dev/staging keep the disk-persisted keys.
+        let tier = crate::session::tier_from_env();
+        let session_secret_for_tenant = crate::session::load_session_secret_for_tier(
+            &tier,
+            std::path::Path::new("./var/.rustango_tenant_session.key"),
+        );
+        let operator_secret = crate::session::load_session_secret_for_tier(
+            &tier,
+            std::path::Path::new("./var/.rustango_operator_session.key"),
+        );
         let ctx = Arc::new(TenantContext {
             pools: self.pools.clone(),
             resolver: build_resolver(&self.apex),

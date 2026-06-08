@@ -37,7 +37,7 @@ use axum::http::{header, Request, Response};
 use tower::ServiceExt as _;
 
 use super::error::TenancyError;
-use super::operator_console::{self, SessionSecret};
+use super::operator_console;
 use super::pools::TenantPools;
 use super::resolver::ChainResolver;
 use crate::sql::sqlx::Database;
@@ -118,8 +118,13 @@ where
     // (#69). Production should still set `RUSTANGO_SESSION_SECRET`.
     // Matches the Builder path at `server/builder.rs:302` so both
     // entrypoints behave the same.
-    let session_secret =
-        SessionSecret::from_env_or_disk(std::path::Path::new("./var/.rustango_session.key"));
+    // Audit M2 — on the prod tier (RUSTANGO_ENV) this requires a valid
+    // RUSTANGO_SESSION_SECRET and panics otherwise (fail closed); dev /
+    // staging keep the disk-persisted key for restart-stable local runs.
+    let session_secret = crate::session::load_session_secret_for_tier(
+        &crate::session::tier_from_env(),
+        std::path::Path::new("./var/.rustango_session.key"),
+    );
 
     // --- Operator console at the apex ---
     // v0.38 — `registry_pool()` (unified Pool enum) instead of the
