@@ -1297,6 +1297,97 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
+    /// Filter to rows that have at least one related row via the
+    /// named reverse-FK relation **AND** the related row matches the
+    /// caller-supplied inner predicate. Eloquent
+    /// `Builder::whereHas($rel, fn ($q) => …)` parity — issue #830
+    /// slice 2.
+    ///
+    /// `inner` is a fully-compiled `SelectQuery` on the child model
+    /// (typically built via `Child::objects().filter(...).compile()?`).
+    /// The method extracts its `WHERE` clause, AND-joins the
+    /// correlated `<child_fk_column> = <outer>.<self_pk_column>`
+    /// predicate, and wraps the result in `EXISTS (…)`.
+    ///
+    /// Schema validation: `inner.model` must point at the same
+    /// `ModelSchema` as the relation's `child_schema`. Mismatches
+    /// surface as [`QueryError::UnknownField`] at compile time.
+    ///
+    /// ```ignore
+    /// // Eloquent: Author::whereHas('books', fn ($q) => $q->where('published', true))->get();
+    /// let inner = Book::objects().filter("published", true).compile()?;
+    /// let authors = Author::objects()
+    ///     .where_has_filter("books", inner)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn where_has_filter(self, name: &str, inner: SelectQuery) -> Self {
+        self.where_has_filter_impl(name, inner, /*negated=*/ false)
+    }
+
+    /// `whereDoesntHave($rel, fn ($q) => …)` counterpart of
+    /// [`Self::where_has_filter`] — filter to rows that have **no**
+    /// related row matching the inner predicate. Emits
+    /// `NOT EXISTS (…)` over the same correlated inner SELECT.
+    #[must_use]
+    pub fn where_doesnt_have_filter(self, name: &str, inner: SelectQuery) -> Self {
+        self.where_has_filter_impl(name, inner, /*negated=*/ true)
+    }
+
+    /// Internal worker shared by [`Self::where_has_filter`] and
+    /// [`Self::where_doesnt_have_filter`]. `negated = true` wraps the
+    /// merged inner SELECT in `NOT EXISTS` instead of `EXISTS`.
+    fn where_has_filter_impl(self, name: &str, mut inner: SelectQuery, negated: bool) -> Self {
+        let rel = match T::reverse_relations().iter().find(|r| r.name == name) {
+            Some(r) => r,
+            None => {
+                return self.with_pending_error(QueryError::UnknownField {
+                    model: T::SCHEMA.name,
+                    field: name.to_string(),
+                });
+            }
+        };
+        // The user might pass an inner queryset built on the wrong
+        // child model — guard against silently producing wrong SQL.
+        // `Model::SCHEMA` is a `const &'static ModelSchema` (not a
+        // `static`), so each use-site can get its own promoted
+        // address — pointer equality is unreliable. Compare by
+        // model name (unique within the crate per `#[derive(Model)]`).
+        if inner.model.name != rel.child_schema.name {
+            return self.with_pending_error(QueryError::UnknownField {
+                model: T::SCHEMA.name,
+                field: format!(
+                    "where_has_filter({name}): inner queryset model mismatch — \
+                     expected `{}`, got `{}`",
+                    rel.child_schema.name, inner.model.name
+                ),
+            });
+        }
+        let correlated = WhereExpr::ExprCompare {
+            lhs: crate::core::Expr::Column(rel.child_fk_column),
+            op: Op::Eq,
+            rhs: crate::core::Expr::OuterRef(rel.self_pk_column),
+        };
+        // AND the correlation predicate with whatever the user
+        // already put on the inner SelectQuery. Flatten when the
+        // user's predicate is itself an `And` to keep the tree
+        // shallow.
+        inner.where_clause =
+            match std::mem::replace(&mut inner.where_clause, WhereExpr::And(Vec::new())) {
+                WhereExpr::And(mut v) => {
+                    v.push(correlated);
+                    WhereExpr::And(v)
+                }
+                other => WhereExpr::And(vec![other, correlated]),
+            };
+        let wrapped = if negated {
+            WhereExpr::NotExists(Box::new(inner))
+        } else {
+            WhereExpr::Exists(Box::new(inner))
+        };
+        self.where_raw(wrapped)
+    }
+
     /// Eloquent `Builder::whereColumn($col1, $col2)` — emits
     /// `<col1> = <col2>`, comparing two columns instead of column
     /// vs literal. Equality is the overwhelming majority of uses;
