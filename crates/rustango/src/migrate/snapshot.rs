@@ -526,6 +526,8 @@ pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
         FieldType::Range(crate::core::RangeElem::Numeric) => "range_numeric",
         FieldType::Range(crate::core::RangeElem::Date) => "range_date",
         FieldType::Range(crate::core::RangeElem::DateTime) => "range_datetime",
+        // #342 — PG hstore.
+        FieldType::HStore => "hstore",
     }
 }
 

@@ -1275,6 +1275,9 @@ fn bind_value_pg(
         SqlValue::RangeLiteral(_) => {
             unreachable!("RangeLiteral values never reach audited-save bind path")
         }
+        SqlValue::HStore(_) => {
+            unreachable!("HStore values never reach audited-save bind path")
+        }
     }
 }
 
@@ -1305,6 +1308,9 @@ fn bind_value_my(
         SqlValue::Array(_) => unreachable!("Array values never reach audited-save bind path"),
         SqlValue::RangeLiteral(_) => {
             unreachable!("RangeLiteral values never reach audited-save bind path")
+        }
+        SqlValue::HStore(_) => {
+            unreachable!("HStore values never reach audited-save bind path")
         }
     }
 }
@@ -1338,6 +1344,9 @@ fn bind_value_sqlite<'q>(
         SqlValue::Array(_) => unreachable!("Array values never reach audited-save bind path"),
         SqlValue::RangeLiteral(_) => {
             unreachable!("RangeLiteral values never reach audited-save bind path")
+        }
+        SqlValue::HStore(_) => {
+            unreachable!("HStore values never reach audited-save bind path")
         }
     }
 }

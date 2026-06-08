@@ -144,9 +144,11 @@ impl Dialect for MySql {
             // target either (it's CHAR(36) in DDL but the user would
             // cast to CHAR in expression form). Arrays (#341) / ranges
             // (#343) are PG-only by language — no MySQL CAST target.
-            FieldType::Uuid | FieldType::Json | FieldType::Array(_) | FieldType::Range(_) => {
-                return None
-            }
+            FieldType::Uuid
+            | FieldType::Json
+            | FieldType::Array(_)
+            | FieldType::Range(_)
+            | FieldType::HStore => return None,
         })
     }
 
@@ -198,6 +200,8 @@ impl Dialect for MySql {
             FieldType::Array(_) => "TEXT".into(),
             // Ditto for PG range columns (#343).
             FieldType::Range(_) => "TEXT".into(),
+            // Ditto for PG hstore columns (#342).
+            FieldType::HStore => "TEXT".into(),
         }
     }
 

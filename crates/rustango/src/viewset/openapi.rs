@@ -276,6 +276,13 @@ fn field_type_to_schema(t: FieldType) -> Schema {
         // #343 — PG range column: serialized as a range-literal string
         // (`"[1,10)"`), so a `string` schema is the honest shape.
         FieldType::Range(_) => Schema::string(),
+        // #342 — PG hstore: a string→string map → `object` with
+        // string-typed additionalProperties.
+        FieldType::HStore => Schema {
+            type_: Some("object".into()),
+            additional_properties: Some(Box::new(Schema::string())),
+            ..Default::default()
+        },
     }
 }
 
