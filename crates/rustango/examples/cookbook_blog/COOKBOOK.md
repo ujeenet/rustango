@@ -1347,6 +1347,40 @@ let row = Post::objects()
 [`tests/queryset_aggregates_sqlite_live.rs`](crates/rustango/tests/queryset_aggregates_sqlite_live.rs),
 [`tests/queryset_lock_for_update_emission.rs`](crates/rustango/tests/queryset_lock_for_update_emission.rs).
 
+### 3.52 Pagination + find-or-insert + single-value reach (v0.43)
+
+```rust
+// Model::paginate(page, per_page, &pool) -> (rows, total) —
+// Eloquent paginate over the whole table.
+let (posts, total) = Post::paginate(2, 10, &pool).await?;
+
+// QuerySet::paginate — filtered counterpart. `total` reflects
+// matching rows.
+let (drafts, total_drafts) = Post::objects()
+    .filter("status", "draft")
+    .paginate(1, 10, &pool).await?;
+
+// Model::find_or_insert(pk, &pool, fallback) — Eloquent
+// findOrCreate. Persists the fallback if not found. Returns
+// (row, exists: bool).
+let (post, found) = Post::find_or_insert(
+    pk,
+    &pool,
+    || Post { id: Auto::default(), title: "new".into() },
+).await?;
+
+// QuerySet::value<U>(col, &pool) — Eloquent Builder::value().
+// Single column from the first row of a filtered queryset.
+let email: Option<String> = User::objects()
+    .filter("id", 1_i64)
+    .value::<String>("email", &pool).await?;
+```
+
+**Verified by**: [`tests/model_paginate_sqlite_live.rs`](crates/rustango/tests/model_paginate_sqlite_live.rs),
+[`tests/queryset_paginate_sqlite_live.rs`](crates/rustango/tests/queryset_paginate_sqlite_live.rs),
+[`tests/model_find_or_insert_sqlite_live.rs`](crates/rustango/tests/model_find_or_insert_sqlite_live.rs),
+[`tests/queryset_value_sqlite_live.rs`](crates/rustango/tests/queryset_value_sqlite_live.rs).
+
 ## Chapter 4 — Migrations
 
 5 live recipes against docker PG verifying the migration lifecycle.
