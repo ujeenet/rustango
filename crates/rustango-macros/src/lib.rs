@@ -3995,6 +3995,33 @@ fn inherent_impl_tokens(
                 }
             },
         );
+        let last_method = emit_if_no_field_collision(
+            "last",
+            quote! {
+                /// Last row of this model by primary-key DESC.
+                /// Eloquent `Model::query()->latest('id')->first()`
+                /// parity — fetches the highest-PK row without
+                /// requiring the caller to spell the PK column.
+                /// Returns `None` on an empty table.
+                ///
+                /// Equivalent to `QuerySet::<Self>::default().last(&pool)`.
+                /// Skipped on models that already declare a field
+                /// named `last`.
+                ///
+                /// # Errors
+                /// As `QuerySet::last`.
+                pub async fn last(
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<
+                    ::core::option::Option<Self>,
+                    #root::sql::ExecError,
+                > {
+                    #root::query::QuerySet::<Self>::default()
+                        .last(pool)
+                        .await
+                }
+            },
+        );
         quote! {
             /// Re-SELECT this row by its primary key and overwrite
             /// every in-memory field with the freshly-fetched value.
@@ -4224,6 +4251,8 @@ fn inherent_impl_tokens(
             }
 
             #first_method
+
+            #last_method
 
             /// Throwing counterpart of [`Self::first_pool`] —
             /// errors with `RowNotFound` when the table is empty.
