@@ -74,6 +74,15 @@ struct CookiePayload {
     is_superuser: bool,
     /// Unix timestamp the session expires at.
     exp: i64,
+    /// Audit N8 — fingerprint of the user's `password_hash` at login
+    /// (Django `get_session_auth_hash` shape). The gate recomputes it
+    /// from the *current* hash each request; a password change (or
+    /// reset) flips it, invalidating every cookie minted before the
+    /// change. `#[serde(default)]` so pre-N8 cookies still decode — they
+    /// carry `""`, which won't match the live fingerprint, so they
+    /// re-authenticate once after upgrade.
+    #[serde(default)]
+    auth_hash: String,
 }
 
 impl CookiePayload {
@@ -82,15 +91,30 @@ impl CookiePayload {
     }
 }
 
-/// Sign a fresh session — returns the cookie value to set on the
-/// response. TTL defaults to 8 hours.
+/// Fingerprint of a user's `password_hash`, bound to the signing
+/// secret (audit N8). Stored in the cookie at login and recomputed per
+/// request; changes when the password changes, so old sessions stop
+/// validating. Not reversible to the hash.
 #[must_use]
-pub(crate) fn encode(secret: &AdminSessionSecret, session: AdminSession) -> String {
+pub(crate) fn password_fingerprint(secret: &AdminSessionSecret, password_hash: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sign(secret, password_hash.as_bytes()))
+}
+
+/// Sign a fresh session — returns the cookie value to set on the
+/// response. TTL defaults to 8 hours. `auth_hash` is the
+/// [`password_fingerprint`] of the user's current `password_hash`.
+#[must_use]
+pub(crate) fn encode(
+    secret: &AdminSessionSecret,
+    session: AdminSession,
+    auth_hash: &str,
+) -> String {
     let payload = CookiePayload {
         user_id: session.user_id,
         username: session.username,
         is_superuser: session.is_superuser,
         exp: chrono::Utc::now().timestamp() + DEFAULT_TTL_SECS,
+        auth_hash: auth_hash.to_owned(),
     };
     let json = serde_json::to_vec(&payload).expect("payload serializes");
     let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json);
@@ -105,6 +129,17 @@ pub(crate) fn encode(secret: &AdminSessionSecret, session: AdminSession) -> Stri
 /// so the caller treats the request as unauthenticated.
 #[must_use]
 pub(crate) fn decode(secret: &AdminSessionSecret, value: &str) -> Option<AdminSession> {
+    decode_full(secret, value).map(|(session, _auth_hash)| session)
+}
+
+/// As [`decode`] but also returns the cookie's stored password
+/// fingerprint so the gate can compare it against the user's current
+/// hash (audit N8 — live password-change session invalidation).
+#[must_use]
+pub(crate) fn decode_full(
+    secret: &AdminSessionSecret,
+    value: &str,
+) -> Option<(AdminSession, String)> {
     let (body, sig_b64) = value.split_once('.')?;
     let expected = sign(secret, body.as_bytes());
     let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -122,44 +157,53 @@ pub(crate) fn decode(secret: &AdminSessionSecret, value: &str) -> Option<AdminSe
     if payload.is_expired() {
         return None;
     }
-    Some(AdminSession {
-        user_id: payload.user_id,
-        username: payload.username,
-        is_superuser: payload.is_superuser,
-    })
+    Some((
+        AdminSession {
+            user_id: payload.user_id,
+            username: payload.username,
+            is_superuser: payload.is_superuser,
+        },
+        payload.auth_hash,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn session(user_id: i64, username: &str, is_superuser: bool) -> AdminSession {
+        AdminSession {
+            user_id,
+            username: username.into(),
+            is_superuser,
+        }
+    }
+
     #[test]
-    fn round_trip_recovers_session_fields() {
+    fn round_trip_recovers_session_fields_and_auth_hash() {
         let secret = AdminSessionSecret::from_bytes(vec![42u8; 32]);
-        let cookie = encode(
-            &secret,
-            AdminSession {
-                user_id: 7,
-                username: "alice".into(),
-                is_superuser: true,
-            },
-        );
-        let session = decode(&secret, &cookie).expect("valid cookie verifies");
-        assert_eq!(session.user_id, 7);
-        assert!(session.is_superuser);
+        let fp = password_fingerprint(&secret, "$argon2id$fake-hash");
+        let cookie = encode(&secret, session(7, "alice", true), &fp);
+        let (s, auth_hash) = decode_full(&secret, &cookie).expect("valid cookie verifies");
+        assert_eq!(s.user_id, 7);
+        assert!(s.is_superuser);
+        assert_eq!(auth_hash, fp);
+    }
+
+    #[test]
+    fn auth_hash_changes_with_password_hash() {
+        // Audit N8 — the fingerprint flips when the password hash
+        // changes, so the gate's compare invalidates old cookies.
+        let secret = AdminSessionSecret::from_bytes(vec![9u8; 32]);
+        let before = password_fingerprint(&secret, "$argon2id$old");
+        let after = password_fingerprint(&secret, "$argon2id$new");
+        assert_ne!(before, after);
     }
 
     #[test]
     fn tampered_signature_rejected() {
         let secret = AdminSessionSecret::from_bytes(vec![1u8; 32]);
-        let cookie = encode(
-            &secret,
-            AdminSession {
-                user_id: 1,
-                username: "bob".into(),
-                is_superuser: false,
-            },
-        );
+        let cookie = encode(&secret, session(1, "bob", false), "fp");
         let (body, _sig) = cookie.split_once('.').unwrap();
         let bad = format!("{body}.AAAA");
         assert!(decode(&secret, &bad).is_none());
@@ -169,14 +213,7 @@ mod tests {
     fn wrong_secret_rejected() {
         let secret_a = AdminSessionSecret::from_bytes(vec![1u8; 32]);
         let secret_b = AdminSessionSecret::from_bytes(vec![2u8; 32]);
-        let cookie = encode(
-            &secret_a,
-            AdminSession {
-                user_id: 1,
-                username: "bob".into(),
-                is_superuser: false,
-            },
-        );
+        let cookie = encode(&secret_a, session(1, "bob", false), "fp");
         assert!(decode(&secret_b, &cookie).is_none());
     }
 }
