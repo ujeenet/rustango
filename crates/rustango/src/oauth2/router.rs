@@ -200,6 +200,16 @@ async fn callback_handler(
         Err(OAuthError::StateMismatch) => {
             return (StatusCode::BAD_REQUEST, "CSRF state mismatch").into_response()
         }
+        // Audit N7b — a stale flow is a client/timeout condition, not an
+        // upstream-IdP failure: return 400 (like StateMismatch), not the
+        // catch-all 502 below.
+        Err(OAuthError::FlowExpired) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "login flow expired — restart at /login",
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::warn!(error = %e, provider = %provider_name, "oauth2 callback failed");
             return (StatusCode::BAD_GATEWAY, format!("auth failed: {e}")).into_response();
