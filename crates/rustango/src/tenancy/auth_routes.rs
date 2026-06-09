@@ -355,6 +355,28 @@ async fn refresh(
         )
             .into_response());
     }
+    // Audit P2 — re-check the account is still active (and exists) before
+    // minting a fresh pair. Otherwise a user deactivated/deleted after
+    // login could keep rotating refresh tokens for the whole refresh TTL,
+    // getting a fresh access token every cycle. Same uniform 401 as other
+    // refresh failures (the caller already proved token possession, so
+    // this isn't an enumeration vector, but uniformity leaks nothing).
+    {
+        use crate::core::Column as _;
+        use crate::sql::FetcherPool as _;
+        use crate::tenancy::auth::User;
+        let users: Vec<User> = User::objects()
+            .where_(User::id.eq(claims.sub))
+            .fetch_pool(t.pool())
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
+        let still_active = users.into_iter().next().is_some_and(|u| u.active);
+        if !still_active {
+            return Err(
+                (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response(),
+            );
+        }
+    }
     let pair = jwt_handle().refresh(&body.refresh).ok_or_else(|| {
         (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
     })?;
