@@ -115,6 +115,45 @@ async fn role_grant_flows_to_has_perm_pool() {
 }
 
 #[tokio::test]
+async fn deactivated_user_with_role_grant_has_no_perm() {
+    // Audit P3 — a user with a genuine role grant who is then
+    // deactivated must NOT pass has_perm_pool: the grant branches now
+    // filter `active`, so the permission primitive is safe even for
+    // callers that don't active-check first.
+    let pool = sqlite_pool().await;
+    let uid = make_user(&pool, "carol_fired").await;
+    let role_id = create_role_pool("ed2", "Edits", &pool)
+        .await
+        .expect("create_role_pool");
+    grant_role_perm_pool(role_id, "perm_sqlite_blog_post.change", &pool)
+        .await
+        .expect("grant_role_perm_pool");
+    assign_role_pool(uid, role_id, &pool)
+        .await
+        .expect("assign_role_pool");
+    // While active, the grant flows through.
+    assert!(has_perm_pool(uid, "perm_sqlite_blog_post.change", &pool)
+        .await
+        .expect("has_perm_pool active"));
+
+    // Deactivate the account.
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    sqlx::query("UPDATE rustango_users SET active = 0 WHERE id = ?")
+        .bind(uid)
+        .execute(sq)
+        .await
+        .expect("deactivate");
+
+    // The role grant must no longer authorize.
+    let ok = has_perm_pool(uid, "perm_sqlite_blog_post.change", &pool)
+        .await
+        .expect("has_perm_pool inactive");
+    assert!(!ok, "deactivated user must lose role-granted perm (P3)");
+}
+
+#[tokio::test]
 async fn has_any_perm_pool_short_circuits_on_first_hit() {
     let pool = sqlite_pool().await;
     let uid = make_user(&pool, "carol_partial").await;

@@ -436,6 +436,9 @@ pub async fn has_perm_pool(
     let p_cn_a = dialect.placeholder(3);
     let p_uid_c = dialect.placeholder(4);
     let p_cn_b = dialect.placeholder(5);
+    // Audit P3 — a 6th uid bind for the `user_active` column so a
+    // deactivated user's role/explicit grants don't authorize.
+    let p_uid_d = dialect.placeholder(6);
     let true_lit = dialect.bool_literal(true);
     let false_lit = dialect.bool_literal(false);
     let sql = format!(
@@ -446,12 +449,14 @@ pub async fn has_perm_pool(
                 WHERE user_id = {p_uid_b} AND codename = {p_cn_a}) AS explicit_grant, \
             EXISTS(SELECT 1 FROM {user_roles_t} ur \
                    JOIN {role_perms_t} rp ON rp.role_id = ur.role_id \
-                   WHERE ur.user_id = {p_uid_c} AND rp.codename = {p_cn_b}) AS via_role"
+                   WHERE ur.user_id = {p_uid_c} AND rp.codename = {p_cn_b}) AS via_role, \
+            EXISTS(SELECT 1 FROM {users_t} \
+                   WHERE id = {p_uid_d} AND active = {true_lit}) AS user_active"
     );
     // #561 — was three byte-similar 5-arg-bind arms differing only
     // in how PG vs MySQL/SQLite decode BOOL vs TINYINT(1)/INTEGER.
     // Collapse onto per-backend `decode_has_perm_*_row` helpers.
-    let (is_super, explicit_grant, via_role) = match pool {
+    let (is_super, explicit_grant, via_role, user_active) = match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
             let row = sqlx::query(&sql)
@@ -460,6 +465,7 @@ pub async fn has_perm_pool(
                 .bind(codename)
                 .bind(uid)
                 .bind(codename)
+                .bind(uid)
                 .fetch_one(pg)
                 .await?;
             decode_has_perm_pg_row(&row)
@@ -472,6 +478,7 @@ pub async fn has_perm_pool(
                 .bind(codename)
                 .bind(uid)
                 .bind(codename)
+                .bind(uid)
                 .fetch_one(my)
                 .await?;
             decode_has_perm_my_row(&row)
@@ -484,6 +491,7 @@ pub async fn has_perm_pool(
                 .bind(codename)
                 .bind(uid)
                 .bind(codename)
+                .bind(uid)
                 .fetch_one(sq)
                 .await?;
             decode_has_perm_sq_row(&row)
@@ -491,6 +499,13 @@ pub async fn has_perm_pool(
     };
     if is_super {
         return Ok(true);
+    }
+    // Audit P3 — a deactivated user holds no permissions, even with a
+    // role / explicit grant on the books. (The is_super branch already
+    // filters active; this extends it to the grant branches so the
+    // primitive is safe even for callers that don't active-check first.)
+    if !user_active {
+        return Ok(false);
     }
     if let Some(granted) = explicit_grant {
         return Ok(granted);
@@ -535,7 +550,9 @@ where
         SELECT
             COALESCE((SELECT is_superuser FROM user_info), FALSE) AS is_super,
             (SELECT granted FROM explicit)                         AS explicit_grant,
-            EXISTS(SELECT 1 FROM via_role)                         AS via_role
+            EXISTS(SELECT 1 FROM via_role)                         AS via_role,
+            EXISTS(SELECT 1 FROM "rustango_users"
+                   WHERE id = $1 AND active = TRUE)                AS user_active
         "#,
     )
     .bind(uid)
@@ -546,6 +563,12 @@ where
     let is_super: bool = row.try_get("is_super").unwrap_or(false);
     if is_super {
         return Ok(true);
+    }
+    // Audit P3 — a deactivated user holds no permissions even with a
+    // role / explicit grant (parity with `has_perm_pool`).
+    let user_active: bool = row.try_get("user_active").unwrap_or(true);
+    if !user_active {
+        return Ok(false);
     }
     let explicit: Option<bool> = row.try_get("explicit_grant").unwrap_or(None);
     if let Some(granted) = explicit {
@@ -1120,32 +1143,48 @@ pub async fn user_roles_qs_pool(
 /// PG decodes the columns as native `bool`; MySQL TINYINT(1) /
 /// SQLite INTEGER come back as `i64` 0/1, normalize.
 #[cfg(feature = "postgres")]
-fn decode_has_perm_pg_row(row: &sqlx::postgres::PgRow) -> (bool, Option<bool>, bool) {
+fn decode_has_perm_pg_row(row: &sqlx::postgres::PgRow) -> (bool, Option<bool>, bool, bool) {
     use sqlx::Row as _;
     (
         row.try_get::<bool, _>("is_super").unwrap_or(false),
         row.try_get::<Option<bool>, _>("explicit_grant")
             .unwrap_or(None),
         row.try_get::<bool, _>("via_role").unwrap_or(false),
+        // Audit P3 — user_active; default true so a decode hiccup doesn't
+        // wrongly strip a live user's perms (the is_super branch and the
+        // gates upstream remain the primary active enforcement).
+        row.try_get::<bool, _>("user_active").unwrap_or(true),
     )
 }
 
 #[cfg(feature = "mysql")]
-fn decode_has_perm_my_row(row: &sqlx::mysql::MySqlRow) -> (bool, Option<bool>, bool) {
+fn decode_has_perm_my_row(row: &sqlx::mysql::MySqlRow) -> (bool, Option<bool>, bool, bool) {
     use sqlx::Row as _;
     let is_super: i64 = row.try_get("is_super").unwrap_or(0);
     let explicit: Option<i64> = row.try_get("explicit_grant").unwrap_or(None);
     let via_role: i64 = row.try_get("via_role").unwrap_or(0);
-    (is_super != 0, explicit.map(|v| v != 0), via_role != 0)
+    let user_active: i64 = row.try_get("user_active").unwrap_or(1);
+    (
+        is_super != 0,
+        explicit.map(|v| v != 0),
+        via_role != 0,
+        user_active != 0,
+    )
 }
 
 #[cfg(feature = "sqlite")]
-fn decode_has_perm_sq_row(row: &sqlx::sqlite::SqliteRow) -> (bool, Option<bool>, bool) {
+fn decode_has_perm_sq_row(row: &sqlx::sqlite::SqliteRow) -> (bool, Option<bool>, bool, bool) {
     use sqlx::Row as _;
     let is_super: i64 = row.try_get("is_super").unwrap_or(0);
     let explicit: Option<i64> = row.try_get("explicit_grant").unwrap_or(None);
     let via_role: i64 = row.try_get("via_role").unwrap_or(0);
-    (is_super != 0, explicit.map(|v| v != 0), via_role != 0)
+    let user_active: i64 = row.try_get("user_active").unwrap_or(1);
+    (
+        is_super != 0,
+        explicit.map(|v| v != 0),
+        via_role != 0,
+        user_active != 0,
+    )
 }
 
 #[cfg(feature = "postgres")]
