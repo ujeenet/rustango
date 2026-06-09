@@ -938,7 +938,7 @@ async fn login_submit(
         .same_site(SameSite::Lax)
         // Audit H2 — Secure on the prod tier (HTTPS); off in dev so the
         // local plain-HTTP login + impersonation-handoff flow still work.
-        .secure(crate::session::secure_cookies_for_tier())
+        .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(ttl_secs))
         .build();
     let mut resp = Redirect::to(&next).into_response();
@@ -964,7 +964,7 @@ fn logout_response(routes: &super::routes::RouteConfig) -> Response {
         .same_site(SameSite::Lax)
         // Match the Secure attribute used when set so the browser clears
         // it reliably (audit H2).
-        .secure(crate::session::secure_cookies_for_tier())
+        .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(0))
         .build();
     let mut resp = Redirect::to(&routes.login_url).into_response();
@@ -1031,7 +1031,7 @@ fn redeem_impersonation_handoff(
         .same_site(SameSite::Lax)
         // Audit H2 — Secure on the prod tier (HTTPS); off in dev so the
         // local plain-HTTP login + impersonation-handoff flow still work.
-        .secure(crate::session::secure_cookies_for_tier())
+        .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(ttl_secs))
         .build();
 
@@ -1091,7 +1091,7 @@ fn end_impersonation_response(_routes: &super::routes::RouteConfig) -> Response 
         .same_site(SameSite::Lax)
         // Match the Secure attribute used when set so the browser clears
         // it reliably (audit H2).
-        .secure(crate::session::secure_cookies_for_tier())
+        .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(0))
         .build();
     let scheme = std::env::var("RUSTANGO_TENANT_SCHEME").unwrap_or_else(|_| "http".into());
