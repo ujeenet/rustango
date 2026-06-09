@@ -104,6 +104,14 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             .unwrap_or_default();
 
         let user = users.into_iter().next().filter(|u| u.active);
+        // Audit P4 — reject a session minted before the user's last
+        // password change (parity with the tenant-admin gate at
+        // `tenancy::admin::validate_session`). `password_changed_at IS
+        // NULL` (never rotated since the column existed) stays valid.
+        let user = user.filter(|u| match u.password_changed_at {
+            Some(changed) => payload.iat >= changed.timestamp(),
+            None => true,
+        });
         Ok(SessionUser(user))
     }
 }
