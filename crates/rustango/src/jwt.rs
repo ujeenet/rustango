@@ -173,12 +173,15 @@ impl Claims {
 /// three-part base64url-encoded token: `header.payload.signature`.
 ///
 /// # Errors
-/// Only on the rare case where `secret.len() == 0` (HMAC accepts any
-/// non-empty key); we surface that as [`JwtError::Decode`] for
-/// uniformity rather than panicking.
+/// [`JwtError::Decode`] when `secret.len() < 32`. HMAC accepts any key
+/// length, but a short/empty key is guessable and the resulting token
+/// is forgeable, so we refuse to sign with one (audit N5; matches the
+/// 32-byte floor `tenancy::auth_routes` enforces).
 pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
-    if secret.is_empty() {
-        return Err(JwtError::Decode("HMAC secret must not be empty".into()));
+    if secret.len() < 32 {
+        return Err(JwtError::Decode(
+            "HMAC secret must be >= 32 bytes (a shorter key is guessable / forgeable)".into(),
+        ));
     }
     let header = json!({"alg": "HS256", "typ": "JWT"});
     let header_b = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header serialize"));
@@ -312,6 +315,19 @@ mod tests {
     fn empty_secret_rejected() {
         let c = Claims::new("x");
         assert!(matches!(encode(&c, b""), Err(JwtError::Decode(_))));
+    }
+
+    #[test]
+    fn short_secret_rejected() {
+        // Audit N5 — a sub-32-byte key is guessable/forgeable; encode
+        // must refuse it, not just the empty case.
+        let c = Claims::new("x");
+        assert!(matches!(
+            encode(&c, b"only-31-bytes-not-enough-yikes!"),
+            Err(JwtError::Decode(_))
+        ));
+        // 32 bytes is accepted.
+        assert!(encode(&c, b"exactly-thirty-two-bytes-of-key!").is_ok());
     }
 
     #[test]
