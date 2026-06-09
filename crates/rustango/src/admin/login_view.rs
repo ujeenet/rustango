@@ -248,6 +248,9 @@ async fn login_submit(
         .clear(&format!("admin:{id}"))
         .await;
 
+    // Audit N8 — bind the cookie to a fingerprint of the current
+    // password hash so a password change/reset invalidates it.
+    let auth_hash = session::password_fingerprint(&secret, stored_hash);
     let cookie_value = session::encode(
         &secret,
         AdminSession {
@@ -255,6 +258,7 @@ async fn login_submit(
             username: form.username.clone(),
             is_superuser,
         },
+        &auth_hash,
     );
     let cookie = format!(
         "{name}={val}; Path=/; HttpOnly; SameSite=Lax{secure}",
@@ -371,7 +375,7 @@ async fn change_password_submit(
         model: AdminUser::SCHEMA,
         set: vec![Assignment {
             column: "password_hash",
-            value: Expr::Literal(SqlValue::String(new_hash)),
+            value: Expr::Literal(SqlValue::String(new_hash.clone())),
         }],
         where_clause: WhereExpr::Predicate(Filter {
             column: "id",
@@ -388,12 +392,44 @@ async fn change_password_submit(
         .into_response();
     }
 
-    Html(render_change_password_form(
+    // Audit N8 — the cookie this request carries holds the OLD password
+    // fingerprint, so the gate would sign this session out on the next
+    // request. Re-issue the cookie with the NEW fingerprint so the
+    // current device stays signed in while every *other* device's
+    // pre-change cookie is invalidated (mirrors Django's
+    // update_session_auth_hash).
+    let mut resp = Html(render_change_password_form(
         &state,
         Some("Password updated."),
         None,
     ))
-    .into_response()
+    .into_response();
+    if let Some(secret) = state.config.session_secret.as_ref() {
+        let auth_hash = session::password_fingerprint(secret, &new_hash);
+        let cookie_value = session::encode(
+            secret,
+            AdminSession {
+                user_id: session.user_id,
+                username: session.username.clone(),
+                is_superuser: session.is_superuser,
+            },
+            &auth_hash,
+        );
+        let cookie = format!(
+            "{name}={val}; Path=/; HttpOnly; SameSite=Lax{secure}",
+            name = SESSION_COOKIE,
+            val = cookie_value,
+            secure = if state.config.secure_cookies {
+                "; Secure"
+            } else {
+                ""
+            },
+        );
+        if let Ok(v) = HeaderValue::from_str(&cookie) {
+            resp.headers_mut().insert(header::SET_COOKIE, v);
+        }
+    }
+    resp
 }
 
 fn render_change_password_form(
@@ -480,6 +516,9 @@ pub(crate) struct SessionGate {
     /// "superuser"). Future epics layering in real permissions can
     /// flip this off and consult a `user_perms` set instead.
     pub(crate) require_superuser: bool,
+    /// Audit N8 — pool for the per-request password-fingerprint check
+    /// that invalidates cookies minted before a password change.
+    pub(crate) pool: crate::sql::Pool,
 }
 
 /// Gate every admin request behind a valid session cookie. The
@@ -502,13 +541,21 @@ pub(crate) async fn require_session(
         return next.run(request).await;
     }
 
-    if let Some(session) = read_session_cookie(&request, &gate.secret) {
+    if let Some((session, cookie_auth_hash)) = read_session_cookie(&request, &gate.secret) {
         if gate.require_superuser && !session.is_superuser {
             // #253 slice C — render a 403 inline rather than redirect
             // to /login, so the operator gets a clear "you are signed
             // in but not allowed here" signal instead of an infinite
             // login → 403 → login loop.
             return forbidden_page(&session);
+        }
+        // Audit N8 — invalidate cookies minted before a password change
+        // by comparing the cookie's password fingerprint against the
+        // user's current hash. Fails closed for a deleted user / changed
+        // password; tolerates a transient DB error (the cookie HMAC + exp
+        // still bound it) so a hiccup doesn't sign everyone out.
+        if !auth_hash_still_valid(&gate, session.user_id, &cookie_auth_hash).await {
+            return Redirect::to(&gate.login_path).into_response();
         }
         request.extensions_mut().insert(session.clone());
         // Scope the task-local so `chrome_context` (deep in the
@@ -567,14 +614,37 @@ fn forbidden_page(session: &AdminSession) -> Response {
     resp
 }
 
-fn read_session_cookie(req: &Request<Body>, secret: &AdminSessionSecret) -> Option<AdminSession> {
+fn read_session_cookie(
+    req: &Request<Body>,
+    secret: &AdminSessionSecret,
+) -> Option<(AdminSession, String)> {
     let raw = req.headers().get(header::COOKIE)?.to_str().ok()?;
     for part in raw.split(';').map(str::trim) {
         if let Some(val) = part.strip_prefix(&format!("{SESSION_COOKIE}=")) {
-            return session::decode(secret, val);
+            return session::decode_full(secret, val);
         }
     }
     None
+}
+
+/// Audit N8 — is the cookie's password fingerprint still current? Looks
+/// up the user's live `password_hash` and recomputes the fingerprint.
+/// `false` (force re-login) when the hash changed or the user is gone;
+/// `true` on a transient DB error so a hiccup doesn't evict everyone.
+async fn auth_hash_still_valid(gate: &SessionGate, user_id: i64, cookie_auth_hash: &str) -> bool {
+    let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
+    let select = SelectQuery::by_pk(AdminUser::SCHEMA, "id", SqlValue::I64(user_id));
+    match crate::sql::select_one_row_as_json(&gate.pool, &select, &fields).await {
+        Ok(Some(row)) => {
+            let current = row
+                .get("password_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            session::password_fingerprint(&gate.secret, current) == cookie_auth_hash
+        }
+        Ok(None) => false,
+        Err(_) => true,
+    }
 }
 
 #[cfg(all(test, feature = "postgres"))]

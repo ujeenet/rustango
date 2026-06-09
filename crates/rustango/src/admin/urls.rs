@@ -689,6 +689,9 @@ impl Builder {
                 // permission-system epics will add a builder knob
                 // to flip this off and consult `user_perms` instead.
                 require_superuser: true,
+                // Audit N8 — pool for the per-request password-fingerprint
+                // check that revokes sessions on password change.
+                pool: state.pool.clone(),
             };
             // Account routes layer on the *inside* of the auth
             // middleware — they require a valid session, just like
