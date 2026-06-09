@@ -309,16 +309,41 @@ pub fn tier_from_env() -> String {
     std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "dev".to_owned())
 }
 
-/// Whether auth cookies should carry the `Secure` attribute for the
-/// current deployment tier (audit H2): `true` on the prod tier
-/// (`RUSTANGO_ENV`), `false` otherwise. Lets HTTPS production
-/// deployments get `Secure` cookies automatically while local
-/// plain-HTTP development (and the localhost impersonation-handoff
-/// flow) keeps working. Used by the tenancy operator + tenant console
-/// cookies, which have no per-Builder config knob.
+/// Explicit override for the console-cookie `Secure` policy. Set once
+/// at boot by [`set_secure_cookies`] from `security.secure_cookies`; when
+/// present it wins over the tier default below (audit N2).
+static SECURE_COOKIES_OVERRIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Install the explicit console-cookie `Secure` policy (first call wins).
+/// The `manage` runner calls this from `security.secure_cookies` (which
+/// defaults to `true`) when settings are applied, so the standard boot
+/// path is **fail-closed**: cookies are `Secure` unless an operator
+/// explicitly sets `security.secure_cookies = false` (e.g. in
+/// `dev_settings.toml` for local plain-HTTP development). Returns `false`
+/// if the policy was already set.
+pub fn set_secure_cookies(secure: bool) -> bool {
+    SECURE_COOKIES_OVERRIDE.set(secure).is_ok()
+}
+
+/// Resolve the console-cookie `Secure` policy: an explicit override
+/// (from `security.secure_cookies`) wins; otherwise fall back to "secure
+/// on the prod tier." Pure helper so the precedence is unit-testable
+/// without touching the process-global / environment.
+fn resolve_secure_cookies(override_flag: Option<bool>, tier: &str) -> bool {
+    override_flag.unwrap_or_else(|| is_prod_tier(tier))
+}
+
+/// Whether the tenancy operator + tenant console cookies should carry the
+/// `Secure` attribute (audit H2/N2). Precedence:
+/// 1. the explicit policy set at boot via [`set_secure_cookies`] (from
+///    `security.secure_cookies`, default `true` on the `manage` path —
+///    fail-closed), else
+/// 2. "secure on the prod tier" (`RUSTANGO_ENV`) as a fallback for
+///    direct/non-`manage` use, so HTTPS prod still gets `Secure` cookies
+///    without config while local plain-HTTP dev keeps working.
 #[must_use]
-pub fn secure_cookies_for_tier() -> bool {
-    is_prod_tier(&tier_from_env())
+pub fn secure_cookies() -> bool {
+    resolve_secure_cookies(SECURE_COOKIES_OVERRIDE.get().copied(), &tier_from_env())
 }
 
 /// Restrict the persisted session-secret file to 0600 on Unix so
@@ -408,6 +433,18 @@ mod tests {
         assert!(!is_prod_tier("dev"));
         assert!(!is_prod_tier("staging"));
         assert!(!is_prod_tier(""));
+    }
+
+    #[test]
+    fn resolve_secure_cookies_override_wins_else_tier() {
+        // Audit N2 — explicit policy (from security.secure_cookies) wins
+        // over the tier; fall back to "secure on prod tier" only when no
+        // override is set.
+        assert!(resolve_secure_cookies(Some(true), "dev")); // override on, even in dev
+        assert!(!resolve_secure_cookies(Some(false), "prod")); // override off, even in prod
+        assert!(resolve_secure_cookies(None, "prod")); // no override → tier
+        assert!(!resolve_secure_cookies(None, "dev")); // no override → tier
+        assert!(!resolve_secure_cookies(None, "")); // unset tier behaves as dev
     }
 
     #[test]

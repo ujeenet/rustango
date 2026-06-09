@@ -391,6 +391,13 @@ impl Cli {
             self.routes = Some(routes_from_settings(&s.routes, self.routes.take()));
         }
 
+        // Audit N2 — set the tenancy console-cookie `Secure` policy
+        // fail-closed: cookies are `Secure` unless `security.secure_cookies`
+        // is explicitly `false` (e.g. dev_settings.toml for local HTTP).
+        // Process-wide so the operator + tenant consoles honor it without
+        // per-Builder wiring; first call wins, like the other boot globals.
+        let _ = crate::session::set_secure_cookies(s.security.secure_cookies.unwrap_or(true));
+
         // Stash a clone for `runserver` to apply layered settings
         // (security_headers, CORS, access_log, body_limit) on top
         // of the user's `api` Router. Done at run time rather than

@@ -706,7 +706,7 @@ async fn login_submit(
         .same_site(SameSite::Lax)
         // Audit H2 — Secure on the prod tier (HTTPS); off in dev so
         // local plain-HTTP login still works.
-        .secure(crate::session::secure_cookies_for_tier())
+        .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(SESSION_TTL_SECS))
         .build();
     let mut resp = Redirect::to(&next).into_response();
@@ -743,7 +743,7 @@ async fn logout(
         .same_site(SameSite::Lax)
         // Match the Secure attribute used when the cookie was set so the
         // browser reliably clears it (audit H2).
-        .secure(crate::session::secure_cookies_for_tier())
+        .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(0))
         .build();
     let mut resp = Redirect::to("/login").into_response();
