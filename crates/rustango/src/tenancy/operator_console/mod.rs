@@ -621,12 +621,59 @@ async fn login_submit(
     };
     let meta = meta_from_headers(&headers, Some("/login"));
     let next = sanitize_next(form.next.as_deref());
+
+    // Audit M1 (console) — per-account brute-force lockout, on by
+    // default. Resolve the operator id up front so the lockout is keyed
+    // by id (`op:<id>`), not the raw username: only an *existing* account
+    // accrues failures, so an attacker can't lock arbitrary names. A
+    // locked account is rejected before `authenticate` runs the verify.
+    #[cfg(feature = "cache")]
+    let pre_id: Option<i64> = {
+        use crate::core::Column as _;
+        use crate::sql::FetcherPool as _;
+        auth::Operator::objects()
+            .where_(auth::Operator::username.eq(form.username.clone()))
+            .fetch_pool(&state.registry)
+            .await
+            .ok()
+            .and_then(|rows: Vec<auth::Operator>| rows.into_iter().next())
+            .and_then(|op| op.id.get().copied())
+    };
+    #[cfg(feature = "cache")]
+    if let Some(id) = pre_id {
+        if crate::account_lockout::shared()
+            .is_locked(&format!("op:{id}"))
+            .await
+        {
+            send_user_login_failed(UserLoginFailedContext {
+                source: "operator",
+                attempted_username: Some(form.username.clone()),
+                reason: AuthFailureReason::InvalidCredentials,
+                request: meta.clone(),
+            })
+            .await;
+            return Redirect::to(&format!(
+                "/login?error=Too+many+failed+attempts.+Try+again+later.&next={}",
+                urlencoding_lite(&next)
+            ))
+            .into_response();
+        }
+    }
+
     let principal =
         match auth::authenticate_operator_pool(&state.registry, &form.username, &form.password)
             .await
         {
             Ok(Some(op)) => op,
             Ok(None) => {
+                // Audit M1 — count the failure against the resolved id
+                // (existing accounts only, so no arbitrary-name DoS).
+                #[cfg(feature = "cache")]
+                if let Some(id) = pre_id {
+                    let _ = crate::account_lockout::shared()
+                        .record_failure(&format!("op:{id}"))
+                        .await;
+                }
                 send_user_login_failed(UserLoginFailedContext {
                     source: "operator",
                     attempted_username: Some(form.username.clone()),
@@ -646,6 +693,11 @@ async fn login_submit(
             }
         };
     let oid = principal.id.get().copied().unwrap_or_default();
+    // Audit M1 — successful login clears the failure counter + any lock.
+    #[cfg(feature = "cache")]
+    crate::account_lockout::shared()
+        .clear(&format!("op:{oid}"))
+        .await;
     let payload = SessionPayload::new(oid, SESSION_TTL_SECS);
     let cookie_value = session::encode(&state.session_secret, &payload);
     let cookie = Cookie::build((COOKIE_NAME, cookie_value))
