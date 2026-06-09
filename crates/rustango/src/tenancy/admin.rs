@@ -485,7 +485,7 @@ where
         }
 
         // Private surface — require a valid session cookie.
-        match validate_session(&parts.headers, cfg, &org, &pool).await {
+        match validate_session(&parts.headers, cfg, &org, &pool, &pools.registry_pool()).await {
             SessionCheck::Authenticated {
                 is_superuser,
                 user_id,
@@ -661,6 +661,7 @@ async fn validate_session(
     cfg: &TenantSessionConfig,
     org: &Org,
     tenant_pool: &crate::sql::Pool,
+    registry_pool: &crate::sql::Pool,
 ) -> SessionCheck {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
@@ -672,14 +673,40 @@ async fn validate_session(
         Ok(p) => p,
         Err(_) => return SessionCheck::Anonymous,
     };
-    // v0.27.8 (#78) — impersonation cookies are minted by the
-    // operator console; the tenant admin trusts them as
-    // superuser without consulting `rustango_users`.
+    // v0.27.8 (#78) — impersonation cookies are minted by the operator
+    // console; they grant tenant-superuser.
+    //
+    // Audit P5 — re-check the impersonating operator is STILL live
+    // (exists + active) on every request, against the registry pool.
+    // Without this, an operator deactivated/deleted after minting the
+    // cookie keeps full tenant-superuser admin for the whole
+    // impersonation TTL (up to ~1h) — the same stale-authorization class
+    // the P1-P4 fixes closed for the four first-class principals.
     if let Some(operator_id) = payload.imp {
-        return SessionCheck::Authenticated {
-            is_superuser: true,
-            user_id: 0,
-            impersonated_by: Some(operator_id),
+        let ops: Vec<super::auth::Operator> = match super::auth::Operator::objects()
+            .where_(super::auth::Operator::id.eq(operator_id))
+            .fetch_pool(registry_pool)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    target: "crate::tenancy::admin",
+                    operator_id,
+                    error = %e,
+                    "operator re-check failed during impersonation session validation",
+                );
+                return SessionCheck::Error("session lookup failed".into());
+            }
+        };
+        return match ops.into_iter().next() {
+            Some(op) if op.active => SessionCheck::Authenticated {
+                is_superuser: true,
+                user_id: 0,
+                impersonated_by: Some(operator_id),
+            },
+            // Operator gone or deactivated → drop the impersonation.
+            _ => SessionCheck::Anonymous,
         };
     }
     // v0.38 — route through ORM `User::objects().fetch_pool` so the
