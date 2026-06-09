@@ -84,6 +84,8 @@ pub enum OAuthError {
     BadResponse(String),
     #[error("CSRF state mismatch")]
     StateMismatch,
+    #[error("login flow expired — restart at /login")]
+    FlowExpired,
     #[error("PKCE verifier missing — flow not initialized")]
     MissingPkce,
     #[error("missing required field `{0}` in userinfo response")]
@@ -135,6 +137,12 @@ pub struct TokenResponse {
     #[serde(default)]
     pub scope: Option<String>,
 }
+
+/// Maximum age of an OAuth2 login flow (audit N7). `complete()` rejects
+/// a flow whose sealed `created_at` is older than this, bounding replay
+/// of a captured sealed-flow value. 10 minutes gives headroom over the
+/// 5-minute cookie `Max-Age` for slow logins while still being short.
+const MAX_FLOW_AGE_SECS: u64 = 600;
 
 /// Per-flow secret state — must be persisted between `begin()` and
 /// `complete()`. Round-trip via signed cookie, server-side cache, or DB.
@@ -366,6 +374,19 @@ impl OAuth2Provider {
             == 0
         {
             return Err(OAuthError::StateMismatch);
+        }
+
+        // Audit N7 — enforce flow freshness server-side. `created_at` is
+        // inside the HMAC-sealed flow, so it can't be forged; without this
+        // a captured sealed flow would be replayable indefinitely (the
+        // 5-minute cookie Max-Age is client-side and outside the MAC).
+        // saturating_sub tolerates a created_at slightly in the future
+        // (clock skew) by treating the age as 0.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if now.saturating_sub(flow.created_at) > MAX_FLOW_AGE_SECS {
+            return Err(OAuthError::FlowExpired);
         }
 
         let mut body: Vec<(&str, &str)> = vec![
@@ -661,6 +682,29 @@ mod tests {
         };
         let err = p.complete(&flow, "code", "wrong-state").await.unwrap_err();
         assert!(matches!(err, OAuthError::StateMismatch));
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_stale_flow() {
+        // Audit N7 — a matching state but an ancient `created_at` is
+        // rejected as FlowExpired *before* any token-exchange HTTP call.
+        let p = OAuth2Provider::new(
+            "test",
+            "cid",
+            "csec",
+            "https://app.test/cb",
+            "https://idp.test/auth",
+            "https://idp.test/token",
+        );
+        let flow = OAuth2Flow {
+            state: "expected".into(),
+            pkce_verifier: "v".into(),
+            created_at: 1, // ~1970 — far older than MAX_FLOW_AGE_SECS
+        };
+        // State matches, so we get past the CSRF check and hit the
+        // freshness gate (no network).
+        let err = p.complete(&flow, "code", "expected").await.unwrap_err();
+        assert!(matches!(err, OAuthError::FlowExpired), "got {err:?}");
     }
 
     #[test]
