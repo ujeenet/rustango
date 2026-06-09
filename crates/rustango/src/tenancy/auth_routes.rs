@@ -334,7 +334,27 @@ pub struct RefreshOutput {
 /// stolen refresh token is single-use — the legitimate user's next
 /// refresh succeeds and invalidates whatever the attacker also tried
 /// to use.
-async fn refresh(Json(body): Json<RefreshInput>) -> Result<Json<RefreshOutput>, Response> {
+async fn refresh(
+    t: Tenant,
+    Json(body): Json<RefreshInput>,
+) -> Result<Json<RefreshOutput>, Response> {
+    // Audit N3 — bind refresh to the resolved tenant. Without this, a
+    // refresh token minted on tenant A could be POSTed to tenant B's
+    // /refresh (they share the session secret) and rotated — burning A's
+    // refresh token (a cross-tenant DoS / rotation oracle). Verify the
+    // token's `tenant` claim matches this subdomain BEFORE rotating.
+    let claims = jwt_handle().verify_refresh(&body.refresh).ok_or_else(|| {
+        (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
+    })?;
+    let tenant_ok =
+        claims.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str());
+    if !tenant_ok {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "refresh token issued for a different tenant",
+        )
+            .into_response());
+    }
     let pair = jwt_handle().refresh(&body.refresh).ok_or_else(|| {
         (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
     })?;
@@ -347,13 +367,30 @@ async fn refresh(Json(body): Json<RefreshInput>) -> Result<Json<RefreshOutput>, 
 /// Revoke the access token's `jti`. Subsequent requests with the
 /// same token return 401 even though `exp` would otherwise still be
 /// valid.
-async fn logout(headers: axum::http::HeaderMap, bearer: Bearer) -> Result<StatusCode, Response> {
+async fn logout(
+    t: Tenant,
+    headers: axum::http::HeaderMap,
+    bearer: Bearer,
+) -> Result<StatusCode, Response> {
     use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
     // Best-effort: decode the bearer to recover the user id for the
     // signal. We don't reject on verify-failure here — the revoke
     // call below still runs, and a stale/expired token logout is a
     // valid audit event in its own right.
-    let user_id = jwt_handle().verify_access(&bearer.0).map(|c| c.sub);
+    let claims = jwt_handle().verify_access(&bearer.0);
+    // Audit N3 — if the token IS valid but bound to a DIFFERENT tenant,
+    // don't let this subdomain's endpoint revoke it. (An unverifiable /
+    // expired token falls through to a best-effort revoke as before.)
+    if let Some(c) = &claims {
+        if c.custom_value("tenant").and_then(|v| v.as_str()) != Some(t.org.slug.as_str()) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "token issued for a different tenant",
+            )
+                .into_response());
+        }
+    }
+    let user_id = claims.map(|c| c.sub);
     let meta = meta_from_headers(&headers, Some("/auth/logout"));
 
     jwt_handle().revoke(&bearer.0);
