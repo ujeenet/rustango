@@ -878,27 +878,56 @@ async fn login_submit(
         async move { send_user_login_failed(ctx).await }
     };
     let Some(user) = users.into_iter().next() else {
+        // Audit H1 — this handler does its own lookup+verify (so it
+        // wasn't covered by the authenticate_*_pool timing fix); spend a
+        // verify's worth of work on the unknown-user path so timing
+        // doesn't reveal whether the username exists.
+        super::password::verify_dummy(&form.password);
         fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     };
-    if !user.active {
-        fire_failed(AuthFailureReason::Inactive).await;
-        return bad_creds();
-    }
-    let hash = user.password_hash.clone();
-    let ok = match super::password::verify(&form.password, &hash) {
-        Ok(b) => b,
-        Err(_) => false,
-    };
-    if !ok {
-        fire_failed(AuthFailureReason::InvalidCredentials).await;
-        return bad_creds();
-    }
     let uid: i64 = user.id.get().copied().unwrap_or(0);
-    if uid == 0 {
+
+    // Audit M1 (console) — per-account brute-force lockout, on by
+    // default, keyed by tenant slug + resolved user id (no
+    // arbitrary-name DoS, no cross-tenant id collision). A locked
+    // account is rejected before the password verify.
+    #[cfg(feature = "cache")]
+    let lock_key = format!("tenant:{}:{}", org.slug, uid);
+    #[cfg(feature = "cache")]
+    if uid != 0 && crate::account_lockout::shared().is_locked(&lock_key).await {
         fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     }
+
+    // Verify before the active check so active vs inactive accounts take
+    // the same time (audit H1).
+    let ok = matches!(
+        super::password::verify(&form.password, &user.password_hash),
+        Ok(true)
+    );
+
+    if !user.active || !ok || uid == 0 {
+        // Audit M1 — count the failure against the resolved id (existing
+        // accounts only).
+        #[cfg(feature = "cache")]
+        if uid != 0 {
+            let _ = crate::account_lockout::shared()
+                .record_failure(&lock_key)
+                .await;
+        }
+        let reason = if !user.active {
+            AuthFailureReason::Inactive
+        } else {
+            AuthFailureReason::InvalidCredentials
+        };
+        fire_failed(reason).await;
+        return bad_creds();
+    }
+
+    // Audit M1 — successful login clears the failure counter + any lock.
+    #[cfg(feature = "cache")]
+    crate::account_lockout::shared().clear(&lock_key).await;
     let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
     let payload = TenantSessionPayload::new(uid, &org.slug, ttl_secs);
