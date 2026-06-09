@@ -541,21 +541,29 @@ pub(crate) async fn require_session(
         return next.run(request).await;
     }
 
-    if let Some((session, cookie_auth_hash)) = read_session_cookie(&request, &gate.secret) {
+    if let Some((mut session, cookie_auth_hash)) = read_session_cookie(&request, &gate.secret) {
+        // Audit N8 + P1 — one per-request lookup re-derives the user's
+        // LIVE state: it invalidates cookies minted before a password
+        // change (fingerprint mismatch), and re-checks `active` +
+        // `is_superuser` from the DB instead of trusting the cookie's
+        // cached copy — so a deactivated or demoted admin loses access
+        // immediately, not at the 8h cookie expiry.
+        match gate_live_check(&gate, session.user_id, &cookie_auth_hash).await {
+            // Password changed / user deleted / deactivated → force re-login.
+            GateCheck::Reject => return Redirect::to(&gate.login_path).into_response(),
+            // Row found + fingerprint matches: trust the LIVE flag.
+            GateCheck::Live { is_superuser } => session.is_superuser = is_superuser,
+            // Transient DB error: fail open on the *fingerprint/active*
+            // checks (the cookie HMAC + exp still bound the session) but
+            // keep the cookie's cached `is_superuser` for the gate below.
+            GateCheck::DbError => {}
+        }
         if gate.require_superuser && !session.is_superuser {
             // #253 slice C — render a 403 inline rather than redirect
             // to /login, so the operator gets a clear "you are signed
             // in but not allowed here" signal instead of an infinite
             // login → 403 → login loop.
             return forbidden_page(&session);
-        }
-        // Audit N8 — invalidate cookies minted before a password change
-        // by comparing the cookie's password fingerprint against the
-        // user's current hash. Fails closed for a deleted user / changed
-        // password; tolerates a transient DB error (the cookie HMAC + exp
-        // still bound it) so a hiccup doesn't sign everyone out.
-        if !auth_hash_still_valid(&gate, session.user_id, &cookie_auth_hash).await {
-            return Redirect::to(&gate.login_path).into_response();
         }
         request.extensions_mut().insert(session.clone());
         // Scope the task-local so `chrome_context` (deep in the
@@ -627,11 +635,25 @@ fn read_session_cookie(
     None
 }
 
-/// Audit N8 — is the cookie's password fingerprint still current? Looks
-/// up the user's live `password_hash` and recomputes the fingerprint.
-/// `false` (force re-login) when the hash changed or the user is gone;
-/// `true` on a transient DB error so a hiccup doesn't evict everyone.
-async fn auth_hash_still_valid(gate: &SessionGate, user_id: i64, cookie_auth_hash: &str) -> bool {
+/// Outcome of the gate's per-request liveness lookup.
+enum GateCheck {
+    /// Row found and the password fingerprint matches; carries the
+    /// user's LIVE `is_superuser` so the gate doesn't trust the cookie.
+    Live { is_superuser: bool },
+    /// Force re-login: password changed (fingerprint mismatch), user
+    /// deleted, or the account is deactivated.
+    Reject,
+    /// Transient DB error — caller fails open on the liveness checks
+    /// (the cookie HMAC + exp still bound the session).
+    DbError,
+}
+
+/// Audit N8 + P1 — re-derive the user's live state in one lookup:
+/// recompute the password fingerprint (invalidate cookies minted before
+/// a password change), and read live `active` / `is_superuser` so a
+/// deactivated or demoted admin loses access immediately rather than at
+/// cookie expiry.
+async fn gate_live_check(gate: &SessionGate, user_id: i64, cookie_auth_hash: &str) -> GateCheck {
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
     let select = SelectQuery::by_pk(AdminUser::SCHEMA, "id", SqlValue::I64(user_id));
     match crate::sql::select_one_row_as_json(&gate.pool, &select, &fields).await {
@@ -640,10 +662,24 @@ async fn auth_hash_still_valid(gate: &SessionGate, user_id: i64, cookie_auth_has
                 .get("password_hash")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            session::password_fingerprint(&gate.secret, current) == cookie_auth_hash
+            if session::password_fingerprint(&gate.secret, current) != cookie_auth_hash {
+                return GateCheck::Reject; // password changed since login
+            }
+            // `active` defaults true (matches the login check) so a
+            // missing/null column doesn't lock everyone out; a real
+            // `false` revokes the session.
+            let active = row.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
+            if !active {
+                return GateCheck::Reject;
+            }
+            let is_superuser = row
+                .get("is_superuser")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            GateCheck::Live { is_superuser }
         }
-        Ok(None) => false,
-        Err(_) => true,
+        Ok(None) => GateCheck::Reject, // user deleted
+        Err(_) => GateCheck::DbError,
     }
 }
 
