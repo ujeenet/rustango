@@ -432,8 +432,19 @@ pub struct JwtBackend {
 
 impl JwtBackend {
     /// Build a backend from raw key bytes.
+    ///
+    /// # Panics
+    /// If `secret` is shorter than 32 bytes (audit N5). HMAC accepts any
+    /// key length, but a short/empty key is guessable and would let
+    /// anyone forge tokens — fail closed rather than sign/verify with a
+    /// weak key. Matches the 32-byte floor on `auth_routes::build_jwt`.
     #[must_use]
     pub fn new(secret: Vec<u8>) -> Self {
+        assert!(
+            secret.len() >= 32,
+            "JwtBackend signing key is {} bytes; need >= 32 (a shorter key is forgeable)",
+            secret.len(),
+        );
         Self {
             secret,
             ttl_secs: 3600,
