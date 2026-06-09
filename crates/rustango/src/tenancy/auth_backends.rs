@@ -124,16 +124,24 @@ impl AuthBackend for ModelBackend {
             .await?;
 
         let Some(user) = users.into_iter().next() else {
+            // Audit H1/N4 — spend a verify's worth of work on the
+            // unknown-user path so timing doesn't reveal whether the
+            // username exists.
+            password::verify_dummy(&password);
             return Ok(None);
         };
 
-        if !user.active {
-            return Err(AuthError::Inactive);
-        }
-
+        // Verify before the active check so active vs inactive accounts
+        // take the same time (audit H1/N4).
         let ok = password::verify(&password, &user.password_hash)
             .map_err(|_| AuthError::InvalidToken)?;
-        if !ok {
+        if !user.active || !ok {
+            // Audit N4 — an inactive account must look identical to a
+            // wrong password at this (username-keyed, pre-credential)
+            // boundary: same `Ok(None)`, not a distinguishable
+            // `Err(Inactive)`, so the backend can't be used to enumerate
+            // accounts. (Inactive is still enforced after a *valid* API
+            // key / JWT below, where the caller already proved ownership.)
             return Ok(None);
         }
 
@@ -324,6 +332,9 @@ impl AuthBackend for ApiKeyBackend {
             .fetch_pool(pool)
             .await?;
         let Some(key) = keys.into_iter().next() else {
+            // Audit N4 — equalize timing on the unknown-prefix path so it
+            // doesn't reveal whether a key prefix exists.
+            password::verify_dummy(secret);
             return Ok(None);
         };
 
