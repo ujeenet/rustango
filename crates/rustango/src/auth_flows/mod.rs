@@ -72,6 +72,12 @@ pub enum AuthFlowError {
     /// Issue #391.
     #[error("database error: {0}")]
     Database(String),
+    /// The token was already redeemed (audit N1). Returned by the
+    /// `verify_single_use` variants when the signature has been seen
+    /// before within its lifetime — defeats replay of a leaked
+    /// magic-link / reset link.
+    #[error("token already used")]
+    AlreadyUsed,
 }
 
 impl From<SignedUrlError> for AuthFlowError {
@@ -124,6 +130,25 @@ impl PasswordReset {
         user_id_str
             .parse::<i64>()
             .map_err(|_| AuthFlowError::Malformed)
+    }
+
+    /// Like [`Self::verify`] but enforces **single use** (audit N1):
+    /// records the token as consumed in `cache` so a replay returns
+    /// [`AuthFlowError::AlreadyUsed`]. Prefer this for reset links, or
+    /// enforce single-use yourself by deleting the reset record after a
+    /// successful password change.
+    ///
+    /// # Errors
+    /// As [`Self::verify`], plus [`AuthFlowError::AlreadyUsed`].
+    #[cfg(feature = "cache")]
+    pub async fn verify_single_use(
+        url: &str,
+        secret: &[u8],
+        cache: &std::sync::Arc<dyn crate::cache::Cache>,
+    ) -> Result<i64, AuthFlowError> {
+        let user_id = Self::verify(url, secret)?;
+        consume_single_use(url, cache).await?;
+        Ok(user_id)
     }
 }
 
@@ -261,6 +286,22 @@ impl EmailVerification {
         let email = extract_query(url, "email").ok_or(AuthFlowError::Malformed)?;
         Ok((user_id, email))
     }
+
+    /// Like [`Self::verify`] but enforces **single use** (audit N1) via
+    /// `cache` — a replay returns [`AuthFlowError::AlreadyUsed`].
+    ///
+    /// # Errors
+    /// As [`Self::verify`], plus [`AuthFlowError::AlreadyUsed`].
+    #[cfg(feature = "cache")]
+    pub async fn verify_single_use(
+        url: &str,
+        secret: &[u8],
+        cache: &std::sync::Arc<dyn crate::cache::Cache>,
+    ) -> Result<(i64, String), AuthFlowError> {
+        let out = Self::verify(url, secret)?;
+        consume_single_use(url, cache).await?;
+        Ok(out)
+    }
 }
 
 // ------------------------------------------------------------------ Magic-link login
@@ -287,6 +328,12 @@ impl MagicLink {
 
     /// Verify the URL and return the email it was issued for.
     ///
+    /// **This is NOT single-use** — the signature is valid until its TTL
+    /// expires, so a leaked link (Referer header, browser history, proxy
+    /// logs) can be replayed to log in repeatedly. For passwordless login
+    /// use [`Self::verify_single_use`] (or otherwise burn the token after
+    /// first use). Audit N1.
+    ///
     /// # Errors
     /// As [`PasswordReset::verify`].
     pub fn verify(url: &str, secret: &[u8]) -> Result<String, AuthFlowError> {
@@ -296,6 +343,24 @@ impl MagicLink {
             return Err(AuthFlowError::WrongPurpose(purpose));
         }
         extract_query(url, "email").ok_or(AuthFlowError::Malformed)
+    }
+
+    /// Like [`Self::verify`] but enforces **single use** (audit N1):
+    /// the magic link can be redeemed only once — a replay returns
+    /// [`AuthFlowError::AlreadyUsed`]. Strongly recommended for
+    /// passwordless login, where `verify` alone leaves a replay window.
+    ///
+    /// # Errors
+    /// As [`Self::verify`], plus [`AuthFlowError::AlreadyUsed`].
+    #[cfg(feature = "cache")]
+    pub async fn verify_single_use(
+        url: &str,
+        secret: &[u8],
+        cache: &std::sync::Arc<dyn crate::cache::Cache>,
+    ) -> Result<String, AuthFlowError> {
+        let email = Self::verify(url, secret)?;
+        consume_single_use(url, cache).await?;
+        Ok(email)
     }
 }
 
@@ -311,6 +376,48 @@ fn extract_query(url: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Mark a (already-verified) signed-URL token as consumed so it can't be
+/// replayed (audit N1). Keys the token's `signature` in the cache for its
+/// remaining lifetime; a repeat within that window returns
+/// [`AuthFlowError::AlreadyUsed`].
+///
+/// **Fail-closed:** a cache read error is treated as "already used" — we
+/// refuse rather than risk replaying a passwordless / reset link while
+/// the cache is unavailable. `exists`+`set` is not atomic, so two
+/// *simultaneous* redemptions of the same URL could race; that window is
+/// sub-millisecond and this is defense-in-depth over the signature+TTL
+/// the token already carries.
+#[cfg(feature = "cache")]
+async fn consume_single_use(
+    url: &str,
+    cache: &std::sync::Arc<dyn crate::cache::Cache>,
+) -> Result<(), AuthFlowError> {
+    let sig = extract_query(url, "signature").ok_or(AuthFlowError::Malformed)?;
+    let key = format!("authflow_used:{sig}");
+    match cache.exists(&key).await {
+        Ok(true) => return Err(AuthFlowError::AlreadyUsed),
+        Ok(false) => {}
+        Err(_) => return Err(AuthFlowError::AlreadyUsed),
+    }
+    let _ = cache.set(&key, "1", Some(single_use_ttl(url))).await;
+    Ok(())
+}
+
+/// Remaining lifetime of the token from its `expires` param (unix secs),
+/// so the used-marker lives exactly as long as the token could be valid.
+/// Falls back to 1h when `expires` is absent/unparseable/in the past.
+#[cfg(feature = "cache")]
+fn single_use_ttl(url: &str) -> Duration {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    extract_query(url, "expires")
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|exp| Duration::from_secs(exp.saturating_sub(now)))
+        .filter(|d| !d.is_zero())
+        .unwrap_or(Duration::from_secs(3600))
 }
 
 // #806 — was byte-identical to `crate::url_codec::url_encode`
@@ -425,6 +532,41 @@ mod tests {
         let url = PasswordReset::issue("https://x/r", 42, SECRET, Duration::from_secs(3600));
         let r = MagicLink::verify(&url, SECRET);
         assert!(matches!(r, Err(AuthFlowError::WrongPurpose(_))));
+    }
+
+    #[cfg(feature = "cache")]
+    #[tokio::test]
+    async fn magic_link_single_use_rejects_replay() {
+        use crate::cache::InMemoryCache;
+        let cache: std::sync::Arc<dyn crate::cache::Cache> =
+            std::sync::Arc::new(InMemoryCache::new());
+        let url = MagicLink::issue(
+            "https://x/login",
+            "alice@example.com",
+            SECRET,
+            Duration::from_secs(900),
+        );
+        // First redemption succeeds.
+        let email = MagicLink::verify_single_use(&url, SECRET, &cache)
+            .await
+            .unwrap();
+        assert_eq!(email, "alice@example.com");
+        // Audit N1 — replaying the same link is rejected.
+        let replay = MagicLink::verify_single_use(&url, SECRET, &cache).await;
+        assert!(
+            matches!(replay, Err(AuthFlowError::AlreadyUsed)),
+            "{replay:?}"
+        );
+        // A *different* link (fresh signature) is unaffected.
+        let other = MagicLink::issue(
+            "https://x/login",
+            "bob@example.com",
+            SECRET,
+            Duration::from_secs(900),
+        );
+        assert!(MagicLink::verify_single_use(&other, SECRET, &cache)
+            .await
+            .is_ok());
     }
 
     // -------------------------------- query string handling

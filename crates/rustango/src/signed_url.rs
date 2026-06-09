@@ -1,10 +1,21 @@
 //! Signed URL helpers — tamper-evident URLs with optional expiry.
 //!
 //! Common uses:
-//! - Magic-link login (one-time URL emailed to the user)
+//! - Magic-link login (emailed to the user)
 //! - Password reset confirmation links
 //! - Time-limited file download URLs
 //! - "Click here to verify your email" links
+//!
+//! ## NOT single-use (audit N1)
+//!
+//! [`verify`] only checks the signature + expiry — it does **not** make
+//! a URL one-time. Until the `expires` window passes, a leaked link
+//! (Referer header, browser history, proxy/access logs, a shared URL)
+//! verifies again and again. For anything that authenticates or mutates
+//! on click (magic-link login, password reset), enforce single use:
+//! either delete/rotate the underlying record after first use, or use
+//! the cache-backed `verify_single_use` variants in
+//! [`crate::auth_flows`].
 //!
 //! ## Quick start
 //!
