@@ -20,8 +20,8 @@ use sqlx::Database;
 
 use crate::sql::sqlx;
 use crate::tenancy::{
-    session::SessionSecret, ChainResolver, DefaultTenantDb, Org, OrgResolver, TenantConn,
-    TenantPools,
+    session::SessionSecret, ChainResolver, DefaultTenantDb, Org, OrgResolver, TenancyError,
+    TenantConn, TenantPools,
 };
 
 /// Per-server context that the [`Tenant`] extractor reads out of
@@ -40,6 +40,24 @@ pub struct TenantContext<DB: Database = DefaultTenantDb> {
     pub operator_secret: SessionSecret,
 }
 
+/// Backing store for a [`Tenant`]'s connection.
+///
+/// Database-mode extractors (SQLite / MySQL) start out `Deferred` and
+/// only check a connection out of the pool when a handler actually asks
+/// for one via [`Tenant::pool_conn`] / [`Tenant::into_conn`]. Handlers
+/// that query solely through [`Tenant::pool`] (the tri-dialect ORM
+/// path) hold zero idle connections, so a request no longer pins a pool
+/// slot it never uses — which is what caused pool-exhaustion deadlock
+/// once concurrency reached `max_conn`. Postgres stays eager (`Ready`)
+/// so schema-mode `SET search_path` is applied up front.
+enum TenantConnCell<DB: Database> {
+    /// Connection already checked out — Postgres always, database-mode
+    /// after the first `pool_conn()`/`into_conn()` call.
+    Ready(TenantConn<DB>),
+    /// No connection held yet; acquire from these pools on demand.
+    Deferred(Arc<TenantPools<DB>>),
+}
+
 /// Extractor: resolves the request's tenant and acquires a connection
 /// scoped to it. Generic over the backend (`DB = sqlx::Postgres`
 /// default — `fn handler(t: Tenant)` continues to mean
@@ -54,7 +72,7 @@ pub struct TenantContext<DB: Database = DefaultTenantDb> {
 /// ```
 pub struct Tenant<DB: Database = DefaultTenantDb> {
     pub org: Org,
-    conn: TenantConn<DB>,
+    conn: TenantConnCell<DB>,
     /// v0.38 — backend-erasing pool reference for the tenant's storage.
     /// On PG schema-mode this wraps the registry pool (queries through
     /// it would hit the `public` schema unless `SET search_path` is
@@ -66,22 +84,54 @@ pub struct Tenant<DB: Database = DefaultTenantDb> {
 }
 
 impl<DB: Database> Tenant<DB> {
-    /// Borrow the tenant-scoped pool connection. Use this for sqlx
-    /// query macros (`sqlx::query!(...).fetch_all(t.pool_conn())`)
-    /// when working in a backend-agnostic context. PG-specific code
-    /// can use [`Tenant::conn`] instead which derefs all the way to
+    /// Borrow the tenant-scoped pool connection, acquiring it on first
+    /// use for database-mode tenants (the extractor defers the checkout
+    /// so `t.pool()`-only handlers never pin a slot). Use this for sqlx
+    /// query macros (`sqlx::query!(...).fetch_all(t.pool_conn().await?)`)
+    /// in a backend-agnostic context. PG-specific code can use
+    /// [`Tenant::conn`] instead which derefs all the way to
     /// `&mut PgConnection` so the framework's `_on` helpers
     /// (`fetch_on`, `select_rows_on`) accept it directly.
-    pub fn pool_conn(&mut self) -> &mut sqlx::pool::PoolConnection<DB> {
-        &mut self.conn
+    ///
+    /// # Errors
+    /// Pool acquire failure for a deferred (database-mode) connection.
+    pub async fn pool_conn(&mut self) -> Result<&mut sqlx::pool::PoolConnection<DB>, TenancyError> {
+        self.ensure_conn().await?;
+        match &mut self.conn {
+            TenantConnCell::Ready(conn) => Ok(conn),
+            TenantConnCell::Deferred(_) => {
+                unreachable!("ensure_conn just populated the connection")
+            }
+        }
+    }
+
+    /// Acquire the deferred connection if one isn't held yet. No-op
+    /// once the cell is [`TenantConnCell::Ready`] (always, for PG).
+    async fn ensure_conn(&mut self) -> Result<(), TenancyError> {
+        let pools = match &self.conn {
+            TenantConnCell::Ready(_) => return Ok(()),
+            TenantConnCell::Deferred(pools) => Arc::clone(pools),
+        };
+        let conn = pools.database_acquire(&self.org).await?;
+        self.conn = TenantConnCell::Ready(conn);
+        Ok(())
     }
 
     /// Yield the underlying connection, releasing it back to the
     /// pool when dropped. Use for handlers that finished their DB
-    /// work but still have long-running computation left.
-    #[must_use]
-    pub fn into_conn(self) -> TenantConn<DB> {
-        self.conn
+    /// work but still have long-running computation left. Acquires the
+    /// connection first if the extractor deferred it (database-mode).
+    ///
+    /// # Errors
+    /// Pool acquire failure for a deferred (database-mode) connection.
+    pub async fn into_conn(mut self) -> Result<TenantConn<DB>, TenancyError> {
+        self.ensure_conn().await?;
+        match self.conn {
+            TenantConnCell::Ready(conn) => Ok(conn),
+            TenantConnCell::Deferred(_) => {
+                unreachable!("ensure_conn just populated the connection")
+            }
+        }
     }
 
     /// Borrow the tenant-scoped [`crate::sql::Pool`] enum. Use this
@@ -120,7 +170,11 @@ impl<DB: Database> Tenant<DB> {
     #[cfg(any(test, feature = "test_utils"))]
     #[must_use]
     pub fn for_test(org: Org, conn: TenantConn<DB>, pool: crate::sql::Pool) -> Self {
-        Self { org, conn, pool }
+        Self {
+            org,
+            conn: TenantConnCell::Ready(conn),
+            pool,
+        }
     }
 }
 
@@ -131,7 +185,12 @@ impl Tenant<sqlx::Postgres> {
     /// expect. PG-only; for generic backends, use
     /// [`Tenant::pool_conn`] and the sqlx query macros.
     pub fn conn(&mut self) -> &mut sqlx::PgConnection {
-        &mut self.conn
+        match &mut self.conn {
+            TenantConnCell::Ready(conn) => conn,
+            TenantConnCell::Deferred(_) => {
+                unreachable!("Tenant<Postgres> acquires its connection eagerly")
+            }
+        }
     }
 }
 
@@ -200,7 +259,11 @@ where
             .scoped_pool_dyn(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        Ok(Tenant { org, conn, pool })
+        Ok(Tenant {
+            org,
+            conn: TenantConnCell::Ready(conn),
+            pool,
+        })
     }
 }
 
@@ -233,12 +296,17 @@ where
             .scoped_pool_dyn(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        let conn = ctx
-            .pools
-            .database_acquire(&org)
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        Ok(Tenant { org, conn, pool })
+        // Lazy connection (database-mode): don't pin a pool slot at
+        // extraction. Handlers using only `t.pool()` hold zero idle
+        // connections; `pool_conn()` / `into_conn()` check one out on
+        // demand. Prevents the pool-exhaustion deadlock where each
+        // concurrent request pinned an unused connection — at
+        // `>= max_conn` every later `t.pool()` acquire then timed out.
+        Ok(Tenant {
+            org,
+            conn: TenantConnCell::Deferred(Arc::clone(&ctx.pools)),
+            pool,
+        })
     }
 }
 
@@ -267,11 +335,16 @@ where
             .scoped_pool_dyn(&org)
             .await
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        let conn = ctx
-            .pools
-            .database_acquire(&org)
-            .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
-        Ok(Tenant { org, conn, pool })
+        // Lazy connection (database-mode): don't pin a pool slot at
+        // extraction. Handlers using only `t.pool()` hold zero idle
+        // connections; `pool_conn()` / `into_conn()` check one out on
+        // demand. Prevents the pool-exhaustion deadlock where each
+        // concurrent request pinned an unused connection — at
+        // `>= max_conn` every later `t.pool()` acquire then timed out.
+        Ok(Tenant {
+            org,
+            conn: TenantConnCell::Deferred(Arc::clone(&ctx.pools)),
+            pool,
+        })
     }
 }
