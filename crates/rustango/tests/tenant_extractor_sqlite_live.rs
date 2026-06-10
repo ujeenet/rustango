@@ -67,7 +67,7 @@ fn fake_sqlite_org() -> Org {
 }
 
 async fn handler(mut t: Tenant<sqlx::Sqlite>) -> impl IntoResponse {
-    let conn = t.pool_conn();
+    let conn = t.pool_conn().await.expect("acquire tenant connection");
     let row = sqlx::query("SELECT 42 as answer")
         .fetch_one(&mut **conn)
         .await
