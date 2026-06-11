@@ -448,6 +448,8 @@ pub mod audit;
 /// Sub-slice F.1 of the v0.15.0 plan.
 pub mod contenttypes;
 pub mod core;
+/// Named multi-database registry + `QuerySet::using(alias)` (#332/#400).
+pub mod databases;
 pub mod migrate;
 pub mod query;
 pub mod sql;
