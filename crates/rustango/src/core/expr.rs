@@ -151,6 +151,20 @@ pub enum Expr {
     ///
     /// [`AggregateQuery`]: crate::core::AggregateQuery
     AggregateSubquery(Box<super::query::AggregateQuery>),
+    /// Correlated aggregate over a **raw relation table** — the M2M /
+    /// GFK counterpart of [`AggregateSubquery`](Expr::AggregateSubquery)
+    /// for tables that have no `ModelSchema` (issue #830). Emits
+    /// `(SELECT <kind>(<column> | *) FROM <table> WHERE <correlation>)`.
+    /// `column` is `None` for `COUNT(*)` and `Some(col)` for
+    /// `SUM`/`AVG`/`MAX`/`MIN`. The correlation back to the outer row
+    /// (and, for M2M target aggregates, the junction membership) lives
+    /// in [`RelCorrelation`](super::query::RelCorrelation).
+    RelAggregate {
+        kind: super::query::RelAggKind,
+        column: Option<&'static str>,
+        table: &'static str,
+        correlation: super::query::RelCorrelation,
+    },
     /// Reference to an outer query's column from inside a correlated
     /// subquery (issue #5). Emitted as `"<outer_table>"."<col>"`; the
     /// outer table is threaded through the writer at emit time so

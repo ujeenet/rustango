@@ -857,6 +857,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &container.default_permissions,
         &container.global_scopes,
         &container.reverse_has_relations,
+        &container.generic_has_relations,
     );
     let module_ident = column_module_ident(struct_name);
     let column_consts = column_const_tokens(&module_ident, &collected.column_entries);
@@ -2320,6 +2321,7 @@ fn model_impl_tokens(
     default_permissions: &[String],
     global_scopes: &[GlobalScopeAttr],
     reverse_has_relations: &[ReverseHasAttr],
+    generic_has_relations: &[GenericHasAttr],
 ) -> TokenStream2 {
     let root = rustango_root();
     let display_tokens = if let Some(name) = display {
@@ -2533,6 +2535,34 @@ fn model_impl_tokens(
             }
         }
     };
+    // Issue #830 — `Model::generic_reverse_relations()` override for
+    // `#[rustango(generic_has(...))]` (the reverse generic-FK arm).
+    let generic_reverse_relations_override = if generic_has_relations.is_empty() {
+        quote!()
+    } else {
+        let entries = generic_has_relations.iter().map(|rel| {
+            let name = rel.name.as_str();
+            let child = &rel.child;
+            let ct_column = rel.ct_column.as_str();
+            let pk_column = rel.pk_column.as_str();
+            let self_pk_column = rel.self_pk_column.as_str();
+            quote! {
+                #root::core::GenericReverseRelation {
+                    name: #name,
+                    child_schema: <#child as #root::core::Model>::SCHEMA,
+                    ct_column: #ct_column,
+                    pk_column: #pk_column,
+                    self_pk_column: #self_pk_column,
+                }
+            }
+        });
+        quote! {
+            fn generic_reverse_relations() -> &'static [#root::core::GenericReverseRelation] {
+                const RELS: &[#root::core::GenericReverseRelation] = &[ #(#entries),* ];
+                RELS
+            }
+        }
+    };
     quote! {
         impl #root::core::Model for #struct_name {
             const SCHEMA: &'static #root::core::ModelSchema = &#root::core::ModelSchema {
@@ -2571,6 +2601,7 @@ fn model_impl_tokens(
             };
 
             #reverse_relations_override
+            #generic_reverse_relations_override
         }
     }
 }
@@ -8002,6 +8033,11 @@ struct ContainerAttrs {
     /// over a correlated subquery against the child table. Users
     /// drop the result into `QuerySet::where_raw(...)`.
     reverse_has_relations: Vec<ReverseHasAttr>,
+    /// `#[rustango(generic_has(...))]` reverse generic-FK declarations —
+    /// issue #830. Each emits a `Model::generic_reverse_relations()`
+    /// entry so the relation-existence family resolves polymorphic
+    /// children by name.
+    generic_has_relations: Vec<GenericHasAttr>,
 }
 
 /// Parsed `#[rustango(global_scope(name = "...", apply = fn_path))]`
@@ -8124,6 +8160,28 @@ struct ReverseHasAttr {
     /// SQL primary-key column on **this** model's table — the column
     /// the `OuterRef` resolves to. Optional; defaults to `"id"`
     /// (rustango's default PK column name).
+    self_pk_column: String,
+}
+
+/// Parsed `#[rustango(generic_has(name, child, ct_column, pk_column
+/// [, self_pk_column]))]` — the reverse generic-FK (GFK) arm of the
+/// relation-existence family (issue #830). The child is a polymorphic,
+/// content-type-discriminated model; emits a `Model::
+/// generic_reverse_relations()` entry the queryset resolves by name.
+struct GenericHasAttr {
+    /// Accessor name, e.g. `name = "tags"`.
+    name: String,
+    /// Child model type identifier (`child = "Tag"`) — looked up for its
+    /// `SCHEMA` so the subquery's `FROM` points at the child table.
+    child: syn::Ident,
+    /// Column on the child table holding the parent's content-type id.
+    /// Optional; defaults to `"content_type_id"`.
+    ct_column: String,
+    /// Column on the child table holding the parent's PK value.
+    /// Optional; defaults to `"object_pk"`.
+    pk_column: String,
+    /// SQL primary-key column on **this** (parent) model's table.
+    /// Optional; defaults to `"id"`.
     self_pk_column: String,
 }
 
@@ -8363,6 +8421,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         global_scopes: Vec::new(),
         through_relations: Vec::new(),
         reverse_has_relations: Vec::new(),
+        generic_has_relations: Vec::new(),
     };
     for attr in &input.attrs {
         if !attr.path().is_ident("rustango") {
@@ -8921,6 +8980,118 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     name,
                     child,
                     child_fk_column,
+                    self_pk_column,
+                });
+                return Ok(());
+            }
+            if meta.path.is_ident("generic_has") {
+                // `#[rustango(generic_has(name = "tags",
+                //  child = "Tag", ct_column = "content_type_id",
+                //  pk_column = "object_pk" [, self_pk_column = "id"]))]`
+                //  — issue #830, the reverse generic-FK (GFK) arm of the
+                //  relation-existence family.
+                let span = meta.path.span();
+                let mut accessor_name: Option<String> = None;
+                let mut child_ident: Option<syn::Ident> = None;
+                let mut ct_column: Option<String> = None;
+                let mut pk_column: Option<String> = None;
+                let mut self_pk_column: Option<String> = None;
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("name") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let raw = s.value();
+                        if raw.trim().is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`generic_has(name = \"...\")` must not be empty",
+                            ));
+                        }
+                        accessor_name = Some(raw);
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("child") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let trimmed = s.value().trim().to_owned();
+                        if trimmed.is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`generic_has(child = \"...\")` must not be empty",
+                            ));
+                        }
+                        child_ident = Some(syn::Ident::new(&trimmed, s.span()));
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("ct_column") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let trimmed = s.value().trim().to_owned();
+                        if trimmed.is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`generic_has(ct_column = \"...\")` must not be empty",
+                            ));
+                        }
+                        ct_column = Some(trimmed);
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("pk_column") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let trimmed = s.value().trim().to_owned();
+                        if trimmed.is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`generic_has(pk_column = \"...\")` must not be empty",
+                            ));
+                        }
+                        pk_column = Some(trimmed);
+                        return Ok(());
+                    }
+                    if inner.path.is_ident("self_pk_column") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        let trimmed = s.value().trim().to_owned();
+                        if trimmed.is_empty() {
+                            return Err(syn::Error::new(
+                                s.span(),
+                                "`generic_has(self_pk_column = \"...\")` must not be empty",
+                            ));
+                        }
+                        self_pk_column = Some(trimmed);
+                        return Ok(());
+                    }
+                    Err(inner.error(
+                        "unknown `generic_has` attribute (supported: \
+                         `name`, `child`, `ct_column`, `pk_column`, \
+                         `self_pk_column`)",
+                    ))
+                })?;
+                let Some(name) = accessor_name else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`generic_has` requires `name = \"...\"`",
+                    ));
+                };
+                let Some(child) = child_ident else {
+                    return Err(syn::Error::new(
+                        span,
+                        "`generic_has` requires `child = \"ChildModelType\"`",
+                    ));
+                };
+                let ct_column = ct_column.unwrap_or_else(|| "content_type_id".to_owned());
+                let pk_column = pk_column.unwrap_or_else(|| "object_pk".to_owned());
+                let self_pk_column = self_pk_column.unwrap_or_else(|| "id".to_owned());
+                if out.generic_has_relations.iter().any(|r| r.name == name) {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "duplicate `generic_has(name = \"{name}\")` — \
+                             pick a unique accessor name"
+                        ),
+                    ));
+                }
+                out.generic_has_relations.push(GenericHasAttr {
+                    name,
+                    child,
+                    ct_column,
+                    pk_column,
                     self_pk_column,
                 });
                 return Ok(());

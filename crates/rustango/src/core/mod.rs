@@ -26,15 +26,15 @@ pub use expr::{BinOp, CaseBranch, Expr, JsonPathStep, ScalarFn, F};
 pub use field_type::{ArrayElem, FieldType, RangeElem};
 pub use query::{
     AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery, ColumnFilter,
-    CompoundBranch, ConflictClause, CountQuery, DeleteQuery, DistinctMode, Filter, InsertQuery,
-    Join, JoinKind, LockMode, NullsOrder, Op, OrderClause, OrderItem, SearchClause, SelectQuery,
-    SetOp, SubqueryJoin, UpdateQuery, WhereExpr,
+    CompoundBranch, ConflictClause, CountQuery, CtFilter, DeleteQuery, DistinctMode, Filter,
+    InsertQuery, Join, JoinKind, LockMode, NullsOrder, Op, OrderClause, OrderItem, RelAggKind,
+    RelCorrelation, SearchClause, SelectQuery, SetOp, SubqueryJoin, UpdateQuery, WhereExpr,
 };
 pub use schema::{
     infer_app_label_from_module_path, AdminConfig, CheckConstraint, CompositeFkRelation,
-    ExclusionConstraint, FieldSchema, Fieldset, GenericRelation, GlobalScope, IndexMethod,
-    IndexSchema, ListSelectRelated, M2MRelation, Model, ModelEntry, ModelSchema, ModelScope,
-    OnDeleteAction, PrepopulatedField, Relation, ReverseRelation,
+    ExclusionConstraint, FieldSchema, Fieldset, GenericRelation, GenericReverseRelation,
+    GlobalScope, IndexMethod, IndexSchema, ListSelectRelated, M2MRelation, Model, ModelEntry,
+    ModelSchema, ModelScope, OnDeleteAction, PrepopulatedField, Relation, ReverseRelation,
 };
 pub use validate::validate_value;
 pub use value::SqlValue;
