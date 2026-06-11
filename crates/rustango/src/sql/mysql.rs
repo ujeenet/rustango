@@ -148,7 +148,8 @@ impl Dialect for MySql {
             | FieldType::Json
             | FieldType::Array(_)
             | FieldType::Range(_)
-            | FieldType::HStore => return None,
+            | FieldType::HStore
+            | FieldType::Vector(_) => return None,
         })
     }
 
@@ -202,6 +203,8 @@ impl Dialect for MySql {
             FieldType::Range(_) => "TEXT".into(),
             // Ditto for PG hstore columns (#342).
             FieldType::HStore => "TEXT".into(),
+            // Ditto for pgvector `vector` columns (#824).
+            FieldType::Vector(_) => "TEXT".into(),
         }
     }
 

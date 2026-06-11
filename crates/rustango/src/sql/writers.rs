@@ -1323,6 +1323,19 @@ fn write_expr(
                     dialect: b.d.name(),
                 });
             }
+            // pgvector distance operators are Postgres-only (#824).
+            if matches!(op, BO::L2Distance | BO::CosineDistance | BO::InnerProduct)
+                && b.d.name() != "postgres"
+            {
+                return Err(SqlError::OpNotSupportedInDialect {
+                    op: match op {
+                        BO::L2Distance => "<-> (pgvector L2 distance)",
+                        BO::CosineDistance => "<=> (pgvector cosine distance)",
+                        _ => "<#> (pgvector inner product)",
+                    },
+                    dialect: b.d.name(),
+                });
+            }
             b.sql.push('(');
             // Nested casts only apply at the literal leaf — clear here
             // so an outer NULL cast doesn't bleed into the operand.
@@ -1347,6 +1360,10 @@ fn write_expr(
                 }
                 BO::BitShl => "<<",
                 BO::BitShr => ">>",
+                // pgvector distance operators (#824); PG-gated above.
+                BO::L2Distance => "<->",
+                BO::CosineDistance => "<=>",
+                BO::InnerProduct => "<#>",
             });
             b.sql.push(' ');
             write_expr(b, right, None)?;

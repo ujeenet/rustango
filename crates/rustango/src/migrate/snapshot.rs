@@ -528,6 +528,10 @@ pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
         FieldType::Range(crate::core::RangeElem::DateTime) => "range_datetime",
         // #342 — PG hstore.
         FieldType::HStore => "hstore",
+        // #824 — pgvector. NOTE: dims aren't encoded here (this returns
+        // `&'static str`), so a dimension-only change (`vector(3)` →
+        // `vector(4)`) isn't surfaced as a schema diff.
+        FieldType::Vector(_) => "vector",
     }
 }
 

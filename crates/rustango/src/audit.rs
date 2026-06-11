@@ -1278,6 +1278,9 @@ fn bind_value_pg(
         SqlValue::HStore(_) => {
             unreachable!("HStore values never reach audited-save bind path")
         }
+        SqlValue::Vector(_) => {
+            unreachable!("Vector values never reach audited-save bind path")
+        }
     }
 }
 
@@ -1311,6 +1314,9 @@ fn bind_value_my(
         }
         SqlValue::HStore(_) => {
             unreachable!("HStore values never reach audited-save bind path")
+        }
+        SqlValue::Vector(_) => {
+            unreachable!("Vector values never reach audited-save bind path")
         }
     }
 }
@@ -1347,6 +1353,9 @@ fn bind_value_sqlite<'q>(
         }
         SqlValue::HStore(_) => {
             unreachable!("HStore values never reach audited-save bind path")
+        }
+        SqlValue::Vector(_) => {
+            unreachable!("Vector values never reach audited-save bind path")
         }
     }
 }

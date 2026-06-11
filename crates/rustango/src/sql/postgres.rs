@@ -121,6 +121,10 @@ impl Dialect for Postgres {
                 | "tablespaces"
                 | "json_path"
                 | "json_query"
+                // pgvector similarity search (#824). Requires the
+                // `vector` extension to be installed/enabled.
+                | "pgvector"
+                | "vector"
         ) || self.default_supports(token)
     }
 

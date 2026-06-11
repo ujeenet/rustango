@@ -144,6 +144,8 @@ where
             FieldType::Range(_) => Value::Null,
             // #342 — PG hstore columns; same generic-decode story.
             FieldType::HStore => Value::Null,
+            // #824 — pgvector columns; typed fetch decodes via `Vector`.
+            FieldType::Vector(_) => Value::Null,
         };
         map.insert(field.name.to_owned(), value);
     }
@@ -285,6 +287,8 @@ pub fn row_to_json_sqlite(
             FieldType::Range(_) => Value::Null,
             // #342 — hstore is PG-only; never present on SQLite.
             FieldType::HStore => Value::Null,
+            // #824 — pgvector is PG-only; typed fetch decodes via `Vector`.
+            FieldType::Vector(_) => Value::Null,
         };
         map.insert(field.name.to_owned(), value);
     }

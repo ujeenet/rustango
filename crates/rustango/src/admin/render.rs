@@ -125,6 +125,8 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
         FieldType::Range(_) => v.as_str().map_or_else(|| v.to_string(), str::to_owned),
         // #342 — PG hstore: compact JSON object form.
         FieldType::HStore => v.to_string(),
+        // #824 — pgvector: compact JSON array form.
+        FieldType::Vector(_) => v.to_string(),
     }
 }
 
@@ -348,6 +350,10 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         FieldType::HStore => format!(
             r#"<input type="text" name="{name}" id="{name}" value="{val}" placeholder="{{&quot;key&quot;: &quot;value&quot;}}"{required}{readonly}>"#
         ),
+        // #824 — pgvector: a JSON-array text input (`[0.1, 0.2, ...]`).
+        FieldType::Vector(_) => format!(
+            r#"<input type="text" name="{name}" id="{name}" value="{val}" placeholder="[0.1, 0.2, ...]"{required}{readonly}>"#
+        ),
     }
 }
 
@@ -527,6 +533,10 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
         FieldType::HStore => serde_json::to_string(v)
             .map(|s| escape(&s))
             .unwrap_or_default(),
+        // #824 — pgvector: compact JSON array in the list cell.
+        FieldType::Vector(_) => serde_json::to_string(v)
+            .map(|s| escape(&s))
+            .unwrap_or_default(),
     }
 }
 
@@ -603,6 +613,8 @@ pub(crate) fn read_joined_value_as_html_json(
         FieldType::Range(_) => None,
         // #342 — hstore isn't a meaningful select_related join target.
         FieldType::HStore => None,
+        // #824 — vector isn't a meaningful select_related join target.
+        FieldType::Vector(_) => None,
     };
     text.map(|s| escape(&s))
 }

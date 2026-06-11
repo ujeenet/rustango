@@ -10178,6 +10178,10 @@ struct FieldAttrs {
     /// silently ignored on non-FK fields. Follow-up to #816.
     related_name: Option<String>,
     max_length: Option<u32>,
+    /// `#[rustango(vector(dims = N))]` — pgvector column dimension (#824).
+    /// Threaded into `FieldType::Vector(N)` at emission. `None` → an
+    /// unconstrained `vector` column.
+    vector_dims: Option<u32>,
     min: Option<i64>,
     max: Option<i64>,
     default: Option<String>,
@@ -10290,6 +10294,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         on_delete: None,
         related_name: None,
         max_length: None,
+        vector_dims: None,
         min: None,
         max: None,
         default: None,
@@ -10394,6 +10399,20 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("max_length") {
                 let lit: syn::LitInt = meta.value()?.parse()?;
                 out.max_length = Some(lit.base10_parse::<u32>()?);
+                return Ok(());
+            }
+            // `#[rustango(vector(dims = N))]` — pgvector column
+            // dimension (#824). Nested-meta form so it reads like the
+            // other typed-column attrs.
+            if meta.path.is_ident("vector") {
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("dims") {
+                        let lit: syn::LitInt = inner.value()?.parse()?;
+                        out.vector_dims = Some(lit.base10_parse::<u32>()?);
+                        return Ok(());
+                    }
+                    Err(inner.error("unknown `vector` attribute (supported: `dims`)"))
+                })?;
                 return Ok(());
             }
             if meta.path.is_ident("min") {
@@ -10912,7 +10931,17 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     }
     let relation = relation_tokens(field, &attrs, fk_inner, table)?;
     let column_lit = column.as_str();
-    let field_type_tokens = kind.variant_tokens();
+    // pgvector (#824): the `vector(dims = N)` attribute supplies the
+    // dimension that the bare `Vector` Rust type can't carry, so emit
+    // `FieldType::Vector(N)` here rather than the `variant_tokens`
+    // fallback of `Vector(0)`.
+    let field_type_tokens = if kind == DetectedKind::Vector {
+        let root = rustango_root();
+        let dims = attrs.vector_dims.unwrap_or(0);
+        quote!(#root::core::FieldType::Vector(#dims))
+    } else {
+        kind.variant_tokens()
+    };
     let max_length = optional_u32(attrs.max_length);
     let min = optional_i64(attrs.min);
     let max = optional_i64(attrs.max);
@@ -11176,6 +11205,10 @@ enum DetectedKind {
     RangeDateTime,
     /// `HStore` → PG `hstore` (#342).
     HStore,
+    /// `Vector` → pgvector `vector(N)` (#824). The dimension `N` comes
+    /// from the `#[rustango(vector(dims = N))]` field attribute, threaded
+    /// in at the `FieldType` emission site (not carried on this enum).
+    Vector,
 }
 
 impl DetectedKind {
@@ -11221,6 +11254,9 @@ impl DetectedKind {
                 quote!(#root::core::FieldType::Range(#root::core::RangeElem::DateTime))
             }
             Self::HStore => quote!(#root::core::FieldType::HStore),
+            // Dimension comes from the `vector(dims = N)` attribute,
+            // applied at the emission site; `0` here is just a fallback.
+            Self::Vector => quote!(#root::core::FieldType::Vector(0)),
         }
     }
 
@@ -11278,6 +11314,8 @@ impl DetectedKind {
             | Self::RangeDateTime => (quote!(RangeLiteral), quote!(::std::string::String::new())),
             // HStore (#342) can't be a FK PK — never reached.
             Self::HStore => (quote!(HStore), quote!(::std::vec::Vec::new())),
+            // Vector (#824) can't be a FK PK — never reached.
+            Self::Vector => (quote!(Vector), quote!(::std::vec::Vec::new())),
         }
     }
 }
@@ -11520,6 +11558,16 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
         "HStore" => {
             return Ok(DetectedType {
                 kind: DetectedKind::HStore,
+                nullable: false,
+                auto: false,
+                fk_inner: None,
+            });
+        }
+        // `Vector` → pgvector `vector(N)` (#824). The dimension is
+        // supplied by `#[rustango(vector(dims = N))]`, not the type.
+        "Vector" => {
+            return Ok(DetectedType {
+                kind: DetectedKind::Vector,
                 nullable: false,
                 auto: false,
                 fk_inner: None,
