@@ -283,6 +283,8 @@ fn field_type_to_schema(t: FieldType) -> Schema {
             additional_properties: Some(Box::new(Schema::string())),
             ..Default::default()
         },
+        // #824 — pgvector embedding: a JSON array of numbers.
+        FieldType::Vector(_) => Schema::array_of(Schema::number()),
     }
 }
 

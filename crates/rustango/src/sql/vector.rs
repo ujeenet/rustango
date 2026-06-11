@@ -214,7 +214,6 @@ impl sqlx::Encode<'_, sqlx::Postgres> for Vector {
 #[cfg(feature = "postgres")]
 impl sqlx::Decode<'_, sqlx::Postgres> for Vector {
     fn decode(value: sqlx::postgres::PgValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {
-        use sqlx::ValueRef as _;
         let inner = match value.format() {
             sqlx::postgres::PgValueFormat::Binary => decode_pgvector_binary(value.as_bytes()?)?,
             sqlx::postgres::PgValueFormat::Text => decode_pgvector_text(value.as_str()?)?,
