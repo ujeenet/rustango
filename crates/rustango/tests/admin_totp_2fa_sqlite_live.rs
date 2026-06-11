@@ -17,7 +17,12 @@ use rustango::sql::{sqlx, Pool};
 use rustango::totp::{self, TotpSecret};
 
 async fn pool() -> Pool {
-    let p = sqlx::SqlitePool::connect("sqlite::memory:")
+    // Pin to one connection: a `sqlite::memory:` DB is per-connection, so
+    // a multi-connection pool could route the seed and a later query to
+    // different (empty) databases.
+    let p = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
         .await
         .expect("sqlite memory");
     let pool: Pool = p.into();

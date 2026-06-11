@@ -24,7 +24,14 @@ use tower::ServiceExt as _;
 const PREFIX: &str = "";
 
 async fn seed() -> (Pool, TotpSecret) {
-    let p = sqlx::SqlitePool::connect("sqlite::memory:")
+    // `max_connections(1)`: a `sqlite::memory:` database is per-connection,
+    // so a multi-connection pool would hand the router a *different*
+    // (empty) DB than the one we seed on. Pinning to one connection keeps
+    // the seed + every request on the same in-memory database. (Passes
+    // locally either way, but CI's timing can open a second connection.)
+    let p = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
         .await
         .expect("sqlite");
     // AdminUser table (matches `rustango_admin_users` / AdminUser::SCHEMA).
