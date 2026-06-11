@@ -23,7 +23,7 @@ use sqlx::postgres::{PgArguments, PgRow};
 use sqlx::query::Query;
 
 use super::ExecError;
-use crate::core::{SelectQuery, SqlValue};
+use crate::core::{AggregateQuery, SelectQuery, SqlValue};
 use crate::sql::Pool;
 use crate::sql::{
     MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
@@ -109,6 +109,87 @@ pub async fn fetch_values_dict(
     query: &SelectQuery,
 ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
     let stmt = pool.dialect().compile_select(query)?;
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query(q, v);
+            }
+            let rows = q.fetch_all(pg).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in &rows {
+                use sqlx::Column as _;
+                use sqlx::Row as _;
+                let mut map = std::collections::HashMap::new();
+                for (i, col) in row.columns().iter().enumerate() {
+                    map.insert(col.name().to_owned(), pg_cell_to_sqlvalue(row, i));
+                }
+                out.push(map);
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "mysql")]
+        Pool::Mysql(my) => {
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            let rows = q.fetch_all(my).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in &rows {
+                use sqlx::Column as _;
+                use sqlx::Row as _;
+                let mut map = std::collections::HashMap::new();
+                for (i, col) in row.columns().iter().enumerate() {
+                    map.insert(col.name().to_owned(), my_cell_to_sqlvalue(row, i));
+                }
+                out.push(map);
+            }
+            Ok(out)
+        }
+        #[cfg(feature = "sqlite")]
+        Pool::Sqlite(sq) => {
+            let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_sqlite(q, v);
+            }
+            let rows = q.fetch_all(sq).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in &rows {
+                use sqlx::Column as _;
+                use sqlx::Row as _;
+                let mut map = std::collections::HashMap::new();
+                for (i, col) in row.columns().iter().enumerate() {
+                    map.insert(col.name().to_owned(), sqlite_cell_to_sqlvalue(row, i));
+                }
+                out.push(map);
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// Execute an [`AggregateQuery`] and return each row as a
+/// `HashMap<String, SqlValue>` keyed by output-column (alias) name —
+/// the tri-dialect counterpart of [`fetch_values_dict`] for the
+/// aggregate / annotate path. Backs [`crate::query::AggregateBuilder::fetch`].
+///
+/// The PG-only [`super::fetch_aggregate_on`] does the same thing on a
+/// borrowed Postgres executor; this routes through the [`Pool`] enum so
+/// the relation eager-aggregates (`withCount` / `withSum` / …, issue
+/// #830) and every other `.annotate(...)` resolve on SQLite and MySQL
+/// too, not just Postgres.
+///
+/// # Errors
+/// SQL compilation or driver failure.
+pub async fn fetch_aggregate_dict(
+    pool: &Pool,
+    query: &AggregateQuery,
+) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
+    let stmt = pool.dialect().compile_aggregate(query)?;
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -429,6 +510,29 @@ impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
     ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
         let q = self.compile()?;
         fetch_values_dict(pool, &q).await
+    }
+}
+
+impl<T: crate::core::Model> crate::query::AggregateBuilder<T> {
+    /// Execute the aggregate / annotate query and return rows as
+    /// `Vec<HashMap<String, SqlValue>>` keyed by output-column name.
+    ///
+    /// This is the tri-dialect fetch path for every `.aggregate()` /
+    /// `.annotate(...)` chain, including the relation eager-aggregates
+    /// [`crate::query::QuerySet::annotate_count`] / `annotate_sum` / …
+    /// (issue #830) — each row carries the parent's scalar columns plus
+    /// the derived `<rel>_<agg>` column.
+    ///
+    /// # Errors
+    /// - [`ExecError::Query`] for SQL compilation failures (unknown
+    ///   relation / column, bad GROUP BY, etc.).
+    /// - [`ExecError::Sqlx`] for driver / network / decode failures.
+    pub async fn fetch(
+        self,
+        pool: &Pool,
+    ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
+        let q = self.compile()?;
+        fetch_aggregate_dict(pool, &q).await
     }
 }
 
@@ -763,7 +867,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             model: <T as crate::core::Model>::SCHEMA,
             where_clause: select_q.where_clause,
             group_by: Vec::new(),
-            aggregates: vec![("v", build(col_static))],
+            aggregates: vec![("v".into(), build(col_static))],
             aliases: Vec::new(),
             having: None,
             order_by: Vec::new(),

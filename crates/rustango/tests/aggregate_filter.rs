@@ -31,7 +31,7 @@ fn agg(expr: AggregateExpr) -> AggregateQuery {
     AggregateQuery {
         model: Post::SCHEMA,
         where_clause: WhereExpr::And(vec![]),
-        aggregates: vec![("agg", expr)],
+        aggregates: vec![("agg".into(), expr)],
         aliases: vec![],
         group_by: vec![],
         having: None,

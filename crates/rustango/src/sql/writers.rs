@@ -699,7 +699,7 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
         }
         write_aggregate_expr(b, expr, query.model)?;
         b.sql.push_str(" AS ");
-        b.write_ident(alias);
+        b.write_ident(alias.as_ref());
     }
 
     b.sql.push_str(" FROM ");
@@ -834,6 +834,15 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
                 wrapper: "PG-aggregate at format_bare_aggregate site",
             });
         }
+        AggregateExpr::RelatedAggregate(_) => {
+            // Correlated relation aggregates (issue #830) are emitted by
+            // the dedicated `write_aggregate_expr` arm via `write_expr`.
+            // Reaching the bare-aggregate helper means someone wrapped one
+            // in `Filtered`/`Coalesced` — not supported.
+            return Err(SqlError::NestedAggregateWrapper {
+                wrapper: "RelatedAggregate at format_bare_aggregate site",
+            });
+        }
     })
 }
 
@@ -959,6 +968,15 @@ fn write_aggregate_expr(
             b.sql.push(')');
             Ok(())
         }
+        // Issue #830 — correlated relation aggregate. The wrapped `Expr`
+        // is an `Expr::AggregateSubquery` over the child table; emit it
+        // directly. `write_aggregate` (reached via `write_expr`) pushes
+        // the child model's scope frame, and the inner `OuterRef` reads
+        // the parent frame this `write_aggregate_inner` already pushed,
+        // so the correlation resolves identically on every dialect. Any
+        // numeric cast the inner aggregate needs is applied inside the
+        // subquery, so no outer cast is required here.
+        AggregateExpr::RelatedAggregate(e) => write_expr(b, e, None),
         _ => write_aggregate_kind(b, expr),
     }
 }
@@ -1028,6 +1046,13 @@ fn write_aggregate_as_case_when(
                 wrapper: "Filtered(PG-aggregate)",
             });
         }
+        AggregateExpr::RelatedAggregate(_) => {
+            // Correlated relation aggregates (issue #830) can't be
+            // rewritten through the MySQL CASE-WHEN FILTER fallback.
+            return Err(SqlError::NestedAggregateWrapper {
+                wrapper: "Filtered(RelatedAggregate)",
+            });
+        }
     };
     let prior = b.sql.len();
     b.sql.push_str(agg_kw);
@@ -1076,6 +1101,10 @@ fn aggregate_column(expr: &AggregateExpr) -> Option<&'static str> {
             crate::core::Expr::Column(c) => Some(*c),
             _ => None,
         }),
+        // The aggregated column lives on the child table inside the
+        // correlated subquery, not on the outer model — there's no outer
+        // column to surface for null-cast resolution. Issue #830.
+        AggregateExpr::RelatedAggregate(_) => None,
     }
 }
 
