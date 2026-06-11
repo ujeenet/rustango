@@ -1549,6 +1549,127 @@ impl<T: Model> QuerySet<T> {
         }
     }
 
+    /// Eager-aggregate the **count** of related rows via the reverse-FK
+    /// relation named `name`, projected as a `<name>_count` column —
+    /// Eloquent `withCount('comments')` / Django
+    /// `.annotate(comments_count=Count('comments'))`. Issue #830 slice 4.
+    ///
+    /// Promotes the queryset to an [`AggregateBuilder`] whose result rows
+    /// are `Vec<HashMap<String, SqlValue>>` (same untyped shape as every
+    /// other [`QuerySet::annotate`] path — a typed `T` has no field to
+    /// land the derived column in). Each row carries every scalar column
+    /// of `T` plus the `<name>_count` key.
+    ///
+    /// The count comes from a **correlated subquery**
+    /// (`(SELECT COUNT(*) FROM <child> WHERE <child_fk> = <outer>.<pk>)`),
+    /// not a `JOIN`, so it never double-counts and emits no N+1 — the same
+    /// portable lowering [`Self::where_has_count`] uses across PG / MySQL /
+    /// SQLite.
+    ///
+    /// Unknown relation names surface as [`QueryError::UnknownField`] at
+    /// `compile()` time.
+    ///
+    /// ```ignore
+    /// // Eloquent: Author::withCount('books')->get();
+    /// let rows = Author::objects()
+    ///     .annotate_count("books")
+    ///     .fetch_pool(&pool).await?;
+    /// // rows[0]["books_count"] => SqlValue::I64(n)
+    /// ```
+    #[must_use]
+    pub fn annotate_count(self, name: &str) -> AggregateBuilder<T> {
+        self.annotate_relation_aggregate(name, None, AggregateExpr::Count(None), "count")
+    }
+
+    /// Eager-aggregate `SUM(<column>)` over related rows via the
+    /// reverse-FK relation `name`, projected as `<name>_sum_<column>` —
+    /// Eloquent `withSum('orders', 'total')`. `column` is a column on the
+    /// **child** model (validated against the child schema at
+    /// `compile()` time). See [`Self::annotate_count`] for the return
+    /// shape and correlated-subquery semantics.
+    #[must_use]
+    pub fn annotate_sum(self, name: &str, column: &'static str) -> AggregateBuilder<T> {
+        self.annotate_relation_aggregate(name, Some(column), AggregateExpr::Sum(column), "sum")
+    }
+
+    /// Eager-aggregate `AVG(<column>)` over related rows — Eloquent
+    /// `withAvg('orders', 'total')`, projected as `<name>_avg_<column>`.
+    /// See [`Self::annotate_sum`].
+    #[must_use]
+    pub fn annotate_avg(self, name: &str, column: &'static str) -> AggregateBuilder<T> {
+        self.annotate_relation_aggregate(name, Some(column), AggregateExpr::Avg(column), "avg")
+    }
+
+    /// Eager-aggregate `MAX(<column>)` over related rows — Eloquent
+    /// `withMax('orders', 'total')`, projected as `<name>_max_<column>`.
+    /// See [`Self::annotate_sum`].
+    #[must_use]
+    pub fn annotate_max(self, name: &str, column: &'static str) -> AggregateBuilder<T> {
+        self.annotate_relation_aggregate(name, Some(column), AggregateExpr::Max(column), "max")
+    }
+
+    /// Eager-aggregate `MIN(<column>)` over related rows — Eloquent
+    /// `withMin('orders', 'total')`, projected as `<name>_min_<column>`.
+    /// See [`Self::annotate_sum`].
+    #[must_use]
+    pub fn annotate_min(self, name: &str, column: &'static str) -> AggregateBuilder<T> {
+        self.annotate_relation_aggregate(name, Some(column), AggregateExpr::Min(column), "min")
+    }
+
+    /// Shared worker for the `annotate_{count,sum,avg,max,min}` family
+    /// (issue #830). Resolves the reverse relation, auto-names the
+    /// projected column (`<name>_count` or `<name>_<suffix>_<column>`),
+    /// wraps the correlated subquery in an
+    /// [`AggregateExpr::RelatedAggregate`], and stages it on a fresh
+    /// [`AggregateBuilder`].
+    ///
+    /// Errors are deferred onto the builder so they surface from
+    /// `compile()` (mirroring the queryset-level deferred-error path):
+    /// an unknown relation name → [`QueryError::UnknownField`] on `T`; a
+    /// `column` that isn't a field of the child model → the same error
+    /// keyed on the child schema.
+    fn annotate_relation_aggregate(
+        self,
+        name: &str,
+        column: Option<&'static str>,
+        agg: AggregateExpr,
+        suffix: &str,
+    ) -> AggregateBuilder<T> {
+        let mut builder = self.aggregate();
+        match T::reverse_relations().iter().find(|r| r.name == name) {
+            Some(rel) => {
+                if let Some(col) = column {
+                    if rel.child_schema.field_by_column(col).is_none() {
+                        builder
+                            .deferred_error
+                            .get_or_insert(QueryError::UnknownField {
+                                model: rel.child_schema.name,
+                                field: col.to_owned(),
+                            });
+                        return builder;
+                    }
+                }
+                let alias = match column {
+                    Some(col) => std::borrow::Cow::Owned(format!("{name}_{suffix}_{col}")),
+                    None => std::borrow::Cow::Owned(format!("{name}_{suffix}")),
+                };
+                let expr = AggregateExpr::RelatedAggregate(Box::new(
+                    crate::core::subquery::reverse_has_aggregate(rel, agg),
+                ));
+                builder.aggregates.push((alias, expr));
+            }
+            None => {
+                builder
+                    .deferred_error
+                    .get_or_insert(QueryError::UnknownField {
+                        model: T::SCHEMA.name,
+                        field: name.to_owned(),
+                    });
+            }
+        }
+        builder
+    }
+
     /// Eloquent `Builder::whereColumn($col1, $col2)` — emits
     /// `<col1> = <col2>`, comparing two columns instead of column
     /// vs literal. Equality is the overwhelming majority of uses;
@@ -3028,12 +3149,12 @@ fn validate_expr_columns_in_model(
 pub struct AggregateBuilder<T: Model> {
     qs: QuerySet<T>,
     group_by: Vec<&'static str>,
-    aggregates: Vec<(&'static str, AggregateExpr)>,
+    aggregates: Vec<(std::borrow::Cow<'static, str>, AggregateExpr)>,
     /// Django 3.2 `.alias()` — non-projected annotations. Resolvable in
     /// `.filter(name, …)` and `.order_by([(name, …)])` (the builder lifts
     /// the expression into the predicate/ORDER item at `compile()` time),
     /// but never emitted in the SELECT list. Issue #268.
-    aliases: Vec<(&'static str, AggregateExpr)>,
+    aliases: Vec<(std::borrow::Cow<'static, str>, AggregateExpr)>,
     having: Option<WhereExpr>,
     order_by: Vec<(&'static str, bool)>,
     limit: Option<i64>,
@@ -3083,7 +3204,8 @@ impl<T: Model> AggregateBuilder<T> {
     /// Add an aggregate expression under `alias` (e.g. `"post_count"`).
     #[must_use]
     pub fn annotate(mut self, alias: &'static str, expr: AggregateExpr) -> Self {
-        self.aggregates.push((alias, expr));
+        self.aggregates
+            .push((std::borrow::Cow::Borrowed(alias), expr));
         self
     }
 
@@ -3119,7 +3241,7 @@ impl<T: Model> AggregateBuilder<T> {
     /// annotate wins (it's projected; semantics-preserving).
     #[must_use]
     pub fn alias(mut self, name: &'static str, expr: AggregateExpr) -> Self {
-        self.aliases.push((name, expr));
+        self.aliases.push((std::borrow::Cow::Borrowed(name), expr));
         self
     }
 
@@ -3305,7 +3427,7 @@ impl<T: Model> AggregateBuilder<T> {
             self.aggregates
                 .iter()
                 .chain(self.aliases.iter())
-                .find(|(a, _)| *a == name)
+                .find(|(a, _)| a.as_ref() == name)
                 .map(|(_, e)| e.clone())
         };
         let order_by = self

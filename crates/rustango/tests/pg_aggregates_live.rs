@@ -70,7 +70,7 @@ fn agg_per_author(expr: AggregateExpr, alias: &'static str) -> AggregateQuery {
         model: <Post as rustango::core::Model>::SCHEMA,
         where_clause: WhereExpr::And(vec![]),
         group_by: vec!["author"],
-        aggregates: vec![(alias, expr)],
+        aggregates: vec![(alias.into(), expr)],
         aliases: vec![],
         having: None,
         order_by: vec![rustango::core::OrderClause {

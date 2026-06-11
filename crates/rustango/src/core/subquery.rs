@@ -156,20 +156,22 @@ pub fn reverse_has_not_exists(rel: &ReverseRelation) -> WhereExpr {
     WhereExpr::NotExists(Box::new(inner))
 }
 
-/// Build the correlated `(SELECT COUNT(*) FROM <child_table> WHERE
+/// Build the correlated `(SELECT <agg> FROM <child_table> WHERE
 /// <child_fk_column> = <outer>.<self_pk_column>)` scalar-aggregate
-/// subquery for the given [`ReverseRelation`] — issue #830 slice 3,
-/// backing [`crate::query::QuerySet::where_has_count`].
+/// subquery for the given [`ReverseRelation`] — issue #830. Backs both
+/// the count-comparator [`crate::query::QuerySet::where_has_count`]
+/// (slice 3) and the eager relation aggregates
+/// [`crate::query::QuerySet::annotate_count`] / `annotate_sum` / … (slice
+/// 4/5).
 ///
-/// The returned [`Expr`] is an [`Expr::AggregateSubquery`] suitable as
-/// the left-hand side of a count-comparison predicate (`… > 3`). The
-/// inner [`AggregateQuery`] projects `COUNT(*)` (no `GROUP BY`, so it
-/// yields exactly one row) and correlates to the parent via
-/// `OuterRef(self_pk_column)`; the writer's scope stack rewrites that
-/// `OuterRef` to the enclosing query's table qualifier at emit time,
-/// identically across PG / MySQL / SQLite.
+/// The returned [`Expr`] is an [`Expr::AggregateSubquery`]. The inner
+/// [`AggregateQuery`] projects `agg` over the **child** table (no
+/// `GROUP BY`, so it yields exactly one scalar row) and correlates to
+/// the parent via `OuterRef(self_pk_column)`; the writer's scope stack
+/// rewrites that `OuterRef` to the enclosing query's table qualifier at
+/// emit time, identically across PG / MySQL / SQLite.
 #[must_use]
-pub fn reverse_has_count(rel: &ReverseRelation) -> Expr {
+pub fn reverse_has_aggregate(rel: &ReverseRelation, agg: AggregateExpr) -> Expr {
     let inner = AggregateQuery {
         model: rel.child_schema,
         where_clause: WhereExpr::ExprCompare {
@@ -178,10 +180,10 @@ pub fn reverse_has_count(rel: &ReverseRelation) -> Expr {
             rhs: Expr::OuterRef(rel.self_pk_column),
         },
         group_by: Vec::new(),
-        // A correlated `COUNT(*)` — the alias is inert in a scalar
-        // subquery (the outer context reads the single value, not the
-        // name) but the aggregate writer requires one.
-        aggregates: vec![("c", AggregateExpr::Count(None))],
+        // The alias is inert in a scalar subquery (the outer context
+        // reads the single value, not the name) but the aggregate writer
+        // requires one.
+        aggregates: vec![("c".into(), agg)],
         aliases: Vec::new(),
         having: None,
         order_by: Vec::new(),
@@ -189,6 +191,16 @@ pub fn reverse_has_count(rel: &ReverseRelation) -> Expr {
         offset: None,
     };
     Expr::AggregateSubquery(Box::new(inner))
+}
+
+/// Correlated `(SELECT COUNT(*) FROM <child> WHERE <child_fk> =
+/// <outer>.<pk>)` — the count specialization of
+/// [`reverse_has_aggregate`], suitable as the left-hand side of a
+/// count-comparison predicate (`… > 3`). Backs
+/// [`crate::query::QuerySet::where_has_count`].
+#[must_use]
+pub fn reverse_has_count(rel: &ReverseRelation) -> Expr {
+    reverse_has_aggregate(rel, AggregateExpr::Count(None))
 }
 
 /// `OuterRef("col")` — reference a column from the enclosing query

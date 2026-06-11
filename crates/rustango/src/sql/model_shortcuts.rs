@@ -152,7 +152,7 @@ where
         model: T::SCHEMA,
         where_clause: WhereExpr::And(Vec::new()),
         group_by: Vec::new(),
-        aggregates: vec![("v", build(col_static))],
+        aggregates: vec![("v".into(), build(col_static))],
         aliases: Vec::new(),
         having: None,
         order_by: Vec::new(),

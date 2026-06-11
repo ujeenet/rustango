@@ -1904,8 +1904,8 @@ where
 mod values;
 #[allow(unused_imports)]
 pub use values::{
-    fetch_values_dict, fetch_values_flat, fetch_values_list, MaybeMyScalar, MaybePgScalar,
-    MaybeSqliteScalar,
+    fetch_aggregate_dict, fetch_values_dict, fetch_values_flat, fetch_values_list, MaybeMyScalar,
+    MaybePgScalar, MaybeSqliteScalar,
 };
 
 /// Execute arbitrary SQL with bound `SqlValue` params and decode each

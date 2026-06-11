@@ -4,6 +4,8 @@
 //! The SQL crate then walks that IR and writes a parameterized statement
 //! per dialect. Anything in this module is therefore visible to both.
 
+use std::borrow::Cow;
+
 use super::expr::Expr;
 use super::{validate::validate_value, ModelSchema, QueryError, SqlValue};
 
@@ -1453,6 +1455,25 @@ pub enum AggregateExpr {
     /// PG: `jsonb_agg(column)` — collects column values into a JSONB
     /// array. Issue #33. **Postgres-only**.
     JsonbAgg { column: &'static str },
+    /// Correlated relation aggregate — `withCount`/`withSum`/`withAvg`/
+    /// `withMax`/`withMin` by relation name (issue #830 slice 4/5).
+    ///
+    /// Wraps the correlated subquery [`Expr`] (always an
+    /// [`Expr::AggregateSubquery`]) produced by the
+    /// [`crate::core::subquery::reverse_has_aggregate`] family. Unlike
+    /// the flat variants, the aggregation happens *inside* the wrapped
+    /// subquery (over the **child** table); from the enclosing query's
+    /// perspective this is a per-row scalar.
+    ///
+    /// It reports [`is_aggregating()`](AggregateExpr::is_aggregating)
+    /// `== true` so the builder's GROUP-BY inference (Django Shape 3)
+    /// projects the parent's scalar columns alongside it — yielding
+    /// `{parent cols…, <rel>_<agg>}` dict rows. Because the count comes
+    /// from a correlated subquery (not a JOIN), it never double-counts.
+    /// The writer emits it via the same `Expr` path the WHERE-clause
+    /// `where_has_count` uses, so it lowers identically on PG / MySQL /
+    /// SQLite.
+    RelatedAggregate(Box<Expr>),
 }
 
 impl AggregateExpr {
@@ -1479,7 +1500,15 @@ impl AggregateExpr {
             | AggregateExpr::VariancePop(_)
             | AggregateExpr::ArrayAgg { .. }
             | AggregateExpr::StringAgg { .. }
-            | AggregateExpr::JsonbAgg { .. } => true,
+            | AggregateExpr::JsonbAgg { .. }
+            // The wrapped correlated subquery aggregates the *child*
+            // table; from the outer query's view it's a scalar, but we
+            // report `true` so the builder's Shape-3 inference adds the
+            // parent's scalar columns to GROUP BY (and thus the SELECT),
+            // surfacing `{parent cols…, <rel>_<agg>}` rows. The PK is in
+            // GROUP BY, so the correlated reference is functionally
+            // determined — valid under MySQL `ONLY_FULL_GROUP_BY` too.
+            | AggregateExpr::RelatedAggregate(_) => true,
             AggregateExpr::Window(_) => false,
             AggregateExpr::Filtered { inner, .. } | AggregateExpr::Coalesced { inner, .. } => {
                 inner.is_aggregating()
@@ -1546,14 +1575,22 @@ pub struct AggregateQuery {
     /// Columns to group by. Must be valid column names on `model`.
     pub group_by: Vec<&'static str>,
     /// `(alias, expr)` pairs — the alias becomes the key in each result row.
-    pub aggregates: Vec<(&'static str, AggregateExpr)>,
+    ///
+    /// The alias is a [`Cow<'static, str>`] rather than a bare
+    /// `&'static str`: most call sites pass a literal (e.g.
+    /// `Cow::Borrowed("post_count")`), but the relation-aggregate
+    /// shortcuts ([`crate::query::QuerySet::annotate_count`] et al.,
+    /// issue #830) auto-name their column from a runtime relation name
+    /// (`{rel}_count`, `{rel}_sum_{col}`), which requires an owned
+    /// string.
+    pub aggregates: Vec<(Cow<'static, str>, AggregateExpr)>,
     /// Non-projected annotations — Django 3.2 `.alias()`. Same `(name, expr)`
     /// shape as [`Self::aggregates`] but the writer omits these from the SELECT
     /// projection. They remain resolvable inside `HAVING` and `ORDER BY` (the
     /// builder lifts the expression in-place at compile time). Useful when you
     /// want to filter/order by a derived aggregate without paying the
     /// column-decode cost. Issue #268.
-    pub aliases: Vec<(&'static str, AggregateExpr)>,
+    pub aliases: Vec<(Cow<'static, str>, AggregateExpr)>,
     /// Optional HAVING clause (applied after GROUP BY).
     pub having: Option<WhereExpr>,
     pub order_by: Vec<OrderItem>,
