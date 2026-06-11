@@ -43,6 +43,7 @@
 //! Use [`BoxedCache`] as a convenient alias.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -485,6 +486,13 @@ impl Cache for NullCache {
 struct CacheEntry {
     value: String,
     expires_at: Option<Instant>,
+    /// Monotonic access tick for approximate-LRU eviction; bumped on
+    /// every read/write from [`InMemoryCache::tick`]. `AtomicU64` so
+    /// reads (which hold only the read lock) can update it.
+    last_used: AtomicU64,
+    /// `key.len() + value.len()` — this entry's charge against the
+    /// cache's byte budget.
+    size: usize,
 }
 
 impl CacheEntry {
@@ -493,47 +501,146 @@ impl CacheEntry {
     }
 }
 
+/// Map plus its running byte total, guarded together so the two can't
+/// drift under concurrent mutation.
+struct Store {
+    map: HashMap<String, CacheEntry>,
+    used_bytes: usize,
+}
+
+/// Default byte budget for [`InMemoryCache::new`] — 256 MiB. Big enough
+/// that normal page / fragment caching never evicts, small enough that
+/// an unauthenticated flood of unique keys (e.g. `?cb=<random>`, which
+/// each create a distinct cache entry) can't drive the process to OOM.
+/// Override — including disabling (`0`) — via
+/// [`InMemoryCache::with_max_bytes`].
+pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// Default entry-count cap for [`InMemoryCache::new`] — bounds the
+/// eviction scan (and memory) even when individual entries are tiny.
+/// `0` disables it; see [`InMemoryCache::with_max_entries`].
+pub const DEFAULT_MAX_ENTRIES: usize = 100_000;
+
 /// A per-process in-memory cache backed by a `tokio::sync::RwLock<HashMap>`.
 ///
 /// - Thread-safe, async-friendly, zero external dependencies.
 /// - TTL is enforced lazily on reads (no background eviction thread).
-/// - `clear()` removes all entries; expired entries accumulate until the
-///   key is read or cleared. For long-running processes with many unique
-///   keys, call `clear()` periodically or use the Redis backend.
+/// - **Size-bounded** (since #_cache_bound): capped at
+///   [`DEFAULT_MAX_BYTES`] / [`DEFAULT_MAX_ENTRIES`] with approximate-LRU
+///   eviction, so a flood of unique keys can't grow the process without
+///   limit. Eviction drops expired entries first, then the
+///   least-recently-used, until both budgets are met. Override or
+///   disable the budgets with [`InMemoryCache::with_max_bytes`] /
+///   [`InMemoryCache::with_max_entries`] (`0` = unbounded — the
+///   pre-#_cache_bound behavior).
+/// - `clear()` removes all entries.
 ///
 /// # Optional default TTL
 ///
 /// Build with [`InMemoryCache::with_default_ttl`] to apply a TTL to every
 /// `set` call that passes `ttl = None`.
 pub struct InMemoryCache {
-    inner: tokio::sync::RwLock<HashMap<String, CacheEntry>>,
+    inner: tokio::sync::RwLock<Store>,
     default_ttl: Option<Duration>,
+    /// Byte budget; `0` = unbounded (opt-out).
+    max_bytes: usize,
+    /// Entry-count budget; `0` = unbounded.
+    max_entries: usize,
+    /// Monotonic clock feeding each entry's `last_used` (approx-LRU).
+    tick: AtomicU64,
 }
 
 impl InMemoryCache {
-    /// Create a cache with no default TTL (entries live forever unless
-    /// explicitly given a TTL or removed).
+    /// Create a cache with no default TTL and the default size budgets
+    /// ([`DEFAULT_MAX_BYTES`] / [`DEFAULT_MAX_ENTRIES`], LRU eviction).
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            inner: tokio::sync::RwLock::new(HashMap::new()),
-            default_ttl: None,
-        }
+        Self::build(None, DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRIES)
     }
 
     /// Create a cache where every `set(key, value, None)` call uses
-    /// `default_ttl` instead of "no expiry".
+    /// `default_ttl` instead of "no expiry". Keeps the default budgets.
     #[must_use]
     pub fn with_default_ttl(default_ttl: Duration) -> Self {
+        Self::build(Some(default_ttl), DEFAULT_MAX_BYTES, DEFAULT_MAX_ENTRIES)
+    }
+
+    /// Override the byte budget. `0` disables it (unbounded — the old
+    /// behavior). Chainable: `InMemoryCache::new().with_max_bytes(64 << 20)`.
+    #[must_use]
+    pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = max_bytes;
+        self
+    }
+
+    /// Override the entry-count budget. `0` disables it. Chainable.
+    #[must_use]
+    pub fn with_max_entries(mut self, max_entries: usize) -> Self {
+        self.max_entries = max_entries;
+        self
+    }
+
+    fn build(default_ttl: Option<Duration>, max_bytes: usize, max_entries: usize) -> Self {
         Self {
-            inner: tokio::sync::RwLock::new(HashMap::new()),
-            default_ttl: Some(default_ttl),
+            inner: tokio::sync::RwLock::new(Store {
+                map: HashMap::new(),
+                used_bytes: 0,
+            }),
+            default_ttl,
+            max_bytes,
+            max_entries,
+            tick: AtomicU64::new(0),
         }
     }
 
     fn resolve_ttl(&self, ttl: Option<Duration>) -> Option<Instant> {
         let effective = ttl.or(self.default_ttl)?;
         Some(Instant::now() + effective)
+    }
+
+    fn next_tick(&self) -> u64 {
+        self.tick.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn over_budget(&self, s: &Store) -> bool {
+        (self.max_bytes > 0 && s.used_bytes > self.max_bytes)
+            || (self.max_entries > 0 && s.map.len() > self.max_entries)
+    }
+
+    /// Evict until both budgets are satisfied — expired entries first
+    /// (free + always correct), then least-recently-used. Caller holds
+    /// the write lock. Always keeps at least one entry, so a single
+    /// value larger than the whole budget still caches.
+    fn evict_locked(&self, store: &mut Store) {
+        if !self.over_budget(store) {
+            return;
+        }
+        let expired: Vec<String> = store
+            .map
+            .iter()
+            .filter(|(_, e)| e.is_expired())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in expired {
+            if let Some(e) = store.map.remove(&k) {
+                store.used_bytes = store.used_bytes.saturating_sub(e.size);
+            }
+        }
+        while self.over_budget(store) && store.map.len() > 1 {
+            let victim = store
+                .map
+                .iter()
+                .min_by_key(|(_, e)| e.last_used.load(Ordering::Relaxed))
+                .map(|(k, _)| k.clone());
+            match victim {
+                Some(k) => {
+                    if let Some(e) = store.map.remove(&k) {
+                        store.used_bytes = store.used_bytes.saturating_sub(e.size);
+                    }
+                }
+                None => break,
+            }
+        }
     }
 }
 
@@ -546,11 +653,13 @@ impl Default for InMemoryCache {
 #[async_trait]
 impl Cache for InMemoryCache {
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
-        let map = self.inner.read().await;
-        Ok(map.get(key).and_then(|e| {
+        let store = self.inner.read().await;
+        Ok(store.map.get(key).and_then(|e| {
             if e.is_expired() {
                 None
             } else {
+                // Approx-LRU bump — read lock is enough (atomic field).
+                e.last_used.store(self.next_tick(), Ordering::Relaxed);
                 Some(e.value.clone())
             }
         }))
@@ -558,29 +667,43 @@ impl Cache for InMemoryCache {
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
         let expires_at = self.resolve_ttl(ttl);
-        let mut map = self.inner.write().await;
-        map.insert(
+        let size = key.len() + value.len();
+        let tick = self.next_tick();
+        let mut store = self.inner.write().await;
+        if let Some(old) = store.map.remove(key) {
+            store.used_bytes = store.used_bytes.saturating_sub(old.size);
+        }
+        store.used_bytes += size;
+        store.map.insert(
             key.to_owned(),
             CacheEntry {
                 value: value.to_owned(),
                 expires_at,
+                last_used: AtomicU64::new(tick),
+                size,
             },
         );
+        self.evict_locked(&mut store);
         Ok(())
     }
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
-        self.inner.write().await.remove(key);
+        let mut store = self.inner.write().await;
+        if let Some(e) = store.map.remove(key) {
+            store.used_bytes = store.used_bytes.saturating_sub(e.size);
+        }
         Ok(())
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CacheError> {
-        let map = self.inner.read().await;
-        Ok(map.get(key).map_or(false, |e| !e.is_expired()))
+        let store = self.inner.read().await;
+        Ok(store.map.get(key).map_or(false, |e| !e.is_expired()))
     }
 
     async fn clear(&self) -> Result<(), CacheError> {
-        self.inner.write().await.clear();
+        let mut store = self.inner.write().await;
+        store.map.clear();
+        store.used_bytes = 0;
         Ok(())
     }
 }
@@ -814,5 +937,81 @@ mod settings_tests {
             cache.set("k", "v", None).await.unwrap();
             assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
         }
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+
+    fn val(n: usize) -> String {
+        "x".repeat(n)
+    }
+
+    /// Byte budget is enforced: flooding unique keys never grows the
+    /// cache past `max_bytes`. This is the unique-key memory-DoS guard.
+    #[tokio::test]
+    async fn byte_budget_caps_unique_key_flood() {
+        let cache = InMemoryCache::new()
+            .with_max_bytes(10 * 1024)
+            .with_max_entries(0);
+        for i in 0..1000 {
+            cache.set(&format!("k{i}"), &val(1024), None).await.unwrap();
+        }
+        let store = cache.inner.read().await;
+        assert!(
+            store.used_bytes <= 10 * 1024,
+            "used_bytes {} exceeded byte budget",
+            store.used_bytes
+        );
+        assert!(
+            store.map.len() <= 12,
+            "entry count {} too high",
+            store.map.len()
+        );
+    }
+
+    /// Entry-count budget is enforced independently of the byte budget.
+    #[tokio::test]
+    async fn entry_budget_caps_count() {
+        let cache = InMemoryCache::new().with_max_bytes(0).with_max_entries(5);
+        for i in 0..50 {
+            cache.set(&format!("k{i}"), "v", None).await.unwrap();
+        }
+        assert!(cache.inner.read().await.map.len() <= 5);
+    }
+
+    /// Eviction is least-recently-used: a key kept warm by reads
+    /// survives a flood that evicts colder keys.
+    #[tokio::test]
+    async fn lru_keeps_recently_used() {
+        let cache = InMemoryCache::new().with_max_bytes(0).with_max_entries(3);
+        cache.set("hot", "v", None).await.unwrap();
+        cache.set("a", "v", None).await.unwrap();
+        cache.set("b", "v", None).await.unwrap();
+        let _ = cache.get("hot").await.unwrap(); // touch -> most-recently-used
+        cache.set("c", "v", None).await.unwrap(); // evicts LRU (a)
+        cache.set("d", "v", None).await.unwrap(); // evicts LRU (b)
+        assert_eq!(cache.get("hot").await.unwrap().as_deref(), Some("v"));
+    }
+
+    /// `0` budgets restore the pre-fix unbounded behavior (opt-out).
+    #[tokio::test]
+    async fn zero_budget_is_unbounded() {
+        let cache = InMemoryCache::new().with_max_bytes(0).with_max_entries(0);
+        for i in 0..1000 {
+            cache.set(&format!("k{i}"), "v", None).await.unwrap();
+        }
+        assert_eq!(cache.inner.read().await.map.len(), 1000);
+    }
+
+    /// Deleting an entry returns its bytes to the budget.
+    #[tokio::test]
+    async fn delete_frees_bytes() {
+        let cache = InMemoryCache::new();
+        cache.set("k", &val(4096), None).await.unwrap();
+        assert!(cache.inner.read().await.used_bytes >= 4096);
+        cache.delete("k").await.unwrap();
+        assert_eq!(cache.inner.read().await.used_bytes, 0);
     }
 }
