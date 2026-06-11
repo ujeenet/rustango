@@ -51,15 +51,18 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        # Pulled from AWS Public ECR's Docker Hub mirror to side-step
-        # the intermittent `registry-1.docker.io context deadline
-        # exceeded` failures that occasionally hit the e2e job (no
-        # rate-limit info in the error — just a connectivity flake).
-        # `public.ecr.aws/docker/library/` is a verbatim mirror of
-        # Docker Hub's official-image namespace; same digests, same
-        # tags, far better availability for CI traffic. (Issue: CI
-        # Docker timeouts after PR #848 / #866.)
-        image: public.ecr.aws/docker/library/postgres:16-alpine
+        # pgvector/pgvector:pg16 = postgres:16 + the `vector` extension
+        # preinstalled (issue #824 — the vector live tests run
+        # `CREATE EXTENSION vector`). A superset of the stock image, so
+        # every existing PG test runs unchanged.
+        #
+        # NOTE: the other PG services here pull from the AWS Public ECR
+        # mirror (`public.ecr.aws/docker/library/`) to dodge the
+        # intermittent `registry-1.docker.io context deadline exceeded`
+        # flakes (PR #848 / #866). That mirror only carries Docker Hub's
+        # official `library/` namespace; pgvector lives in a user
+        # namespace, so this one image comes straight from Docker Hub.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: rustango
           POSTGRES_PASSWORD: rustango
