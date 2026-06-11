@@ -1,7 +1,7 @@
 //! Live, multi-dialect tests for the relation eager-aggregate family
 //! `QuerySet::annotate_count` / `annotate_sum` / `annotate_avg` /
-//! `annotate_max` / `annotate_min` — issue #830 slice 4/5
-//! (`withCount`/`withSum`/… by relation name).
+//! `annotate_max` / `annotate_min` / `annotate_exists` — issue #830
+//! slice 4/5 (`withCount`/`withSum`/`withExists`/… by relation name).
 //!
 //! Exercises the correlated aggregate projection end-to-end against real
 //! engines: seed authors with differing book counts and page totals, then
@@ -220,6 +220,23 @@ mod sqlite_live {
     }
 
     #[tokio::test]
+    async fn annotate_exists_flags_presence_as_one_or_zero() {
+        let pool = make_pool().await;
+        seed(&pool).await;
+        let by_name: HashMap<String, i64> = Author::objects()
+            .annotate_exists("books")
+            .fetch(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (get_string(r, "name").to_owned(), get_i64(r, "books_exists")))
+            .collect();
+        assert_eq!(by_name.get("Zero"), Some(&0)); // no books -> 0
+        assert_eq!(by_name.get("One"), Some(&1));
+        assert_eq!(by_name.get("Three"), Some(&1));
+    }
+
+    #[tokio::test]
     async fn unknown_relation_errors_at_compile_time() {
         let pool = make_pool().await;
         seed(&pool).await;
@@ -277,6 +294,18 @@ mod pg_live {
             .await
             .unwrap();
         assert_eq!(get_i64(&three[0], "books_sum_pages"), 60);
+
+        let exists: HashMap<String, i64> = Author::objects()
+            .annotate_exists("books")
+            .fetch(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (get_string(r, "name").to_owned(), get_i64(r, "books_exists")))
+            .collect();
+        assert_eq!(exists.get("Zero"), Some(&0));
+        assert_eq!(exists.get("One"), Some(&1));
+        assert_eq!(exists.get("Three"), Some(&1));
     }
 }
 
@@ -325,5 +354,17 @@ mod my_live {
             .await
             .unwrap();
         assert_eq!(get_i64(&three[0], "books_sum_pages"), 60);
+
+        let exists: HashMap<String, i64> = Author::objects()
+            .annotate_exists("books")
+            .fetch(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (get_string(r, "name").to_owned(), get_i64(r, "books_exists")))
+            .collect();
+        assert_eq!(exists.get("Zero"), Some(&0));
+        assert_eq!(exists.get("One"), Some(&1));
+        assert_eq!(exists.get("Three"), Some(&1));
     }
 }

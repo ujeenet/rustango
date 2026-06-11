@@ -1616,6 +1616,46 @@ impl<T: Model> QuerySet<T> {
         self.annotate_relation_aggregate(name, Some(column), AggregateExpr::Min(column), "min")
     }
 
+    /// Eager-annotate whether **any** related row exists via the
+    /// reverse-FK relation `name`, projected as a `<name>_exists` column
+    /// — Eloquent `withExists('comments')` / Django
+    /// `.annotate(has_comments=Exists(...))`. Issue #830 slice 5.
+    ///
+    /// Emits `CASE WHEN EXISTS (SELECT 1 FROM <child> WHERE <child_fk> =
+    /// <outer>.<pk>) THEN 1 ELSE 0 END` — cheaper than
+    /// [`Self::annotate_count`] when you only need presence (`EXISTS`
+    /// short-circuits on the first matching child row). The column
+    /// decodes as `SqlValue::I64(1)` / `I64(0)` on all three backends
+    /// (integer literals are used rather than a native boolean so the
+    /// dict-row value doesn't vary by dialect). See
+    /// [`Self::annotate_count`] for the return shape.
+    ///
+    /// Unknown relation names surface as [`QueryError::UnknownField`] at
+    /// `compile()` time.
+    #[must_use]
+    pub fn annotate_exists(self, name: &str) -> AggregateBuilder<T> {
+        let mut builder = self.aggregate();
+        match T::reverse_relations().iter().find(|r| r.name == name) {
+            Some(rel) => {
+                let expr = AggregateExpr::RelatedAggregate(Box::new(
+                    crate::core::subquery::reverse_has_exists_expr(rel),
+                ));
+                builder
+                    .aggregates
+                    .push((std::borrow::Cow::Owned(format!("{name}_exists")), expr));
+            }
+            None => {
+                builder
+                    .deferred_error
+                    .get_or_insert(QueryError::UnknownField {
+                        model: T::SCHEMA.name,
+                        field: name.to_owned(),
+                    });
+            }
+        }
+        builder
+    }
+
     /// Shared worker for the `annotate_{count,sum,avg,max,min}` family
     /// (issue #830). Resolves the reverse relation, auto-names the
     /// projected column (`<name>_count` or `<name>_<suffix>_<column>`),

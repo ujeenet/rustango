@@ -61,9 +61,10 @@
 //! `queryset.compile()` call — not when the outer query is finally
 //! executed. Build the subquery first, propagate `?`, then embed.
 
-use super::expr::Expr;
+use super::expr::{CaseBranch, Expr};
 use super::query::{AggregateExpr, AggregateQuery, Op, SelectQuery, WhereExpr};
 use super::schema::ReverseRelation;
+use super::SqlValue;
 
 /// `EXISTS (subquery)` — true when the subquery returns at least one
 /// row. Mirrors Django's [`Exists`] expression and is by far the most
@@ -201,6 +202,27 @@ pub fn reverse_has_aggregate(rel: &ReverseRelation, agg: AggregateExpr) -> Expr 
 #[must_use]
 pub fn reverse_has_count(rel: &ReverseRelation) -> Expr {
     reverse_has_aggregate(rel, AggregateExpr::Count(None))
+}
+
+/// Build a correlated `CASE WHEN EXISTS (SELECT 1 FROM <child> WHERE
+/// <child_fk> = <outer>.<pk>) THEN 1 ELSE 0 END` projection [`Expr`]
+/// for the given reverse-FK relation — backs
+/// [`crate::query::QuerySet::annotate_exists`] (`withExists`).
+///
+/// Integer `1`/`0` literals (rather than booleans) are deliberate: the
+/// projected `<rel>_exists` column then decodes as `SqlValue::I64(0|1)`
+/// identically on PG / MySQL / SQLite. A bare `EXISTS(…)` projection
+/// would return a native `bool` on Postgres but `0|1` on the other two,
+/// so the dict-row value would vary by backend.
+#[must_use]
+pub fn reverse_has_exists_expr(rel: &ReverseRelation) -> Expr {
+    Expr::Case {
+        branches: vec![CaseBranch {
+            condition: reverse_has_exists(rel),
+            then: Expr::Literal(SqlValue::I64(1)),
+        }],
+        default: Some(Box::new(Expr::Literal(SqlValue::I64(0)))),
+    }
 }
 
 /// `OuterRef("col")` — reference a column from the enclosing query

@@ -1,7 +1,7 @@
 //! Tri-dialect emission tests for the relation eager-aggregate family
 //! `QuerySet::annotate_count` / `annotate_sum` / `annotate_avg` /
-//! `annotate_max` / `annotate_min` — issue #830 slice 4/5
-//! (`withCount`/`withSum`/… by relation name).
+//! `annotate_max` / `annotate_min` / `annotate_exists` — issue #830
+//! slice 4/5 (`withCount`/`withSum`/`withExists`/… by relation name).
 //!
 //! Each method resolves the named reverse-FK relation via
 //! `Model::reverse_relations()` and projects a **correlated** aggregate
@@ -147,6 +147,36 @@ fn avg_max_min_use_their_suffix_and_function() {
             "expected alias {suffix} in: {sql}"
         );
     }
+}
+
+#[test]
+fn annotate_exists_emits_case_when_exists_with_integer_literals() {
+    // PG — `CASE WHEN EXISTS (...) THEN 1 ELSE 0 END AS "books_exists"`.
+    let q = Author::objects()
+        .annotate_exists("books")
+        .compile()
+        .expect("compile annotate_exists");
+    let sql = Postgres.compile_aggregate(&q).expect("emit SQL").sql;
+    assert!(
+        sql.contains(r#"CASE WHEN EXISTS (SELECT"#),
+        "missing CASE WHEN EXISTS: {sql}"
+    );
+    assert!(
+        sql.contains(r#"FROM "arc_book" WHERE "author_id" = "arc_author"."id""#),
+        "missing correlated child WHERE: {sql}"
+    );
+    // Integer literals (bound params), not a native boolean.
+    assert!(
+        sql.contains("THEN $1 ELSE $2 END AS \"books_exists\""),
+        "expected integer-literal CASE result aliased books_exists: {sql}"
+    );
+
+    // MySQL emits the same shape with backtick quoting.
+    let my = MySql.compile_aggregate(&q).expect("emit MySQL").sql;
+    assert!(
+        my.contains("CASE WHEN EXISTS (SELECT") && my.contains("END AS `books_exists`"),
+        "MySQL CASE/alias shape: {my}"
+    );
 }
 
 #[test]
