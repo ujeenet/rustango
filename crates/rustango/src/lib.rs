@@ -293,7 +293,7 @@ macro_rules! __impl_my_load_related {
     // Fix: capture `$self` explicitly. The proc-macro now passes it
     // through and the macro_rules substitutes it where the arms use
     // it.
-    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident| {
+    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident, $rest:ident, $next:ident| {
         $($arms:tt)*
     }) => {
         impl $crate::sql::LoadRelatedMy for $struct {
@@ -305,7 +305,23 @@ macro_rules! __impl_my_load_related {
                 $alias: &str,
             ) -> ::core::result::Result<bool, $crate::sql::sqlx::Error> {
                 let $self_ = self;
-                match $field {
+                // Audit #451 — split the multi-hop path so the arms match
+                // the base FK on THIS model and recurse on `$rest` at the
+                // accumulated `$next` alias (see the PG twin for the full
+                // walk-through).
+                let (__base, $rest): (&str, ::core::option::Option<&str>) =
+                    match $field.split_once("__") {
+                        ::core::option::Option::Some((b, r)) => (b, ::core::option::Option::Some(r)),
+                        ::core::option::Option::None => ($field, ::core::option::Option::None),
+                    };
+                let $next: ::std::string::String = match $rest {
+                    ::core::option::Option::Some(__r) => {
+                        let __rb = __r.split_once("__").map(|(b, _)| b).unwrap_or(__r);
+                        ::std::format!("{}__{}", $alias, __rb)
+                    }
+                    ::core::option::Option::None => ::std::string::String::new(),
+                };
+                match __base {
                     $($arms)*
                     _ => ::core::result::Result::Ok(false),
                 }
@@ -318,7 +334,7 @@ macro_rules! __impl_my_load_related {
 #[cfg(not(feature = "mysql"))]
 #[macro_export]
 macro_rules! __impl_my_load_related {
-    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident| {
+    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident, $rest:ident, $next:ident| {
         $($arms:tt)*
     }) => {};
 }
@@ -382,7 +398,7 @@ macro_rules! __impl_sqlite_aliased_row_decoder {
 #[cfg(feature = "sqlite")]
 #[macro_export]
 macro_rules! __impl_sqlite_load_related {
-    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident| {
+    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident, $rest:ident, $next:ident| {
         $($arms:tt)*
     }) => {
         impl $crate::sql::LoadRelatedSqlite for $struct {
@@ -394,7 +410,20 @@ macro_rules! __impl_sqlite_load_related {
                 $alias: &str,
             ) -> ::core::result::Result<bool, $crate::sql::sqlx::Error> {
                 let $self_ = self;
-                match $field {
+                // Audit #451 — split the multi-hop path (see PG twin).
+                let (__base, $rest): (&str, ::core::option::Option<&str>) =
+                    match $field.split_once("__") {
+                        ::core::option::Option::Some((b, r)) => (b, ::core::option::Option::Some(r)),
+                        ::core::option::Option::None => ($field, ::core::option::Option::None),
+                    };
+                let $next: ::std::string::String = match $rest {
+                    ::core::option::Option::Some(__r) => {
+                        let __rb = __r.split_once("__").map(|(b, _)| b).unwrap_or(__r);
+                        ::std::format!("{}__{}", $alias, __rb)
+                    }
+                    ::core::option::Option::None => ::std::string::String::new(),
+                };
+                match __base {
                     $($arms)*
                     _ => ::core::result::Result::Ok(false),
                 }
@@ -407,7 +436,7 @@ macro_rules! __impl_sqlite_load_related {
 #[cfg(not(feature = "sqlite"))]
 #[macro_export]
 macro_rules! __impl_sqlite_load_related {
-    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident| {
+    ($struct:ty, |$self_:ident, $row:ident, $field:ident, $alias:ident, $rest:ident, $next:ident| {
         $($arms:tt)*
     }) => {};
 }

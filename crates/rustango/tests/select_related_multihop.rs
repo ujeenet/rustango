@@ -254,3 +254,181 @@ fn two_separate_chains_compose_into_distinct_alias_trees() {
         "second chain: {sql}"
     );
 }
+
+// ---------- Decoder-side recursive stitching (#451) ----------
+//
+// T2.2 (#308) shipped the multi-hop JOIN *emission* (pinned above);
+// #451 is the decoder-side gap: a fetched `Post` must come back with
+// `post.author -> profile -> country` all populated as nested loaded
+// objects, not just the columns sitting in the row. Live on SQLite
+// (the cheapest dialect) so the recursive `__rustango_load_related*`
+// is exercised end-to-end.
+#[cfg(feature = "sqlite")]
+mod sqlite_live {
+    use super::Post;
+    use rustango::sql::{sqlx, FetcherPool as _, Pool};
+
+    async fn seeded_pool() -> Pool {
+        let sq = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite mem pool");
+        for ddl in [
+            "CREATE TABLE srm_country (id INTEGER PRIMARY KEY, code TEXT NOT NULL)",
+            "CREATE TABLE srm_profile (id INTEGER PRIMARY KEY, country INTEGER NOT NULL, bio TEXT NOT NULL)",
+            "CREATE TABLE srm_author (id INTEGER PRIMARY KEY, profile INTEGER NOT NULL, name TEXT NOT NULL)",
+            "CREATE TABLE srm_post (id INTEGER PRIMARY KEY, author INTEGER NOT NULL, title TEXT NOT NULL)",
+        ] {
+            sqlx::query(ddl).execute(&sq).await.expect("ddl");
+        }
+        for dml in [
+            "INSERT INTO srm_country (id, code) VALUES (1, 'US')",
+            "INSERT INTO srm_profile (id, country, bio) VALUES (1, 1, 'hello-bio')",
+            "INSERT INTO srm_author (id, profile, name) VALUES (1, 1, 'Ada')",
+            "INSERT INTO srm_post (id, author, title) VALUES (1, 1, 'Hello')",
+        ] {
+            sqlx::query(dml).execute(&sq).await.expect("seed");
+        }
+        Pool::Sqlite(sq)
+    }
+
+    #[tokio::test]
+    async fn three_hop_select_related_stitches_nested_objects() {
+        let pool = seeded_pool().await;
+        let posts: Vec<Post> = Post::objects()
+            .select_related("author__profile__country")
+            .fetch_pool(&pool)
+            .await
+            .expect("fetch");
+        assert_eq!(posts.len(), 1);
+        let post = &posts[0];
+
+        // hop 1 — author (worked pre-#451).
+        let author = post.author.value().expect("hop 1: author stitched");
+        assert_eq!(author.name, "Ada");
+        // hop 2 — THE #451 GAP: profile was never stitched onto author
+        // before the recursive `__rustango_load_related`.
+        let profile = author.profile.value().expect("hop 2: profile stitched");
+        assert_eq!(profile.bio, "hello-bio");
+        // hop 3 — country stitched onto profile.
+        let country = profile.country.value().expect("hop 3: country stitched");
+        assert_eq!(country.code, "US");
+    }
+
+    #[tokio::test]
+    async fn single_hop_does_not_over_stitch() {
+        // Regression guard: select_related("author") must stitch the
+        // author but leave the author's own FK (profile) UNLOADED — the
+        // leaf-alias change must not accidentally pull deeper relations.
+        let pool = seeded_pool().await;
+        let posts: Vec<Post> = Post::objects()
+            .select_related("author")
+            .fetch_pool(&pool)
+            .await
+            .expect("fetch");
+        let author = posts[0].author.value().expect("author stitched");
+        assert_eq!(author.name, "Ada");
+        assert!(
+            !author.profile.is_loaded(),
+            "profile must stay unloaded when only `author` is select_related"
+        );
+    }
+}
+
+// Same 3-hop stitch, proven LIVE on Postgres + MySQL so the recursive
+// decoder is verified on every dialect, not just SQLite. Both skip
+// silently when their DB URL is unset (offline / CI-without-DB), matching
+// the rest of the live suite; CI's `e2e (postgres|mysql)` jobs set them.
+#[cfg(feature = "postgres")]
+mod pg_live {
+    use super::Post;
+    use rustango::sql::{sqlx, FetcherPool as _, Pool};
+
+    const DDL: [&str; 8] = [
+        "DROP TABLE IF EXISTS srm_post",
+        "DROP TABLE IF EXISTS srm_author",
+        "DROP TABLE IF EXISTS srm_profile",
+        "DROP TABLE IF EXISTS srm_country",
+        // BIGINT (int8) — the model's `id: i64` / `ForeignKey<_>` PKs
+        // decode as i64; PG is strict about int4-vs-int8.
+        "CREATE TABLE srm_country (id BIGINT PRIMARY KEY, code TEXT NOT NULL)",
+        "CREATE TABLE srm_profile (id BIGINT PRIMARY KEY, country BIGINT NOT NULL, bio TEXT NOT NULL)",
+        "CREATE TABLE srm_author (id BIGINT PRIMARY KEY, profile BIGINT NOT NULL, name TEXT NOT NULL)",
+        "CREATE TABLE srm_post (id BIGINT PRIMARY KEY, author BIGINT NOT NULL, title TEXT NOT NULL)",
+    ];
+    const SEED: [&str; 4] = [
+        "INSERT INTO srm_country (id, code) VALUES (1, 'US')",
+        "INSERT INTO srm_profile (id, country, bio) VALUES (1, 1, 'hello-bio')",
+        "INSERT INTO srm_author (id, profile, name) VALUES (1, 1, 'Ada')",
+        "INSERT INTO srm_post (id, author, title) VALUES (1, 1, 'Hello')",
+    ];
+
+    #[tokio::test]
+    async fn three_hop_select_related_stitches_nested_objects() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL unset — skipping PG multi-hop live test");
+            return;
+        };
+        let pg = sqlx::PgPool::connect(&url).await.expect("connect PG");
+        for s in DDL.iter().chain(SEED.iter()) {
+            sqlx::query(s).execute(&pg).await.expect("setup");
+        }
+        let pool = Pool::Postgres(pg);
+        let posts: Vec<Post> = Post::objects()
+            .select_related("author__profile__country")
+            .fetch_pool(&pool)
+            .await
+            .expect("fetch");
+        assert_eq!(posts.len(), 1);
+        let author = posts[0].author.value().expect("hop 1: author");
+        assert_eq!(author.name, "Ada");
+        let profile = author.profile.value().expect("hop 2: profile");
+        assert_eq!(profile.bio, "hello-bio");
+        let country = profile.country.value().expect("hop 3: country");
+        assert_eq!(country.code, "US");
+    }
+}
+
+#[cfg(feature = "mysql")]
+mod my_live {
+    use super::Post;
+    use rustango::sql::{sqlx, FetcherPool as _, Pool};
+
+    #[tokio::test]
+    async fn three_hop_select_related_stitches_nested_objects() {
+        let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+            eprintln!("MYSQL_TEST_URL unset — skipping MySQL multi-hop live test");
+            return;
+        };
+        let my = sqlx::MySqlPool::connect(&url).await.expect("connect MySQL");
+        let ddl = [
+            "DROP TABLE IF EXISTS srm_post",
+            "DROP TABLE IF EXISTS srm_author",
+            "DROP TABLE IF EXISTS srm_profile",
+            "DROP TABLE IF EXISTS srm_country",
+            "CREATE TABLE srm_country (id BIGINT PRIMARY KEY, code VARCHAR(8) NOT NULL)",
+            "CREATE TABLE srm_profile (id BIGINT PRIMARY KEY, country BIGINT NOT NULL, bio VARCHAR(200) NOT NULL)",
+            "CREATE TABLE srm_author (id BIGINT PRIMARY KEY, profile BIGINT NOT NULL, name VARCHAR(80) NOT NULL)",
+            "CREATE TABLE srm_post (id BIGINT PRIMARY KEY, author BIGINT NOT NULL, title VARCHAR(200) NOT NULL)",
+            "INSERT INTO srm_country (id, code) VALUES (1, 'US')",
+            "INSERT INTO srm_profile (id, country, bio) VALUES (1, 1, 'hello-bio')",
+            "INSERT INTO srm_author (id, profile, name) VALUES (1, 1, 'Ada')",
+            "INSERT INTO srm_post (id, author, title) VALUES (1, 1, 'Hello')",
+        ];
+        for s in ddl {
+            sqlx::query(s).execute(&my).await.expect("setup");
+        }
+        let pool = Pool::Mysql(my);
+        let posts: Vec<Post> = Post::objects()
+            .select_related("author__profile__country")
+            .fetch_pool(&pool)
+            .await
+            .expect("fetch");
+        assert_eq!(posts.len(), 1);
+        let author = posts[0].author.value().expect("hop 1: author");
+        assert_eq!(author.name, "Ada");
+        let profile = author.profile.value().expect("hop 2: profile");
+        assert_eq!(profile.bio, "hello-bio");
+        let country = profile.country.value().expect("hop 3: country");
+        assert_eq!(country.code, "US");
+    }
+}

@@ -980,7 +980,17 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
         };
         quote! {
             #fk_col => {
-                let _parent: #parent_ty = <#parent_ty>::__rustango_from_aliased_row(row, alias)?;
+                let mut _parent: #parent_ty = <#parent_ty>::__rustango_from_aliased_row(row, alias)?;
+                // Audit #451 — multi-hop `select_related("a__b__c")`:
+                // stitch the deeper relation onto this parent first,
+                // decoding it at the accumulated `__next_alias`. The
+                // parent type also impls `LoadRelated`, so this recurses
+                // the FK chain to arbitrary depth.
+                if let ::core::option::Option::Some(__r) = __rest {
+                    let _ = #root::sql::LoadRelated::__rustango_load_related(
+                        &mut _parent, row, __r, &__next_alias,
+                    )?;
+                }
                 // Loud-in-debug, default-in-release: a divergence
                 // between the FK field's declared `K` (drives the
                 // expected `SqlValue::<Variant>`) and the parent's
@@ -1017,7 +1027,24 @@ fn load_related_impl_tokens(struct_name: &syn::Ident, fk_relations: &[FkRelation
                 field_name: &str,
                 alias: &str,
             ) -> ::core::result::Result<bool, #root::sql::sqlx::Error> {
-                match field_name {
+                // Audit #451 — split the multi-hop path: `base` is the FK
+                // on THIS model, `__rest` (if any) is the remaining chain
+                // to stitch onto the loaded parent. `__next_alias` is the
+                // accumulated join alias the parent's columns live under
+                // (`{alias}__{next-hop}`), matching `lower_select_related`.
+                let (__base, __rest): (&str, ::core::option::Option<&str>) =
+                    match field_name.split_once("__") {
+                        ::core::option::Option::Some((b, r)) => (b, ::core::option::Option::Some(r)),
+                        ::core::option::Option::None => (field_name, ::core::option::Option::None),
+                    };
+                let __next_alias: ::std::string::String = match __rest {
+                    ::core::option::Option::Some(__r) => {
+                        let __rb = __r.split_once("__").map(|(b, _)| b).unwrap_or(__r);
+                        ::std::format!("{}__{}", alias, __rb)
+                    }
+                    ::core::option::Option::None => ::std::string::String::new(),
+                };
+                match __base {
                     #( #arms )*
                     _ => ::core::result::Result::Ok(false),
                 }
@@ -1060,8 +1087,15 @@ fn load_related_impl_my_tokens(
         // and let the macro_rules rebind it to the receiver.
         quote! {
             #fk_col => {
-                let _parent: #parent_ty =
+                let mut _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_my_row(row, alias)?;
+                // Audit #451 — multi-hop: stitch the deeper relation onto
+                // the parent at the accumulated alias (see PG twin).
+                if let ::core::option::Option::Some(__r) = __rest {
+                    let _ = #root::sql::LoadRelatedMy::__rustango_load_related_my(
+                        &mut _parent, row, __r, &__next_alias,
+                    )?;
+                }
                 // See note in `load_related_impl_tokens` (PG twin) —
                 // the same loud-in-debug invariant guard.
                 let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
@@ -1085,7 +1119,7 @@ fn load_related_impl_my_tokens(
         }
     });
     quote! {
-        #root::__impl_my_load_related!(#struct_name, |__self, row, field_name, alias| {
+        #root::__impl_my_load_related!(#struct_name, |__self, row, field_name, alias, __rest, __next_alias| {
             #( #arms )*
         });
     }
@@ -1117,8 +1151,15 @@ fn load_related_impl_sqlite_tokens(
         };
         quote! {
             #fk_col => {
-                let _parent: #parent_ty =
+                let mut _parent: #parent_ty =
                     <#parent_ty>::__rustango_from_aliased_sqlite_row(row, alias)?;
+                // Audit #451 — multi-hop: stitch the deeper relation onto
+                // the parent at the accumulated alias (see PG twin).
+                if let ::core::option::Option::Some(__r) = __rest {
+                    let _ = #root::sql::LoadRelatedSqlite::__rustango_load_related_sqlite(
+                        &mut _parent, row, __r, &__next_alias,
+                    )?;
+                }
                 let _pk = match <#parent_ty>::__rustango_pk_value(&_parent) {
                     #root::core::SqlValue::#variant_ident(v) => v,
                     _other => {
@@ -1140,7 +1181,7 @@ fn load_related_impl_sqlite_tokens(
         }
     });
     quote! {
-        #root::__impl_sqlite_load_related!(#struct_name, |__self, row, field_name, alias| {
+        #root::__impl_sqlite_load_related!(#struct_name, |__self, row, field_name, alias, __rest, __next_alias| {
             #( #arms )*
         });
     }

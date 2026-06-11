@@ -106,7 +106,7 @@ Summary: **22 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-bas
 | `.order_by(*fields)` | [order_by](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#order-by) | SHIPPED | `.order_by(&[("col", false), ...])` + `.unordered()` | |
 | `.reverse()` | [reverse](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#reverse) | SHIPPED | `QuerySet::reverse()` (#325, v0.42) — flips the `desc` flag on every pending `ORDER BY` entry. No-op when no ordering is set; `Random` entries are left untouched. | |
 | `.select_related(*fk)` (single hop) | [select_related](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#select-related) | SHIPPED | `lower_select_related` in query/mod.rs | |
-| `.select_related("a__b__c")` (multi-hop) | [select_related](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#select-related) | PARTIAL | T2.2 closed (PR #308) — JOIN emission ships; decoder-side recursive stitching deferred (#451) | Filter-on-deep-column works via `Expr::AliasedColumn`; `post.author.profile.get_pool()` auto-stitch is a follow-up. |
+| `.select_related("a__b__c")` (multi-hop) | [select_related](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#select-related) | SHIPPED | JOIN emission (PR #308) + decoder-side recursive stitching (#451): `__rustango_load_related*` splits the `__` path, decodes each hop at its accumulated alias, and recurses via the parent's own loader; executor stitches from leaf aliases (`select_related_leaves`). Tri-dialect. | Fetched rows come back with nested loaded FKs (`post.author.value().profile.value().country`) — no N+1. Tested: `select_related_multihop.rs` (sqlite live 3-hop stitch) + `select_related_leaves` unit. |
 | `.prefetch_related(*rel)` | [prefetch_related](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#prefetch-related) | SHIPPED | `sql::fetch_with_prefetch_pool` | Tri-dialect; non-i64 FK PKs supported (v0.26). |
 | `.prefetch_related(Prefetch(qs))` | [Prefetch](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#django.db.models.Prefetch) | SHIPPED | `sql::fetch_with_prefetch_filtered` (T2.1 closed, PR #309) | Global `LIMIT` only — Django's per-parent slice (LATERAL JOIN) is a follow-up. |
 | `.raw(sql)` | [raw](https://docs.djangoproject.com/en/6.0/topics/db/sql/#executing-raw-queries) | SHIPPED | `sql::raw_query_pool` | |
@@ -842,7 +842,7 @@ Ranked by how often a real-world Django project hits the gap. Refreshed 2026-06-
 
 2. **`FileField` / `ImageField` on arbitrary models** (sec 3 + 19, #339 / #340). Rustango has `Media` model + `Storage` trait, but no `pub avatar: FileField` shape on user-defined models. Major DX gap vs Django's "drop a field, get upload + URL + ORM round-trip for free."
 
-3. **`select_related("a__b__c")` decoder-side auto-stitching** (sec 2, #451). T2.2 shipped JOIN emission; `post.author.profile.get_pool(...)` auto-stitch still deferred. Multi-hop reads pay N+1 unless the user explicitly walks the JSON map. PARTIAL.
+3. ~~**`select_related("a__b__c")` decoder-side auto-stitching** (sec 2, #451).~~ **SHIPPED.** Recursive `__rustango_load_related*` (tri-dialect) + leaf-alias executor dispatch stitch the full FK chain into nested loaded objects in one query — no N+1, no manual JSON walk.
 
 4. **`abstract = True` base classes** (sec 1, #322 area). Django uses `abstract = True` for `created_at` / `updated_at` mixin patterns. Currently PARTIAL — Rust trait composition is close but not the same derive-macro UX. `managed = false` covers the operator-managed-table case via #321.
 
