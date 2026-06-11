@@ -83,6 +83,33 @@ pub trait LoadRelated {}
 #[cfg(not(feature = "postgres"))]
 impl<T> LoadRelated for T {}
 
+/// Audit #451 — reduce all `select_related` join aliases to the **leaf**
+/// aliases (those that aren't a `__`-boundary prefix of a longer alias),
+/// each paired with its first-hop alias. `lower_select_related` emits one
+/// join per hop (`author`, `author__profile`), so for a multi-hop chain
+/// only the deepest alias is a leaf; the recursive `__rustango_load_related*`
+/// decodes the whole chain from that single leaf. Single-hop aliases come
+/// back as `(alias, alias)` — bit-identical to the pre-#451 stitch.
+pub(crate) fn select_related_leaves(aliases: &[&'static str]) -> Vec<(&'static str, &'static str)> {
+    aliases
+        .iter()
+        .copied()
+        .filter(|a| {
+            // Keep `a` only if no other alias extends it as `a__…`.
+            !aliases.iter().any(|b| {
+                *b != *a
+                    && b.len() > a.len()
+                    && b.starts_with(a)
+                    && b.as_bytes()[a.len()..].starts_with(b"__")
+            })
+        })
+        .map(|a| {
+            let first_hop = a.split_once("__").map(|(h, _)| h).unwrap_or(a);
+            (a, first_hop)
+        })
+        .collect()
+}
+
 #[cfg(feature = "postgres")]
 impl<T> QuerySet<T>
 where
@@ -127,11 +154,14 @@ where
             q = bind_query(q, value);
         }
         let raw_rows = q.fetch_all(executor).await?;
+        // Audit #451 — drive the stitch from leaf aliases so each FK
+        // chain (incl. multi-hop `a__b__c`) is decoded once, recursively.
+        let leaves = select_related_leaves(&select_related_aliases);
         let mut out = Vec::with_capacity(raw_rows.len());
         for row in &raw_rows {
             let mut t = T::from_row(row)?;
-            for alias in &select_related_aliases {
-                let _ = t.__rustango_load_related(row, alias, alias)?;
+            for (leaf, first_hop) in &leaves {
+                let _ = t.__rustango_load_related(row, leaf, first_hop)?;
             }
             out.push(t);
         }
@@ -1556,6 +1586,9 @@ where
 {
     let stmt = tx.dialect().compile_select(query)?;
     let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
+    // Audit #451 — drive the stitch from leaf aliases so each FK chain
+    // (incl. multi-hop `a__b__c`) is decoded once, recursively.
+    let leaves = select_related_leaves(&aliases);
     match tx {
         #[cfg(feature = "postgres")]
         PoolTx::Postgres(t) => {
@@ -1575,8 +1608,8 @@ where
             let mut out = Vec::with_capacity(raw_rows.len());
             for row in &raw_rows {
                 let mut item = T::from_row(row)?;
-                for alias in &aliases {
-                    let _ = item.__rustango_load_related(row, alias, alias)?;
+                for &(alias, first_hop) in &leaves {
+                    let _ = item.__rustango_load_related(row, alias, first_hop)?;
                 }
                 out.push(item);
             }
@@ -1601,8 +1634,8 @@ where
             let mut out = Vec::with_capacity(raw_rows.len());
             for row in &raw_rows {
                 let mut item = <T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?;
-                for alias in &aliases {
-                    let _ = item.__rustango_load_related_my(row, alias, alias)?;
+                for &(alias, first_hop) in &leaves {
+                    let _ = item.__rustango_load_related_my(row, alias, first_hop)?;
                 }
                 out.push(item);
             }
@@ -1631,8 +1664,8 @@ where
             let mut out = Vec::with_capacity(raw_rows.len());
             for row in &raw_rows {
                 let mut item = <T as sqlx::FromRow<sqlx::sqlite::SqliteRow>>::from_row(row)?;
-                for alias in &aliases {
-                    let _ = item.__rustango_load_related_sqlite(row, alias, alias)?;
+                for &(alias, first_hop) in &leaves {
+                    let _ = item.__rustango_load_related_sqlite(row, alias, first_hop)?;
                 }
                 out.push(item);
             }
@@ -2312,6 +2345,9 @@ where
     crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
     let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
+    // Audit #451 — drive the stitch from leaf aliases so each FK chain
+    // (incl. multi-hop `a__b__c`) is decoded once, recursively.
+    let leaves = select_related_leaves(&aliases);
 
     match pool {
         #[cfg(feature = "postgres")]
@@ -2334,8 +2370,8 @@ where
             let mut out = Vec::with_capacity(raw_rows.len());
             for row in &raw_rows {
                 let mut t = T::from_row(row)?;
-                for alias in &aliases {
-                    let _ = t.__rustango_load_related(row, alias, alias)?;
+                for &(alias, first_hop) in &leaves {
+                    let _ = t.__rustango_load_related(row, alias, first_hop)?;
                 }
                 out.push(t);
             }
@@ -2362,8 +2398,8 @@ where
             let mut out = Vec::with_capacity(raw_rows.len());
             for row in &raw_rows {
                 let mut t = <T as sqlx::FromRow<sqlx::mysql::MySqlRow>>::from_row(row)?;
-                for alias in &aliases {
-                    let _ = t.__rustango_load_related_my(row, alias, alias)?;
+                for &(alias, first_hop) in &leaves {
+                    let _ = t.__rustango_load_related_my(row, alias, first_hop)?;
                 }
                 out.push(t);
             }
@@ -2394,8 +2430,8 @@ where
             let mut out = Vec::with_capacity(raw_rows.len());
             for row in &raw_rows {
                 let mut t = <T as sqlx::FromRow<sqlx::sqlite::SqliteRow>>::from_row(row)?;
-                for alias in &aliases {
-                    let _ = t.__rustango_load_related_sqlite(row, alias, alias)?;
+                for &(alias, first_hop) in &leaves {
+                    let _ = t.__rustango_load_related_sqlite(row, alias, first_hop)?;
                 }
                 out.push(t);
             }
@@ -3003,5 +3039,37 @@ mod pool_dispatch_tests {
     fn maybe_my_from_row_resolves_for_unit_type() {
         fn check<T: super::MaybeMyFromRow>() {}
         check::<()>();
+    }
+
+    /// Audit #451 — `select_related_leaves` reduces join aliases to the
+    /// deepest in each FK chain, paired with the first-hop alias.
+    #[test]
+    fn select_related_leaves_keeps_deepest_chain_aliases() {
+        // Single-hop FKs: (alias, alias) — bit-identical to pre-#451.
+        assert_eq!(
+            super::select_related_leaves(&["author", "editor"]),
+            vec![("author", "author"), ("editor", "editor")],
+        );
+        // A multi-hop chain emits a join per hop; only the leaf survives,
+        // paired with the first hop (where the base FK lives).
+        assert_eq!(
+            super::select_related_leaves(&[
+                "author",
+                "author__profile",
+                "author__profile__country"
+            ]),
+            vec![("author__profile__country", "author")],
+        );
+        // A single-hop FK alongside a chain.
+        assert_eq!(
+            super::select_related_leaves(&["editor", "author", "author__profile"]),
+            vec![("editor", "editor"), ("author__profile", "author")],
+        );
+        // String-prefix collision that is NOT a `__` boundary must keep
+        // both (e.g. `author` vs `authorship` — not a parent/child).
+        assert_eq!(
+            super::select_related_leaves(&["author", "authorship"]),
+            vec![("author", "author"), ("authorship", "authorship")],
+        );
     }
 }
