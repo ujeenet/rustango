@@ -61,6 +61,13 @@ pub enum FieldType {
     /// / SQLite degrade to `TEXT` and the decode path errors there.
     /// Requires the `hstore` extension on the database.
     HStore,
+    /// Native pgvector `vector(N)` embedding column — Eloquent 13's
+    /// `vector(...)` (#824). `N` is the dimension; `0` means
+    /// unconstrained (`vector`). Rust type: [`crate::sql::Vector`].
+    /// **PG-only by language semantics** like [`Self::Array`]: MySQL /
+    /// SQLite degrade to `TEXT`, and the decode path + distance
+    /// operators error there. Requires the `vector` extension.
+    Vector(u32),
 }
 
 /// Element type of a [`FieldType::Range`] column (#343). Selects the
@@ -151,6 +158,7 @@ impl FieldType {
             Self::Range(RangeElem::Date) => "Range<NaiveDate>",
             Self::Range(RangeElem::DateTime) => "Range<DateTime<Utc>>",
             Self::HStore => "HStore",
+            Self::Vector(_) => "Vector",
         }
     }
 }

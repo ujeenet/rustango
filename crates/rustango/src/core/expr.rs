@@ -78,6 +78,43 @@ pub enum BinOp {
     BitShl,
     /// Right shift.
     BitShr,
+    /// pgvector L2 (Euclidean) distance — `<->`. **PG-only** (#824); the
+    /// writer raises `OpNotSupportedInDialect` on MySQL / SQLite.
+    L2Distance,
+    /// pgvector cosine distance — `<=>`. **PG-only** (#824).
+    CosineDistance,
+    /// pgvector (negative) inner product — `<#>`. **PG-only** (#824).
+    /// pgvector returns the negative inner product, so ascending order
+    /// still ranks most-similar first.
+    InnerProduct,
+}
+
+/// Distance metric for pgvector similarity search (#824) — the
+/// user-facing selector for [`crate::query::QuerySet::order_by_distance`]
+/// / [`k_nearest`](crate::query::QuerySet::k_nearest). Maps to the
+/// pgvector distance operator ([`BinOp::L2Distance`] / `CosineDistance`
+/// / `InnerProduct`). Ascending order always ranks the most-similar row
+/// first (pgvector's `<#>` returns the *negative* inner product).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VectorMetric {
+    /// L2 / Euclidean distance — pgvector `<->`.
+    L2,
+    /// Cosine distance — pgvector `<=>`.
+    Cosine,
+    /// (Negative) inner product — pgvector `<#>`.
+    InnerProduct,
+}
+
+impl VectorMetric {
+    /// The [`BinOp`] distance operator this metric lowers to.
+    #[must_use]
+    pub const fn to_binop(self) -> BinOp {
+        match self {
+            Self::L2 => BinOp::L2Distance,
+            Self::Cosine => BinOp::CosineDistance,
+            Self::InnerProduct => BinOp::InnerProduct,
+        }
+    }
 }
 
 /// RHS expression — literal, column reference, arithmetic tree, or

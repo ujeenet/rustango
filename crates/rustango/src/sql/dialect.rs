@@ -364,6 +364,10 @@ pub trait Dialect {
             FieldType::Range(crate::core::RangeElem::DateTime) => "tstzrange",
             // PG hstore CAST target (#342).
             FieldType::HStore => "hstore",
+            // pgvector `vector(N)` carries a dynamic dimension, so it
+            // has no `&'static` CAST spelling — casting to it isn't
+            // supported through this path (#824).
+            FieldType::Vector(_) => return None,
         })
     }
 
@@ -407,6 +411,10 @@ pub trait Dialect {
             // Native PG hstore column (#342). Requires the `hstore`
             // extension on the database.
             FieldType::HStore => "hstore".into(),
+            // pgvector `vector(N)` column (#824); `0` = unconstrained
+            // dimension. Requires the `vector` extension.
+            FieldType::Vector(0) => "vector".into(),
+            FieldType::Vector(dims) => format!("vector({dims})"),
         }
     }
 

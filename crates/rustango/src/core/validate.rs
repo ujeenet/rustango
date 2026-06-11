@@ -47,7 +47,8 @@ pub fn validate_value(
         | SqlValue::Json(_)
         | SqlValue::Decimal(_)
         | SqlValue::Binary(_)
-        | SqlValue::HStore(_) => Ok(()),
+        | SqlValue::HStore(_)
+        | SqlValue::Vector(_) => Ok(()),
     }
 }
 

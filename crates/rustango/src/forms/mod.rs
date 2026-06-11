@@ -239,10 +239,12 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
         | FieldType::Json
         | FieldType::Decimal
         | FieldType::Binary
-        // #341 / #343 / #342 — array / range / hstore can't be a PK.
+        // #341 / #343 / #342 / #824 — array / range / hstore / vector
+        // can't be a PK.
         | FieldType::Array(_)
         | FieldType::Range(_)
-        | FieldType::HStore => Err(FormError::UnsupportedPk {
+        | FieldType::HStore
+        | FieldType::Vector(_) => Err(FormError::UnsupportedPk {
             field: field.name.to_owned(),
             ty: field.ty.as_str(),
         }),
@@ -417,6 +419,13 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
             let map: std::collections::BTreeMap<String, Option<String>> = serde_json::from_str(raw)
                 .map_err(|e| make_parse_err("hstore (JSON object)", &e))?;
             Ok(SqlValue::HStore(map.into_iter().collect()))
+        }
+        // #824 — pgvector column from a form field: a JSON array of
+        // numbers (`[0.1, 0.2, 0.3]`).
+        FieldType::Vector(_) => {
+            let vec: Vec<f32> = serde_json::from_str(raw)
+                .map_err(|e| make_parse_err("vector (JSON array of numbers)", &e))?;
+            Ok(SqlValue::Vector(vec))
         }
     }
 }

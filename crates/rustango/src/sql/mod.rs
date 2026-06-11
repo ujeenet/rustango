@@ -25,6 +25,7 @@ mod postgres;
 mod range;
 #[cfg(feature = "sqlite")]
 mod sqlite;
+mod vector;
 mod writers;
 
 pub use array::Array;
@@ -38,6 +39,7 @@ pub use dialect::Dialect;
 pub use error::{is_mysql_dup_index_error, ExecError, SqlError};
 pub use hstore::HStore;
 pub use range::Range;
+pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
 #[cfg(feature = "mysql")]
 pub use executor::row_to_json_my;

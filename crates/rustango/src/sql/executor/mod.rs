@@ -764,6 +764,10 @@ macro_rules! bind_match {
             SqlValue::HStore(pairs) => {
                 $q.bind(sqlx::postgres::types::PgHstore(pairs.into_iter().collect()))
             }
+            // pgvector embedding (#824) — bind via the `Vector` newtype's
+            // PG `Encode` (binary wire format); the column/param type is
+            // `vector`, resolved by name.
+            SqlValue::Vector(v) => $q.bind(crate::sql::Vector(v)),
             // PG single-parameter array (issue #30). v1 supports
             // I32/I64/String/Bool elements; other element kinds
             // panic at bind time. Homogeneous-element arrays are
@@ -848,6 +852,9 @@ macro_rules! bind_match_mysql {
             SqlValue::HStore(_) => {
                 unreachable!("MySQL has no hstore type; `HStore` columns are PG-only. Issue #342.")
             }
+            SqlValue::Vector(_) => unreachable!(
+                "MySQL has no vector type; pgvector distance operators are rejected before bind. Issue #824."
+            ),
         }
     };
 }
@@ -892,6 +899,9 @@ macro_rules! bind_match_sqlite {
             SqlValue::HStore(_) => {
                 unreachable!("SQLite has no hstore type; `HStore` columns are PG-only. Issue #342.")
             }
+            SqlValue::Vector(_) => unreachable!(
+                "SQLite has no vector type; pgvector distance operators are rejected before bind. Issue #824."
+            ),
         }
     };
 }

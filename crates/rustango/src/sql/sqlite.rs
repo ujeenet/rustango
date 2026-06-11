@@ -191,6 +191,8 @@ impl Dialect for Sqlite {
             FieldType::Range(_) => "TEXT",
             // Ditto for PG hstore columns (#342).
             FieldType::HStore => "TEXT",
+            // Ditto for pgvector `vector` columns (#824).
+            FieldType::Vector(_) => "TEXT",
         })
     }
 
@@ -221,6 +223,8 @@ impl Dialect for Sqlite {
             FieldType::Range(_) => "TEXT".into(),
             // Ditto for PG hstore columns (#342).
             FieldType::HStore => "TEXT".into(),
+            // Ditto for pgvector `vector` columns (#824).
+            FieldType::Vector(_) => "TEXT".into(),
         }
     }
 

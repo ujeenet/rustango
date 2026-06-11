@@ -776,6 +776,63 @@ impl<T: Model> QuerySet<T> {
         self
     }
 
+    /// Order rows by pgvector similarity to `query` over the `column`
+    /// vector column — Eloquent 13's `whereVectorSimilarTo(...)` auto-
+    /// ordering (#824). Ascending distance, so the **nearest** rows come
+    /// first (pgvector's `<#>` returns the negative inner product, so
+    /// ascending ranks most-similar first for every metric).
+    ///
+    /// Emits `ORDER BY <column> <op> $vec` where `<op>` is the pgvector
+    /// distance operator for `metric` (`<->` / `<=>` / `<#>`). **PG-only**
+    /// — the writer raises `OpNotSupportedInDialect` on MySQL / SQLite.
+    /// Pair with `.limit(k)` (or use [`Self::k_nearest`]) for a k-NN
+    /// query. The column should be a [`crate::sql::Vector`] /
+    /// `#[rustango(vector(dims = N))]` field.
+    ///
+    /// ```ignore
+    /// use rustango::core::VectorMetric;
+    /// // 5 nearest documents to `query_embedding` by cosine distance.
+    /// let hits = Doc::objects()
+    ///     .order_by_distance("embedding", query_embedding, VectorMetric::Cosine)
+    ///     .limit(5)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn order_by_distance(
+        self,
+        column: &'static str,
+        query: Vec<f32>,
+        metric: crate::core::VectorMetric,
+    ) -> Self {
+        let expr = crate::core::Expr::BinOp {
+            left: Box::new(crate::core::Expr::Column(column)),
+            op: metric.to_binop(),
+            right: Box::new(crate::core::Expr::Literal(SqlValue::Vector(query))),
+        };
+        self.order_by_expr(expr, /*desc=*/ false)
+    }
+
+    /// k-nearest-neighbour shortcut: [`Self::order_by_distance`] followed
+    /// by `.limit(k)` — the `k` rows closest to `query` under `metric`.
+    /// Issue #824, **PG-only**.
+    ///
+    /// ```ignore
+    /// use rustango::core::VectorMetric;
+    /// let top3 = Doc::objects()
+    ///     .k_nearest("embedding", query_embedding, 3, VectorMetric::L2)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn k_nearest(
+        self,
+        column: &'static str,
+        query: Vec<f32>,
+        k: i64,
+        metric: crate::core::VectorMetric,
+    ) -> Self {
+        self.order_by_distance(column, query, metric).limit(k)
+    }
+
     /// Same as [`Self::order_by_expr`] but with an explicit
     /// `NullsOrder`. Issue #76.
     #[must_use]

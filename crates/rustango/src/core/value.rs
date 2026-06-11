@@ -77,6 +77,12 @@ pub enum SqlValue {
     /// (no `hstore` type). Built from [`crate::sql::HStore`] via
     /// `Into<SqlValue>`.
     HStore(Vec<(String, Option<String>)>),
+    /// pgvector embedding — a dense `Vec<f32>`. Issue #824. Backend-
+    /// neutral at this layer; the PG bind path encodes it as the
+    /// pgvector `vector` wire format (via [`crate::sql::Vector`]), MySQL
+    /// / SQLite reject (no `vector` type). Built from
+    /// [`crate::sql::Vector`] via `Into<SqlValue>`.
+    Vector(Vec<f32>),
 }
 
 impl SqlValue {
@@ -123,6 +129,10 @@ impl SqlValue {
                     .collect();
                 format!("hstore{{{}}}", inner.join(", "))
             }
+            Self::Vector(items) => {
+                let inner: Vec<String> = items.iter().map(f32::to_string).collect();
+                format!("vector[{}]", inner.join(", "))
+            }
         }
     }
 
@@ -134,7 +144,11 @@ impl SqlValue {
             | Self::List(_)
             | Self::Array(_)
             | Self::RangeLiteral(_)
-            | Self::HStore(_) => return None,
+            | Self::HStore(_)
+            // `Vector` carries no dimension here; the column's
+            // `FieldType::Vector(dims)` comes from the schema, so a bound
+            // value can't be type-checked against it. Skip (like Array).
+            | Self::Vector(_) => return None,
             Self::I16(_) => FieldType::I16,
             Self::I32(_) => FieldType::I32,
             Self::I64(_) => FieldType::I64,

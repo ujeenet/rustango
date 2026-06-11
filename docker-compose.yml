@@ -1,6 +1,10 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 is postgres:16 + the `vector` extension
+    # preinstalled (issue #824). A drop-in superset of the stock image —
+    # every existing PG test runs unchanged; the vector live tests can
+    # `CREATE EXTENSION vector`.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: rustango
       POSTGRES_PASSWORD: rustango

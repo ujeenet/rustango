@@ -3004,6 +3004,21 @@ fn json_to_sql_value(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(SqlValue::HStore(pairs))
         }
+        // #824 — pgvector column from a fixture: a JSON array of numbers.
+        FieldType::Vector(_) => {
+            let arr = v
+                .as_array()
+                .ok_or_else(|| format!("expected JSON array for Vector column, got {v}"))?;
+            let items = arr
+                .iter()
+                .map(|el| {
+                    el.as_f64()
+                        .map(|n| n as f32)
+                        .ok_or_else(|| format!("expected numeric vector element, got {el}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(SqlValue::Vector(items))
+        }
     }
 }
 
