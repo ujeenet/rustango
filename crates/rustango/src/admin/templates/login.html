@@ -82,6 +82,13 @@
       Password
       <input type="password" name="password" autocomplete="current-password" required>
     </label>
+    {% if totp_enabled %}
+    <label>
+      Authenticator code <span class="hint">(if two-factor is enabled)</span>
+      <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code"
+             pattern="[0-9]*" maxlength="8" placeholder="123456">
+    </label>
+    {% endif %}
     <button type="submit">Sign in</button>
   </form>
 </body>

@@ -40,6 +40,11 @@ fn templates() -> &'static tera::Tera {
                 include_str!("templates/change_password.html"),
             ),
             ("audit_log.html", include_str!("templates/audit_log.html")),
+            // Issue #367 — TOTP two-factor enrollment page.
+            (
+                "totp_enroll.html",
+                include_str!("templates/totp_enroll.html"),
+            ),
         ])
         .expect("admin templates compile");
         tera

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} · {{ admin_title }}</title>
+  <link rel="stylesheet" href="{{ static_url }}/admin.css">
+  <style>
+    .totp-wrap { max-width: 32rem; margin: 3rem auto; padding: 0 1rem; }
+    .totp-secret { font-family: monospace; font-size: 1.1rem; letter-spacing: .1em;
+      background: #f3f4f6; padding: .5rem .75rem; border-radius: .375rem; word-break: break-all; }
+    .totp-uri { font-family: monospace; font-size: .8rem; color: #555; word-break: break-all; }
+    .totp-msg.error { color: #b91c1c; }
+    .totp-msg.ok { color: #15803d; }
+    .hint { color: #6b7280; font-weight: normal; }
+  </style>
+</head>
+<body>
+  <div class="totp-wrap">
+    <h1>Two-factor authentication</h1>
+
+    {% if error %}<p class="totp-msg error">{{ error }}</p>{% endif %}
+    {% if success %}<p class="totp-msg ok">{{ success }}</p>{% endif %}
+
+    {% if already_enabled %}
+      <p>Two-factor authentication is <strong>enabled</strong> for your account.</p>
+      <p>To re-enroll (e.g. on a new device), submit the form below with a fresh setup —
+         this replaces your current device.</p>
+      <form method="post" action="{{ action }}">
+        <button type="submit" name="reset" value="1">Re-enroll</button>
+      </form>
+    {% else %}
+      <p>Scan this setup key in your authenticator app (Google Authenticator, 1Password,
+         Authy, …), or enter it manually, then confirm with the 6-digit code it shows.</p>
+
+      <p><strong>Setup key</strong></p>
+      <p class="totp-secret">{{ secret_base32 }}</p>
+
+      <p><strong>otpauth URI</strong> <span class="hint">(for manual / QR import)</span></p>
+      <p class="totp-uri">{{ otpauth_url }}</p>
+
+      <form method="post" action="{{ action }}">
+        <label>
+          Verification code
+          <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code"
+                 pattern="[0-9]*" maxlength="8" placeholder="123456" autofocus required>
+        </label>
+        <button type="submit">Enable two-factor</button>
+      </form>
+    {% endif %}
+
+    <p><a href="{{ admin_prefix }}/">← Back to admin</a></p>
+  </div>
+</body>
+</html>
