@@ -43,6 +43,13 @@ pub enum SqlError {
     #[error("bulk UPDATE requires a primary key on the model")]
     MissingPrimaryKey,
 
+    /// A relation aggregate (`Expr::RelAggregate`, issue #830) other than
+    /// `COUNT` was emitted without a target column. The builder should
+    /// always supply one for `SUM`/`AVG`/`MAX`/`MIN`; this guards the
+    /// writer against a malformed node rather than emitting invalid SQL.
+    #[error("relation aggregate `{kind}` requires a target column")]
+    RelAggregateMissingColumn { kind: &'static str },
+
     /// `Op::In` with an empty list — Postgres does not accept `IN ()`.
     #[error("empty `IN` list is not supported")]
     EmptyInList,

@@ -1350,44 +1350,109 @@ impl<T: Model> QuerySet<T> {
     }
 
     /// Filter to rows that have at least one related row via the
-    /// reverse-FK relation named `name` — Django
-    /// `filter(<name>__isnull=False)` shape via
-    /// `T::reverse_relations()` metadata.
+    /// relation named `name` — Eloquent `has($rel)` / Django
+    /// `filter(<rel>__isnull=False)`. Issue #830.
     ///
-    /// `name` must match a declared
-    /// `#[rustango(reverse_has(name = "...", child = Child,
-    /// child_fk_column = "..."))]` on `T`. The method emits a
-    /// correlated `EXISTS (SELECT 1 FROM <child_table> WHERE
-    /// <child_fk_column> = <outer>.<self_pk_column>)` predicate that
-    /// the writer's scope-stack threads through PG / MySQL / SQLite
-    /// identically.
+    /// `name` is resolved across all three relation kinds (in this
+    /// order), so the same call works regardless of how the relation is
+    /// declared on `T`:
+    /// - **reverse-FK** — `#[rustango(reverse_has(name, child,
+    ///   child_fk_column))]` → `EXISTS (SELECT 1 FROM <child> WHERE
+    ///   <child_fk> = <outer>.<pk>)`.
+    /// - **many-to-many** — `#[rustango(m2m(name, to, through, src,
+    ///   dst))]` → `EXISTS (SELECT 1 FROM <through> WHERE <src> =
+    ///   <outer>.<pk>)` over the junction table.
+    /// - **generic-FK** — `#[rustango(generic_has(name, child,
+    ///   ct_column, pk_column))]` → the same `EXISTS` over the
+    ///   polymorphic child, AND-ed with a content-type discriminator so
+    ///   only children pointing at *this* model match.
     ///
-    /// Unknown relation names surface as
-    /// [`QueryError::UnknownField`] (field set to the unknown name)
-    /// at `compile()` time via the deferred-error path.
+    /// All three lower identically across PG / MySQL / SQLite (the
+    /// writer's scope stack threads the correlation). Unknown relation
+    /// names surface as [`QueryError::UnknownField`] at `compile()` time.
     ///
     /// ```ignore
-    /// // Requires Author declared with
-    /// // `#[rustango(reverse_has(name = "books", child = Book,
-    /// //            child_fk_column = "author_id"))]`.
+    /// // Authors with at least one book (reverse-FK relation "books").
     /// let with_books = Author::objects()
     ///     .where_has("books")
     ///     .fetch_pool(&pool).await?;
     /// ```
-    ///
-    /// Issue #830 — first slice (existence only). Builds on the
-    /// existing per-instance `<name>_exists_expr()` accessor by
-    /// lifting the relation triple into runtime `Model` metadata so
-    /// callers don't need a concrete `self` to resolve it.
     #[must_use]
     pub fn where_has(self, name: &str) -> Self {
-        match T::reverse_relations().iter().find(|r| r.name == name) {
-            Some(rel) => self.where_raw(crate::core::subquery::reverse_has_exists(rel)),
+        match Self::resolve_rel_exists(name, /*negated=*/ false) {
+            Some(expr) => self.where_raw(expr),
             None => self.with_pending_error(QueryError::UnknownField {
                 model: T::SCHEMA.name,
                 field: name.to_string(),
             }),
         }
+    }
+
+    /// This model's primary-key column name (defaults to `"id"`). Used
+    /// to correlate M2M relation subqueries back to the parent row.
+    fn self_pk_column() -> &'static str {
+        T::SCHEMA.primary_key().map_or("id", |f| f.column)
+    }
+
+    /// Resolve a relation `name` — reverse-FK, many-to-many, or
+    /// generic-FK — into a correlated `[NOT ]EXISTS` predicate (issue
+    /// #830). Returns `None` when the name matches no declared relation,
+    /// so callers can surface a [`QueryError::UnknownField`]. Resolution
+    /// order is reverse-FK → M2M → GFK; relation names are expected to
+    /// be unique across the three within a model.
+    fn resolve_rel_exists(name: &str, negated: bool) -> Option<WhereExpr> {
+        use crate::core::subquery;
+        if let Some(rel) = T::reverse_relations().iter().find(|r| r.name == name) {
+            return Some(if negated {
+                subquery::reverse_has_not_exists(rel)
+            } else {
+                subquery::reverse_has_exists(rel)
+            });
+        }
+        if let Some(m2m) = T::SCHEMA.m2m.iter().find(|m| m.name == name) {
+            return Some(subquery::m2m_has_exists(
+                m2m,
+                Self::self_pk_column(),
+                negated,
+            ));
+        }
+        if let Some(g) = T::generic_reverse_relations()
+            .iter()
+            .find(|g| g.name == name)
+        {
+            return Some(subquery::generic_has_exists(g, T::SCHEMA.table, negated));
+        }
+        None
+    }
+
+    /// Resolve a relation `name` into a correlated scalar `COUNT`
+    /// [`Expr`] (the left-hand side of a `has($rel, op, n)` comparison),
+    /// across reverse-FK / M2M / GFK. `None` if unknown. Issue #830.
+    fn resolve_rel_count(name: &str) -> Option<Expr> {
+        use crate::core::{subquery, RelAggKind};
+        if let Some(rel) = T::reverse_relations().iter().find(|r| r.name == name) {
+            return Some(subquery::reverse_has_count(rel));
+        }
+        if let Some(m2m) = T::SCHEMA.m2m.iter().find(|m| m.name == name) {
+            return Some(subquery::m2m_has_aggregate(
+                m2m,
+                Self::self_pk_column(),
+                RelAggKind::Count,
+                None,
+            ));
+        }
+        if let Some(g) = T::generic_reverse_relations()
+            .iter()
+            .find(|g| g.name == name)
+        {
+            return Some(subquery::generic_has_aggregate(
+                g,
+                T::SCHEMA.table,
+                RelAggKind::Count,
+                None,
+            ));
+        }
+        None
     }
 
     /// Opposite of [`Self::where_has`] — filter to rows that have
@@ -1403,8 +1468,8 @@ impl<T: Model> QuerySet<T> {
     /// ```
     #[must_use]
     pub fn where_doesnt_have(self, name: &str) -> Self {
-        match T::reverse_relations().iter().find(|r| r.name == name) {
-            Some(rel) => self.where_raw(crate::core::subquery::reverse_has_not_exists(rel)),
+        match Self::resolve_rel_exists(name, /*negated=*/ true) {
+            Some(expr) => self.where_raw(expr),
             None => self.with_pending_error(QueryError::UnknownField {
                 model: T::SCHEMA.name,
                 field: name.to_string(),
@@ -1533,15 +1598,12 @@ impl<T: Model> QuerySet<T> {
     /// ```
     #[must_use]
     pub fn where_has_count(self, name: &str, op: Op, n: i64) -> Self {
-        match T::reverse_relations().iter().find(|r| r.name == name) {
-            Some(rel) => {
-                let lhs = crate::core::subquery::reverse_has_count(rel);
-                self.where_raw(WhereExpr::ExprCompare {
-                    lhs,
-                    op,
-                    rhs: Expr::Literal(SqlValue::I64(n)),
-                })
-            }
+        match Self::resolve_rel_count(name) {
+            Some(lhs) => self.where_raw(WhereExpr::ExprCompare {
+                lhs,
+                op,
+                rhs: Expr::Literal(SqlValue::I64(n)),
+            }),
             None => self.with_pending_error(QueryError::UnknownField {
                 model: T::SCHEMA.name,
                 field: name.to_string(),
@@ -1635,10 +1697,13 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn annotate_exists(self, name: &str) -> AggregateBuilder<T> {
         let mut builder = self.aggregate();
-        match T::reverse_relations().iter().find(|r| r.name == name) {
-            Some(rel) => {
+        // Reuse the existence resolver (reverse-FK / M2M / GFK), then
+        // wrap whatever `[NOT ]EXISTS` it produced in a `CASE WHEN …
+        // THEN 1 ELSE 0` so it projects as an `I64(0|1)` column.
+        match Self::resolve_rel_exists(name, /*negated=*/ false) {
+            Some(exists) => {
                 let expr = AggregateExpr::RelatedAggregate(Box::new(
-                    crate::core::subquery::reverse_has_exists_expr(rel),
+                    crate::core::subquery::exists_as_int(exists),
                 ));
                 builder
                     .aggregates
@@ -1675,38 +1740,91 @@ impl<T: Model> QuerySet<T> {
         agg: AggregateExpr,
         suffix: &str,
     ) -> AggregateBuilder<T> {
+        use crate::core::{subquery, RelAggKind};
         let mut builder = self.aggregate();
-        match T::reverse_relations().iter().find(|r| r.name == name) {
-            Some(rel) => {
-                if let Some(col) = column {
-                    if rel.child_schema.field_by_column(col).is_none() {
-                        builder
-                            .deferred_error
-                            .get_or_insert(QueryError::UnknownField {
-                                model: rel.child_schema.name,
-                                field: col.to_owned(),
-                            });
-                        return builder;
-                    }
+        // `<name>_count` (no column) or `<name>_<suffix>_<column>`.
+        let alias = || match column {
+            Some(col) => std::borrow::Cow::Owned(format!("{name}_{suffix}_{col}")),
+            None => std::borrow::Cow::Owned(format!("{name}_{suffix}")),
+        };
+        // Map the reverse-FK `AggregateExpr` onto the raw-table
+        // `RelAggKind` used by the M2M / GFK builders.
+        let rel_kind = |a: &AggregateExpr| match a {
+            AggregateExpr::Sum(_) => RelAggKind::Sum,
+            AggregateExpr::Avg(_) => RelAggKind::Avg,
+            AggregateExpr::Max(_) => RelAggKind::Max,
+            AggregateExpr::Min(_) => RelAggKind::Min,
+            _ => RelAggKind::Count,
+        };
+
+        // Reverse-FK relation — aggregate over the child table directly.
+        if let Some(rel) = T::reverse_relations().iter().find(|r| r.name == name) {
+            if let Some(col) = column {
+                if rel.child_schema.field_by_column(col).is_none() {
+                    builder
+                        .deferred_error
+                        .get_or_insert(QueryError::UnknownField {
+                            model: rel.child_schema.name,
+                            field: col.to_owned(),
+                        });
+                    return builder;
                 }
-                let alias = match column {
-                    Some(col) => std::borrow::Cow::Owned(format!("{name}_{suffix}_{col}")),
-                    None => std::borrow::Cow::Owned(format!("{name}_{suffix}")),
-                };
-                let expr = AggregateExpr::RelatedAggregate(Box::new(
-                    crate::core::subquery::reverse_has_aggregate(rel, agg),
-                ));
-                builder.aggregates.push((alias, expr));
             }
-            None => {
-                builder
-                    .deferred_error
-                    .get_or_insert(QueryError::UnknownField {
-                        model: T::SCHEMA.name,
-                        field: name.to_owned(),
-                    });
-            }
+            let expr = AggregateExpr::RelatedAggregate(Box::new(subquery::reverse_has_aggregate(
+                rel, agg,
+            )));
+            builder.aggregates.push((alias(), expr));
+            return builder;
         }
+
+        // Many-to-many — `Count` over the junction; `Sum`/`Avg`/`Max`/
+        // `Min` over a target column reached through the junction. The
+        // target table has no `ModelSchema`, so `column` can't be
+        // validated here (a bad column surfaces at the database).
+        if let Some(m2m) = T::SCHEMA.m2m.iter().find(|m| m.name == name) {
+            let expr = AggregateExpr::RelatedAggregate(Box::new(subquery::m2m_has_aggregate(
+                m2m,
+                Self::self_pk_column(),
+                rel_kind(&agg),
+                column,
+            )));
+            builder.aggregates.push((alias(), expr));
+            return builder;
+        }
+
+        // Generic-FK — aggregate over the polymorphic child table,
+        // discriminated by content type.
+        if let Some(g) = T::generic_reverse_relations()
+            .iter()
+            .find(|g| g.name == name)
+        {
+            if let Some(col) = column {
+                if g.child_schema.field_by_column(col).is_none() {
+                    builder
+                        .deferred_error
+                        .get_or_insert(QueryError::UnknownField {
+                            model: g.child_schema.name,
+                            field: col.to_owned(),
+                        });
+                    return builder;
+                }
+            }
+            let expr = AggregateExpr::RelatedAggregate(Box::new(subquery::generic_has_aggregate(
+                g,
+                T::SCHEMA.table,
+                rel_kind(&agg),
+                column,
+            )));
+            builder.aggregates.push((alias(), expr));
+            return builder;
+        }
+
+        builder
+            .deferred_error
+            .get_or_insert(QueryError::UnknownField {
+                model: T::SCHEMA.name,
+                field: name.to_owned(),
+            });
         builder
     }
 
@@ -3146,6 +3264,9 @@ fn validate_expr_columns_in_model(
         Expr::Subquery(_)
         | Expr::AggregateSubquery(_)
         | Expr::OuterRef(_)
+        // `RelAggregate` (issue #830) aggregates a raw relation table;
+        // its columns resolve there, not on this model.
+        | Expr::RelAggregate { .. }
         | Expr::AliasedColumn { .. } => Ok(()),
         // Window (issue #7) — partition_by + order_by + arg columns
         // reference the model. Walk them.

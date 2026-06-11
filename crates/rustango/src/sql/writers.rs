@@ -1410,6 +1410,42 @@ fn write_expr(
             b.sql.push(')');
             Ok(())
         }
+        Expr::RelAggregate {
+            kind,
+            column,
+            table,
+            correlation,
+        } => {
+            use crate::core::RelAggKind;
+            // `(SELECT <kind>(<col>|*) FROM <table> WHERE <correlation>)`
+            // over a raw relation table (M2M junction/target or GFK
+            // child, issue #830). SUM/AVG get the dialect's decoder-side
+            // cast so the scalar decodes as i64/f64 just like the flat
+            // aggregate path; MAX/MIN/COUNT need none.
+            let col_sql = |c: Option<&'static str>, k: &'static str| -> Result<String, SqlError> {
+                c.map(|c| b.d.quote_ident(c))
+                    .ok_or(SqlError::RelAggregateMissingColumn { kind: k })
+            };
+            let agg = match kind {
+                RelAggKind::Count => "COUNT(*)".to_string(),
+                RelAggKind::Sum => {
+                    b.d.cast_aggregate_to_int(&format!("SUM({})", col_sql(*column, "SUM")?))
+                }
+                RelAggKind::Avg => {
+                    b.d.cast_aggregate_to_float(&format!("AVG({})", col_sql(*column, "AVG")?))
+                }
+                RelAggKind::Max => format!("MAX({})", col_sql(*column, "MAX")?),
+                RelAggKind::Min => format!("MIN({})", col_sql(*column, "MIN")?),
+            };
+            b.sql.push_str("(SELECT ");
+            b.sql.push_str(&agg);
+            b.sql.push_str(" FROM ");
+            b.write_ident(table);
+            b.sql.push_str(" WHERE ");
+            write_rel_correlation(b, table, correlation)?;
+            b.sql.push(')');
+            Ok(())
+        }
         Expr::OuterRef(col) => {
             // Resolve against the immediate enclosing scope. The top
             // frame is the *current* query (the subquery emitting
@@ -3292,6 +3328,106 @@ pub(super) fn write_where_expr(
             Ok(())
         }
         WhereExpr::ExprCompare { lhs, op, rhs } => write_expr_compare(b, lhs, *op, rhs),
+        WhereExpr::RelExists {
+            table,
+            correlation,
+            negated,
+        } => {
+            b.sql
+                .push_str(if *negated { "NOT EXISTS (" } else { "EXISTS (" });
+            b.sql.push_str("SELECT 1 FROM ");
+            b.write_ident(table);
+            b.sql.push_str(" WHERE ");
+            write_rel_correlation(b, table, correlation)?;
+            b.sql.push(')');
+            Ok(())
+        }
+    }
+}
+
+/// Emit the WHERE-clause body that correlates a raw-table relation
+/// subquery ([`WhereExpr::RelExists`] / [`Expr::RelAggregate`], issue
+/// #830) back to the enclosing row. These nodes don't embed a
+/// [`SelectQuery`] and therefore push no scope frame of their own, so
+/// the enclosing query is the **top** of the scope stack (unlike
+/// [`Expr::OuterRef`], whose referent is the second-from-top frame).
+fn write_rel_correlation(
+    b: &mut Sql<'_>,
+    table: &str,
+    correlation: &crate::core::RelCorrelation,
+) -> Result<(), SqlError> {
+    use crate::core::RelCorrelation;
+    let outer_table = match b.scope_stack.last() {
+        Some(m) => m.table,
+        // Relation subqueries are only ever emitted inside a query that
+        // pushed its model frame; reaching here means a bug.
+        None => {
+            return Err(SqlError::OuterRefOutsideSubquery {
+                column: "<relation>",
+            })
+        }
+    };
+    match correlation {
+        RelCorrelation::Fk {
+            fk_column,
+            outer_column,
+            ct,
+        } => {
+            // <table>.<fk_column> = <outer>.<outer_column>
+            b.write_ident(table);
+            b.sql.push('.');
+            b.write_ident(fk_column);
+            b.sql.push_str(" = ");
+            b.write_ident(outer_table);
+            b.sql.push('.');
+            b.write_ident(outer_column);
+            // GFK content-type discriminator:
+            //   AND <table>.<ct_column> =
+            //       (SELECT <ct_pk> FROM <ct_table> WHERE <ct_table_col> = $param)
+            if let Some(ct) = ct {
+                b.sql.push_str(" AND ");
+                b.write_ident(table);
+                b.sql.push('.');
+                b.write_ident(ct.ct_column);
+                b.sql.push_str(" = (SELECT ");
+                b.write_ident(ct.ct_pk);
+                b.sql.push_str(" FROM ");
+                b.write_ident(ct.ct_table);
+                b.sql.push_str(" WHERE ");
+                b.write_ident(ct.ct_table_col);
+                b.sql.push_str(" = ");
+                b.push_param(crate::core::SqlValue::String(ct.parent_table.to_owned()));
+                b.sql.push(')');
+            }
+            Ok(())
+        }
+        RelCorrelation::Membership {
+            target_pk,
+            through,
+            dst_col,
+            src_col,
+            outer_column,
+        } => {
+            // <table>.<target_pk> IN
+            //   (SELECT <dst_col> FROM <through> WHERE <src_col> = <outer>.<outer_column>)
+            b.write_ident(table);
+            b.sql.push('.');
+            b.write_ident(target_pk);
+            b.sql.push_str(" IN (SELECT ");
+            b.write_ident(dst_col);
+            b.sql.push_str(" FROM ");
+            b.write_ident(through);
+            b.sql.push_str(" WHERE ");
+            b.write_ident(through);
+            b.sql.push('.');
+            b.write_ident(src_col);
+            b.sql.push_str(" = ");
+            b.write_ident(outer_table);
+            b.sql.push('.');
+            b.write_ident(outer_column);
+            b.sql.push(')');
+            Ok(())
+        }
     }
 }
 
@@ -3503,7 +3639,8 @@ fn write_child(
         WhereExpr::Exists(_)
         | WhereExpr::NotExists(_)
         | WhereExpr::InSubquery { .. }
-        | WhereExpr::ExprCompare { .. } => write_where_expr(b, expr, qualify_with, model),
+        | WhereExpr::ExprCompare { .. }
+        | WhereExpr::RelExists { .. } => write_where_expr(b, expr, qualify_with, model),
         WhereExpr::And(_) | WhereExpr::Or(_) | WhereExpr::Xor(_) | WhereExpr::Not(_) => {
             b.sql.push('(');
             write_where_expr(b, expr, qualify_with, model)?;

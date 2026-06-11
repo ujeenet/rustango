@@ -62,8 +62,10 @@
 //! executed. Build the subquery first, propagate `?`, then embed.
 
 use super::expr::{CaseBranch, Expr};
-use super::query::{AggregateExpr, AggregateQuery, Op, SelectQuery, WhereExpr};
-use super::schema::ReverseRelation;
+use super::query::{
+    AggregateExpr, AggregateQuery, CtFilter, Op, RelAggKind, RelCorrelation, SelectQuery, WhereExpr,
+};
+use super::schema::{GenericReverseRelation, M2MRelation, ReverseRelation};
 use super::SqlValue;
 
 /// `EXISTS (subquery)` — true when the subquery returns at least one
@@ -204,10 +206,11 @@ pub fn reverse_has_count(rel: &ReverseRelation) -> Expr {
     reverse_has_aggregate(rel, AggregateExpr::Count(None))
 }
 
-/// Build a correlated `CASE WHEN EXISTS (SELECT 1 FROM <child> WHERE
-/// <child_fk> = <outer>.<pk>) THEN 1 ELSE 0 END` projection [`Expr`]
-/// for the given reverse-FK relation — backs
-/// [`crate::query::QuerySet::annotate_exists`] (`withExists`).
+/// Wrap any existence predicate (`EXISTS` / `NOT EXISTS` / `RelExists`,
+/// from the reverse-FK, M2M, or GFK builders) in `CASE WHEN <exists>
+/// THEN 1 ELSE 0 END` so it can be **projected** as a column — backs
+/// [`crate::query::QuerySet::annotate_exists`] (`withExists`) for every
+/// relation kind.
 ///
 /// Integer `1`/`0` literals (rather than booleans) are deliberate: the
 /// projected `<rel>_exists` column then decodes as `SqlValue::I64(0|1)`
@@ -215,10 +218,10 @@ pub fn reverse_has_count(rel: &ReverseRelation) -> Expr {
 /// would return a native `bool` on Postgres but `0|1` on the other two,
 /// so the dict-row value would vary by backend.
 #[must_use]
-pub fn reverse_has_exists_expr(rel: &ReverseRelation) -> Expr {
+pub fn exists_as_int(exists: WhereExpr) -> Expr {
     Expr::Case {
         branches: vec![CaseBranch {
-            condition: reverse_has_exists(rel),
+            condition: exists,
             then: Expr::Literal(SqlValue::I64(1)),
         }],
         default: Some(Box::new(Expr::Literal(SqlValue::I64(0)))),
@@ -242,6 +245,133 @@ pub fn reverse_has_exists_expr(rel: &ReverseRelation) -> Expr {
 #[must_use]
 pub fn outer_ref(column: &'static str) -> Expr {
     Expr::OuterRef(column)
+}
+
+// ----------------------------------------------------------- M2M (#830)
+
+/// `[NOT ]EXISTS (SELECT 1 FROM <through> WHERE <src_col> =
+/// <outer>.<self_pk>)` — many-to-many relation existence over the
+/// junction table. `self_pk` is the parent model's primary-key column.
+/// Backs [`crate::query::QuerySet::where_has`] for M2M relations.
+#[must_use]
+pub fn m2m_has_exists(m2m: &M2MRelation, self_pk: &'static str, negated: bool) -> WhereExpr {
+    WhereExpr::RelExists {
+        table: m2m.through,
+        correlation: RelCorrelation::Fk {
+            fk_column: m2m.src_col,
+            outer_column: self_pk,
+            ct: None,
+        },
+        negated,
+    }
+}
+
+/// Correlated many-to-many aggregate. `Count` counts **junction rows**
+/// (`SELECT COUNT(*) FROM <through> WHERE <src_col> = <outer>.<self_pk>`);
+/// `Sum`/`Avg`/`Max`/`Min` aggregate `column` on the **target** table,
+/// reached through the junction:
+///
+/// ```text
+/// (SELECT <agg>(<column>) FROM <to>
+///  WHERE <to>.id IN (SELECT <dst_col> FROM <through>
+///                    WHERE <src_col> = <outer>.<self_pk>))
+/// ```
+///
+/// The target PK is assumed to be `"id"` — rustango's surrogate-PK
+/// convention; [`M2MRelation`] doesn't carry the target PK column.
+#[must_use]
+pub fn m2m_has_aggregate(
+    m2m: &M2MRelation,
+    self_pk: &'static str,
+    kind: RelAggKind,
+    column: Option<&'static str>,
+) -> Expr {
+    match kind {
+        RelAggKind::Count => Expr::RelAggregate {
+            kind: RelAggKind::Count,
+            column: None,
+            table: m2m.through,
+            correlation: RelCorrelation::Fk {
+                fk_column: m2m.src_col,
+                outer_column: self_pk,
+                ct: None,
+            },
+        },
+        _ => Expr::RelAggregate {
+            kind,
+            column,
+            table: m2m.to,
+            correlation: RelCorrelation::Membership {
+                target_pk: "id",
+                through: m2m.through,
+                dst_col: m2m.dst_col,
+                src_col: m2m.src_col,
+                outer_column: self_pk,
+            },
+        },
+    }
+}
+
+// ----------------------------------------------------- GFK / generic (#830)
+
+/// Build the content-type discriminator for a generic-FK relation. The
+/// registry coordinates (`rustango_content_types` / `id` / `table`)
+/// mirror [`crate::contenttypes::ContentType`]; they're inlined here
+/// rather than read off `ContentType::SCHEMA` so `core` stays free of a
+/// dependency on the higher-level contenttypes app module.
+fn ct_filter(rel: &GenericReverseRelation, parent_table: &'static str) -> CtFilter {
+    CtFilter {
+        ct_column: rel.ct_column,
+        parent_table,
+        ct_table: "rustango_content_types",
+        ct_pk: "id",
+        ct_table_col: "table",
+    }
+}
+
+/// `[NOT ]EXISTS (SELECT 1 FROM <child> WHERE <pk_column> =
+/// <outer>.<self_pk> AND <ct_column> = (SELECT id FROM
+/// rustango_content_types WHERE "table" = '<parent_table>'))` — generic
+/// (polymorphic) relation existence. `parent_table` is the querying
+/// model's table name (a compile-time constant), used to resolve its
+/// content-type id via the nested subquery — no async lookup needed.
+#[must_use]
+pub fn generic_has_exists(
+    rel: &GenericReverseRelation,
+    parent_table: &'static str,
+    negated: bool,
+) -> WhereExpr {
+    WhereExpr::RelExists {
+        table: rel.child_schema.table,
+        correlation: RelCorrelation::Fk {
+            fk_column: rel.pk_column,
+            outer_column: rel.self_pk_column,
+            ct: Some(ct_filter(rel, parent_table)),
+        },
+        negated,
+    }
+}
+
+/// Correlated generic-FK aggregate over a `child` column. The child
+/// table carries the data column, so a single-table aggregate suffices
+/// (no junction). `Count` ignores `column`.
+#[must_use]
+pub fn generic_has_aggregate(
+    rel: &GenericReverseRelation,
+    parent_table: &'static str,
+    kind: RelAggKind,
+    column: Option<&'static str>,
+) -> Expr {
+    Expr::RelAggregate {
+        kind,
+        column,
+        table: rel.child_schema.table,
+        correlation: RelCorrelation::Fk {
+            fk_column: rel.pk_column,
+            outer_column: rel.self_pk_column,
+            ct: Some(ct_filter(rel, parent_table)),
+        },
+    }
 }
 
 #[cfg(test)]

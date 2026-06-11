@@ -267,6 +267,73 @@ pub enum WhereExpr {
     /// `Gt`, `Gte`) make sense here; the writer rejects other ops
     /// the same way it does for `ColumnFilter`.
     ExprCompare { lhs: Expr, op: Op, rhs: Expr },
+    /// `[NOT ]EXISTS (SELECT 1 FROM <table> WHERE <correlation>)` over a
+    /// **raw table** — the M2M / GFK arm of the relation-existence
+    /// family (issue #830). Unlike [`Self::Exists`] it doesn't embed a
+    /// [`SelectQuery`] (which would need a `ModelSchema` to project): an
+    /// M2M junction table has no model, and the GFK case only needs a
+    /// literal `SELECT 1`. The correlation back to the outer row (and,
+    /// for GFK, the content-type discriminator) lives in
+    /// [`RelCorrelation`].
+    RelExists {
+        table: &'static str,
+        correlation: RelCorrelation,
+        negated: bool,
+    },
+}
+
+/// Aggregate function for a correlated raw-table relation aggregate
+/// ([`Expr::RelAggregate`]). Distinct from [`AggregateExpr`] because the
+/// raw-table path (M2M / GFK, issue #830) has no `ModelSchema` and only
+/// supports this fixed set — `COUNT(*)` / `SUM` / `AVG` / `MAX` / `MIN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelAggKind {
+    Count,
+    Sum,
+    Avg,
+    Max,
+    Min,
+}
+
+/// Content-type discriminator for a generic-FK (GFK) relation — AND-ed
+/// into a [`RelCorrelation::Fk`] so a polymorphic child table is
+/// filtered to rows pointing at *this* parent model. Emits
+/// `<ct_column> = (SELECT <ct_pk> FROM <ct_table> WHERE <ct_table_col> =
+/// '<parent_table>')`, resolving the parent's content-type id via a
+/// nested subquery keyed on the compile-time-constant parent table name
+/// (so no async content-type lookup is needed at query-build time).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CtFilter {
+    pub ct_column: &'static str,
+    pub parent_table: &'static str,
+    pub ct_table: &'static str,
+    pub ct_pk: &'static str,
+    pub ct_table_col: &'static str,
+}
+
+/// How a raw-table relation subquery ([`WhereExpr::RelExists`] /
+/// [`Expr::RelAggregate`]) correlates back to the enclosing row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelCorrelation {
+    /// `<table>.<fk_column> = <outer>.<outer_column>` (plus an optional
+    /// GFK content-type filter). Covers an M2M junction (`fk_column` =
+    /// junction src column) and a generic child (`fk_column` = the
+    /// `object_pk` column, with `ct` set).
+    Fk {
+        fk_column: &'static str,
+        outer_column: &'static str,
+        ct: Option<CtFilter>,
+    },
+    /// `<table>.<target_pk> IN (SELECT <dst_col> FROM <through> WHERE
+    /// <src_col> = <outer>.<outer_column>)` — an M2M aggregate over a
+    /// column on the *target* table, reached through the junction.
+    Membership {
+        target_pk: &'static str,
+        through: &'static str,
+        dst_col: &'static str,
+        src_col: &'static str,
+        outer_column: &'static str,
+    },
 }
 
 impl WhereExpr {
@@ -333,7 +400,8 @@ impl WhereExpr {
             | Self::Exists(_)
             | Self::NotExists(_)
             | Self::InSubquery { .. }
-            | Self::ExprCompare { .. } => None,
+            | Self::ExprCompare { .. }
+            | Self::RelExists { .. } => None,
         }
     }
 
@@ -379,6 +447,12 @@ impl WhereExpr {
             // model's perspective there is nothing to check beyond
             // the column on the LHS of `InSubquery`.
             Self::Exists(_) | Self::NotExists(_) => Ok(()),
+            // Raw-table relation existence (M2M / GFK, issue #830) — the
+            // `table`/correlation columns live on a junction or
+            // polymorphic child, not on `model`; the framework builds
+            // them from trusted relation metadata. Nothing to validate
+            // against the outer model.
+            Self::RelExists { .. } => Ok(()),
             Self::InSubquery { column, .. } => {
                 if model.field_by_column(column).is_none() {
                     return Err(QueryError::UnknownField {
@@ -451,6 +525,11 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
         Expr::Subquery(_)
         | Expr::AggregateSubquery(_)
         | Expr::OuterRef(_)
+        // `RelAggregate` (issue #830) aggregates a raw relation table
+        // (M2M junction/target or GFK child); its columns live there,
+        // not on `model`, and the framework builds it from trusted
+        // relation metadata — nothing to validate against this model.
+        | Expr::RelAggregate { .. }
         | Expr::AliasedColumn { .. } => Ok(()),
         // Window (issue #7) — args / partition_by / order_by all
         // reference the outer model's columns. Validate them.

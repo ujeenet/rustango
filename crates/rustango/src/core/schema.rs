@@ -265,6 +265,39 @@ pub struct ReverseRelation {
     pub self_pk_column: &'static str,
 }
 
+/// Runtime metadata for a **reverse generic-FK** relation, declared via
+/// `#[rustango(generic_has(name, child, ct_column, pk_column))]`. The
+/// M2M/GFK arm of the relation-existence family (issue #830): lets a
+/// parent model resolve "do polymorphic children point at me?" by name
+/// from the queryset, the way [`ReverseRelation`] does for plain
+/// reverse-FK relations.
+///
+/// The child is content-type-discriminated: its `pk_column` (e.g.
+/// `object_pk`) holds the parent's PK and its `ct_column` (e.g.
+/// `content_type_id`) holds the parent model's content-type id. The
+/// existence subquery AND-s a `ct_column = (SELECT id FROM
+/// rustango_content_types WHERE "table" = '<parent_table>')` predicate so
+/// only children pointing at *this* model match — the parent table name
+/// is a compile-time constant, so no async content-type lookup is needed.
+#[derive(Debug, Clone, Copy)]
+pub struct GenericReverseRelation {
+    /// Relation accessor name as declared in `generic_has(name = "tags")`.
+    pub name: &'static str,
+    /// `ModelSchema` of the **child** model — the `FROM` clause of the
+    /// correlated subquery (filled by the macro from
+    /// `<Child as Model>::SCHEMA`).
+    pub child_schema: &'static ModelSchema,
+    /// Column on the child table holding the parent's content-type id
+    /// (e.g. `"content_type_id"`).
+    pub ct_column: &'static str,
+    /// Column on the child table holding the parent's primary-key value
+    /// (e.g. `"object_pk"`) — the `OuterRef` correlation target's match.
+    pub pk_column: &'static str,
+    /// SQL primary-key column on **this** (parent) model's table.
+    /// Defaults to `"id"`.
+    pub self_pk_column: &'static str,
+}
+
 /// Multi-column ("composite") foreign key relation, declared at the
 /// model level rather than the field level — single-column FKs stay
 /// in [`FieldSchema::relation`], composite FKs live here so each
@@ -1145,6 +1178,19 @@ pub trait Model: Sized + Send + Sync + 'static {
     /// `(child_table, child_fk_column, self_pk_column)` without
     /// needing a concrete `self`. Issue #830 sub-piece.
     fn reverse_relations() -> &'static [ReverseRelation] {
+        &[]
+    }
+
+    /// Reverse **generic-FK** existence relations declared via
+    /// `#[rustango(generic_has(name, child, ct_column, pk_column))]`.
+    /// The macro overrides this to return the populated slice; models
+    /// with no `generic_has` declarations inherit the empty default.
+    ///
+    /// Used by the relation-existence family
+    /// ([`crate::query::QuerySet::where_has`] /
+    /// [`crate::query::QuerySet::annotate_count`] / …) to resolve a
+    /// content-type-discriminated child relation by name. Issue #830.
+    fn generic_reverse_relations() -> &'static [GenericReverseRelation] {
         &[]
     }
 }
