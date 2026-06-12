@@ -10,11 +10,14 @@
 //! Slice 2 (#1006): view + edit + coverage + persist. Slice 3 (this
 //! change): add a brand-new key (footer row), delete a key (per-row
 //! checkbox → all locales), export the whole catalog as JSON
-//! (`…/export.json`), and gate **writes** on superuser — the POST handler
-//! reads the live [`crate::admin::AdminSession`] from request extensions,
-//! rejects non-superusers with 403, and records the operator's username
-//! as `updated_by`. Reads (the grid + export) stay at the admin login
-//! gate.
+//! (`…/export.json`), and gate **writes** on superuser — when session
+//! auth is configured (the default), the POST handler reads the live
+//! [`crate::admin::AdminSession`] from request extensions, rejects
+//! non-superusers with 403, and records the operator's username as
+//! `updated_by`. An admin mounted without session auth (open / proxied)
+//! has no superuser to check, so writes stay open there, consistent with
+//! the rest of that admin's surface. Reads (the grid + export) stay at
+//! the admin login gate.
 //!
 //! Still tracked on #532: the `seed-translations` manage verb (needs a
 //! locales-dir wired into the `Cli`) and a fine-grained
@@ -327,27 +330,24 @@ async fn editor_post(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Redirect};
-    // Writes require a superuser. The admin login gate inserts the live
-    // `AdminSession` into request extensions (see `admin::login_view`);
-    // read it before consuming the body.
-    let Some(session) = req
-        .extensions()
-        .get::<crate::admin::AdminSession>()
-        .cloned()
-    else {
-        return (
-            StatusCode::FORBIDDEN,
-            "translations editor: no admin session",
-        )
-            .into_response();
+    // When session auth is configured (the default), writes require a
+    // superuser: the admin login gate inserts the live `AdminSession` into
+    // request extensions (see `admin::login_view`) — read it before
+    // consuming the body, 403 non-superusers, and attribute the edit to
+    // the operator. When the admin is mounted WITHOUT session auth (an
+    // open / externally-proxied admin), there's no superuser to check, so
+    // writes stay open — consistent with the rest of that admin's surface.
+    let updated_by = match req.extensions().get::<crate::admin::AdminSession>() {
+        Some(session) if session.is_superuser => session.username.clone(),
+        Some(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                "translations editor: editing requires a superuser",
+            )
+                .into_response();
+        }
+        None => "admin".to_owned(),
     };
-    if !session.is_superuser {
-        return (
-            StatusCode::FORBIDDEN,
-            "translations editor: editing requires a superuser",
-        )
-            .into_response();
-    }
 
     let body = match axum::body::to_bytes(req.into_body(), 1 << 20).await {
         Ok(b) => b,
@@ -361,7 +361,7 @@ async fn editor_post(
     edits.extend(parse_new_key(&form));
     let deletes = parse_deletes(&form);
     let result = async {
-        apply_edits(&pool, &edits, &session.username).await?;
+        apply_edits(&pool, &edits, &updated_by).await?;
         apply_deletes(&pool, &deletes).await
     }
     .await;
