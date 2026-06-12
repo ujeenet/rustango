@@ -146,6 +146,8 @@ where
             FieldType::HStore => Value::Null,
             // #824 — pgvector columns; typed fetch decodes via `Vector`.
             FieldType::Vector(_) => Value::Null,
+            // #443 — PostGIS geometry columns; typed fetch decodes via `Point`.
+            FieldType::Geometry(_) => Value::Null,
         };
         map.insert(field.name.to_owned(), value);
     }
@@ -289,6 +291,8 @@ pub fn row_to_json_sqlite(
             FieldType::HStore => Value::Null,
             // #824 — pgvector is PG-only; typed fetch decodes via `Vector`.
             FieldType::Vector(_) => Value::Null,
+            // #443 — PostGIS geometry is PG-only; never present on SQLite.
+            FieldType::Geometry(_) => Value::Null,
         };
         map.insert(field.name.to_owned(), value);
     }

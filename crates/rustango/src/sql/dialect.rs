@@ -368,6 +368,9 @@ pub trait Dialect {
             // has no `&'static` CAST spelling — casting to it isn't
             // supported through this path (#824).
             FieldType::Vector(_) => return None,
+            // PostGIS `geometry(Point, srid)` likewise has no `&'static`
+            // CAST spelling (#443).
+            FieldType::Geometry(_) => return None,
         })
     }
 
@@ -415,6 +418,10 @@ pub trait Dialect {
             // dimension. Requires the `vector` extension.
             FieldType::Vector(0) => "vector".into(),
             FieldType::Vector(dims) => format!("vector({dims})"),
+            // PostGIS `geometry(Point, srid)` column (#443). `0` = no
+            // SRID constraint (`geometry(Point)`). Requires `postgis`.
+            FieldType::Geometry(0) => "geometry(Point)".into(),
+            FieldType::Geometry(srid) => format!("geometry(Point,{srid})"),
         }
     }
 

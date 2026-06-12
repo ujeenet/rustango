@@ -532,6 +532,9 @@ pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
         // `&'static str`), so a dimension-only change (`vector(3)` →
         // `vector(4)`) isn't surfaced as a schema diff.
         FieldType::Vector(_) => "vector",
+        // #443 — PostGIS geometry. Like `vector`, the SRID isn't encoded
+        // in this `&'static str`, so an SRID-only change isn't diffed.
+        FieldType::Geometry(_) => "geometry",
     }
 }
 

@@ -1521,6 +1521,8 @@ fn field_type_label(ty: crate::core::FieldType) -> &'static str {
         T::HStore => "hstore",
         // #824 — pgvector columns.
         T::Vector(_) => "vector",
+        // #443 — PostGIS geometry columns.
+        T::Geometry(_) => "geometry",
     }
 }
 

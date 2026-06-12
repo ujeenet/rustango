@@ -83,6 +83,16 @@ pub enum SqlValue {
     /// / SQLite reject (no `vector` type). Built from
     /// [`crate::sql::Vector`] via `Into<SqlValue>`.
     Vector(Vec<f32>),
+    /// PostGIS `geometry(Point, …)` value — issue #443. Backend-neutral
+    /// 2-D point + SRID at this layer; the PG bind path encodes it as
+    /// EWKB (via [`crate::sql::Point`]), MySQL / SQLite reject (no
+    /// `geometry` type). Built from [`crate::sql::Point`] via
+    /// `Into<SqlValue>`.
+    Geometry {
+        x: f64,
+        y: f64,
+        srid: u32,
+    },
 }
 
 impl SqlValue {
@@ -133,6 +143,7 @@ impl SqlValue {
                 let inner: Vec<String> = items.iter().map(f32::to_string).collect();
                 format!("vector[{}]", inner.join(", "))
             }
+            Self::Geometry { x, y, srid } => format!("SRID={srid};POINT({x} {y})"),
         }
     }
 
@@ -148,7 +159,10 @@ impl SqlValue {
             // `Vector` carries no dimension here; the column's
             // `FieldType::Vector(dims)` comes from the schema, so a bound
             // value can't be type-checked against it. Skip (like Array).
-            | Self::Vector(_) => return None,
+            | Self::Vector(_)
+            // `Geometry` likewise can't be type-checked against the
+            // column's `FieldType::Geometry(srid)` from here. Skip.
+            | Self::Geometry { .. } => return None,
             Self::I16(_) => FieldType::I16,
             Self::I32(_) => FieldType::I32,
             Self::I64(_) => FieldType::I64,

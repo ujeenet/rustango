@@ -125,6 +125,10 @@ impl Dialect for Postgres {
                 // `vector` extension to be installed/enabled.
                 | "pgvector"
                 | "vector"
+                // PostGIS geometry columns (#443). Requires the
+                // `postgis` extension to be installed/enabled.
+                | "postgis"
+                | "geometry"
         ) || self.default_supports(token)
     }
 
