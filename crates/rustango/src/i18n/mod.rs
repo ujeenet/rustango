@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::RwLock;
 
+pub mod admin;
 pub mod db;
 pub mod middleware;
 pub mod tera_tags;
