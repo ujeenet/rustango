@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Model reference — {{ admin_title }}{% endblock title %}
+{% block body %}
+<nav class="breadcrumb" aria-label="breadcrumb">
+  <ol>
+    <li><a href="{{ admin_prefix }}/">{{ admin_title }}</a></li>
+    <li><strong>Model reference</strong></li>
+  </ol>
+</nav>
+<h1>Model reference</h1>
+<p>{{ apps | length }} app{% if apps | length != 1 %}s{% endif %} &middot; every registered model and its fields.</p>
+
+{% for app in apps %}
+<section class="docs-app">
+  <h2>{{ app.app }}</h2>
+  {% for m in app.models %}
+  <h3><code>{{ m.model }}</code> <span class="docs-table">{{ m.table }}</span></h3>
+  <table class="docs-fields">
+    <thead>
+      <tr><th>field</th><th>column</th><th>type</th><th>flags</th><th>relation</th></tr>
+    </thead>
+    <tbody>
+    {% for f in m.fields %}
+      <tr>
+        <td><code>{{ f.name }}</code></td>
+        <td><code>{{ f.column }}</code></td>
+        <td>{{ f.type }}</td>
+        <td>{% if f.pk %}PK {% endif %}{% if f.unique %}unique {% endif %}{% if f.nullable %}nullable{% endif %}</td>
+        <td>{{ f.relation }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endfor %}
+</section>
+{% endfor %}
+{% endblock body %}

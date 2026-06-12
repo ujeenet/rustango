@@ -647,6 +647,8 @@ impl Builder {
                 &audit_cleanup_path,
                 post(super::audit::audit_cleanup_submit),
             )
+            // #1011 — in-admin model reference (Django admindocs).
+            .route("/__docs", get(super::docs::docs_view))
             .route(
                 "/{table}",
                 get(views::table_view).post(views::create_submit),
