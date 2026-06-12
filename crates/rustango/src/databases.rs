@@ -109,6 +109,103 @@ pub fn clear() {
         .clear();
 }
 
+// ---- DATABASE_ROUTERS (#401) -----------------------------------------
+
+/// A database router — Django's
+/// [`DATABASE_ROUTERS`](https://docs.djangoproject.com/en/6.0/topics/db/multi-db/#database-routers)
+/// (#401). Decides which registered alias a given model's reads / writes
+/// should target, so callers get automatic read-replica / sharding
+/// routing instead of threading an alias through every call.
+///
+/// Both methods default to `None` ("no opinion — defer to the next
+/// router, then the `"default"` alias"), so an implementation overrides
+/// only what it cares about. Routers are consulted in registration order;
+/// the first `Some(alias)` wins.
+///
+/// ```ignore
+/// struct ReadReplicaRouter;
+/// impl rustango::databases::DatabaseRouter for ReadReplicaRouter {
+///     // Send every read to the replica; writes fall through to "default".
+///     fn db_for_read(&self, _model: &rustango::core::ModelSchema) -> Option<String> {
+///         Some("replica".into())
+///     }
+/// }
+/// rustango::databases::register_router(ReadReplicaRouter);
+/// ```
+pub trait DatabaseRouter: Send + Sync + 'static {
+    /// Alias to read `model` from, or `None` to defer.
+    fn db_for_read(&self, model: &crate::core::ModelSchema) -> Option<String> {
+        let _ = model;
+        None
+    }
+    /// Alias to write `model` to, or `None` to defer.
+    fn db_for_write(&self, model: &crate::core::ModelSchema) -> Option<String> {
+        let _ = model;
+        None
+    }
+}
+
+#[allow(clippy::type_complexity)]
+static ROUTERS: OnceLock<RwLock<Vec<Box<dyn DatabaseRouter>>>> = OnceLock::new();
+
+fn routers() -> &'static RwLock<Vec<Box<dyn DatabaseRouter>>> {
+    ROUTERS.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// Append a router to the chain (Django's `DATABASE_ROUTERS` list).
+/// Routers are consulted in registration order.
+pub fn register_router(router: impl DatabaseRouter) {
+    routers()
+        .write()
+        .expect("routers registry not poisoned")
+        .push(Box::new(router));
+}
+
+/// Remove every registered router. Intended for test isolation.
+pub fn clear_routers() {
+    routers()
+        .write()
+        .expect("routers registry not poisoned")
+        .clear();
+}
+
+/// The alias to **read** `model` from — the first router that returns
+/// `Some`, or `None` if every router defers (caller falls back to
+/// [`DEFAULT_ALIAS`]).
+#[must_use]
+pub fn route_read(model: &crate::core::ModelSchema) -> Option<String> {
+    routers()
+        .read()
+        .expect("routers registry not poisoned")
+        .iter()
+        .find_map(|r| r.db_for_read(model))
+}
+
+/// The alias to **write** `model` to — see [`route_read`].
+#[must_use]
+pub fn route_write(model: &crate::core::ModelSchema) -> Option<String> {
+    routers()
+        .read()
+        .expect("routers registry not poisoned")
+        .iter()
+        .find_map(|r| r.db_for_write(model))
+}
+
+/// Resolve the read pool for `model` via the router chain, falling back
+/// to the `"default"` alias. Panics if the chosen alias isn't registered
+/// (see [`pool`]).
+#[must_use]
+pub fn read_pool_for(model: &crate::core::ModelSchema) -> Pool {
+    pool(&route_read(model).unwrap_or_else(|| DEFAULT_ALIAS.to_owned()))
+}
+
+/// Resolve the write pool for `model` via the router chain, falling back
+/// to the `"default"` alias.
+#[must_use]
+pub fn write_pool_for(model: &crate::core::ModelSchema) -> Pool {
+    pool(&route_write(model).unwrap_or_else(|| DEFAULT_ALIAS.to_owned()))
+}
+
 impl<T: crate::core::Model> crate::query::QuerySet<T> {
     /// Route this queryset to the connection registered under `alias` —
     /// Django's [`QuerySet.using(alias)`](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#using).
@@ -125,6 +222,22 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
             qs: self,
             pool: pool(alias),
         }
+    }
+
+    /// Route this read through the registered [`DatabaseRouter`] chain —
+    /// the automatic counterpart of [`Self::using`] (issue #401). The
+    /// routers' `db_for_read(T::SCHEMA)` decision picks the alias (first
+    /// `Some` wins), falling back to the `"default"` alias when every
+    /// router defers. Returns a [`UsingQuerySet`] bound to that pool.
+    ///
+    /// Panics if the chosen alias isn't registered (see [`pool`]). Like
+    /// [`Self::using`], this exposes only read terminals; for writes use
+    /// [`write_pool_for`] (`fetch_pool(&write_pool_for(T::SCHEMA))`) so a
+    /// write is never silently sent to a read replica.
+    #[must_use]
+    pub fn routed(self) -> UsingQuerySet<T> {
+        let pool = read_pool_for(T::SCHEMA);
+        UsingQuerySet { qs: self, pool }
     }
 }
 
