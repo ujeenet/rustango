@@ -423,6 +423,10 @@ lettre = { version = "0.11", default-features = false, features = [
 # default tracing subscriber (env-filter) before the user body runs.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json"], optional = true }
 tracing-appender = { workspace = true, optional = true }
+# Not used directly — declared only to pin the transitive `time` away from
+# the broken 0.3.48 (see the workspace.dependencies note). `time` is
+# already pulled by cookie / tracing-appender / sqlx in every real build.
+time = { workspace = true }
 
 [dev-dependencies]
 tokio          = { workspace = true }
