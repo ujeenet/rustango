@@ -1284,6 +1284,9 @@ fn bind_value_pg(
         SqlValue::Geometry { .. } => {
             unreachable!("Geometry values never reach audited-save bind path")
         }
+        SqlValue::Raster(_) => {
+            unreachable!("Raster values never reach audited-save bind path")
+        }
     }
 }
 
@@ -1323,6 +1326,9 @@ fn bind_value_my(
         }
         SqlValue::Geometry { .. } => {
             unreachable!("Geometry values never reach audited-save bind path")
+        }
+        SqlValue::Raster(_) => {
+            unreachable!("Raster values never reach audited-save bind path")
         }
     }
 }
@@ -1365,6 +1371,9 @@ fn bind_value_sqlite<'q>(
         }
         SqlValue::Geometry { .. } => {
             unreachable!("Geometry values never reach audited-save bind path")
+        }
+        SqlValue::Raster(_) => {
+            unreachable!("Raster values never reach audited-save bind path")
         }
     }
 }

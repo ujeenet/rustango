@@ -3026,6 +3026,12 @@ fn json_to_sql_value(
                 .map_err(|e| format!("expected JSON {{x, y, srid?}} for geometry column: {e}"))?;
             Ok(p.into())
         }
+        // #444 — PostGIS raster from a fixture: a lowercase-hex WKB string.
+        FieldType::Raster => {
+            let r: crate::sql::Raster = serde_json::from_value(v.clone())
+                .map_err(|e| format!("expected a hex-WKB string for raster column: {e}"))?;
+            Ok(r.into())
+        }
     }
 }
 

@@ -287,6 +287,8 @@ fn field_type_to_schema(t: FieldType) -> Schema {
         FieldType::Vector(_) => Schema::array_of(Schema::number()),
         // #443 — PostGIS Point: a JSON object `{ x, y, srid }`.
         FieldType::Geometry(_) => Schema::object(),
+        // #444 — PostGIS raster: serialized as a hex-WKB string.
+        FieldType::Raster => Schema::string(),
     }
 }
 

@@ -93,6 +93,11 @@ pub enum SqlValue {
         y: f64,
         srid: u32,
     },
+    /// PostGIS `raster` value — issue #444. The raw WKB-raster bytes; the
+    /// PG bind path writes them verbatim (via [`crate::sql::Raster`]),
+    /// MySQL / SQLite reject (no `raster` type). Built from
+    /// [`crate::sql::Raster`] via `Into<SqlValue>`.
+    Raster(Vec<u8>),
 }
 
 impl SqlValue {
@@ -144,6 +149,7 @@ impl SqlValue {
                 format!("vector[{}]", inner.join(", "))
             }
             Self::Geometry { x, y, srid } => format!("SRID={srid};POINT({x} {y})"),
+            Self::Raster(bytes) => format!("<raster {} bytes>", bytes.len()),
         }
     }
 
@@ -162,7 +168,10 @@ impl SqlValue {
             | Self::Vector(_)
             // `Geometry` likewise can't be type-checked against the
             // column's `FieldType::Geometry(srid)` from here. Skip.
-            | Self::Geometry { .. } => return None,
+            | Self::Geometry { .. }
+            // `Raster` likewise can't be type-checked against the column's
+            // `FieldType::Raster` from here. Skip.
+            | Self::Raster(_) => return None,
             Self::I16(_) => FieldType::I16,
             Self::I32(_) => FieldType::I32,
             Self::I64(_) => FieldType::I64,

@@ -129,6 +129,8 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
         FieldType::Vector(_) => v.to_string(),
         // #443 — PostGIS Point: compact JSON object form.
         FieldType::Geometry(_) => v.to_string(),
+        // #444 — PostGIS raster: hex-WKB string form.
+        FieldType::Raster => v.to_string(),
     }
 }
 
@@ -360,6 +362,10 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         FieldType::Geometry(_) => format!(
             r#"<input type="text" name="{name}" id="{name}" value="{val}" placeholder="{{&quot;x&quot;: 0, &quot;y&quot;: 0, &quot;srid&quot;: 4326}}"{required}{readonly}>"#
         ),
+        // #444 — PostGIS raster: a hex-WKB text input (rarely hand-edited).
+        FieldType::Raster => format!(
+            r#"<input type="text" name="{name}" id="{name}" value="{val}" placeholder="hex WKB raster"{required}{readonly}>"#
+        ),
     }
 }
 
@@ -547,6 +553,10 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
         FieldType::Geometry(_) => serde_json::to_string(v)
             .map(|s| escape(&s))
             .unwrap_or_default(),
+        // #444 — PostGIS raster: hex-WKB string in the list cell.
+        FieldType::Raster => serde_json::to_string(v)
+            .map(|s| escape(&s))
+            .unwrap_or_default(),
     }
 }
 
@@ -627,6 +637,8 @@ pub(crate) fn read_joined_value_as_html_json(
         FieldType::Vector(_) => None,
         // #443 — geometry isn't a meaningful select_related join target.
         FieldType::Geometry(_) => None,
+        // #444 — raster isn't a meaningful select_related join target.
+        FieldType::Raster => None,
     };
     text.map(|s| escape(&s))
 }

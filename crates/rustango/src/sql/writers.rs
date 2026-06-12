@@ -96,7 +96,12 @@ impl<'d> Sql<'d> {
     ///   take their type from the operator context and emit a bare
     ///   placeholder via a separate path, so they're unaffected.)
     pub(super) fn push_param_typed(&mut self, value: SqlValue, cast: Option<&'static str>) {
-        let needs_cast = matches!(value, SqlValue::Null | SqlValue::RangeLiteral(_));
+        // `Raster` (#444) is bound as hex text and cast `$N::raster` —
+        // PostGIS `raster` has no binary input function, only a text one.
+        let needs_cast = matches!(
+            value,
+            SqlValue::Null | SqlValue::RangeLiteral(_) | SqlValue::Raster(_)
+        );
         self.params.push(value);
         let p = self.d.placeholder(self.params.len());
         self.sql.push_str(&p);

@@ -49,7 +49,8 @@ pub fn validate_value(
         | SqlValue::Binary(_)
         | SqlValue::HStore(_)
         | SqlValue::Vector(_)
-        | SqlValue::Geometry { .. } => Ok(()),
+        | SqlValue::Geometry { .. }
+        | SqlValue::Raster(_) => Ok(()),
     }
 }
 

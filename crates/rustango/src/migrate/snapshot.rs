@@ -535,6 +535,8 @@ pub(crate) fn field_type_name(ty: FieldType) -> &'static str {
         // #443 — PostGIS geometry. Like `vector`, the SRID isn't encoded
         // in this `&'static str`, so an SRID-only change isn't diffed.
         FieldType::Geometry(_) => "geometry",
+        // #444 — PostGIS raster.
+        FieldType::Raster => "raster",
     }
 }
 

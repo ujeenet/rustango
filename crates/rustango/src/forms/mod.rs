@@ -245,7 +245,8 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
         | FieldType::Range(_)
         | FieldType::HStore
         | FieldType::Vector(_)
-        | FieldType::Geometry(_) => Err(FormError::UnsupportedPk {
+        | FieldType::Geometry(_)
+        | FieldType::Raster => Err(FormError::UnsupportedPk {
             field: field.name.to_owned(),
             ty: field.ty.as_str(),
         }),
@@ -434,6 +435,13 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
             let p: crate::sql::Point = serde_json::from_str(raw)
                 .map_err(|e| make_parse_err("geometry (JSON {x, y, srid?})", &e))?;
             Ok(p.into())
+        }
+        // #444 — PostGIS raster from a form field: lowercase-hex WKB.
+        FieldType::Raster => {
+            let r: crate::sql::Raster =
+                serde_json::from_value(serde_json::Value::String(raw.trim().to_owned()))
+                    .map_err(|e| make_parse_err("raster (hex WKB string)", &e))?;
+            Ok(r.into())
         }
     }
 }

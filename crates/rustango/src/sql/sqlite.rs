@@ -195,6 +195,8 @@ impl Dialect for Sqlite {
             FieldType::Vector(_) => "TEXT",
             // Ditto for PostGIS `geometry` columns (#443).
             FieldType::Geometry(_) => "TEXT",
+            // Ditto for PostGIS `raster` columns (#444).
+            FieldType::Raster => "TEXT",
         })
     }
 
@@ -229,6 +231,8 @@ impl Dialect for Sqlite {
             FieldType::Vector(_) => "TEXT".into(),
             // Ditto for PostGIS `geometry` columns (#443).
             FieldType::Geometry(_) => "TEXT".into(),
+            // Ditto for PostGIS `raster` columns (#444).
+            FieldType::Raster => "TEXT".into(),
         }
     }
 

@@ -75,6 +75,12 @@ pub enum FieldType {
     /// to `TEXT` and the decode path errors there. Requires the `postgis`
     /// extension. (Slice 1 supports the `Point` subtype only.)
     Geometry(u32),
+    /// Native PostGIS `raster` column — GeoDjango `gis.gdal` raster
+    /// support (#444). Rust type: [`crate::sql::Raster`]. **PG/PostGIS-only
+    /// by language semantics** like [`Self::Geometry`]: MySQL / SQLite
+    /// degrade to `TEXT` and the decode path errors there. Requires the
+    /// `postgis_raster` extension.
+    Raster,
 }
 
 /// Element type of a [`FieldType::Range`] column (#343). Selects the
@@ -167,6 +173,7 @@ impl FieldType {
             Self::HStore => "HStore",
             Self::Vector(_) => "Vector",
             Self::Geometry(_) => "Point",
+            Self::Raster => "Raster",
         }
     }
 }

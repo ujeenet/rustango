@@ -150,7 +150,8 @@ impl Dialect for MySql {
             | FieldType::Range(_)
             | FieldType::HStore
             | FieldType::Vector(_)
-            | FieldType::Geometry(_) => return None,
+            | FieldType::Geometry(_)
+            | FieldType::Raster => return None,
         })
     }
 
@@ -208,6 +209,8 @@ impl Dialect for MySql {
             FieldType::Vector(_) => "TEXT".into(),
             // Ditto for PostGIS `geometry` columns (#443).
             FieldType::Geometry(_) => "TEXT".into(),
+            // Ditto for PostGIS `raster` columns (#444).
+            FieldType::Raster => "TEXT".into(),
         }
     }
 

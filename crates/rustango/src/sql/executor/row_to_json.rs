@@ -148,6 +148,8 @@ where
             FieldType::Vector(_) => Value::Null,
             // #443 — PostGIS geometry columns; typed fetch decodes via `Point`.
             FieldType::Geometry(_) => Value::Null,
+            // #444 — PostGIS raster columns; typed fetch decodes via `Raster`.
+            FieldType::Raster => Value::Null,
         };
         map.insert(field.name.to_owned(), value);
     }
@@ -293,6 +295,8 @@ pub fn row_to_json_sqlite(
             FieldType::Vector(_) => Value::Null,
             // #443 — PostGIS geometry is PG-only; never present on SQLite.
             FieldType::Geometry(_) => Value::Null,
+            // #444 — PostGIS raster is PG-only; never present on SQLite.
+            FieldType::Raster => Value::Null,
         };
         map.insert(field.name.to_owned(), value);
     }

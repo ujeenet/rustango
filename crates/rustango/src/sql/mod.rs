@@ -24,6 +24,7 @@ mod mysql;
 mod pool;
 mod postgres;
 mod range;
+mod raster;
 #[cfg(feature = "sqlite")]
 mod sqlite;
 mod vector;
@@ -41,6 +42,7 @@ pub use error::{is_mysql_dup_index_error, ExecError, SqlError};
 pub use geometry::{Point, SRID_WGS84};
 pub use hstore::HStore;
 pub use range::Range;
+pub use raster::Raster;
 pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
 #[cfg(feature = "mysql")]

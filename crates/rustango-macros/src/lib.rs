@@ -11367,6 +11367,9 @@ enum DetectedKind {
     /// from the `#[rustango(geometry(srid = N))]` field attribute,
     /// threaded in at the `FieldType` emission site.
     Geometry,
+    /// `Raster` → PostGIS `raster` (#444). No field attribute — the
+    /// `Raster` Rust type alone selects it.
+    Raster,
 }
 
 impl DetectedKind {
@@ -11418,6 +11421,7 @@ impl DetectedKind {
             // SRID comes from the `geometry(srid = N)` attribute, applied
             // at the emission site; `0` here is just a fallback.
             Self::Geometry => quote!(#root::core::FieldType::Geometry(0)),
+            Self::Raster => quote!(#root::core::FieldType::Raster),
         }
     }
 
@@ -11480,6 +11484,8 @@ impl DetectedKind {
             // Geometry (#443) can't be a FK PK — never reached (arm is
             // exhaustiveness-only; never interpolated into emitted code).
             Self::Geometry => (quote!(Geometry), quote!(::std::vec::Vec::new())),
+            // Raster (#444) can't be a FK PK — never reached.
+            Self::Raster => (quote!(Raster), quote!(::std::vec::Vec::new())),
         }
     }
 }
@@ -11742,6 +11748,16 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
         "Point" => {
             return Ok(DetectedType {
                 kind: DetectedKind::Geometry,
+                nullable: false,
+                auto: false,
+                fk_inner: None,
+            });
+        }
+        // `Raster` → PostGIS `raster` (#444). No attribute; the type
+        // alone selects it.
+        "Raster" => {
+            return Ok(DetectedType {
+                kind: DetectedKind::Raster,
                 nullable: false,
                 auto: false,
                 fk_inner: None,

@@ -129,6 +129,10 @@ impl Dialect for Postgres {
                 // `postgis` extension to be installed/enabled.
                 | "postgis"
                 | "geometry"
+                // PostGIS raster columns (#444). Requires the
+                // `postgis_raster` extension.
+                | "postgis_raster"
+                | "raster"
         ) || self.default_supports(token)
     }
 
@@ -142,6 +146,11 @@ impl Dialect for Postgres {
     }
 
     fn null_cast(&self, ty: FieldType) -> Option<&'static str> {
+        // #444 — PostGIS `raster` is bound as hex text and needs an
+        // explicit `::raster` cast (it has no binary input function).
+        if matches!(ty, FieldType::Raster) {
+            return Some("raster");
+        }
         // #562 — the PG `null_cast` table was character-identical to
         // the trait-default `cast_type` table 14 variants long.
         // Delegate so the canonical token table lives in one place

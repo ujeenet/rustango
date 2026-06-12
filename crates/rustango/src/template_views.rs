@@ -1523,6 +1523,8 @@ fn field_type_label(ty: crate::core::FieldType) -> &'static str {
         T::Vector(_) => "vector",
         // #443 — PostGIS geometry columns.
         T::Geometry(_) => "geometry",
+        // #444 — PostGIS raster columns.
+        T::Raster => "raster",
     }
 }
 

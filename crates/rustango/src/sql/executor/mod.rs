@@ -774,6 +774,10 @@ macro_rules! bind_match {
             SqlValue::Geometry { x, y, srid } => {
                 $q.bind(crate::sql::Point { x, y, srid })
             }
+            // PostGIS raster (#444) — bound as hex *text*; the writer
+            // emits `$N::raster` to cast it (the `raster` type has no
+            // binary input function, only a text one).
+            SqlValue::Raster(bytes) => $q.bind(crate::sql::Raster(bytes).to_hex()),
             // PG single-parameter array (issue #30). v1 supports
             // I32/I64/String/Bool elements; other element kinds
             // panic at bind time. Homogeneous-element arrays are
@@ -864,6 +868,9 @@ macro_rules! bind_match_mysql {
             SqlValue::Geometry { .. } => unreachable!(
                 "MySQL has no geometry type; PostGIS `Point` columns are PG-only. Issue #443."
             ),
+            SqlValue::Raster(_) => unreachable!(
+                "MySQL has no raster type; PostGIS `Raster` columns are PG-only. Issue #444."
+            ),
         }
     };
 }
@@ -913,6 +920,9 @@ macro_rules! bind_match_sqlite {
             ),
             SqlValue::Geometry { .. } => unreachable!(
                 "SQLite has no geometry type; PostGIS `Point` columns are PG-only. Issue #443."
+            ),
+            SqlValue::Raster(_) => unreachable!(
+                "SQLite has no raster type; PostGIS `Raster` columns are PG-only. Issue #444."
             ),
         }
     };

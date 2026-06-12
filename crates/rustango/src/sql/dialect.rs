@@ -371,6 +371,8 @@ pub trait Dialect {
             // PostGIS `geometry(Point, srid)` likewise has no `&'static`
             // CAST spelling (#443).
             FieldType::Geometry(_) => return None,
+            // PostGIS `raster` has no `&'static` CAST spelling (#444).
+            FieldType::Raster => return None,
         })
     }
 
@@ -422,6 +424,8 @@ pub trait Dialect {
             // SRID constraint (`geometry(Point)`). Requires `postgis`.
             FieldType::Geometry(0) => "geometry(Point)".into(),
             FieldType::Geometry(srid) => format!("geometry(Point,{srid})"),
+            // PostGIS `raster` column (#444). Requires `postgis_raster`.
+            FieldType::Raster => "raster".into(),
         }
     }
 
