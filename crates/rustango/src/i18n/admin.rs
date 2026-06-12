@@ -1,4 +1,4 @@
-//! Admin UI to edit translations — issue #532 Slice 2.
+//! Admin UI to edit translations — issue #532 Slices 2 + 3.
 //!
 //! A pivoted editor over the [`crate::i18n::db`] override layer: one row
 //! per translation key, one editable column per locale, plus a per-locale
@@ -7,9 +7,19 @@
 //! operators fix typos — and fill coverage gaps (a blank cell for an
 //! existing key) — without a redeploy.
 //!
-//! Slice 2 scope: view + edit + coverage + persist. Add-brand-new-key,
-//! delete-key, export-to-JSON, and the `seed-translations` verb are a
-//! tracked Slice 3 follow-up.
+//! Slice 2 (#1006): view + edit + coverage + persist. Slice 3 (this
+//! change): add a brand-new key (footer row), delete a key (per-row
+//! checkbox → all locales), export the whole catalog as JSON
+//! (`…/export.json`), and gate **writes** on superuser — the POST handler
+//! reads the live [`crate::admin::AdminSession`] from request extensions,
+//! rejects non-superusers with 403, and records the operator's username
+//! as `updated_by`. Reads (the grid + export) stay at the admin login
+//! gate.
+//!
+//! Still tracked on #532: the `seed-translations` manage verb (needs a
+//! locales-dir wired into the `Cli`) and a fine-grained
+//! `auth.edit_translations` permission codename (superuser is the gate
+//! for now).
 //!
 //! Mounted as an admin custom view on the `rustango_translations` model
 //! (so it inherits the admin's login gate):
@@ -25,7 +35,7 @@
 //! a short interval; the persisted edit is authoritative regardless.
 
 #[cfg(feature = "admin")]
-use crate::i18n::db::{all_pool, upsert_pool, Translation};
+use crate::i18n::db::{all_pool, delete_key_pool, upsert_pool, Translation};
 use crate::sql::Pool;
 
 /// A single key's value across the active locales, for the pivoted grid.
@@ -110,6 +120,7 @@ pub fn render_editor(
         ));
     }
     h.push_str("</p>");
+    h.push_str(r#"<p class="export"><a href="export.json">Export JSON</a></p>"#);
 
     h.push_str(&format!(
         "<form method=\"post\" action=\"{}\"><table><thead><tr><th>key</th>",
@@ -118,7 +129,7 @@ pub fn render_editor(
     for loc in locales {
         h.push_str(&format!("<th>{}</th>", escape(loc)));
     }
-    h.push_str("</tr></thead><tbody>");
+    h.push_str("<th>delete</th></tr></thead><tbody>");
     for row in rows {
         h.push_str(&format!("<tr><td>{}</td>", escape(&row.key)));
         for (i, loc) in locales.iter().enumerate() {
@@ -130,9 +141,25 @@ pub fn render_editor(
                 escape(val)
             ));
         }
-        h.push_str("</tr>");
+        // Per-row "delete this key" (removes every locale's override).
+        h.push_str(&format!(
+            "<td><input type=\"checkbox\" name=\"delkey:{}\"></td></tr>",
+            escape(&row.key)
+        ));
     }
-    h.push_str("</tbody></table><button type=\"submit\">Save</button></form>");
+    h.push_str("</tbody>");
+    // Footer: add a brand-new key across the active locales. The key goes
+    // in `newkey`; each locale's value in `newval:<locale>`.
+    h.push_str("<tfoot><tr><td><input name=\"newkey\" placeholder=\"new key\"></td>");
+    for loc in locales {
+        h.push_str(&format!(
+            "<td><input name=\"newval:{}\" placeholder=\"{}\"></td>",
+            escape(loc),
+            escape(loc)
+        ));
+    }
+    h.push_str("<td></td></tr></tfoot>");
+    h.push_str("</table><button type=\"submit\">Save</button></form>");
     h
 }
 
@@ -153,6 +180,59 @@ pub fn parse_edits(form: &[(String, String)]) -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// Parse the "add new key" footer of the editor POST body: `newkey` names
+/// the key, each `newval:<locale>` carries that locale's value. Returns
+/// one `(locale, key, value)` edit per **non-empty** `newval`. An empty
+/// `newkey` (or no non-empty values) yields nothing.
+#[must_use]
+pub fn parse_new_key(form: &[(String, String)]) -> Vec<(String, String, String)> {
+    let key = form
+        .iter()
+        .find(|(n, _)| n == "newkey")
+        .map_or("", |(_, v)| v.trim());
+    if key.is_empty() {
+        return Vec::new();
+    }
+    form.iter()
+        .filter_map(|(name, value)| {
+            let locale = name.strip_prefix("newval:")?;
+            if locale.is_empty() || value.is_empty() {
+                return None;
+            }
+            Some((locale.to_owned(), key.to_owned(), value.clone()))
+        })
+        .collect()
+}
+
+/// Parse the per-row delete checkboxes (`delkey:<key>`) from the editor
+/// POST body. An HTML checkbox only submits when ticked, so any present
+/// `delkey:<key>` marks that key for deletion (all locales). Returns the
+/// keys to drop.
+#[must_use]
+pub fn parse_deletes(form: &[(String, String)]) -> Vec<String> {
+    form.iter()
+        .filter_map(|(name, _)| name.strip_prefix("delkey:").map(str::to_owned))
+        .filter(|k| !k.is_empty())
+        .collect()
+}
+
+/// Render the override catalog as a locale-keyed JSON object —
+/// `{"<locale>": {"<key>": "<value>", …}, …}` — for the editor's
+/// "Export JSON" link / backup. Locales and keys are sorted (`BTreeMap`)
+/// so the output is deterministic; pretty-printed.
+#[must_use]
+pub fn export_json(rows: &[(String, String, String)]) -> String {
+    use std::collections::BTreeMap;
+    let mut by_locale: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
+    for (locale, key, value) in rows {
+        by_locale
+            .entry(locale.as_str())
+            .or_default()
+            .insert(key.as_str(), value.as_str());
+    }
+    serde_json::to_string_pretty(&by_locale).unwrap_or_else(|_| "{}".to_owned())
+}
+
 /// Upsert each parsed edit into the override layer. Returns the count
 /// written. `updated_by` records the operator.
 ///
@@ -168,6 +248,20 @@ pub async fn apply_edits(
         upsert_pool(pool, locale, key, value, updated_by).await?;
     }
     Ok(edits.len())
+}
+
+/// Delete each listed key (all locales) from the override layer. Returns
+/// the total override rows removed.
+///
+/// # Errors
+/// As the ORM delete path ([`crate::sql::ExecError`]).
+#[cfg(feature = "admin")]
+pub async fn apply_deletes(pool: &Pool, keys: &[String]) -> Result<u64, crate::sql::ExecError> {
+    let mut removed = 0;
+    for key in keys {
+        removed += delete_key_pool(pool, key).await?;
+    }
+    Ok(removed)
 }
 
 /// Fetch the current override rows as `(locale, key, value)` triples for
@@ -231,21 +325,75 @@ async fn editor_post(
     pool: Pool,
     req: axum::http::Request<axum::body::Body>,
 ) -> axum::response::Response {
+    use axum::http::StatusCode;
     use axum::response::{IntoResponse, Redirect};
+    // Writes require a superuser. The admin login gate inserts the live
+    // `AdminSession` into request extensions (see `admin::login_view`);
+    // read it before consuming the body.
+    let Some(session) = req
+        .extensions()
+        .get::<crate::admin::AdminSession>()
+        .cloned()
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            "translations editor: no admin session",
+        )
+            .into_response();
+    };
+    if !session.is_superuser {
+        return (
+            StatusCode::FORBIDDEN,
+            "translations editor: editing requires a superuser",
+        )
+            .into_response();
+    }
+
     let body = match axum::body::to_bytes(req.into_body(), 1 << 20).await {
         Ok(b) => b,
-        Err(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
     let form: Vec<(String, String)> = serde_urlencoded::from_bytes(&body).unwrap_or_default();
-    let edits = parse_edits(&form);
-    if let Err(e) = apply_edits(&pool, &edits, "admin").await {
+
+    // Edits + the new key are upserts; deletes run last so a key that's
+    // both edited and delete-checked in the same submit ends up deleted.
+    let mut edits = parse_edits(&form);
+    edits.extend(parse_new_key(&form));
+    let deletes = parse_deletes(&form);
+    let result = async {
+        apply_edits(&pool, &edits, &session.username).await?;
+        apply_deletes(&pool, &deletes).await
+    }
+    .await;
+    if let Err(e) = result {
         return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INTERNAL_SERVER_ERROR,
             format!("save translations: {e}"),
         )
             .into_response();
     }
     Redirect::to("editor").into_response()
+}
+
+#[cfg(feature = "admin")]
+async fn export_get(
+    pool: Pool,
+    _req: axum::http::Request<axum::body::Body>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    match editor_rows(&pool).await {
+        Ok(triples) => (
+            [(header::CONTENT_TYPE, "application/json")],
+            export_json(&triples),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("export translations: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(feature = "admin")]
@@ -264,6 +412,15 @@ crate::register_admin_view!(
     axum::http::Method::POST,
     "",
     editor_post,
+);
+
+#[cfg(feature = "admin")]
+crate::register_admin_view!(
+    "rustango_translations",
+    "export.json",
+    axum::http::Method::GET,
+    "Export translations (JSON)",
+    export_get,
 );
 
 #[cfg(test)]
@@ -339,5 +496,67 @@ mod tests {
             parse_edits(&form),
             vec![("en".into(), "nav.home_link".into(), "Home".into())]
         );
+    }
+
+    #[test]
+    fn render_includes_delete_export_and_add_key_controls() {
+        let (locales, key_rows) = pivot(&rows());
+        let html = render_editor(&locales, &key_rows, "editor", |s| s.to_owned());
+        assert!(
+            html.contains(r#"href="export.json""#),
+            "export link: {html}"
+        );
+        assert!(
+            html.contains(r#"name="delkey:greeting""#),
+            "per-row delete: {html}"
+        );
+        assert!(html.contains(r#"name="newkey""#), "add-key field: {html}");
+        assert!(
+            html.contains(r#"name="newval:fr""#),
+            "add-key per-locale: {html}"
+        );
+    }
+
+    #[test]
+    fn parse_new_key_builds_edits_for_nonempty_values_only() {
+        let form = vec![
+            ("newkey".into(), " farewell ".into()), // trimmed
+            ("newval:en".into(), "Goodbye".into()),
+            ("newval:fr".into(), String::new()), // empty → skipped
+            ("tr:en:greeting".into(), "Hi".into()), // not a newval
+        ];
+        assert_eq!(
+            parse_new_key(&form),
+            vec![("en".into(), "farewell".into(), "Goodbye".into())]
+        );
+    }
+
+    #[test]
+    fn parse_new_key_empty_key_yields_nothing() {
+        let form = vec![
+            ("newkey".into(), "   ".into()),
+            ("newval:en".into(), "x".into()),
+        ];
+        assert!(parse_new_key(&form).is_empty());
+    }
+
+    #[test]
+    fn parse_deletes_collects_checked_keys() {
+        let form = vec![
+            ("delkey:greeting".into(), "on".into()),
+            ("delkey:nav.home".into(), "on".into()),
+            ("tr:en:bye".into(), "Bye".into()), // ignored
+        ];
+        assert_eq!(parse_deletes(&form), vec!["greeting", "nav.home"]);
+    }
+
+    #[test]
+    fn export_json_is_locale_keyed_and_sorted() {
+        let json = export_json(&rows());
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["en"]["greeting"], "Hello");
+        assert_eq!(v["fr"]["greeting"], "Bonjour");
+        assert_eq!(v["en"]["bye"], "Bye");
+        assert!(v["fr"].get("bye").is_none(), "fr.bye absent (coverage gap)");
     }
 }

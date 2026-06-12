@@ -172,6 +172,30 @@ pub async fn seed_from_translator_pool(
     Ok(n)
 }
 
+/// Delete every override row for `key` (all locales) — the Slice 2
+/// editor's "delete key" action. Returns the number of rows removed (0
+/// if the key had no overrides). The file-catalog default, if any, is
+/// untouched, so a deleted key falls back to its shipped value.
+///
+/// # Errors
+/// As the ORM delete path ([`ExecError`]).
+pub async fn delete_key_pool(pool: &Pool, key: &str) -> Result<u64, ExecError> {
+    use crate::core::Model as _; // brings `Translation::SCHEMA` into scope
+    use crate::core::{DeleteQuery, Filter, Op, SqlValue, WhereExpr};
+    crate::sql::delete_pool(
+        pool,
+        &DeleteQuery {
+            model: Translation::SCHEMA,
+            where_clause: WhereExpr::and_predicates(vec![Filter {
+                column: "key",
+                op: Op::Eq,
+                value: SqlValue::from(key),
+            }]),
+        },
+    )
+    .await
+}
+
 /// Reload `translator`'s override layer from the DB so subsequent
 /// `translate(...)` calls reflect persisted edits — call after seeding,
 /// on boot, and after each admin save. Returns the row count loaded.

@@ -1,14 +1,19 @@
 #![cfg(all(feature = "sqlite", feature = "admin"))]
-//! Live SQLite test for the i18n admin editor — issue #532 Slice 2.
+//! Live SQLite tests for the i18n admin editor — issue #532 Slices 2 + 3.
 //!
-//! Exercises the save → store → re-render round-trip end-to-end against
-//! the merged Slice 1 override layer: `apply_edits` upserts what the
-//! editor POSTs, `editor_rows` reads it back, `pivot` builds the grid,
-//! and `render_editor` produces inputs that round-trip the values.
+//! Slice 2: the save → store → re-render round-trip end-to-end against
+//! the Slice 1 override layer — `apply_edits` upserts what the editor
+//! POSTs, `editor_rows` reads it back, `pivot` builds the grid, and
+//! `render_editor` produces inputs that round-trip the values.
+//!
+//! Slice 3: `apply_deletes` removes a key across all locales, and
+//! `export_json` renders the live catalog locale-keyed.
 //!
 //! `max_connections(1)` pins DDL + writes + reads to one in-memory DB.
 
-use rustango::i18n::admin::{apply_edits, editor_rows, pivot, render_editor};
+use rustango::i18n::admin::{
+    apply_deletes, apply_edits, editor_rows, export_json, pivot, render_editor,
+};
 use rustango::i18n::db::ensure_table_pool;
 use rustango::sql::{sqlx, Pool};
 
@@ -74,4 +79,34 @@ async fn editor_save_store_render_round_trip() {
     );
     // Coverage now complete for both locales (4 rows, 2 keys × 2 locales).
     assert_eq!(editor_rows(&p).await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn delete_key_and_export_round_trip() {
+    let p = pool().await;
+    let edits = vec![
+        ("en".to_owned(), "greeting".to_owned(), "Hello".to_owned()),
+        ("fr".to_owned(), "greeting".to_owned(), "Bonjour".to_owned()),
+        ("en".to_owned(), "bye".to_owned(), "Bye".to_owned()),
+    ];
+    apply_edits(&p, &edits, "alice").await.unwrap();
+
+    // Export renders the live catalog locale-keyed (deterministic JSON).
+    let json = export_json(&editor_rows(&p).await.unwrap());
+    assert!(json.contains("\"greeting\""), "{json}");
+    assert!(json.contains("Bonjour"), "{json}");
+    assert!(json.contains("Bye"), "{json}");
+
+    // Delete the "greeting" key → both locales' overrides removed.
+    let removed = apply_deletes(&p, &["greeting".to_owned()]).await.unwrap();
+    assert_eq!(removed, 2, "greeting had en + fr overrides");
+    let rows = editor_rows(&p).await.unwrap();
+    assert!(
+        rows.iter().all(|(_, k, _)| k != "greeting"),
+        "greeting gone: {rows:?}"
+    );
+    assert_eq!(rows.len(), 1, "only en.bye remains");
+
+    // Deleting an unknown key is a no-op (0 rows).
+    assert_eq!(apply_deletes(&p, &["nope".to_owned()]).await.unwrap(), 0);
 }
