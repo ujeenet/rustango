@@ -8,6 +8,13 @@ pub enum QueryError {
     #[error("model `{model}` has no field `{field}`")]
     UnknownField { model: &'static str, field: String },
 
+    /// `bulk_update()` was asked to update the primary-key column, which
+    /// identifies each row in the `WHERE`/`CASE` join and so cannot be
+    /// reassigned. Mirrors Django's
+    /// `ValueError("bulk_update() cannot be used with primary key fields.")`.
+    #[error("`bulk_update` cannot update the primary-key field `{model}.{field}`")]
+    BulkUpdatePrimaryKey { model: &'static str, field: String },
+
     #[error("field `{model}.{field}` is type {expected}, but the bound value is type {actual}")]
     TypeMismatch {
         model: &'static str,

@@ -7485,6 +7485,133 @@ fn inherent_impl_tokens(
         }
     };
 
+    // Ergonomic `Model::bulk_update(objs, fields)` — Django's
+    // `QuerySet.bulk_update`. The SQL/IR/executor stack
+    // (`BulkUpdateQuery` + `bulk_update_pool` + the per-dialect
+    // `write_bulk_update_*` writers) already existed; what was missing
+    // was the per-model constructor that maps `&[Self]` + a runtime
+    // column list into rows of `[pk, col_vals…]` so callers don't
+    // hand-build the IR. Emitted only when the model has a primary key
+    // (the PK is the join key and can't itself be updated).
+    let bulk_update_method = match &fields.primary_key {
+        None => quote! {},
+        Some((pk_ident, pk_col)) => {
+            // One pair of match arms per non-PK column: a validation arm
+            // resolving the runtime name to its `&'static str` column,
+            // and a value arm pushing that field off the row.
+            let mut col_arms: Vec<TokenStream2> = Vec::new();
+            let mut val_arms: Vec<TokenStream2> = Vec::new();
+            for entry in &fields.column_entries {
+                if &entry.column == pk_col {
+                    continue;
+                }
+                let col = &entry.column;
+                let ident = &entry.ident;
+                col_arms.push(quote! { #col => #col, });
+                val_arms.push(quote! {
+                    #col => _row_vals.push(
+                        ::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(&_o.#ident)
+                        )
+                    ),
+                });
+            }
+            quote! {
+                /// Django's `QuerySet.bulk_update(objs, fields)` — write
+                /// per-row-different values for the named `fields` across
+                /// every object in `objs` in a single statement, matched
+                /// by primary key.
+                ///
+                /// `fields` names the **columns** to update. The primary
+                /// key identifies each row and cannot itself be updated
+                /// (pass it and you get
+                /// [`#root::core::QueryError::BulkUpdatePrimaryKey`]).
+                /// Empty `objs` or `fields` is a no-op returning `0`.
+                /// Objects whose PK matches no row are simply not updated.
+                /// Returns the number of rows affected.
+                ///
+                /// Tri-dialect: lowers to one
+                /// [`#root::core::BulkUpdateQuery`] and dispatches
+                /// per-backend — `UPDATE … FROM (VALUES …)` on Postgres,
+                /// a CTE + correlated subquery on SQLite, an inner
+                /// `JOIN (VALUES …)` on MySQL.
+                ///
+                /// # Errors
+                /// [`#root::core::QueryError::UnknownField`] for a name
+                /// that isn't a column on this model,
+                /// [`#root::core::QueryError::BulkUpdatePrimaryKey`] if
+                /// `fields` names the PK, or [`#root::sql::ExecError`] for
+                /// SQL-writing / driver failures.
+                pub async fn bulk_update(
+                    objs: &[Self],
+                    fields: &[&str],
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    if objs.is_empty() || fields.is_empty() {
+                        return ::core::result::Result::Ok(0);
+                    }
+                    let _model_name = <Self as #root::core::Model>::SCHEMA.name;
+                    let mut _update_columns: ::std::vec::Vec<&'static str> =
+                        ::std::vec::Vec::with_capacity(fields.len());
+                    for &_f in fields {
+                        let _col: &'static str = match _f {
+                            #pk_col => {
+                                return ::core::result::Result::Err(
+                                    ::core::convert::Into::into(
+                                        #root::core::QueryError::BulkUpdatePrimaryKey {
+                                            model: _model_name,
+                                            field: ::std::string::ToString::to_string(_f),
+                                        }
+                                    )
+                                );
+                            }
+                            #( #col_arms )*
+                            _ => {
+                                return ::core::result::Result::Err(
+                                    ::core::convert::Into::into(
+                                        #root::core::QueryError::UnknownField {
+                                            model: _model_name,
+                                            field: ::std::string::ToString::to_string(_f),
+                                        }
+                                    )
+                                );
+                            }
+                        };
+                        _update_columns.push(_col);
+                    }
+                    let mut _rows: ::std::vec::Vec<
+                        ::std::vec::Vec<#root::core::SqlValue>,
+                    > = ::std::vec::Vec::with_capacity(objs.len());
+                    for _o in objs.iter() {
+                        let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
+                            ::std::vec::Vec::with_capacity(fields.len() + 1);
+                        // PK first — the writers expect `[pk, …update cols]`.
+                        _row_vals.push(
+                            ::core::convert::Into::<#root::core::SqlValue>::into(
+                                ::core::clone::Clone::clone(&_o.#pk_ident)
+                            )
+                        );
+                        for &_f in fields {
+                            match _f {
+                                #( #val_arms )*
+                                // Unreachable: every name was validated
+                                // against the same arm set above.
+                                _ => {}
+                            }
+                        }
+                        _rows.push(_row_vals);
+                    }
+                    let _query = #root::core::BulkUpdateQuery {
+                        model: <Self as #root::core::Model>::SCHEMA,
+                        update_columns: _update_columns,
+                        rows: _rows,
+                    };
+                    #root::sql::bulk_update_pool(pool, &_query).await
+                }
+            }
+        }
+    };
+
     let pk_value_helper = primary_key.map(|(pk_ident, _)| {
         quote! {
             /// Hidden runtime accessor for the primary-key value as a
@@ -7696,6 +7823,8 @@ fn inherent_impl_tokens(
             #bulk_insert_method
 
             #bulk_upsert_pool_method
+
+            #bulk_update_method
 
             #save_method
 
