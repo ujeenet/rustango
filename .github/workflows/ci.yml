@@ -228,6 +228,7 @@ jobs:
             --test funcs_batch1_sqlite_live \
             --test funcs_batch2_sqlite_live \
             --test get_or_create_sqlite_live \
+            --test i18n_db_overrides_sqlite_live \
             --test inspectdb_sqlite_live \
             --test inspectdb_views_sqlite_live \
             --test jobs_sqlite_live \

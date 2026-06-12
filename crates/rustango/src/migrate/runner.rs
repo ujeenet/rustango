@@ -244,6 +244,22 @@ pub fn registered_models() -> Vec<&'static ModelSchema> {
         .collect()
 }
 
+/// The subset of [`registered_models`] the inventory-walk bootstrap
+/// (`apply_all*` / `drop_all*`) should touch: framework-managed tables
+/// only. Django `Meta.managed = False` (#321) means the framework
+/// neither creates nor drops the table — the snapshot / migration path
+/// already filters these (see `snapshot.rs`), and the bootstrap walk
+/// must match. Otherwise a `managed = false` model (e.g.
+/// `rustango_translations`, which owns its schema via its own
+/// `ensure_table`) would get a second, schema-mismatched `CREATE TABLE`
+/// emitted from its field metadata here.
+fn bootstrap_models() -> Vec<&'static ModelSchema> {
+    registered_models()
+        .into_iter()
+        .filter(|m| m.managed)
+        .collect()
+}
+
 /// Run `CREATE TABLE` for every registered model, then every model's FK
 /// `ALTER TABLE` constraints. Two-phase so create order doesn't matter.
 /// PG-typed back-compat; for non-PG use [`apply_all_pool`].
@@ -260,7 +276,7 @@ pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
         source: "apply_all",
     })
     .await;
-    let models = registered_models();
+    let models = bootstrap_models();
 
     for model in &models {
         let sql = ddl::create_table_sql(model);
@@ -289,7 +305,7 @@ pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
 /// Returns [`MigrateError`] for any sqlx failure.
 #[cfg(feature = "postgres")]
 pub async fn drop_all(pool: &PgPool) -> Result<(), MigrateError> {
-    for model in registered_models() {
+    for model in bootstrap_models() {
         let sql = ddl::drop_table_sql(model, /* if_exists */ true, /* cascade */ true);
         sqlx::query(&sql).execute(pool).await?;
     }
@@ -319,7 +335,7 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     })
     .await;
     let dialect = pool.dialect();
-    let models = registered_models();
+    let models = bootstrap_models();
     for model in &models {
         let sql = ddl::create_table_sql_with_dialect(dialect, model);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
@@ -371,7 +387,7 @@ pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> 
     let dialect = pool.dialect();
     // Cascade only emitted for PG — MySQL parses it as syntax error.
     let cascade = dialect.name() == "postgres";
-    for model in registered_models() {
+    for model in bootstrap_models() {
         let sql =
             ddl::drop_table_sql_with_dialect(dialect, model, /* if_exists */ true, cascade);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;

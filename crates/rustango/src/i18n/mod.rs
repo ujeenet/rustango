@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::RwLock;
 
+pub mod db;
 pub mod middleware;
 pub mod tera_tags;
 pub mod timezone;
@@ -310,6 +311,14 @@ pub struct Translator {
     /// Django parity #425. Lowercased on insert.
     fallback_chain: Vec<Locale>,
     catalogs: RwLock<HashMap<Locale, HashMap<String, String>>>,
+    /// DB-sourced override layer (#532). Same `locale → key → value`
+    /// shape as `catalogs`, but consulted *first* by [`Self::translate`]
+    /// so operator edits persisted to `rustango_translations` win over
+    /// the file-loaded defaults. Empty unless [`Self::load_overrides`] /
+    /// [`Self::set_override`] is called (e.g. by
+    /// [`crate::i18n::db::refresh_overrides_pool`]). Refreshing from the
+    /// DB keeps `translate` synchronous — no per-render query.
+    overrides: RwLock<HashMap<Locale, HashMap<String, String>>>,
 }
 
 impl Translator {
@@ -320,6 +329,7 @@ impl Translator {
             default_locale,
             fallback_chain: Vec::new(),
             catalogs: RwLock::new(HashMap::new()),
+            overrides: RwLock::new(HashMap::new()),
         }
     }
 
@@ -382,8 +392,23 @@ impl Translator {
     /// `params` substitutes `{name}` placeholders in the result.
     #[must_use]
     pub fn translate(&self, locale: &str, key: &str, params: &[(&str, &str)]) -> String {
-        let cats = self.catalogs.read().expect("translator poisoned");
         let req = Locale::new(locale);
+
+        // DB override layer (#532) takes priority over the file
+        // catalogs for the requested locale / its base language, so an
+        // operator's persisted edit wins. Anything not overridden falls
+        // through to the unchanged catalog lookup below.
+        {
+            let ov = self.overrides.read().expect("translator poisoned");
+            if let Some(v) = ov.get(&req).and_then(|c| c.get(key)).or_else(|| {
+                ov.get(&Locale::new(req.base_language()))
+                    .and_then(|c| c.get(key))
+            }) {
+                return substitute(v, params);
+            }
+        }
+
+        let cats = self.catalogs.read().expect("translator poisoned");
 
         // Walk the lookup chain in priority order.
         let mut template: Option<String> = cats
@@ -432,6 +457,63 @@ impl Translator {
             .keys()
             .map(|l| l.0.clone())
             .collect()
+    }
+
+    /// Every file-catalog entry as `(locale, key, value)` triples — used
+    /// to seed the editable DB layer from the on-disk defaults (#532).
+    #[must_use]
+    pub fn entries(&self) -> Vec<(String, String, String)> {
+        let cats = self.catalogs.read().expect("translator poisoned");
+        let mut out = Vec::new();
+        for (loc, catalog) in cats.iter() {
+            for (k, v) in catalog {
+                out.push((loc.0.clone(), k.clone(), v.clone()));
+            }
+        }
+        out
+    }
+
+    /// Replace the entire DB-override layer (#532) with `rows`
+    /// (`(locale, key, value)` triples — typically every
+    /// `rustango_translations` row). Locale strings are normalized the
+    /// same way as catalog locales. See
+    /// [`crate::i18n::db::refresh_overrides_pool`].
+    pub fn load_overrides(&self, rows: impl IntoIterator<Item = (String, String, String)>) {
+        let mut map: HashMap<Locale, HashMap<String, String>> = HashMap::new();
+        for (locale, key, value) in rows {
+            map.entry(Locale::new(&locale))
+                .or_default()
+                .insert(key, value);
+        }
+        *self.overrides.write().expect("translator poisoned") = map;
+    }
+
+    /// Set a single override entry (#532) without a full reload — used by
+    /// the admin edit path so a save takes effect immediately.
+    pub fn set_override(&self, locale: &str, key: impl Into<String>, value: impl Into<String>) {
+        self.overrides
+            .write()
+            .expect("translator poisoned")
+            .entry(Locale::new(locale))
+            .or_default()
+            .insert(key.into(), value.into());
+    }
+
+    /// Drop every DB override, falling back to the file catalogs (#532).
+    pub fn clear_overrides(&self) {
+        self.overrides.write().expect("translator poisoned").clear();
+    }
+
+    /// Total number of override entries across all locales (#532) —
+    /// handy for diagnostics and the admin coverage panel.
+    #[must_use]
+    pub fn override_count(&self) -> usize {
+        self.overrides
+            .read()
+            .expect("translator poisoned")
+            .values()
+            .map(HashMap::len)
+            .sum()
     }
 
     /// Load every `*.json` file in `dir` as a locale catalog. The file
