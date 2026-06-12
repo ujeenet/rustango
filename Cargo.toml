@@ -59,6 +59,13 @@ thiserror = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-appender = "0.2"
 
+# `time` 0.3.48 shipped an E0119 regression (conflicting `From` impl in
+# `format_description::parse`); the workspace gitignores Cargo.lock so CI
+# fresh-resolves and picks it up, breaking every build. `time` is pulled
+# transitively (cookie / tracing-appender / sqlx date types), so we pin it
+# here below 0.3.48. Unpin once a fixed release (0.3.49+) is verified.
+time = ">=0.3, <0.3.48"
+
 # Async-trait for dyn-dispatchable async traits (e.g. OrgResolver)
 async-trait = "0.1"
 
