@@ -222,6 +222,11 @@ casts = ["dep:chacha20poly1305", "dep:base64", "dep:rand", "dep:sha2"]
 # TOTP / 2FA (`rustango::totp`) — RFC 6238 time-based one-time passwords
 # for second-factor authentication. SHA-1 (Google Authenticator default).
 totp = ["dep:hmac", "dep:sha1", "dep:rand", "dep:subtle"]
+# Passkey / WebAuthn (#392). Foundation slice = credential storage only
+# (no extra deps). The ceremony layer adds pure-Rust CBOR (`ciborium`) +
+# ES256 (`p256`) when it lands — keeping the all-RustCrypto, no-C-dep
+# stack (vs `webauthn-rs` → openssl).
+passkey = ["dep:rand", "dep:base64", "dep:sha2", "dep:subtle", "dep:ciborium", "dep:p256"]
 
 # Webhook signature verification (`rustango::webhook`) — HMAC-SHA256
 # constant-time verification for inbound webhooks (Stripe, GitHub, etc.).
@@ -382,6 +387,8 @@ toml = { workspace = true, optional = true }
 # `admin` feature deps — optional.
 axum           = { workspace = true, optional = true }
 base64         = { workspace = true, optional = true }
+ciborium       = { workspace = true, optional = true }
+p256           = { workspace = true, optional = true }
 http           = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
 tera           = { workspace = true, optional = true }

@@ -885,6 +885,12 @@ pub mod api_keys;
 #[cfg(feature = "passwords")]
 pub mod passwords;
 
+/// Passkey / WebAuthn (#392). Foundation slice: credential storage
+/// ([`passkey::WebauthnCredential`] + the store API). Pure-Rust ceremony
+/// crypto (CBOR + ES256) lands in a follow-up slice.
+#[cfg(feature = "passkey")]
+pub mod passkey;
+
 /// Pagination helpers — RFC 5988 Link headers + cursor params.
 /// See [`pagination::LinkHeaderBuilder`].
 pub mod pagination;
