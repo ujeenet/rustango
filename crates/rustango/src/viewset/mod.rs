@@ -60,6 +60,23 @@
 //!
 //! Response: `{"page_size": S, "next": "<token>" \| null, "results": [...]}`
 //!
+//! ### Limit/offset pagination (opt-in)
+//!
+//! Enable via `.limit_offset_pagination()`. DRF-shape `?limit=&offset=`
+//! windowing — handy for tables/grids that page by row offset rather
+//! than page number. Runs `COUNT(*)` per request (same cost as
+//! page-number).
+//!
+//! | Parameter | Default | Description |
+//! |---|---|---|
+//! | `limit` | configured default | Items to return (capped at 1000) |
+//! | `offset` | 0 | Rows to skip before the window |
+//! | `ordering` | configured default | Comma-separated field names, prefix `-` for DESC |
+//! | `search` | — | Full-text search across `search_fields` |
+//! | `{field}` | — | Exact filter for any `filter_fields` |
+//!
+//! Response: `{"count": N, "limit": L, "offset": O, "results": [...]}`
+//!
 //! ## Permissions
 //!
 //! Pair with [`RouterAuthExt`](crate::tenancy::middleware::RouterAuthExt)
@@ -137,6 +154,11 @@ pub enum PaginationStyle {
         /// of `>`. Default ordering is set automatically to match.
         desc: bool,
     },
+    /// DRF-shape limit/offset windowing — `?limit=20&offset=40`. Returns
+    /// `count` + `limit` + `offset` in the response. Runs `COUNT(*)` per
+    /// request (same cost as [`PaginationStyle::PageNumber`]); pick it
+    /// when callers think in row offsets rather than page numbers.
+    LimitOffset,
 }
 
 impl PaginationStyle {
@@ -156,6 +178,12 @@ impl PaginationStyle {
     #[must_use]
     pub const fn cursor_desc(field: &'static str) -> Self {
         Self::Cursor { field, desc: true }
+    }
+
+    /// DRF-shape limit/offset pagination.
+    #[must_use]
+    pub const fn limit_offset() -> Self {
+        Self::LimitOffset
     }
 }
 
@@ -272,6 +300,15 @@ impl ViewSet {
     #[must_use]
     pub fn cursor_pagination_desc(mut self, field: &'static str) -> Self {
         self.pagination = PaginationStyle::Cursor { field, desc: true };
+        self
+    }
+
+    /// Switch to DRF-shape limit/offset pagination — `?limit=&offset=`.
+    /// Like page-number it runs `COUNT(*)` per request, but callers
+    /// window by row offset instead of page index.
+    #[must_use]
+    pub fn limit_offset_pagination(mut self) -> Self {
+        self.pagination = PaginationStyle::LimitOffset;
         self
     }
 
@@ -1045,6 +1082,43 @@ async fn handle_list(
                 *desc,
             )
             .await
+        }
+        PaginationStyle::LimitOffset => {
+            // `?limit=` overrides the default page size; `?offset=` skips
+            // rows. Same `COUNT(*)` cost as page-number pagination.
+            let limit: i64 = params
+                .get("limit")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(page_size)
+                .min(1000)
+                .max(1);
+            let offset: i64 = params
+                .get("offset")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0)
+                .max(0);
+
+            let select_q = SelectQuery {
+                where_clause: where_clause.clone(),
+                search: search_clause.clone(),
+                order_by,
+                limit: Some(limit),
+                offset: Some(offset),
+                ..SelectQuery::new(state.vs.schema)
+            };
+            let count_q = CountQuery {
+                model: state.vs.schema,
+                where_clause,
+                search: search_clause,
+            };
+            let results = or_500!(acq.select_rows_as_json(&select_q, &fields).await);
+            let count = or_500!(acq.count_rows(&count_q).await);
+            json_response(json!({
+                "count": count,
+                "limit": limit,
+                "offset": offset,
+                "results": results,
+            }))
         }
     }
 }

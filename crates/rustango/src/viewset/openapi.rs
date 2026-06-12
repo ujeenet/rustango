@@ -165,6 +165,16 @@ impl ViewSet {
                         .description("Items per page (max 1000)"),
                 );
             }
+            PaginationStyle::LimitOffset => {
+                out.push(
+                    Parameter::query("limit", Schema::int32())
+                        .description("Items to return (max 1000)"),
+                );
+                out.push(
+                    Parameter::query("offset", Schema::int32())
+                        .description("Rows to skip before the window"),
+                );
+            }
         }
         // Search
         if !self.search_fields.is_empty() {
@@ -227,6 +237,12 @@ impl ViewSet {
                 .property("next", Schema::string().nullable())
                 .property("results", items)
                 .required(["page_size", "results"]),
+            PaginationStyle::LimitOffset => Schema::object()
+                .property("count", Schema::integer())
+                .property("limit", Schema::int32())
+                .property("offset", Schema::int32())
+                .property("results", items)
+                .required(["count", "limit", "offset", "results"]),
         }
     }
 }

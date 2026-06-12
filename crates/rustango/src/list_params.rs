@@ -37,7 +37,15 @@ use crate::core::{ModelSchema, OrderItem};
 /// Reserved query-string keys that NEVER match a model field — they
 /// drive pagination, sort, search, and cursor flow. List handlers
 /// must skip these when interpreting params as filter clauses.
-pub const RESERVED_LIST_KEYS: &[&str] = &["page", "page_size", "ordering", "search", "cursor"];
+pub const RESERVED_LIST_KEYS: &[&str] = &[
+    "page",
+    "page_size",
+    "ordering",
+    "search",
+    "cursor",
+    "limit",
+    "offset",
+];
 
 /// `true` when `key` is one of [`RESERVED_LIST_KEYS`]. Use to gate
 /// filter parsing:
@@ -126,7 +134,15 @@ mod tests {
 
     #[test]
     fn reserved_keys_match_documented_set() {
-        for k in ["page", "page_size", "ordering", "search", "cursor"] {
+        for k in [
+            "page",
+            "page_size",
+            "ordering",
+            "search",
+            "cursor",
+            "limit",
+            "offset",
+        ] {
             assert!(is_reserved_list_key(k), "{k} should be reserved");
         }
         assert!(!is_reserved_list_key("name"));
