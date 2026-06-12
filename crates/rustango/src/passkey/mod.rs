@@ -21,6 +21,16 @@
 //!
 //! Gated behind the `passkey` feature; builds without it are unchanged.
 
+pub mod ceremony;
+pub mod error;
+pub mod verify;
+
+pub use ceremony::{
+    authentication_options_json, generate_challenge, registration_options_json,
+    verify_authentication, verify_registration, RegistrationOutcome,
+};
+pub use error::PasskeyError;
+
 use crate::sql::{Auto, Pool};
 use crate::Model;
 

@@ -99,6 +99,11 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serde_urlencoded = "0.7"
 base64 = "0.22"
+# Passkey / WebAuthn ceremony crypto (#392) — pure-Rust, no C dep.
+# `ciborium` parses CBOR (attestationObject / COSE keys); `p256` verifies
+# ES256 (P-256 ECDSA) assertion signatures.
+ciborium = "0.2"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 tera = { version = "1.20", default-features = false }
 
 # Caching
