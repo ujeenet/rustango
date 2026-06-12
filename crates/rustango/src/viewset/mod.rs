@@ -98,7 +98,8 @@
 mod openapi;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
@@ -132,6 +133,73 @@ pub struct ViewSetPerms {
     pub update: Vec<String>,
     /// Codenames required to call `DELETE /{pk}` (destroy).
     pub destroy: Vec<String>,
+}
+
+/// A fixed-window throttle limit — at most `max` requests per
+/// `window_secs` (DRF `ScopedRateThrottle` shape, #1010).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThrottleRule {
+    /// Max requests allowed within the window.
+    pub max: u32,
+    /// Window length in seconds.
+    pub window_secs: u64,
+}
+
+impl ThrottleRule {
+    /// `max` requests per `window_secs` seconds.
+    #[must_use]
+    pub const fn new(max: u32, window_secs: u64) -> Self {
+        Self { max, window_secs }
+    }
+}
+
+/// Per-action request throttles for a ViewSet (DRF `throttle_classes`
+/// parity, #1010). Any action left `None` is unthrottled.
+///
+/// Counters are **process-local** (per server instance) — same model as
+/// [`crate::rate_limit`]. Behind N replicas the effective limit is N×;
+/// for a shared limit, front the service with a gateway throttle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ViewSetThrottle {
+    /// Throttle for `GET /` (list).
+    pub list: Option<ThrottleRule>,
+    /// Throttle for `GET /{pk}` (retrieve).
+    pub retrieve: Option<ThrottleRule>,
+    /// Throttle for `POST /` (create).
+    pub create: Option<ThrottleRule>,
+    /// Throttle for `PUT`/`PATCH /{pk}` (update).
+    pub update: Option<ThrottleRule>,
+    /// Throttle for `DELETE /{pk}` (destroy).
+    pub destroy: Option<ThrottleRule>,
+}
+
+impl ViewSetThrottle {
+    /// Apply the same rule to every action.
+    #[must_use]
+    pub const fn all(max: u32, window_secs: u64) -> Self {
+        let r = Some(ThrottleRule::new(max, window_secs));
+        Self {
+            list: r,
+            retrieve: r,
+            create: r,
+            update: r,
+            destroy: r,
+        }
+    }
+
+    /// The rule for an action name (`"list"` / `"retrieve"` / `"create"`
+    /// / `"update"` / `"destroy"`), if any.
+    #[must_use]
+    pub fn for_action(&self, action: &str) -> Option<ThrottleRule> {
+        match action {
+            "list" => self.list,
+            "retrieve" => self.retrieve,
+            "create" => self.create,
+            "update" => self.update,
+            "destroy" => self.destroy,
+            _ => None,
+        }
+    }
 }
 
 // ------------------------------------------------------------------ ViewSet builder
@@ -278,6 +346,8 @@ pub struct ViewSet {
     /// Pluggable filter backends (#1010) — each contributes extra `WHERE`
     /// predicates on the list action, ANDed with the built-in filters.
     filter_backends: Vec<std::sync::Arc<dyn ViewSetFilter>>,
+    /// Per-action request throttles (#1010). Default: unthrottled.
+    throttle: ViewSetThrottle,
     /// When set (PG only), list / retrieve responses run each row
     /// through this callback instead of the default field-level
     /// projection. Wired via [`Self::serializer`].
@@ -300,6 +370,7 @@ impl ViewSet {
             read_only: false,
             pagination: PaginationStyle::PageNumber,
             filter_backends: Vec::new(),
+            throttle: ViewSetThrottle::default(),
             #[cfg(feature = "postgres")]
             row_render: None,
         }
@@ -384,6 +455,22 @@ impl ViewSet {
     #[must_use]
     pub fn filter_backend(mut self, backend: impl ViewSetFilter) -> Self {
         self.filter_backends.push(std::sync::Arc::new(backend));
+        self
+    }
+
+    /// Set per-action request throttles (DRF `throttle_classes` parity,
+    /// #1010). Counters are process-local — see [`ViewSetThrottle`].
+    #[must_use]
+    pub fn throttle(mut self, throttle: ViewSetThrottle) -> Self {
+        self.throttle = throttle;
+        self
+    }
+
+    /// Throttle every action to `max` requests per `window_secs`.
+    /// Shorthand for `.throttle(ViewSetThrottle::all(max, window_secs))`.
+    #[must_use]
+    pub fn throttle_all(mut self, max: u32, window_secs: u64) -> Self {
+        self.throttle = ViewSetThrottle::all(max, window_secs);
         self
     }
 
@@ -534,6 +621,7 @@ impl ViewSet {
         let state = Arc::new(ViewSetState {
             pool_source,
             vs: self.clone(),
+            throttle_store: Arc::new(Mutex::new(HashMap::new())),
         });
         let prefix = prefix.trim_end_matches('/').to_owned();
         let collection = prefix.clone();
@@ -589,6 +677,10 @@ enum PoolSource {
 struct ViewSetState {
     pool_source: PoolSource,
     vs: ViewSet,
+    /// Process-local fixed-window throttle counters, keyed by
+    /// `{table}:{action}:{client}`. Shared across requests via the
+    /// `Arc<ViewSetState>` the router holds. `#1010`.
+    throttle_store: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
 }
 
 /// A per-request connection handle that abstracts over static-pool
@@ -869,13 +961,91 @@ async fn enter(
     state: &Arc<ViewSetState>,
     req: axum::extract::Request,
     codenames: &[String],
+    action: &'static str,
 ) -> Result<(axum::http::request::Parts, Body, AcquiredConn), Response> {
     let (mut parts, body) = req.into_parts();
+    // #1010 — per-action throttle is checked before acquiring a
+    // connection, so throttled requests shed load early.
+    if let Some(resp) = check_throttle(state, action, &parts) {
+        return Err(resp);
+    }
     let mut acq = state.acquire(&mut parts).await?;
     if !state.check_perm(codenames, &parts, &mut acq).await {
         return Err(json_error(StatusCode::FORBIDDEN, "permission denied"));
     }
     Ok((parts, body, acq))
+}
+
+/// Per-action fixed-window throttle (#1010). Returns `Some(429)` when the
+/// client has exceeded the action's [`ThrottleRule`] within its window,
+/// else `None`. Counters are process-local (see [`ViewSetThrottle`]).
+fn check_throttle(
+    state: &ViewSetState,
+    action: &str,
+    parts: &axum::http::request::Parts,
+) -> Option<Response> {
+    let rule = state.vs.throttle.for_action(action)?;
+    let client = client_key(parts);
+    let key = format!("{}:{}:{}", state.vs.schema.table, action, client);
+    let now = Instant::now();
+    let window = std::time::Duration::from_secs(rule.window_secs);
+
+    // A poisoned mutex means a prior panic mid-update; fail open rather
+    // than reject every subsequent request.
+    let mut store = match state.throttle_store.lock() {
+        Ok(g) => g,
+        Err(_) => return None,
+    };
+    let entry = store.entry(key).or_insert((0, now));
+    if now.duration_since(entry.1) >= window {
+        *entry = (0, now); // window elapsed → reset
+    }
+    entry.0 += 1;
+    if entry.0 > rule.max {
+        let retry = window
+            .checked_sub(now.duration_since(entry.1))
+            .map_or(1, |d| d.as_secs().max(1));
+        return Some(throttled_response(retry));
+    }
+    None
+}
+
+/// Best-effort client identity for throttle keying: the peer IP from
+/// `ConnectInfo` when the server installed it, else the first
+/// `X-Forwarded-For` / `X-Real-IP` hop, else a shared `"global"` bucket
+/// (coarse but safe). #1010.
+fn client_key(parts: &axum::http::request::Parts) -> String {
+    if let Some(ci) = parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    {
+        return ci.0.ip().to_string();
+    }
+    for h in ["x-forwarded-for", "x-real-ip"] {
+        if let Some(first) = parts
+            .headers
+            .get(h)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return first.to_owned();
+        }
+    }
+    "global".to_owned()
+}
+
+/// A `429 Too Many Requests` with a `Retry-After` header (#1010).
+fn throttled_response(retry_after_secs: u64) -> Response {
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::RETRY_AFTER, retry_after_secs.to_string())
+        .body(Body::from(
+            json!({ "error": "request throttled" }).to_string(),
+        ))
+        .unwrap()
 }
 
 /// #808 — was repeated verbatim in `handle_retrieve` / `update_inner`
@@ -989,7 +1159,7 @@ async fn handle_list(
     Query(params): Query<HashMap<String, String>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (_parts, _body, mut acq) = match enter(&state, req, &state.vs.perms.list).await {
+    let (_parts, _body, mut acq) = match enter(&state, req, &state.vs.perms.list, "list").await {
         Ok(x) => x,
         Err(resp) => return resp,
     };
@@ -1318,10 +1488,11 @@ async fn handle_retrieve(
     Path(pk_raw): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (_parts, _body, mut acq) = match enter(&state, req, &state.vs.perms.retrieve).await {
-        Ok(x) => x,
-        Err(resp) => return resp,
-    };
+    let (_parts, _body, mut acq) =
+        match enter(&state, req, &state.vs.perms.retrieve, "retrieve").await {
+            Ok(x) => x,
+            Err(resp) => return resp,
+        };
 
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
@@ -1348,7 +1519,7 @@ async fn handle_create(
     State(state): State<Arc<ViewSetState>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (parts, body, mut acq) = match enter(&state, req, &state.vs.perms.create).await {
+    let (parts, body, mut acq) = match enter(&state, req, &state.vs.perms.create, "create").await {
         Ok(x) => x,
         Err(resp) => return resp,
     };
@@ -1521,7 +1692,7 @@ async fn update_inner(
     req: axum::extract::Request,
     partial: bool,
 ) -> Response {
-    let (parts, body, mut acq) = match enter(&state, req, &state.vs.perms.update).await {
+    let (parts, body, mut acq) = match enter(&state, req, &state.vs.perms.update, "update").await {
         Ok(x) => x,
         Err(resp) => return resp,
     };
@@ -1586,10 +1757,11 @@ async fn handle_destroy(
     Path(pk_raw): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (_parts, _body, mut acq) = match enter(&state, req, &state.vs.perms.destroy).await {
-        Ok(x) => x,
-        Err(resp) => return resp,
-    };
+    let (_parts, _body, mut acq) =
+        match enter(&state, req, &state.vs.perms.destroy, "destroy").await {
+            Ok(x) => x,
+            Err(resp) => return resp,
+        };
 
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
