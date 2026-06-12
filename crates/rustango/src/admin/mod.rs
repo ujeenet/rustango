@@ -54,6 +54,10 @@ mod manage_admin;
 pub mod object_permissions;
 pub mod queryset_hooks;
 pub mod session;
+/// Admin TOTP (two-factor) device persistence — issue #367. Gated on
+/// the `totp` feature; admin builds without it have no 2FA challenge.
+#[cfg(feature = "totp")]
+pub mod totp_store;
 pub mod user;
 // `pub(crate)` so the operator console can reuse `render_input` /
 // `render_value_for_input` for its `/orgs/{slug}/edit` form. Stays

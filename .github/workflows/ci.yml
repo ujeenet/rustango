@@ -200,7 +200,7 @@ jobs:
       - run: |
           cargo test -p rustango \
             --no-default-features \
-            --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer \
+            --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer,totp \
             --test access_admin_codename_sqlite_live \
             --test admin_sqlite_live \
             --test admin_list_display_links_sqlite_live \
@@ -247,7 +247,9 @@ jobs:
             --test tenant_pools_sqlite_live \
             --test tx_methods_sqlite_live \
             --test unique_when_sqlite_live \
-            --test viewset_sqlite_live
+            --test viewset_sqlite_live \
+            --test admin_totp_2fa_sqlite_live \
+            --test admin_totp_2fa_e2e
 
   # v0.41 MySQL parity — the marketing claim is tri-dialect end-to-end
   # since v0.38, but every MySQL `_live.rs` test was skipped silently

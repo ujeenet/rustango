@@ -46,12 +46,18 @@ pub(crate) fn public_router(state: AppState) -> Router {
 /// can't reach the password-change form. Mounted from
 /// [`crate::admin::Builder::build`] when `with_session_auth` is set.
 pub(crate) fn protected_router(state: AppState) -> Router {
-    Router::new()
-        .route(
-            "/account/password",
-            get(change_password_form).post(change_password_submit),
-        )
-        .with_state(state)
+    let router = Router::new().route(
+        "/account/password",
+        get(change_password_form).post(change_password_submit),
+    );
+    // Issue #367 — TOTP two-factor enrollment (self-service, behind the
+    // session gate). Only mounted when the `totp` feature is on.
+    #[cfg(feature = "totp")]
+    let router = router.route(
+        "/account/totp",
+        get(totp_enroll_form).post(totp_enroll_submit),
+    );
+    router.with_state(state)
 }
 
 // ============================================================ Login form (GET)
@@ -96,6 +102,11 @@ fn render_login_form(state: &AppState, error: Option<&str>, csrf_input: &str) ->
             .unwrap_or("Rustango Admin"),
         "admin_prefix": admin_prefix,
         "static_url": &state.config.static_url,
+        // Issue #367 — show the optional authenticator-code field when
+        // the `totp` feature is compiled in. The field is harmless for
+        // non-enrolled users (left blank), so a build-time flag is
+        // enough; no per-request DB lookup on the login GET.
+        "totp_enabled": cfg!(feature = "totp"),
     });
     render_template("login.html", &ctx)
 }
@@ -111,6 +122,17 @@ struct LoginInput {
     /// rejection.
     #[serde(rename = "_csrf", default)]
     csrf_token: Option<String>,
+    /// Authenticator (TOTP) code — issue #367. Optional: only enrolled
+    /// users need it, and the field is always present on the form so a
+    /// 2FA user submits username + password + code in one step (no
+    /// hidden-password second round). Ignored when the `totp` feature is
+    /// off or the user has no confirmed device.
+    // Read only when the `totp` feature compiles the 2FA challenge; the
+    // field stays on the form unconditionally so enabling the feature
+    // doesn't change the wire format.
+    #[cfg_attr(not(feature = "totp"), allow(dead_code))]
+    #[serde(default)]
+    totp_code: Option<String>,
 }
 
 async fn login_submit(
@@ -240,6 +262,35 @@ async fn login_submit(
         })
         .await;
         return login_response(&state, &headers, Some("Invalid credentials."));
+    }
+
+    // Issue #367 — two-factor challenge. If the user has a confirmed
+    // TOTP device, a valid authenticator code is required before the
+    // session is granted. The password is already verified at this
+    // point; a missing/wrong code re-renders the login form (the
+    // password counts as "spent" so we don't reveal 2FA-enrolled status
+    // any differently than a normal failure beyond the message).
+    #[cfg(feature = "totp")]
+    {
+        if let Some(totp_secret) = super::totp_store::confirmed_secret(&state.pool, id).await {
+            let code = form.totp_code.as_deref().unwrap_or("").trim();
+            // 30s step, 6 digits, ±1 window — standard authenticator app
+            // defaults, tolerant of one step of clock skew.
+            if code.is_empty() || !crate::totp::verify(&totp_secret, code, 30, 6, 1) {
+                send_user_login_failed(UserLoginFailedContext {
+                    source: "admin",
+                    attempted_username: Some(form.username.clone()),
+                    reason: AuthFailureReason::InvalidCredentials,
+                    request: meta.clone(),
+                })
+                .await;
+                return login_response(
+                    &state,
+                    &headers,
+                    Some("Enter the 6-digit code from your authenticator app."),
+                );
+            }
+        }
     }
 
     // Audit M1 — successful login clears the failure counter + any lock.
@@ -449,6 +500,179 @@ fn render_change_password_form(
         &mut ctx,
         super::helpers::chrome_context(state, None),
     )
+}
+
+// ===================================================== TOTP 2FA enrollment (#367)
+
+#[cfg(feature = "totp")]
+#[derive(serde::Deserialize)]
+struct TotpEnrollInput {
+    #[serde(default)]
+    totp_code: Option<String>,
+    /// Present (`reset=1`) when re-enrolling from an already-enabled
+    /// account — wipes the current device and shows a fresh setup.
+    #[serde(default)]
+    reset: Option<String>,
+}
+
+#[cfg(feature = "totp")]
+fn render_totp_enroll(
+    state: &AppState,
+    already_enabled: bool,
+    secret_base32: &str,
+    otpauth_url: &str,
+    error: Option<&str>,
+    success: Option<&str>,
+) -> String {
+    let admin_prefix = &state.config.admin_prefix;
+    let ctx = serde_json::json!({
+        "title": "Two-factor authentication",
+        "action": format!("{admin_prefix}/account/totp"),
+        "admin_title": state.config.title.as_deref().unwrap_or("Rustango Admin"),
+        "admin_prefix": admin_prefix,
+        "static_url": &state.config.static_url,
+        "already_enabled": already_enabled,
+        "secret_base32": secret_base32,
+        "otpauth_url": otpauth_url,
+        "error": error,
+        "success": success,
+    });
+    render_template("totp_enroll.html", &ctx)
+}
+
+/// Build an `otpauth://` URI for the session user against `secret`.
+#[cfg(feature = "totp")]
+fn enroll_otpauth(state: &AppState, account: &str, secret: &crate::totp::TotpSecret) -> String {
+    let issuer = state.config.title.as_deref().unwrap_or("Rustango Admin");
+    crate::totp::otpauth_url(issuer, account, secret)
+}
+
+#[cfg(feature = "totp")]
+async fn totp_enroll_form(State(state): State<AppState>) -> Response {
+    let Some(session) = super::session::current() else {
+        return (StatusCode::UNAUTHORIZED, "session required").into_response();
+    };
+    let _ = super::totp_store::ensure_table(&state.pool).await;
+    let device = super::totp_store::device(&state.pool, session.user_id).await;
+    if device.as_ref().is_some_and(|d| d.confirmed) {
+        return Html(render_totp_enroll(&state, true, "", "", None, None)).into_response();
+    }
+    // Reuse the pending secret if one exists, else generate + persist a
+    // fresh (unconfirmed) one so a page reload is stable.
+    let secret = match device.and_then(|d| crate::totp::TotpSecret::from_base32(&d.secret_base32)) {
+        Some(s) => s,
+        None => {
+            let s = crate::totp::TotpSecret::generate();
+            if super::totp_store::start_enrollment(&state.pool, session.user_id, &s)
+                .await
+                .is_err()
+            {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not start enrollment",
+                )
+                    .into_response();
+            }
+            s
+        }
+    };
+    let otpauth = enroll_otpauth(&state, &session.username, &secret);
+    Html(render_totp_enroll(
+        &state,
+        false,
+        &secret.to_base32(),
+        &otpauth,
+        None,
+        None,
+    ))
+    .into_response()
+}
+
+#[cfg(feature = "totp")]
+async fn totp_enroll_submit(
+    State(state): State<AppState>,
+    Form(form): Form<TotpEnrollInput>,
+) -> Response {
+    let Some(session) = super::session::current() else {
+        return (StatusCode::UNAUTHORIZED, "session required").into_response();
+    };
+    let _ = super::totp_store::ensure_table(&state.pool).await;
+
+    // Re-enroll: wipe + regenerate, then show the fresh setup.
+    if form.reset.is_some() {
+        let s = crate::totp::TotpSecret::generate();
+        let _ = super::totp_store::start_enrollment(&state.pool, session.user_id, &s).await;
+        let otpauth = enroll_otpauth(&state, &session.username, &s);
+        return Html(render_totp_enroll(
+            &state,
+            false,
+            &s.to_base32(),
+            &otpauth,
+            None,
+            None,
+        ))
+        .into_response();
+    }
+
+    // Confirm: verify the submitted code against the pending secret.
+    let Some(device) = super::totp_store::device(&state.pool, session.user_id).await else {
+        return Html(render_totp_enroll(
+            &state,
+            false,
+            "",
+            "",
+            Some("No enrollment in progress — reload the page."),
+            None,
+        ))
+        .into_response();
+    };
+    let Some(secret) = crate::totp::TotpSecret::from_base32(&device.secret_base32) else {
+        return Html(render_totp_enroll(
+            &state,
+            false,
+            "",
+            "",
+            Some("Stored setup key is invalid — re-enroll."),
+            None,
+        ))
+        .into_response();
+    };
+    let code = form.totp_code.as_deref().unwrap_or("").trim();
+    if code.is_empty() || !crate::totp::verify(&secret, code, 30, 6, 1) {
+        let otpauth = enroll_otpauth(&state, &session.username, &secret);
+        return Html(render_totp_enroll(
+            &state,
+            false,
+            &device.secret_base32,
+            &otpauth,
+            Some("That code didn't match. Try again."),
+            None,
+        ))
+        .into_response();
+    }
+    if super::totp_store::confirm(&state.pool, session.user_id)
+        .await
+        .is_err()
+    {
+        return Html(render_totp_enroll(
+            &state,
+            false,
+            "",
+            "",
+            Some("Could not save — please try again."),
+            None,
+        ))
+        .into_response();
+    }
+    Html(render_totp_enroll(
+        &state,
+        true,
+        "",
+        "",
+        None,
+        Some("Two-factor authentication is now enabled."),
+    ))
+    .into_response()
 }
 
 // ============================================================ Logout (POST)
