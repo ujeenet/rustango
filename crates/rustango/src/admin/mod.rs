@@ -44,6 +44,7 @@ mod auth;
 pub mod computed_fields;
 pub mod custom_views;
 mod date_hierarchy;
+mod docs;
 mod errors;
 mod forms;
 mod helpers;

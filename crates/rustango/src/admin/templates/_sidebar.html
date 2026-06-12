@@ -10,6 +10,11 @@
         <a href="{{ admin_prefix }}{{ audit_url }}"
            class="{% if active_table == '__audit' %}active{% endif %}">Activity</a>
     </p>
+    <p>
+        {# #1011 — in-admin model reference (Django admindocs). #}
+        <a href="{{ admin_prefix }}/__docs"
+           class="{% if active_table == '__docs' %}active{% endif %}">Model reference</a>
+    </p>
     {# #253 follow-up — Change-password link moved into the
        Logout form at the bottom of the sidebar to keep all
        account actions in one place. The old standalone <p>
