@@ -607,6 +607,30 @@ pub enum ScalarFn {
     /// and dropping tsvector semantics). **PG-only**; MySQL / SQLite
     /// reject with `OpNotSupportedInDialect`. Variadic ≥ 2 args.
     TsConcat,
+
+    // --- PostGIS spatial functions (GeoDjango queries, issue #58) ---
+    /// `ST_Distance(a, b)` — distance between two geometries in the
+    /// column's SRID units (degrees for 4326). Returns `double
+    /// precision`; use for nearest-neighbour ordering. Arity 2.
+    /// **PG/PostGIS-only** — MySQL / SQLite reject with
+    /// `OpNotSupportedInDialect`. Pairs with the [`crate::sql::Point`]
+    /// type (#443).
+    StDistance,
+    /// `ST_DWithin(a, b, distance)` — `true` when `a` is within
+    /// `distance` (SRID units) of `b`. The index-friendly "within
+    /// radius" / geofence predicate. Returns `boolean`. Arity 3.
+    /// **PG/PostGIS-only**.
+    StDWithin,
+    /// `ST_Contains(a, b)` — `true` when geometry `a` completely
+    /// contains `b`. Returns `boolean`. Arity 2. **PG/PostGIS-only**.
+    StContains,
+    /// `ST_Within(a, b)` — `true` when geometry `a` is completely
+    /// inside `b` (the converse of [`Self::StContains`]). Returns
+    /// `boolean`. Arity 2. **PG/PostGIS-only**.
+    StWithin,
+    /// `ST_Intersects(a, b)` — `true` when the geometries share any
+    /// point. Returns `boolean`. Arity 2. **PG/PostGIS-only**.
+    StIntersects,
 }
 
 impl Expr {

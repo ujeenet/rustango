@@ -868,6 +868,61 @@ pub fn json_path_indexed(
     }
 }
 
+// ---- PostGIS spatial functions (GeoDjango queries, issue #58) -------
+//
+// All Postgres/PostGIS-only — they emit `OpNotSupportedInDialect` on
+// MySQL / SQLite. Pass a column via `F("col")` and a literal point as a
+// bare [`crate::sql::Point`] (which is `Into<Expr>`).
+
+/// `ST_Distance(a, b)` — distance between two geometries in SRID units.
+/// Returns `double precision`; use with `.order_by_expr(...)` for
+/// nearest-neighbour ordering (or [`crate::query::QuerySet::order_by_distance_to`]).
+#[must_use]
+pub fn st_distance(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::StDistance,
+        args: vec![a.into(), b.into()],
+    }
+}
+
+/// `ST_DWithin(a, b, distance)` — boolean "within `distance` (SRID
+/// units)" predicate. Use with `.where_raw(...)` (or the
+/// [`crate::query::QuerySet::filter_dwithin`] shortcut).
+#[must_use]
+pub fn st_dwithin(a: impl Into<Expr>, b: impl Into<Expr>, distance: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::StDWithin,
+        args: vec![a.into(), b.into(), distance.into()],
+    }
+}
+
+/// `ST_Contains(a, b)` — boolean "geometry `a` completely contains `b`".
+#[must_use]
+pub fn st_contains(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::StContains,
+        args: vec![a.into(), b.into()],
+    }
+}
+
+/// `ST_Within(a, b)` — boolean "geometry `a` is completely inside `b`".
+#[must_use]
+pub fn st_within(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::StWithin,
+        args: vec![a.into(), b.into()],
+    }
+}
+
+/// `ST_Intersects(a, b)` — boolean "the geometries share any point".
+#[must_use]
+pub fn st_intersects(a: impl Into<Expr>, b: impl Into<Expr>) -> Expr {
+    Expr::Function {
+        kind: ScalarFn::StIntersects,
+        args: vec![a.into(), b.into()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
