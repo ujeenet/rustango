@@ -203,6 +203,59 @@ impl PaginationStyle {
 #[cfg(feature = "postgres")]
 type RowRender = std::sync::Arc<dyn Fn(&crate::sql::sqlx::postgres::PgRow) -> Value + Send + Sync>;
 
+/// A pluggable filter backend (DRF `BaseFilterBackend` parity, #1010).
+///
+/// Registered on a [`ViewSet`] via [`ViewSet::filter_backend`], a backend
+/// contributes extra `WHERE` predicates from the list request's query
+/// params. Its predicates are `AND`-ed with the built-in exact / lookup
+/// filters — use it for what the `filter_fields` surface can't express
+/// (a geo-radius, a custom `?q=` DSL, request-scoped row visibility, …).
+///
+/// Any `Fn(&HashMap<String, String>, &'static ModelSchema) -> Vec<WhereExpr>`
+/// is a backend via the blanket impl below, so a closure works directly:
+///
+/// ```ignore
+/// use rustango::core::{Filter, Op, SqlValue, WhereExpr};
+/// ViewSet::for_model(Post::SCHEMA)
+///     .filter_backend(|params: &HashMap<String, String>, schema| {
+///         // hide drafts unless ?include_drafts=1
+///         if params.get("include_drafts").map(String::as_str) == Some("1") {
+///             return Vec::new();
+///         }
+///         schema.field("status").map_or_else(Vec::new, |f| {
+///             vec![WhereExpr::Predicate(Filter {
+///                 column: f.column,
+///                 op: Op::Eq,
+///                 value: SqlValue::from("published"),
+///             })]
+///         })
+///     })
+///     .router_pool("/posts", pool);
+/// ```
+///
+/// Backends run on the **list** action.
+pub trait ViewSetFilter: Send + Sync + 'static {
+    /// Return `WHERE` predicates to AND into the list query for this request.
+    fn filter(
+        &self,
+        params: &HashMap<String, String>,
+        schema: &'static ModelSchema,
+    ) -> Vec<WhereExpr>;
+}
+
+impl<F> ViewSetFilter for F
+where
+    F: Fn(&HashMap<String, String>, &'static ModelSchema) -> Vec<WhereExpr> + Send + Sync + 'static,
+{
+    fn filter(
+        &self,
+        params: &HashMap<String, String>,
+        schema: &'static ModelSchema,
+    ) -> Vec<WhereExpr> {
+        self(params, schema)
+    }
+}
+
 /// Builder for a set of REST CRUD endpoints over a single [`Model`] table.
 ///
 /// Call `.router(prefix, pool)` when done to get an `axum::Router`.
@@ -222,6 +275,9 @@ pub struct ViewSet {
     perms: ViewSetPerms,
     read_only: bool,
     pagination: PaginationStyle,
+    /// Pluggable filter backends (#1010) — each contributes extra `WHERE`
+    /// predicates on the list action, ANDed with the built-in filters.
+    filter_backends: Vec<std::sync::Arc<dyn ViewSetFilter>>,
     /// When set (PG only), list / retrieve responses run each row
     /// through this callback instead of the default field-level
     /// projection. Wired via [`Self::serializer`].
@@ -243,6 +299,7 @@ impl ViewSet {
             perms: ViewSetPerms::default(),
             read_only: false,
             pagination: PaginationStyle::PageNumber,
+            filter_backends: Vec::new(),
             #[cfg(feature = "postgres")]
             row_render: None,
         }
@@ -316,6 +373,17 @@ impl ViewSet {
     #[must_use]
     pub fn pagination(mut self, style: PaginationStyle) -> Self {
         self.pagination = style;
+        self
+    }
+
+    /// Register a pluggable filter backend (DRF `filter_backends` parity,
+    /// #1010). Each backend contributes extra `WHERE` predicates on the
+    /// list action, ANDed with the built-in `filter_fields`. Call
+    /// repeatedly to stack backends; any matching closure works (see
+    /// [`ViewSetFilter`]).
+    #[must_use]
+    pub fn filter_backend(mut self, backend: impl ViewSetFilter) -> Self {
+        self.filter_backends.push(std::sync::Arc::new(backend));
         self
     }
 
@@ -962,6 +1030,12 @@ async fn handle_list(
         if let Some(predicate) = build_lookup_filter(field, lookup, raw_val) {
             filters.push(predicate);
         }
+    }
+
+    // #1010 — pluggable filter backends contribute extra predicates,
+    // ANDed with the built-in filter_fields parsed above.
+    for backend in &state.vs.filter_backends {
+        filters.extend(backend.filter(&params, state.vs.schema));
     }
 
     let where_clause = if filters.len() == 1 {
