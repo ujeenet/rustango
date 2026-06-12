@@ -297,6 +297,38 @@ jobs:
       - run: cargo test -p rustango --features mysql --test funcs_batch1_mysql_live
       - run: cargo test -p rustango --features mysql --test json_path_mysql_live
 
+  # PostGIS geometry live suite (#443). The regular `postgres_test` runs
+  # against `pgvector/pgvector:pg16`, which has no PostGIS, so the
+  # geometry round-trip test there skips (CREATE EXTENSION postgis fails →
+  # graceful skip). This job runs `postgis/postgis:16-3.4` so the
+  # `Point` column EWKB encode/decode is exercised end-to-end against a
+  # real PostGIS. Like pgvector, the postgis image is a Docker Hub user-
+  # namespace image (not on the AWS ECR `library/` mirror), so it's
+  # pulled straight from Docker Hub.
+  postgis_live:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: rustango
+          POSTGRES_PASSWORD: rustango
+          POSTGRES_DB: rustango_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rustango -d rustango_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://rustango:rustango@127.0.0.1:5432/rustango_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p rustango --features postgres,tenancy --test gis_geometry_postgis_live
+
   # End-to-end playwright suite for the multi-app rustango showcase.
   # The showcase is a severed workspace under examples/showcase/ that
   # exercises every framework surface (admin, viewsets, forms, auth,

@@ -48,7 +48,8 @@ pub fn validate_value(
         | SqlValue::Decimal(_)
         | SqlValue::Binary(_)
         | SqlValue::HStore(_)
-        | SqlValue::Vector(_) => Ok(()),
+        | SqlValue::Vector(_)
+        | SqlValue::Geometry { .. } => Ok(()),
     }
 }
 

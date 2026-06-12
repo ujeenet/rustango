@@ -127,6 +127,8 @@ pub(crate) fn render_value_for_input_json(row: &serde_json::Value, field: &Field
         FieldType::HStore => v.to_string(),
         // #824 — pgvector: compact JSON array form.
         FieldType::Vector(_) => v.to_string(),
+        // #443 — PostGIS Point: compact JSON object form.
+        FieldType::Geometry(_) => v.to_string(),
     }
 }
 
@@ -354,6 +356,10 @@ fn render_input_default(field: &FieldSchema, value: &str, pk_locked: bool) -> St
         FieldType::Vector(_) => format!(
             r#"<input type="text" name="{name}" id="{name}" value="{val}" placeholder="[0.1, 0.2, ...]"{required}{readonly}>"#
         ),
+        // #443 — PostGIS Point: a JSON-object text input (`{{"x":..,"y":..}}`).
+        FieldType::Geometry(_) => format!(
+            r#"<input type="text" name="{name}" id="{name}" value="{val}" placeholder="{{&quot;x&quot;: 0, &quot;y&quot;: 0, &quot;srid&quot;: 4326}}"{required}{readonly}>"#
+        ),
     }
 }
 
@@ -537,6 +543,10 @@ pub(crate) fn render_value_json(row: &serde_json::Value, field: &FieldSchema) ->
         FieldType::Vector(_) => serde_json::to_string(v)
             .map(|s| escape(&s))
             .unwrap_or_default(),
+        // #443 — PostGIS Point: compact JSON object in the list cell.
+        FieldType::Geometry(_) => serde_json::to_string(v)
+            .map(|s| escape(&s))
+            .unwrap_or_default(),
     }
 }
 
@@ -615,6 +625,8 @@ pub(crate) fn read_joined_value_as_html_json(
         FieldType::HStore => None,
         // #824 — vector isn't a meaningful select_related join target.
         FieldType::Vector(_) => None,
+        // #443 — geometry isn't a meaningful select_related join target.
+        FieldType::Geometry(_) => None,
     };
     text.map(|s| escape(&s))
 }

@@ -1281,6 +1281,9 @@ fn bind_value_pg(
         SqlValue::Vector(_) => {
             unreachable!("Vector values never reach audited-save bind path")
         }
+        SqlValue::Geometry { .. } => {
+            unreachable!("Geometry values never reach audited-save bind path")
+        }
     }
 }
 
@@ -1317,6 +1320,9 @@ fn bind_value_my(
         }
         SqlValue::Vector(_) => {
             unreachable!("Vector values never reach audited-save bind path")
+        }
+        SqlValue::Geometry { .. } => {
+            unreachable!("Geometry values never reach audited-save bind path")
         }
     }
 }
@@ -1356,6 +1362,9 @@ fn bind_value_sqlite<'q>(
         }
         SqlValue::Vector(_) => {
             unreachable!("Vector values never reach audited-save bind path")
+        }
+        SqlValue::Geometry { .. } => {
+            unreachable!("Geometry values never reach audited-save bind path")
         }
     }
 }

@@ -285,6 +285,8 @@ fn field_type_to_schema(t: FieldType) -> Schema {
         },
         // #824 — pgvector embedding: a JSON array of numbers.
         FieldType::Vector(_) => Schema::array_of(Schema::number()),
+        // #443 — PostGIS Point: a JSON object `{ x, y, srid }`.
+        FieldType::Geometry(_) => Schema::object(),
     }
 }
 

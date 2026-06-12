@@ -239,12 +239,13 @@ pub fn parse_pk_string(field: &FieldSchema, raw: &str) -> Result<SqlValue, FormE
         | FieldType::Json
         | FieldType::Decimal
         | FieldType::Binary
-        // #341 / #343 / #342 / #824 — array / range / hstore / vector
-        // can't be a PK.
+        // #341 / #343 / #342 / #824 / #443 — array / range / hstore /
+        // vector / geometry can't be a PK.
         | FieldType::Array(_)
         | FieldType::Range(_)
         | FieldType::HStore
-        | FieldType::Vector(_) => Err(FormError::UnsupportedPk {
+        | FieldType::Vector(_)
+        | FieldType::Geometry(_) => Err(FormError::UnsupportedPk {
             field: field.name.to_owned(),
             ty: field.ty.as_str(),
         }),
@@ -426,6 +427,13 @@ pub fn parse_form_value(field: &FieldSchema, raw: Option<&str>) -> Result<SqlVal
             let vec: Vec<f32> = serde_json::from_str(raw)
                 .map_err(|e| make_parse_err("vector (JSON array of numbers)", &e))?;
             Ok(SqlValue::Vector(vec))
+        }
+        // #443 — PostGIS geometry from a form field: a JSON Point object
+        // (`{"x": 1.5, "y": -2.25, "srid": 4326}`; `srid` defaults to 4326).
+        FieldType::Geometry(_) => {
+            let p: crate::sql::Point = serde_json::from_str(raw)
+                .map_err(|e| make_parse_err("geometry (JSON {x, y, srid?})", &e))?;
+            Ok(p.into())
         }
     }
 }

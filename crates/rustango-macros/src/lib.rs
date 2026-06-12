@@ -10311,6 +10311,10 @@ struct FieldAttrs {
     /// Threaded into `FieldType::Vector(N)` at emission. `None` → an
     /// unconstrained `vector` column.
     vector_dims: Option<u32>,
+    /// `#[rustango(geometry(srid = N))]` — PostGIS geometry SRID (#443).
+    /// Threaded into `FieldType::Geometry(N)` at emission. `None` → an
+    /// unconstrained `geometry(Point)` column (SRID 0).
+    geometry_srid: Option<u32>,
     min: Option<i64>,
     max: Option<i64>,
     default: Option<String>,
@@ -10424,6 +10428,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         related_name: None,
         max_length: None,
         vector_dims: None,
+        geometry_srid: None,
         min: None,
         max: None,
         default: None,
@@ -10541,6 +10546,19 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                         return Ok(());
                     }
                     Err(inner.error("unknown `vector` attribute (supported: `dims`)"))
+                })?;
+                return Ok(());
+            }
+            // `#[rustango(geometry(srid = N))]` — PostGIS geometry SRID
+            // (#443). Nested-meta form, mirroring `vector(dims = N)`.
+            if meta.path.is_ident("geometry") {
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("srid") {
+                        let lit: syn::LitInt = inner.value()?.parse()?;
+                        out.geometry_srid = Some(lit.base10_parse::<u32>()?);
+                        return Ok(());
+                    }
+                    Err(inner.error("unknown `geometry` attribute (supported: `srid`)"))
                 })?;
                 return Ok(());
             }
@@ -11068,6 +11086,13 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         let root = rustango_root();
         let dims = attrs.vector_dims.unwrap_or(0);
         quote!(#root::core::FieldType::Vector(#dims))
+    } else if kind == DetectedKind::Geometry {
+        // PostGIS (#443): the `geometry(srid = N)` attribute supplies the
+        // SRID that the bare `Point` Rust type can't carry, so emit
+        // `FieldType::Geometry(N)` rather than the `Geometry(0)` fallback.
+        let root = rustango_root();
+        let srid = attrs.geometry_srid.unwrap_or(0);
+        quote!(#root::core::FieldType::Geometry(#srid))
     } else {
         kind.variant_tokens()
     };
@@ -11338,6 +11363,10 @@ enum DetectedKind {
     /// from the `#[rustango(vector(dims = N))]` field attribute, threaded
     /// in at the `FieldType` emission site (not carried on this enum).
     Vector,
+    /// `Point` → PostGIS `geometry(Point, srid)` (#443). The SRID comes
+    /// from the `#[rustango(geometry(srid = N))]` field attribute,
+    /// threaded in at the `FieldType` emission site.
+    Geometry,
 }
 
 impl DetectedKind {
@@ -11386,6 +11415,9 @@ impl DetectedKind {
             // Dimension comes from the `vector(dims = N)` attribute,
             // applied at the emission site; `0` here is just a fallback.
             Self::Vector => quote!(#root::core::FieldType::Vector(0)),
+            // SRID comes from the `geometry(srid = N)` attribute, applied
+            // at the emission site; `0` here is just a fallback.
+            Self::Geometry => quote!(#root::core::FieldType::Geometry(0)),
         }
     }
 
@@ -11445,6 +11477,9 @@ impl DetectedKind {
             Self::HStore => (quote!(HStore), quote!(::std::vec::Vec::new())),
             // Vector (#824) can't be a FK PK — never reached.
             Self::Vector => (quote!(Vector), quote!(::std::vec::Vec::new())),
+            // Geometry (#443) can't be a FK PK — never reached (arm is
+            // exhaustiveness-only; never interpolated into emitted code).
+            Self::Geometry => (quote!(Geometry), quote!(::std::vec::Vec::new())),
         }
     }
 }
@@ -11697,6 +11732,16 @@ fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {
         "Vector" => {
             return Ok(DetectedType {
                 kind: DetectedKind::Vector,
+                nullable: false,
+                auto: false,
+                fk_inner: None,
+            });
+        }
+        // `Point` → PostGIS `geometry(Point, srid)` (#443). The SRID is
+        // supplied by `#[rustango(geometry(srid = N))]`, not the type.
+        "Point" => {
+            return Ok(DetectedType {
+                kind: DetectedKind::Geometry,
                 nullable: false,
                 auto: false,
                 fk_inner: None,

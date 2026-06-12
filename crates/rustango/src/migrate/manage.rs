@@ -3019,6 +3019,13 @@ fn json_to_sql_value(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(SqlValue::Vector(items))
         }
+        // #443 — PostGIS geometry from a fixture: a JSON Point object
+        // (`{"x": .., "y": .., "srid": ..}`; `srid` defaults to 4326).
+        FieldType::Geometry(_) => {
+            let p: crate::sql::Point = serde_json::from_value(v.clone())
+                .map_err(|e| format!("expected JSON {{x, y, srid?}} for geometry column: {e}"))?;
+            Ok(p.into())
+        }
     }
 }
 

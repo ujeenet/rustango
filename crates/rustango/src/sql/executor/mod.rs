@@ -768,6 +768,12 @@ macro_rules! bind_match {
             // PG `Encode` (binary wire format); the column/param type is
             // `vector`, resolved by name.
             SqlValue::Vector(v) => $q.bind(crate::sql::Vector(v)),
+            // PostGIS geometry (#443) — bind via the `Point` newtype's
+            // PG `Encode` (EWKB binary); the column/param type is
+            // `geometry`, resolved by name.
+            SqlValue::Geometry { x, y, srid } => {
+                $q.bind(crate::sql::Point { x, y, srid })
+            }
             // PG single-parameter array (issue #30). v1 supports
             // I32/I64/String/Bool elements; other element kinds
             // panic at bind time. Homogeneous-element arrays are
@@ -855,6 +861,9 @@ macro_rules! bind_match_mysql {
             SqlValue::Vector(_) => unreachable!(
                 "MySQL has no vector type; pgvector distance operators are rejected before bind. Issue #824."
             ),
+            SqlValue::Geometry { .. } => unreachable!(
+                "MySQL has no geometry type; PostGIS `Point` columns are PG-only. Issue #443."
+            ),
         }
     };
 }
@@ -901,6 +910,9 @@ macro_rules! bind_match_sqlite {
             }
             SqlValue::Vector(_) => unreachable!(
                 "SQLite has no vector type; pgvector distance operators are rejected before bind. Issue #824."
+            ),
+            SqlValue::Geometry { .. } => unreachable!(
+                "SQLite has no geometry type; PostGIS `Point` columns are PG-only. Issue #443."
             ),
         }
     };

@@ -68,6 +68,13 @@ pub enum FieldType {
     /// SQLite degrade to `TEXT`, and the decode path + distance
     /// operators error there. Requires the `vector` extension.
     Vector(u32),
+    /// Native PostGIS `geometry(Point, SRID)` column — GeoDjango
+    /// `gis.geos` geometry types (#443). The `u32` is the SRID (4326 =
+    /// WGS 84). Rust type: [`crate::sql::Point`]. **PG/PostGIS-only by
+    /// language semantics** like [`Self::Vector`]: MySQL / SQLite degrade
+    /// to `TEXT` and the decode path errors there. Requires the `postgis`
+    /// extension. (Slice 1 supports the `Point` subtype only.)
+    Geometry(u32),
 }
 
 /// Element type of a [`FieldType::Range`] column (#343). Selects the
@@ -159,6 +166,7 @@ impl FieldType {
             Self::Range(RangeElem::DateTime) => "Range<DateTime<Utc>>",
             Self::HStore => "HStore",
             Self::Vector(_) => "Vector",
+            Self::Geometry(_) => "Point",
         }
     }
 }

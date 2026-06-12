@@ -14,6 +14,7 @@ mod dialect;
 mod error;
 mod executor;
 mod foreign_key;
+mod geometry;
 mod hstore;
 pub mod m2m;
 #[doc(hidden)]
@@ -37,6 +38,7 @@ pub use backend::{
 pub use compiled::CompiledStatement;
 pub use dialect::Dialect;
 pub use error::{is_mysql_dup_index_error, ExecError, SqlError};
+pub use geometry::{Point, SRID_WGS84};
 pub use hstore::HStore;
 pub use range::Range;
 pub use vector::Vector;
