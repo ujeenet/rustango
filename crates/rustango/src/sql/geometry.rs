@@ -99,6 +99,14 @@ impl From<Point> for crate::core::SqlValue {
     }
 }
 
+// A `Point` literal in an expression tree — lets the spatial function
+// builders (`st_distance(F("loc"), point)`, #58) accept a bare `Point`.
+impl From<Point> for crate::core::Expr {
+    fn from(p: Point) -> Self {
+        crate::core::Expr::Literal(p.into())
+    }
+}
+
 // ---- serde: a plain `{ "x", "y", "srid" }` object -------------------
 
 impl serde::Serialize for Point {

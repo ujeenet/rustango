@@ -328,6 +328,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rustango --features postgres,tenancy --test gis_geometry_postgis_live
+      - run: cargo test -p rustango --features postgres,tenancy --test gis_spatial_queries_postgis_live
 
   # End-to-end playwright suite for the multi-app rustango showcase.
   # The showcase is a severed workspace under examples/showcase/ that

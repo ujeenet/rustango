@@ -2299,7 +2299,53 @@ fn write_function(
         // -------- Full-text search builder (issue #295 / T2.4) --------
         F::SetWeight => write_setweight(b, args),
         F::TsConcat => write_ts_concat(b, args),
+
+        // -------- PostGIS spatial functions (#58) — PG-only --------
+        F::StDistance | F::StDWithin | F::StContains | F::StWithin | F::StIntersects => {
+            write_spatial_fn(b, kind, args)
+        }
     }
+}
+
+/// PostGIS `ST_*` spatial functions (#58). All are Postgres/PostGIS-only
+/// — MySQL / SQLite reject with `OpNotSupportedInDialect`, mirroring the
+/// pgvector distance operators and FTS functions. Arity is checked so a
+/// hand-built `Expr::Function` fails at emit-time rather than reaching
+/// the database malformed.
+fn write_spatial_fn(
+    b: &mut Sql<'_>,
+    kind: crate::core::ScalarFn,
+    args: &[crate::core::Expr],
+) -> Result<(), SqlError> {
+    use crate::core::ScalarFn as F;
+    let (name, arity): (&'static str, usize) = match kind {
+        F::StDistance => ("ST_Distance", 2),
+        F::StDWithin => ("ST_DWithin", 3),
+        F::StContains => ("ST_Contains", 2),
+        F::StWithin => ("ST_Within", 2),
+        F::StIntersects => ("ST_Intersects", 2),
+        _ => unreachable!("write_spatial_fn only handles ST_* variants"),
+    };
+    if args.len() != arity {
+        return Err(SqlError::FunctionArityMismatch {
+            func: name,
+            expected: if arity == 3 { "3" } else { "2" },
+            got: args.len(),
+        });
+    }
+    if b.d.name() != "postgres" {
+        return Err(SqlError::OpNotSupportedInDialect {
+            op: match kind {
+                F::StDistance => "ST_Distance (PostGIS) is Postgres-only",
+                F::StDWithin => "ST_DWithin (PostGIS) is Postgres-only",
+                F::StContains => "ST_Contains (PostGIS) is Postgres-only",
+                F::StWithin => "ST_Within (PostGIS) is Postgres-only",
+                _ => "ST_Intersects (PostGIS) is Postgres-only",
+            },
+            dialect: b.d.name(),
+        });
+    }
+    write_call(b, name, args)
 }
 
 /// `LPAD(s, len, fill)` / `RPAD(s, len, fill)` — PG/MySQL native;

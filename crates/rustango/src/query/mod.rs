@@ -833,6 +833,55 @@ impl<T: Model> QuerySet<T> {
         self.order_by_distance(column, query, metric).limit(k)
     }
 
+    /// PostGIS nearest-first ordering (#58): `ORDER BY
+    /// ST_Distance(<column>, <point>)` ascending. Pair with `.limit(k)`
+    /// for a k-nearest query. `column` should be a `geometry(Point, …)`
+    /// / `#[rustango(geometry(...))]` field. **PG/PostGIS-only** — emits
+    /// `OpNotSupportedInDialect` at compile time on MySQL / SQLite.
+    ///
+    /// ```ignore
+    /// // The 5 places nearest to `here`.
+    /// let near = Place::objects()
+    ///     .order_by_distance_to("location", here)
+    ///     .limit(5)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn order_by_distance_to(self, column: &'static str, point: crate::sql::Point) -> Self {
+        let expr = crate::core::funcs::st_distance(crate::core::Expr::Column(column), point);
+        self.order_by_expr(expr, /*desc=*/ false)
+    }
+
+    /// PostGIS "within radius" filter (#58): `WHERE ST_DWithin(<column>,
+    /// <point>, <distance>)`. `distance` is in the column's SRID units
+    /// (degrees for SRID 4326 — cast to `::geography` in raw SQL when you
+    /// need metres). **PG/PostGIS-only.**
+    ///
+    /// ```ignore
+    /// // Places within ~1km (in degrees) of `here`.
+    /// let nearby = Place::objects()
+    ///     .filter_dwithin("location", here, 0.01)
+    ///     .fetch_pool(&pool).await?;
+    /// ```
+    #[must_use]
+    pub fn filter_dwithin(
+        self,
+        column: &'static str,
+        point: crate::sql::Point,
+        distance: f64,
+    ) -> Self {
+        let pred = WhereExpr::ExprCompare {
+            lhs: crate::core::funcs::st_dwithin(
+                crate::core::Expr::Column(column),
+                point,
+                crate::core::Expr::Literal(SqlValue::F64(distance)),
+            ),
+            op: Op::Eq,
+            rhs: crate::core::Expr::Literal(SqlValue::Bool(true)),
+        };
+        self.where_raw(pred)
+    }
+
     /// Same as [`Self::order_by_expr`] but with an explicit
     /// `NullsOrder`. Issue #76.
     #[must_use]
