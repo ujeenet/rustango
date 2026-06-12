@@ -133,3 +133,27 @@ async fn seed_from_translator_is_idempotent() {
     refresh_overrides_pool(&t, &pool).await.unwrap();
     assert_eq!(t.translate("fr", "a", &[]), "Salut-override");
 }
+
+#[tokio::test]
+async fn apply_all_does_not_bootstrap_the_managed_false_table() {
+    // `Translation` is `managed = false`: its schema is owned by
+    // `ensure_table_pool` (UNIQUE(locale,key) + DB-defaulted timestamps),
+    // so the inventory-walk bootstrap must skip it. Otherwise it gets a
+    // second, schema-mismatched CREATE TABLE from its field metadata —
+    // the regression that broke `migrate_signals` / `mysql_live` when
+    // this model first landed (apply_all walking every registered model,
+    // not just the managed ones).
+    let pool = empty_pool().await;
+    rustango::migrate::apply_all_pool(&pool)
+        .await
+        .expect("apply_all_pool succeeds with a managed=false model in inventory");
+
+    // The bootstrap did NOT create rustango_translations…
+    assert!(
+        all_pool(&pool).await.is_err(),
+        "managed=false table must be absent after apply_all_pool"
+    );
+    // …`ensure_table_pool` is its sole creator.
+    ensure_table_pool(&pool).await.unwrap();
+    assert_eq!(all_pool(&pool).await.unwrap().len(), 0);
+}
