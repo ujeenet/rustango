@@ -23,6 +23,7 @@
 
 pub mod ceremony;
 pub mod error;
+pub mod session;
 pub mod verify;
 
 pub use ceremony::{
@@ -30,6 +31,7 @@ pub use ceremony::{
     verify_authentication, verify_registration, RegistrationOutcome,
 };
 pub use error::PasskeyError;
+pub use session::{open_challenge, seal_challenge};
 
 use crate::sql::{Auto, Pool};
 use crate::Model;
