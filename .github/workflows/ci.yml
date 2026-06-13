@@ -256,7 +256,15 @@ jobs:
             --test unique_when_sqlite_live \
             --test viewset_sqlite_live \
             --test admin_totp_2fa_sqlite_live \
-            --test admin_totp_2fa_e2e
+            --test admin_totp_2fa_e2e \
+            --test django6_aggregation \
+            --test django6_subquery \
+            --test django6_window \
+            --test django6_joins \
+            --test django6_setops \
+            --test django6_json_dates \
+            --test django6_writes \
+            --test django6_delta
 
   # v0.41 MySQL parity — the marketing claim is tri-dialect end-to-end
   # since v0.38, but every MySQL `_live.rs` test was skipped silently
@@ -302,6 +310,17 @@ jobs:
       - run: cargo test -p rustango --features mysql --test inspectdb_mysql_live
       - run: cargo test -p rustango --features mysql --test funcs_batch1_mysql_live
       - run: cargo test -p rustango --features mysql --test json_path_mysql_live
+      # Django 6.0 ORM parity execution-verification suite (audit §26).
+      # Shared scenario bodies; the mysql cfg-mod runs here, PG mods
+      # skip (DATABASE_URL unset), sqlite mods are compiled out.
+      - run: cargo test -p rustango --features mysql --test django6_aggregation
+      - run: cargo test -p rustango --features mysql --test django6_subquery
+      - run: cargo test -p rustango --features mysql --test django6_window
+      - run: cargo test -p rustango --features mysql --test django6_joins
+      - run: cargo test -p rustango --features mysql --test django6_setops
+      - run: cargo test -p rustango --features mysql --test django6_json_dates
+      - run: cargo test -p rustango --features mysql --test django6_writes
+      - run: cargo test -p rustango --features mysql --test django6_delta
 
   # PostGIS geometry live suite (#443). The regular `postgres_test` runs
   # against `pgvector/pgvector:pg16`, which has no PostGIS, so the
