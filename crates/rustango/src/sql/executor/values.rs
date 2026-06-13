@@ -110,7 +110,40 @@ fn my_cell_to_sqlvalue(row: &sqlx::mysql::MySqlRow, i: usize) -> SqlValue {
 
 #[cfg(feature = "sqlite")]
 fn sqlite_cell_to_sqlvalue(row: &sqlx::sqlite::SqliteRow, i: usize) -> SqlValue {
-    use sqlx::Row as _;
+    use sqlx::{Row as _, TypeInfo as _, ValueRef as _};
+    // SQLite is dynamically typed, and an untyped expression column (e.g.
+    // a scalar subquery, #1036) carries a value storage class but no
+    // useful *declared* column type. `try_get::<T>` checks the requested
+    // type against the DECLARED type: for such a column it reports
+    // INTEGER, so `try_get::<i64>` passes the check and silently coerces a
+    // TEXT value to `0`, while `try_get::<String>` fails the check
+    // outright. So when the value's runtime storage class is TEXT, decode
+    // it with `try_get_unchecked` (skips the declared-type check, reads
+    // the actual bytes). Every other case falls through to the probe
+    // below, which is correct and reliable — and we deliberately don't
+    // branch on the raw type for them, since `is_null()` / `type_info()`
+    // also misreport correlated aggregate columns like `(SELECT SUM(x) …)`
+    // on SQLite (the probe handles those right).
+    if let Ok(raw) = row.try_get_raw(i) {
+        let is_null = raw.is_null();
+        let is_text = raw.type_info().name() == "TEXT";
+        // Decode up front while `raw` is in scope — this borrow pattern
+        // decodes reliably, whereas evaluating `type_info()` inline
+        // immediately before the call can make it spuriously fail.
+        let as_text = row.try_get_unchecked::<String, _>(i);
+        if is_text {
+            // A TEXT-class value must NOT fall through to the integer
+            // probe below: `try_get::<i64>` would coerce both a real
+            // string and a NULL to `0`. `try_get_unchecked::<String>`
+            // skips the (unreliable) declared-type check on these
+            // untyped expression columns.
+            return if is_null {
+                SqlValue::Null
+            } else {
+                as_text.map_or(SqlValue::Null, SqlValue::String)
+            };
+        }
+    }
     if let Ok(v) = row.try_get::<i64, _>(i) {
         SqlValue::I64(v)
     } else if let Ok(v) = row.try_get::<i32, _>(i) {

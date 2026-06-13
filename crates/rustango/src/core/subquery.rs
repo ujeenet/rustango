@@ -121,6 +121,42 @@ pub fn subquery(inner: SelectQuery) -> Expr {
     Expr::Subquery(Box::new(inner))
 }
 
+/// Project a correlated scalar subquery as an annotation column —
+/// Django's `annotate(newest=Subquery(books.values("title")[:1]))`
+/// (#1036). Wraps the subquery as an [`AggregateExpr`] so it drops
+/// straight into [`crate::query::QuerySet::annotate`] /
+/// [`crate::query::AggregateBuilder::annotate`] (or the
+/// `annotate_subquery` sugar).
+///
+/// The mechanism is the existing [`AggregateExpr::RelatedAggregate`]
+/// projection path (the same one backing `annotate_count`): it emits
+/// `(SELECT … ) AS <alias>` via the `Expr::Subquery` writer, whose
+/// scope frame already rewrites any [`outer_ref`] inside `inner` to the
+/// enclosing query's table qualifier — so correlation works on PG /
+/// MySQL / SQLite with no writer changes.
+///
+/// **Caller contract:** shape `inner` to one column × at most one row
+/// (`.values_list_flat(col)` + `.limit(1)`), exactly as Django requires
+/// for `Subquery()`. A row that matches nothing projects `NULL`; more
+/// than one row is a database runtime error, same as Django.
+///
+/// ```ignore
+/// // Newest book title per author.
+/// let newest = Book::objects()
+///     .where_(Book::author_id.eq_expr(outer_ref("id")))
+///     .order_by(&[("id", true)])
+///     .limit(1)
+///     .values_list_flat("title")
+///     .compile()?;
+/// let rows = Author::objects()
+///     .annotate("newest", scalar_subquery(newest))
+///     .fetch_values(&pool).await?;
+/// ```
+#[must_use]
+pub fn scalar_subquery(inner: SelectQuery) -> AggregateExpr {
+    AggregateExpr::RelatedAggregate(Box::new(Expr::Subquery(Box::new(inner))))
+}
+
 /// Build the correlated `EXISTS (SELECT 1 FROM <child_table> WHERE
 /// <child_fk_column> = <outer>.<self_pk_column>)` predicate for the
 /// given [`ReverseRelation`] — issue #830 sub-piece backing
