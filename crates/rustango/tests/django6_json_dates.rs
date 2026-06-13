@@ -164,28 +164,27 @@ mod scenarios {
         assert_eq!(ids(rows), vec![1, 2]);
     }
 
-    /// `filter(created__quarter=1)` — PG and MySQL have native
-    /// QUARTER extraction; SQLite's strftime has no quarter code.
-    /// GAP-PIN on SQLite (Django computes quarter on SQLite via a
-    /// CASE rewrite, so this is a real parity gap). Issue #1037.
+    /// `filter(created__quarter=N)` across all three dialects. PG/MySQL
+    /// have native QUARTER extraction; SQLite synthesizes it from the
+    /// month (`((month + 2) / 3)`), matching Django. Issue #1037 — was a
+    /// SQLite gap-pin, now uniform.
     pub async fn check_quarter_dialect_matrix(pool: &Pool) {
-        let res = Doc::objects()
+        // March (rows 1+2) is Q1 on every backend.
+        let q1 = Doc::objects()
             .filter("created__quarter", 1_i64)
             .fetch_pool(pool)
-            .await;
-        if pool.dialect().name() == "sqlite" {
-            let err = res
-                .map(|rows: Vec<Doc>| rows.len())
-                .expect_err("__quarter must error on sqlite");
-            assert!(
-                matches!(err, ExecError::Sql(_)),
-                "expected a writer-side SqlError, got {err:?} — if quarter now \
-                 works on sqlite, update the audit"
-            );
-        } else {
-            let rows = res.expect("__quarter on PG/MySQL");
-            assert_eq!(ids(rows), vec![1, 2], "March is Q1");
-        }
+            .await
+            .expect("__quarter Q1");
+        assert_eq!(ids(q1), vec![1, 2], "March is Q1");
+
+        // July (row 3, seeded 2025-07-01) is Q3 — guards the arithmetic
+        // off-by-one in the SQLite synthesis.
+        let q3 = Doc::objects()
+            .filter("created__quarter", 3_i64)
+            .fetch_pool(pool)
+            .await
+            .expect("__quarter Q3");
+        assert_eq!(ids(q3), vec![3], "July is Q3");
     }
 
     /// Django `.dates("created", "month")` — distinct truncated

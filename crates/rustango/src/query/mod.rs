@@ -1270,7 +1270,7 @@ impl<T: Model> QuerySet<T> {
     /// | `__isnull` | `<col> IS NULL` / `IS NOT NULL` | value must be `bool` |
     /// | `__between` / `__range` | `<col> BETWEEN ? AND ?` | value must be 2-element `SqlValue::List` |
     /// | `__not_between` / `__not_range` | `<col> NOT BETWEEN ? AND ?` | value must be 2-element `SqlValue::List`. Eloquent `whereNotBetween` parity. |
-    /// | `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` | `EXTRACT(<part> FROM <col>) = ?` | scalar value matches the date part (issue #829). Composes with trailing `__gte` / `__lt` / etc. SQLite-unsupported parts (e.g. quarter) error consistently with the underlying fn. |
+    /// | `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` | `EXTRACT(<part> FROM <col>) = ?` | scalar value matches the date part (issue #829). Composes with trailing `__gte` / `__lt` / etc. `__quarter` is cross-dialect (SQLite synthesizes it from the month, #1037); `__week` numbering differs per backend. |
     /// | `__date` | `DATE(<col>) = ?` | value is a `chrono::NaiveDate`; strips the time component before comparison. |
     ///
     /// ```ignore

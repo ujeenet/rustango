@@ -2013,15 +2013,13 @@ fn write_function(
                 });
             }
             if b.d.name() == "sqlite" {
-                // SQLite has no quarter token in strftime and no
-                // QUARTER() function. Surface a clear error rather
-                // than synthesize a multi-clause CASE expression.
-                return Err(SqlError::OpNotSupportedInDialect {
-                    op: "EXTRACT(QUARTER) (SQLite has no native quarter token)",
-                    dialect: "sqlite",
-                });
+                // SQLite has no quarter token in strftime; synthesize it
+                // from the month (#1037), matching how Django lowers
+                // `__quarter` on SQLite.
+                write_extract_quarter_sqlite(b, &args[0])
+            } else {
+                write_extract_int(b, kind, args)
             }
-            write_extract_int(b, kind, args)
         }
         F::TruncDate => {
             if args.len() != 1 {
@@ -2923,6 +2921,19 @@ fn write_ts_concat(b: &mut Sql<'_>, args: &[crate::core::Expr]) -> Result<(), Sq
 /// Emit an `EXTRACT(<field> FROM x)` family call. PG uses the SQL
 /// standard syntax + cast to integer; MySQL has direct per-field
 /// functions; SQLite routes through `strftime` + cast.
+/// SQLite quarter synthesis (#1037). SQLite's `strftime` has no quarter
+/// token, so derive it from the month via integer division:
+/// `((month + 2) / 3)` → months 1-3 = Q1, 4-6 = Q2, 7-9 = Q3, 10-12 = Q4.
+/// Mirrors how Django lowers `__quarter` on SQLite. Shared by the
+/// `filter("…__quarter", …)` lookup path and the `extract_quarter()`
+/// projection — both route through the `ExtractQuarter` writer arm.
+fn write_extract_quarter_sqlite(b: &mut Sql<'_>, expr: &crate::core::Expr) -> Result<(), SqlError> {
+    b.sql.push_str("((CAST(strftime('%m', ");
+    write_expr(b, expr, None)?;
+    b.sql.push_str(") AS INTEGER) + 2) / 3)");
+    Ok(())
+}
+
 fn write_extract_int(
     b: &mut Sql<'_>,
     kind: crate::core::ScalarFn,

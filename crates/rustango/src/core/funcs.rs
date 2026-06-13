@@ -64,8 +64,9 @@
 //!   MySQL's native `DAYOFWEEK()` returns 1=Sunday; the writer
 //!   subtracts 1 to align with PG's `EXTRACT(DOW)`. SQLite's
 //!   `strftime('%w')` already matches.
-//! - **`extract_quarter` errors on SQLite** — no native quarter
-//!   token; emitter returns `OpNotSupportedInDialect`.
+//! - **`extract_quarter` is cross-dialect** — PG/MySQL use native
+//!   QUARTER extraction; SQLite synthesizes it from the month
+//!   (`((month + 2) / 3)`), matching Django (#1037).
 //! - **⚠ `extract_week` is NOT cross-dialect**. Each backend uses a
 //!   different week-numbering convention (PG: ISO 8601; MySQL:
 //!   Sunday-start range 0–53; SQLite: Monday-start range 00–53). For
@@ -335,9 +336,9 @@ pub fn extract_weekday(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::ExtractWeekDay, arg)
 }
 
-/// `EXTRACT(QUARTER FROM x)` — quarter (1–4) as integer.
-/// **Not supported on SQLite** (no native `strftime` token); emits
-/// `OpNotSupportedInDialect`.
+/// `EXTRACT(QUARTER FROM x)` — quarter (1–4) as integer. Cross-dialect:
+/// native on PG/MySQL; on SQLite synthesized from the month as
+/// `((month + 2) / 3)` (#1037).
 #[must_use]
 pub fn extract_quarter(arg: impl Into<Expr>) -> Expr {
     unary(ScalarFn::ExtractQuarter, arg)
