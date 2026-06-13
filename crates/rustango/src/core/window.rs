@@ -107,6 +107,18 @@ pub enum WindowFn {
     /// `LAST_VALUE(expr)` — value from the last row in the
     /// partition/frame.
     LastValue,
+    /// `SUM(expr)` used as a window — running / partitioned total
+    /// (Django 6.0 `Window(Sum(...))`, #1035).
+    Sum,
+    /// `AVG(expr)` used as a window — partitioned / running mean.
+    Avg,
+    /// `MIN(expr)` used as a window — partitioned / running minimum.
+    Min,
+    /// `MAX(expr)` used as a window — partitioned / running maximum.
+    Max,
+    /// `COUNT(expr)` / `COUNT(*)` used as a window — partitioned /
+    /// running count. Empty args render `COUNT(*)`.
+    Count,
 }
 
 /// `ROWS` vs `RANGE` frame mode.
@@ -291,6 +303,51 @@ pub fn first_value(column: &'static str) -> WindowBuilder {
 #[must_use]
 pub fn last_value(column: &'static str) -> WindowBuilder {
     WindowBuilder::new(WindowFn::LastValue, vec![Expr::Column(column)])
+}
+
+/// `SUM(<column>) OVER (…)` — aggregate used as a window function
+/// (Django 6.0 `Window(Sum("points"), …)`, #1035). With an `ORDER BY`
+/// and no explicit [`WindowBuilder::frame`], SQL defaults to `RANGE
+/// UNBOUNDED PRECEDING .. CURRENT ROW` — a running total where peer
+/// rows (equal ORDER BY keys) share the cumulative value. Add
+/// `.frame(...)` for `ROWS` framing. Tri-dialect native (PG / MySQL 8+
+/// / SQLite 3.25+); no dialect fork.
+#[must_use]
+pub fn sum_over(column: &'static str) -> WindowBuilder {
+    WindowBuilder::new(WindowFn::Sum, vec![Expr::Column(column)])
+}
+
+/// `AVG(<column>) OVER (…)` — partitioned / running mean. Same framing
+/// note as [`sum_over`].
+#[must_use]
+pub fn avg_over(column: &'static str) -> WindowBuilder {
+    WindowBuilder::new(WindowFn::Avg, vec![Expr::Column(column)])
+}
+
+/// `MIN(<column>) OVER (…)` — partitioned / running minimum.
+#[must_use]
+pub fn min_over(column: &'static str) -> WindowBuilder {
+    WindowBuilder::new(WindowFn::Min, vec![Expr::Column(column)])
+}
+
+/// `MAX(<column>) OVER (…)` — partitioned / running maximum.
+#[must_use]
+pub fn max_over(column: &'static str) -> WindowBuilder {
+    WindowBuilder::new(WindowFn::Max, vec![Expr::Column(column)])
+}
+
+/// `COUNT(*) OVER (…)` — partitioned / running row count. For
+/// `COUNT(<column>)` (non-NULL only), use [`count_column_over`].
+#[must_use]
+pub fn count_over() -> WindowBuilder {
+    WindowBuilder::new(WindowFn::Count, vec![])
+}
+
+/// `COUNT(<column>) OVER (…)` — partitioned / running count of
+/// non-NULL `column` values.
+#[must_use]
+pub fn count_column_over(column: &'static str) -> WindowBuilder {
+    WindowBuilder::new(WindowFn::Count, vec![Expr::Column(column)])
 }
 
 #[cfg(test)]

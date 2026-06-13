@@ -4,6 +4,8 @@
 //! Django scenarios covered (docs.djangoproject.com/en/6.0):
 //! - `Window(Rank(), partition_by=..., order_by=...)` (+ dense_rank,
 //!   ntile, lag-with-default, first_value with a ROWS frame)
+//! - aggregates as window expressions: `Window(Sum("points"), …)` —
+//!   partitioned running total via `sum_over` (#1035 Part A)
 //! - `.distinct("tenant_id")` first-row-per-group (PG `DISTINCT ON`
 //!   native; MySQL/SQLite via the ROW_NUMBER fallback)
 //! - top-N-per-group: Django filters on a window annotation via an
@@ -12,10 +14,6 @@
 //!   SQLite)
 //!
 //! AUDIT NOTES (compile-time API absences, no runtime pin possible):
-//! - Django allows *aggregates as window expressions*
-//!   (`Window(Sum("points"), ...)`); rustango's `WindowFn` has only
-//!   the 8 ranking/navigation variants — `SUM(...) OVER (...)` is not
-//!   expressible. Issue #1035 (also covers windowed-query-as-subquery).
 //! - ERGONOMICS DIVERGENCE (execution-verified): Django annotates a
 //!   window onto a plain queryset; rustango requires the explicit
 //!   `.aggregate().group_by(<every projected column>)` shape —
@@ -34,7 +32,7 @@ mod scenarios {
 
     use rustango::core::joins::aliased;
     use rustango::core::window::{
-        dense_rank, first_value, lag, ntile, rank, FrameBoundary, FrameKind, WindowFrame,
+        dense_rank, first_value, lag, ntile, rank, sum_over, FrameBoundary, FrameKind, WindowFrame,
     };
     use rustango::core::{Join, JoinKind, Model as _, Op, SqlValue, WhereExpr};
     use rustango::sql::{raw_execute_pool, Auto, ExecError, FetcherPool as _, Pool, SqlError};
@@ -89,6 +87,14 @@ mod scenarios {
         match row.get(key) {
             Some(SqlValue::I64(n)) => *n,
             Some(SqlValue::I32(n)) => i64::from(*n),
+            // SUM over a BIGINT column widens per dialect: PG → NUMERIC,
+            // MySQL → DECIMAL, SQLite → INTEGER. Normalize for assertions.
+            Some(SqlValue::F64(f)) => *f as i64,
+            Some(SqlValue::Decimal(d)) => d
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or_else(|_| panic!("unparseable decimal at `{key}`: {d}"))
+                as i64,
             other => panic!("expected integer at `{key}`, got {other:?}"),
         }
     }
@@ -216,6 +222,33 @@ mod scenarios {
             .expect("ntile window");
         let buckets: Vec<i64> = rows.iter().map(|r| as_i64(r, "bucket")).collect();
         assert_eq!(buckets, vec![1, 1, 1, 2, 2]);
+    }
+
+    /// Django 6.0 `Window(Sum("points"), partition_by="player",
+    /// order_by="day")` — a partitioned running total (#1035 Part A).
+    /// Tenant 1, per player by day: the cumulative points carry the
+    /// default `RANGE UNBOUNDED PRECEDING .. CURRENT ROW` frame.
+    pub async fn check_sum_over_running_total(pool: &Pool) {
+        let rows = Score::objects()
+            .aggregate()
+            .group_by("player")
+            .group_by("day")
+            .group_by("points")
+            .annotate(
+                "running",
+                sum_over("points")
+                    .partition_by("player")
+                    .order_by(&[("day", false)])
+                    .into(),
+            )
+            .filter("tenant_id", Op::Eq, 1_i64)
+            .order_by(&[("player", false), ("day", false)])
+            .fetch(pool)
+            .await
+            .expect("sum-over running total");
+        let running: Vec<i64> = rows.iter().map(|r| as_i64(r, "running")).collect();
+        // alice 30→(30,65), bob 20→(20,35), carol 10→(10).
+        assert_eq!(running, vec![30, 65, 20, 35, 10]);
     }
 
     /// Django `.distinct("tenant_id")` + ordering — best score row per
@@ -388,6 +421,7 @@ mod pg_live {
     pg_case!(check_lag_with_default);
     pg_case!(check_first_value_rows_frame);
     pg_case!(check_ntile_buckets);
+    pg_case!(check_sum_over_running_total);
     pg_case!(check_distinct_on_first_row_per_tenant);
     pg_case!(check_distinct_on_with_join_dialect_matrix);
     pg_case!(check_top_n_per_group_via_lateral);
@@ -439,6 +473,7 @@ mod sqlite_live {
     sqlite_case!(check_lag_with_default);
     sqlite_case!(check_first_value_rows_frame);
     sqlite_case!(check_ntile_buckets);
+    sqlite_case!(check_sum_over_running_total);
     sqlite_case!(check_distinct_on_first_row_per_tenant);
     sqlite_case!(check_distinct_on_with_join_dialect_matrix);
     sqlite_case!(check_top_n_per_group_via_lateral);
@@ -503,6 +538,7 @@ mod mysql_live {
     mysql_case!(check_lag_with_default);
     mysql_case!(check_first_value_rows_frame);
     mysql_case!(check_ntile_buckets);
+    mysql_case!(check_sum_over_running_total);
     mysql_case!(check_distinct_on_first_row_per_tenant);
     mysql_case!(check_distinct_on_with_join_dialect_matrix);
     mysql_case!(check_top_n_per_group_via_lateral);
