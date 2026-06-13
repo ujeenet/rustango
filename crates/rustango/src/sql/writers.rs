@@ -173,34 +173,47 @@ pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), S
 /// apply to ITS branch (the first one in the compound, since the
 /// outer is itself a complete `SelectQuery`).
 fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
-    // First branch: the outer query itself. Build a copy with the
-    // compound stripped + the outer order_by / limit / offset /
-    // lock_mode stripped (those apply to the WHOLE compound, not
-    // the head branch).
+    // First branch: the outer query itself. Build a copy carrying its
+    // WHERE / search / joins AND its own `order_by` / `limit` /
+    // `offset` — #1034: those are the head-branch clauses (set BEFORE
+    // the first `.union()`), so they scope to the first queryset, not
+    // the merged result. The *combined-result* clauses live in
+    // `compound_order_by` / `compound_limit` / `compound_offset` and
+    // emit after the last branch (below).
     //
-    // No parens around branches: SQLite's `compound-select-stmt`
-    // grammar (`select-core (UNION select-core)*`) explicitly forbids
-    // parenthesizing the head select; PG / MySQL accept either shape
-    // identically. Per-branch `ORDER BY` / `LIMIT` are already
-    // stripped from the outer head (see fields cleared below); branch
-    // queries that *do* carry their own ORDER BY / LIMIT are
-    // surrounded by `SELECT * FROM (<sub>)` rather than naked parens
-    // (handled by the writer for nested subqueries — set ops with
-    // per-branch LIMIT remain a stretch goal).
-    // #562 — struct-update over SelectQuery::new; the head copies the
-    // outer query's WHERE / search / joins but explicitly clears the
-    // compound + outer-only fields (order_by / limit / offset /
-    // lock_mode / compound) since those apply to the merged result,
-    // not the head branch.
+    // Derived-table wrapping (`SELECT * FROM (<branch>) AS __rustango_bN`)
+    // is what keeps a branch's own ORDER BY / LIMIT local instead of
+    // attaching to the whole compound. #1032: every wrapper carries an
+    // alias — MySQL rejects an alias-less derived table (error 1248),
+    // and PG / SQLite accept the alias, so one code path serves all
+    // three. The head reserves `__rustango_b0`; branches start at 1.
+    // SQLite's `compound-select-stmt` grammar forbids bare parens
+    // around a select-core, hence the derived-table form over naked
+    // parens.
+    // #562 — struct-update over SelectQuery::new; the head clears
+    // `compound` (it's one branch, not the whole thing) and
+    // `lock_mode` (that applies to the merged result).
     let head = SelectQuery {
         where_clause: query.where_clause.clone(),
         search: query.search.clone(),
         joins: query.joins.clone(),
+        order_by: query.order_by.clone(),
+        limit: query.limit,
+        offset: query.offset,
         ..SelectQuery::new(query.model)
     };
-    write_select_inner(b, &head)?;
+    let head_scoped = !head.order_by.is_empty() || head.limit.is_some() || head.offset.is_some();
+    if head_scoped {
+        b.sql.push_str("SELECT * FROM (");
+        write_select_inner(b, &head)?;
+        b.sql.push(')');
+        b.sql.push_str(" AS ");
+        b.write_ident("__rustango_b0");
+    } else {
+        write_select_inner(b, &head)?;
+    }
 
-    for branch in &query.compound {
+    for (i, branch) in query.compound.iter().enumerate() {
         b.sql.push(' ');
         b.sql.push_str(branch.op.keyword());
         b.sql.push(' ');
@@ -210,13 +223,10 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         // need their own frame.
         b.scope_stack.push(branch.query.model);
         // Branches that carry their own ORDER BY / LIMIT / OFFSET get
-        // wrapped in `SELECT * FROM (<branch>)` so those clauses scope
-        // to the branch instead of attaching to the outer compound.
-        // SQLite's `compound-select-stmt` grammar forbids bare
-        // parens around a select-core, so we use a derived-table
-        // wrap (portable across PG / MySQL / SQLite). Plain branches
-        // with no ORDER BY / LIMIT emit inline — `SELECT … UNION
-        // SELECT …` is the shortest valid form on every backend.
+        // wrapped in `SELECT * FROM (<branch>) AS __rustango_bN`. Plain
+        // branches with no ORDER BY / LIMIT emit inline — `SELECT …
+        // UNION SELECT …` is the shortest valid form on every backend
+        // and needs no alias.
         let scoped = !branch.query.order_by.is_empty()
             || branch.query.limit.is_some()
             || branch.query.offset.is_some();
@@ -225,6 +235,10 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
                 b.sql.push_str("SELECT * FROM (");
                 let r = write_select_inner(b, &branch.query);
                 b.sql.push(')');
+                if r.is_ok() {
+                    b.sql.push_str(" AS ");
+                    b.write_ident(&format!("__rustango_b{}", i + 1));
+                }
                 r
             } else {
                 write_select_inner(b, &branch.query)
@@ -235,16 +249,26 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
             b.sql.push_str("SELECT * FROM (");
             let r = write_compound_select(b, &branch.query);
             b.sql.push(')');
+            if r.is_ok() {
+                b.sql.push_str(" AS ");
+                b.write_ident(&format!("__rustango_b{}", i + 1));
+            }
             r
         };
         b.scope_stack.pop();
         r?;
     }
 
-    // Outer ORDER BY / LIMIT / OFFSET apply to the merged result.
-    // No qualify (the compound's "table" is the merged resultset, not
-    // a join target).
-    write_order_limit_offset(b, &query.order_by, query.limit, query.offset, None)?;
+    // Combined-result ORDER BY / LIMIT / OFFSET — the clauses chained
+    // AFTER the first set-op call (#1034). No qualify (the compound's
+    // "table" is the merged resultset, not a join target).
+    write_order_limit_offset(
+        b,
+        &query.compound_order_by,
+        query.compound_limit,
+        query.compound_offset,
+        None,
+    )?;
 
     if let Some(lock) = &query.lock_mode {
         write_lock_clause(b, lock);

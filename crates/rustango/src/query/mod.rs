@@ -75,6 +75,20 @@ pub struct QuerySet<T: Model> {
     /// Each entry is a pre-compiled [`crate::core::CompoundBranch`].
     /// Empty (default) emits a plain SELECT.
     compound: Vec<crate::core::CompoundBranch>,
+    /// #1034 — head-branch `ORDER BY` frozen at the first `.union()` /
+    /// `.intersection()` / `.difference()` call. `order_by` / `limit` /
+    /// `offset` set BEFORE the first set-op scope to the FIRST
+    /// queryset (Django 4.0+ component-queryset slicing); the freeze
+    /// snapshots them here so clauses chained AFTER the set-op
+    /// accumulate fresh in the live slots and apply to the combined
+    /// result. Empty until the first set-op call.
+    head_order_by: Vec<PendingOrderItem>,
+    /// #1034 — head-branch `LIMIT` frozen at the first set-op call.
+    /// See [`Self::head_order_by`].
+    head_limit: Option<i64>,
+    /// #1034 — head-branch `OFFSET` frozen at the first set-op call.
+    /// See [`Self::head_order_by`].
+    head_offset: Option<i64>,
     /// Django `.none()` short-circuit — issue #331. When `true`, every
     /// terminal op compiles to a guaranteed-empty SQL statement: SELECT
     /// gets `LIMIT 0`, UPDATE / DELETE gain an `IS NULL` predicate
@@ -208,6 +222,9 @@ impl<T: Model> Clone for QuerySet<T> {
             order_by: self.order_by.clone(),
             lock_mode: self.lock_mode.clone(),
             compound: self.compound.clone(),
+            head_order_by: self.head_order_by.clone(),
+            head_limit: self.head_limit,
+            head_offset: self.head_offset,
             is_none: self.is_none,
             disabled_global_scopes: self.disabled_global_scopes.clone(),
             disable_all_global_scopes: self.disable_all_global_scopes,
@@ -230,6 +247,9 @@ impl<T: Model> QuerySet<T> {
             order_by: Vec::new(),
             lock_mode: None,
             compound: Vec::new(),
+            head_order_by: Vec::new(),
+            head_limit: None,
+            head_offset: None,
             is_none: false,
             disabled_global_scopes: Vec::new(),
             disable_all_global_scopes: false,
@@ -470,10 +490,14 @@ impl<T: Model> QuerySet<T> {
     /// or `difference` on the same chain is allowed but unusual; SQL
     /// evaluates them left-to-right.
     ///
-    /// Outer `.order_by()` / `.limit()` / `.offset()` set after
-    /// `.union()` apply to the COMBINED result (the merged
-    /// resultset). Each branch keeps its own per-branch ORDER BY /
-    /// LIMIT inside parens.
+    /// `.order_by()` / `.limit()` / `.offset()` set AFTER `.union()`
+    /// apply to the COMBINED result (the merged resultset); the same
+    /// methods called BEFORE `.union()` scope to the FIRST queryset —
+    /// Django 4.0+ component-queryset slicing (#1034). Each argument
+    /// branch likewise keeps its own per-branch ORDER BY / LIMIT. Every
+    /// such component wraps in an aliased derived table
+    /// (`SELECT * FROM (…) AS __rustango_bN`) so the clauses stay local
+    /// on all three backends.
     ///
     /// Tri-dialect availability: every supported backend.
     ///
@@ -565,6 +589,18 @@ impl<T: Model> QuerySet<T> {
         op: crate::core::SetOp,
         branch: crate::core::SelectQuery,
     ) -> Self {
+        // #1034 — the FIRST set-op call freezes the pre-union
+        // `ORDER BY` / `LIMIT` / `OFFSET` into the head-branch slots
+        // (those clauses scope to the first queryset, Django 4.0+
+        // component-slicing). Clearing the live slots means anything
+        // chained AFTER this point accumulates fresh and applies to
+        // the combined result. Subsequent set-op calls leave the
+        // already-frozen head untouched.
+        if self.compound.is_empty() {
+            self.head_order_by = std::mem::take(&mut self.order_by);
+            self.head_limit = self.limit.take();
+            self.head_offset = self.offset.take();
+        }
         self.compound.push(crate::core::CompoundBranch {
             op,
             query: Box::new(branch),
@@ -2168,11 +2204,41 @@ impl<T: Model> QuerySet<T> {
         // for legacy callers, and keeps user-driven joins next to the
         // user-driven WHERE.
         joins.extend(self.ad_hoc_joins);
+        // #1034 — split head-branch clauses from combined-result
+        // clauses. With a compound, the head-branch `ORDER BY` /
+        // `LIMIT` / `OFFSET` were frozen at the first set-op call
+        // (`head_*`); the live slots hold whatever was chained AFTER
+        // and apply to the merged result. Without a compound, the
+        // live slots are the query's own and `head_*` are empty.
+        let has_compound = !self.compound.is_empty();
+        let (head_pending, head_limit, head_offset, comb_pending, comb_limit, comb_offset) =
+            if has_compound {
+                (
+                    std::mem::take(&mut self.head_order_by),
+                    self.head_limit,
+                    self.head_offset,
+                    std::mem::take(&mut self.order_by),
+                    self.limit,
+                    self.offset,
+                )
+            } else {
+                (
+                    std::mem::take(&mut self.order_by),
+                    self.limit,
+                    self.offset,
+                    Vec::new(),
+                    None,
+                    None,
+                )
+            };
         // Lower the unified pending list to OrderItems. Insertion
         // order is preserved across legacy `.order_by(...)` and
         // issue-#76 `.order_by_with_nulls(...)` / `.order_by_expr(...)`
         // calls so a mixed chain emits in the order it was written.
-        let order_by = lower_order_items(model, self.order_by)?;
+        // `order_by` is the head-branch (or sole) ordering; the
+        // combined-result ordering lowers separately below.
+        let order_by = lower_order_items(model, head_pending)?;
+        let compound_order_by = lower_order_items(model, comb_pending)?;
         // Issue #264 / T1.2 — `.distinct_on(&[...])` requires the
         // listed columns to head the ORDER BY (Django enforces this
         // at runtime; we catch it at builder time). Empty list is
@@ -2220,8 +2286,18 @@ impl<T: Model> QuerySet<T> {
         // Cheap on every dialect (PG/MySQL/SQLite skip plan
         // materialization), and the other terminal ops (count, exists,
         // first) read off the same SelectQuery so they see the same
-        // empty result without further special-casing.
-        let limit = if self.is_none { Some(0) } else { self.limit };
+        // empty result without further special-casing. The `LIMIT 0`
+        // pins to the OUTERMOST slot — the combined result when a
+        // compound is present, else the head/sole query.
+        let (limit, compound_limit) = if self.is_none {
+            if has_compound {
+                (head_limit, Some(0))
+            } else {
+                (Some(0), comb_limit)
+            }
+        } else {
+            (head_limit, comb_limit)
+        };
         Ok(SelectQuery {
             model,
             where_clause,
@@ -2230,11 +2306,14 @@ impl<T: Model> QuerySet<T> {
             subquery_joins: self.subquery_joins,
             order_by,
             limit,
-            offset: self.offset,
+            offset: head_offset,
             lock_mode: self.lock_mode,
             compound: self.compound,
             projection: None,
             distinct: self.distinct,
+            compound_order_by,
+            compound_limit,
+            compound_offset: comb_offset,
         })
     }
 

@@ -159,6 +159,85 @@ fn branch_order_by_wraps_in_derived_table() {
         "branch LIMIT inside derived table: {}",
         stmt.sql
     );
+    // #1032 — the derived table carries an alias (MySQL error 1248
+    // otherwise; PG/SQLite accept it, so one code path serves all
+    // three). Branches start numbering at 1 (b0 reserved for the head).
+    assert!(
+        stmt.sql.contains(r#") AS "__rustango_b1""#),
+        "branch wrapper aliased: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn head_order_by_before_union_wraps_with_b0_alias() {
+    // #1034 — ORDER BY / LIMIT set BEFORE the first `.union()` scope to
+    // the FIRST queryset (Django 4.0+ component-slicing). The head is
+    // wrapped in its own aliased derived table; the clauses live inside
+    // the parens, NOT after the final branch.
+    let q = Post::objects()
+        .where_(Post::status.eq("draft"))
+        .order_by(&[("id", true)])
+        .limit(2)
+        .union(Post::objects().where_(Post::status.eq("review")))
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_select(&q).unwrap();
+    // Statement opens with the wrapped head (SQLite forbids a leading
+    // bare paren, but `SELECT * FROM (` is a valid select-core head).
+    assert!(
+        stmt.sql.starts_with(r#"SELECT * FROM ("#),
+        "head wraps in derived table: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql.contains(r#") AS "__rustango_b0" UNION "#),
+        "head wrapper aliased b0, before UNION: {}",
+        stmt.sql
+    );
+    // The head's ORDER BY / LIMIT are INSIDE the b0 parens (before the
+    // UNION keyword), not trailing the whole compound.
+    let union_pos = stmt.sql.find(" UNION ").unwrap();
+    let order_pos = stmt.sql.find("ORDER BY").expect("head ORDER BY");
+    let limit_pos = stmt.sql.find("LIMIT").expect("head LIMIT");
+    assert!(
+        order_pos < union_pos,
+        "head ORDER BY before UNION: {}",
+        stmt.sql
+    );
+    assert!(
+        limit_pos < union_pos,
+        "head LIMIT before UNION: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn clauses_after_union_scope_to_combined_result() {
+    // #1034 — the SAME clauses set AFTER `.union()` route to the
+    // combined-result slots and emit after the last branch (the head
+    // is NOT wrapped). This is the Django-documented outer form.
+    let q = Post::objects()
+        .where_(Post::status.eq("draft"))
+        .union(Post::objects().where_(Post::status.eq("review")))
+        .order_by(&[("id", true)])
+        .limit(2)
+        .compile()
+        .unwrap();
+    let stmt = Postgres.compile_select(&q).unwrap();
+    // No head wrap, no b0 alias — ordering trails the final branch.
+    assert!(
+        !stmt.sql.contains("__rustango_b0"),
+        "head not wrapped when clauses set after union: {}",
+        stmt.sql
+    );
+    let union_pos = stmt.sql.rfind(" UNION ").unwrap();
+    let order_pos = stmt.sql.find("ORDER BY").expect("combined ORDER BY");
+    assert!(
+        order_pos > union_pos,
+        "combined ORDER BY after final UNION: {}",
+        stmt.sql
+    );
 }
 
 // ---------- Multiple branches accumulate ----------

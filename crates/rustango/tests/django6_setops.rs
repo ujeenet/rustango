@@ -72,27 +72,20 @@ mod scenarios {
         assert_eq!(union_all.len(), 7, "3 + 4 with duplicates kept");
     }
 
-    /// Per-branch ORDER BY + LIMIT. DIVERGENCE (execution-verified):
-    /// only the *other* branch (the argument to `union_all`) gets the
-    /// parenthesized branch-scoped wrapping; ORDER BY/LIMIT on the
-    /// *first* queryset always apply to the COMBINED result — the
-    /// builder stores them in the same slots as post-union clauses, so
-    /// "before union" vs "after union" is indistinguishable. Django
-    /// 4.0+ supports slicing BOTH component querysets
-    /// (`qs1[:2].union(qs2[:1])`); rustango can slice only the
-    /// non-self branches.
+    /// Per-branch ORDER BY + LIMIT (Django 4.0+ component-queryset
+    /// slicing — `qs1[:2].union(qs2[:1])`). Both the head queryset and
+    /// the argument branches carry their OWN parenthesized
+    /// branch-scoped ORDER BY/LIMIT (#1032 + #1034):
+    /// - #1032: each derived-table wrapper carries an alias
+    ///   (`__rustango_bN`) so MySQL accepts it (error 1248 otherwise).
+    /// - #1034: clauses set BEFORE the first set-op call scope to the
+    ///   FIRST queryset; clauses set AFTER apply to the combined
+    ///   result (see `check_outer_order_limit_on_combined`).
     pub async fn check_per_branch_order_and_limit(pool: &Pool) {
-        // Other-branch clauses ARE branch-scoped: all of 'a' + top-1
-        // of 'b' by rank desc.
-        //
-        // GAP-PIN (MySQL): the branch wrapper emits
-        // `SELECT * FROM (<branch>)` with NO alias — PG/SQLite accept
-        // that, MySQL rejects it with error 1248 ("Every derived
-        // table must have its own alias"). Ordered/limited union
-        // branches are therefore broken on MySQL until the writer
-        // appends an alias. Tracked in the gh issue filed from this
-        // suite (#1032).
-        let res = Item::objects()
+        // Other-branch clauses are branch-scoped: all of 'a' + top-1
+        // of 'b' by rank desc. Works on every backend now that the
+        // wrapper carries an alias (#1032).
+        let rows: Vec<Item> = Item::objects()
             .filter("grp", "a")
             .union_all(
                 Item::objects()
@@ -101,26 +94,13 @@ mod scenarios {
                     .limit(1),
             )
             .fetch_pool(pool)
-            .await;
-        if pool.dialect().name() == "mysql" {
-            let err = res
-                .map(|rows: Vec<Item>| rows.len())
-                .expect_err("MySQL must reject the alias-less branch wrapper");
-            let msg = format!("{err}");
-            assert!(
-                msg.contains("alias"),
-                "expected MySQL error 1248 (derived table alias), got: {msg} — \
-                 if branch wrappers now carry aliases, update the audit + issue"
-            );
-        } else {
-            let rows: Vec<Item> = res.expect("other-branch order/limit fetch");
-            assert_eq!(sorted_names(rows), vec!["a1", "a2", "a3", "b2"]);
-        }
+            .await
+            .expect("other-branch order/limit fetch");
+        assert_eq!(sorted_names(rows), vec!["a1", "a2", "a3", "b2"]);
 
-        // PINNED DIVERGENCE: first-queryset clauses leak to the
-        // combined result — top-2 of (a ∪ b) by rank asc, NOT
-        // "top-2 of 'a' plus all of 'b'". Goes red if branch-scoped
-        // first-queryset slicing ever ships (then update the audit). Issue #1034.
+        // First-queryset clauses are now ALSO branch-scoped (#1034):
+        // top-2 of 'a' by rank asc (a1, a2) PLUS all of 'b' (b1, b2) —
+        // NOT "top-2 of the combined set".
         let rows: Vec<Item> = Item::objects()
             .filter("grp", "a")
             .order_by(&[("rnk", false)])
@@ -131,8 +111,8 @@ mod scenarios {
             .expect("first-queryset order/limit fetch");
         assert_eq!(
             sorted_names(rows),
-            vec!["a1", "a2"],
-            "first-queryset LIMIT applies to the combined result"
+            vec!["a1", "a2", "b1", "b2"],
+            "first-queryset LIMIT scopes to the FIRST branch (top-2 of 'a' + all of 'b')"
         );
     }
 

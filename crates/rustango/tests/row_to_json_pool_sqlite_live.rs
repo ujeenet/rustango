@@ -84,6 +84,9 @@ async fn select_rows_as_json_pool_decodes_sqlite_rows() {
             compound: vec![],
             projection: None,
             distinct: None,
+            compound_order_by: vec![],
+            compound_limit: None,
+            compound_offset: None,
         },
         &fields,
     )
@@ -124,6 +127,9 @@ async fn select_one_row_as_json_pool_returns_none_for_miss() {
             compound: vec![],
             projection: None,
             distinct: None,
+            compound_order_by: vec![],
+            compound_limit: None,
+            compound_offset: None,
         },
         &fields,
     )
@@ -166,6 +172,9 @@ async fn select_one_row_as_json_pool_returns_decoded_row_for_hit() {
             compound: vec![],
             projection: None,
             distinct: None,
+            compound_order_by: vec![],
+            compound_limit: None,
+            compound_offset: None,
         },
         &fields,
     )
