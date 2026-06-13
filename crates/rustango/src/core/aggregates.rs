@@ -170,6 +170,17 @@ pub fn min(column: &'static str) -> AggregateBuilder {
     AggregateBuilder::new(AggregateExpr::Min(column))
 }
 
+/// `ANY_VALUE(column)` — an arbitrary value from the group's non-null
+/// inputs (new in Django 6.0, #1025). Projects a functionally-dependent
+/// column without adding it to GROUP BY. PG 16+ `any_value()`, MySQL
+/// `ANY_VALUE()`, SQLite `min()` fallback. PG < 16 has no `any_value()`
+/// and the server errors at execution. Composes with `.filter()` /
+/// `.default()` via the existing wrappers.
+#[must_use]
+pub fn any_value(column: &'static str) -> AggregateBuilder {
+    AggregateBuilder::new(AggregateExpr::AnyValue(column))
+}
+
 /// `STDDEV_SAMP(column)` — sample standard deviation. Native on PG
 /// and MySQL 8+; SQLite has no built-in stddev and the writer raises
 /// `SqlError::AggregateNotSupported` (matches Django behavior).

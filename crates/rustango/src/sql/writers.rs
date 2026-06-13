@@ -792,6 +792,17 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
         AggregateExpr::Avg(col) => format!("AVG({})", b.d.quote_ident(col)),
         AggregateExpr::Max(col) => format!("MAX({})", b.d.quote_ident(col)),
         AggregateExpr::Min(col) => format!("MIN({})", b.d.quote_ident(col)),
+        AggregateExpr::AnyValue(col) => {
+            // Django 6.0 (#1025): PG 16+ `any_value()`, MySQL
+            // `ANY_VALUE()`, SQLite has neither — fall back to `min()`
+            // (deterministic, satisfies the "arbitrary value" contract).
+            let ident = b.d.quote_ident(col);
+            match b.d.name() {
+                "mysql" => format!("ANY_VALUE({ident})"),
+                "sqlite" => format!("min({ident})"),
+                _ => format!("any_value({ident})"),
+            }
+        }
         AggregateExpr::StdDev(col)
         | AggregateExpr::StdDevPop(col)
         | AggregateExpr::Variance(col)
@@ -1053,6 +1064,7 @@ fn write_aggregate_as_case_when(
         AggregateExpr::Avg(col) => ("AVG", Some(*col), ""),
         AggregateExpr::Max(col) => ("MAX", Some(*col), ""),
         AggregateExpr::Min(col) => ("MIN", Some(*col), ""),
+        AggregateExpr::AnyValue(col) => ("ANY_VALUE", Some(*col), ""),
         AggregateExpr::StdDev(col)
         | AggregateExpr::StdDevPop(col)
         | AggregateExpr::Variance(col)
@@ -1124,6 +1136,7 @@ fn aggregate_column(expr: &AggregateExpr) -> Option<&'static str> {
         | AggregateExpr::Avg(c)
         | AggregateExpr::Max(c)
         | AggregateExpr::Min(c)
+        | AggregateExpr::AnyValue(c)
         | AggregateExpr::StdDev(c)
         | AggregateExpr::StdDevPop(c)
         | AggregateExpr::Variance(c)
