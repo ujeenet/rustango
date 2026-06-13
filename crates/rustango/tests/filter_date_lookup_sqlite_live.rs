@@ -171,18 +171,19 @@ async fn week_day_lookup_matches_normalized_dow() {
 }
 
 #[tokio::test]
-async fn quarter_lookup_errors_on_sqlite() {
+async fn quarter_lookup_works_on_sqlite() {
     let pool = make_pool().await;
     seed(&pool).await;
 
-    let result = QuerySet::<Event>::default()
+    // #1037 — quarter is synthesized from the month on SQLite. Q2
+    // (Apr–Jun) matches only the June row.
+    let rows = QuerySet::<Event>::default()
         .filter("created__quarter", 2_i64)
         .fetch_pool(&pool)
-        .await;
-    assert!(
-        result.is_err(),
-        "SQLite has no native quarter; should error consistently"
-    );
+        .await
+        .expect("quarter lookup now works on SQLite");
+    let labels: Vec<&str> = rows.iter().map(|e| e.label.as_str()).collect();
+    assert_eq!(labels, vec!["y2026-jun"], "Q2 = June");
 }
 
 // Smoke: keep an unused chrono ref so warnings stay clean if cfg
