@@ -15,12 +15,12 @@
 //! - `DEFAULT_AUTO_FIELD` now defaults to `BigAutoField` — rustango's
 //!   `Auto<i64>` ↔ BIGSERIAL/BIGINT AUTO_INCREMENT already matches
 //!
+//! - `Aggregate(order_by=...)` (new in 6.0, deprecates PG
+//!   `OrderableAggMixin`) — `string_agg_ordered` / `_distinct_ordered`
+//!   emit `ORDER BY` inside the aggregate (#1026).
+//!
 //! Release-note items that are compile-time API absences (no runtime
 //! pin possible — audit rows + issues only):
-//! - `Aggregate(order_by=...)` (new in 6.0, deprecates PG
-//!   `OrderableAggMixin`): `AggregateExpr::StringAgg` carries no
-//!   ordering (issue #1026) — element order in the joined string is
-//!   backend-arbitrary (tests sort to compensate).
 //! - `Model.NotUpdated` on forced 0-row update — pinned in
 //!   django6_writes.rs::check_zero_row_update_semantics.
 //! - CompositePrimaryKey enhancements (raw(), subquery lookups) — N/A
@@ -84,8 +84,8 @@ mod scenarios {
             Some(SqlValue::String(s)) => s.clone(),
             other => panic!("expected string names, got {other:?}"),
         };
-        // No order_by param yet (#1026) — element order is arbitrary, so
-        // sort before asserting.
+        // Unordered form — element order is backend-arbitrary, so sort
+        // before asserting (the ordered form is `check_string_agg_ordered`).
         let mut parts: Vec<&str> = joined.split(',').collect();
         parts.sort_unstable();
         assert_eq!(parts, vec!["alpha", "beta", "beta", "gamma"]);
@@ -114,6 +114,31 @@ mod scenarios {
             parts,
             vec!["alpha", "beta", "gamma"],
             "duplicate beta deduped"
+        );
+    }
+
+    /// Django 6.0 `Aggregate(order_by=…)` (#1026) — ordered StringAgg.
+    /// With ORDER BY the joined string is deterministic, so we assert the
+    /// EXACT result (no sort-to-compensate). PG/MySQL native; SQLite needs
+    /// 3.44+ for ORDER BY inside an aggregate.
+    pub async fn check_string_agg_ordered(pool: &Pool) {
+        let rows = DeltaRow::objects()
+            .aggregate()
+            .values(&[])
+            .annotate(
+                "names",
+                AggregateExpr::string_agg_ordered("name", ",", &[("name", false)]),
+            )
+            .fetch(pool)
+            .await
+            .expect("ordered string_agg on every backend");
+        let joined = match rows[0].get("names") {
+            Some(SqlValue::String(s)) => s.clone(),
+            other => panic!("expected string names, got {other:?}"),
+        };
+        assert_eq!(
+            joined, "alpha,beta,beta,gamma",
+            "exact ascending-by-name order"
         );
     }
 
@@ -253,6 +278,7 @@ mod pg_live {
     pg_case!(check_string_agg_dialect_matrix);
     pg_case!(check_string_agg_distinct);
     pg_case!(check_any_value);
+    pg_case!(check_string_agg_ordered);
     pg_case!(check_generated_column_not_refreshed_on_save);
     pg_case!(check_auto_pk_is_big_auto_field);
 }
@@ -300,6 +326,7 @@ mod sqlite_live {
     sqlite_case!(check_string_agg_dialect_matrix);
     sqlite_case!(check_string_agg_distinct);
     sqlite_case!(check_any_value);
+    sqlite_case!(check_string_agg_ordered);
     sqlite_case!(check_generated_column_not_refreshed_on_save);
     sqlite_case!(check_auto_pk_is_big_auto_field);
 }
@@ -360,6 +387,7 @@ mod mysql_live {
     mysql_case!(check_string_agg_dialect_matrix);
     mysql_case!(check_string_agg_distinct);
     mysql_case!(check_any_value);
+    mysql_case!(check_string_agg_ordered);
     mysql_case!(check_generated_column_not_refreshed_on_save);
     mysql_case!(check_auto_pk_is_big_auto_field);
 }

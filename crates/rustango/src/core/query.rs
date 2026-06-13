@@ -1536,6 +1536,10 @@ pub enum AggregateExpr {
         column: &'static str,
         delimiter: String,
         distinct: bool,
+        /// `ORDER BY` inside the aggregate (Django 6.0 `Aggregate(order_by=…)`,
+        /// #1026). Empty = backend-arbitrary order. With `distinct`, every
+        /// clause must order by `column` itself (validated at emit).
+        order_by: Vec<OrderClause>,
     },
     /// PG: `jsonb_agg(column)` — collects column values into a JSONB
     /// array. Issue #33. **Postgres-only**.
@@ -1629,6 +1633,7 @@ impl AggregateExpr {
             column,
             delimiter: delimiter.into(),
             distinct: false,
+            order_by: Vec::new(),
         }
     }
 
@@ -1640,6 +1645,53 @@ impl AggregateExpr {
             column,
             delimiter: delimiter.into(),
             distinct: true,
+            order_by: Vec::new(),
+        }
+    }
+
+    /// `string_agg(column, delimiter ORDER BY …)` — ordered concatenation
+    /// (Django 6.0 `Aggregate(order_by=…)`, #1026). `order` is a slice of
+    /// `(column, desc)` pairs (the `WindowBuilder::order_by` convention).
+    #[must_use]
+    pub fn string_agg_ordered(
+        column: &'static str,
+        delimiter: impl Into<String>,
+        order: &[(&'static str, bool)],
+    ) -> Self {
+        Self::StringAgg {
+            column,
+            delimiter: delimiter.into(),
+            distinct: false,
+            order_by: order
+                .iter()
+                .map(|(c, desc)| OrderClause {
+                    column: c,
+                    desc: *desc,
+                })
+                .collect(),
+        }
+    }
+
+    /// `string_agg(DISTINCT column, delimiter ORDER BY …)` (#1026). With
+    /// DISTINCT, `order` may only reference `column` itself — enforced at
+    /// emit time (PG hard requirement; portable-safe everywhere).
+    #[must_use]
+    pub fn string_agg_distinct_ordered(
+        column: &'static str,
+        delimiter: impl Into<String>,
+        order: &[(&'static str, bool)],
+    ) -> Self {
+        Self::StringAgg {
+            column,
+            delimiter: delimiter.into(),
+            distinct: true,
+            order_by: order
+                .iter()
+                .map(|(c, desc)| OrderClause {
+                    column: c,
+                    desc: *desc,
+                })
+                .collect(),
         }
     }
 
