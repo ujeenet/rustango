@@ -161,6 +161,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_filepath_field
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,serializer --test serializer_cross_validate
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_none
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_exclude_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlmigrate
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_set_ops
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test set_algebra_emission
