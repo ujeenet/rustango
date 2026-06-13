@@ -1775,9 +1775,19 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
         WindowFn::Lead => "LEAD",
         WindowFn::FirstValue => "FIRST_VALUE",
         WindowFn::LastValue => "LAST_VALUE",
+        WindowFn::Sum => "SUM",
+        WindowFn::Avg => "AVG",
+        WindowFn::Min => "MIN",
+        WindowFn::Max => "MAX",
+        WindowFn::Count => "COUNT",
     };
     b.sql.push_str(fn_name);
     b.sql.push('(');
+    // `COUNT()` is invalid SQL — a bare `count_over()` (no column
+    // argument) is the windowed `COUNT(*)` (#1035).
+    if matches!(w.kind, WindowFn::Count) && w.args.is_empty() {
+        b.sql.push('*');
+    }
     // PG's LAG/LEAD/NTILE require `offset`/`buckets` as `integer`, not
     // `bigint`. Binding `i64` as a parameter (which PG types as
     // `bigint`) makes function lookup fail with

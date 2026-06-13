@@ -53,6 +53,11 @@ fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
         SqlValue::F64(v)
     } else if let Ok(v) = row.try_get::<bool, _>(i) {
         SqlValue::Bool(v)
+    } else if let Ok(v) = row.try_get::<rust_decimal::Decimal, _>(i) {
+        // #1035 — PG `NUMERIC` (e.g. `SUM(bigint)` / `SUM(...) OVER (...)`,
+        // which PG widens to numeric). The i64/f64 probes don't decode
+        // numeric, so without this the value silently decoded to `Null`.
+        SqlValue::Decimal(v)
     } else if let Ok(v) = row.try_get::<String, _>(i) {
         SqlValue::String(v)
     } else if let Ok(v) = row.try_get::<serde_json::Value, _>(i) {
@@ -91,6 +96,11 @@ fn my_cell_to_sqlvalue(row: &sqlx::mysql::MySqlRow, i: usize) -> SqlValue {
         SqlValue::F64(v)
     } else if let Ok(v) = row.try_get::<bool, _>(i) {
         SqlValue::Bool(v)
+    } else if let Ok(v) = row.try_get::<rust_decimal::Decimal, _>(i) {
+        // #1035 — MySQL `DECIMAL` (e.g. `SUM(...)` / `SUM(...) OVER (...)`
+        // over an integer column). Without this the i64/f64 probes fail
+        // and the value silently decoded to `Null`.
+        SqlValue::Decimal(v)
     } else if let Ok(v) = row.try_get::<String, _>(i) {
         SqlValue::String(v)
     } else {

@@ -5,7 +5,8 @@
 //! and the dialect-shape placeholders for each backend.
 
 use rustango::core::window::{
-    dense_rank, first_value, lag, last_value, lead, ntile, rank, row_number,
+    avg_over, count_column_over, count_over, dense_rank, first_value, lag, last_value, lead,
+    max_over, min_over, ntile, rank, row_number, sum_over,
 };
 use rustango::core::{
     AggregateExpr, AggregateQuery, Expr, FrameBoundary, FrameKind, Model as _, SqlValue, WhereExpr,
@@ -487,6 +488,89 @@ fn filtered_window_rejection_msg_consistent_across_dialects() {
                 }
             ),
             "{label}: expected wrapper=Filtered(Window), got {err:?}",
+        );
+    }
+}
+
+// ---------- Aggregate window functions (#1035 Part A) ----------
+
+#[test]
+fn pg_sum_over_emits_running_total_form() {
+    // Window(Sum("score"), partition_by=tenant_id, order_by=id) — a
+    // partitioned running total. SQL-standard `SUM(col) OVER (…)`.
+    let w = sum_over("score")
+        .partition_by("tenant_id")
+        .order_by(&[("id", false)]);
+    let stmt = Postgres.compile_aggregate(&agg(w.into())).unwrap();
+    assert!(
+        stmt.sql
+            .contains(r#"SUM("score") OVER (PARTITION BY "tenant_id" ORDER BY "id") AS "w""#),
+        "got: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn sum_over_is_tri_dialect_identical_apart_from_quoting() {
+    let mk = || {
+        sum_over("score")
+            .partition_by("tenant_id")
+            .order_by(&[("id", false)])
+    };
+    assert!(MySql
+        .compile_aggregate(&agg(mk().into()))
+        .unwrap()
+        .sql
+        .contains("SUM(`score`) OVER (PARTITION BY `tenant_id` ORDER BY `id`)"));
+    assert!(Sqlite
+        .compile_aggregate(&agg(mk().into()))
+        .unwrap()
+        .sql
+        .contains(r#"SUM("score") OVER (PARTITION BY "tenant_id" ORDER BY "id")"#));
+}
+
+#[test]
+fn count_over_emits_count_star() {
+    // Bare `count_over()` is the windowed COUNT(*) — `COUNT()` would be
+    // invalid SQL.
+    let w = count_over().partition_by("tenant_id");
+    let stmt = Postgres.compile_aggregate(&agg(w.into())).unwrap();
+    assert!(
+        stmt.sql
+            .contains(r#"COUNT(*) OVER (PARTITION BY "tenant_id") AS "w""#),
+        "got: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn count_column_over_emits_column_arg() {
+    let w = count_column_over("score").order_by(&[("id", false)]);
+    let stmt = Postgres.compile_aggregate(&agg(w.into())).unwrap();
+    assert!(
+        stmt.sql.contains(r#"COUNT("score") OVER (ORDER BY "id")"#),
+        "got: {}",
+        stmt.sql
+    );
+}
+
+#[test]
+fn avg_min_max_over_map_to_their_keywords() {
+    for (build, kw) in [
+        (avg_over("score").build(), "AVG"),
+        (min_over("score").build(), "MIN"),
+        (max_over("score").build(), "MAX"),
+    ] {
+        // `.build()` yields an Expr; wrap it back into the aggregate slot.
+        let expr = AggregateExpr::Window(match build {
+            Expr::Window(w) => w,
+            other => panic!("expected Expr::Window, got {other:?}"),
+        });
+        let stmt = Postgres.compile_aggregate(&agg(expr)).unwrap();
+        assert!(
+            stmt.sql.contains(&format!(r#"{kw}("score") OVER"#)),
+            "{kw}: got {}",
+            stmt.sql
         );
     }
 }
