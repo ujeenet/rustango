@@ -195,6 +195,9 @@ async fn empty_or_branch_returns_named_writer_error() {
         compound: vec![],
         projection: None,
         distinct: None,
+        compound_order_by: vec![],
+        compound_limit: None,
+        compound_offset: None,
     };
     let err = Postgres.compile_select(&q).unwrap_err();
     assert!(matches!(err, SqlError::EmptyOrBranch));
@@ -217,6 +220,9 @@ async fn empty_or_branch_returns_named_writer_error() {
         compound: vec![],
         projection: None,
         distinct: None,
+        compound_order_by: vec![],
+        compound_limit: None,
+        compound_offset: None,
     };
     rustango::sql::__macro_internals::select_rows_on(&pool, &q2)
         .await

@@ -35,6 +35,9 @@ fn select(where_clause: WhereExpr) -> SelectQuery {
         compound: vec![],
         projection: None,
         distinct: None,
+        compound_order_by: vec![],
+        compound_limit: None,
+        compound_offset: None,
     }
 }
 

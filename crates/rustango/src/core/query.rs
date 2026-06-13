@@ -649,6 +649,20 @@ pub struct SelectQuery {
     /// cols ORDER BY <order_by>) AS __rn` subquery with an outer
     /// `WHERE __rn = 1` so the "first row per group" semantics carry.
     pub distinct: Option<DistinctMode>,
+    /// #1034 — outer-compound `ORDER BY` that applies to the COMBINED
+    /// result of a set operation. Holds the clauses chained AFTER the
+    /// first `.union()` / `.intersection()` / `.difference()` call.
+    /// Empty when there is no compound, or when ordering was set
+    /// BEFORE the first set-op call (those scope to the head branch and
+    /// live in [`Self::order_by`], which the writer wraps). Emitted
+    /// after the last branch.
+    pub compound_order_by: Vec<OrderItem>,
+    /// #1034 — outer-compound `LIMIT` on the merged result (chained
+    /// after the first set-op call). See [`Self::compound_order_by`].
+    pub compound_limit: Option<i64>,
+    /// #1034 — outer-compound `OFFSET` on the merged result (chained
+    /// after the first set-op call). See [`Self::compound_order_by`].
+    pub compound_offset: Option<i64>,
 }
 
 impl SelectQuery {
@@ -690,6 +704,9 @@ impl SelectQuery {
             compound: Vec::new(),
             projection: None,
             distinct: None,
+            compound_order_by: Vec::new(),
+            compound_limit: None,
+            compound_offset: None,
         }
     }
 
@@ -892,6 +909,9 @@ impl PartialEq for SelectQuery {
             && self.lock_mode == other.lock_mode
             && self.compound == other.compound
             && self.projection == other.projection
+            && self.compound_order_by == other.compound_order_by
+            && self.compound_limit == other.compound_limit
+            && self.compound_offset == other.compound_offset
     }
 }
 

@@ -598,6 +598,9 @@ fn empty_select() -> SelectQuery {
         compound: vec![],
         projection: None,
         distinct: None,
+        compound_order_by: vec![],
+        compound_limit: None,
+        compound_offset: None,
     }
 }
 
@@ -830,6 +833,9 @@ fn empty_post_select() -> SelectQuery {
         compound: vec![],
         projection: None,
         distinct: None,
+        compound_order_by: vec![],
+        compound_limit: None,
+        compound_offset: None,
     }
 }
 
