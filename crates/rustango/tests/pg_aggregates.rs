@@ -166,6 +166,64 @@ fn any_value_emits_per_dialect() {
     );
 }
 
+// ---------- string_agg ORDER BY (#1026) ----------
+
+#[test]
+fn string_agg_ordered_emits_per_dialect() {
+    let q = aggregate_query(
+        AggregateExpr::string_agg_ordered("tag", ", ", &[("tag", true)]),
+        "tag_list",
+    );
+    assert!(
+        Postgres
+            .compile_aggregate(&q)
+            .unwrap()
+            .sql
+            .contains(r#"string_agg("tag", $1 ORDER BY "tag" DESC)"#),
+        "PG ordered"
+    );
+    assert!(
+        MySql
+            .compile_aggregate(&q)
+            .unwrap()
+            .sql
+            .contains("GROUP_CONCAT(`tag` ORDER BY `tag` DESC SEPARATOR ', ')"),
+        "MySQL ordered (ORDER BY before SEPARATOR)"
+    );
+    // SQLite — ORDER BY inside group_concat (3.44+); ascending here.
+    let asc = aggregate_query(
+        AggregateExpr::string_agg_ordered("tag", ", ", &[("tag", false)]),
+        "tag_list",
+    );
+    assert!(
+        Sqlite
+            .compile_aggregate(&asc)
+            .unwrap()
+            .sql
+            .contains(r#"ORDER BY "tag")"#),
+        "SQLite ordered"
+    );
+}
+
+#[test]
+fn string_agg_distinct_ordered_by_non_agg_column_is_rejected() {
+    // DISTINCT aggregates may only ORDER BY the aggregated column.
+    let q = aggregate_query(
+        AggregateExpr::string_agg_distinct_ordered("tag", ",", &[("author", true)]),
+        "tag_list",
+    );
+    assert!(matches!(
+        Postgres.compile_aggregate(&q),
+        Err(SqlError::AggregateNotSupportedInDialect { .. })
+    ));
+    // Ordering by the agg column itself is fine.
+    let ok = aggregate_query(
+        AggregateExpr::string_agg_distinct_ordered("tag", ",", &[("tag", false)]),
+        "tag_list",
+    );
+    assert!(Postgres.compile_aggregate(&ok).is_ok());
+}
+
 // ---------- jsonb_agg ----------
 
 #[test]

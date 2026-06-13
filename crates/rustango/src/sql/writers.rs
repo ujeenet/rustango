@@ -781,6 +781,27 @@ fn apply_agg_cast(d: &dyn Dialect, kind: AggCast, inner: &str) -> String {
 /// of the flat variants. Doesn't write to `b.sql` — the caller
 /// composes it (optionally inside a FILTER clause, then post-wraps
 /// with `apply_agg_cast` for cast-needing kinds).
+/// Render an aggregate's inner `ORDER BY` clause (#1026) — e.g.
+/// `" ORDER BY \"name\" DESC"`, or `""` when there are no clauses. Used
+/// by `StringAgg`'s per-dialect emission (PG/MySQL/SQLite all spell the
+/// inner ORDER BY the same; only its position differs).
+fn render_agg_order_by(b: &Sql<'_>, order_by: &[crate::core::OrderClause]) -> String {
+    if order_by.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(" ORDER BY ");
+    for (i, o) in order_by.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&b.d.quote_ident(o.column));
+        if o.desc {
+            s.push_str(" DESC");
+        }
+    }
+    s
+}
+
 fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, SqlError> {
     Ok(match expr {
         AggregateExpr::Count(None) => "COUNT(*)".into(),
@@ -950,19 +971,32 @@ fn write_aggregate_expr(
             column,
             delimiter,
             distinct,
+            order_by,
         } => {
+            // #1026 — DISTINCT aggregates may only ORDER BY the aggregated
+            // column (PG hard requirement; kept portable-safe everywhere).
+            if *distinct && order_by.iter().any(|o| o.column != *column) {
+                return Err(SqlError::AggregateNotSupportedInDialect {
+                    aggregate: "string_agg(DISTINCT) ORDER BY a non-aggregated column",
+                    dialect: b.d.name(),
+                });
+            }
+            let order_sql = render_agg_order_by(b, order_by);
             // Django 6.0 made StringAgg database-agnostic (#1024): PG
             // `string_agg`, MySQL `GROUP_CONCAT`, SQLite `group_concat`.
+            // ORDER BY (#1026) sits at the dialect-correct position.
             match b.d.name() {
                 "mysql" => {
                     // `SEPARATOR` does NOT accept a bound parameter — the
                     // delimiter is inlined as a literal (single-quotes
-                    // doubled to stay injection-safe).
+                    // doubled to stay injection-safe). ORDER BY goes before
+                    // SEPARATOR.
                     b.sql.push_str("GROUP_CONCAT(");
                     if *distinct {
                         b.sql.push_str("DISTINCT ");
                     }
                     b.write_ident(column);
+                    b.sql.push_str(&order_sql);
                     b.sql.push_str(" SEPARATOR '");
                     b.sql.push_str(&delimiter.replace('\'', "''"));
                     b.sql.push_str("')");
@@ -972,6 +1006,7 @@ fn write_aggregate_expr(
                     // DISTINCT aggregates take exactly one argument. Mirror
                     // Django: allow DISTINCT only with the default ','
                     // separator; reject DISTINCT + a custom delimiter.
+                    // ORDER BY inside the aggregate needs SQLite 3.44+.
                     if *distinct {
                         if delimiter.as_str() != "," {
                             return Err(SqlError::AggregateNotSupportedInDialect {
@@ -981,16 +1016,19 @@ fn write_aggregate_expr(
                         }
                         b.sql.push_str("group_concat(DISTINCT ");
                         b.write_ident(column);
+                        b.sql.push_str(&order_sql);
                         b.sql.push(')');
                     } else {
                         b.sql.push_str("group_concat(");
                         b.write_ident(column);
                         b.sql.push_str(", ");
                         b.push_param(crate::core::SqlValue::String(delimiter.clone()));
+                        b.sql.push_str(&order_sql);
                         b.sql.push(')');
                     }
                 }
-                // Postgres (+ any future dialect): the standard form.
+                // Postgres (+ any future dialect): the standard form. ORDER
+                // BY goes after the delimiter, inside the parens.
                 _ => {
                     b.sql.push_str("string_agg(");
                     if *distinct {
@@ -999,6 +1037,7 @@ fn write_aggregate_expr(
                     b.write_ident(column);
                     b.sql.push_str(", ");
                     b.push_param(crate::core::SqlValue::String(delimiter.clone()));
+                    b.sql.push_str(&order_sql);
                     b.sql.push(')');
                 }
             }
