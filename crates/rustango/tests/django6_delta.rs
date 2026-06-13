@@ -4,8 +4,10 @@
 //!
 //! Release-note items covered here:
 //! - `StringAgg` is database-agnostic in Django 6.0 (was PG-only
-//!   contrib.postgres) — rustango is still PG-only: PINNED GAP on
-//!   MySQL (GROUP_CONCAT) + SQLite (group_concat)
+//!   contrib.postgres) — rustango lowers it to GROUP_CONCAT (MySQL) /
+//!   group_concat (SQLite) (#1024)
+//! - `AnyValue` aggregate (new in 6.0) — PG `any_value()`, MySQL
+//!   `ANY_VALUE()`, SQLite `min()` fallback (#1025)
 //! - `GeneratedField` values are refreshed from the database after
 //!   `save()` on RETURNING-capable backends (PG/SQLite) — rustango
 //!   never refreshes: PINNED DIVERGENCE (DB value correct, struct
@@ -15,7 +17,6 @@
 //!
 //! Release-note items that are compile-time API absences (no runtime
 //! pin possible — audit rows + issues only):
-//! - `AnyValue` aggregate (new in 6.0): no `AggregateExpr` variant. Issue #1025.
 //! - `Aggregate(order_by=...)` (new in 6.0, deprecates PG
 //!   `OrderableAggMixin`): `AggregateExpr::StringAgg` carries no
 //!   ordering (issue #1026) — element order in the joined string is
@@ -116,6 +117,44 @@ mod scenarios {
         );
     }
 
+    /// Django 6.0 `AnyValue` (#1025) — projects a value from each group
+    /// without adding the column to GROUP BY. Group by name, then take
+    /// `any_value(id)`: the returned id must be a member of that name's
+    /// group (PG/MySQL pick arbitrarily; SQLite's `min()` fallback picks
+    /// the lowest — both are valid group members).
+    pub async fn check_any_value(pool: &Pool) {
+        let rows = DeltaRow::objects()
+            .aggregate()
+            .group_by("name")
+            .annotate("anyid", AggregateExpr::AnyValue("id"))
+            .fetch(pool)
+            .await
+            .expect("any_value on every backend");
+        assert_eq!(rows.len(), 3, "three distinct names");
+        for row in &rows {
+            let name = match row.get("name") {
+                Some(SqlValue::String(s)) => s.as_str(),
+                other => panic!("expected name, got {other:?}"),
+            };
+            let anyid = match row.get("anyid") {
+                Some(SqlValue::I64(n)) => *n,
+                Some(SqlValue::I32(n)) => i64::from(*n),
+                other => panic!("expected integer anyid, got {other:?}"),
+            };
+            // Seed: alpha=id1, beta=id2+id4, gamma=id3.
+            let ok = match name {
+                "alpha" => anyid == 1,
+                "beta" => anyid == 2 || anyid == 4,
+                "gamma" => anyid == 3,
+                other => panic!("unexpected name {other}"),
+            };
+            assert!(
+                ok,
+                "any_value(id) for {name} returned {anyid}, not a group member"
+            );
+        }
+    }
+
     /// Django 6.0: after `save()`, `GeneratedField`s refresh from the
     /// database via RETURNING (PG/SQLite; deferred on MySQL).
     /// rustango DIVERGENCE PIN: the DB computes the column correctly
@@ -213,6 +252,7 @@ mod pg_live {
 
     pg_case!(check_string_agg_dialect_matrix);
     pg_case!(check_string_agg_distinct);
+    pg_case!(check_any_value);
     pg_case!(check_generated_column_not_refreshed_on_save);
     pg_case!(check_auto_pk_is_big_auto_field);
 }
@@ -259,6 +299,7 @@ mod sqlite_live {
 
     sqlite_case!(check_string_agg_dialect_matrix);
     sqlite_case!(check_string_agg_distinct);
+    sqlite_case!(check_any_value);
     sqlite_case!(check_generated_column_not_refreshed_on_save);
     sqlite_case!(check_auto_pk_is_big_auto_field);
 }
@@ -318,6 +359,7 @@ mod mysql_live {
 
     mysql_case!(check_string_agg_dialect_matrix);
     mysql_case!(check_string_agg_distinct);
+    mysql_case!(check_any_value);
     mysql_case!(check_generated_column_not_refreshed_on_save);
     mysql_case!(check_auto_pk_is_big_auto_field);
 }

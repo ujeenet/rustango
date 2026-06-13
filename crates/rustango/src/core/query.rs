@@ -1473,6 +1473,12 @@ pub enum AggregateExpr {
     Max(&'static str),
     /// `MIN(column)`.
     Min(&'static str),
+    /// `ANY_VALUE(column)` — an arbitrary value from the group's non-null
+    /// inputs (new in Django 6.0, #1025). Lets a functionally-dependent
+    /// column be projected without adding it to GROUP BY. PG 16+
+    /// `any_value()`, MySQL `ANY_VALUE()`, SQLite falls back to `min()`
+    /// (deterministic, satisfies the "arbitrary value" contract).
+    AnyValue(&'static str),
     /// `STDDEV_SAMP(column)` — sample standard deviation. Issue #6.
     /// Native on PG + MySQL 8+; the writer raises
     /// [`crate::sql::SqlError::AggregateNotSupported`] on SQLite,
@@ -1573,6 +1579,7 @@ impl AggregateExpr {
             | AggregateExpr::Avg(_)
             | AggregateExpr::Max(_)
             | AggregateExpr::Min(_)
+            | AggregateExpr::AnyValue(_)
             | AggregateExpr::StdDev(_)
             | AggregateExpr::StdDevPop(_)
             | AggregateExpr::Variance(_)

@@ -133,6 +133,39 @@ fn string_agg_lowers_on_mysql_and_sqlite() {
     assert_eq!(sq.params, vec![SqlValue::String(", ".into())]);
 }
 
+// ---------- any_value (#1025) ----------
+
+#[test]
+fn any_value_emits_per_dialect() {
+    // Django 6.0 AnyValue: PG `any_value()`, MySQL `ANY_VALUE()`, SQLite
+    // has neither so it falls back to `min()` (deterministic).
+    let q = aggregate_query(AggregateExpr::AnyValue("tag"), "any_tag");
+    assert!(
+        Postgres
+            .compile_aggregate(&q)
+            .unwrap()
+            .sql
+            .contains(r#"any_value("tag")"#),
+        "PG any_value"
+    );
+    assert!(
+        MySql
+            .compile_aggregate(&q)
+            .unwrap()
+            .sql
+            .contains("ANY_VALUE(`tag`)"),
+        "MySQL ANY_VALUE"
+    );
+    assert!(
+        Sqlite
+            .compile_aggregate(&q)
+            .unwrap()
+            .sql
+            .contains(r#"min("tag")"#),
+        "SQLite min() fallback"
+    );
+}
+
 // ---------- jsonb_agg ----------
 
 #[test]
