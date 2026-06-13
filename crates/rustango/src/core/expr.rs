@@ -273,10 +273,10 @@ pub enum Expr {
 /// lookups (`{"k": v}` → `JsonPathStep::Key("k")`); indices are array
 /// lookups (`[a, b, c]` → `JsonPathStep::Index(0)`).
 ///
-/// Negative indices follow PG's convention: PG's `->` accepts negative
-/// indices ("count from the end"); MySQL / SQLite emit `$[N]` which
-/// only accepts non-negative — the writer rejects negative indices on
-/// non-PG with a clear error.
+/// Negative indices ("count from the end") work on PG (native `->`) and
+/// SQLite (the `$[#-1]` from-the-end anchor, #1027). MySQL's `$[N]` path
+/// grammar has no negative form, so the writer rejects negative indices
+/// on MySQL with a clear error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JsonPathStep {
     /// Object key lookup. The string is emitted as a quoted SQL

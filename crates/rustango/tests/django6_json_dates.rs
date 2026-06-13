@@ -6,9 +6,9 @@
 //! - `filter(data__meta__kind="post")` nested key traversal
 //! - `filter(data__items__0__name="x")` key + array-index traversal
 //! - JSON array length lookup (`tags__len__gte` shape)
-//! - negative array indexing — NEW in Django 6.0 for SQLite; rustango
-//!   supports PG only (pinned gap on SQLite + MySQL — MySQL's
-//!   `$[N]` path syntax genuinely can't express it upstream)
+//! - negative array indexing — PG (native) + SQLite (`$[#-1]` anchor,
+//!   Django 6.0 + #1027); MySQL's `$[N]` path syntax genuinely can't
+//!   express it upstream (documented rejection)
 //! - `filter(created__year__gte=...)` / `__month` / `__quarter`
 //!   date-transform chains
 //! - `.dates("created", "month")` / `.datetimes("created", "hour")`
@@ -103,10 +103,10 @@ mod scenarios {
         assert_eq!(ids(rows), vec![1, 3]);
     }
 
-    /// Negative array index (`data__tags__-1`). Django 6.0 added
-    /// SQLite support; rustango emits PG's native negative `->` only.
-    /// GAP-PIN: SQLite (and MySQL, where `$[N]` genuinely can't
-    /// express it) reject with `OpNotSupportedInDialect`. Issue #1027.
+    /// Negative array index (`data__tags__-1`). PG (native `-> -1`) and
+    /// SQLite (the `$[#-1]` from-the-end anchor, Django 6.0 + #1027) both
+    /// resolve it; MySQL's `$[N]` path grammar has no negative form, so
+    /// it stays a documented rejection.
     pub async fn check_negative_index_dialect_matrix(pool: &Pool) {
         let qs = || {
             Doc::objects().where_raw(WhereExpr::ExprCompare {
@@ -119,28 +119,29 @@ mod scenarios {
                 rhs: Expr::Literal(SqlValue::String("c".into())),
             })
         };
-        if pool.dialect().name() == "postgres" {
-            let rows: Vec<Doc> = qs().fetch_pool(pool).await.expect("PG negative index");
-            assert_eq!(ids(rows), vec![1]);
+        let name = pool.dialect().name();
+        if name == "postgres" || name == "sqlite" {
+            let rows: Vec<Doc> = qs()
+                .fetch_pool(pool)
+                .await
+                .expect("negative index (PG / SQLite)");
+            assert_eq!(ids(rows), vec![1], "row 1's last tag is \"c\"");
         } else {
+            // MySQL only — `$[N]` has no negative form upstream.
             let err = qs()
                 .fetch_pool(pool)
                 .await
                 .map(|rows: Vec<Doc>| rows.len())
-                .expect_err("negative index must be rejected off-PG");
+                .expect_err("negative index must be rejected on MySQL");
             match err {
                 ExecError::Sql(SqlError::OpNotSupportedInDialect { op, dialect }) => {
                     assert!(
                         op.contains("negative"),
                         "error should mention negative indices: {op}"
                     );
-                    assert_eq!(dialect, pool.dialect().name());
+                    assert_eq!(dialect, "mysql");
                 }
-                other => panic!(
-                    "expected OpNotSupportedInDialect, got {other:?} — if negative \
-                     JSON indices now work here (Django 6.0 supports them on \
-                     SQLite), update the audit + issue"
-                ),
+                other => panic!("expected OpNotSupportedInDialect on MySQL, got {other:?}"),
             }
         }
     }

@@ -1600,14 +1600,24 @@ fn write_json_path(
             }
             JsonPathStep::Index(n) => {
                 if *n < 0 {
-                    return Err(SqlError::OpNotSupportedInDialect {
-                        op: "JsonPath negative indices are PG-only (MySQL/SQLite require non-negative)",
-                        dialect,
-                    });
+                    // SQLite 3.31+ has the `$[#-1]` "from the end" anchor;
+                    // `n` is already negative so it renders as `[#-1]`
+                    // (#1027). MySQL's `$[N]` grammar has no negative form.
+                    if dialect == "sqlite" {
+                        json_path.push_str("[#");
+                        json_path.push_str(&n.to_string());
+                        json_path.push(']');
+                    } else {
+                        return Err(SqlError::OpNotSupportedInDialect {
+                            op: "JsonPath negative indices are unsupported on MySQL (the $[N] path grammar has no negative form; PG + SQLite support them)",
+                            dialect,
+                        });
+                    }
+                } else {
+                    json_path.push('[');
+                    json_path.push_str(&n.to_string());
+                    json_path.push(']');
                 }
-                json_path.push('[');
-                json_path.push_str(&n.to_string());
-                json_path.push(']');
             }
         }
     }
