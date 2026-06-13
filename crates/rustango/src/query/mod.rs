@@ -143,6 +143,11 @@ enum PendingFilter {
     /// typed-column API). Already validated; contributes a whole
     /// sub-tree to the WHERE clause.
     Expr(WhereExpr),
+    /// Negated predicate — `NOT (<inner>)`. Backs
+    /// [`QuerySet::exclude`] (#1030). The inner entry is resolved
+    /// recursively then wrapped in [`WhereExpr::Not`], so `exclude`
+    /// inherits the full lookup grammar (`__gt`, `__icontains`, …).
+    Negated(Box<PendingFilter>),
     /// Deferred error surfaced at `compile()` time. Used by
     /// [`QuerySet::filter`] (issue #71) when the lookup-suffix
     /// parser fails — keeps the builder API non-Result while
@@ -1293,26 +1298,35 @@ impl<T: Model> QuerySet<T> {
     /// `prefetch_related`). v1 supports single-table fields only.
     #[must_use]
     pub fn filter(mut self, key: &str, value: impl Into<SqlValue>) -> Self {
-        let raw = value.into();
-        match parse_lookup(key, raw) {
-            Ok(ParsedLookup::Raw { field, op, value }) => self.filter_op(field, op, value),
-            Ok(ParsedLookup::DateTransform {
-                field,
-                transform,
-                op,
-                value,
-            }) => {
-                self.pending
-                    .push(PendingFilter::DateTransform(DateTransformFilter {
-                        field,
-                        transform,
-                        op,
-                        value,
-                    }));
-                self
-            }
-            Err(e) => self.with_pending_error(e),
-        }
+        self.pending.push(parse_to_pending(key, value.into()));
+        self
+    }
+
+    /// Django `.exclude(key, value)` — the negation of [`Self::filter`].
+    /// Each `exclude` call wraps **its own** predicate in `NOT (…)`;
+    /// chained excludes AND together (identical to Django for
+    /// single-kwarg excludes). The full `__lookup` suffix grammar works
+    /// through `exclude` exactly as through `filter` (shared parser).
+    ///
+    /// ```ignore
+    /// // Django: Post.objects.exclude(status="draft")
+    /// Post::objects().exclude("status", "draft").fetch_pool(&pool).await?;
+    /// // with a lookup suffix:
+    /// Post::objects().exclude("views__lt", 100_i64)
+    /// ```
+    ///
+    /// **NULL semantics:** `NOT (col = v)` excludes rows where `col IS
+    /// NULL` (SQL three-valued logic) — matching Django's emission for
+    /// the same shape. For Django's multi-kwarg `exclude(a=1, b=2)` (one
+    /// `NOT` over the whole group), compose `where_raw(!Q(...))`.
+    #[must_use]
+    pub fn exclude(mut self, key: &str, value: impl Into<SqlValue>) -> Self {
+        self.pending
+            .push(PendingFilter::Negated(Box::new(parse_to_pending(
+                key,
+                value.into(),
+            ))));
+        self
     }
 
     /// Stash a builder-time error to surface at `compile()` time.
@@ -3174,33 +3188,60 @@ fn never_match_clause(
     })
 }
 
+/// Parse a `key`/`value` pair through the lookup grammar into a single
+/// [`PendingFilter`]. Shared by [`QuerySet::filter`] and
+/// [`QuerySet::exclude`] (#1030) so the `__lookup` suffix grammar can
+/// never drift between the two.
+fn parse_to_pending(key: &str, value: SqlValue) -> PendingFilter {
+    match parse_lookup(key, value) {
+        Ok(ParsedLookup::Raw { field, op, value }) => {
+            PendingFilter::Raw(RawFilter { field, op, value })
+        }
+        Ok(ParsedLookup::DateTransform {
+            field,
+            transform,
+            op,
+            value,
+        }) => PendingFilter::DateTransform(DateTransformFilter {
+            field,
+            transform,
+            op,
+            value,
+        }),
+        Err(e) => PendingFilter::Error(e),
+    }
+}
+
 fn resolve_pending(
     model: &'static ModelSchema,
     pending: Vec<PendingFilter>,
 ) -> Result<WhereExpr, QueryError> {
     let mut nodes: Vec<WhereExpr> = Vec::with_capacity(pending.len());
     for entry in pending {
-        match entry {
-            PendingFilter::Raw(raw) => {
-                nodes.push(WhereExpr::Predicate(resolve_filter(model, raw)?));
-            }
-            PendingFilter::DateTransform(dt) => {
-                nodes.push(resolve_date_transform(model, dt)?);
-            }
-            PendingFilter::Resolved(filter) => {
-                nodes.push(WhereExpr::Predicate(filter));
-            }
-            PendingFilter::Expr(expr) => {
-                nodes.push(expr);
-            }
-            PendingFilter::Error(e) => {
-                // Issue #71 — bubble the deferred lookup-parse error
-                // up at the natural `compile()` checkpoint.
-                return Err(e);
-            }
-        }
+        nodes.push(resolve_one_pending(model, entry)?);
     }
     Ok(WhereExpr::And(nodes))
+}
+
+/// Lower a single [`PendingFilter`] to a [`WhereExpr`]. Split out of
+/// [`resolve_pending`]'s loop so [`PendingFilter::Negated`] can resolve
+/// its inner entry recursively (#1030).
+fn resolve_one_pending(
+    model: &'static ModelSchema,
+    entry: PendingFilter,
+) -> Result<WhereExpr, QueryError> {
+    Ok(match entry {
+        PendingFilter::Raw(raw) => WhereExpr::Predicate(resolve_filter(model, raw)?),
+        PendingFilter::DateTransform(dt) => resolve_date_transform(model, dt)?,
+        PendingFilter::Resolved(filter) => WhereExpr::Predicate(filter),
+        PendingFilter::Expr(expr) => expr,
+        PendingFilter::Negated(inner) => {
+            WhereExpr::Not(Box::new(resolve_one_pending(model, *inner)?))
+        }
+        // Issue #71 — bubble the deferred lookup-parse error up at the
+        // natural `compile()` checkpoint.
+        PendingFilter::Error(e) => return Err(e),
+    })
 }
 
 fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter, QueryError> {
