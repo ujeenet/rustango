@@ -202,18 +202,14 @@ fn pg_mysql_extract_quarter_works() {
 }
 
 #[test]
-fn sqlite_extract_quarter_returns_op_not_supported() {
+fn sqlite_extract_quarter_synthesizes_from_month() {
+    // #1037 — SQLite has no quarter token in strftime, so quarter is
+    // synthesized from the month: ((month + 2) / 3).
     let q = update_set(extract_quarter(F("created_at")));
-    let err = Sqlite.compile_update(&q).unwrap_err();
+    let sql = Sqlite.compile_update(&q).unwrap().sql;
     assert!(
-        matches!(
-            err,
-            SqlError::OpNotSupportedInDialect {
-                dialect: "sqlite",
-                ..
-            }
-        ),
-        "expected OpNotSupportedInDialect, got {err:?}",
+        sql.contains("strftime('%m'") && sql.contains("+ 2) / 3"),
+        "expected month-synthesis for quarter, got {sql}",
     );
 }
 
