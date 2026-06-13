@@ -36,7 +36,7 @@ mod scenarios {
     use rustango::core::window::{
         dense_rank, first_value, lag, ntile, rank, FrameBoundary, FrameKind, WindowFrame,
     };
-    use rustango::core::{Expr, Join, JoinKind, Model as _, Op, SqlValue, WhereExpr};
+    use rustango::core::{Join, JoinKind, Model as _, Op, SqlValue, WhereExpr};
     use rustango::sql::{raw_execute_pool, Auto, ExecError, FetcherPool as _, Pool, SqlError};
     use rustango::Model;
 
@@ -93,31 +93,6 @@ mod scenarios {
         }
     }
 
-    /// Whether this dialect's ranking-window outputs decode correctly
-    /// in dict rows. GAP-PIN (MySQL): `RANK()` / `DENSE_RANK()` /
-    /// `NTILE()` return BIGINT UNSIGNED on MySQL and the dict decoder
-    /// currently maps them to `SqlValue::Bool` — the numeric rank is
-    /// unrecoverable. LAG/FIRST_VALUE (which carry the source column's
-    /// signed type) are unaffected. Tracked in the Django 6.0 parity
-    /// audit; issue #1033.
-    fn ranking_decode_is_lossy(pool: &Pool) -> bool {
-        pool.dialect().name() == "mysql"
-    }
-
-    /// Pin the MySQL decode wart: every ranking value comes back as
-    /// `SqlValue::Bool`. Goes red the moment the decoder is fixed.
-    fn assert_lossy_ranking(rows: &[Row], key: &str) {
-        for row in rows {
-            match row.get(key) {
-                Some(SqlValue::Bool(_)) => {}
-                other => panic!(
-                    "expected the MySQL Bool-decode wart at `{key}`, got {other:?} — \
-                     if ranking windows now decode numerically, update the audit + issue"
-                ),
-            }
-        }
-    }
-
     /// `Window(Rank(), partition_by="tenant_id", order_by="-points")`
     /// — full table, both partitions in one pass.
     pub async fn check_rank_partitioned(pool: &Pool) {
@@ -138,10 +113,6 @@ mod scenarios {
             .await
             .expect("rank window");
         assert_eq!(rows.len(), 9);
-        if ranking_decode_is_lossy(pool) {
-            assert_lossy_ranking(&rows, "r");
-            return;
-        }
         let ranks: Vec<i64> = rows.iter().map(|r| as_i64(r, "r")).collect();
         // t1: 35,30,20,15,10 → 1..5; t2: 100,50,50,25 → 1,2,2,4 (RANK skips).
         assert_eq!(ranks, vec![1, 2, 3, 4, 5, 1, 2, 2, 4]);
@@ -159,10 +130,6 @@ mod scenarios {
             .fetch(pool)
             .await
             .expect("dense_rank window");
-        if ranking_decode_is_lossy(pool) {
-            assert_lossy_ranking(&rows, "d");
-            return;
-        }
         let dense: Vec<i64> = rows.iter().map(|r| as_i64(r, "d")).collect();
         assert_eq!(dense, vec![1, 2, 2, 3]);
     }
@@ -247,10 +214,6 @@ mod scenarios {
             .fetch(pool)
             .await
             .expect("ntile window");
-        if ranking_decode_is_lossy(pool) {
-            assert_lossy_ranking(&rows, "bucket");
-            return;
-        }
         let buckets: Vec<i64> = rows.iter().map(|r| as_i64(r, "bucket")).collect();
         assert_eq!(buckets, vec![1, 1, 1, 2, 2]);
     }

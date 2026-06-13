@@ -64,7 +64,25 @@ fn pg_cell_to_sqlvalue(row: &PgRow, i: usize) -> SqlValue {
 
 #[cfg(feature = "mysql")]
 fn my_cell_to_sqlvalue(row: &sqlx::mysql::MySqlRow, i: usize) -> SqlValue {
-    use sqlx::Row as _;
+    use sqlx::{Column as _, Row as _, TypeInfo as _};
+    // #1033 — MySQL window-ranking outputs (RANK/DENSE_RANK/NTILE) and
+    // COUNT(*) come back as BIGINT UNSIGNED, which the i64 probe below
+    // can't decode; sqlx's permissive bool decode would then swallow
+    // them as `SqlValue::Bool`, making the numeric rank unrecoverable.
+    // Branch on the column type FIRST so unsigned ints decode losslessly
+    // — real BOOLEAN / TINYINT(1) columns aren't UNSIGNED, so they still
+    // fall through to the bool probe below and decode as `Bool`.
+    if row.column(i).type_info().name().contains("UNSIGNED") {
+        if let Ok(v) = row.try_get::<u64, _>(i) {
+            // Ranks are tiny; the String fallback keeps a (theoretical)
+            // value > i64::MAX lossless rather than saturating.
+            return i64::try_from(v)
+                .map_or_else(|_| SqlValue::String(v.to_string()), SqlValue::I64);
+        }
+        if let Ok(v) = row.try_get::<u32, _>(i) {
+            return SqlValue::I64(i64::from(v));
+        }
+    }
     if let Ok(v) = row.try_get::<i64, _>(i) {
         SqlValue::I64(v)
     } else if let Ok(v) = row.try_get::<i32, _>(i) {
