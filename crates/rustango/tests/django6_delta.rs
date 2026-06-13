@@ -30,7 +30,7 @@
 #[cfg(any(feature = "postgres", feature = "sqlite", feature = "mysql"))]
 mod scenarios {
     use rustango::core::{AggregateExpr, SqlValue};
-    use rustango::sql::{raw_execute_pool, Auto, ExecError, FetcherPool as _, Pool, SqlError};
+    use rustango::sql::{raw_execute_pool, Auto, FetcherPool as _, Pool};
     use rustango::Model;
 
     #[derive(Model, Debug, Clone)]
@@ -68,51 +68,34 @@ mod scenarios {
         }
     }
 
-    /// Django 6.0: `StringAgg("name", delimiter=Value(","))` works on
-    /// every backend. rustango: PG-only — GAP-PIN on MySQL + SQLite
-    /// (both have native equivalents: GROUP_CONCAT / group_concat). Issue #1024.
+    /// Django 6.0: `StringAgg("name", delimiter=Value(","))` is
+    /// database-agnostic — PG `string_agg`, MySQL `GROUP_CONCAT`, SQLite
+    /// `group_concat` (#1024). Uniform assertion across all backends.
     pub async fn check_string_agg_dialect_matrix(pool: &Pool) {
-        let res = DeltaRow::objects()
+        let rows = DeltaRow::objects()
             .aggregate()
             .values(&[])
             .annotate("names", AggregateExpr::string_agg("name", ","))
             .fetch(pool)
-            .await;
-        if pool.dialect().name() == "postgres" {
-            let rows = res.expect("string_agg on PG");
-            let joined = match rows[0].get("names") {
-                Some(SqlValue::String(s)) => s.clone(),
-                other => panic!("expected string names, got {other:?}"),
-            };
-            // No order_by param exists on the aggregate (Django 6.0
-            // Aggregate.order_by gap) — element order is arbitrary,
-            // so sort before asserting.
-            let mut parts: Vec<&str> = joined.split(',').collect();
-            parts.sort_unstable();
-            assert_eq!(parts, vec!["alpha", "beta", "beta", "gamma"]);
-        } else {
-            let err = res.expect_err("string_agg must be rejected off-PG");
-            match err {
-                ExecError::Sql(SqlError::AggregateNotSupportedInDialect { aggregate, dialect }) => {
-                    assert_eq!(aggregate, "string_agg");
-                    assert_eq!(dialect, pool.dialect().name());
-                }
-                other => panic!(
-                    "expected AggregateNotSupportedInDialect, got {other:?} — if \
-                     string_agg now lowers to GROUP_CONCAT here (Django 6.0 made \
-                     StringAgg database-agnostic), update the audit + issue"
-                ),
-            }
-        }
+            .await
+            .expect("string_agg on every backend");
+        let joined = match rows[0].get("names") {
+            Some(SqlValue::String(s)) => s.clone(),
+            other => panic!("expected string names, got {other:?}"),
+        };
+        // No order_by param yet (#1026) — element order is arbitrary, so
+        // sort before asserting.
+        let mut parts: Vec<&str> = joined.split(',').collect();
+        parts.sort_unstable();
+        assert_eq!(parts, vec!["alpha", "beta", "beta", "gamma"]);
     }
 
-    /// `string_agg(DISTINCT name, ...)` on PG — the dedup variant.
-    /// Off-PG it is the same pinned gap as above, so only the PG arm
-    /// asserts content.
+    /// `string_agg(DISTINCT name, ",")` — the dedup variant. With the
+    /// default `,` delimiter this works on every backend (#1024): PG
+    /// `string_agg(DISTINCT …)`, MySQL `GROUP_CONCAT(DISTINCT …)`, SQLite
+    /// `group_concat(DISTINCT …)` (DISTINCT + a *custom* delimiter stays
+    /// rejected on SQLite — covered by the emission tests).
     pub async fn check_string_agg_distinct(pool: &Pool) {
-        if pool.dialect().name() != "postgres" {
-            return;
-        }
         let rows = DeltaRow::objects()
             .aggregate()
             .values(&[])

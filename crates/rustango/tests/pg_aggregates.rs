@@ -1,6 +1,8 @@
 //! Tri-dialect emission tests for PG aggregate functions (issue #33):
-//! `array_agg`, `string_agg`, `jsonb_agg`. PG-only — non-PG backends
-//! must emit `SqlError::AggregateNotSupportedInDialect`.
+//! `array_agg`, `string_agg`, `jsonb_agg`. `array_agg` / `jsonb_agg`
+//! stay PG-only (non-PG emits `SqlError::AggregateNotSupportedInDialect`);
+//! `string_agg` is database-agnostic as of Django 6.0 (#1024) — it
+//! lowers to GROUP_CONCAT (MySQL) / group_concat (SQLite).
 
 use rustango::core::{AggregateExpr, AggregateQuery, SqlValue, WhereExpr};
 use rustango::sql::{Dialect, MySql, Postgres, SqlError, Sqlite};
@@ -111,22 +113,24 @@ fn string_agg_distinct_emits_distinct() {
 }
 
 #[test]
-fn string_agg_rejected_on_non_pg() {
+fn string_agg_lowers_on_mysql_and_sqlite() {
+    // #1024 — Django 6.0 made StringAgg database-agnostic. MySQL maps to
+    // GROUP_CONCAT (delimiter inlined into SEPARATOR), SQLite to
+    // group_concat (delimiter bound as a parameter).
     let q = aggregate_query(AggregateExpr::string_agg("tag", ", "), "tags");
-    assert!(matches!(
-        MySql.compile_aggregate(&q),
-        Err(SqlError::AggregateNotSupportedInDialect {
-            aggregate: "string_agg",
-            ..
-        })
-    ));
-    assert!(matches!(
-        Sqlite.compile_aggregate(&q),
-        Err(SqlError::AggregateNotSupportedInDialect {
-            aggregate: "string_agg",
-            ..
-        })
-    ));
+    let my = MySql.compile_aggregate(&q).unwrap();
+    assert!(
+        my.sql.contains("GROUP_CONCAT(`tag` SEPARATOR ', ')"),
+        "MySQL GROUP_CONCAT: {}",
+        my.sql
+    );
+    let sq = Sqlite.compile_aggregate(&q).unwrap();
+    assert!(
+        sq.sql.contains(r#"group_concat("tag", "#),
+        "SQLite group_concat: {}",
+        sq.sql
+    );
+    assert_eq!(sq.params, vec![SqlValue::String(", ".into())]);
 }
 
 // ---------- jsonb_agg ----------

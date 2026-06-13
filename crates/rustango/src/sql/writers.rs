@@ -940,20 +940,57 @@ fn write_aggregate_expr(
             delimiter,
             distinct,
         } => {
-            if b.d.name() != "postgres" {
-                return Err(SqlError::AggregateNotSupportedInDialect {
-                    aggregate: "string_agg",
-                    dialect: b.d.name(),
-                });
+            // Django 6.0 made StringAgg database-agnostic (#1024): PG
+            // `string_agg`, MySQL `GROUP_CONCAT`, SQLite `group_concat`.
+            match b.d.name() {
+                "mysql" => {
+                    // `SEPARATOR` does NOT accept a bound parameter — the
+                    // delimiter is inlined as a literal (single-quotes
+                    // doubled to stay injection-safe).
+                    b.sql.push_str("GROUP_CONCAT(");
+                    if *distinct {
+                        b.sql.push_str("DISTINCT ");
+                    }
+                    b.write_ident(column);
+                    b.sql.push_str(" SEPARATOR '");
+                    b.sql.push_str(&delimiter.replace('\'', "''"));
+                    b.sql.push_str("')");
+                }
+                "sqlite" => {
+                    // SQLite rejects `group_concat(DISTINCT col, sep)` —
+                    // DISTINCT aggregates take exactly one argument. Mirror
+                    // Django: allow DISTINCT only with the default ','
+                    // separator; reject DISTINCT + a custom delimiter.
+                    if *distinct {
+                        if delimiter.as_str() != "," {
+                            return Err(SqlError::AggregateNotSupportedInDialect {
+                                aggregate: "string_agg(DISTINCT) with a custom delimiter (SQLite group_concat DISTINCT takes one arg)",
+                                dialect: b.d.name(),
+                            });
+                        }
+                        b.sql.push_str("group_concat(DISTINCT ");
+                        b.write_ident(column);
+                        b.sql.push(')');
+                    } else {
+                        b.sql.push_str("group_concat(");
+                        b.write_ident(column);
+                        b.sql.push_str(", ");
+                        b.push_param(crate::core::SqlValue::String(delimiter.clone()));
+                        b.sql.push(')');
+                    }
+                }
+                // Postgres (+ any future dialect): the standard form.
+                _ => {
+                    b.sql.push_str("string_agg(");
+                    if *distinct {
+                        b.sql.push_str("DISTINCT ");
+                    }
+                    b.write_ident(column);
+                    b.sql.push_str(", ");
+                    b.push_param(crate::core::SqlValue::String(delimiter.clone()));
+                    b.sql.push(')');
+                }
             }
-            b.sql.push_str("string_agg(");
-            if *distinct {
-                b.sql.push_str("DISTINCT ");
-            }
-            b.write_ident(column);
-            b.sql.push_str(", ");
-            b.push_param(crate::core::SqlValue::String(delimiter.clone()));
-            b.sql.push(')');
             Ok(())
         }
         AggregateExpr::JsonbAgg { column } => {
