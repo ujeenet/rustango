@@ -131,15 +131,19 @@ fn array_index_step_emits_per_dialect_form() {
 }
 
 #[test]
-fn negative_index_is_pg_only() {
+fn negative_index_pg_and_sqlite() {
     let e = json_path_indexed(F("data"), [JsonPathStep::Index(-1)], false);
     // PG accepts negative indices natively.
     let pg = pg(&e).unwrap();
     assert!(pg.contains(r#""data" -> -1"#), "PG negative index: {pg}");
-    // MySQL and SQLite must error — their `$[N]` syntax requires non-negative.
-    for err in [my(&e).unwrap_err(), sqlite(&e).unwrap_err()] {
-        assert!(matches!(err, SqlError::OpNotSupportedInDialect { .. }));
-    }
+    // SQLite uses the `$[#-1]` from-the-end anchor (#1027).
+    let sq = sqlite(&e).unwrap();
+    assert!(sq.contains("[#-1]"), "SQLite from-end anchor: {sq}");
+    // MySQL's `$[N]` grammar has no negative form — still rejected.
+    assert!(matches!(
+        my(&e).unwrap_err(),
+        SqlError::OpNotSupportedInDialect { .. }
+    ));
 }
 
 // ---------- Safety guards ----------
