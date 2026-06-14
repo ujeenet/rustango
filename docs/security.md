@@ -1,34 +1,34 @@
 # Security guide
 
-A walkthrough of every security feature rustango ships and how to compose them. Pair with `manage check --deploy` for an automated audit.
+This guide covers every security feature **Rustango** ships and how to combine them. If you come from Django, Laravel, or Rails, most of these will feel familiar — the names differ, but the ideas are the same. Each feature below is usually one line of setup. When you're ready to ship, run `manage check --deploy` for an automated audit.
 
 ## Table of contents
 
-- [Defense-in-depth checklist](#defense-in-depth-checklist)
-- [Security headers](#security-headers)
-- [CORS](#cors)
-- [Rate limiting](#rate-limiting)
-- [IP allowlist / blocklist](#ip-allowlist--blocklist)
-- [CSRF](#csrf)
-- [XSS defense](#xss-defense)
-- [SQL injection](#sql-injection)
-- [Authentication](#authentication)
-- [Password hashing + strength](#password-hashing--strength)
-- [JWT lifecycle](#jwt-lifecycle)
-- [API keys](#api-keys)
-- [TOTP / 2FA](#totp--2fa)
-- [Signed URLs (magic links)](#signed-urls-magic-links)
-- [Webhook signatures](#webhook-signatures)
-- [Access log PII redaction](#access-log-pii-redaction)
-- [Request ID for log correlation](#request-id-for-log-correlation)
-- [Secrets management](#secrets-management)
-- [Pre-deploy audit](#pre-deploy-audit)
+- [The defense-in-depth checklist](#the-defense-in-depth-checklist)
+- [Setting security headers](#setting-security-headers)
+- [Allowing cross-origin requests (CORS)](#allowing-cross-origin-requests-cors)
+- [Rate limiting requests](#rate-limiting-requests)
+- [Allowing or blocking IPs](#allowing-or-blocking-ips)
+- [Protecting against CSRF](#protecting-against-csrf)
+- [Preventing XSS](#preventing-xss)
+- [Preventing SQL injection](#preventing-sql-injection)
+- [Authenticating users](#authenticating-users)
+- [Hashing and checking passwords](#hashing-and-checking-passwords)
+- [Issuing and refreshing JWTs](#issuing-and-refreshing-jwts)
+- [Authenticating with API keys](#authenticating-with-api-keys)
+- [Adding two-factor auth (TOTP)](#adding-two-factor-auth-totp)
+- [Sending signed URLs (magic links)](#sending-signed-urls-magic-links)
+- [Verifying incoming webhooks](#verifying-incoming-webhooks)
+- [Keeping secrets out of your logs](#keeping-secrets-out-of-your-logs)
+- [Tracing requests across services](#tracing-requests-across-services)
+- [Managing secrets](#managing-secrets)
+- [Auditing before you deploy](#auditing-before-you-deploy)
 
 ---
 
-## Defense-in-depth checklist
+## The defense-in-depth checklist
 
-A production rustango app should layer these (most are one line each):
+Good security comes from many small layers, not one big wall. A production **Rustango** app should stack the layers below — most are one line each. The rest of this guide explains each one.
 
 ```rust
 let app = Router::new()
@@ -48,9 +48,9 @@ let app = Router::new()
 
 ---
 
-## Security headers
+## Setting security headers
 
-`SecurityHeadersLayer` sets the canonical HTTP response headers Django ships by default and Rocket auto-attaches via `Shield`.
+Security headers tell the browser how to protect your users (block clickjacking, force HTTPS, stop content-type sniffing). `SecurityHeadersLayer` sets the standard set with one line — the same headers Django ships by default. (A "layer" is **Rustango**'s term for middleware; you attach it to your router.)
 
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};
@@ -99,7 +99,9 @@ After verifying no console errors → flip `csp_report_only(false)` to enforce.
 
 ---
 
-## CORS
+## Allowing cross-origin requests (CORS)
+
+CORS controls which other websites are allowed to call your API from a browser. By default browsers block these calls; you opt specific origins back in. List your real front-end domains in production and never open it up to everyone.
 
 ```rust
 use rustango::cors::{CorsLayer, CorsRouterExt};
@@ -120,7 +122,9 @@ let layer = CorsLayer::permissive();              // any origin, common methods
 
 ---
 
-## Rate limiting
+## Rate limiting requests
+
+Rate limiting caps how many requests a client can make in a window of time. Use it to slow down brute-force logins, scraping, and abuse. You can limit per IP, per API key, or globally for one expensive endpoint.
 
 ```rust
 use rustango::rate_limit::{RateLimitLayer, RateLimitRouterExt};
@@ -137,7 +141,7 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 When exhausted: `429 Too Many Requests` with `Retry-After` header. Every successful response includes `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-`RateLimitLayer` is **process-local** — fine for single-instance deployments. For distributed enforcement across replicas use `rate_limit_cache::CacheRateLimitLayer`, which delegates to any `cache::Cache` impl (pair with `cache::RedisCache` for a shared counter incremented atomically by Redis `INCRBY`):
+`RateLimitLayer` is **process-local** — it counts requests only within one running instance, which is fine if you run a single instance. If you run several instances (replicas) behind a load balancer, each would keep its own count, so the real limit multiplies. To share one count across all replicas, use `rate_limit_cache::CacheRateLimitLayer`, which delegates to any `cache::Cache` impl (pair with `cache::RedisCache` for a shared counter incremented atomically by Redis `INCRBY`):
 
 ```rust
 use rustango::cache::RedisCache;
@@ -158,9 +162,9 @@ let app = axum::Router::new()
 
 ---
 
-## IP allowlist / blocklist
+## Allowing or blocking IPs
 
-Restrict admin / internal routes to known networks:
+Lock down sensitive routes (like your admin) to a known set of IP addresses, or block specific abusers. An allowlist permits only the listed networks; a blocklist denies the listed ones.
 
 ```rust
 use rustango::ip_filter::{IpFilterLayer, IpFilterRouterExt};
@@ -180,7 +184,7 @@ let public_router = public_router
 
 **IPv4 + IPv6 supported.** Cross-family safe (an IPv4 CIDR doesn't match IPv6 addresses). Returns `403 Forbidden` on rejection.
 
-**Important:** rustango reads the client IP from `ConnectInfo<SocketAddr>`. Mount with:
+**Important:** **Rustango** reads the client IP from `ConnectInfo<SocketAddr>`. Mount with:
 
 ```rust
 axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
@@ -190,31 +194,31 @@ If your reverse proxy forwards `X-Forwarded-For`, configure it to set `RemoteAdd
 
 ---
 
-## CSRF
+## Protecting against CSRF
 
-CSRF middleware is in `rustango::forms::csrf` (behind the `csrf` feature, implied by `admin`):
+CSRF (cross-site request forgery) is when another site tricks a logged-in user's browser into submitting a request to your app. The defense is a secret token on every form, just like Django's `{% csrf_token %}`. The CSRF middleware lives in `rustango::forms::csrf` (behind the `csrf` feature, which is turned on automatically by the `admin` feature):
 
 ```rust
-use rustango::forms::csrf::CsrfLayer;
+use rustango::forms::csrf;
 
 let app = Router::new()
     .route("/contact", get(form).post(submit))
-    .layer(CsrfLayer::default());
+    .layer(csrf::layer());
 ```
 
-Renders `{% csrf_token %}` in templates expand into a hidden form input. Double-submit cookie pattern — token in form must match cookie.
+`csrf::layer()` builds the layer with sensible defaults; `csrf::with_config(CsrfConfig)` lets you override the cookie/header names and the `Secure` flag. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` gives you a ready-made hidden `<input>` — drop one inside every form. It uses the double-submit cookie pattern: on unsafe methods (POST, PUT, PATCH, DELETE) the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
 
-The auto-admin enables CSRF on every mutation by default (no opt-out).
+The auto-admin enables CSRF on every mutation by default, and there is no way to opt out.
 
 ---
 
-## XSS defense
+## Preventing XSS
 
-Two layers:
+XSS (cross-site scripting) happens when user input is rendered as HTML and runs as code in someone else's browser. The fix is to escape any user input before it reaches the page. **Rustango** handles this two ways:
 
-**1. Tera template auto-escape** — every `{{ var }}` is HTML-escaped by default. Use `{{ var | safe }}` to opt out (rare, dangerous).
+**1. Tera template auto-escape** — Tera is **Rustango**'s template engine (like Django templates or Blade). Every `{{ var }}` is HTML-escaped automatically. Use `{{ var | safe }}` to opt out — rare, and dangerous, so only do it for HTML you fully trust.
 
-**2. Manual escape helper** — for non-template HTML construction:
+**2. Manual escape helper** — for when you build HTML in Rust code instead of a template:
 
 ```rust
 use rustango::text::html_escape;
@@ -226,42 +230,47 @@ let safe = html_escape(user_input);
 
 Replaces `&`, `<`, `>`, `"`, `'`. Suitable for HTML element content + double-quoted attributes.
 
-For CSP-based XSS defense, see [Security headers](#security-headers).
+For CSP-based XSS defense, see [Setting security headers](#setting-security-headers).
 
 ---
 
-## SQL injection
+## Preventing SQL injection
 
-The ORM uses sqlx parameter binding throughout — every value goes through `$1, $2, ...` placeholders. **Direct concatenation of user input into SQL is impossible at the ORM API surface.**
+SQL injection happens when user input gets pasted straight into a SQL string and changes the query. **Rustango**'s ORM stops this by design: it uses sqlx parameter binding everywhere — every value is sent as a `$1, $2, ...` placeholder, never glued into the query text. (sqlx is the underlying database library.) **You can't accidentally concatenate user input into SQL through the ORM API.**
 
-Two places to be careful:
+There are two spots to stay careful about:
 
-**1. Identifier interpolation in `bulk_actions` + `fixtures`:**
+**1. Table and column names in `bulk_actions`:**
+
+Placeholders protect values, but they can't carry an identifier (a table or column name), so those need their own guard. The bulk-action runner never glues raw user-supplied table/column names into SQL. Internally it validates every identifier (a crate-private
+`validate_ident` that rejects `"`, `` ` ``, `\0`, `\n`, `\r`, `\`, `;`,
+spaces, and control chars) and then quotes it via `dialect.quote_ident()`
+before building the statement. This guard runs for you — you don't call it
+yourself.
+
+**2. The raw SQL escape hatch:**
+
+If you drop down to raw `sqlx`, bind every *value* as a parameter and
+never paste an *identifier* (table or column name) that came from
+user input into the query string — placeholders can't carry identifiers:
 
 ```rust
-use rustango::bulk_actions::validate_ident;
-
-validate_ident("user-supplied-table")?;   // rejects ;, ", \n, control chars
-```
-
-The framework calls this internally for any user-supplied table/column names.
-
-**2. Raw SQL escape hatch:**
-
-```rust
-sqlx::query("SELECT * FROM ? WHERE id = $1")    // ❌ NEVER interpolate identifiers
+// ✅ values go through bound placeholders
+sqlx::query("SELECT * FROM posts WHERE id = $1")
     .bind(1).fetch_all(&pool).await?;
 
-let table = validate_ident(user_table)?;        // ✅ validate first
-let sql = format!("SELECT * FROM \"{table}\" WHERE id = $1");
+// ❌ NEVER interpolate a user-supplied identifier into the SQL string
+let sql = format!("SELECT * FROM \"{user_table}\" WHERE id = $1");
 sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 ```
 
 ---
 
-## Authentication
+## Authenticating users
 
-### Three pluggable backends
+Authentication is how you confirm who is making a request. **Rustango** ships three ready-made backends (Basic auth, API keys, and JWTs) and lets you write your own — much like Django's authentication backends. You attach them to routes, and requests without a recognized credential get a `401`.
+
+### Three ready-made backends
 
 ```rust
 use rustango::tenancy::auth_backends::{ModelBackend, ApiKeyBackend, JwtBackend};
@@ -282,9 +291,9 @@ let app = Router::new()
     .require_auth(backends, pool);
 ```
 
-The middleware tries each backend in order. First success wins; first hard error short-circuits.
+The middleware tries each backend in order. The first one that succeeds wins; the first one that returns a hard error stops the chain.
 
-### Custom backend
+### Writing your own backend
 
 ```rust
 use rustango::tenancy::auth_backends::{AuthBackend, AuthUser, AuthError};
@@ -294,7 +303,7 @@ pub struct OAuthBackend { /* ... */ }
 
 #[async_trait]
 impl AuthBackend for OAuthBackend {
-    async fn authenticate(&self, parts: &Parts, pool: &PgPool)
+    async fn authenticate(&self, parts: &Parts, pool: &rustango::sql::Pool)
         -> Result<Option<AuthUser>, AuthError>
     {
         // Read your custom header, validate, look up the user
@@ -305,7 +314,9 @@ impl AuthBackend for OAuthBackend {
 
 ---
 
-## Password hashing + strength
+## Hashing and checking passwords
+
+Never store passwords as plain text. Hash them on signup with `hash`, and on login compare the attempt with `verify`. Use `strength_score` to reject weak passwords before you ever hash them.
 
 ```rust
 use rustango::passwords::{hash, verify, strength_score, StrengthIssue};
@@ -321,13 +332,15 @@ let hashed = hash(&new_password)?;
 let ok = verify(&attempted, &user.password_hash)?;
 ```
 
-Uses **argon2id** (default since OWASP 2023 — better than bcrypt against GPU attacks). PHC-string format is forward-compatible with parameter changes.
+Hashing uses **argon2id** (the OWASP-recommended default since 2023 — it resists GPU cracking better than bcrypt). Hashes are stored in PHC-string format, so you can change parameters later without breaking old hashes.
 
-**Strength check** is intentionally minimal — pair with HIBP / pwned-passwords API for serious deployments.
+The built-in **strength check** is intentionally minimal. For serious deployments, also check passwords against the HIBP / pwned-passwords API to reject ones known to be leaked.
 
 ---
 
-## JWT lifecycle
+## Issuing and refreshing JWTs
+
+A JWT (JSON Web Token) is a signed token a client sends instead of logging in every time. `JwtLifecycle` handles the whole flow: a short-lived access token plus a longer-lived refresh token, with verify, refresh, and revoke built in.
 
 ```rust
 use rustango::tenancy::jwt_lifecycle::{JwtLifecycle, JwtTokenPair, JwtIssueError};
@@ -338,7 +351,7 @@ let jwt = JwtLifecycle::new(secret)
     .with_refresh_ttl(7 * 86400);                 // 7 days
 ```
 
-### Issue with custom claims (no DB lookup on verify)
+### Issuing a token with custom claims (no DB lookup on verify)
 
 ```rust
 let pair = jwt.issue_pair_with(user_id, json!({
@@ -349,9 +362,9 @@ let pair = jwt.issue_pair_with(user_id, json!({
 }).as_object().unwrap().clone())?;
 ```
 
-Reserved claim names (`sub`, `exp`, `jti`, `typ`) cannot appear in custom — returns `JwtIssueError::ReservedClaim`.
+"Claims" are the key/value facts you embed in the token (roles, tenant, and so on); the client sends them back and you read them without hitting the database. Reserved claim names (`sub`, `exp`, `jti`, `typ`) are used by the framework and can't appear in your custom claims — trying returns `JwtIssueError::ReservedClaim`.
 
-### Verify
+### Verifying a token
 
 ```rust
 let claims = jwt.verify_access(&access_token)
@@ -361,7 +374,7 @@ let roles: Vec<String> = claims.get_custom("roles").unwrap_or_default();
 let tenant: String = claims.get_custom("tenant").unwrap_or_default();
 ```
 
-### Refresh — preserves custom claims
+### Refreshing a token (keeps your custom claims)
 
 ```rust
 let new_pair = jwt.refresh(&refresh_token)
@@ -369,31 +382,34 @@ let new_pair = jwt.refresh(&refresh_token)
 // new_pair has the same roles + scope + tenant
 ```
 
-The old refresh token's JTI is added to the blacklist, preventing replay.
+The old refresh token's JTI (its unique ID) is added to a blacklist so it can't be reused — this blocks replay attacks where a stolen old token is sent again.
 
-### Refresh with re-evaluated permissions
+### Refreshing with re-checked permissions
 
 ```rust
+// returns Result<Option<JwtTokenPair>, JwtIssueError>:
+// Err on a reserved-claim collision, Ok(None) on an invalid/expired refresh.
 let new_pair = jwt.refresh_with(&refresh_token, json!({
     "roles": ["viewer"],     // role was demoted since login
     "tenant": "acme",
-}).as_object().unwrap().clone())?;
+}).as_object().unwrap().clone())?
+    .ok_or(StatusCode::UNAUTHORIZED)?;
 ```
 
-### Revoke
+### Revoking a token
 
 ```rust
 jwt.revoke(&access_token);     // adds JTI to blacklist
 jwt.revoke(&refresh_token);
 ```
 
-In-memory blacklist auto-prunes expired entries. For multi-process deployments, swap to a cache-backed implementation (separate effort).
+The default in-memory blacklist (`InMemoryJtiStore`) cleans out expired entries on its own, but it lives in one process and forgets every revocation on restart. For multi-process deployments, install a shared, durable store via `JwtLifecycle::new(secret).with_jti_store(store)` — `store` is any `Arc<dyn JtiStore>` (for example a Redis- or DB-backed one). Without a shared store, a token you revoke on one replica can still be replayed on another until it expires.
 
 ---
 
-## API keys
+## Authenticating with API keys
 
-For API-key authentication that doesn't require user-password sessions:
+API keys let scripts and services authenticate without a username, password, or session — handy for machine-to-machine access. You generate a key, show it to the user once, and store only its prefix and hash.
 
 ```rust
 use rustango::api_keys::{generate_key, verify_key, split_token};
@@ -412,13 +428,13 @@ if !verify_key(secret, &row.hash)? {
 }
 ```
 
-**Wire-compatible with the multi-tenancy `ApiKeyBackend`** — both use the same `{prefix}.{secret}` format with argon2id-hashed secrets.
+These keys work directly with the multi-tenancy `ApiKeyBackend` — both use the same `{prefix}.{secret}` format with argon2id-hashed secrets, so a key issued here authenticates there with no extra work.
 
 ---
 
-## TOTP / 2FA
+## Adding two-factor auth (TOTP)
 
-RFC 6238 time-based one-time passwords:
+TOTP is the 6-digit code from an authenticator app — a second factor on top of the password. You generate a secret per user, show it as a QR code to enroll, then verify the code they type on each login. It follows the RFC 6238 standard.
 
 ```rust
 use rustango::totp::{TotpSecret, otpauth_url, verify};
@@ -435,13 +451,15 @@ if !verify(&secret, &user_supplied_code, 30, 6, 1) {            // 6 digits, ±3
 }
 ```
 
-Compatible with Google Authenticator, Authy, 1Password, Bitwarden, etc.
+Works with Google Authenticator, Authy, 1Password, Bitwarden, and other standard authenticator apps.
 
-**Recovery codes** (one-time backup codes) — not yet shipped; common pattern is to store 8–10 hashed codes per user and burn one when used.
+**Recovery codes** (one-time backup codes for when a user loses their phone) aren't shipped yet. The common pattern is to store 8–10 hashed codes per user and burn one each time it's used.
 
 ---
 
-## Signed URLs (magic links)
+## Sending signed URLs (magic links)
+
+A signed URL carries a tamper-proof signature, so you can trust it without a session — perfect for magic-link logins, password resets, and time-limited download links. You `sign` a URL (optionally with an expiry) and `verify` it when the user clicks. (Laravel calls these "signed routes.")
 
 ```rust
 use rustango::signed_url::{sign, verify, SignedUrlError};
@@ -471,13 +489,13 @@ Common uses:
 - "Click here to verify your email" links
 - Unsubscribe links (no auth needed; URL itself proves intent)
 
-Canonical query-param sorting prevents reorder forgery (e.g. attacker can't move `?expires=...` around to change the signature input).
+Before signing, the query params are sorted into a fixed order, so an attacker can't reorder them (for example moving `?expires=...`) to change what the signature covers and forge a valid-looking link.
 
 ---
 
-## Webhook signatures
+## Verifying incoming webhooks
 
-For inbound webhooks (Stripe, GitHub, Slack, custom):
+A webhook is an HTTP callback another service sends you (a payment succeeded, a push happened). Always check its signature so you know it really came from that service and the body wasn't changed. `verify_signature` handles the common formats.
 
 ```rust
 use rustango::webhook::{verify_signature, SignatureFormat};
@@ -501,13 +519,13 @@ async fn handle_stripe_webhook(headers: HeaderMap, body: Bytes) -> impl IntoResp
 | `HexSha256` | Slack, raw HMAC providers |
 | `Base64Sha256` | Stripe, AWS SNS |
 
-Comparison is constant-time (defends against timing attacks).
+The signature comparison is constant-time, meaning it always takes the same amount of time whether the guess is right or wrong. That stops timing attacks, where an attacker measures tiny response-time differences to guess the secret one character at a time.
 
 ---
 
-## Access log PII redaction
+## Keeping secrets out of your logs
 
-`AccessLogLayer` redacts known credential params from logged URLs:
+Logged URLs can leak passwords and tokens that show up in query strings. `AccessLogLayer` automatically masks known credential params before writing the log line (PII = personally identifiable information).
 
 ```rust
 let app = router.access_log(AccessLogLayer::default());
@@ -531,17 +549,19 @@ let layer = AccessLogLayer::default()
     .redact(vec!["only_this".into()]);
 ```
 
-Note: this redacts **query strings** only. For request bodies / headers, use `tracing::Subscriber` filtering at the source.
+Note: this redacts **query strings** only. To scrub request bodies or headers, filter at the source with `tracing::Subscriber`.
 
 ---
 
-## Request ID for log correlation
+## Tracing requests across services
+
+A request ID tags every log line for one request with the same ID, so you can follow that request across handlers — and across services. `RequestIdLayer` adds one to every request.
 
 ```rust
 let app = router.request_id(RequestIdLayer::default());
 ```
 
-Honors inbound `X-Request-Id` (chained services) or generates a fresh 22-char base64 ID. Inbound IDs are validated — control chars / newlines / null bytes / >128 chars rejected (header-injection defense).
+It reuses an inbound `X-Request-Id` (so chained services share one ID) or generates a fresh 22-char base64 ID. Inbound IDs are validated first — anything with control chars, newlines, null bytes, or longer than 128 chars is rejected, which blocks header-injection attacks.
 
 In handlers:
 
@@ -552,7 +572,7 @@ async fn handler(id: rustango::request_id::RequestId) -> String {
 }
 ```
 
-For zero-trust environments where you don't trust upstream IDs:
+In a zero-trust setup, where you don't trust IDs sent by upstream services, always make your own:
 
 ```rust
 router.request_id(RequestIdLayer::always_generate());
@@ -560,9 +580,9 @@ router.request_id(RequestIdLayer::always_generate());
 
 ---
 
-## Secrets management
+## Managing secrets
 
-Don't hard-code secrets — read via the `Secrets` trait:
+Never hard-code secrets (database passwords, API keys) in your source. Read them at runtime through the `Secrets` trait, which abstracts over where they actually live. (A "trait" is Rust's version of an interface.) The built-in `EnvSecrets` reads from environment variables.
 
 ```rust
 use rustango::secrets::{Secrets, EnvSecrets, BoxedSecrets};
@@ -575,23 +595,28 @@ let db_pwd = secrets.require("DB_PASSWORD").await?;       // reads MYAPP_DB_PASS
 let redis_url = secrets.get("REDIS_URL").await?;          // None when unset
 ```
 
-For Vault / AWS Secrets Manager / GCP Secret Manager, implement the trait yourself (one async method).
+To pull secrets from Vault, AWS Secrets Manager, or GCP Secret Manager, implement the trait yourself — it's just one async method.
 
 ---
 
-## Pre-deploy audit
+## Auditing before you deploy
+
+Before going to production, run the built-in audit. It catches common misconfigurations — like a missing or too-short signing secret — that you don't want to discover in production.
 
 ```bash
 manage check --deploy
 ```
 
-Checks:
-- ✅ DB reachable
+Always-on checks (run with or without `--deploy`):
 - ✅ Models registered in inventory
-- ✅ Pending migrations applied
+- ✅ DB reachable (`SELECT 1`)
+- ✅ Migrations on disk for registered models
+
+Additional `--deploy` (production-hardening) checks:
 - ✅ `RUSTANGO_ENV` is `prod` or `production`
-- ✅ `SECRET_KEY` set and ≥ 32 bytes
-- ✅ `DATABASE_URL` set
+- ✅ `RUSTANGO_SESSION_SECRET` set and ≥ 32 bytes (the HMAC key for cookie + JWT signing — `SECRET_KEY` is **not** read by the framework), with no scaffolder placeholder left in
+- ✅ `DATABASE_URL` set (and warns if it points at localhost)
+- ⚠️ `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` sanity warnings for tenancy + non-loopback binding
 
 Returns non-zero exit on any **error-level** finding (good for CI gates). Warnings don't trigger failure but show in output.
 
@@ -604,10 +629,13 @@ For checks beyond what ships, extend with custom code in your `manage` binary be
 The framework comparison roadmap (memory:`framework-comparison-2026-05-02.md`) flags these as future work:
 
 - **OAuth2 social login** (Google, GitHub, etc.) — Tier 2
-- **Account lockout after N failed logins** (per-account, not just per-IP)
 - **Password reset + email verification end-to-end flow** (helpers exist; no built-in token+email+view+validate cycle)
-- **CSP report endpoint** for `report-uri` directive
-- **Distributed rate limiting** via cache layer
 - **PII redaction of request body / headers** in access_log
 
-Until these ship, glue them yourself using the primitives above (`signed_url::sign` for password reset tokens, `cache::set` for account lockout counters, etc.).
+Already shipped (don't reach for these on the roadmap):
+
+- **Per-account lockout** — `rustango::account_lockout::Lockout` (cache-backed; `is_locked` / `record_failure` / `clear`, configurable `max_attempts` + `lockout_duration`)
+- **CSP report endpoint** — `security_headers::csp_report_router(path)` + `SecurityHeadersLayer::csp_report_uri(uri)`
+- **Distributed rate limiting** — `rate_limit_cache::CacheRateLimitLayer` (see [Rate limiting requests](#rate-limiting-requests))
+
+Until the unshipped items land, glue them yourself using the primitives above (`signed_url::sign` for password reset tokens, etc.).

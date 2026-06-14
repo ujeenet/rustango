@@ -1,0 +1,20 @@
+# getting_started_blog — staging tier
+# Loaded when RUSTANGO_ENV=staging. Production-shape security
+# headers, but pointed at a separate database with shorter retention
+# so QA volume doesn't bleed into prod analytics.
+
+# [database]
+# url = "postgres://staging-host/getting_started_blog_staging"
+
+[server]
+bind = "0.0.0.0:8080"
+
+[security]
+headers_preset    = "strict"
+hsts_max_age_secs = 31536000
+
+[brand]
+tagline = "(staging)"
+
+[audit]
+retention_days = 30

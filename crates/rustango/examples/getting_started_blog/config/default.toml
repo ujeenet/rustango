@@ -1,0 +1,48 @@
+# getting_started_blog — shared defaults across every tier
+# (`config/default.toml` is loaded first; `config/<RUSTANGO_ENV>_settings.toml`
+# overrides on top.) Every section is optional — uncomment + edit
+# what you need.
+
+# [database]
+# url           = "postgres://localhost/getting_started_blog"
+# pool_min_size = 2
+# pool_max_size = 20
+
+# [admin]
+# allowed_tables   = []        # empty = every registered model
+# read_only_tables = []
+
+# [server]
+# bind                  = "127.0.0.1:8080"
+# request_timeout_secs  = 30
+# max_body_bytes        = 2097152      # 2 MiB
+
+# [auth]
+# argon2_memory_kib  = 19456    # OWASP 2024 floor
+# argon2_iterations  = 2
+# lockout_threshold  = 5
+# lockout_duration_secs = 900
+
+# [auth.jwt]
+# access_ttl_secs   = 900       # 15 min
+# refresh_ttl_secs  = 604800    # 7 days
+# issuer            = "getting_started_blog"
+
+# [brand]
+# name           = "getting_started_blog"
+# tagline        = ""
+# primary_color  = "#2c6fb0"
+# theme_mode     = "auto"       # auto | light | dark
+
+# [security]
+# headers_preset       = "strict"
+# hsts_max_age_secs    = 31536000     # 1 year
+# cors_allowed_origins = []
+
+# [routes]
+# legacy_preset = false
+# # Per-field overrides: login_url / admin_url / audit_url / static_url /
+# # brand_url / change_password_url / impersonation_handoff_url
+
+# [audit]
+# retention_days = 90

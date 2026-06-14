@@ -1,0 +1,239 @@
+{
+  "name": "0001_create_item_and_posts_and_rustango_admin_users_etc",
+  "created_at": "2026-06-14T18:27:02.112523+00:00",
+  "atomic": true,
+  "snapshot": {
+    "tables": [
+      {
+        "name": "item",
+        "model": "Item",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "name",
+            "column": "name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 64
+          }
+        ]
+      },
+      {
+        "name": "posts",
+        "model": "Post",
+        "fields": [
+          {
+            "name": "author_id",
+            "column": "author_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "body",
+            "column": "body",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "deleted_at",
+            "column": "deleted_at",
+            "ty": "datetime",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "published_at",
+            "column": "published_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "status",
+            "column": "status",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 20,
+            "default": "'draft'"
+          },
+          {
+            "name": "title",
+            "column": "title",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 200
+          }
+        ]
+      },
+      {
+        "name": "rustango_admin_users",
+        "model": "AdminUser",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "true"
+          },
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "is_superuser",
+            "column": "is_superuser",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "false"
+          },
+          {
+            "name": "password_hash",
+            "column": "password_hash",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 200
+          },
+          {
+            "name": "username",
+            "column": "username",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 150,
+            "unique": true
+          }
+        ]
+      },
+      {
+        "name": "rustango_content_types",
+        "model": "ContentType",
+        "fields": [
+          {
+            "name": "app_label",
+            "column": "app_label",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "model_name",
+            "column": "model_name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "table",
+            "column": "table",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          }
+        ]
+      }
+    ],
+    "indexes": [
+      {
+        "name": "posts_status_published_at_idx",
+        "table": "posts",
+        "columns": [
+          "status",
+          "published_at"
+        ],
+        "unique": false,
+        "method": "btree"
+      }
+    ]
+  },
+  "forward": [
+    {
+      "schema": {
+        "CreateTable": "item"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "posts"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_admin_users"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_content_types"
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "posts_status_published_at_idx",
+          "table": "posts",
+          "columns": [
+            "status",
+            "published_at"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    }
+  ]
+}

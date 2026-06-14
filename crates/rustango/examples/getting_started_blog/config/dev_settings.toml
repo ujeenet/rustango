@@ -1,0 +1,18 @@
+# getting_started_blog — local development tier
+# Loaded when RUSTANGO_ENV=dev (the default when unset).
+
+[database]
+url = "postgres://postgres:postgres@localhost:5432/getting_started_blog_dev"
+
+[server]
+bind = "127.0.0.1:8080"
+
+[security]
+# Drop strict headers in dev so http<->https rebinds don't lock the
+# browser into HSTS.
+headers_preset    = "dev"
+hsts_max_age_secs = 0
+
+[brand]
+# Make the dev tier visually distinguishable from prod.
+tagline = "(dev)"
