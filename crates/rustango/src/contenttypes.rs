@@ -78,7 +78,7 @@ pub struct ContentType {
 /// [`crate::sql::Pool`] enum carries.
 impl ContentType {
     /// Backend-agnostic counterpart of [`Self::by_natural_key`].
-    /// Routes through [`crate::sql::FetcherPool::fetch_pool`] so the
+    /// Routes through [`crate::sql::FetcherPool::fetch`] so the
     /// same call works against `Pool::Postgres` / `Pool::Mysql` /
     /// `Pool::Sqlite`.
     /// Prefer this in framework code so sqlite/mysql apps don't get
@@ -103,7 +103,7 @@ impl ContentType {
                 SqlValue::String(model_name.into()),
             )
             .limit(1)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await?;
         Ok(rows.into_iter().next())
     }
@@ -117,7 +117,7 @@ impl ContentType {
         let rows: Vec<Self> = Self::objects()
             .filter_op("id", crate::core::Op::Eq, SqlValue::I64(id))
             .limit(1)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await?;
         Ok(rows.into_iter().next())
     }
@@ -125,7 +125,7 @@ impl ContentType {
     /// Tri-dialect counterpart of [`Self::for_model`] (v0.38).
     /// Resolves `T`'s registered ContentType row via the natural
     /// `(app_label, model_name)` key — same lookup logic, but the
-    /// query goes through [`crate::sql::FetcherPool::fetch_pool`]
+    /// query goes through [`crate::sql::FetcherPool::fetch`]
     /// so the call works on PG / SQLite / MySQL.
     ///
     /// # Errors
@@ -213,7 +213,7 @@ impl ContentType {
     pub async fn all_ordered(pool: &crate::sql::Pool) -> Result<Vec<Self>, ExecError> {
         let rows: Vec<Self> = Self::objects()
             .order_by(&[("app_label", false), ("model_name", false)])
-            .fetch_pool(pool)
+            .fetch(pool)
             .await?;
         Ok(rows)
     }
@@ -598,7 +598,7 @@ pub async fn render_generic_fk_link(
 
 /// Tri-dialect counterpart of [`prefetch_soft`] (v0.38). Same shape
 /// — one batched SELECT against `target_fk_column`, grouped by
-/// parent PK — but routes through [`crate::sql::FetcherPool::fetch_pool`]
+/// parent PK — but routes through [`crate::sql::FetcherPool::fetch`]
 /// so the bound is `C: Model + MaybePgFromRow + MaybeMyFromRow +
 /// MaybeSqliteFromRow + …` (all auto-implemented by `#[derive(Model)]`).
 ///
@@ -641,7 +641,7 @@ where
             crate::core::Op::In,
             crate::core::SqlValue::List(pk_values),
         )
-        .fetch_pool(pool)
+        .fetch(pool)
         .await?;
     let mut grouped: ::std::collections::HashMap<i64, Vec<C>> = ::std::collections::HashMap::new();
     for child in children {
@@ -653,7 +653,7 @@ where
 
 /// Tri-dialect counterpart of [`prefetch_generic`] (v0.38). Routes the
 /// ContentType lookup through [`ContentType::for_model`] and the
-/// target SELECT through [`crate::sql::FetcherPool::fetch_pool`] so
+/// target SELECT through [`crate::sql::FetcherPool::fetch`] so
 /// the same body works on PG / SQLite / MySQL.
 ///
 /// # Errors
@@ -719,7 +719,7 @@ where
             crate::core::Op::In,
             crate::core::SqlValue::List(pk_values),
         )
-        .fetch_pool(pool)
+        .fetch(pool)
         .await?;
 
     let mut out: ::std::collections::HashMap<(i64, i64), C> =

@@ -230,7 +230,7 @@ async fn login(
 
     let users = User::objects()
         .where_(User::username.eq(body.username.clone()))
-        .fetch_pool(t.pool())
+        .fetch(t.pool())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
 
@@ -367,7 +367,7 @@ async fn refresh(
         use crate::tenancy::auth::User;
         let users: Vec<User> = User::objects()
             .where_(User::id.eq(claims.sub))
-            .fetch_pool(t.pool())
+            .fetch(t.pool())
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
         let still_active = users.into_iter().next().is_some_and(|u| u.active);
@@ -468,7 +468,7 @@ async fn me(t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
 
     let users = User::objects()
         .where_(User::id.eq(user_id))
-        .fetch_pool(t.pool())
+        .fetch(t.pool())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
 

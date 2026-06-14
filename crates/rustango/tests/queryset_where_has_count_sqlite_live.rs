@@ -91,7 +91,7 @@ async fn seed(pool: &Pool) {
 async fn names_for(pool: &Pool, op: Op, n: i64) -> Vec<String> {
     let mut names: Vec<String> = Author::objects()
         .where_has_count("books", op, n)
-        .fetch_pool(pool)
+        .fetch(pool)
         .await
         .unwrap()
         .into_iter()
@@ -156,7 +156,7 @@ async fn composes_with_other_filters() {
     let rows = Author::objects()
         .filter("name", "One")
         .where_has_count("books", Op::Gte, 1)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -169,7 +169,7 @@ async fn unknown_relation_errors_at_compile_time() {
     seed(&pool).await;
     let err = Author::objects()
         .where_has_count("nope", Op::Gt, 1)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap_err();
     assert!(format!("{err}").contains("nope"));

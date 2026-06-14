@@ -172,7 +172,7 @@ where
 /// - `all = true`  → returns every row (vacuous AND is TRUE).
 ///
 /// # Errors
-/// As [`FetcherPool::fetch_pool`]; or
+/// As [`FetcherPool::fetch`]; or
 /// [`ExecError::Query(QueryError::UnknownField)`] when any
 /// column is not declared on the model.
 pub async fn where_multi_pool<T>(
@@ -194,7 +194,7 @@ where
 {
     if cols.is_empty() {
         return if all {
-            QuerySet::<T>::default().fetch_pool(pool).await
+            QuerySet::<T>::default().fetch(pool).await
         } else {
             Ok(Vec::new())
         };
@@ -217,6 +217,6 @@ where
     }
     QuerySet::<T>::default()
         .where_(q.expect("non-empty cols"))
-        .fetch_pool(pool)
+        .fetch(pool)
         .await
 }

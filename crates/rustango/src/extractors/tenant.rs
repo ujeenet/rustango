@@ -78,7 +78,7 @@ pub struct Tenant<DB: Database = DefaultTenantDb> {
     /// it would hit the `public` schema unless `SET search_path` is
     /// applied — for that path prefer [`Tenant::conn`]). On non-PG
     /// (and PG database-mode), this is the tenant's dedicated pool;
-    /// handlers can run `Model::objects().fetch_pool(&t.pool)` for
+    /// handlers can run `Model::objects().fetch(&t.pool)` for
     /// tri-dialect ORM queries.
     pool: crate::sql::Pool,
 }
@@ -135,7 +135,7 @@ impl<DB: Database> Tenant<DB> {
     }
 
     /// Borrow the tenant-scoped [`crate::sql::Pool`] enum. Use this
-    /// when routing through the tri-dialect ORM (`fetch_pool` /
+    /// when routing through the tri-dialect ORM (`fetch` /
     /// `insert_pool` / `save_pool`) — every backend works through the
     /// same code path.
     ///
@@ -251,7 +251,7 @@ where
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
         // v0.38 — also resolve the backend-erasing Pool enum so
         // `t.pool()` lets handlers use tri-dialect ORM helpers
-        // (fetch_pool / save_pool / etc.). Schema-mode picks the
+        // (fetch / save_pool / etc.). Schema-mode picks the
         // shared registry pool (which requires SET search_path);
         // database-mode resolves to the dedicated tenant pool.
         let pool = ctx

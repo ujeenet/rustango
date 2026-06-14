@@ -120,7 +120,7 @@ where
     T: Prunable + Send + 'static,
     QuerySet<T>: CounterPool<T>,
 {
-    Box::pin(async move { T::prune_queryset().count_pool(pool).await })
+    Box::pin(async move { T::prune_queryset().count(pool).await })
 }
 
 /// Internal helper invoked from [`register_prunable!`] to build the
@@ -241,7 +241,7 @@ pub async fn prune_pretend(
         let rows = (entry.count)(pool).await?;
         reports.push(PruneReport {
             table: entry.name.to_owned(),
-            // `count_pool` returns i64; clamp the negative-impossible
+            // `count` returns i64; clamp the negative-impossible
             // case to 0 so the reporting type stays positive.
             rows: u64::try_from(rows.max(0)).unwrap_or(0),
         });

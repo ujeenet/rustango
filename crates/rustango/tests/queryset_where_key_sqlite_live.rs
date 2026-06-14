@@ -53,7 +53,7 @@ async fn where_key_filters_to_single_row() {
     let target = ids[2];
     let rows = Post::objects()
         .where_key(target)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -68,7 +68,7 @@ async fn where_key_not_excludes_pk() {
     let excluded = ids[1];
     let mut got: Vec<i64> = Post::objects()
         .where_key_not(excluded)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -86,7 +86,7 @@ async fn where_key_no_match_returns_empty() {
     seed(&pool).await;
     let rows = Post::objects()
         .where_key(999_999_i64)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert!(rows.is_empty());

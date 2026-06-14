@@ -112,7 +112,7 @@ pub async fn ensure_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
 /// As the ORM fetch path ([`ExecError`]).
 pub async fn all_pool(pool: &Pool) -> Result<Vec<Translation>, ExecError> {
     use crate::sql::FetcherPool as _;
-    Translation::objects().fetch_pool(pool).await
+    Translation::objects().fetch(pool).await
 }
 
 /// Insert-or-update the editable value for `(locale, key)` — the

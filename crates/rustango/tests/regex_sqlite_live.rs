@@ -65,7 +65,7 @@ async fn regex_emission_parses_clean_runtime_error_on_missing_extension() {
 
     let err = User::objects()
         .where_(User::name.regex("^al.*"))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect_err("should error — regexp not registered");
 
@@ -92,7 +92,7 @@ async fn iregex_lower_wrap_parses_clean_runtime_error() {
 
     let err = User::objects()
         .where_(User::name.iregex("^al.*"))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect_err("should error — regexp not registered");
 

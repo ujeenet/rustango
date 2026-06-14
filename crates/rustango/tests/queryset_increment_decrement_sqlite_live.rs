@@ -59,7 +59,7 @@ async fn seed(pool: &Pool) -> (Vec<i64>, Vec<i64>) {
 async fn views_for(pool: &Pool, id: i64) -> i64 {
     Post::objects()
         .filter("id", id)
-        .fetch_pool(pool)
+        .fetch(pool)
         .await
         .unwrap()
         .pop()

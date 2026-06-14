@@ -79,7 +79,7 @@ pub async fn device(pool: &Pool, user_id: i64) -> Option<AdminTotp> {
     use crate::sql::FetcherPool as _;
     AdminTotp::objects()
         .filter("user_id", user_id)
-        .fetch_pool(pool)
+        .fetch(pool)
         .await
         .ok()
         .and_then(|rows| rows.into_iter().next())

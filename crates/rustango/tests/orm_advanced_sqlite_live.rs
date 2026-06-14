@@ -1,6 +1,6 @@
 #![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds; pattern is refutable on multi-backend builds.
 //! Advanced ORM coverage on SQLite — closes the gap between the
-//! basic `save_pool` / `fetch_pool` round-trips in `sqlite_live.rs`
+//! basic `save_pool` / `fetch` round-trips in `sqlite_live.rs`
 //! and the full PG live suite (`save_live.rs`, `select_related_live.rs`,
 //! `where_expr_live.rs`, `order_by_annotate_live.rs`, `upsert_unique_*`,
 //! `prefetch_related_live.rs`).
@@ -9,7 +9,7 @@
 //!   * `select_related(&[Fk])` decodes the joined row correctly
 //!   * `where_(...)` with AND / OR / IN combinations compiles + matches
 //!   * `order_by(&[(col, asc)])` produces deterministic ordering
-//!   * `count_pool` matches `fetch_pool().len()` for the same QuerySet
+//!   * `count` matches `fetch().len()` for the same QuerySet
 //!   * `bulk_insert_pool` round-trips
 //!   * upsert via the ORM IR (`InsertQuery` with `ConflictClause::DoUpdate`)
 //!   * `prefetch_related` (FK-based) hydrates parents-then-children
@@ -110,7 +110,7 @@ async fn where_chain_with_and_filters_correctly_on_sqlite() {
     let posts: Vec<Post> = Post::objects()
         .where_(Post::author.eq(alice))
         .where_(Post::published.eq(true))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("fetch");
     assert_eq!(posts.len(), 2, "two published posts by alice");
@@ -129,7 +129,7 @@ async fn where_in_list_filters_on_sqlite() {
             rustango::core::Op::In,
             SqlValue::List(vec![SqlValue::I64(alice), SqlValue::I64(bob)]),
         )
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("fetch IN");
     assert_eq!(posts.len(), 2, "both authors' posts");
@@ -147,7 +147,7 @@ async fn order_by_desc_produces_deterministic_order_on_sqlite() {
     .await;
     let posts: Vec<Post> = Post::objects()
         .order_by(&[("title", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("fetch");
     let titles: Vec<&str> = posts.iter().map(|p| p.title.as_str()).collect();
@@ -155,7 +155,7 @@ async fn order_by_desc_produces_deterministic_order_on_sqlite() {
     // DESC.
     let posts: Vec<Post> = Post::objects()
         .order_by(&[("title", true)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("fetch desc");
     let titles: Vec<&str> = posts.iter().map(|p| p.title.as_str()).collect();
@@ -163,17 +163,17 @@ async fn order_by_desc_produces_deterministic_order_on_sqlite() {
 }
 
 #[tokio::test]
-async fn count_pool_matches_fetch_pool_len_on_sqlite() {
+async fn count_matches_fetch_len_on_sqlite() {
     let pool = fresh_pool().await;
     let (alice, _bob) = seed_basic(&pool).await;
     seed_posts(&pool, alice, &[("a", true), ("b", false), ("c", true)]).await;
     let qs = Post::objects().where_(Post::author.eq(alice));
     let qs2 = Post::objects().where_(Post::author.eq(alice));
-    let n_count = qs.count_pool(&pool).await.expect("count");
-    let n_fetch = qs2.fetch_pool(&pool).await.expect("fetch").len() as i64;
+    let n_count = qs.count(&pool).await.expect("count");
+    let n_fetch = qs2.fetch(&pool).await.expect("fetch").len() as i64;
     assert_eq!(
         n_count, n_fetch,
-        "count_pool should match fetch_pool().len() — got count={n_count}, fetch_len={n_fetch}"
+        "count should match fetch().len() — got count={n_count}, fetch_len={n_fetch}"
     );
 }
 
@@ -184,7 +184,7 @@ async fn foreign_key_get_pool_lazy_loads_author_on_sqlite() {
     seed_posts(&pool, alice, &[("hello", true)]).await;
     let mut posts: Vec<Post> = Post::objects()
         .where_(Post::published.eq(true))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("fetch");
     assert_eq!(posts.len(), 1);
@@ -262,7 +262,7 @@ async fn upsert_via_insert_query_with_do_update_works_on_sqlite() {
     // Verify there's still only one row + `published` is now true.
     let rows: Vec<Post> = Post::objects()
         .where_(Post::title.eq("unique-slot".to_owned()))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("fetch");
     assert_eq!(rows.len(), 1, "ON CONFLICT should keep one row");
@@ -289,7 +289,7 @@ async fn limit_offset_pagination_on_sqlite() {
         .order_by(&[("title", false)])
         .limit(2)
         .offset(0)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("page 1");
     assert_eq!(
@@ -300,7 +300,7 @@ async fn limit_offset_pagination_on_sqlite() {
         .order_by(&[("title", false)])
         .limit(2)
         .offset(2)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("page 2");
     assert_eq!(
@@ -311,7 +311,7 @@ async fn limit_offset_pagination_on_sqlite() {
         .order_by(&[("title", false)])
         .limit(2)
         .offset(4)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("page 3");
     assert_eq!(
@@ -326,7 +326,7 @@ async fn save_pool_updates_existing_row_on_sqlite() {
     let (alice, _) = seed_basic(&pool).await;
     seed_posts(&pool, alice, &[("draft", false)]).await;
     let mut row: Post = Post::objects()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("fetch")
         .into_iter()
@@ -336,7 +336,7 @@ async fn save_pool_updates_existing_row_on_sqlite() {
     row.title = "published".into();
     row.save_pool(&pool).await.expect("save update");
     let again: Post = Post::objects()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("fetch again")
         .into_iter()

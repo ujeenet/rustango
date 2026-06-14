@@ -16,7 +16,7 @@
 //! // Column-vs-column filter.
 //! Reservation::objects()
 //!     .where_col(Reservation::start_date, Op::Lt, F("end_date"))
-//!     .fetch_pool(&pool).await?;
+//!     .fetch(&pool).await?;
 //! ```
 //!
 //! `Expr` carries three variants:

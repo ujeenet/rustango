@@ -751,7 +751,7 @@ pub async fn get_or_create_role_pool(
     let existing: Vec<Role> = Role::objects()
         .where_(Role::name.eq(name.to_owned()))
         .limit(1)
-        .fetch_pool(pool)
+        .fetch(pool)
         .await?;
     if let Some(r) = existing.into_iter().next() {
         return Ok(r.id.get().copied().unwrap_or(0));

@@ -64,7 +64,7 @@ fn user_model_also_implements_pg_from_row() {
 #[test]
 fn maybe_my_from_row_resolves_for_derived_model() {
     // The MaybeMyFromRow bound is what `select_rows_pool` and
-    // `FetcherPool::fetch_pool` use. Confirm derived models satisfy
+    // `FetcherPool::fetch` use. Confirm derived models satisfy
     // it under the mysql feature config.
     fn check<T: rustango::sql::MaybeMyFromRow>() {}
     check::<User>();
@@ -199,14 +199,14 @@ fn direction_aware_pool_runners_are_callable() {
 
 #[test]
 fn fetcher_pool_satisfies_join_bound() {
-    // batch 15 — FetcherPool::fetch_pool now requires LoadRelated +
+    // batch 15 — FetcherPool::fetch now requires LoadRelated +
     // MaybeMyLoadRelated alongside FromRow + MaybeMyFromRow. Every
     // derived Model satisfies all four bounds (FK-less models get
     // empty-arm impls), so this resolves at compile time.
     use rustango::sql::FetcherPool;
     fn _probe(pool: &rustango::sql::Pool) {
-        let _fut = User::objects().fetch_pool(pool);
-        let _fut = Post::objects().fetch_pool(pool);
+        let _fut = User::objects().fetch(pool);
+        let _fut = Post::objects().fetch(pool);
     }
 }
 
@@ -305,11 +305,11 @@ fn audited_auto_pk_model_gets_insert_pool() {
 }
 
 #[test]
-fn counter_pool_count_pool_is_callable() {
-    // batch 24 — QuerySet::count_pool fills the QuerySet counter gap.
+fn counter_pool_count_is_callable() {
+    // batch 24 — QuerySet::count fills the QuerySet counter gap.
     use rustango::sql::CounterPool;
     fn _probe(pool: &rustango::sql::Pool) {
-        let _fut = User::objects().count_pool(pool);
+        let _fut = User::objects().count(pool);
     }
 }
 

@@ -90,7 +90,7 @@ async fn where_exists_finds_authors_with_books() {
         .unwrap();
     let rows = Author::objects()
         .where_exists(inner)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -107,7 +107,7 @@ async fn where_not_exists_finds_authors_with_no_books() {
         .unwrap();
     let rows = Author::objects()
         .where_not_exists(inner)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);

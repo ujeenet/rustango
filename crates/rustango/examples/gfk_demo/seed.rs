@@ -16,7 +16,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     // #253 — seed the admin user used by the session-login form.
     // Credentials default to `admin / admin`; override via the
     // `RUSTANGO_DEMO_USER` / `RUSTANGO_DEMO_PASS` env vars.
-    let existing_admin: Vec<AdminUser> = AdminUser::objects().fetch_pool(pool).await?;
+    let existing_admin: Vec<AdminUser> = AdminUser::objects().fetch(pool).await?;
     if existing_admin.is_empty() {
         let username = std::env::var("RUSTANGO_DEMO_USER").unwrap_or_else(|_| "admin".to_owned());
         let password = std::env::var("RUSTANGO_DEMO_PASS").unwrap_or_else(|_| "admin".to_owned());
@@ -27,7 +27,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Skip the rest if we've already populated.
-    let existing_posts: Vec<Post> = Post::objects().fetch_pool(pool).await?;
+    let existing_posts: Vec<Post> = Post::objects().fetch(pool).await?;
     if !existing_posts.is_empty() {
         println!("→ seed: demo data already present, skipping");
         return Ok(());

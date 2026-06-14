@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite test for `QuerySet::is_empty(&pool)` — inverse of
-//! `exists_pool`, more readable in negation-flavored code.
+//! `exists`, more readable in negation-flavored code.
 
 use rustango::sql::{sqlx, Auto, ExistsPool as _, Pool};
 use rustango::Model;
@@ -49,11 +49,11 @@ async fn is_empty_returns_false_when_rows_match() {
 }
 
 #[tokio::test]
-async fn is_empty_is_inverse_of_exists_pool() {
+async fn is_empty_is_inverse_of_exists() {
     let pool = make_pool().await;
     // Empty table — exists=false, is_empty=true.
     assert_eq!(
-        Post::objects().exists_pool(&pool).await.unwrap(),
+        Post::objects().exists(&pool).await.unwrap(),
         !Post::objects().is_empty(&pool).await.unwrap()
     );
 
@@ -64,7 +64,7 @@ async fn is_empty_is_inverse_of_exists_pool() {
     };
     p.save_pool(&pool).await.unwrap();
     assert_eq!(
-        Post::objects().exists_pool(&pool).await.unwrap(),
+        Post::objects().exists(&pool).await.unwrap(),
         !Post::objects().is_empty(&pool).await.unwrap()
     );
 }

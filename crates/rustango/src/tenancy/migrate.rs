@@ -423,7 +423,7 @@ where
     let registry_pool = pools.registry_pool();
     let orgs: Vec<Org> = Org::objects()
         .where_(Org::active.eq(true))
-        .fetch_pool(&registry_pool)
+        .fetch(&registry_pool)
         .await?;
 
     info!(

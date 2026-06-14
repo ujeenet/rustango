@@ -258,7 +258,7 @@ mod scenarios {
         let rows: Vec<Score> = Score::objects()
             .distinct_on(&["tenant_id"])
             .order_by(&[("tenant_id", false), ("points", true)])
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("distinct_on fetch");
         let players: Vec<(i64, String, i64)> = rows
@@ -298,11 +298,11 @@ mod scenarios {
                 })
         };
         if pool.dialect().name() == "postgres" {
-            let rows: Vec<Score> = qs().fetch_pool(pool).await.expect("PG DISTINCT ON + join");
+            let rows: Vec<Score> = qs().fetch(pool).await.expect("PG DISTINCT ON + join");
             assert_eq!(rows.len(), 2);
         } else {
             let err = qs()
-                .fetch_pool(pool)
+                .fetch(pool)
                 .await
                 .map(|rows: Vec<Score>| rows.len())
                 .expect_err("distinct_on + join must be rejected on the window fallback");
@@ -339,7 +339,7 @@ mod scenarios {
             .expect("inner compile");
         let res = Tenant::objects()
             .join_lateral(top2, "top", WhereExpr::And(vec![]))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await;
         if pool.dialect().name() == "sqlite" {
             let err = res

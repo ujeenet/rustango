@@ -217,7 +217,7 @@ async fn no_operators_warn<W: Write + Send>(
     use crate::sql::FetcherPool;
     let active: Vec<super::auth::Operator> = super::auth::Operator::objects()
         .where_(super::auth::Operator::active.eq(true))
-        .fetch_pool(registry)
+        .fetch(registry)
         .await?;
     if active.is_empty() {
         writeln!(w, "WARNING: no active operators in `rustango_operators` —")?;

@@ -53,7 +53,7 @@ async fn reverse_flips_single_column_ascending_to_descending() {
     // ASC by rating → [b(1), c(2), a(3)]
     let asc: Vec<Widget> = Widget::objects()
         .order_by(&[("rating", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(
@@ -65,7 +65,7 @@ async fn reverse_flips_single_column_ascending_to_descending() {
     let rev: Vec<Widget> = Widget::objects()
         .order_by(&[("rating", false)])
         .reverse()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(
@@ -83,7 +83,7 @@ async fn reverse_flips_descending_to_ascending() {
     let rev: Vec<Widget> = Widget::objects()
         .order_by(&[("rating", true)])
         .reverse()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(
@@ -118,7 +118,7 @@ async fn reverse_flips_each_field_of_a_multi_column_sort() {
     // ORDER BY rating ASC, label ASC → [(1,a), (1,b), (2,c)]
     let asc: Vec<Widget> = Widget::objects()
         .order_by(&[("rating", false), ("label", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(
@@ -130,7 +130,7 @@ async fn reverse_flips_each_field_of_a_multi_column_sort() {
     let rev: Vec<Widget> = Widget::objects()
         .order_by(&[("rating", false), ("label", false)])
         .reverse()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(
@@ -145,7 +145,7 @@ async fn reverse_no_op_when_no_ordering_set() {
     seed(&pool).await;
 
     // No order_by — .reverse() must not error and must return all rows.
-    let rows: Vec<Widget> = Widget::objects().reverse().fetch_pool(&pool).await.unwrap();
+    let rows: Vec<Widget> = Widget::objects().reverse().fetch(&pool).await.unwrap();
     assert_eq!(rows.len(), 3);
 }
 
@@ -156,14 +156,14 @@ async fn double_reverse_returns_to_original() {
 
     let original: Vec<Widget> = Widget::objects()
         .order_by(&[("rating", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     let twice_reversed: Vec<Widget> = Widget::objects()
         .order_by(&[("rating", false)])
         .reverse()
         .reverse()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(

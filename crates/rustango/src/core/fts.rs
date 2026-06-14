@@ -29,7 +29,7 @@
 //!     .annotate("rank", SearchRank::new(&v, &q))
 //!     .where_raw(v.matches(&q))
 //!     .order_by_expr(SearchRank::new(&v, &q), true) // rank DESC
-//!     .fetch_pool(&pool).await?;
+//!     .fetch(&pool).await?;
 //! ```
 //!
 //! ## API surface

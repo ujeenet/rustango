@@ -93,7 +93,7 @@ async fn where_in_subquery_finds_posts_with_public_category() {
         .unwrap();
     let mut titles: Vec<String> = Post::objects()
         .where_in_subquery("category_id", public_ids)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -114,7 +114,7 @@ async fn where_not_in_subquery_finds_posts_outside_public_category() {
         .unwrap();
     let mut titles: Vec<String> = Post::objects()
         .where_not_in_subquery("category_id", public_ids)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()

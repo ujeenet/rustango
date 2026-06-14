@@ -69,7 +69,7 @@ async fn vector_column_round_trip_and_knn() {
     use rustango::core::VectorMetric;
     let nearest: Vec<String> = Doc::objects()
         .k_nearest("embedding", vec![1.0, 0.0, 0.0], 2, VectorMetric::L2)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -80,7 +80,7 @@ async fn vector_column_round_trip_and_knn() {
     // Full ordering across all three, + typed decode of the embedding.
     let all: Vec<Doc> = Doc::objects()
         .order_by_distance("embedding", vec![1.0, 0.0, 0.0], VectorMetric::L2)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     let order: Vec<&str> = all.iter().map(|d| d.title.as_str()).collect();
@@ -95,7 +95,7 @@ async fn vector_column_round_trip_and_knn() {
     // Cosine ordering ranks A first too (identical direction → 0 distance).
     let cos_first = Doc::objects()
         .k_nearest("embedding", vec![1.0, 0.0, 0.0], 1, VectorMetric::Cosine)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(cos_first[0].title, "A");

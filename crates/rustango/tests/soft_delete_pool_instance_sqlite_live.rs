@@ -68,7 +68,7 @@ async fn soft_delete_pool_marks_row_trashed_but_keeps_in_table() {
     // Row still exists in the table; `active()` excludes it.
     let all_with_trashed: Vec<Post> = QuerySet::<Post>::default()
         .with_trashed()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(all_with_trashed.len(), 1);
@@ -76,7 +76,7 @@ async fn soft_delete_pool_marks_row_trashed_but_keeps_in_table() {
 
     let actives: Vec<Post> = QuerySet::<Post>::default()
         .active()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert!(actives.is_empty(), "active() must hide trashed rows");
@@ -93,7 +93,7 @@ async fn restore_pool_clears_deleted_at_back_to_null() {
     // Re-fetch the trashed version, then restore.
     let trashed: Post = QuerySet::<Post>::default()
         .only_trashed()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .pop()
@@ -104,7 +104,7 @@ async fn restore_pool_clears_deleted_at_back_to_null() {
     // Back to active.
     let actives: Vec<Post> = QuerySet::<Post>::default()
         .active()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(actives.len(), 1);
@@ -123,7 +123,7 @@ async fn force_delete_pool_actually_removes_the_row() {
     // Row is gone for real — not even `with_trashed` brings it back.
     let all: Vec<Post> = QuerySet::<Post>::default()
         .with_trashed()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert!(all.is_empty(), "force_delete_pool removes the row entirely");

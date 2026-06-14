@@ -53,7 +53,7 @@ async fn assert_num_queries_counts_single_select() {
     }
 
     assert_num_queries(1, async {
-        let rows: Vec<Post> = Post::objects().fetch_pool(&pool).await.unwrap();
+        let rows: Vec<Post> = Post::objects().fetch(&pool).await.unwrap();
         assert_eq!(rows.len(), 3);
     })
     .await;
@@ -70,7 +70,7 @@ async fn assert_num_queries_counts_insert_then_select() {
         };
         p.insert_pool(&pool).await.unwrap();
 
-        let rows: Vec<Post> = Post::objects().fetch_pool(&pool).await.unwrap();
+        let rows: Vec<Post> = Post::objects().fetch(&pool).await.unwrap();
         assert_eq!(rows.len(), 1);
     })
     .await;
@@ -124,7 +124,7 @@ async fn outside_scope_bumps_are_silently_dropped() {
 
     // Now open a scope and run exactly 1 query — count must be 1, not 6.
     assert_num_queries(1, async {
-        let rows: Vec<Post> = Post::objects().fetch_pool(&pool).await.unwrap();
+        let rows: Vec<Post> = Post::objects().fetch(&pool).await.unwrap();
         assert_eq!(rows.len(), 5);
     })
     .await;
@@ -146,7 +146,7 @@ async fn scope_take_resets_mid_block() {
         assert_eq!(QueryCounter::take(), 2);
 
         // Second segment: 1 select
-        let rows: Vec<Post> = Post::objects().fetch_pool(&pool).await.unwrap();
+        let rows: Vec<Post> = Post::objects().fetch(&pool).await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(QueryCounter::take(), 1);
     })
@@ -165,7 +165,7 @@ async fn fails_loudly_when_count_diverges() {
             title: "x".into(),
         };
         p.insert_pool(&pool).await.unwrap();
-        let _rows: Vec<Post> = Post::objects().fetch_pool(&pool).await.unwrap();
+        let _rows: Vec<Post> = Post::objects().fetch(&pool).await.unwrap();
     })
     .await;
 }

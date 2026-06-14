@@ -200,7 +200,7 @@ mod scenarios {
              refreshes GeneratedFields via RETURNING; if this is now 12, update \
              the audit + issue"
         );
-        let fetched: Vec<Invoice> = Invoice::objects().fetch_pool(pool).await.expect("re-fetch");
+        let fetched: Vec<Invoice> = Invoice::objects().fetch(pool).await.expect("re-fetch");
         assert_eq!(fetched.len(), 1);
         assert_eq!(fetched[0].total, 12, "the DB-side value IS computed");
     }

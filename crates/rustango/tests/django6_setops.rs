@@ -58,7 +58,7 @@ mod scenarios {
         let union: Vec<Item> = Item::objects()
             .filter("grp", "a")
             .union(Item::objects().filter("rnk__lte", 4_i64))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("UNION fetch");
         assert_eq!(sorted_names(union), vec!["a1", "a2", "a3", "b1"]);
@@ -66,7 +66,7 @@ mod scenarios {
         let union_all: Vec<Item> = Item::objects()
             .filter("grp", "a")
             .union_all(Item::objects().filter("rnk__lte", 4_i64))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("UNION ALL fetch");
         assert_eq!(union_all.len(), 7, "3 + 4 with duplicates kept");
@@ -93,7 +93,7 @@ mod scenarios {
                     .order_by(&[("rnk", true)])
                     .limit(1),
             )
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("other-branch order/limit fetch");
         assert_eq!(sorted_names(rows), vec!["a1", "a2", "a3", "b2"]);
@@ -106,7 +106,7 @@ mod scenarios {
             .order_by(&[("rnk", false)])
             .limit(2)
             .union_all(Item::objects().filter("grp", "b"))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("first-queryset order/limit fetch");
         assert_eq!(
@@ -124,7 +124,7 @@ mod scenarios {
             .union(Item::objects().filter("grp", "b"))
             .order_by(&[("rnk", true)])
             .limit(3)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("outer order/limit fetch");
         let ranks: Vec<i64> = rows.into_iter().map(|i| i.rnk).collect();
@@ -136,7 +136,7 @@ mod scenarios {
         let rows: Vec<Item> = Item::objects()
             .filter("grp", "a")
             .intersection(Item::objects().filter("rnk__lte", 1_i64))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("INTERSECT fetch (MySQL needs 8.0.31+)");
         assert_eq!(sorted_names(rows), vec!["a1"]);
@@ -147,7 +147,7 @@ mod scenarios {
         let rows: Vec<Item> = Item::objects()
             .filter("grp", "a")
             .difference(Item::objects().filter("rnk__lte", 2_i64))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("EXCEPT fetch (MySQL needs 8.0.31+)");
         assert_eq!(sorted_names(rows), vec!["a3"]);
@@ -162,7 +162,7 @@ mod scenarios {
         let rows: Vec<Item> = Item::objects()
             .filter("grp", "a")
             .with_compound(SetOp::Union, branch)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("with_compound fetch");
         assert_eq!(rows.len(), 5);

@@ -51,7 +51,7 @@ where
     let registry = pools.registry_pool();
     let existing: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(parsed.slug.clone()))
-        .fetch_pool(&registry)
+        .fetch(&registry)
         .await?;
     if !existing.is_empty() {
         return Err(TenancyError::Validation(format!(
@@ -336,7 +336,7 @@ where
     let registry = pools.registry_pool();
     let existing: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .fetch_pool(&registry)
+        .fetch(&registry)
         .await?;
     let Some(org) = existing.into_iter().next() else {
         return Err(TenancyError::Validation(format!(
@@ -462,7 +462,7 @@ where
     let registry = pools.registry_pool();
     let existing: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
-        .fetch_pool(&registry)
+        .fetch(&registry)
         .await?;
     let Some(org) = existing.into_iter().next() else {
         return Err(TenancyError::Validation(format!(
@@ -625,7 +625,7 @@ pub(super) async fn list_tenants<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let orgs: Vec<Org> = Org::objects().fetch_pool(&pools.registry_pool()).await?;
+    let orgs: Vec<Org> = Org::objects().fetch(&pools.registry_pool()).await?;
     if orgs.is_empty() {
         writeln!(w, "(no tenants)")?;
         return Ok(());

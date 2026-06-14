@@ -21,19 +21,19 @@
 //! For server-side rendered list views (Tera / template_views), pure-
 //! metadata `Paginator` + `Page` types. The `Page` holds no rows — the
 //! caller computes `page.offset()` and `page.limit()` and feeds them
-//! into a `QuerySet` `.offset(...).limit(...).fetch_pool(...)` call.
+//! into a `QuerySet` `.offset(...).limit(...).fetch(...)` call.
 //!
 //! ```ignore
 //! use rustango::pagination::Paginator;
 //!
-//! let total = Post::objects().count_pool(&pool).await?;
+//! let total = Post::objects().count(&pool).await?;
 //! let paginator = Paginator::new(total as usize, 20);
 //! let page = paginator.get_page(requested_page_number); // never errors — clamps
 //! let rows = Post::objects()
 //!     .order_by(&[("id", false)])
 //!     .limit(page.limit() as i64)
 //!     .offset(page.offset() as i64)
-//!     .fetch_pool(&pool).await?;
+//!     .fetch(&pool).await?;
 //!
 //! // Template rendering — emit the 1, 2, …, 12, 13, 14, …, 49, 50 pager:
 //! for mark in paginator.get_elided_page_range(page.number, 3, 2) { … }
@@ -70,7 +70,7 @@
 //! if let Some(c) = &cursor {
 //!     q = q.filter("id__gt", c.position.id);
 //! }
-//! let rows = q.fetch_pool(&pool).await?;
+//! let rows = q.fetch(&pool).await?;
 //!
 //! let page = paginator.build_page(rows, |row| PostPos { id: row.id });
 //! // page.items — up to N rows
@@ -932,7 +932,7 @@ impl<'a> Page<'a> {
 
     /// Slice a fully-fetched item list for this page. Convenient for
     /// in-memory paging when you've already pulled everything via a
-    /// single `fetch_pool` and want to render one page at a time
+    /// single `fetch` and want to render one page at a time
     /// without round-trips. For DB-backed paging, prefer
     /// `.limit([page.limit()]).offset([page.offset()])` on the queryset.
     ///

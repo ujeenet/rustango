@@ -115,7 +115,7 @@ impl<T> QuerySet<T>
 where
     T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
 {
-    /// Like [`Fetcher::fetch`] but takes any sqlx executor — `&PgPool`,
+    /// Like [`FetcherPool::fetch`] but takes any sqlx executor — `&PgPool`,
     /// `&mut PgConnection`, or a `Transaction`. The escape hatch for
     /// tenant-scoped queries: schema-mode tenants share the registry
     /// pool but rely on a per-checkout `SET search_path`, so passing
@@ -123,7 +123,7 @@ where
     /// connection via `TenantPools::acquire(&org)` and pass that here.
     ///
     /// # Errors
-    /// As [`Fetcher::fetch`].
+    /// As [`FetcherPool::fetch`].
     pub async fn fetch_on<'c, E>(self, executor: E) -> Result<Vec<T>, ExecError>
     where
         E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -2102,7 +2102,7 @@ pub async fn fetch_datetimes_pool<T: crate::core::Model + Send>(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-/// `Counter::count` against either backend — fills the QuerySet
+/// `CounterPool::count` against either backend — fills the QuerySet
 /// counter gap from batches 5/15. Counts rows matching the queryset's
 /// filters via `count_rows_pool`.
 ///
@@ -2111,15 +2111,13 @@ pub trait CounterPool<T: Model + Send> {
     /// Count rows matching the queryset's filters against either backend.
     ///
     /// # Errors
-    /// As [`Counter::count`].
-    fn count_pool(
-        self,
-        pool: &Pool,
-    ) -> impl std::future::Future<Output = Result<i64, ExecError>> + Send;
+    /// As [`CounterPool::count`].
+    fn count(self, pool: &Pool)
+        -> impl std::future::Future<Output = Result<i64, ExecError>> + Send;
 }
 
 impl<T: Model + Send> CounterPool<T> for QuerySet<T> {
-    async fn count_pool(self, pool: &Pool) -> Result<i64, ExecError> {
+    async fn count(self, pool: &Pool) -> Result<i64, ExecError> {
         let select = self.compile()?;
         count_rows_pool(
             pool,
@@ -2137,9 +2135,9 @@ impl<T: Model + Send> CounterPool<T> for QuerySet<T> {
 /// (issue #330) — boolean predicates on top of the existing count
 /// path.
 ///
-/// `exists_pool` returns `Ok(true)` when at least one row matches the
+/// `exists` returns `Ok(true)` when at least one row matches the
 /// queryset's filters, `Ok(false)` otherwise. Internally runs the
-/// same `COUNT(*)` as [`CounterPool::count_pool`] and compares to
+/// same `COUNT(*)` as [`CounterPool::count`] and compares to
 /// zero — simple + dialect-agnostic. Future optimization: emit
 /// `SELECT 1 FROM … LIMIT 1` instead of `COUNT(*)`, which doesn't
 /// scan all matching rows. Tracked as a follow-up; the count
@@ -2147,8 +2145,8 @@ impl<T: Model + Send> CounterPool<T> for QuerySet<T> {
 ///
 /// `contains_pk` adds the convenience of "is THIS pk in the
 /// queryset?" — looks up the model's primary key column from the
-/// schema, builds an `Eq` predicate, and forwards to `exists_pool`.
-/// Equivalent to `qs.filter("<pk_col>", pk).exists_pool(pool)` with
+/// schema, builds an `Eq` predicate, and forwards to `exists`.
+/// Equivalent to `qs.filter("<pk_col>", pk).exists(pool)` with
 /// the column lookup baked in.
 ///
 /// Pulled in via `use rustango::sql::ExistsPool;`.
@@ -2157,19 +2155,19 @@ pub trait ExistsPool<T: Model + Send> {
     /// filters, `Ok(false)` otherwise. #330.
     ///
     /// # Errors
-    /// As [`CounterPool::count_pool`].
-    fn exists_pool(
+    /// As [`CounterPool::count`].
+    fn exists(
         self,
         pool: &Pool,
     ) -> impl std::future::Future<Output = Result<bool, ExecError>> + Send;
 
     /// `Ok(true)` when the queryset matches zero rows, `Ok(false)`
-    /// otherwise — inverse of [`Self::exists_pool`]. Reads naturally
+    /// otherwise — inverse of [`Self::exists`]. Reads naturally
     /// in negation-flavored code (`if qs.is_empty(&pool).await? {
-    /// ... }`) where `!qs.exists_pool(...).await?` is awkward.
+    /// ... }`) where `!qs.exists(...).await?` is awkward.
     ///
     /// # Errors
-    /// As [`Self::exists_pool`].
+    /// As [`Self::exists`].
     fn is_empty(
         self,
         pool: &Pool,
@@ -2192,7 +2190,7 @@ pub trait ExistsPool<T: Model + Send> {
     /// models without an explicit `#[rustango(primary_key)]`).
     ///
     /// # Errors
-    /// As [`Self::exists_pool`], plus a model-without-PK error wrapped
+    /// As [`Self::exists`], plus a model-without-PK error wrapped
     /// in `ExecError::Query`.
     fn contains_pk(
         self,
@@ -2202,13 +2200,13 @@ pub trait ExistsPool<T: Model + Send> {
 }
 
 impl<T: Model + Send> ExistsPool<T> for QuerySet<T> {
-    async fn exists_pool(self, pool: &Pool) -> Result<bool, ExecError> {
-        let count = self.count_pool(pool).await?;
+    async fn exists(self, pool: &Pool) -> Result<bool, ExecError> {
+        let count = self.count(pool).await?;
         Ok(count > 0)
     }
 
     async fn is_empty(self, pool: &Pool) -> Result<bool, ExecError> {
-        let count = self.count_pool(pool).await?;
+        let count = self.count(pool).await?;
         Ok(count == 0)
     }
 
@@ -2228,7 +2226,7 @@ impl<T: Model + Send> ExistsPool<T> for QuerySet<T> {
             }));
         };
         self.filter_op(pk_field.column, crate::core::Op::Eq, pk_value.into())
-            .exists_pool(pool)
+            .exists(pool)
             .await
     }
 }
@@ -2488,8 +2486,8 @@ where
     /// declared any.
     ///
     /// # Errors
-    /// As [`Fetcher::fetch`].
-    fn fetch_pool(
+    /// As [`FetcherPool::fetch`].
+    fn fetch(
         self,
         pool: &Pool,
     ) -> impl std::future::Future<Output = Result<Vec<T>, ExecError>> + Send;
@@ -2507,7 +2505,7 @@ where
         + Send
         + Unpin,
 {
-    async fn fetch_pool(self, pool: &Pool) -> Result<Vec<T>, ExecError> {
+    async fn fetch(self, pool: &Pool) -> Result<Vec<T>, ExecError> {
         let select = self.compile()?;
         select_rows_pool_with_related(pool, &select).await
     }
@@ -2515,7 +2513,7 @@ where
 
 // v0.45 — single-row sugar on top of FetcherPool. Each method
 // applies the appropriate `order_by` + `limit(1)` then forwards to
-// `fetch_pool`. All four are inherent methods on `QuerySet<T>` (not
+// `fetch`. All four are inherent methods on `QuerySet<T>` (not
 // trait methods) because adding default methods to `FetcherPool`
 // would require RTN syntax against `Self::Future` and bound shuffling
 // we don't need — `QuerySet<T>` is the only Self that matters.
@@ -2540,10 +2538,10 @@ where
     /// way (it falls back to PK ordering for determinism).
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch_pool`].
+    /// As [`FetcherPool::fetch`].
     pub async fn first(self, pool: &Pool) -> Result<Option<T>, ExecError> {
         let qs = ensure_pk_ordering(self, /*reverse=*/ false);
-        let rows = qs.limit(1).fetch_pool(pool).await?;
+        let rows = qs.limit(1).fetch(pool).await?;
         Ok(rows.into_iter().next())
     }
 
@@ -2555,10 +2553,10 @@ where
     /// If no `order_by` is set, sorts by PK DESC.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch_pool`].
+    /// As [`FetcherPool::fetch`].
     pub async fn last(self, pool: &Pool) -> Result<Option<T>, ExecError> {
         let qs = ensure_pk_ordering(self, /*reverse=*/ true);
-        let rows = qs.limit(1).fetch_pool(pool).await?;
+        let rows = qs.limit(1).fetch(pool).await?;
         Ok(rows.into_iter().next())
     }
 
@@ -2569,10 +2567,10 @@ where
     /// declares the sort itself.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch_pool`].
+    /// As [`FetcherPool::fetch`].
     pub async fn earliest(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
         self = self.replace_order_by(&[(field, false)]);
-        let rows = self.limit(1).fetch_pool(pool).await?;
+        let rows = self.limit(1).fetch(pool).await?;
         Ok(rows.into_iter().next())
     }
 
@@ -2583,10 +2581,10 @@ where
     /// declares the sort itself.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch_pool`].
+    /// As [`FetcherPool::fetch`].
     pub async fn latest(mut self, field: &str, pool: &Pool) -> Result<Option<T>, ExecError> {
         self = self.replace_order_by(&[(field, true)]);
-        let rows = self.limit(1).fetch_pool(pool).await?;
+        let rows = self.limit(1).fetch(pool).await?;
         Ok(rows.into_iter().next())
     }
 
@@ -2614,7 +2612,7 @@ where
     /// via the deferred-error path.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch_pool`].
+    /// As [`FetcherPool::fetch`].
     pub async fn find(self, pk: impl Into<SqlValue>, pool: &Pool) -> Result<Option<T>, ExecError> {
         self.where_key(pk).first(pool).await
     }
@@ -2681,11 +2679,11 @@ where
     /// ```
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch_pool`]; additionally
+    /// As [`FetcherPool::fetch`]; additionally
     /// [`ExecError::Driver(sqlx::Error::RowNotFound)`] on empty
     /// result, [`ExecError::MultipleRowsReturned`] on >1 matches.
     pub async fn sole(self, pool: &Pool) -> Result<T, ExecError> {
-        let mut rows = self.limit(2).fetch_pool(pool).await?;
+        let mut rows = self.limit(2).fetch(pool).await?;
         match rows.len() {
             0 => Err(ExecError::Driver(sqlx::Error::RowNotFound)),
             1 => Ok(rows.remove(0)),
@@ -2709,7 +2707,7 @@ where
     /// so a `get_latest_by = "-priority"` reverses the sort.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch_pool`]; also returns
+    /// As [`FetcherPool::fetch`]; also returns
     /// [`ExecError::Query`] when `Meta.get_latest_by` is unset.
     pub async fn latest_default(self, pool: &Pool) -> Result<Option<T>, ExecError> {
         let Some((field, attr_desc)) = T::SCHEMA.get_latest_by else {
@@ -2886,7 +2884,7 @@ where
     /// unique column to avoid surprises.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch_pool`].
+    /// As [`FetcherPool::fetch`].
     pub async fn in_bulk<C, K, I, F>(
         self,
         column: C,
@@ -2915,7 +2913,7 @@ where
                 crate::core::Op::In,
                 crate::core::SqlValue::List(id_values),
             )
-            .fetch_pool(pool)
+            .fetch(pool)
             .await?;
         let mut out = std::collections::HashMap::with_capacity(rows.len());
         for row in rows {
@@ -2980,7 +2978,7 @@ where
     /// transaction. Stitches `select_related` joins automatically.
     ///
     /// # Errors
-    /// As [`FetcherPool::fetch_pool`].
+    /// As [`FetcherPool::fetch`].
     fn fetch_tx(
         self,
         tx: &mut PoolTx<'_>,

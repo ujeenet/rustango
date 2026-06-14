@@ -119,7 +119,7 @@ async fn where_has_filter_narrows_to_authors_with_matching_child_rows() {
     let inner = Book::objects().filter("published", true).compile().unwrap();
     let rows = Author::objects()
         .where_has_filter("books", inner)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -134,7 +134,7 @@ async fn where_doesnt_have_filter_finds_authors_without_matching_child_rows() {
     let inner = Book::objects().filter("published", true).compile().unwrap();
     let mut names: Vec<String> = Author::objects()
         .where_doesnt_have_filter("books", inner)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -151,7 +151,7 @@ async fn where_has_filter_with_unknown_relation_errors() {
     let inner = Book::objects().compile().unwrap();
     let err = Author::objects()
         .where_has_filter("nonexistent", inner)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap_err();
     assert!(format!("{err}").contains("nonexistent"));
@@ -166,7 +166,7 @@ async fn where_has_filter_with_wrong_child_model_errors() {
     let wrong_inner = Other::objects().compile().unwrap();
     let err = Author::objects()
         .where_has_filter("books", wrong_inner)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap_err();
     let msg = format!("{err}");

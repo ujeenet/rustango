@@ -15,8 +15,8 @@
 //!    suppresses one scope; other scopes (if any) keep applying.
 //! 3. **Wholesale opt-out** — `qs.without_global_scopes()` returns the
 //!    same WHERE you'd get on a model with no scopes declared.
-//! 4. **Apply across query verbs** — SELECT (`fetch_pool` /
-//!    `Model::all`) and aggregate (`count_pool` / `Model::count`) both
+//! 4. **Apply across query verbs** — SELECT (`fetch` /
+//!    `Model::all`) and aggregate (`count` / `Model::count`) both
 //!    fold the scope in. DELETE is exercised via the free
 //!    `rustango::sql::delete_pool` to prove `compile_delete()` honors
 //!    the scope too.
@@ -108,7 +108,7 @@ async fn default_queryset_hides_inactive_rows() {
     let pool = make_pool().await;
     seed(&pool).await;
     // `Post::all(&pool)` is the macro-emitted shortcut over
-    // `Post::objects().fetch_pool(&pool)` — the scope should fold in
+    // `Post::objects().fetch(&pool)` — the scope should fold in
     // here just as in the explicit chain.
     let visible = Post::all(&pool).await.unwrap();
     assert_eq!(visible.len(), 3, "scope must filter to active rows only");
@@ -123,7 +123,7 @@ async fn without_global_scope_by_name_sees_every_row() {
     seed(&pool).await;
     let all = Post::objects()
         .without_global_scope("active")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(all.len(), 5);
@@ -135,7 +135,7 @@ async fn without_global_scopes_sees_every_row() {
     seed(&pool).await;
     let all = Post::objects()
         .without_global_scopes()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(all.len(), 5);
@@ -150,14 +150,14 @@ async fn unknown_scope_name_is_silently_ignored() {
     // robust against scope renames.
     let visible = Post::objects()
         .without_global_scope("nope")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(visible.len(), 3);
 }
 
 #[tokio::test]
-async fn count_pool_honors_global_scope() {
+async fn count_honors_global_scope() {
     let pool = make_pool().await;
     seed(&pool).await;
     let active_count = Post::count(&pool).await.unwrap();
@@ -165,7 +165,7 @@ async fn count_pool_honors_global_scope() {
 
     let total = Post::objects()
         .without_global_scopes()
-        .count_pool(&pool)
+        .count(&pool)
         .await
         .unwrap();
     assert_eq!(total, 5);
@@ -179,7 +179,7 @@ async fn user_filters_compose_with_global_scope() {
     // active row whose title equals "alpha".
     let rows = Post::objects()
         .filter("title", "alpha")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -189,14 +189,14 @@ async fn user_filters_compose_with_global_scope() {
     // empty (scope hides it); unscoped MUST find it.
     let beta_scoped = Post::objects()
         .filter("title", "beta")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert!(beta_scoped.is_empty(), "scope must hide inactive `beta`");
     let beta_unscoped = Post::objects()
         .without_global_scopes()
         .filter("title", "beta")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(beta_unscoped.len(), 1);
@@ -215,7 +215,7 @@ async fn compile_delete_honors_global_scope() {
 
     let survivors = Post::objects()
         .without_global_scopes()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(survivors.len(), 2);

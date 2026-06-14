@@ -10,7 +10,7 @@
 //!   - Model derivation with `Auto<i64>` PK + `ForeignKey<T>`
 //!   - Schema bootstrap via the dialect-aware DDL emitter
 //!   - `insert_pool` (INSERT … RETURNING populating Auto PKs)
-//!   - `save_pool` / `delete_pool` / `count_pool` / `fetch_pool`
+//!   - `save_pool` / `delete_pool` / `count` / `fetch`
 //!   - QuerySet `filter` / `order_by` / `limit` / `offset`
 //!   - Filter operators: Eq, Gt, In, Like, ILike, Between
 //!   - `select_related` (FK join decoded via LoadRelatedSqlite)
@@ -132,12 +132,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustango::sql::bulk_insert_pool(&pool, &bulk_query).await?;
     println!("bulk_insert_pool inserted {} rows", post_seed.len());
 
-    println!("\n== 3. count_pool + fetch_pool ==");
-    let total = Post::objects().count_pool(&pool).await?;
+    println!("\n== 3. count + fetch ==");
+    let total = Post::objects().count(&pool).await?;
     println!("Post count: {total}");
     let all_posts: Vec<Post> = Post::objects()
         .order_by(&[("id", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     for p in &all_posts {
         println!(
@@ -154,13 +154,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let alice_posts: Vec<Post> = Post::objects()
         .filter_op("author_id", Op::Eq, alice_id)
         .order_by(&[("title", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     println!("Alice has {} post(s)", alice_posts.len());
 
     let popular: Vec<Post> = Post::objects()
         .filter_op("views", Op::Gt, 0_i64)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     println!("posts with views > 0: {}", popular.len());
 
@@ -170,20 +170,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Op::In,
             SqlValue::List(vec![SqlValue::I64(alice_id), SqlValue::I64(bob_id)]),
         )
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     println!("posts by Alice or Bob: {}", by_known_authors.len());
 
     let titles_with_pks: Vec<Post> = Post::objects()
         .filter_op("title", Op::Like, "%PKs%")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     println!("LIKE '%PKs%': {}", titles_with_pks.len());
 
     // ILIKE — translated to LOWER(col) LIKE LOWER(?) on SQLite.
     let titles_ilike: Vec<Post> = Post::objects()
         .filter_op("title", Op::ILike, "%hello%")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     println!("ILIKE '%hello%': {}", titles_ilike.len());
 
@@ -193,7 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Op::Between,
             SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(50)]),
         )
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     println!("BETWEEN 1 AND 50 views: {}", mid_views.len());
 
@@ -201,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let newest_two: Vec<Post> = Post::objects()
         .order_by(&[("published_at", true)])
         .limit(2)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     for p in &newest_two {
         println!("  newest: {}", p.title);
@@ -210,7 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .order_by(&[("id", false)])
         .offset(1)
         .limit(2)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     println!("skip 1 row, take 2: {}", skip_one.len());
 
@@ -218,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut first = Post::objects()
         .order_by(&[("id", false)])
         .limit(1)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?
         .pop()
         .expect("at least one post");
@@ -226,7 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     first.save_pool(&pool).await?;
     let refetched: Post = QuerySet::<Post>::new()
         .filter_op("id", Op::Eq, *first.id.get().unwrap())
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?
         .pop()
         .unwrap();
@@ -256,7 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let alice_after: Author = QuerySet::<Author>::new()
         .filter_op("id", Op::Eq, alice_id)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?
         .pop()
         .unwrap();
@@ -267,7 +267,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let joined: Vec<Post> = Post::objects()
         .select_related("author_id")
         .order_by(&[("id", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     for p in &joined {
         let author_name = p
@@ -314,13 +314,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n== 12. delete_pool removes a row ==");
     let doomed = Post::objects()
         .filter_op("title", Op::Eq, "Draft")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?
         .pop()
         .expect("Draft post exists");
     let removed = doomed.delete_pool(&pool).await?;
     println!("delete_pool removed {removed} row");
-    let after = Post::objects().count_pool(&pool).await?;
+    let after = Post::objects().count(&pool).await?;
     println!("Post count after delete: {after}");
 
     println!("\n== ✓ All 12 sections completed against in-memory SQLite ==");

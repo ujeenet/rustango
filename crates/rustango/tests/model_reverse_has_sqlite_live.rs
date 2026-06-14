@@ -17,7 +17,7 @@
 //! ```ignore
 //! Post::objects()
 //!     .where_raw(Post::comments_exists_expr())
-//!     .fetch_pool(&pool).await?;
+//!     .fetch(&pool).await?;
 //! ```
 //!
 //! Tri-dialect: `EXISTS` is portable across PG / MySQL / SQLite —
@@ -117,7 +117,7 @@ async fn where_has_returns_only_posts_with_at_least_one_comment() {
 
     let mut posts = Post::objects()
         .where_raw(Post::comments_exists_expr())
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     posts.sort_by_key(|p| p.id.get().copied().unwrap());
@@ -134,7 +134,7 @@ async fn where_doesnt_have_returns_only_posts_with_zero_comments() {
 
     let posts = Post::objects()
         .where_raw(Post::comments_not_exists_expr())
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(posts.len(), 1);
@@ -152,7 +152,7 @@ async fn reverse_has_composes_with_user_filters() {
     let posts = Post::objects()
         .where_raw(Post::comments_exists_expr())
         .filter("title__startswith", "Has")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(posts.len(), 1);
@@ -165,7 +165,7 @@ async fn empty_child_table_returns_zero_via_where_has() {
     // No seeding — comment table is empty so EXISTS never matches.
     let posts = Post::objects()
         .where_raw(Post::comments_exists_expr())
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert!(posts.is_empty());
@@ -180,7 +180,7 @@ async fn comments_accessor_returns_chainable_queryset() {
     let (p1_id, _p2_id, _p3_id) = seed(&pool).await;
     let p1 = Post::find(p1_id, &pool).await.unwrap().unwrap();
 
-    let all = p1.comments().fetch_pool(&pool).await.unwrap();
+    let all = p1.comments().fetch(&pool).await.unwrap();
     assert_eq!(all.len(), 3);
     for c in &all {
         // Every fetched comment's FK matches this post's id.
@@ -191,7 +191,7 @@ async fn comments_accessor_returns_chainable_queryset() {
     let filtered = p1
         .comments()
         .filter("body", "comment-1")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(filtered.len(), 1);
@@ -229,7 +229,7 @@ async fn comments_first_returns_first_child_or_none() {
 #[tokio::test]
 async fn comments_fetch_bare_name_hot_path() {
     // Bare-name hot path — `post.comments_fetch(&pool)` is the
-    // suffix-free shortcut over `post.comments().fetch_pool(&pool)`.
+    // suffix-free shortcut over `post.comments().fetch(&pool)`.
     // Same rows, no `_pool` in the user-visible spelling.
     let pool = make_pool().await;
     let (p1_id, _, _) = seed(&pool).await;

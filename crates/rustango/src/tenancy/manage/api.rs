@@ -75,7 +75,7 @@ where
 {
     let mut rows: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))
-        .fetch_pool(&pools.registry_pool())
+        .fetch(&pools.registry_pool())
         .await?;
     Ok(rows.pop())
 }
@@ -245,7 +245,7 @@ where
     let registry = pools.registry_pool();
     let mut existing: Vec<Operator> = Operator::objects()
         .where_(Operator::username.eq(username.to_owned()))
-        .fetch_pool(&registry)
+        .fetch(&registry)
         .await?;
     if let Some(op) = existing.pop() {
         return Ok(op);
@@ -291,7 +291,7 @@ where
 
     let mut existing: Vec<User> = User::objects()
         .where_(User::username.eq(username.to_owned()))
-        .fetch_pool(&scoped)
+        .fetch(&scoped)
         .await?;
     if let Some(u) = existing.pop() {
         return Ok(u);

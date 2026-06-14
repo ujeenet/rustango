@@ -89,7 +89,7 @@ async fn active_filters_to_non_trashed() {
 
     let rows: Vec<Post> = QuerySet::<Post>::default()
         .active()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3, "expected 3 alive rows: {rows:?}");
@@ -105,7 +105,7 @@ async fn only_trashed_filters_to_trashed() {
 
     let rows: Vec<Post> = QuerySet::<Post>::default()
         .only_trashed()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2, "expected 2 trashed rows: {rows:?}");
@@ -121,7 +121,7 @@ async fn with_trashed_is_no_op_returning_all_rows() {
 
     let rows: Vec<Post> = QuerySet::<Post>::default()
         .with_trashed()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 5, "with_trashed() should not filter anything");
@@ -138,7 +138,7 @@ async fn active_composes_with_other_filters() {
     let rows: Vec<Post> = QuerySet::<Post>::default()
         .active()
         .filter("title__startswith", "alive")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3);
@@ -160,14 +160,14 @@ async fn active_is_noop_on_model_without_soft_delete_column() {
 
     let rows: Vec<Plain> = QuerySet::<Plain>::default()
         .active()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
 
     let rows: Vec<Plain> = QuerySet::<Plain>::default()
         .only_trashed()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2, "only_trashed() no-op on non-SD model");

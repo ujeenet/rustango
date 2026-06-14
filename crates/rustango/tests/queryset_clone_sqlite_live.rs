@@ -64,8 +64,8 @@ async fn cloning_a_queryset_lets_branches_diverge() {
     let drafts = base.clone().filter("status", "draft");
     let pub_only = base.filter("status", "published");
 
-    let drafts_rows = drafts.fetch_pool(&pool).await.unwrap();
-    let pub_rows = pub_only.fetch_pool(&pool).await.unwrap();
+    let drafts_rows = drafts.fetch(&pool).await.unwrap();
+    let pub_rows = pub_only.fetch(&pool).await.unwrap();
 
     assert_eq!(drafts_rows.len(), 2);
     assert!(drafts_rows.iter().all(|r| r.status == "draft"));
@@ -84,10 +84,10 @@ async fn clone_does_not_share_pending_state() {
     let with_filter = original.clone().filter("status", "draft");
 
     // Original is still unfiltered → returns all 5.
-    let all = original.fetch_pool(&pool).await.unwrap();
+    let all = original.fetch(&pool).await.unwrap();
     assert_eq!(all.len(), 5);
 
     // Cloned-then-filtered branch → returns only the 2 drafts.
-    let drafts = with_filter.fetch_pool(&pool).await.unwrap();
+    let drafts = with_filter.fetch(&pool).await.unwrap();
     assert_eq!(drafts.len(), 2);
 }

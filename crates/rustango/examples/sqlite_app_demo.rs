@@ -80,7 +80,7 @@ fn routes() -> Router {
 async fn list_users(Extension(pool): Extension<Arc<Pool>>) -> Json<Vec<User>> {
     let users = User::objects()
         .order_by(&[("id", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("fetch users");
     Json(users)

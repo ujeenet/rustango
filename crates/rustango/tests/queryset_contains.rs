@@ -50,35 +50,35 @@ async fn seed(pool: &Pool) -> Vec<i64> {
     ids
 }
 
-// ----- exists_pool
+// ----- exists
 
 #[tokio::test]
-async fn exists_pool_true_when_any_match() {
+async fn exists_true_when_any_match() {
     let pool = fresh_pool().await;
     seed(&pool).await;
-    assert!(Widget::objects().exists_pool(&pool).await.unwrap());
+    assert!(Widget::objects().exists(&pool).await.unwrap());
 }
 
 #[tokio::test]
-async fn exists_pool_false_on_empty_table() {
+async fn exists_false_on_empty_table() {
     let pool = fresh_pool().await;
-    assert!(!Widget::objects().exists_pool(&pool).await.unwrap());
+    assert!(!Widget::objects().exists(&pool).await.unwrap());
 }
 
 #[tokio::test]
-async fn exists_pool_false_when_filter_excludes_all() {
+async fn exists_false_when_filter_excludes_all() {
     let pool = fresh_pool().await;
     seed(&pool).await;
     let any_z: bool = Widget::objects()
         .where_(Widget::label.eq("z".to_owned()))
-        .exists_pool(&pool)
+        .exists(&pool)
         .await
         .unwrap();
     assert!(!any_z);
 }
 
 #[tokio::test]
-async fn exists_pool_honors_chained_filters() {
+async fn exists_honors_chained_filters() {
     let pool = fresh_pool().await;
     seed(&pool).await;
     // Both filters need to match — there ARE published rows, but
@@ -86,7 +86,7 @@ async fn exists_pool_honors_chained_filters() {
     let q = Widget::objects()
         .where_(Widget::published.eq(true))
         .where_(Widget::label.eq("b".to_owned()))
-        .exists_pool(&pool)
+        .exists(&pool)
         .await
         .unwrap();
     assert!(!q);
@@ -141,7 +141,7 @@ async fn contains_pk_after_delete_returns_false() {
     // contains_pk flips to false.
     let row: Widget = Widget::objects()
         .where_(Widget::id.eq(ids[0]))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()

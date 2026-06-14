@@ -35,10 +35,7 @@ fn into_pool(p: &AttachedPool) -> Pool {
 #[must_use]
 pub fn api() -> Router {
     Router::new()
-        .route(
-            "/shop/products",
-            get(list_products).post(create_product),
-        )
+        .route("/shop/products", get(list_products).post(create_product))
         .route("/shop/products/{id}", get(retrieve_product))
 }
 
@@ -99,7 +96,7 @@ async fn list_products(
         qs = qs.filter_op("active", Op::Eq, want_active);
     }
     let rows: Vec<Product> = qs
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(rows.into_iter().map(ProductOut::from).collect()))
@@ -112,7 +109,7 @@ async fn retrieve_product(
     let pool = into_pool(&pool);
     let mut rows: Vec<Product> = Product::objects()
         .filter_op("id", Op::Eq, id)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(p) = rows.pop() {
@@ -151,7 +148,7 @@ async fn create_product(
     };
     let mut rows: Vec<Product> = Product::objects()
         .filter_op("id", Op::Eq, id)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let stored = rows.pop().ok_or((

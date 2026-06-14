@@ -159,7 +159,7 @@ async fn range_contains_operator_filters() {
     // `seats @> int4range(5,6)` — only "small" contains seat 5.
     let names: Vec<String> = Event::objects()
         .where_(Event::seats.range_contains("[5,6)"))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()

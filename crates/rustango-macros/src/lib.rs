@@ -242,7 +242,7 @@ pub fn embed_migrations(input: TokenStream) -> TokenStream {
 ///         Q!(User.active = true)
 ///             .and(Q!(User.email__icontains = "alice"))
 ///     )
-///     .fetch_pool(&pool).await?;
+///     .fetch(&pool).await?;
 /// ```
 ///
 /// All emitted code routes through existing per-dialect writers — no new
@@ -1388,7 +1388,7 @@ fn reverse_helper_tokens(
                     let _pk: #root::core::SqlValue = self.__rustango_pk_value();
                     #root::query::QuerySet::<#child_ident>::new()
                         .filter_op(#fk_col, #root::core::Op::Eq, _pk)
-                        .fetch_pool(pool)
+                        .fetch(pool)
                         .await
                 }
             }
@@ -1639,7 +1639,7 @@ fn reverse_has_accessor_tokens(
              `{child_fk_column}` matches this `{struct_name}` \
              instance's primary key. **Chainable**: compose `.filter()` \
              / `.order_by()` / `.limit()` etc. on top, then call \
-             `.fetch_pool(&pool)` (the QuerySet trait method) when \
+             `.fetch(&pool)` (the QuerySet trait method) when \
              done. For the simple \"fetch all\" hot path with no \
              further composition, prefer the bare-name \
              `{name}_fetch(&pool)` companion.",
@@ -1647,7 +1647,7 @@ fn reverse_has_accessor_tokens(
         );
         let fetch_doc = format!(
             "Eloquent `$model->{name}->get()` — bare-name hot-path \
-             over `{name}(&self).fetch_pool(&pool)`. Use this when \
+             over `{name}(&self).fetch(&pool)`. Use this when \
              you don't need further `.filter()` / `.order_by()` \
              composition; falls back to the chainable accessor when \
              you do. Avoids the `_pool` suffix on the most common \
@@ -1670,7 +1670,7 @@ fn reverse_has_accessor_tokens(
                 #root::sql::ExecError,
             > {
                 use #root::sql::FetcherPool as _;
-                self.#accessor_ident().fetch_pool(pool).await
+                self.#accessor_ident().fetch(pool).await
             }
 
             /// Eloquent `$model->relation->first()` / `hasOne`
@@ -1757,7 +1757,7 @@ fn reverse_has_accessor_tokens(
                 use #root::sql::CounterPool as _;
                 #root::query::QuerySet::<#child>::new()
                     .filter(#child_fk_column, self.__rustango_pk_value())
-                    .count_pool(pool)
+                    .count(pool)
                     .await
             }
         }
@@ -1825,7 +1825,7 @@ fn through_accessor_tokens(
             "Eloquent `$model->{name}->count()` analog for the \
              through-relation — returns the number of `{far}` rows \
              reachable through `{intermediate}`. Equivalent to \
-             `self.{name}_through().count_pool(pool)` but spelled \
+             `self.{name}_through().count(pool)` but spelled \
              as a bare instance method for parity with the \
              `reverse_has` `<name>_count` shape.",
             name = rel.name,
@@ -1865,12 +1865,12 @@ fn through_accessor_tokens(
                 #root::sql::ExecError,
             > {
                 use #root::sql::CounterPool as _;
-                self.#method_ident().count_pool(pool).await
+                self.#method_ident().count(pool).await
             }
 
             /// Eloquent `$model->relation->get()` for the
             /// through-relation — bare-name hot-path over
-            /// `self.<name>_through().fetch_pool(&pool)`. Use this
+            /// `self.<name>_through().fetch(&pool)`. Use this
             /// when you don't need further `.filter()` /
             /// `.order_by()` composition; falls back to the
             /// chainable accessor when you do. Avoids the `_pool`
@@ -1883,7 +1883,7 @@ fn through_accessor_tokens(
                 #root::sql::ExecError,
             > {
                 use #root::sql::FetcherPool as _;
-                self.#method_ident().fetch_pool(pool).await
+                self.#method_ident().fetch(pool).await
             }
 
             /// Eloquent `hasOneThrough` analog — bare-name shortcut
@@ -3921,7 +3921,7 @@ fn inherent_impl_tokens(
         //
         // Drop the conflicting shortcut for that model. Callers can
         // still reach the same behavior via
-        // `QuerySet::<Model>::default().count_pool(&pool)`.
+        // `QuerySet::<Model>::default().count(&pool)`.
         let column_names: ::std::collections::HashSet<String> = fields
             .column_entries
             .iter()
@@ -3941,19 +3941,19 @@ fn inherent_impl_tokens(
                 /// <table>`. Eloquent `Model::count()` parity.
                 ///
                 /// Skipped on models that already declare a field named
-                /// `count`. Drop into `QuerySet::<Self>::default().count_pool(&pool)`
+                /// `count`. Drop into `QuerySet::<Self>::default().count(&pool)`
                 /// in that case.
                 ///
                 /// # Errors
-                /// As [`CounterPool::count_pool`].
+                /// As [`CounterPool::count`].
                 ///
-                /// [`CounterPool::count_pool`]: rustango::sql::CounterPool::count_pool
+                /// [`CounterPool::count`]: rustango::sql::CounterPool::count
                 pub async fn count(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<i64, #root::sql::ExecError> {
                     use #root::sql::CounterPool as _;
                     #root::query::QuerySet::<Self>::default()
-                        .count_pool(pool)
+                        .count(pool)
                         .await
                 }
             },
@@ -4180,11 +4180,11 @@ fn inherent_impl_tokens(
             /// the row was deleted concurrently).
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`]; also `RowNotFound` when
+            /// As [`FetcherPool::fetch`]; also `RowNotFound` when
             /// the PK no longer exists.
             ///
             /// [`Model.refresh_from_db`]: https://docs.djangoproject.com/en/5.1/ref/models/instances/#django.db.models.Model.refresh_from_db
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn refresh_from_db(
                 &mut self,
                 pool: &#root::sql::Pool,
@@ -4197,7 +4197,7 @@ fn inherent_impl_tokens(
                     #root::query::QuerySet::<Self>::default()
                         .filter(::core::stringify!(#pk_ident), _pk_val)
                         .limit(1)
-                        .fetch_pool(pool)
+                        .fetch(pool)
                         .await?;
                 match _rows.into_iter().next() {
                     ::core::option::Option::Some(_fresh) => {
@@ -4361,9 +4361,9 @@ fn inherent_impl_tokens(
             /// reference you already hold.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn fresh(
                 &self,
                 pool: &#root::sql::Pool,
@@ -4379,7 +4379,7 @@ fn inherent_impl_tokens(
                     #root::query::QuerySet::<Self>::default()
                         .filter(::core::stringify!(#pk_ident), _pk_val)
                         .limit(1)
-                        .fetch_pool(pool)
+                        .fetch(pool)
                         .await?;
                 ::core::result::Result::Ok(_rows.into_iter().next())
             }
@@ -4503,7 +4503,7 @@ fn inherent_impl_tokens(
                             .order_by(&[(pk_col, false)])
                             .limit(n)
                             .offset(offset)
-                            .fetch_pool(pool)
+                            .fetch(pool)
                             .await?;
                     if rows.is_empty() {
                         return ::core::result::Result::Ok(());
@@ -4564,7 +4564,7 @@ fn inherent_impl_tokens(
                             .filter(key.as_str(), last_seen)
                             .order_by(&[(pk_col, false)])
                             .limit(n)
-                            .fetch_pool(pool)
+                            .fetch(pool)
                             .await?;
                     if rows.is_empty() {
                         return ::core::result::Result::Ok(());
@@ -4636,7 +4636,7 @@ fn inherent_impl_tokens(
                             .filter(key.as_str(), last_seen)
                             .order_by(&[(pk_col, false)])
                             .limit(batch)
-                            .fetch_pool(pool)
+                            .fetch(pool)
                             .await?;
                     if rows.is_empty() {
                         return ::core::result::Result::Ok(());
@@ -4746,7 +4746,7 @@ fn inherent_impl_tokens(
             /// `Model.objects.filter(col=val).all()` parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
-            /// .filter(col, val).fetch_pool(pool)`. For one row,
+            /// .filter(col, val).fetch(pool)`. For one row,
             /// use [`Self::first_where_pool`]; for a chain that
             /// needs further `.filter()` / `.order_by()` /
             /// `.limit()`, drop down to `Self::query().filter(...)`
@@ -4756,9 +4756,9 @@ fn inherent_impl_tokens(
             /// strings, ints, UUIDs, etc. all work.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_(
                 col: &str,
                 val: impl ::core::convert::Into<#root::core::SqlValue>,
@@ -4770,7 +4770,7 @@ fn inherent_impl_tokens(
                 use #root::sql::FetcherPool as _;
                 #root::query::QuerySet::<Self>::default()
                     .filter(col, val)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -4784,9 +4784,9 @@ fn inherent_impl_tokens(
             /// etc.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_in<V>(
                 col: &str,
                 vals: impl ::core::iter::IntoIterator<Item = V>,
@@ -4807,7 +4807,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__in", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::List(_values))
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -4817,9 +4817,9 @@ fn inherent_impl_tokens(
             /// semantics — vacuously true for every row).
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_not_in<V>(
                 col: &str,
                 vals: impl ::core::iter::IntoIterator<Item = V>,
@@ -4836,13 +4836,13 @@ fn inherent_impl_tokens(
                     vals.into_iter().map(::core::convert::Into::into).collect();
                 if _values.is_empty() {
                     return #root::query::QuerySet::<Self>::default()
-                        .fetch_pool(pool)
+                        .fetch(pool)
                         .await;
                 }
                 let _key = ::std::format!("{}__not_in", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::List(_values))
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -4850,9 +4850,9 @@ fn inherent_impl_tokens(
             /// `Model::whereNull($col)->get()` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_null(
                 col: &str,
                 pool: &#root::sql::Pool,
@@ -4864,7 +4864,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__isnull", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::Bool(true))
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -4872,9 +4872,9 @@ fn inherent_impl_tokens(
             /// `Model::whereNotNull($col)->get()` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_not_null(
                 col: &str,
                 pool: &#root::sql::Pool,
@@ -4886,7 +4886,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__isnull", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::Bool(false))
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -4899,9 +4899,9 @@ fn inherent_impl_tokens(
             /// `pk >= rand_offset LIMIT N` walk for huge tables.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn random_n(
                 n: i64,
                 pool: &#root::sql::Pool,
@@ -4913,7 +4913,7 @@ fn inherent_impl_tokens(
                 #root::query::QuerySet::<Self>::default()
                     .order_random()
                     .limit(n)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -4922,9 +4922,9 @@ fn inherent_impl_tokens(
             /// performance caveat as [`Self::random_n_pool`].
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn random(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<
@@ -4941,9 +4941,9 @@ fn inherent_impl_tokens(
             /// counterpart of [`Self::earliest_pool`].
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn oldest(
                 field: &str,
                 pool: &#root::sql::Pool,
@@ -4954,7 +4954,7 @@ fn inherent_impl_tokens(
                 use #root::sql::FetcherPool as _;
                 #root::query::QuerySet::<Self>::default()
                     .order_by(&[(field, false)])
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -4963,9 +4963,9 @@ fn inherent_impl_tokens(
             /// counterpart of [`Self::latest_pool`].
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn newest(
                 field: &str,
                 pool: &#root::sql::Pool,
@@ -4976,7 +4976,7 @@ fn inherent_impl_tokens(
                 use #root::sql::FetcherPool as _;
                 #root::query::QuerySet::<Self>::default()
                     .order_by(&[(field, true)])
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -4986,9 +4986,9 @@ fn inherent_impl_tokens(
             /// (issue #829).
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_year(
                 col: &str,
                 year: i64,
@@ -5001,7 +5001,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__year", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::I64(year))
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5010,9 +5010,9 @@ fn inherent_impl_tokens(
             /// `month` is 1–12.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_month(
                 col: &str,
                 month: i64,
@@ -5025,7 +5025,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__month", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::I64(month))
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5034,9 +5034,9 @@ fn inherent_impl_tokens(
             /// `day` is 1–31.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_day(
                 col: &str,
                 day: i64,
@@ -5049,7 +5049,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__day", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::I64(day))
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5058,9 +5058,9 @@ fn inherent_impl_tokens(
             /// `hour` is 0–23.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_hour(
                 col: &str,
                 hour: i64,
@@ -5073,7 +5073,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__hour", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::I64(hour))
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5082,9 +5082,9 @@ fn inherent_impl_tokens(
             /// `minute` is 0–59.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_minute(
                 col: &str,
                 minute: i64,
@@ -5097,7 +5097,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__minute", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::I64(minute))
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5107,9 +5107,9 @@ fn inherent_impl_tokens(
             /// parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_like(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
@@ -5125,7 +5125,7 @@ fn inherent_impl_tokens(
                         &_key,
                         #root::core::SqlValue::String(pattern.into()),
                     )
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5134,9 +5134,9 @@ fn inherent_impl_tokens(
             /// emulated via `LOWER(col) LIKE LOWER(pattern)`).
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_ilike(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
@@ -5152,7 +5152,7 @@ fn inherent_impl_tokens(
                         &_key,
                         #root::core::SqlValue::String(pattern.into()),
                     )
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5161,9 +5161,9 @@ fn inherent_impl_tokens(
             /// `whereLike("col", "$prefix%")` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_starts_with(
                 col: &str,
                 prefix: impl ::core::convert::Into<::std::string::String>,
@@ -5179,7 +5179,7 @@ fn inherent_impl_tokens(
                         &_key,
                         #root::core::SqlValue::String(prefix.into()),
                     )
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5188,9 +5188,9 @@ fn inherent_impl_tokens(
             /// `whereLike("col", "%$suffix")` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_ends_with(
                 col: &str,
                 suffix: impl ::core::convert::Into<::std::string::String>,
@@ -5206,7 +5206,7 @@ fn inherent_impl_tokens(
                         &_key,
                         #root::core::SqlValue::String(suffix.into()),
                     )
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5215,9 +5215,9 @@ fn inherent_impl_tokens(
             /// Eloquent `whereLike("col", "%$substr%")` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_contains(
                 col: &str,
                 substr: impl ::core::convert::Into<::std::string::String>,
@@ -5233,7 +5233,7 @@ fn inherent_impl_tokens(
                         &_key,
                         #root::core::SqlValue::String(substr.into()),
                     )
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5241,9 +5241,9 @@ fn inherent_impl_tokens(
             /// `Model::where($col, ">", $val)->get()` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_gt(
                 col: &str,
                 val: impl ::core::convert::Into<#root::core::SqlValue>,
@@ -5256,7 +5256,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__gt", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, val)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5264,9 +5264,9 @@ fn inherent_impl_tokens(
             /// `Model::where($col, ">=", $val)->get()` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_gte(
                 col: &str,
                 val: impl ::core::convert::Into<#root::core::SqlValue>,
@@ -5279,7 +5279,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__gte", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, val)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5287,9 +5287,9 @@ fn inherent_impl_tokens(
             /// `Model::where($col, "<", $val)->get()` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_lt(
                 col: &str,
                 val: impl ::core::convert::Into<#root::core::SqlValue>,
@@ -5302,7 +5302,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__lt", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, val)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5310,9 +5310,9 @@ fn inherent_impl_tokens(
             /// `Model::where($col, "<=", $val)->get()` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_lte(
                 col: &str,
                 val: impl ::core::convert::Into<#root::core::SqlValue>,
@@ -5325,7 +5325,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__lte", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, val)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5333,9 +5333,9 @@ fn inherent_impl_tokens(
             /// `Model::where($col, "!=", $val)->get()` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_ne(
                 col: &str,
                 val: impl ::core::convert::Into<#root::core::SqlValue>,
@@ -5348,7 +5348,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__ne", col);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, val)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5361,10 +5361,10 @@ fn inherent_impl_tokens(
             /// `Q` expression (`col1 = ? OR col2 = ? OR …`).
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`]; `QueryError::UnknownField`
+            /// As [`FetcherPool::fetch`]; `QueryError::UnknownField`
             /// when any column is not declared on the model.
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_any(
                 cols: &[&str],
                 val: impl ::core::convert::Into<#root::core::SqlValue>,
@@ -5416,9 +5416,9 @@ fn inherent_impl_tokens(
             /// drop into `Self::query()` for that.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn take(
                 n: i64,
                 pool: &#root::sql::Pool,
@@ -5429,7 +5429,7 @@ fn inherent_impl_tokens(
                 use #root::sql::FetcherPool as _;
                 #root::query::QuerySet::<Self>::default()
                     .limit(n)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5441,9 +5441,9 @@ fn inherent_impl_tokens(
             /// prefer keyset pagination via PK on hot paths.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn for_page(
                 page: i64,
                 per_page: i64,
@@ -5457,7 +5457,7 @@ fn inherent_impl_tokens(
                 #root::query::QuerySet::<Self>::default()
                     .limit(per_page)
                     .offset(_offset)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5492,7 +5492,7 @@ fn inherent_impl_tokens(
                 let total = {
                     use #root::sql::CounterPool as _;
                     #root::query::QuerySet::<Self>::default()
-                        .count_pool(pool)
+                        .count(pool)
                         .await?
                 };
                 let rows = Self::for_page(page, per_page, pool).await?;
@@ -5596,9 +5596,9 @@ fn inherent_impl_tokens(
             /// passed verbatim — caller controls `%` / `_`.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_not_like(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
@@ -5614,7 +5614,7 @@ fn inherent_impl_tokens(
                         &_key,
                         #root::core::SqlValue::String(pattern.into()),
                     )
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5623,9 +5623,9 @@ fn inherent_impl_tokens(
             /// SQLite emulated via `LOWER(col) NOT LIKE LOWER(pattern)`).
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_not_ilike(
                 col: &str,
                 pattern: impl ::core::convert::Into<::std::string::String>,
@@ -5641,7 +5641,7 @@ fn inherent_impl_tokens(
                         &_key,
                         #root::core::SqlValue::String(pattern.into()),
                     )
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5650,9 +5650,9 @@ fn inherent_impl_tokens(
             /// parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_not_between(
                 col: &str,
                 lo: impl ::core::convert::Into<#root::core::SqlValue>,
@@ -5670,7 +5670,7 @@ fn inherent_impl_tokens(
                 ]);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, _vals)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5697,9 +5697,9 @@ fn inherent_impl_tokens(
             /// `Model::whereBetween($col, [$lo, $hi])->get()` parity.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_between(
                 col: &str,
                 lo: impl ::core::convert::Into<#root::core::SqlValue>,
@@ -5717,7 +5717,7 @@ fn inherent_impl_tokens(
                 ]);
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, _vals)
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5804,27 +5804,27 @@ fn inherent_impl_tokens(
             /// `true` when the table contains at least one row.
             /// Eloquent `Model::query()->exists()` / Django
             /// `Model.objects.exists()` parity. Thin wrapper over
-            /// `QuerySet::<Self>::default().exists_pool(pool)`.
+            /// `QuerySet::<Self>::default().exists(pool)`.
             ///
             /// # Errors
-            /// As [`ExistsPool::exists_pool`].
+            /// As [`ExistsPool::exists`].
             ///
-            /// [`ExistsPool::exists_pool`]: rustango::sql::ExistsPool::exists_pool
+            /// [`ExistsPool::exists`]: rustango::sql::ExistsPool::exists
             pub async fn exists(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<bool, #root::sql::ExecError> {
                 use #root::sql::ExistsPool as _;
                 #root::query::QuerySet::<Self>::default()
-                    .exists_pool(pool)
+                    .exists(pool)
                     .await
             }
 
-            /// Inverse of [`Self::exists_pool`] — returns `true` when
+            /// Inverse of [`Self::exists`] — returns `true` when
             /// the table has zero rows. Eloquent
             /// `Model::doesntExist()` parity.
             ///
             /// # Errors
-            /// As [`Self::exists_pool`].
+            /// As [`Self::exists`].
             pub async fn doesnt_exist(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<bool, #root::sql::ExecError> {
@@ -5884,26 +5884,26 @@ fn inherent_impl_tokens(
 
             /// Fetch every row of this model from `pool`. Eloquent
             /// `Model::all()` parity — a thin wrapper over
-            /// `QuerySet::<Self>::default().fetch_pool(pool)`.
+            /// `QuerySet::<Self>::default().fetch(pool)`.
             ///
             /// **Use with care on large tables** — there's no
             /// pagination or limit; the entire table is materialized
             /// into memory. For anything beyond fixture / lookup
             /// tables, page through `QuerySet::<Self>::default()
-            /// .order_by(...).limit(N).offset(M).fetch_pool(pool)`
+            /// .order_by(...).limit(N).offset(M).fetch(pool)`
             /// or stream via `.iterator(chunk_size)`.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn all(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<::std::vec::Vec<Self>, #root::sql::ExecError>
             {
                 use #root::sql::FetcherPool as _;
                 #root::query::QuerySet::<Self>::default()
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5915,7 +5915,7 @@ fn inherent_impl_tokens(
             /// parity.
             ///
             /// Thin wrapper over `QuerySet::<Self>::default()
-            /// .filter("<pk>__in", SqlValue::List([...])).fetch_pool(pool)`.
+            /// .filter("<pk>__in", SqlValue::List([...])).fetch(pool)`.
             /// Caller-supplied PKs that don't match a row are
             /// silently skipped (the returned vec is shorter than
             /// the input list). For an order-preserving / "fail
@@ -5927,9 +5927,9 @@ fn inherent_impl_tokens(
             /// `Vec<Uuid>`, etc.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn find_many<V>(
                 pks: impl ::core::iter::IntoIterator<Item = V>,
                 pool: &#root::sql::Pool,
@@ -5949,7 +5949,7 @@ fn inherent_impl_tokens(
                 let _key = ::std::format!("{}__in", ::core::stringify!(#pk_ident));
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::List(_values))
-                    .fetch_pool(pool)
+                    .fetch(pool)
                     .await
             }
 
@@ -5961,13 +5961,13 @@ fn inherent_impl_tokens(
             ///
             /// One-liner shortcut for the common
             /// `QuerySet::<Self>::default().filter("<pk_field>", pk)
-            /// .limit(1).fetch_pool(pool).await?.into_iter().next()`
+            /// .limit(1).fetch(pool).await?.into_iter().next()`
             /// dance.
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch_pool`].
+            /// As [`FetcherPool::fetch`].
             ///
-            /// [`FetcherPool::fetch_pool`]: rustango::sql::FetcherPool::fetch_pool
+            /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn find(
                 pk: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
@@ -5979,7 +5979,7 @@ fn inherent_impl_tokens(
                     #root::query::QuerySet::<Self>::default()
                         .filter(::core::stringify!(#pk_ident), _pk_val)
                         .limit(1)
-                        .fetch_pool(pool)
+                        .fetch(pool)
                         .await?;
                 ::core::result::Result::Ok(_rows.into_iter().next())
             }
@@ -6910,10 +6910,10 @@ fn inherent_impl_tokens(
                 /// see issue #820 — so this is the explicit shortcut).
                 ///
                 /// One-liner over `QuerySet::<Self>::default()
-                /// .active().fetch_pool(pool)`. Closes #821 partial.
+                /// .active().fetch(pool)`. Closes #821 partial.
                 ///
                 /// # Errors
-                /// As [`#root::sql::FetcherPool::fetch_pool`].
+                /// As [`#root::sql::FetcherPool::fetch`].
                 pub async fn active(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
@@ -6923,7 +6923,7 @@ fn inherent_impl_tokens(
                     use #root::sql::FetcherPool as _;
                     #root::query::QuerySet::<Self>::default()
                         .active()
-                        .fetch_pool(pool)
+                        .fetch(pool)
                         .await
                 }
 
@@ -6933,11 +6933,11 @@ fn inherent_impl_tokens(
                 /// scans, etc.
                 ///
                 /// One-liner over `QuerySet::<Self>::default()
-                /// .only_trashed().fetch_pool(pool)`. Closes #821
+                /// .only_trashed().fetch(pool)`. Closes #821
                 /// partial.
                 ///
                 /// # Errors
-                /// As [`#root::sql::FetcherPool::fetch_pool`].
+                /// As [`#root::sql::FetcherPool::fetch`].
                 pub async fn only_trashed(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
@@ -6947,7 +6947,7 @@ fn inherent_impl_tokens(
                     use #root::sql::FetcherPool as _;
                     #root::query::QuerySet::<Self>::default()
                         .only_trashed()
-                        .fetch_pool(pool)
+                        .fetch(pool)
                         .await
                 }
 
@@ -6965,7 +6965,7 @@ fn inherent_impl_tokens(
                 /// Closes #821 partial.
                 ///
                 /// # Errors
-                /// As [`#root::sql::FetcherPool::fetch_pool`].
+                /// As [`#root::sql::FetcherPool::fetch`].
                 pub async fn with_trashed(
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<
@@ -6975,7 +6975,7 @@ fn inherent_impl_tokens(
                     use #root::sql::FetcherPool as _;
                     #root::query::QuerySet::<Self>::default()
                         .with_trashed()
-                        .fetch_pool(pool)
+                        .fetch(pool)
                         .await
                 }
 
@@ -8264,9 +8264,9 @@ struct ThroughAttr {
 ///
 /// ```ignore
 /// // Posts with at least one comment:
-/// Post::objects().where_raw(Post::comments_exists_expr()).fetch_pool(&pool)
+/// Post::objects().where_raw(Post::comments_exists_expr()).fetch(&pool)
 /// // Posts with no comments:
-/// Post::objects().where_raw(Post::comments_not_exists_expr()).fetch_pool(&pool)
+/// Post::objects().where_raw(Post::comments_not_exists_expr()).fetch(&pool)
 /// ```
 ///
 /// As with #817, all column / table identifiers are **SQL names**

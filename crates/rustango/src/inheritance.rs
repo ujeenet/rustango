@@ -115,7 +115,7 @@
 //! }
 //!
 //! // Acts as a "PublishedArticle" proxy:
-//! Article::objects().only_published().fetch_pool(&pool).await?;
+//! Article::objects().only_published().fetch(&pool).await?;
 //! ```
 //!
 //! ## Summary table

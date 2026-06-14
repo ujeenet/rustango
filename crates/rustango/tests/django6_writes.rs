@@ -63,7 +63,7 @@ mod scenarios {
     async fn fetch_sku(pool: &Pool, code: &str) -> Sku {
         let rows: Vec<Sku> = Sku::objects()
             .filter("code", code)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("fetch sku");
         assert_eq!(rows.len(), 1, "exactly one row for code {code}");
@@ -122,7 +122,7 @@ mod scenarios {
         assert_eq!(Stock::count(pool).await.unwrap(), 3);
         let east: Vec<Stock> = Stock::objects()
             .filter("warehouse", "east")
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("fetch east");
         assert_eq!(east[0].qty, 50);
@@ -206,7 +206,7 @@ mod scenarios {
         assert_eq!(
             Sku::objects()
                 .filter("code", "stale")
-                .fetch_pool(pool)
+                .fetch(pool)
                 .await
                 .map(|rows: Vec<Sku>| rows.len())
                 .unwrap(),

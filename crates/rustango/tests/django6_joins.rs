@@ -131,7 +131,7 @@ mod scenarios {
         let posts: Vec<Post> = Post::objects()
             .select_related("author__profile__country")
             .order_by(&[("id", false)])
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("3-hop fetch");
         assert_eq!(posts.len(), 2);
@@ -152,7 +152,7 @@ mod scenarios {
         // Single hop: `author__name = "Ada"` → post 1 only.
         let rows: Vec<Post> = Post::objects()
             .filter("author__name", "Ada")
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("single-hop relation-spanning filter");
         assert_eq!(rows.len(), 1);
@@ -162,7 +162,7 @@ mod scenarios {
         // Ada's profile bio is "ada bio"; Bob's is "bob bio".
         let rows: Vec<Post> = Post::objects()
             .filter("author__profile__bio__icontains", "ADA")
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("two-hop relation-spanning filter with suffix");
         assert_eq!(rows.len(), 1);
@@ -174,7 +174,7 @@ mod scenarios {
         let rows: Vec<Post> = Post::objects()
             .select_related("author")
             .filter("author__name", "Bob")
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("span + select_related dedupe");
         assert_eq!(rows.len(), 1);
@@ -187,7 +187,7 @@ mod scenarios {
     pub async fn check_relation_spanning_order_by_is_rejected(pool: &Pool) {
         let err = Post::objects()
             .order_by(&[("author__name", false)])
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .map(|rows: Vec<Post>| rows.len())
             .expect_err("relation-spanning order_by must be rejected");
@@ -213,7 +213,7 @@ mod scenarios {
                 project: vec![],
             })
             .where_raw(col_filter("a", "name", Op::Eq, "Ada"))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("cross-table filter via join");
         assert_eq!(posts.len(), 1);
@@ -242,7 +242,7 @@ mod scenarios {
                 rhs: aliased("p", "views"),
             })
             .order_by(&[("score", false)])
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("F across join");
         let scores: Vec<i64> = comments.into_iter().map(|c| c.score).collect();

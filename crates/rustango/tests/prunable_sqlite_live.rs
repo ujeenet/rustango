@@ -136,7 +136,7 @@ async fn prune_pretend_counts_without_deleting() {
 
     // Nothing was deleted.
     let audits: Vec<AuditEntry> = QuerySet::<AuditEntry>::default()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(audits.len(), 4, "no rows actually deleted");
@@ -155,7 +155,7 @@ async fn prune_all_deletes_matching_rows() {
 
     // Survivors only.
     let audits: Vec<AuditEntry> = QuerySet::<AuditEntry>::default()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(audits.len(), 2);
@@ -168,7 +168,7 @@ async fn prune_all_deletes_matching_rows() {
         );
     }
     let sessions: Vec<StaleSession> = QuerySet::<StaleSession>::default()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(sessions.len(), 2);
@@ -189,7 +189,7 @@ async fn prune_only_restricts_to_listed_models() {
 
     // Session table untouched.
     let sessions: Vec<StaleSession> = QuerySet::<StaleSession>::default()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(sessions.len(), 3, "session prune was filtered out");
@@ -211,7 +211,7 @@ async fn prune_except_skips_listed_models() {
 
     // Audit table untouched.
     let audits: Vec<AuditEntry> = QuerySet::<AuditEntry>::default()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(audits.len(), 4, "audit prune was filtered out");

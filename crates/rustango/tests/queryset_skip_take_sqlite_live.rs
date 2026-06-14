@@ -49,7 +49,7 @@ async fn skip_take_chains_correctly() {
         .order_by(&[("n", false)])
         .skip(5)
         .take(3)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     let ns: Vec<i64> = rows.iter().map(|r| r.n).collect();
@@ -63,7 +63,7 @@ async fn take_alone_caps_result() {
     let rows = Post::objects()
         .order_by(&[("n", false)])
         .take(3)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3);
@@ -80,7 +80,7 @@ async fn skip_alone_with_limit_returns_remainder() {
         .order_by(&[("n", false)])
         .skip(7)
         .take(100)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 3);

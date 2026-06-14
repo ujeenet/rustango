@@ -5,7 +5,7 @@
 //! behind `#[cfg(feature = "postgres")]` because its inner
 //! User-fetch ran through `pools.acquire(&org)` + `fetch_on(&mut **conn)`,
 //! a PG-specific path. The tri-dialect lift swapped that for
-//! `scoped_pool_dyn` + `fetch_pool`, matching `SessionOperator`'s
+//! `scoped_pool_dyn` + `fetch`, matching `SessionOperator`'s
 //! shape and unblocking sqlite/mysql tenancy builds.
 //!
 //! This test proves the new path compiles + runs end-to-end on
@@ -19,7 +19,7 @@
 //! Anonymous-path validation is sufficient for the cfg-lift contract.
 //! The cookie-decode + user-fetch path goes through
 //! `tenant_console::decode` (dialect-agnostic HMAC) +
-//! `Model::objects().fetch_pool(&pool)` (the same primitive
+//! `Model::objects().fetch(&pool)` (the same primitive
 //! `SessionOperator` already uses successfully on sqlite). PG-specific
 //! regression of the cookie path is covered by the existing PG
 //! integration suite (`auth_live.rs`).

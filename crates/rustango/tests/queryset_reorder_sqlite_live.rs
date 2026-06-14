@@ -53,7 +53,7 @@ async fn order_by_appends_secondary_sort_key() {
     let rows = Post::objects()
         .order_by(&[("title", false)])
         .order_by(&[("views", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
@@ -69,7 +69,7 @@ async fn reorder_replaces_prior_order_by_keys() {
     let rows = Post::objects()
         .with_default_order() // inherits `title ASC` from schema
         .reorder(&[("views", true)]) // replaces with views DESC
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     let views: Vec<i64> = rows.iter().map(|r| r.views).collect();
@@ -86,7 +86,7 @@ async fn reorder_with_empty_slice_clears_sort() {
         .order_by(&[("title", true)])
         .reorder(&[])
         .order_by(&[("id", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     // After reorder(&[]) the prior title-DESC is gone; only id-ASC
