@@ -162,6 +162,14 @@ enum PendingFilter {
     /// recursively then wrapped in [`WhereExpr::Not`], so `exclude`
     /// inherits the full lookup grammar (`__gt`, `__icontains`, …).
     Negated(Box<PendingFilter>),
+    /// Relation-spanning lookup deferred from [`parse_lookup`] (#1031) —
+    /// `author__name`, `author__profile__bio__icontains`. Resolved by a
+    /// pre-pass in [`QuerySet::compile`] that converts it to a
+    /// [`PendingFilter::Expr`] (an aliased `ExprCompare`) and registers
+    /// the FK-chain JOINs. Reaching [`resolve_one_pending`] still as a
+    /// `RelationSpan` means a non-SELECT path (update / delete /
+    /// aggregate) — unsupported there in P1, so it errors clearly.
+    RelationSpan { raw_key: String, value: SqlValue },
     /// Deferred error surfaced at `compile()` time. Used by
     /// [`QuerySet::filter`] (issue #71) when the lookup-suffix
     /// parser fails — keeps the builder API non-Result while
@@ -2197,13 +2205,25 @@ impl<T: Model> QuerySet<T> {
         // and which were user-provided.
         self.apply_global_scopes();
         let model: &'static ModelSchema = T::SCHEMA;
-        let where_clause = resolve_pending(model, self.pending)?;
+        // #1031 — lower relation-spanning lookups (`author__name`) into
+        // aliased predicates + their FK-chain JOINs before the WHERE is
+        // resolved. The JOINs merge into the select_related set below,
+        // deduped by alias.
+        let (pending, span_joins) = lower_relation_spans(model, self.pending)?;
+        let where_clause = resolve_pending(model, pending)?;
         let mut joins = lower_select_related(model, &self.select_related)?;
         // Ad-hoc joins (issue #80) come AFTER FK-driven select_related
         // joins in the SELECT — preserves the existing column ordering
         // for legacy callers, and keeps user-driven joins next to the
         // user-driven WHERE.
         joins.extend(self.ad_hoc_joins);
+        // Relation-span JOINs (#1031) — skip any alias already present
+        // (a span over the same path as a `select_related` emits once).
+        for j in span_joins {
+            if !joins.iter().any(|e| e.alias == j.alias) {
+                joins.push(j);
+            }
+        }
         // #1034 — split head-branch clauses from combined-result
         // clauses. With a compound, the head-branch `ORDER BY` /
         // `LIMIT` / `OFFSET` were frozen at the first set-op call
@@ -2901,6 +2921,15 @@ enum ParsedLookup {
         op: Op,
         value: SqlValue,
     },
+    /// Relation-spanning lookup — `author__name`, `author__name__icontains`,
+    /// `author__profile__bio` (#1031). The key carries at least one
+    /// `__`-separated FK hop before the terminal column + optional
+    /// lookup suffix. Schema-agnostic at parse time: `parse_lookup`
+    /// can't tell an FK hop from a scalar field, so it defers the whole
+    /// key here and the resolver (`resolve_span`) walks it against the
+    /// schema — building the JOINs and the aliased predicate, or
+    /// surfacing the original `UnknownLookup` if no FK chain resolves.
+    RelationSpan { raw_key: String, value: SqlValue },
 }
 
 /// Map a date-transform suffix token to its corresponding scalar fn.
@@ -3197,9 +3226,16 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
             };
             Ok(pair(field, op, SqlValue::Array(elems)))
         }
-        unknown => Err(QueryError::UnknownLookup {
-            field,
-            suffix: unknown.to_owned(),
+        // Unknown suffix — but the key may be a relation-spanning
+        // lookup (`author__name`, `author__name__icontains`). We can't
+        // tell here (no schema), so defer the whole key to the resolver.
+        // It walks the FK chain against the schema; if the first segment
+        // isn't an FK (a genuinely unknown suffix on a scalar field, e.g.
+        // `pages__bogus`) it re-surfaces this exact `UnknownLookup`.
+        // #1031.
+        _ => Ok(ParsedLookup::RelationSpan {
+            raw_key: key.to_owned(),
+            value,
         }),
     }
 }
@@ -3303,6 +3339,9 @@ fn parse_to_pending(key: &str, value: SqlValue) -> PendingFilter {
             op,
             value,
         }),
+        Ok(ParsedLookup::RelationSpan { raw_key, value }) => {
+            PendingFilter::RelationSpan { raw_key, value }
+        }
         Err(e) => PendingFilter::Error(e),
     }
 }
@@ -3332,6 +3371,20 @@ fn resolve_one_pending(
         PendingFilter::Expr(expr) => expr,
         PendingFilter::Negated(inner) => {
             WhereExpr::Not(Box::new(resolve_one_pending(model, *inner)?))
+        }
+        // #1031 — relation spans are lowered to `Expr` + JOINs by the
+        // SELECT compile() pre-pass (`lower_relation_spans`). Reaching
+        // here still as a span means a context without join support
+        // (update / delete / aggregate). Resolve first to distinguish a
+        // genuine bad suffix (`status__bogus` → first segment isn't an
+        // FK → `resolve_span` returns the original `UnknownLookup`,
+        // which we preserve) from a real relation span (resolves OK, but
+        // the JOIN can't be carried here → clear error).
+        PendingFilter::RelationSpan { raw_key, value } => {
+            return match resolve_span(model, &raw_key, value) {
+                Ok(_) => Err(QueryError::RelationSpanUnsupportedHere { key: raw_key }),
+                Err(e) => Err(e),
+            }
         }
         // Issue #71 — bubble the deferred lookup-parse error up at the
         // natural `compile()` checkpoint.
@@ -3369,6 +3422,189 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
         column: field.column,
         op: raw.op,
         value: raw.value,
+    })
+}
+
+/// #1031 — resolve a relation-spanning lookup key into its FK-chain
+/// LEFT JOINs plus an aliased `ExprCompare` predicate.
+///
+/// `author__name` / `author__profile__bio__icontains` / `author__profile`
+/// all decompose as: leading segments that name an FK/O2O field are
+/// JOIN hops; the first non-FK (or the final) segment is the terminal
+/// column; any remaining segments are a lookup suffix re-parsed through
+/// the normal grammar ([`parse_lookup`]) and re-targeted onto the
+/// aliased column. The terminal `ExprCompare` carries `rhs:
+/// Expr::Literal(value)` for every op the [`write_expr_compare`] writer
+/// supports (binary / LIKE / ILIKE / IN / BETWEEN / IS NULL).
+///
+/// When the first segment isn't an FK the key isn't a relation span at
+/// all (e.g. `pages__bogus`) — we re-surface the original
+/// [`QueryError::UnknownLookup`] so existing errors are unchanged.
+fn resolve_span(
+    model: &'static ModelSchema,
+    raw_key: &str,
+    value: SqlValue,
+) -> Result<(Vec<crate::core::Join>, WhereExpr), QueryError> {
+    use crate::core::{inventory, Expr, Join, JoinKind, ModelEntry, Relation};
+    let segs: Vec<&str> = raw_key.split("__").collect();
+    let mut joins: Vec<Join> = Vec::new();
+    let mut current: &'static ModelSchema = model;
+    let mut prev_alias: &'static str = model.table;
+    let mut alias_path = String::new();
+    let mut term_i = segs.len() - 1;
+    for (i, seg) in segs.iter().enumerate() {
+        let is_last = i + 1 == segs.len();
+        let field = current.field(seg);
+        let fk = field.and_then(|f| match f.relation {
+            Some(Relation::Fk { to, on }) | Some(Relation::O2O { to, on }) => Some((f, to, on)),
+            _ => None,
+        });
+        match fk {
+            // An FK that isn't the final segment is a JOIN hop.
+            Some((field, to, on)) if !is_last => {
+                let target = inventory::iter::<ModelEntry>
+                    .into_iter()
+                    .find(|e| e.schema.table == to)
+                    .map(|e| e.schema)
+                    .ok_or_else(|| QueryError::UnknownField {
+                        model: current.name,
+                        field: format!("{seg} (target table `{to}` not registered)"),
+                    })?;
+                alias_path = if alias_path.is_empty() {
+                    (*seg).to_owned()
+                } else {
+                    format!("{alias_path}__{seg}")
+                };
+                // Leak the cumulative dotted alias — bounded by the
+                // user's schema depth, paid once at compile() time;
+                // matches `lower_select_related`'s alias scheme so a
+                // span + `select_related` over the same path dedupe.
+                let alias: &'static str = Box::leak(alias_path.clone().into_boxed_str());
+                let project: Vec<&'static str> = target.scalar_fields().map(|f| f.column).collect();
+                joins.push(Join {
+                    target,
+                    alias,
+                    kind: JoinKind::Left,
+                    on: WhereExpr::ExprCompare {
+                        lhs: Expr::AliasedColumn {
+                            alias: prev_alias,
+                            column: field.column,
+                        },
+                        op: Op::Eq,
+                        rhs: Expr::AliasedColumn { alias, column: on },
+                    },
+                    project,
+                });
+                current = target;
+                prev_alias = alias;
+            }
+            _ => {
+                term_i = i;
+                break;
+            }
+        }
+    }
+
+    // No hop consumed → the first segment isn't an FK, so this is a
+    // plain unknown suffix on a scalar field — re-surface the original
+    // error (`pages__bogus` → UnknownLookup{ pages, bogus }).
+    if joins.is_empty() {
+        let suffix = raw_key.splitn(2, "__").nth(1).unwrap_or("").to_owned();
+        return Err(QueryError::UnknownLookup {
+            field: segs.first().map_or_else(String::new, |s| (*s).to_owned()),
+            suffix,
+        });
+    }
+
+    let term_field = current
+        .field(segs[term_i])
+        .ok_or_else(|| QueryError::UnknownField {
+            model: current.name,
+            field: segs[term_i].to_owned(),
+        })?;
+    let suffix_segs = &segs[term_i + 1..];
+
+    // Re-parse any trailing suffix through the normal grammar; bare
+    // span (no suffix) is an exact match.
+    let (op, value, transform) = if suffix_segs.is_empty() {
+        (Op::Eq, value, None)
+    } else {
+        let synth = format!("{}__{}", term_field.name, suffix_segs.join("__"));
+        match parse_lookup(&synth, value) {
+            Ok(ParsedLookup::Raw { op, value, .. }) => (op, value, None),
+            Ok(ParsedLookup::DateTransform {
+                transform,
+                op,
+                value,
+                ..
+            }) => (op, value, Some(transform)),
+            // A trailing suffix that's still unknown is a genuine bad
+            // lookup on the terminal field.
+            Ok(ParsedLookup::RelationSpan { .. }) => {
+                return Err(QueryError::UnknownLookup {
+                    field: term_field.name.to_owned(),
+                    suffix: suffix_segs.join("__"),
+                })
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let column = Expr::AliasedColumn {
+        alias: prev_alias,
+        column: term_field.column,
+    };
+    let lhs = match transform {
+        None => column,
+        Some(kind) => Expr::Function {
+            kind,
+            args: vec![column],
+        },
+    };
+    let predicate = WhereExpr::ExprCompare {
+        lhs,
+        op,
+        rhs: Expr::Literal(value),
+    };
+    Ok((joins, predicate))
+}
+
+/// #1031 — pre-pass over the pending filters that lowers every
+/// relation-spanning lookup ([`PendingFilter::RelationSpan`], including
+/// inside [`PendingFilter::Negated`] from `exclude`) into a resolved
+/// `Expr` predicate, accumulating the FK-chain JOINs. Returns the
+/// rewritten pending list plus the JOINs to merge (deduped by alias) on
+/// the SELECT path.
+fn lower_relation_spans(
+    model: &'static ModelSchema,
+    pending: Vec<PendingFilter>,
+) -> Result<(Vec<PendingFilter>, Vec<crate::core::Join>), QueryError> {
+    let mut joins: Vec<crate::core::Join> = Vec::new();
+    let mut out = Vec::with_capacity(pending.len());
+    for pf in pending {
+        out.push(convert_relation_span(model, pf, &mut joins)?);
+    }
+    Ok((out, joins))
+}
+
+fn convert_relation_span(
+    model: &'static ModelSchema,
+    pf: PendingFilter,
+    joins: &mut Vec<crate::core::Join>,
+) -> Result<PendingFilter, QueryError> {
+    Ok(match pf {
+        PendingFilter::RelationSpan { raw_key, value } => {
+            let (jns, predicate) = resolve_span(model, &raw_key, value)?;
+            for j in jns {
+                if !joins.iter().any(|e| e.alias == j.alias) {
+                    joins.push(j);
+                }
+            }
+            PendingFilter::Expr(predicate)
+        }
+        PendingFilter::Negated(inner) => {
+            PendingFilter::Negated(Box::new(convert_relation_span(model, *inner, joins)?))
+        }
+        other => other,
     })
 }
 

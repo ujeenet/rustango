@@ -127,6 +127,18 @@ pub enum QueryError {
     )]
     UnknownLookup { field: String, suffix: String },
 
+    /// Relation-spanning lookup (`author__name`) used in a context that
+    /// doesn't yet support the implicit JOIN — `update()` / `delete()` /
+    /// `.aggregate()`. Supported in `filter()` / `exclude()` /
+    /// `order_by()` on the SELECT path (#1031); elsewhere, add the JOIN
+    /// explicitly via `.join(...)` + `col_filter`.
+    #[error(
+        "relation-spanning lookup `{key}` is only supported in \
+         filter()/exclude()/order_by() on a SELECT; for update/delete/\
+         aggregate add the join explicitly via `.join(...)`"
+    )]
+    RelationSpanUnsupportedHere { key: String },
+
     /// Django-shape `.filter("field__lookup", value)` got a value
     /// whose shape doesn't fit the chosen lookup. Issue #71.
     /// Examples: `__in` with a non-list, `__isnull` with a
