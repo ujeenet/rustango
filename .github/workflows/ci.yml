@@ -449,3 +449,55 @@ jobs:
         with:
           name: playwright-report-${{ matrix.backend }}
           path: examples/showcase/e2e/playwright-report
+
+  # Runnable documentation examples — keep docs/getting-started.md and
+  # docs/orm.md in sync with the framework. Each example is a severed
+  # workspace under crates/rustango/examples/ whose integration tests run
+  # against a real Postgres. A failure here means a code block in the
+  # guides no longer matches the API (exactly the `fetch_pool` → `fetch`
+  # class of drift these examples were added to catch).
+  #
+  # getting_started_blog runs `migrate` first to create its schema;
+  # orm_cookbook resets the `public` schema inside the test itself.
+  doc_examples:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - example: getting_started_blog
+            migrate: true
+          - example: orm_cookbook
+            migrate: false
+    services:
+      # See `postgres_test`'s comment for the AWS Public ECR mirror
+      # rationale (CI Docker Hub timeouts after PR #848 / #866).
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16-alpine
+        env:
+          POSTGRES_USER: rustango
+          POSTGRES_PASSWORD: rustango
+          POSTGRES_DB: rustango_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rustango -d rustango_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: doc-example-${{ matrix.example }}
+          workspaces: crates/rustango/examples/${{ matrix.example }}
+      - name: Create schema (migrate)
+        if: ${{ matrix.migrate }}
+        working-directory: crates/rustango/examples/${{ matrix.example }}
+        run: cargo run -- migrate
+      - name: Test
+        working-directory: crates/rustango/examples/${{ matrix.example }}
+        run: cargo test
