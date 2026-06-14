@@ -4,7 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-Post-v0.42 Django-parity follow-ups. Each item is a self-contained slice that landed as its own PR after the v0.42.0 release tag.
+_Nothing yet — next development cycle._
+
+## [0.43.0] — 2026-06-13
+
+Django-parity batch since the v0.42.0 tag — each item below landed as its own PR. Headlines: **relation-spanning lookups** in `filter()`/`exclude()` (`author__name__icontains`, #1031), **aggregate window functions** (`SUM`/`AVG`/`MIN`/`MAX`/`COUNT OVER`, #1035), scalar **`Subquery()` annotations** (#1036), **union component-queryset slicing** + aliased derived tables (#1032/#1034), and the full **Django 6.0 aggregate family** (`StringAgg`→`GROUP_CONCAT`, `AnyValue`, ordered aggregates, #1024–#1026) — plus i18n/RTL, `CITextField`, `DatabaseCache`, `managed=false`, and 50+ Eloquent query shortcuts.
 
 ### Added
 
