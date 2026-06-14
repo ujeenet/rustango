@@ -799,6 +799,12 @@ async fn migrate<W: Write>(
             writeln!(w, "  applied {}", m.name)?;
         }
     }
+    // Framework bootstrap table that isn't model-derived: the audit log
+    // is created via idempotent DDL (`CREATE TABLE IF NOT EXISTS`) so any
+    // model declaring `audit(track = ...)` can record writes the moment
+    // migrations are applied — the user never hand-creates it. Cheap and
+    // safe to re-run on every `migrate`.
+    crate::audit::ensure_table_pool(pool).await?;
     Ok(())
 }
 

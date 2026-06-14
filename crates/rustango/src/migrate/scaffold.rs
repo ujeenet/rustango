@@ -506,43 +506,44 @@ pub fn api() -> Router<()> {
 /// Default `tests.rs` body — generated per-app so the inventory
 /// smoke test can reference the starter model's table by name.
 fn render_tests_template(singular_table: &str, crate_root: &str) -> String {
+    // This file is already pulled in as the `tests` module via
+    // `#[cfg(test)] mod tests;` in `mod.rs`, so the body lives at module
+    // scope here — NOT wrapped in another `mod tests {{ }}` (that would
+    // nest to `<app>::tests::tests` and break the `super::` paths).
     format!(
         "//! App-level integration tests.
 //!
 //! Run with `cargo test`. Uses `{crate_root}::test_client::TestClient` to
 //! exercise the app's router in-process — no network, no real socket.
 
-#[cfg(test)]
-mod tests {{
-    use super::urls::api;
+use super::urls::api;
 
-    /// Smoke test — the empty router builds without panicking.
-    /// Replace with real route assertions once you add `.route(...)`
-    /// lines in `urls.rs`.
-    #[tokio::test]
-    async fn router_builds() {{
-        let _router = api();
-    }}
+/// Smoke test — the empty router builds without panicking.
+/// Replace with real route assertions once you add `.route(...)`
+/// lines in `urls.rs`.
+#[tokio::test]
+async fn router_builds() {{
+    let _router = api();
+}}
 
-    /// Smoke test — every `#[derive(Model)]` in `models.rs` registers
-    /// itself in `inventory` at link time. The auto-admin walks that
-    /// registry, so seeing your model here is the canonical
-    /// confirmation that the admin will pick it up.
-    ///
-    /// If you rename the starter model's `table = \"...\"`, update
-    /// the literal below.
-    #[test]
-    fn starter_model_registered_in_inventory() {{
-        use {crate_root}::core::ModelEntry;
-        let tables: Vec<&'static str> = inventory::iter::<ModelEntry>
-            .into_iter()
-            .map(|e| e.schema.table)
-            .collect();
-        assert!(
-            tables.iter().any(|t| *t == \"{singular_table}\"),
-            \"`{singular_table}` missing from inventory; tables: {{tables:?}}\",
-        );
-    }}
+/// Smoke test — every `#[derive(Model)]` in `models.rs` registers
+/// itself in `inventory` at link time. The auto-admin walks that
+/// registry, so seeing your model here is the canonical
+/// confirmation that the admin will pick it up.
+///
+/// If you rename the starter model's `table = \"...\"`, update
+/// the literal below.
+#[test]
+fn starter_model_registered_in_inventory() {{
+    use {crate_root}::core::ModelEntry;
+    let tables: Vec<&'static str> = {crate_root}::inventory::iter::<ModelEntry>
+        .into_iter()
+        .map(|e| e.schema.table)
+        .collect();
+    assert!(
+        tables.iter().any(|t| *t == \"{singular_table}\"),
+        \"`{singular_table}` missing from inventory; tables: {{tables:?}}\",
+    );
 }}
 "
     )

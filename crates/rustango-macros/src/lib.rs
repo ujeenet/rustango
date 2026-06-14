@@ -2378,7 +2378,19 @@ fn model_impl_tokens(
         .map(|action| quote!(#action))
         .collect();
     let indexes_tokens = indexes.iter().map(|idx| {
-        let name = idx.name.as_deref().unwrap_or("unnamed_index");
+        // When no explicit `name = "..."` was given, derive a stable,
+        // collision-free name from the table + columns (Django-shape
+        // `<table>_<col>_<col>_idx`) instead of a shared literal that
+        // would clash the moment a model declares two unnamed indexes.
+        // Capped at Postgres's 63-char identifier limit.
+        let derived_name = idx.name.clone().unwrap_or_else(|| {
+            let mut n = format!("{table}_{}_idx", idx.columns.join("_"));
+            if n.len() > 63 {
+                n.truncate(63);
+            }
+            n
+        });
+        let name = derived_name.as_str();
         let cols: Vec<&str> = idx.columns.iter().map(String::as_str).collect();
         let unique = idx.unique;
         // Map the parsed method string onto the IndexMethod enum
@@ -9774,22 +9786,68 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("index") {
-                // Container-level composite index — legacy entry that
-                // was advertised with a trailing `, unique, name = ...`
-                // flag block which doesn't actually compose under
-                // `parse_nested_meta`. Prefer `unique_together` /
-                // `index_together` (above) for new code. The bare
-                // `index = "..."` form is kept for back-compat: it
-                // emits a non-unique composite index.
-                let cols_lit: LitStr = meta.value()?.parse()?;
+                // Container-level composite index. Two syntaxes:
+                //   #[rustango(index = "col1, col2")]   — bare, non-unique btree
+                //   #[rustango(index("col1, col2"))]    — call form (same result)
+                //   #[rustango(index("col1, col2", unique, name = "my_idx", method = "gin"))]
+                // The call form takes the column list as a leading string
+                // literal, then optional `unique` / `name = "..."` /
+                // `method = "..."` flags (a leading literal can't compose
+                // under `parse_nested_meta`, so the paren body is parsed by
+                // hand). `unique_together` / `index_together` remain the
+                // Django-shape aliases for the same feature.
+                let cols_lit: LitStr;
+                let mut unique = false;
+                let mut name: Option<String> = None;
+                let mut method = "btree".to_owned();
+                if meta.input.peek(syn::token::Paren) {
+                    let content;
+                    syn::parenthesized!(content in meta.input);
+                    cols_lit = content.parse()?;
+                    while content.peek(syn::Token![,]) {
+                        content.parse::<syn::Token![,]>()?;
+                        if content.is_empty() {
+                            break;
+                        }
+                        let flag: syn::Ident = content.parse()?;
+                        if flag == "unique" {
+                            unique = true;
+                        } else if flag == "name" {
+                            content.parse::<syn::Token![=]>()?;
+                            let s: LitStr = content.parse()?;
+                            name = Some(s.value());
+                        } else if flag == "method" {
+                            content.parse::<syn::Token![=]>()?;
+                            let s: LitStr = content.parse()?;
+                            let v = s.value();
+                            match v.as_str() {
+                                "btree" | "gin" | "gist" | "brin" | "spgist" | "hash"
+                                | "bloom" => method = v,
+                                other => {
+                                    return Err(syn::Error::new(
+                                        s.span(),
+                                        format!("unknown index method `{other}` (supported: btree, gin, gist, brin, spgist, hash, bloom)"),
+                                    ));
+                                }
+                            }
+                        } else {
+                            return Err(syn::Error::new(
+                                flag.span(),
+                                "unknown index flag (supported: `unique`, `name`, `method`)",
+                            ));
+                        }
+                    }
+                } else {
+                    cols_lit = meta.value()?.parse()?;
+                }
                 let columns = split_field_list(&cols_lit.value());
                 out.indexes.push(IndexAttr {
-                    name: None,
+                    name,
                     columns,
-                    unique: false,
-                    method: "btree".to_owned(),
+                    unique,
+                    method,
                     where_clause: None,
-                include: Vec::new(),
+                    include: Vec::new(),
                 });
                 return Ok(());
             }
