@@ -117,7 +117,7 @@ async fn register(
     };
     let mut rows: Vec<User> = User::objects()
         .filter_op("id", Op::Eq, id)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let stored = rows.pop().ok_or((
@@ -146,7 +146,7 @@ async fn login(
     let pool = into_pool(&pool);
     let mut rows: Vec<User> = User::objects()
         .filter_op("username", Op::Eq, input.username.clone())
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let user = rows
@@ -162,10 +162,7 @@ async fn login(
     let id = match user.id {
         Auto::Set(n) => n,
         Auto::Unset => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "user has no PK".into(),
-            ));
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "user has no PK".into()));
         }
     };
     let claims = Claims::new(id.to_string())
@@ -195,7 +192,8 @@ async fn me(
             "missing or malformed Authorization header".into(),
         ))?;
 
-    let claims = decode(token, &jwt_secret()).map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+    let claims =
+        decode(token, &jwt_secret()).map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
     let id: i64 = claims
         .subject()
         .and_then(|s| s.parse().ok())
@@ -203,7 +201,7 @@ async fn me(
 
     let mut rows: Vec<User> = User::objects()
         .filter_op("id", Op::Eq, id)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let user = rows

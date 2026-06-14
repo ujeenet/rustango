@@ -16,9 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     rustango::manage::Cli::new()
         .api(apps::api())
-        .migrations_dir(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"),
-        )
+        .migrations_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
         .run()
         .await
 }

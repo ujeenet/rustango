@@ -85,7 +85,7 @@ async fn list_posts(
     let pool = into_pool(&pool);
     let posts: Vec<Post> = Post::objects()
         .order_by(&[("id", false)]) // ASC — natural list order
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(posts.into_iter().map(PostOut::from).collect()))
@@ -98,7 +98,7 @@ async fn retrieve_post(
     let pool = into_pool(&pool);
     let mut rows: Vec<Post> = Post::objects()
         .filter_op("id", Op::Eq, id)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(p) = rows.pop() {
@@ -140,7 +140,7 @@ async fn create_post(
     };
     let mut rows: Vec<Post> = Post::objects()
         .filter_op("id", Op::Eq, id)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let stored = rows.pop().ok_or((

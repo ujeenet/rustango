@@ -27,10 +27,7 @@ pub fn api() -> Router {
 /// Smoke endpoint — used by the E2E playwright suite's readiness
 /// probe + by the matrix job to assert which backend it ran against.
 async fn info() -> Json<serde_json::Value> {
-    let backend = match std::env::var("DATABASE_URL")
-        .unwrap_or_default()
-        .as_str()
-    {
+    let backend = match std::env::var("DATABASE_URL").unwrap_or_default().as_str() {
         u if u.starts_with("postgres://") || u.starts_with("postgresql://") => "postgres",
         u if u.starts_with("mysql://") || u.starts_with("mariadb://") => "mysql",
         u if u.starts_with("sqlite:") => "sqlite",
