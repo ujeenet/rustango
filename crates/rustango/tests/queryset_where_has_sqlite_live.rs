@@ -89,7 +89,7 @@ async fn where_has_resolves_relation_name_to_exists() {
     seed(&pool).await;
     let rows = Author::objects()
         .where_has("books")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -102,7 +102,7 @@ async fn where_doesnt_have_resolves_relation_name_to_not_exists() {
     seed(&pool).await;
     let rows = Author::objects()
         .where_doesnt_have("books")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -115,7 +115,7 @@ async fn where_has_unknown_relation_errors_at_compile_time() {
     seed(&pool).await;
     let err = Author::objects()
         .where_has("nonexistent")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap_err();
     let msg = format!("{err}");

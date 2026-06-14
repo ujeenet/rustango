@@ -54,7 +54,7 @@ async fn destroy_pool_deletes_listed_rows() {
     let n = Post::destroy(to_delete, &pool).await.unwrap();
     assert_eq!(n, 3);
 
-    let remaining: Vec<Post> = QuerySet::<Post>::default().fetch_pool(&pool).await.unwrap();
+    let remaining: Vec<Post> = QuerySet::<Post>::default().fetch(&pool).await.unwrap();
     assert_eq!(remaining.len(), 2);
     let titles: Vec<&str> = remaining.iter().map(|p| p.title.as_str()).collect();
     assert!(titles.contains(&"b"));
@@ -68,7 +68,7 @@ async fn destroy_pool_empty_list_is_noop() {
     let n = Post::destroy(Vec::<i64>::new(), &pool).await.unwrap();
     assert_eq!(n, 0);
 
-    let remaining: Vec<Post> = QuerySet::<Post>::default().fetch_pool(&pool).await.unwrap();
+    let remaining: Vec<Post> = QuerySet::<Post>::default().fetch(&pool).await.unwrap();
     assert_eq!(remaining.len(), 5);
 }
 

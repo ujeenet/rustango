@@ -107,7 +107,7 @@ async fn join_lateral_correlates_to_outer_and_filters() {
 
     let rows = Customer::objects()
         .join_lateral(latest, "lo", WhereExpr::And(vec![]))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
 
@@ -148,7 +148,7 @@ async fn left_join_lateral_keeps_all_customers() {
 
     let rows = Customer::objects()
         .left_join_lateral(latest, "lo", WhereExpr::And(vec![]))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
 

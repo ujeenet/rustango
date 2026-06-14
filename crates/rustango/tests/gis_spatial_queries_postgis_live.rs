@@ -67,7 +67,7 @@ async fn spatial_distance_dwithin_and_intersects() {
     // order_by_distance_to → ST_Distance ascending: nearest first.
     let ordered: Vec<String> = Place::objects()
         .order_by_distance_to("location", origin)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -84,7 +84,7 @@ async fn spatial_distance_dwithin_and_intersects() {
     let within: Vec<String> = Place::objects()
         .filter_dwithin("location", origin, 1.0)
         .order_by_distance_to("location", origin)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -101,7 +101,7 @@ async fn spatial_distance_dwithin_and_intersects() {
             op: Op::Eq,
             rhs: Expr::Literal(SqlValue::Bool(true)),
         })
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()

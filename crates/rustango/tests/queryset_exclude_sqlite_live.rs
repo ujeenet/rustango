@@ -48,7 +48,7 @@ async fn seeded() -> Pool {
 
 async fn ids(pool: &Pool, qs: rustango::query::QuerySet<Post>) -> Vec<i64> {
     let mut v: Vec<i64> = qs
-        .fetch_pool(pool)
+        .fetch(pool)
         .await
         .expect("fetch")
         .into_iter()

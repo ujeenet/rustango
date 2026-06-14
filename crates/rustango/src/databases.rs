@@ -2,7 +2,7 @@
 //! `QuerySet.using(alias)` (issues #332 / #400).
 //!
 //! rustango is single-pool-per-call by default: every terminal takes an
-//! explicit connection (`fetch_pool(&pool)` / `fetch_on(executor)`), so
+//! explicit connection (`fetch(&pool)` / `fetch_on(executor)`), so
 //! multi-DB routing is already possible by passing the right pool. This
 //! module adds the Django-shaped **named-alias** convenience on top: a
 //! process-wide registry of `alias → Pool` plus a `.using("alias")` verb
@@ -23,7 +23,7 @@
 //!     .await?;
 //! ```
 //!
-//! **Writes** still route through the explicit `fetch_pool(&pool)` family
+//! **Writes** still route through the explicit `fetch(&pool)` family
 //! on purpose — `.using` exposes only the read terminals so a write
 //! can't be silently sent to a read replica. Automatic per-model routing
 //! (Django's `DATABASE_ROUTERS`, #401) is a separate layer on top of this
@@ -215,7 +215,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     /// (`fetch` / `first` / `count` / `exists`) bound to the resolved
     /// pool. Panics at call time if `alias` isn't registered (see
     /// [`pool`]). Writes intentionally aren't routed here — use the
-    /// explicit `fetch_pool(&pool)` family for those.
+    /// explicit `fetch(&pool)` family for those.
     #[must_use]
     pub fn using(self, alias: &str) -> UsingQuerySet<T> {
         UsingQuerySet {
@@ -232,7 +232,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     ///
     /// Panics if the chosen alias isn't registered (see [`pool`]). Like
     /// [`Self::using`], this exposes only read terminals; for writes use
-    /// [`write_pool_for`] (`fetch_pool(&write_pool_for(T::SCHEMA))`) so a
+    /// [`write_pool_for`] (`fetch(&write_pool_for(T::SCHEMA))`) so a
     /// write is never silently sent to a read replica.
     #[must_use]
     pub fn routed(self) -> UsingQuerySet<T> {
@@ -262,13 +262,13 @@ where
         + Unpin,
 {
     /// Run the query against the chosen connection — like
-    /// `fetch_pool(&pool)` but routed by alias.
+    /// `fetch(&pool)` but routed by alias.
     ///
     /// # Errors
-    /// As [`crate::sql::FetcherPool::fetch_pool`].
+    /// As [`crate::sql::FetcherPool::fetch`].
     pub async fn fetch(self) -> Result<Vec<T>, crate::sql::ExecError> {
         use crate::sql::FetcherPool as _;
-        self.qs.fetch_pool(&self.pool).await
+        self.qs.fetch(&self.pool).await
     }
 
     /// The first matching row (applies `LIMIT 1`).
@@ -277,30 +277,24 @@ where
     /// As [`Self::fetch`].
     pub async fn first(self) -> Result<Option<T>, crate::sql::ExecError> {
         use crate::sql::FetcherPool as _;
-        Ok(self
-            .qs
-            .limit(1)
-            .fetch_pool(&self.pool)
-            .await?
-            .into_iter()
-            .next())
+        Ok(self.qs.limit(1).fetch(&self.pool).await?.into_iter().next())
     }
 
     /// `SELECT COUNT(*)` against the chosen connection.
     ///
     /// # Errors
-    /// As [`crate::sql::CounterPool::count_pool`].
+    /// As [`crate::sql::CounterPool::count`].
     pub async fn count(self) -> Result<i64, crate::sql::ExecError> {
         use crate::sql::CounterPool as _;
-        self.qs.count_pool(&self.pool).await
+        self.qs.count(&self.pool).await
     }
 
     /// `EXISTS` against the chosen connection.
     ///
     /// # Errors
-    /// As [`crate::sql::ExistsPool::exists_pool`].
+    /// As [`crate::sql::ExistsPool::exists`].
     pub async fn exists(self) -> Result<bool, crate::sql::ExecError> {
         use crate::sql::ExistsPool as _;
-        self.qs.exists_pool(&self.pool).await
+        self.qs.exists(&self.pool).await
     }
 }

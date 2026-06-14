@@ -683,7 +683,7 @@ impl<T: Model> QuerySet<T> {
     /// chainable form lives here under the explicit name.
     ///
     /// ```ignore
-    /// Post::objects().order_by_desc("created_at").fetch_pool(&pool).await?;
+    /// Post::objects().order_by_desc("created_at").fetch(&pool).await?;
     /// // SELECT ... FROM post ORDER BY created_at DESC
     /// ```
     #[must_use]
@@ -698,7 +698,7 @@ impl<T: Model> QuerySet<T> {
     /// `Builder::oldest($column)`.
     ///
     /// ```ignore
-    /// Post::objects().order_by_asc("created_at").fetch_pool(&pool).await?;
+    /// Post::objects().order_by_asc("created_at").fetch(&pool).await?;
     /// // SELECT ... FROM post ORDER BY created_at ASC
     /// ```
     #[must_use]
@@ -844,7 +844,7 @@ impl<T: Model> QuerySet<T> {
     /// let hits = Doc::objects()
     ///     .order_by_distance("embedding", query_embedding, VectorMetric::Cosine)
     ///     .limit(5)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn order_by_distance(
@@ -869,7 +869,7 @@ impl<T: Model> QuerySet<T> {
     /// use rustango::core::VectorMetric;
     /// let top3 = Doc::objects()
     ///     .k_nearest("embedding", query_embedding, 3, VectorMetric::L2)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn k_nearest(
@@ -893,7 +893,7 @@ impl<T: Model> QuerySet<T> {
     /// let near = Place::objects()
     ///     .order_by_distance_to("location", here)
     ///     .limit(5)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn order_by_distance_to(self, column: &'static str, point: crate::sql::Point) -> Self {
@@ -910,7 +910,7 @@ impl<T: Model> QuerySet<T> {
     /// // Places within ~1km (in degrees) of `here`.
     /// let nearby = Place::objects()
     ///     .filter_dwithin("location", here, 0.01)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn filter_dwithin(
@@ -986,7 +986,7 @@ impl<T: Model> QuerySet<T> {
     /// let five = Post::objects()
     ///     .in_random_order()
     ///     .take(5)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn in_random_order(self) -> Self {
@@ -1162,7 +1162,7 @@ impl<T: Model> QuerySet<T> {
     ///         op: Op::Eq,
     ///         rhs: aliased("customer", "id"),
     ///     })
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn join_sub(self, sub: SelectQuery, alias: &'static str, on: WhereExpr) -> Self {
@@ -1354,7 +1354,7 @@ impl<T: Model> QuerySet<T> {
     ///
     /// ```ignore
     /// // Django: Post.objects.exclude(status="draft")
-    /// Post::objects().exclude("status", "draft").fetch_pool(&pool).await?;
+    /// Post::objects().exclude("status", "draft").fetch(&pool).await?;
     /// // with a lookup suffix:
     /// Post::objects().exclude("views__lt", 100_i64)
     /// ```
@@ -1422,7 +1422,7 @@ impl<T: Model> QuerySet<T> {
     /// // Eloquent: Post::query()->whereKeyNot(1)->get();
     /// let others = Post::objects()
     ///     .where_key_not(1_i64)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     ///
     /// Errors as [`Self::where_key`] when the model carries no PK.
@@ -1456,7 +1456,7 @@ impl<T: Model> QuerySet<T> {
     ///     .compile()?;
     /// let authors = Author::objects()
     ///     .where_exists(with_books)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     ///
     /// Sugar over `self.where_raw(subquery::exists(subquery))`.
@@ -1476,7 +1476,7 @@ impl<T: Model> QuerySet<T> {
     ///     .compile()?;
     /// let empty = Author::objects()
     ///     .where_not_exists(no_books)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn where_not_exists(self, subquery: SelectQuery) -> Self {
@@ -1499,7 +1499,7 @@ impl<T: Model> QuerySet<T> {
     ///     .compile()?;
     /// let visible = Post::objects()
     ///     .where_in_subquery("category_id", public_cat_ids)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn where_in_subquery(self, column: &'static str, subquery: SelectQuery) -> Self {
@@ -1539,7 +1539,7 @@ impl<T: Model> QuerySet<T> {
     /// // Authors with at least one book (reverse-FK relation "books").
     /// let with_books = Author::objects()
     ///     .where_has("books")
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn where_has(self, name: &str) -> Self {
@@ -1628,7 +1628,7 @@ impl<T: Model> QuerySet<T> {
     /// // Authors with zero books.
     /// let empty = Author::objects()
     ///     .where_doesnt_have("books")
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn where_doesnt_have(self, name: &str) -> Self {
@@ -1662,7 +1662,7 @@ impl<T: Model> QuerySet<T> {
     /// let inner = Book::objects().filter("published", true).compile()?;
     /// let authors = Author::objects()
     ///     .where_has_filter("books", inner)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn where_has_filter(self, name: &str, inner: SelectQuery) -> Self {
@@ -1758,7 +1758,7 @@ impl<T: Model> QuerySet<T> {
     /// // Eloquent: Author::has('books', '>', 3)->get();
     /// let prolific = Author::objects()
     ///     .where_has_count("books", Op::Gt, 3)
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn where_has_count(self, name: &str, op: Op, n: i64) -> Self {
@@ -1799,7 +1799,7 @@ impl<T: Model> QuerySet<T> {
     /// // Eloquent: Author::withCount('books')->get();
     /// let rows = Author::objects()
     ///     .annotate_count("books")
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// // rows[0]["books_count"] => SqlValue::I64(n)
     /// ```
     #[must_use]
@@ -2006,7 +2006,7 @@ impl<T: Model> QuerySet<T> {
     /// // Eloquent: User::whereColumn('first_name', 'last_name');
     /// User::objects()
     ///     .where_column("first_name", "last_name")
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn where_column(self, col1: &'static str, col2: &'static str) -> Self {
@@ -2022,7 +2022,7 @@ impl<T: Model> QuerySet<T> {
     /// // start_date < end_date — Eloquent: whereColumn('start_date', '<', 'end_date')
     /// Reservation::objects()
     ///     .where_column_op("start_date", Op::Lt, "end_date")
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn where_column_op(self, col1: &'static str, op: Op, col2: &'static str) -> Self {
@@ -2116,7 +2116,7 @@ impl<T: Model> QuerySet<T> {
     /// let rows = Post::objects()
     ///     .filter("active", true)
     ///     .tap(|qs| tracing::debug!(?qs, "about to fetch"))
-    ///     .fetch_pool(&pool).await?;
+    ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
     pub fn tap<F>(self, f: F) -> Self
@@ -2339,7 +2339,7 @@ impl<T: Model> QuerySet<T> {
 
     /// Project to `Vec<HashMap<String, SqlValue>>` — Django's
     /// `.values('id', 'name')`. Issue #22. Returns a
-    /// [`ValuesQuerySet`] whose terminal `.fetch_pool(&pool)` decodes
+    /// [`ValuesQuerySet`] whose terminal `.fetch(&pool)` decodes
     /// rows into a `HashMap` keyed by column name.
     ///
     /// Skips the typed `Model` decode — useful when you only need a
@@ -2377,7 +2377,7 @@ impl<T: Model> QuerySet<T> {
 
     /// Single-column flat projection — Django's
     /// `.values_list('id', flat=True)`. Issue #22. Returns
-    /// [`ValuesFlatQuerySet`] whose terminal `.fetch_pool::<U>(&pool)`
+    /// [`ValuesFlatQuerySet`] whose terminal `.fetch::<U>(&pool)`
     /// decodes the single column into `Vec<U>` directly via sqlx's
     /// typed `query_scalar` path.
     ///
@@ -2448,7 +2448,7 @@ impl<T: Model> QuerySet<T> {
     pub fn compile_delete(mut self) -> Result<DeleteQuery, QueryError> {
         // Issue #820 — fold global scopes into the WHERE so a
         // `Post.objects().delete_pool(&pool)` honors the same
-        // auto-applied filter that `Post.objects().fetch_pool(&pool)`
+        // auto-applied filter that `Post.objects().fetch(&pool)`
         // does (e.g. a `published_only` scope means a wholesale delete
         // still won't reach unpublished rows).
         self.apply_global_scopes();
@@ -2669,7 +2669,7 @@ impl<T: Model> UpdateBuilder<T> {
     pub fn compile(mut self) -> Result<UpdateQuery, QueryError> {
         // Issue #820 — same rationale as the SELECT / DELETE paths:
         // an `.update().set(...)` shouldn't escape the model's global
-        // scopes any more than a plain `.fetch_pool` would.
+        // scopes any more than a plain `.fetch` would.
         self.qs.apply_global_scopes();
         let model: &'static ModelSchema = T::SCHEMA;
 
@@ -4051,7 +4051,7 @@ impl<T: Model> AggregateBuilder<T> {
             return Err(e);
         }
         // Issue #820 — fold global scopes into the WHERE so aggregates
-        // honor the same auto-applied filter (e.g. `.count_pool()`
+        // honor the same auto-applied filter (e.g. `.count()`
         // against a `published_only`-scoped model counts published
         // rows only, not the table's full row count).
         self.qs.apply_global_scopes();
@@ -4221,7 +4221,7 @@ fn validate_aggregate_expr_columns(
 /// Pure-projection queryset returned by [`QuerySet::values_dict`].
 /// Compiles to a `SELECT <cols> FROM …` with the WHERE / ORDER BY /
 /// LIMIT / OFFSET / set-algebra branches of the underlying queryset
-/// preserved. Terminal `fetch_pool` lives in
+/// preserved. Terminal `fetch` lives in
 /// [`crate::sql::fetch_values_dict_pool`].
 pub struct ValuesQuerySet<T: Model> {
     pub(crate) qs: QuerySet<T>,
@@ -4342,7 +4342,7 @@ impl DateKind {
 }
 
 /// Builder returned by [`QuerySet::dates`]. The terminal
-/// [`fetch_pool`](Self::fetch_pool) emits
+/// [`fetch`](Self::fetch) emits
 /// `SELECT DISTINCT <trunc(col)> AS d FROM (<inner-query>) sub ORDER BY d`
 /// — the wrap inherits the underlying queryset's WHERE / JOINs / LIMIT
 /// / ORDER BY so filters on the QuerySet pass through to `.dates()`.

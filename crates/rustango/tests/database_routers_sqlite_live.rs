@@ -86,7 +86,7 @@ async fn routed_reads_hit_the_replica_writes_hit_the_primary() {
 
     // `write_pool_for` resolves the primary — confirm by reading it back.
     let on_primary: Vec<String> = Widget::objects()
-        .fetch_pool(&databases::write_pool_for(Widget::SCHEMA))
+        .fetch(&databases::write_pool_for(Widget::SCHEMA))
         .await
         .unwrap()
         .into_iter()

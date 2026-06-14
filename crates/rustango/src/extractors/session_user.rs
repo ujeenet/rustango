@@ -89,7 +89,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
         // instead of acquiring a backend-specific TenantConn. This
         // lets `SessionUser` resolve on sqlite + mysql tenancy builds
         // the same way `SessionOperator` already does (via
-        // `fetch_pool` on the registry pool below).
+        // `fetch` on the registry pool below).
         let pool = match ctx.pools.scoped_pool_dyn(&org).await {
             Ok(p) => p,
             Err(_) => return Ok(SessionUser(None)),
@@ -99,7 +99,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
         use crate::sql::FetcherPool as _;
         let users = User::objects()
             .where_(User::id.eq(payload.uid))
-            .fetch_pool(&pool)
+            .fetch(&pool)
             .await
             .unwrap_or_default();
 
@@ -147,7 +147,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {
         use crate::sql::FetcherPool as _;
         let ops = Operator::objects()
             .where_(Operator::id.eq(payload.oid))
-            .fetch_pool(&ctx.pools.registry_pool())
+            .fetch(&ctx.pools.registry_pool())
             .await
             .unwrap_or_default();
 

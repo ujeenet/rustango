@@ -155,7 +155,7 @@ async fn posts_through_returns_only_far_model_rows_for_this_country() {
     let (a_id, b_id) = seed(&pool).await;
 
     let a = Country::find(a_id, &pool).await.unwrap().unwrap();
-    let posts = a.posts_through().fetch_pool(&pool).await.unwrap();
+    let posts = a.posts_through().fetch(&pool).await.unwrap();
     // Country A has 2 users × 3 posts each = 6 far-model rows.
     assert_eq!(posts.len(), 6);
     for p in &posts {
@@ -167,7 +167,7 @@ async fn posts_through_returns_only_far_model_rows_for_this_country() {
     }
 
     let b = Country::find(b_id, &pool).await.unwrap().unwrap();
-    let posts_b = b.posts_through().fetch_pool(&pool).await.unwrap();
+    let posts_b = b.posts_through().fetch(&pool).await.unwrap();
     // Country B has 3 users × 3 posts each = 9.
     assert_eq!(posts_b.len(), 9);
     for p in &posts_b {
@@ -193,7 +193,7 @@ async fn through_accessor_is_chainable_with_filter_and_limit() {
     let alice_posts = a
         .posts_through()
         .filter("title__startswith", "alice-")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(alice_posts.len(), 3);
@@ -207,7 +207,7 @@ async fn through_accessor_is_chainable_with_filter_and_limit() {
         .posts_through()
         .order_by(&[("id", false)])
         .limit(2)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(first_two.len(), 2);
@@ -222,7 +222,7 @@ async fn through_accessor_returns_empty_for_country_with_no_users() {
         name: "Empty".into(),
     };
     empty.save_pool(&pool).await.unwrap();
-    let posts = empty.posts_through().fetch_pool(&pool).await.unwrap();
+    let posts = empty.posts_through().fetch(&pool).await.unwrap();
     assert!(posts.is_empty());
 }
 
@@ -286,7 +286,7 @@ async fn posts_through_first_returns_first_far_or_none() {
 #[tokio::test]
 async fn posts_through_fetch_bare_name_hot_path() {
     // Bare-name hot path — `posts_through_fetch(&pool)` is the
-    // suffix-free shortcut over `posts_through().fetch_pool(&pool)`.
+    // suffix-free shortcut over `posts_through().fetch(&pool)`.
     let pool = make_pool().await;
     let (a_id, _b_id) = seed(&pool).await;
     let a = Country::find(a_id, &pool).await.unwrap().unwrap();

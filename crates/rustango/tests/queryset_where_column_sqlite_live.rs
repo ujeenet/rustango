@@ -56,7 +56,7 @@ async fn where_column_eq_matches_rows_with_equal_columns() {
     insert(&pool, 7, 7, "same2").await;
     let mut got: Vec<String> = Reservation::objects()
         .where_column("start_day", "end_day")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -74,7 +74,7 @@ async fn where_column_op_lt_finds_rows_where_start_before_end() {
     insert(&pool, 9, 1, "reversed").await;
     let mut got: Vec<String> = Reservation::objects()
         .where_column_op("start_day", Op::Lt, "end_day")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()

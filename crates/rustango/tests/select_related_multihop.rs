@@ -296,7 +296,7 @@ mod sqlite_live {
         let pool = seeded_pool().await;
         let posts: Vec<Post> = Post::objects()
             .select_related("author__profile__country")
-            .fetch_pool(&pool)
+            .fetch(&pool)
             .await
             .expect("fetch");
         assert_eq!(posts.len(), 1);
@@ -322,7 +322,7 @@ mod sqlite_live {
         let pool = seeded_pool().await;
         let posts: Vec<Post> = Post::objects()
             .select_related("author")
-            .fetch_pool(&pool)
+            .fetch(&pool)
             .await
             .expect("fetch");
         let author = posts[0].author.value().expect("author stitched");
@@ -375,7 +375,7 @@ mod pg_live {
         let pool = Pool::Postgres(pg);
         let posts: Vec<Post> = Post::objects()
             .select_related("author__profile__country")
-            .fetch_pool(&pool)
+            .fetch(&pool)
             .await
             .expect("fetch");
         assert_eq!(posts.len(), 1);
@@ -420,7 +420,7 @@ mod my_live {
         let pool = Pool::Mysql(my);
         let posts: Vec<Post> = Post::objects()
             .select_related("author__profile__country")
-            .fetch_pool(&pool)
+            .fetch(&pool)
             .await
             .expect("fetch");
         assert_eq!(posts.len(), 1);

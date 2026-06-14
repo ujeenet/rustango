@@ -61,7 +61,7 @@ mod scenarios {
                 op: Op::Eq,
                 rhs: Expr::Literal(SqlValue::String("post".into())),
             })
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("nested key traversal");
         assert_eq!(ids(rows), vec![1, 3]);
@@ -83,7 +83,7 @@ mod scenarios {
                 op: Op::Eq,
                 rhs: Expr::Literal(SqlValue::String("x".into())),
             })
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("key+index traversal");
         assert_eq!(ids(rows), vec![1]);
@@ -97,7 +97,7 @@ mod scenarios {
                 op: Op::Gte,
                 rhs: Expr::Literal(SqlValue::I64(2)),
             })
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("json_array_length");
         assert_eq!(ids(rows), vec![1, 3]);
@@ -122,14 +122,14 @@ mod scenarios {
         let name = pool.dialect().name();
         if name == "postgres" || name == "sqlite" {
             let rows: Vec<Doc> = qs()
-                .fetch_pool(pool)
+                .fetch(pool)
                 .await
                 .expect("negative index (PG / SQLite)");
             assert_eq!(ids(rows), vec![1], "row 1's last tag is \"c\"");
         } else {
             // MySQL only — `$[N]` has no negative form upstream.
             let err = qs()
-                .fetch_pool(pool)
+                .fetch(pool)
                 .await
                 .map(|rows: Vec<Doc>| rows.len())
                 .expect_err("negative index must be rejected on MySQL");
@@ -152,14 +152,14 @@ mod scenarios {
     pub async fn check_date_transform_chains(pool: &Pool) {
         let rows: Vec<Doc> = Doc::objects()
             .filter("created__year__gte", 2025_i64)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("__year__gte");
         assert_eq!(ids(rows), vec![3]);
 
         let rows: Vec<Doc> = Doc::objects()
             .filter("created__month", 3_i64)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("__month");
         assert_eq!(ids(rows), vec![1, 2]);
@@ -173,7 +173,7 @@ mod scenarios {
         // March (rows 1+2) is Q1 on every backend.
         let q1 = Doc::objects()
             .filter("created__quarter", 1_i64)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("__quarter Q1");
         assert_eq!(ids(q1), vec![1, 2], "March is Q1");
@@ -182,7 +182,7 @@ mod scenarios {
         // off-by-one in the SQLite synthesis.
         let q3 = Doc::objects()
             .filter("created__quarter", 3_i64)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("__quarter Q3");
         assert_eq!(ids(q3), vec![3], "July is Q3");

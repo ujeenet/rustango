@@ -136,7 +136,7 @@ pub async fn for_user(
     use crate::sql::FetcherPool as _;
     WebauthnCredential::objects()
         .filter("user_id", user_id)
-        .fetch_pool(pool)
+        .fetch(pool)
         .await
 }
 
@@ -152,7 +152,7 @@ pub async fn by_credential_id(
     use crate::sql::FetcherPool as _;
     Ok(WebauthnCredential::objects()
         .filter("credential_id", credential_id.to_owned())
-        .fetch_pool(pool)
+        .fetch(pool)
         .await?
         .into_iter()
         .next())

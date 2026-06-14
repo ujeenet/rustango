@@ -1,7 +1,7 @@
 //! Django-shape `get_or_create` / `update_or_create` helpers.
 //!
 //! Extracted from `executor/mod.rs` as part of #116 step 2. Both
-//! helpers go through `FetcherPool::fetch_pool` then either return
+//! helpers go through `FetcherPool::fetch` then either return
 //! the existing row or invoke the caller's `create_fn` / `update_fn`
 //! closure.
 
@@ -51,7 +51,7 @@ use crate::sql::Pool;
 /// # Errors
 /// - [`ExecError::MultipleRowsReturned`] when the filter matches >1 row.
 /// - Whatever the `create_fn` closure returns when matching no rows.
-/// - Whatever [`FetcherPool::fetch_pool`] returns.
+/// - Whatever [`FetcherPool::fetch`] returns.
 pub async fn get_or_create<T, F, Fut>(
     qs: crate::query::QuerySet<T>,
     create_fn: F,
@@ -70,7 +70,7 @@ where
     F: FnOnce(Pool) -> Fut,
     Fut: std::future::Future<Output = Result<T, ExecError>>,
 {
-    let mut rows = qs.fetch_pool(pool).await?;
+    let mut rows = qs.fetch(pool).await?;
     match rows.len() {
         0 => Ok((create_fn(pool.clone()).await?, true)),
         1 => Ok((rows.remove(0), false)),
@@ -137,7 +137,7 @@ where
     CF: FnOnce(Pool) -> CFut,
     CFut: std::future::Future<Output = Result<T, ExecError>>,
 {
-    let mut rows = qs.fetch_pool(pool).await?;
+    let mut rows = qs.fetch(pool).await?;
     match rows.len() {
         0 => Ok((create_fn(pool.clone()).await?, true)),
         1 => {

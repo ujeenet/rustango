@@ -5,7 +5,7 @@
 //! The per-tenant verbs (create-user / set-superuser / reset-password)
 //! rely on `scoped_tenant_pool` which on PG dispatches through schema-
 //! mode + database-mode, and on sqlite/mysql resolves to database-mode
-//! only. The `_pool` ORM family (`fetch_pool`, `save_pool`,
+//! only. The `_pool` ORM family (`fetch`, `save_pool`,
 //! `update_pool`) drives every backend-uniform query path so the same
 //! verb body runs on PG / MySQL / SQLite.
 
@@ -96,7 +96,7 @@ where
     let registry = pools.registry_pool();
     let existing: Vec<crate::tenancy::Operator> = crate::tenancy::Operator::objects()
         .where_(crate::tenancy::Operator::username.eq(username.clone()))
-        .fetch_pool(&registry)
+        .fetch(&registry)
         .await?;
     if !existing.is_empty() {
         return Err(TenancyError::Validation(format!(
@@ -208,7 +208,7 @@ where
     let registry = pools.registry_pool();
     let orgs: Vec<crate::tenancy::Org> = crate::tenancy::Org::objects()
         .where_(crate::tenancy::Org::slug.eq(slug.clone()))
-        .fetch_pool(&registry)
+        .fetch(&registry)
         .await?;
     orgs.into_iter().next().ok_or_else(|| {
         TenancyError::Validation(format!("create-user: no tenant with slug `{slug}`"))
@@ -218,7 +218,7 @@ where
 
     // v0.38 — open a tenant-scoped Pool enum (handles schema-mode on
     // PG, database-mode on any backend). Then drive the read/write
-    // through the tri-dialect ORM (FetcherPool::fetch_pool +
+    // through the tri-dialect ORM (FetcherPool::fetch +
     // Model::save_pool) so the same code runs on PG / MySQL / SQLite.
     use crate::sql::FetcherPool as _;
     let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
@@ -229,7 +229,7 @@ where
     let mut auto_promoted = false;
     if !is_superuser {
         let existing: Vec<crate::tenancy::User> = crate::tenancy::User::objects()
-            .fetch_pool(&scoped)
+            .fetch(&scoped)
             .await
             .unwrap_or_default();
         if existing.is_empty() {
@@ -553,7 +553,7 @@ where
     let registry = pools.registry_pool();
     let existing: Vec<crate::tenancy::Operator> = crate::tenancy::Operator::objects()
         .where_(crate::tenancy::Operator::username.eq(username.clone()))
-        .fetch_pool(&registry)
+        .fetch(&registry)
         .await?;
     let mut op = existing.into_iter().next().ok_or_else(|| {
         TenancyError::Validation(format!(
@@ -655,7 +655,7 @@ where
     use crate::sql::FetcherPool as _;
     let users: Vec<crate::tenancy::User> = crate::tenancy::User::objects()
         .where_(crate::tenancy::User::username.eq(username.clone()))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await?;
     let Some(mut user) = users.into_iter().next() else {
         return Err(TenancyError::Validation(format!(
@@ -758,7 +758,7 @@ where
     let registry = pools.registry_pool();
     let existing: Vec<crate::tenancy::Operator> = crate::tenancy::Operator::objects()
         .where_(crate::tenancy::Operator::username.eq(username.clone()))
-        .fetch_pool(&registry)
+        .fetch(&registry)
         .await?;
     let mut op = existing.into_iter().next().ok_or_else(|| {
         TenancyError::Validation(format!(
@@ -794,7 +794,7 @@ where
 {
     let orgs: Vec<crate::tenancy::Org> = crate::tenancy::Org::objects()
         .where_(crate::tenancy::Org::slug.eq(slug.to_owned()))
-        .fetch_pool(&pools.registry_pool())
+        .fetch(&pools.registry_pool())
         .await?;
     let org = orgs
         .into_iter()

@@ -85,7 +85,7 @@ where
     let orgs: Vec<Org> = if let Some(ref slug) = tenant_slug {
         let found: Vec<Org> = Org::objects()
             .where_(Org::slug.eq(slug.as_str()))
-            .fetch_pool(&registry)
+            .fetch(&registry)
             .await?;
         if found.is_empty() {
             return Err(TenancyError::Validation(format!(
@@ -96,7 +96,7 @@ where
     } else {
         Org::objects()
             .where_(Org::active.eq(true))
-            .fetch_pool(&registry)
+            .fetch(&registry)
             .await?
     };
 

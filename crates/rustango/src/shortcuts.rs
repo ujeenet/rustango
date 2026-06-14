@@ -178,7 +178,7 @@ where
         + MaybeMyLoadRelated
         + MaybeSqliteLoadRelated,
 {
-    let rows = qs.fetch_pool(pool).await?;
+    let rows = qs.fetch(pool).await?;
     if rows.is_empty() {
         Err(ShortcutError::not_found(format!(
             "no {} matches",

@@ -324,7 +324,7 @@ where
     let rows: Vec<Org> = Org::objects()
         .where_(typed)
         .where_(Org::active.eq(true))
-        .fetch_pool(registry)
+        .fetch(registry)
         .await
         .map_err(|e| TenancyError::Driver(driver_from_exec(e)))?;
     Ok(rows.into_iter().next())

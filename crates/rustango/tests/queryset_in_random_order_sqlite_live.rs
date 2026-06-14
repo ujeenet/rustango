@@ -42,7 +42,7 @@ async fn in_random_order_returns_every_row() {
     }
     let rows = Post::objects()
         .in_random_order()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 10);
@@ -64,7 +64,7 @@ async fn in_random_order_with_take_caps_result() {
     let rows = Post::objects()
         .in_random_order()
         .take(5)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 5);

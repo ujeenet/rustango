@@ -1417,7 +1417,7 @@ pub use rustango_macros::embed_migrations;
 ///
 /// User::objects()
 ///     .where_(Q!(User.email__icontains = "alice"))
-///     .fetch_pool(&pool).await?;
+///     .fetch(&pool).await?;
 /// // → WHERE "email" ILIKE $1   ($1 = "%alice%")
 /// ```
 #[allow(non_upper_case_globals)]

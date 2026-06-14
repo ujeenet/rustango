@@ -163,7 +163,7 @@ pub async fn authenticate_operator_pool(
     use crate::sql::FetcherPool as _;
     let rows: Vec<Operator> = Operator::objects()
         .where_(Operator::username.eq(username.to_owned()))
-        .fetch_pool(registry)
+        .fetch(registry)
         .await?;
     let Some(op) = rows.into_iter().next() else {
         // H1: spend a verify's worth of work on the unknown-user path
@@ -271,7 +271,7 @@ pub async fn authenticate_user_pool(
     use crate::sql::FetcherPool as _;
     let rows: Vec<User> = User::objects()
         .where_(User::username.eq(username.to_owned()))
-        .fetch_pool(pool)
+        .fetch(pool)
         .await?;
     let Some(user) = rows.into_iter().next() else {
         // H1: equalize timing for the unknown-user path.

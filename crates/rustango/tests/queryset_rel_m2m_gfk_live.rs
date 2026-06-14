@@ -142,7 +142,7 @@ async fn assert_relations(pool: &rustango::sql::Pool) {
     // --- M2M where_has: A, B (not C) ---
     let mut has_tags: Vec<String> = Post::objects()
         .where_has("tags")
-        .fetch_pool(pool)
+        .fetch(pool)
         .await
         .unwrap()
         .into_iter()
@@ -193,7 +193,7 @@ async fn assert_relations(pool: &rustango::sql::Pool) {
     // --- GFK where_has: P, Q (not R) ---
     let mut commented: Vec<String> = Article::objects()
         .where_has("comments")
-        .fetch_pool(pool)
+        .fetch(pool)
         .await
         .unwrap()
         .into_iter()

@@ -73,7 +73,7 @@ where
     // unnoticeable, and the code stays tri-dialect without per-
     // dialect SQL.
     use crate::tenancy::permissions::{Role, RolePermission};
-    let roles: Vec<Role> = Role::objects().fetch_pool(&pool).await?;
+    let roles: Vec<Role> = Role::objects().fetch(&pool).await?;
     if roles.is_empty() {
         writeln!(w, "(no roles on tenant `{slug}`)")?;
         return Ok(());
@@ -84,7 +84,7 @@ where
         let id = role.id.get().copied().unwrap_or(0);
         let perms: Vec<RolePermission> = RolePermission::objects()
             .where_(RolePermission::role_id.eq(id))
-            .fetch_pool(&pool)
+            .fetch(&pool)
             .await?;
         writeln!(
             w,
@@ -346,7 +346,7 @@ where
     let targets: Vec<Org> = if let Some(s) = slug.as_deref() {
         let orgs: Vec<Org> = Org::objects()
             .where_(Org::slug.eq(s.to_owned()))
-            .fetch_pool(&registry)
+            .fetch(&registry)
             .await?;
         if orgs.is_empty() {
             return Err(TenancyError::Validation(format!("tenant `{s}` not found")));
@@ -355,7 +355,7 @@ where
     } else {
         Org::objects()
             .where_(Org::active.eq(true))
-            .fetch_pool(&registry)
+            .fetch(&registry)
             .await?
     };
 
@@ -387,7 +387,7 @@ where
 {
     let orgs: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))
-        .fetch_pool(&pools.registry_pool())
+        .fetch(&pools.registry_pool())
         .await?;
     let org = orgs
         .into_iter()
@@ -399,7 +399,7 @@ where
 async fn user_id_by_username(username: &str, pool: &crate::sql::Pool) -> Result<i64, TenancyError> {
     let rows = User::objects()
         .where_(User::username.eq(username.to_owned()))
-        .fetch_pool(pool)
+        .fetch(pool)
         .await?;
     rows.into_iter()
         .next()
@@ -411,7 +411,7 @@ async fn role_id_by_name(name: &str, pool: &crate::sql::Pool) -> Result<i64, Ten
     use crate::tenancy::permissions::Role;
     let rows = Role::objects()
         .where_(Role::name.eq(name.to_owned()))
-        .fetch_pool(pool)
+        .fetch(pool)
         .await?;
     rows.into_iter()
         .next()

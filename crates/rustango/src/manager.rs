@@ -33,7 +33,7 @@
 //! Rust's **extension trait** idiom maps directly to Django's
 //! `as_manager()` — and it's strictly more flexible because the
 //! returned chained value is still a `QuerySet<T>`, so every existing
-//! method (`.where_`, `.order_by`, `.fetch_pool`) stays available
+//! method (`.where_`, `.order_by`, `.fetch`) stays available
 //! alongside the app-specific shortcuts. No subclassing, no method
 //! resolution surprises.
 //!
@@ -73,7 +73,7 @@
 //!         .published()                    // custom shortcut
 //!         .by_author(7)                   // another custom shortcut
 //!         .order_by("-id")                // framework method
-//!         .fetch_pool(pool).await.unwrap();
+//!         .fetch(pool).await.unwrap();
 //! }
 //! ```
 //!
@@ -98,12 +98,12 @@
 //! // Usage:
 //! let public_articles = Article::published_objects()
 //!     .order_by("-id")
-//!     .fetch_pool(&pool).await?;
+//!     .fetch(&pool).await?;
 //! ```
 //!
 //! Either shape composes with the rest of the QuerySet builder —
 //! you can call any framework method (`.where_`, `.limit`,
-//! `.select_related`, `.order_by`, `.fetch_pool`) on the result.
+//! `.select_related`, `.order_by`, `.fetch`) on the result.
 //!
 //! ## Why no `#[rustango(manager = "...")]` attribute?
 //!
@@ -134,4 +134,4 @@
 // machinery — no framework runtime to test. Worked examples live in
 // `tests/manager_pattern_live.rs`, which uses a real `#[derive(Model)]`
 // type to prove the shape compiles end-to-end and the chained QuerySet
-// still routes through `.fetch_pool()`.
+// still routes through `.fetch()`.

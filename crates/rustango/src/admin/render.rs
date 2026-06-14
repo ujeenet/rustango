@@ -71,7 +71,7 @@ pub(crate) fn coerce_form_to_json(field: &FieldSchema, raw: &str) -> serde_json:
 
 /// Backend-agnostic counterpart of [`render_value_for_input`]. Takes
 /// a `serde_json::Value` instead of a `PgRow` — call sites that fetch
-/// rows via the ORM (`Model::objects().fetch_pool` then
+/// rows via the ORM (`Model::objects().fetch` then
 /// `serde_json::to_value(&row)`) can render form inputs without
 /// pinning the registry to Postgres. Used by the v0.34 operator
 /// console.

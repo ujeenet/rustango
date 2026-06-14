@@ -120,7 +120,7 @@ impl AuthBackend for ModelBackend {
 
         let users = super::auth::User::objects()
             .where_(super::auth::User::username.eq(username.clone()))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await?;
 
         let Some(user) = users.into_iter().next() else {
@@ -329,7 +329,7 @@ impl AuthBackend for ApiKeyBackend {
         // total latency on the hot path is two index seeks.
         let keys = ApiKey::objects()
             .where_(ApiKey::key_prefix.eq(prefix.to_owned()))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await?;
         let Some(key) = keys.into_iter().next() else {
             // Audit N4 — equalize timing on the unknown-prefix path so it
@@ -351,7 +351,7 @@ impl AuthBackend for ApiKeyBackend {
 
         let users = super::auth::User::objects()
             .where_(super::auth::User::id.eq(key.user_id))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await?;
         let Some(user) = users.into_iter().next() else {
             return Ok(None);
@@ -542,7 +542,7 @@ impl AuthBackend for JwtBackend {
 
         let users = super::auth::User::objects()
             .where_(super::auth::User::id.eq(user_id))
-            .fetch_pool(pool)
+            .fetch(pool)
             .await?;
 
         let Some(user) = users.into_iter().next() else {

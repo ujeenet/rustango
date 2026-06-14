@@ -101,7 +101,7 @@ async fn per_fk_related_name_disambiguates_two_fks_to_same_parent() {
 
     let ada_db = QuerySet::<User>::default()
         .filter("id", ada_pk)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .pop()
@@ -122,7 +122,7 @@ async fn per_fk_related_name_disambiguates_two_fks_to_same_parent() {
 
     let grace_db = QuerySet::<User>::default()
         .filter("id", grace_pk)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .pop()

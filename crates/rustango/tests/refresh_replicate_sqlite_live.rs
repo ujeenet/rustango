@@ -8,7 +8,7 @@
 //!   `Auto<T>` PKs so the next `save_pool` allocates a fresh
 //!   autoincrement.
 //!
-//! Backend-neutral (the methods route through `QuerySet::fetch_pool`
+//! Backend-neutral (the methods route through `QuerySet::fetch`
 //! + the existing `_pool` save family); SQLite proves the round-trip.
 
 use rustango::sql::{sqlx, Auto, FetcherPool, Pool};
@@ -134,7 +134,7 @@ async fn replicate_resets_auto_pk_and_clones_other_fields() {
 
     // Both rows live in the table.
     let rows: Vec<Post> = rustango::query::QuerySet::<Post>::default()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);

@@ -41,7 +41,7 @@
 use crate::core::Column as _;
 // v0.34 — operator console no longer imports `PgPool` directly.
 // ConsoleState.registry is `crate::sql::Pool` (the backend-erasing
-// enum); all internal queries route through `fetch_pool` /
+// enum); all internal queries route through `fetch` /
 // `insert_pool` / `save_pool` / `update_pool`.
 use crate::sql::FetcherPool;
 use crate::storage::BoxedStorage;
@@ -75,7 +75,7 @@ const RUSTANGO_PNG: &[u8] = include_bytes!("../static/rustango.png");
 struct ConsoleState {
     /// Backend-erasing registry pool. PG / MySQL / SQLite all share
     /// one operator-console code path — every query inside the
-    /// console routes through `_pool` ORM helpers (`fetch_pool` /
+    /// console routes through `_pool` ORM helpers (`fetch` /
     /// `insert_pool` / `save_pool`) which dispatch per-backend.
     registry: crate::sql::Pool,
     /// Optional pool cache. When `Some`, the operator console exposes
@@ -500,7 +500,7 @@ async fn require_session(
     };
     match auth::Operator::objects()
         .where_(auth::Operator::id.eq(payload.oid))
-        .fetch_pool(&state.registry)
+        .fetch(&state.registry)
         .await
     {
         Ok(rows) => {
@@ -633,7 +633,7 @@ async fn login_submit(
         use crate::sql::FetcherPool as _;
         auth::Operator::objects()
             .where_(auth::Operator::username.eq(form.username.clone()))
-            .fetch_pool(&state.registry)
+            .fetch(&state.registry)
             .await
             .ok()
             .and_then(|rows: Vec<auth::Operator>| rows.into_iter().next())
@@ -854,7 +854,7 @@ async fn change_password_submit(
     // account.
     let mut op_row: auth::Operator = match auth::Operator::objects()
         .where_(auth::Operator::id.eq(op_id))
-        .fetch_pool(&state.registry)
+        .fetch(&state.registry)
         .await
     {
         Ok(rows) => match rows.into_iter().next() {
@@ -906,11 +906,10 @@ async fn operators_list(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
 ) -> Response<Body> {
-    let rows: Vec<auth::Operator> =
-        match auth::Operator::objects().fetch_pool(&state.registry).await {
-            Ok(r) => r,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
-        };
+    let rows: Vec<auth::Operator> = match auth::Operator::objects().fetch(&state.registry).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
     let view: Vec<_> = rows
         .into_iter()
         .map(|o| {
@@ -940,7 +939,7 @@ async fn orgs_list(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
 ) -> Response<Body> {
-    let rows: Vec<super::Org> = match super::Org::objects().fetch_pool(&state.registry).await {
+    let rows: Vec<super::Org> = match super::Org::objects().fetch(&state.registry).await {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     };
@@ -1034,7 +1033,7 @@ async fn org_edit_form(
     // Fetch via the ORM (bi-dialect) instead of `SELECT *` + PgRow.
     let rows: Vec<super::Org> = match super::Org::objects()
         .where_(super::Org::slug.eq(slug.clone()))
-        .fetch_pool(&state.registry)
+        .fetch(&state.registry)
         .await
     {
         Ok(r) => r,
@@ -1179,7 +1178,7 @@ async fn org_edit_submit(
     // ORM path so registry-backend stays plug-and-play.
     let existing_orgs: Vec<super::Org> = match super::Org::objects()
         .where_(super::Org::slug.eq(slug.clone()))
-        .fetch_pool(&state.registry)
+        .fetch(&state.registry)
         .await
     {
         Ok(rows) => rows,
@@ -1563,7 +1562,7 @@ async fn org_impersonate(
     // correct context.
     let orgs: Vec<super::Org> = match super::Org::objects()
         .where_(super::Org::slug.eq(slug.clone()))
-        .fetch_pool(&state.registry)
+        .fetch(&state.registry)
         .await
     {
         Ok(rows) => rows,

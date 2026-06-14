@@ -17,7 +17,7 @@
 //!         Q::startswith("name", "A")
 //!             | (Q::gt("age", 18_i64) & !Q::eq("banned", true))
 //!     )
-//!     .fetch_pool(&pool).await?;
+//!     .fetch(&pool).await?;
 //! ```
 //!
 //! ## When to reach for `Q()` vs `Q!()` macro vs typed methods

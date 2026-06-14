@@ -54,7 +54,7 @@ async fn insert_with_unset_pk_generates_uuid_v7() {
 
     // Read it back — it lives in the row.
     let rows: Vec<Post> = rustango::query::QuerySet::<Post>::default()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -118,7 +118,7 @@ async fn save_pool_after_insert_does_an_update() {
     post.save_pool(&pool).await.unwrap();
 
     let rows: Vec<Post> = rustango::query::QuerySet::<Post>::default()
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1, "save_pool should UPDATE not re-INSERT");

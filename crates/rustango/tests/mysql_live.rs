@@ -115,15 +115,12 @@ async fn auto_pk_insert_pool_round_trips() {
     // LAST_INSERT_ID() — first row → 1.
     assert_eq!(u.id.get().copied(), Some(1));
 
-    let n = LiveUser::objects()
-        .count_pool(&pool)
-        .await
-        .expect("count_pool");
+    let n = LiveUser::objects().count(&pool).await.expect("count");
     assert_eq!(n, 1);
 }
 
 #[tokio::test]
-async fn fetch_pool_round_trips_decoded_row() {
+async fn fetch_round_trips_decoded_row() {
     let Some(pool) = pool_or_skip().await else {
         eprintln!("MYSQL_TEST_URL unset — skipping");
         return;
@@ -138,10 +135,7 @@ async fn fetch_pool_round_trips_decoded_row() {
     };
     u.insert_pool(&pool).await.expect("insert_pool");
 
-    let users: Vec<LiveUser> = LiveUser::objects()
-        .fetch_pool(&pool)
-        .await
-        .expect("fetch_pool");
+    let users: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.expect("fetch");
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].name, "bob");
     assert!(!users[0].is_active);
@@ -166,7 +160,7 @@ async fn save_pool_updates_existing_row() {
     u.name = "Carol".into();
     u.save_pool(&pool).await.expect("save_pool");
 
-    let users: Vec<LiveUser> = LiveUser::objects().fetch_pool(&pool).await.expect("fetch");
+    let users: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.expect("fetch");
     assert_eq!(users[0].name, "Carol");
 }
 
@@ -187,7 +181,7 @@ async fn delete_pool_removes_row() {
     u.insert_pool(&pool).await.expect("insert");
     let affected = u.delete_pool(&pool).await.expect("delete_pool");
     assert_eq!(affected, 1);
-    let n = LiveUser::objects().count_pool(&pool).await.expect("count");
+    let n = LiveUser::objects().count(&pool).await.expect("count");
     assert_eq!(n, 0);
 }
 
@@ -264,7 +258,7 @@ async fn transaction_pool_commit_persists() {
         _ => unreachable!("test runs with mysql feature"),
     }
 
-    let n = LiveUser::objects().count_pool(&pool).await.expect("count");
+    let n = LiveUser::objects().count(&pool).await.expect("count");
     assert_eq!(n, 1);
 }
 

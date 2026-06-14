@@ -685,7 +685,7 @@ async fn validate_session(
     if let Some(operator_id) = payload.imp {
         let ops: Vec<super::auth::Operator> = match super::auth::Operator::objects()
             .where_(super::auth::Operator::id.eq(operator_id))
-            .fetch_pool(registry_pool)
+            .fetch(registry_pool)
             .await
         {
             Ok(v) => v,
@@ -709,12 +709,12 @@ async fn validate_session(
             _ => SessionCheck::Anonymous,
         };
     }
-    // v0.38 — route through ORM `User::objects().fetch_pool` so the
+    // v0.38 — route through ORM `User::objects().fetch` so the
     // same body runs on PG / MySQL / SQLite. Identifier quoting +
     // placeholders are handled by the dialect emitter.
     let users: Vec<super::auth::User> = match super::auth::User::objects()
         .where_(super::auth::User::id.eq(payload.uid))
-        .fetch_pool(tenant_pool)
+        .fetch(tenant_pool)
         .await
     {
         Ok(v) => v,
@@ -878,7 +878,7 @@ async fn login_submit(
     // is built with search_path baked in).
     let users: Vec<super::auth::User> = match super::auth::User::objects()
         .where_(super::auth::User::username.eq(form.username.clone()))
-        .fetch_pool(tenant_pool)
+        .fetch(tenant_pool)
         .await
     {
         Ok(v) => v,
@@ -1262,7 +1262,7 @@ async fn change_password_submit(
     // identifier quoting differences.
     let users: Vec<super::auth::User> = match super::auth::User::objects()
         .where_(super::auth::User::id.eq(user_id))
-        .fetch_pool(tenant_pool)
+        .fetch(tenant_pool)
         .await
     {
         Ok(v) => v,

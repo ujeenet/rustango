@@ -56,7 +56,7 @@ where
         + Send
         + Unpin,
 {
-    let parents: Vec<P> = parent_qs.fetch_pool(pool).await?;
+    let parents: Vec<P> = parent_qs.fetch(pool).await?;
     if parents.is_empty() {
         return Ok(Vec::new());
     }
@@ -89,7 +89,7 @@ where
             crate::core::Op::In,
             crate::core::SqlValue::List(parent_pks),
         )
-        .fetch_pool(pool)
+        .fetch(pool)
         .await?;
 
     let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();
@@ -175,7 +175,7 @@ where
         + Send
         + Unpin,
 {
-    let parents: Vec<P> = parent_qs.fetch_pool(pool).await?;
+    let parents: Vec<P> = parent_qs.fetch(pool).await?;
     if parents.is_empty() {
         return Ok(Vec::new());
     }
@@ -210,7 +210,7 @@ where
             crate::core::Op::In,
             crate::core::SqlValue::List(parent_pks),
         )
-        .fetch_pool(pool)
+        .fetch(pool)
         .await?;
 
     let mut grouped: std::collections::HashMap<String, Vec<C>> = std::collections::HashMap::new();

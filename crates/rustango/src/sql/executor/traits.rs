@@ -18,7 +18,7 @@
 // `&Pool` FromRow dispatch — Phase B (v0.23.0-batch6)
 // ====================================================================
 //
-// `select_rows_pool` / `Fetcher::fetch` for `&Pool`. The trait bound on
+// `select_rows_pool` / `FetcherPool::fetch` for `&Pool`. The trait bound on
 // `T` needs to flex: when rustango is built with the `mysql` feature,
 // it must also include `FromRow<MySqlRow>`; without it, the MySql
 // variant doesn't exist and the bound shouldn't either. The

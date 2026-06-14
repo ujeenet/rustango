@@ -73,7 +73,7 @@ async fn where_json_length_gt_filters_correctly() {
         rhs: Expr::Literal(SqlValue::I64(1)),
     });
 
-    let rows: Vec<Doc> = q.fetch_pool(&pool).await.unwrap();
+    let rows: Vec<Doc> = q.fetch(&pool).await.unwrap();
     assert_eq!(
         rows.len(),
         2,
@@ -94,6 +94,6 @@ async fn where_json_length_eq_zero_finds_empty_arrays() {
         rhs: Expr::Literal(SqlValue::I64(0)),
     });
 
-    let rows: Vec<Doc> = q.fetch_pool(&pool).await.unwrap();
+    let rows: Vec<Doc> = q.fetch(&pool).await.unwrap();
     assert_eq!(rows.len(), 1, "expected 1 doc with empty tags array");
 }

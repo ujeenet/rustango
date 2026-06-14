@@ -128,7 +128,7 @@ async fn override_emits_custom_named_accessor() {
 
     let ada = QuerySet::<Author>::default()
         .filter("id", ada_pk)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .pop()
@@ -143,7 +143,7 @@ async fn override_emits_custom_named_accessor() {
 
     let grace = QuerySet::<Author>::default()
         .filter("id", grace_pk)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .pop()
@@ -160,7 +160,7 @@ async fn default_name_falls_back_to_child_snake_set() {
 
     let ada = QuerySet::<Author>::default()
         .filter("id", ada_pk)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .pop()

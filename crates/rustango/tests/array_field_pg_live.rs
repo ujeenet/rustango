@@ -122,7 +122,7 @@ async fn array_contains_operator_filters() {
     // `tags @> ARRAY['rust']` — only the first post.
     let mut titles: Vec<String> = Post::objects()
         .where_(Post::tags.array_contains(["rust".to_owned()]))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()
@@ -134,7 +134,7 @@ async fn array_contains_operator_filters() {
     // `tags @> ARRAY['orm']` — both posts.
     let n = Post::objects()
         .where_(Post::tags.array_contains(["orm".to_owned()]))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .len();

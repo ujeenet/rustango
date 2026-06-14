@@ -97,7 +97,7 @@ mod scenarios {
         let rows: Vec<Author> = Author::objects()
             .where_exists(inner)
             .order_by(&[("name", false)])
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("EXISTS fetch");
         assert_eq!(names(rows), vec!["Ada", "Bob", "Dan"]);
@@ -114,7 +114,7 @@ mod scenarios {
             .expect("inner compile");
         let rows: Vec<Author> = Author::objects()
             .where_not_exists(inner)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("NOT EXISTS fetch");
         assert_eq!(names(rows), vec!["Cara"]);
@@ -140,7 +140,7 @@ mod scenarios {
         let has: Vec<Author> = Author::objects()
             .where_has_filter("books", unpublished())
             .order_by(&[("name", false)])
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("whereHas fetch");
         assert_eq!(names(has), vec!["Ada", "Dan"], "filter() direction");
@@ -148,7 +148,7 @@ mod scenarios {
         let doesnt: Vec<Author> = Author::objects()
             .where_doesnt_have_filter("books", unpublished())
             .order_by(&[("name", false)])
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("whereDoesntHave fetch");
         assert_eq!(
@@ -168,7 +168,7 @@ mod scenarios {
             .expect("inner compile");
         let rows: Vec<Book> = Book::objects()
             .where_in_subquery("author_id", active_ids)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("IN subquery fetch");
         assert_eq!(rows.len(), 5, "Ada's 2 + Dan's 3 books");
@@ -180,7 +180,7 @@ mod scenarios {
             .expect("inner compile");
         let rows: Vec<Book> = Book::objects()
             .where_not_in_subquery("author_id", active_ids)
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("NOT IN subquery fetch");
         assert_eq!(rows.len(), 1, "only Bob's book");
@@ -192,7 +192,7 @@ mod scenarios {
         let rows: Vec<Author> = Author::objects()
             .where_has_count("books", Op::Gte, 2)
             .order_by(&[("name", false)])
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("has-count fetch");
         assert_eq!(names(rows), vec!["Ada", "Dan"]);
@@ -235,7 +235,7 @@ mod scenarios {
                 op: Op::Eq,
                 rhs: subquery(newest_author),
             })
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .expect("scalar subquery fetch");
         assert_eq!(rows.len(), 3, "Dan's 3 books");
@@ -294,7 +294,7 @@ mod scenarios {
                 op: Op::Eq,
                 rhs: outer_ref("id"),
             })
-            .fetch_pool(pool)
+            .fetch(pool)
             .await
             .map(|rows: Vec<Author>| rows.len())
             .expect_err("OuterRef outside a subquery must error");

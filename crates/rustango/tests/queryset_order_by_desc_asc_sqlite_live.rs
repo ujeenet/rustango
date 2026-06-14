@@ -49,7 +49,7 @@ async fn order_by_desc_appends_descending_order() {
     seed(&pool, 5).await;
     let rows = Post::objects()
         .order_by_desc("seq")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     let ns: Vec<i64> = rows.iter().map(|r| r.seq).collect();
@@ -62,7 +62,7 @@ async fn order_by_asc_appends_ascending_order() {
     seed(&pool, 5).await;
     let rows = Post::objects()
         .order_by_asc("seq")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     let ns: Vec<i64> = rows.iter().map(|r| r.seq).collect();

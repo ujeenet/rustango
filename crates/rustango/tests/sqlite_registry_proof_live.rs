@@ -7,7 +7,7 @@
 //!
 //! ✅ `Org::insert_pool(&Pool::Sqlite(...))` round-trips through
 //!    SQLite's `INSERT ... RETURNING id` (SQLite ≥ 3.35).
-//! ✅ `Org::objects().fetch_pool(&Pool::Sqlite(...))` reads rows back.
+//! ✅ `Org::objects().fetch(&Pool::Sqlite(...))` reads rows back.
 //! ✅ The new `Org.backend_kind` column persists via SQLite TEXT.
 //!
 //! ❌ `TenantPools::registry()` still returns `&PgPool` — apps wanting
@@ -111,7 +111,7 @@ async fn org_insert_and_fetch_against_sqlite_registry() {
     // FETCH through the QuerySet API.
     let rows: Vec<Org> = Org::objects()
         .order_by(&[("slug", false)])
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("fetch");
     assert_eq!(rows.len(), 2);
@@ -121,7 +121,7 @@ async fn org_insert_and_fetch_against_sqlite_registry() {
     // Filtered fetch — confirms WHERE generation lands sqlite syntax.
     let mut just_acme: Vec<Org> = Org::objects()
         .where_(Org::slug.eq("acme".to_owned()))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("filtered fetch");
     assert_eq!(just_acme.len(), 1);
@@ -144,7 +144,7 @@ async fn org_save_against_sqlite_registry() {
 
     let after: Vec<Org> = Org::objects()
         .where_(Org::slug.eq("acme".to_owned()))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("refetch");
     assert_eq!(after.len(), 1);

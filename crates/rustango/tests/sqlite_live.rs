@@ -2,8 +2,8 @@
 //!
 //! Runs against an anonymous in-memory SQLite database — no env var,
 //! no external service, no docker. Confirms the bi-dialect surface
-//! (`apply_all_pool` → `insert_pool` → `fetch_pool` → `save_pool` →
-//! `delete_pool` → `count_pool`) reaches the SQLite arms cleanly,
+//! (`apply_all_pool` → `insert_pool` → `fetch` → `save_pool` →
+//! `delete_pool` → `count`) reaches the SQLite arms cleanly,
 //! including `Auto<i64>` PK assignment via `INSERT … RETURNING`.
 
 #![cfg(feature = "sqlite")]
@@ -68,15 +68,12 @@ async fn auto_pk_insert_pool_round_trips() {
     let id = u.id.get().copied().unwrap();
     assert!(id >= 1);
 
-    let n = LiveUser::objects()
-        .count_pool(&pool)
-        .await
-        .expect("count_pool");
+    let n = LiveUser::objects().count(&pool).await.expect("count");
     assert_eq!(n, 1);
 }
 
 #[tokio::test]
-async fn fetch_pool_round_trips_decoded_row() {
+async fn fetch_round_trips_decoded_row() {
     let pool = fresh_pool().await;
 
     let mut u = LiveUser {
@@ -86,10 +83,7 @@ async fn fetch_pool_round_trips_decoded_row() {
     };
     u.insert_pool(&pool).await.expect("insert_pool");
 
-    let users: Vec<LiveUser> = LiveUser::objects()
-        .fetch_pool(&pool)
-        .await
-        .expect("fetch_pool");
+    let users: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.expect("fetch");
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].name, "bob");
     assert!(!users[0].is_active);
@@ -109,7 +103,7 @@ async fn save_pool_updates_existing_row() {
     u.name = "Carol".into();
     u.save_pool(&pool).await.expect("save_pool");
 
-    let users: Vec<LiveUser> = LiveUser::objects().fetch_pool(&pool).await.expect("fetch");
+    let users: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.expect("fetch");
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].name, "Carol");
 }
@@ -126,7 +120,7 @@ async fn delete_pool_removes_row() {
     u.insert_pool(&pool).await.expect("insert");
     let affected = u.delete_pool(&pool).await.expect("delete_pool");
     assert_eq!(affected, 1);
-    let n = LiveUser::objects().count_pool(&pool).await.expect("count");
+    let n = LiveUser::objects().count(&pool).await.expect("count");
     assert_eq!(n, 0);
 }
 

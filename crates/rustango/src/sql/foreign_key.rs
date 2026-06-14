@@ -354,7 +354,7 @@ where
 {
     /// Resolve the parent row and cache it on the field. Backend-
     /// agnostic counterpart of [`Self::get`] — routes through
-    /// [`crate::sql::FetcherPool::fetch_pool`].
+    /// [`crate::sql::FetcherPool::fetch`].
     ///
     /// # Errors
     /// As [`Self::get`].
@@ -369,7 +369,7 @@ where
                 })?;
             let mut rows: Vec<T> = QuerySet::<T>::new()
                 .filter_op(pk_field.column, Op::Eq, pk.clone())
-                .fetch_pool(pool)
+                .fetch(pool)
                 .await?;
             let value = rows.pop().ok_or_else(|| {
                 let sv: SqlValue = pk.clone().into();

@@ -317,7 +317,7 @@ impl TenantPools<sqlx::Postgres> {
     /// Available only when the registry IS Postgres. For
     /// backend-agnostic access use [`Self::registry_pool`] (returns
     /// `&crate::sql::Pool` which dispatches per-backend through
-    /// `fetch_pool` / `insert_pool` / `save_pool`).
+    /// `fetch` / `insert_pool` / `save_pool`).
     #[must_use]
     pub fn registry(&self) -> &PgPool {
         &self.registry
@@ -332,7 +332,7 @@ where
     /// [`rustango::sql::Pool`] enum. Used by the v0.34 resolver
     /// chain which is generic across backends — keeps a single
     /// `TenantPools` API while letting the resolver implementations
-    /// route through `fetch_pool` / `insert_pool`.
+    /// route through `fetch` / `insert_pool`.
     ///
     /// Cheap: `Pool` is `Arc`-shaped under sqlx, so the clone is a
     /// reference bump.
@@ -608,7 +608,7 @@ where
         let orgs: Vec<Org> = Org::objects()
             .where_(Org::storage_mode.eq("database".to_owned()))
             .where_(Org::active.eq(true))
-            .fetch_pool(&registry_pool)
+            .fetch(&registry_pool)
             .await?;
         let total = orgs.len();
         let mut report = PrewarmReport {

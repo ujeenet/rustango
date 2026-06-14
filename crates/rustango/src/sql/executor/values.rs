@@ -702,7 +702,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     /// readable left-to-right.
     ///
     /// # Errors
-    /// As [`crate::sql::FetcherPool::fetch_pool`], plus per-cell
+    /// As [`crate::sql::FetcherPool::fetch`], plus per-cell
     /// type-mismatch errors when `K` / `V` don't match the columns'
     /// SQL types.
     pub async fn pluck_pairs<K, V>(
@@ -823,8 +823,8 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     /// Eloquent and `Model::for_page`.
     ///
     /// # Errors
-    /// As [`crate::sql::CounterPool::count_pool`] and
-    /// [`crate::sql::FetcherPool::fetch_pool`].
+    /// As [`crate::sql::CounterPool::count`] and
+    /// [`crate::sql::FetcherPool::fetch`].
     pub async fn paginate(
         self,
         page: i64,
@@ -844,10 +844,10 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     {
         use crate::sql::{CounterPool as _, FetcherPool as _};
         let total = <crate::query::QuerySet<T> as ::core::clone::Clone>::clone(&self)
-            .count_pool(pool)
+            .count(pool)
             .await?;
         let offset = if page > 1 { (page - 1) * per_page } else { 0 };
-        let rows = self.limit(per_page).offset(offset).fetch_pool(pool).await?;
+        let rows = self.limit(per_page).offset(offset).fetch(pool).await?;
         Ok((rows, total))
     }
 

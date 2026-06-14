@@ -61,7 +61,7 @@ async fn cookbook_rating_round_trips_against_mysql() {
 
     let rows: Vec<Rating> = Rating::objects()
         .filter("id", Op::Eq, id)
-        .fetch_pool(&p).await.expect("fetch_pool against mysql");
+        .fetch(&p).await.expect("fetch against mysql");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].score, 4);
 }
@@ -96,7 +96,7 @@ async fn mysql_multi_auto_inserts_then_refetches_for_remaining_fields() {
     // save when they need server-set timestamps.
     let rows: Vec<Author> = Author::objects()
         .filter("id", Op::Eq, id)
-        .fetch_pool(&p).await.unwrap();
+        .fetch(&p).await.unwrap();
     assert_eq!(rows.len(), 1);
     let loaded_joined_at = match rows[0].joined_at {
         Auto::Set(t) => t,
@@ -135,7 +135,7 @@ async fn mysql_decodes_multi_row_select() {
         r.save_pool(&p).await.unwrap();
     }
     let rows: Vec<Rating> = Rating::objects()
-        .fetch_pool(&p).await.expect("fetch_pool against mysql");
+        .fetch(&p).await.expect("fetch against mysql");
     assert_eq!(rows.len(), 5);
     let total: i64 = rows.iter().map(|r| r.score).sum();
     assert_eq!(total, 1 + 2 + 3 + 4 + 5);

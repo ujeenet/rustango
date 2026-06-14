@@ -73,7 +73,7 @@ async fn year_lookup_matches_only_target_year() {
 
     let rows: Vec<Event> = QuerySet::<Event>::default()
         .filter("created__year", 2025_i64)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1, "only y2025 should match: {rows:?}");
@@ -87,7 +87,7 @@ async fn year_lookup_gte_picks_recent_years() {
 
     let rows: Vec<Event> = QuerySet::<Event>::default()
         .filter("created__year__gte", 2025_i64)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
@@ -103,7 +103,7 @@ async fn month_lookup_matches_by_month_only() {
 
     let rows: Vec<Event> = QuerySet::<Event>::default()
         .filter("created__month", 2_i64)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -117,7 +117,7 @@ async fn day_lookup_matches_by_day_of_month() {
 
     let rows: Vec<Event> = QuerySet::<Event>::default()
         .filter("created__day", 6_i64)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -131,7 +131,7 @@ async fn hour_lookup_matches_by_hour() {
 
     let rows: Vec<Event> = QuerySet::<Event>::default()
         .filter("created__hour", 14_i64)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -146,7 +146,7 @@ async fn date_lookup_matches_full_date() {
     let target = NaiveDate::from_ymd_opt(2026, 6, 6).unwrap();
     let rows: Vec<Event> = QuerySet::<Event>::default()
         .filter("created__date", target)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -163,7 +163,7 @@ async fn week_day_lookup_matches_normalized_dow() {
     // 2026-06-06 is a Saturday → '6'
     let rows: Vec<Event> = QuerySet::<Event>::default()
         .filter("created__week_day", 6_i64)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -179,7 +179,7 @@ async fn quarter_lookup_works_on_sqlite() {
     // (Apr–Jun) matches only the June row.
     let rows = QuerySet::<Event>::default()
         .filter("created__quarter", 2_i64)
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .expect("quarter lookup now works on SQLite");
     let labels: Vec<&str> = rows.iter().map(|e| e.label.as_str()).collect();

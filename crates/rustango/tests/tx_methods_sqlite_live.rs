@@ -68,9 +68,9 @@ async fn tx_insert_save_delete_commit_round_trip() {
 
     let after: Vec<Widget> = Widget::objects()
         .where_(Widget::id.eq(id))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
-        .expect("post-commit fetch_pool");
+        .expect("post-commit fetch");
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].count, 42);
 
@@ -81,9 +81,9 @@ async fn tx_insert_save_delete_commit_round_trip() {
 
     let gone: Vec<Widget> = Widget::objects()
         .where_(Widget::id.eq(id))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
-        .expect("post-delete fetch_pool");
+        .expect("post-delete fetch");
     assert!(gone.is_empty(), "row truly deleted");
 }
 
@@ -104,9 +104,9 @@ async fn tx_rollback_discards_writes() {
 
     let rows: Vec<Widget> = Widget::objects()
         .where_(Widget::id.eq(id))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
-        .expect("post-rollback fetch_pool");
+        .expect("post-rollback fetch");
     assert!(rows.is_empty(), "rollback discarded the insert");
 }
 

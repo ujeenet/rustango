@@ -58,7 +58,7 @@ async fn seed() -> (Pool, TotpSecret) {
     }
     let alice_id = AdminUser::objects()
         .filter("username", "alice")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap()
         .into_iter()

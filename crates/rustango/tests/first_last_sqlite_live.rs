@@ -1,7 +1,7 @@
 //! v0.45 — live SQLite coverage for `QuerySet::first`,
 //! `last`, `earliest`, `latest`.
 //!
-//! Builder sugar over `order_by + limit(1) + fetch_pool`. No DB-side
+//! Builder sugar over `order_by + limit(1) + fetch`. No DB-side
 //! ranking logic; this suite proves the ordering semantics match
 //! Django:
 //!

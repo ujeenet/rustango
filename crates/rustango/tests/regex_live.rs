@@ -73,7 +73,7 @@ async fn regex_case_sensitive_matches_lowercase_only() {
 
     let rows: Vec<User> = User::objects()
         .where_(User::name.regex("^al.*"))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
 
@@ -91,7 +91,7 @@ async fn iregex_case_insensitive_matches_both_cases() {
 
     let rows: Vec<User> = User::objects()
         .where_(User::name.iregex("^al.*"))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
 
@@ -112,7 +112,7 @@ async fn not_regex_excludes_case_sensitive_matches() {
 
     let rows: Vec<User> = User::objects()
         .where_(User::name.not_regex("^admin"))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
 
@@ -139,7 +139,7 @@ async fn not_iregex_excludes_both_cases() {
 
     let rows: Vec<User> = User::objects()
         .where_(User::name.not_iregex("^admin"))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
 
@@ -165,7 +165,7 @@ async fn filter_string_iregex_routes_at_runtime() {
 
     let rows: Vec<User> = User::objects()
         .filter("name__iregex", "^bob")
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
 

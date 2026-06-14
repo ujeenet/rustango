@@ -83,7 +83,7 @@ async fn join_sub_filters_to_customers_with_orders() {
                 rhs: aliased("sj_customer", "id"),
             },
         )
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
 
@@ -113,7 +113,7 @@ async fn left_join_sub_keeps_unmatched_rows() {
                 rhs: aliased("sj_customer", "id"),
             },
         )
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap();
     // Alice matches her order; Bob is preserved by the LEFT JOIN.
@@ -129,7 +129,7 @@ async fn join_lateral_errors_on_sqlite() {
     let sub = Order::objects().compile().unwrap();
     let err = Customer::objects()
         .join_lateral(sub, "lo", WhereExpr::And(vec![]))
-        .fetch_pool(&pool)
+        .fetch(&pool)
         .await
         .unwrap_err();
     assert!(
