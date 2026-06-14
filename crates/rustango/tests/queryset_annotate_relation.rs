@@ -223,3 +223,34 @@ fn annotate_count_composes_with_a_where_filter() {
         "missing count projection: {sql}"
     );
 }
+
+// ---- scalar Subquery as a projected annotation (#1036) ----
+
+#[test]
+fn pg_scalar_subquery_annotation_projects_correlated_select() {
+    use rustango::core::subquery::{outer_ref, scalar_subquery};
+    use rustango::core::Column as _;
+    // Newest book title per author — `annotate(newest=Subquery(...))`.
+    let inner = Book::objects()
+        .where_(Book::author_id.eq_expr(outer_ref("id")))
+        .order_by(&[("id", true)])
+        .limit(1)
+        .values_list_flat("title")
+        .compile()
+        .expect("inner compile");
+    let q = Author::objects()
+        .annotate("newest", scalar_subquery(inner))
+        .compile()
+        .expect("compile");
+    let sql = Postgres.compile_aggregate(&q).expect("emit SQL").sql;
+    // Correlated scalar subquery, OuterRef rewritten to the parent
+    // qualifier, projected under the alias.
+    assert!(
+        sql.contains(r#"(SELECT "title" FROM "arc_book" WHERE "author_id" = "arc_author"."id""#),
+        "correlated scalar subquery projection: {sql}"
+    );
+    assert!(
+        sql.contains(r#"LIMIT 1) AS "newest""#),
+        "limited + aliased: {sql}"
+    );
+}

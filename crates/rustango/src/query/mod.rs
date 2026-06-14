@@ -2558,6 +2558,22 @@ impl<T: Model> QuerySet<T> {
     pub fn annotate(self, alias: &'static str, expr: AggregateExpr) -> AggregateBuilder<T> {
         self.aggregate().annotate(alias, expr)
     }
+
+    /// Project a correlated scalar subquery under `alias`, promoting to
+    /// an [`AggregateBuilder`] — Django's
+    /// `annotate(newest=Subquery(...))` (#1036). Sugar over
+    /// [`Self::annotate`] with [`crate::core::subquery::scalar_subquery`];
+    /// shape `inner` to one column × ≤1 row (see that function's caller
+    /// contract). Correlate via [`crate::core::subquery::outer_ref`].
+    #[must_use]
+    pub fn annotate_subquery(
+        self,
+        alias: &'static str,
+        inner: crate::core::SelectQuery,
+    ) -> AggregateBuilder<T> {
+        self.aggregate()
+            .annotate(alias, crate::core::subquery::scalar_subquery(inner))
+    }
 }
 
 /// Accumulates `SET column = value` assignments, then compiles to an `UpdateQuery`.
@@ -3594,6 +3610,15 @@ impl<T: Model> AggregateBuilder<T> {
         self.aggregates
             .push((std::borrow::Cow::Borrowed(alias), expr));
         self
+    }
+
+    /// Project a correlated scalar subquery under `alias` — Django's
+    /// `annotate(x=Subquery(...))` (#1036). Sugar over [`Self::annotate`]
+    /// with [`crate::core::subquery::scalar_subquery`]; shape `inner` to
+    /// one column × ≤1 row (see that function's caller contract).
+    #[must_use]
+    pub fn annotate_subquery(self, alias: &'static str, inner: crate::core::SelectQuery) -> Self {
+        self.annotate(alias, crate::core::subquery::scalar_subquery(inner))
     }
 
     /// Django 3.2 `.alias()` — annotate without projecting. The expression

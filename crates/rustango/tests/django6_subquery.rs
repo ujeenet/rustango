@@ -13,13 +13,12 @@
 //!   Eloquent `has('books', '>=', 2)`)
 //! - `annotate(books_count=Count("books"))` eager count column
 //! - scalar `Subquery()` embedded in a WHERE comparison
+//! - scalar `Subquery()` projected as an annotation column
+//!   (`annotate(newest=Subquery(...))`) via `annotate_subquery` /
+//!   `scalar_subquery` (#1036)
 //! - `OuterRef` outside a subquery is a programming error (pinned)
 //!
 //! AUDIT NOTES (compile-time API absences, no runtime pin possible):
-//! - Django's scalar `Subquery()` as a **projected annotation**
-//!   (`annotate(newest=Subquery(...))`) is not expressible:
-//!   `annotate()` takes `AggregateExpr`, which has no scalar-subquery
-//!   variant. `Expr::Subquery` works in WHERE / UPDATE SET only. Issue #1036.
 //! - Composite `(a, b) IN (SELECT …)` tuple-membership has no API;
 //!   the workaround is a correlated `EXISTS` with a multi-predicate
 //!   WHERE (exactly what `where_has_filter` emits — see
@@ -242,6 +241,49 @@ mod scenarios {
         assert_eq!(rows.len(), 3, "Dan's 3 books");
     }
 
+    /// Django: `Author.objects.annotate(newest=Subquery(
+    /// Book.objects.filter(author=OuterRef("pk")).order_by("-id")
+    /// .values("title")[:1]))` — a correlated scalar subquery projected
+    /// as a column (#1036). Each author's newest book title; bookless
+    /// Cara projects NULL. Lowers through `RelatedAggregate` — same
+    /// per-row scalar path as `annotate_count`, no JOIN, no writer
+    /// changes.
+    pub async fn check_scalar_subquery_annotation(pool: &Pool) {
+        use rustango::core::Column as _;
+        let newest = Book::objects()
+            .where_(Book::author_id.eq_expr(outer_ref("id")))
+            .order_by(&[("id", true)])
+            .limit(1)
+            .values_list_flat("title")
+            .compile()
+            .expect("inner compile");
+        let rows = Author::objects()
+            .annotate_subquery("newest", newest)
+            .order_by(&[("name", false)])
+            .fetch(pool)
+            .await
+            .expect("scalar-subquery annotation fetch");
+        assert_eq!(rows.len(), 4);
+        let titles: Vec<Option<String>> = rows
+            .iter()
+            .map(|r| match r.get("newest") {
+                Some(SqlValue::String(s)) => Some(s.clone()),
+                Some(SqlValue::Null) | None => None,
+                other => panic!("expected String/Null newest, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            vec![
+                Some("Drafts".to_owned()),   // Ada — newest of {Rust 101, Drafts}
+                Some("SQL Bits".to_owned()), // Bob
+                None,                        // Cara — no books → NULL
+                Some("D3".to_owned()),       // Dan — newest of {D1, D2, D3}
+            ],
+            "newest book title per author (Ada, Bob, Cara, Dan)"
+        );
+    }
+
     /// `OuterRef` outside any subquery wrapper is a programming error
     /// — pinned: the writer rejects it with a clear error instead of
     /// emitting broken SQL (Django raises ValueError at evaluation).
@@ -326,6 +368,7 @@ mod pg_live {
     pg_case!(check_where_has_count);
     pg_case!(check_annotate_count);
     pg_case!(check_scalar_subquery_in_where);
+    pg_case!(check_scalar_subquery_annotation);
     pg_case!(check_outer_ref_outside_subquery_errors);
 }
 
@@ -377,6 +420,7 @@ mod sqlite_live {
     sqlite_case!(check_where_has_count);
     sqlite_case!(check_annotate_count);
     sqlite_case!(check_scalar_subquery_in_where);
+    sqlite_case!(check_scalar_subquery_annotation);
     sqlite_case!(check_outer_ref_outside_subquery_errors);
 }
 
@@ -441,5 +485,6 @@ mod mysql_live {
     mysql_case!(check_where_has_count);
     mysql_case!(check_annotate_count);
     mysql_case!(check_scalar_subquery_in_where);
+    mysql_case!(check_scalar_subquery_annotation);
     mysql_case!(check_outer_ref_outside_subquery_errors);
 }
