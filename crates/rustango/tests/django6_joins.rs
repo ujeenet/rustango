@@ -143,27 +143,43 @@ mod scenarios {
         assert_eq!(country.code, "US");
     }
 
-    /// GAP-PIN: Django's `filter(author__name="Ada")` implicit-join
-    /// filter has no rustango equivalent — relation-spanning string
-    /// lookups are documented out-of-scope for `filter()` and error
-    /// at compile. The workaround is `check_cross_table_filter_via_join`.
-    /// Issue #1031.
-    pub async fn check_relation_spanning_filter_is_rejected(pool: &Pool) {
-        let err = Post::objects()
+    /// Django's `filter(author__name="Ada")` implicit-join filter —
+    /// relation-spanning string lookups now resolve the FK chain into
+    /// LEFT JOINs + an aliased predicate (#1031). Single-hop, multi-hop
+    /// with a lookup suffix, and span-over-a-`select_related`-path (one
+    /// JOIN, not two) all work.
+    pub async fn check_relation_spanning_filter_joins(pool: &Pool) {
+        // Single hop: `author__name = "Ada"` → post 1 only.
+        let rows: Vec<Post> = Post::objects()
             .filter("author__name", "Ada")
             .fetch_pool(pool)
             .await
-            .map(|rows: Vec<Post>| rows.len())
-            .expect_err("relation-spanning filter must be rejected");
-        let msg = format!("{err}");
-        assert!(
-            matches!(err, ExecError::Query(_)),
-            "expected a compile-side QueryError, got {err:?}"
-        );
-        assert!(
-            msg.contains("name") || msg.contains("lookup") || msg.contains("author"),
-            "error should point at the bad lookup: {msg}"
-        );
+            .expect("single-hop relation-spanning filter");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Hello");
+
+        // Two hops + a lookup suffix: `author__profile__bio__icontains`.
+        // Ada's profile bio is "ada bio"; Bob's is "bob bio".
+        let rows: Vec<Post> = Post::objects()
+            .filter("author__profile__bio__icontains", "ADA")
+            .fetch_pool(pool)
+            .await
+            .expect("two-hop relation-spanning filter with suffix");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Hello");
+
+        // Span over the same path as a `select_related` — the JOIN is
+        // deduped (alias `author` emitted once), and the parent rows
+        // still stitch.
+        let rows: Vec<Post> = Post::objects()
+            .select_related("author")
+            .filter("author__name", "Bob")
+            .fetch_pool(pool)
+            .await
+            .expect("span + select_related dedupe");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "World");
+        assert_eq!(rows[0].author.value().expect("stitched").name, "Bob");
     }
 
     /// GAP-PIN: `order_by("author__name")` relation-spanning ordering
@@ -325,7 +341,7 @@ mod pg_live {
     }
 
     pg_case!(check_three_hop_select_related_stitching);
-    pg_case!(check_relation_spanning_filter_is_rejected);
+    pg_case!(check_relation_spanning_filter_joins);
     pg_case!(check_relation_spanning_order_by_is_rejected);
     pg_case!(check_cross_table_filter_via_join);
     pg_case!(check_f_comparison_across_join);
@@ -369,7 +385,7 @@ mod sqlite_live {
     }
 
     sqlite_case!(check_three_hop_select_related_stitching);
-    sqlite_case!(check_relation_spanning_filter_is_rejected);
+    sqlite_case!(check_relation_spanning_filter_joins);
     sqlite_case!(check_relation_spanning_order_by_is_rejected);
     sqlite_case!(check_cross_table_filter_via_join);
     sqlite_case!(check_f_comparison_across_join);
@@ -430,7 +446,7 @@ mod mysql_live {
     }
 
     mysql_case!(check_three_hop_select_related_stitching);
-    mysql_case!(check_relation_spanning_filter_is_rejected);
+    mysql_case!(check_relation_spanning_filter_joins);
     mysql_case!(check_relation_spanning_order_by_is_rejected);
     mysql_case!(check_cross_table_filter_via_join);
     mysql_case!(check_f_comparison_across_join);
