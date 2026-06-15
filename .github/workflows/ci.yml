@@ -469,6 +469,8 @@ jobs:
             migrate: true
           - example: orm_cookbook
             migrate: false
+          - example: admin_demo
+            migrate: true
     services:
       # See `postgres_test`'s comment for the AWS Public ECR mirror
       # rationale (CI Docker Hub timeouts after PR #848 / #866).
