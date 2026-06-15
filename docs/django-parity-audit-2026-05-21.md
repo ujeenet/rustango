@@ -1,4 +1,4 @@
-# Django 6.0 parity audit — rustango v0.41 (2026-05-21)
+# Django 6.0 parity audit — rustango v0.43 (snapshot 2026-05-21 · refreshed 2026-06-15)
 
 Single-source reference for "what does rustango cover vs Django, what's still missing." Every row points at a specific Django 6.0 doc anchor + the closest rustango source path or issue.
 
@@ -21,11 +21,11 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | Category | SHIPPED | PARTIAL | MISSING | N/A |
 |---|---:|---:|---:|---:|
 | 1. ORM — models / fields / Meta | 22 | 1 | 1 | 0 |
-| 2. QuerySet API | 36 | 2 | 2 | 0 |
+| 2. QuerySet API | 37 | 2 | 1 | 0 |
 | 3. Field types & options | 32 | 0 | 2 | 1 |
 | 4. Postgres-specific fields | 5 | 0 | 0 | 0 |
 | 5. Migrations | 15 | 0 | 0 | 1 |
-| 6. Admin (ModelAdmin) | 35 | 1 | 0 | 1 |
+| 6. Admin (ModelAdmin) | 36 | 1 | 0 | 0 |
 | 7. Forms / Formsets | 14 | 1 | 0 | 0 |
 | 8. Generic CBVs | 12 | 0 | 1 | 1 |
 | 9. URL routing | 6 | 0 | 0 | 1 |
@@ -43,13 +43,15 @@ This is a static snapshot — when in doubt about a row, `grep` the cited source
 | 21. Testing | 14 | 0 | 0 | 0 |
 | 22. Async support | 4 | 0 | 0 | 3 |
 | 23. DRF parity | 22 | 0 | 1 | 0 |
-| 24. contrib modules | 12 | 1 | 3 | 2 |
+| 24. contrib modules | 13 | 1 | 3 | 1 |
 | 25. `django.utils.*` helpers | 106 | 0 | 0 | 0 |
-| **Totals** | **479** | **12** | **22** | **19** |
+| **Totals** | **482** | **12** | **21** | **17** |
 
-Coverage = 479 / (479 + 12 + 22) = **93% full, 2% partial, 4% missing** vs Django 6.0 surface (excluding 19 N/A rows). Partial+shipped = **96%**. (Two rows corrected by the 2026-06-12 execution-verification pass — see §26.3.)
+Coverage = 482 / (482 + 12 + 21) = **94% full, 2% partial, 4% missing** vs Django 6.0 surface (excluding 17 N/A rows). Partial+shipped = **96%**. (Two rows corrected by the 2026-06-12 execution pass — §26.3; three rows refreshed 2026-06-15 — §2 `.exclude()` MISSING→SHIPPED, §6 + §24 admindocs N/A→SHIPPED — see §26.5.)
 
-Snapshot date: 2026-06-06 (post-v0.42 plus 100+ Django `utils.*` + `template.defaultfilters` + `validators` parity helpers across PRs #619–#731 + the 2026-06-06 Laravel 13 / Eloquent parity sweep: date-transform lookups (#834 / #829), `refresh_from_db` + `replicate` (#835 / #825), `default_uuid_v7` (#836 / #823), `Observer<T>` + quiet writes (#837 / #827), reverse-FK accessor + per-FK `related_name` (#838 / #841, #816), `Prunable` + `manage prune` (#848 / #822), `manage clear-cache` / `createcachetable` (#849 / #850), `QuerySet::active()` / `only_trashed()` / `with_trashed()` (#851 / #821 partial), `whereJsonLength` (#853 / #826), `__not_in` (#854) / `__not_between` (#855) / raw-`__like` (#856), the full Eloquent Model-level CRUD-shortcut surface — `find_pool` / `find_or_fail_pool` / `find_many_pool` / `all_pool` / `first_pool` / `first_or_fail_pool` / `first_where_pool` / `count_pool` / `exists_pool` / `latest_pool` / `earliest_pool` / `destroy_pool` / `truncate_pool` / `pluck_pool` / `query` / `fresh_pool` (PRs #857–#873), and soft-delete instance `_pool` family (`soft_delete_pool` / `restore_pool` / `force_delete_pool`, PR #872, closing more of #821). CI Docker pull mirror migrated to `public.ecr.aws/docker/library/` (PR #868) — eliminates the intermittent `registry-1.docker.io` timeouts that were affecting earlier PRs.
+Snapshot date: 2026-06-06 (post-v0.42 plus 100+ Django `utils.*` + `template.defaultfilters` + `validators` parity helpers across PRs #619–#731 + the 2026-06-06 Laravel 13 / Eloquent parity sweep: date-transform lookups (#834 / #829), `refresh_from_db` + `replicate` (#835 / #825), `default_uuid_v7` (#836 / #823), `Observer<T>` + quiet writes (#837 / #827), reverse-FK accessor + per-FK `related_name` (#838 / #841, #816), `Prunable` + `manage prune` (#848 / #822), `manage clear-cache` / `createcachetable` (#849 / #850), `QuerySet::active()` / `only_trashed()` / `with_trashed()` (#851 / #821 partial), `whereJsonLength` (#853 / #826), `__not_in` (#854) / `__not_between` (#855) / raw-`__like` (#856), the full Eloquent Model-level CRUD-shortcut surface — `find` / `find_or_fail` / `find_many` / `all` / `first` / `first_or_fail` / `first_where` / `count` / `exists` / `latest` / `earliest` / `destroy` / `truncate` / `pluck` / `query` / `fresh` (PRs #857–#873), and soft-delete instance `_pool` family (`soft_delete` / `restore` / `force_delete`, PR #872, closing more of #821). CI Docker pull mirror migrated to `public.ecr.aws/docker/library/` (PR #868) — eliminates the intermittent `registry-1.docker.io` timeouts that were affecting earlier PRs.
+
+**Refreshed 2026-06-15 (v0.43).** Method-name + status delta since the 2026-06-12 execution pass: (1) the QuerySet terminals dropped the `_pool` suffix — `fetch` / `count` / `exists` (PR #1054, formerly `fetch_pool` / `count_pool` / `exists_pool`); (2) the Eloquent Model-level CRUD shortcuts are bare throughout (`find` / `find_or_fail` / `find_many` / `all` / `first` / `first_or_fail` / `first_where` / `latest` / `earliest` / `destroy` / `truncate` / `pluck` / `fresh` / `refresh_from_db` / `soft_delete` / `restore` / `force_delete`). The multi-backend write path keeps its suffix on purpose — `save_pool` / `insert_pool` / `delete_pool` take `&Pool` and coexist with PG-only `&PgPool` siblings (`save` / `insert` / `delete`), so the suffix still discriminates; (3) ten of the §26 execution-pinned gaps closed (#1024 / #1025 / #1026 / #1027 / #1030 / #1032 / #1033 / #1034 / #1036 / #1037) plus #1031 Part 1 and #1035 Part A (PRs #1041–#1051), and admindocs shipped (#1011 / PR #1023). Full closed-vs-open ledger in **§26.5**.
 
 ---
 
@@ -91,14 +93,14 @@ Summary: **22 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-bas
 | Django method | Doc | Status | rustango pointer | Notes |
 |---|---|---|---|---|
 | `.filter(**kwargs)` (string keyed) | [filter](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#filter) | SHIPPED | [crates/rustango/src/query/mod.rs#QuerySet::filter](crates/rustango/src/query/mod.rs) | `__icontains`, `__in`, `__gte`, `__between` etc. via `parse_lookup`. |
-| `.exclude(**kwargs)` | [exclude](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#exclude) | MISSING | n/a — no `QuerySet::exclude` exists (the only `exclude` is the unrelated forms field-whitelist builder). Negate via `Q::negate()` / `where_raw(WhereExpr::Not)` / `where_doesnt_have*`. | Disproven by execution 2026-06-12 (§26.3), #1030. Django's exclude-on-multi-valued-relation semantics ARE available via `where_doesnt_have_filter` — pinned in `tests/django6_subquery.rs`. |
+| `.exclude(**kwargs)` | [exclude](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#exclude) | SHIPPED | `QuerySet::exclude(...)` (closed #1030, PR #1044) — negates the lookup into the WHERE. Was briefly downgraded to MISSING by the 2026-06-12 execution pass (the audit pointer had aliased the unrelated forms field-whitelist builder); the real method shipped 2026-06-13. | Exclude-on-multi-valued-relation semantics also available via `where_doesnt_have_filter` (NOT EXISTS) — pinned in `tests/django6_subquery.rs`. |
 | `Q()` composable | [Q](https://docs.djangoproject.com/en/6.0/topics/db/queries/#complex-lookups-with-q-objects) | SHIPPED | `Q!()` compile-time macro + `core::query::Q` runtime (T1.1, T1.7) | |
 | `F()` expression | [F](https://docs.djangoproject.com/en/6.0/ref/models/expressions/#f) | SHIPPED | `F("col")` in [src/core/expr.rs](crates/rustango/src/core/expr.rs) | |
 | `.annotate(alias=expr)` | [annotate](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#annotate) | SHIPPED | `AggregateBuilder::annotate` + tri-dialect GROUP BY parity (T2.8 closed) | |
 | `.alias()` (non-projected) | [alias](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#alias) | SHIPPED | T1.6 closed | |
 | `.aggregate(**kwargs)` | [aggregate](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#aggregate) | SHIPPED | `aggregates::{count_all, sum, avg, min, max, ...}` | |
-| Window functions (`Window`, `RowNumber`, `Rank`, `Lag`, `Lead`) | [Window](https://docs.djangoproject.com/en/6.0/ref/models/expressions/#window-functions) | PARTIAL | `core::window::{row_number, rank, dense_rank, lag, lead, ntile, first_value, last_value}` | Downgraded 2026-06-12 (§26.2-C): only the 8 ranking/navigation fns — Django's aggregates-as-windows (`Window(Sum(...))`) inexpressible, windowed query can't be a subquery source (top-N-per-group needs `join_lateral`, PG/MySQL-only) — #1035. Required shape is `.aggregate().group_by(<every projected col>)` (`.values()`+window errors `ValuesRequiresAggregate`). MySQL: ranking outputs decode as `SqlValue::Bool` in dict rows — #1033. Pinned in `tests/django6_window.rs`. |
-| `Subquery()`, `OuterRef()`, `Exists()` | [Subquery](https://docs.djangoproject.com/en/6.0/ref/models/expressions/#subquery-expressions) | SHIPPED | `core::subquery::{Subquery, OuterRef, exists}` | |
+| Window functions (`Window`, `RowNumber`, `Rank`, `Lag`, `Lead`) | [Window](https://docs.djangoproject.com/en/6.0/ref/models/expressions/#window-functions) | PARTIAL | `core::window::{row_number, rank, dense_rank, lag, lead, ntile, first_value, last_value}` | Downgraded 2026-06-12 (§26.2-C), partially closed 2026-06-13: the 8 ranking/navigation fns PLUS aggregate-as-window (`Sum/Avg/Min/Max/Count OVER`) now ship (#1035 Part A, PR #1050), and MySQL ranking outputs decode losslessly (#1033 fixed, PR #1043 — no longer `SqlValue::Bool`). Still open (#1035 remaining): a windowed query as a subquery source (top-N-per-group needs `join_lateral`, PG/MySQL-only). Required shape is `.aggregate().group_by(<every projected col>)` (`.values()`+window errors `ValuesRequiresAggregate`). Pinned in `tests/django6_window.rs`. |
+| `Subquery()`, `OuterRef()`, `Exists()` | [Subquery](https://docs.djangoproject.com/en/6.0/ref/models/expressions/#subquery-expressions) | SHIPPED | `core::subquery::{Subquery, OuterRef, exists}` | Scalar `Subquery` as a projected annotation (was inexpressible per §26.2-B) shipped 2026-06-13 — #1036, PR #1049. |
 | `Case` / `When` | [Case](https://docs.djangoproject.com/en/6.0/ref/models/expressions/#case) | SHIPPED | `core::case::case()` builder | |
 | `.values(*fields)` (dict-shape projection) | [values](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#values) | SHIPPED | `.values_dict(&["col", ...])` + `.values(...).annotate(...)` Shape 2/3 (T2.8) | |
 | `.values_list(*fields, flat=True)` | [values_list](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#values-list) | SHIPPED | `.values_list(...)` + `.values_list_flat(col)` | |
@@ -120,18 +122,18 @@ Summary: **22 SHIPPED / 1 PARTIAL / 1 MISSING / 0 N/A**. Gaps: full abstract-bas
 | `.in_bulk(ids)` | [in_bulk](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#in-bulk) | SHIPPED | `QuerySet::in_bulk` | |
 | `.dates(field, kind)` | [dates](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#dates) | SHIPPED | `QuerySet::dates(field, DateKind)` + `sql::fetch_dates_pool` (closed #327, v0.42). Tri-dialect via per-backend trunc fragments (PG `DATE_TRUNC`, MySQL `DATE_FORMAT` + cast, SQLite `strftime`). Filters / joins / limits on the underlying QuerySet pass through to the truncation pipeline. `order_desc(true)` reverses output. | |
 | `.datetimes(field, kind)` | [datetimes](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#datetimes) | SHIPPED | `QuerySet::datetimes(field, DateTimeKind)` + `sql::fetch_datetimes_pool` (closed #328, v0.42). Same shape as `.dates()` but accepts `Hour` / `Minute` / `Second` granularity and returns `DateTime<Utc>`. | |
-| `.latest(*fields)` / `.earliest(*fields)` | [latest](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#latest) | SHIPPED | `QuerySet::latest` / `earliest` on pool. Model-level shortcut: `Self::latest_pool(field, &pool)` / `Self::earliest_pool(field, &pool)` (PR #862). | |
-| `.first()` / `.last()` | [first](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#first) | SHIPPED | `QuerySet::first` / `.last`. Model-level shortcut: `Self::first_pool(&pool)` + `first_or_fail_pool` (PR #860). | |
-| `.count()` / `.exists()` | [count](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#count) | SHIPPED | `.count_pool` / `.exists_pool`. Model-level shortcut: `Self::count_pool(&pool)` / `Self::exists_pool(&pool)` (PR #861). | |
-| Eloquent-shape Model-level CRUD shortcuts (`find` / `findOrFail` / `findMany` / `all` / `first` / `firstOrFail` / `firstWhere` / `count` / `exists` / `latest` / `oldest` / `destroy` / `truncate` / `pluck` / `query` / `fresh` / `refresh` / `replicate` / soft-delete trio) | n/a in Django core (verbs live on `objects.<x>`) | SHIPPED | Macro-emitted on every `#[derive(Model)]` struct with a PK across PRs #835 / #857–#873. Full surface: `Self::find_pool(pk, &pool) -> Option<Self>` (#857), `find_or_fail_pool` (#859), `find_many_pool(pks, &pool) -> Vec<Self>` (#871), `all_pool(&pool) -> Vec<Self>` (#858), `first_pool` / `first_or_fail_pool` (#860), `first_where_pool(col, val, &pool)` (#869), `count_pool(&pool) -> i64` / `exists_pool(&pool) -> bool` (#861), `latest_pool` / `earliest_pool(field, &pool)` (#862), `destroy_pool(pks, &pool) -> u64` (#863), `truncate_pool(&pool) -> u64` (#864), `pluck_pool::<U>(col, &pool) -> Vec<U>` (#865), `query()` Eloquent alias of `objects()` (#870), `fresh_pool(&pool) -> Option<Self>` (#873), `refresh_from_db_pool(&mut self, &pool)` + `replicate(&self) -> Self` (#835). For soft-delete-enabled models: `soft_delete_pool` / `restore_pool` / `force_delete_pool` (#872). Rustango ahead of Django here; matches Eloquent's Model-level surface. | |
+| `.latest(*fields)` / `.earliest(*fields)` | [latest](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#latest) | SHIPPED | `QuerySet::latest` / `earliest` on pool. Model-level shortcut: `Self::latest(field, &pool)` / `Self::earliest(field, &pool)` (PR #862). | |
+| `.first()` / `.last()` | [first](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#first) | SHIPPED | `QuerySet::first` / `.last`. Model-level shortcut: `Self::first(&pool)` + `first_or_fail` (PR #860). | |
+| `.count()` / `.exists()` | [count](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#count) | SHIPPED | `.count` / `.exists`. Model-level shortcut: `Self::count(&pool)` / `Self::exists(&pool)` (PR #861). | |
+| Eloquent-shape Model-level CRUD shortcuts (`find` / `findOrFail` / `findMany` / `all` / `first` / `firstOrFail` / `firstWhere` / `count` / `exists` / `latest` / `oldest` / `destroy` / `truncate` / `pluck` / `query` / `fresh` / `refresh` / `replicate` / soft-delete trio) | n/a in Django core (verbs live on `objects.<x>`) | SHIPPED | Macro-emitted on every `#[derive(Model)]` struct with a PK across PRs #835 / #857–#873. Full surface: `Self::find(pk, &pool) -> Option<Self>` (#857), `find_or_fail` (#859), `find_many(pks, &pool) -> Vec<Self>` (#871), `all(&pool) -> Vec<Self>` (#858), `first` / `first_or_fail` (#860), `first_where(col, val, &pool)` (#869), `count(&pool) -> i64` / `exists(&pool) -> bool` (#861), `latest` / `earliest(field, &pool)` (#862), `destroy(pks, &pool) -> u64` (#863), `truncate(&pool) -> u64` (#864), `pluck::<U>(col, &pool) -> Vec<U>` (#865), `query()` Eloquent alias of `objects()` (#870), `fresh(&pool) -> Option<Self>` (#873), `refresh_from_db(&mut self, &pool)` + `replicate(&self) -> Self` (#835). For soft-delete-enabled models: `soft_delete` / `restore` / `force_delete` (#872). Rustango ahead of Django here; matches Eloquent's Model-level surface. | |
 | `.get_or_create()` / `.update_or_create()` | [get_or_create](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#get-or-create) | SHIPPED | `sql::get_or_create` + `sql::update_or_create` | |
-| `.union()` / `.intersection()` / `.difference()` | [union](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#union) | SHIPPED | `QuerySet::{union, union_all, intersection, difference}` + `with_compound(SetOp, …)` (closed #329, v0.42). Writer emits the bare compound shape (`SELECT … UNION SELECT …`) — portable across PG / MySQL / SQLite. Branches with per-branch `ORDER BY` / `LIMIT` / `OFFSET` wrap in `SELECT * FROM (<branch>)` so those clauses scope to the branch instead of attaching to the outer compound. **MySQL caveat**: native `INTERSECT` / `EXCEPT` require 8.0.31+; pre-8.0.31 surfaces a driver syntax error. Execution-verified 2026-06-12 (§26.2-E): per-branch wrapper emits NO derived-table alias → MySQL error 1248 on ordered/limited branches (#1032); ORDER BY/LIMIT on the FIRST queryset always apply to the combined result — Django 4.0+ slices both components (#1034). Pinned in `tests/django6_setops.rs`. | |
-| `.contains(obj)` / `.exists()` | [contains](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#contains) | SHIPPED | `ExistsPool::exists_pool(&pool)` + `ExistsPool::contains_pk(&pool, pk)` (#330, v0.42). `contains_pk` looks up the PK column from the schema; takes a typed pk value rather than the obj instance to keep the Rust API explicit. | |
+| `.union()` / `.intersection()` / `.difference()` | [union](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#union) | SHIPPED | `QuerySet::{union, union_all, intersection, difference}` + `with_compound(SetOp, …)` (closed #329, v0.42). Writer emits the bare compound shape (`SELECT … UNION SELECT …`) — portable across PG / MySQL / SQLite. Branches with per-branch `ORDER BY` / `LIMIT` / `OFFSET` wrap in `SELECT * FROM (<branch>)` so those clauses scope to the branch instead of attaching to the outer compound. **MySQL caveat**: native `INTERSECT` / `EXCEPT` require 8.0.31+; pre-8.0.31 surfaces a driver syntax error. Execution-verified 2026-06-12 (§26.2-E), both gaps closed 2026-06-13 (PR #1048): per-branch wrappers now emit aliased derived tables (no more MySQL error 1248 on ordered/limited branches — #1032), and component-queryset slicing applies ORDER BY/LIMIT per-component the way Django 4.0+ does (#1034). Pinned in `tests/django6_setops.rs`. | |
+| `.contains(obj)` / `.exists()` | [contains](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#contains) | SHIPPED | `ExistsPool::exists(&pool)` + `ExistsPool::contains_pk(&pool, pk)` (#330, v0.42). `contains_pk` looks up the PK column from the schema; takes a typed pk value rather than the obj instance to keep the Rust API explicit. | |
 | `.none()` | [none](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#none) | SHIPPED | `QuerySet::none()` (closed #331, v0.42) — SELECT compiles to `LIMIT 0`; UPDATE / DELETE add an `<pk> IS NULL` guard against the (NOT NULL) primary key so every row is rejected. Chained filters / ordering are preserved alongside the marker (Django semantic). | |
-| `__lookup`s (`__icontains`, `__lt`, `__in`, `__between`, `__range`, `__isnull`, ...) | [Field lookups](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#field-lookups) | SHIPPED | `parse_lookup` in query/mod.rs | Django field-lookup coverage including date-transform chains: `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` / `__date` + composition with trailing comparison ops (`created__year__gte`) shipped in PR #834 (#829). `__quarter` errors on SQLite (Django lowers via CASE) — #1037, pinned in `tests/django6_json_dates.rs`. |
+| `__lookup`s (`__icontains`, `__lt`, `__in`, `__between`, `__range`, `__isnull`, ...) | [Field lookups](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#field-lookups) | SHIPPED | `parse_lookup` in query/mod.rs | Django field-lookup coverage including date-transform chains: `__year` / `__month` / `__day` / `__hour` / `__minute` / `__second` / `__quarter` / `__week` / `__week_day` / `__date` + composition with trailing comparison ops (`created__year__gte`) shipped in PR #834 (#829). `__quarter` on SQLite now synthesized (Django lowers via CASE) — #1037 fixed 2026-06-13 (PR #1041), pinned in `tests/django6_json_dates.rs`. |
 | `.using(db_alias)` (multi-DB routing) | [using](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#using) | MISSING | n/a (#332) | rustango is single-pool-per-QuerySet (or tenant-scoped); multi-DB router missing. |
 
-Summary: **36 SHIPPED / 2 PARTIAL / 2 MISSING / 0 N/A** (post-#857–#865 Eloquent Model-shortcut surface added as one row; `.exclude()` corrected to MISSING and Window downgraded to PARTIAL by the 2026-06-12 execution pass, §26.3). Gaps: multi-DB `.using()` (#332), `.exclude()` (#1030), relation-spanning lookups (#1031), plus a few esoteric Postgres lookups. `.dates/datetimes/contains/none` all shipped in v0.42; `__date` / `__year` / `__year__lte` and the full date-transform lookup grammar shipped post-v0.42 (PR #834, #829). Lookup-parser drift fixes for `__not_in` (PR #854), `__not_between` / `__not_range` (PR #855), and raw-pattern `__like` / `__ilike` / `__not_like` / `__not_ilike` (PR #856) closed the remaining Eloquent `whereNotIn` / `whereNotBetween` / `whereLike` / `whereNotLike` gaps. `whereJsonLength` shipped via `ScalarFn::JsonArrayLength` (PR #853).
+Summary: **37 SHIPPED / 2 PARTIAL / 1 MISSING / 0 N/A** (refreshed 2026-06-15: `.exclude()` shipped #1030/PR #1044 — it was briefly MISSING after the 2026-06-12 pass, §26.3; Window stays PARTIAL but #1035 Part A + #1033 landed). Gaps: multi-DB `.using()` (#332, the only MISSING); PARTIAL = Window (windowed-subquery-source, #1035 remaining) and relation-spanning lookups (#1031 — filter/exclude shipped Part 1 / PR #1051, `order_by("author__name")` still pending). `.dates/datetimes/contains/none` all shipped in v0.42; `__date` / `__year` / `__year__lte` and the full date-transform lookup grammar shipped post-v0.42 (PR #834, #829). Lookup-parser drift fixes for `__not_in` (PR #854), `__not_between` / `__not_range` (PR #855), and raw-pattern `__like` / `__ilike` / `__not_like` / `__not_ilike` (PR #856) closed the remaining Eloquent `whereNotIn` / `whereNotBetween` / `whereLike` / `whereNotLike` gaps. `whereJsonLength` shipped via `ScalarFn::JsonArrayLength` (PR #853).
 
 ---
 
@@ -265,9 +267,9 @@ Summary: **15 SHIPPED / 0 PARTIAL / 0 MISSING / 1 N/A**. Section 5 is fully ship
 | Two-factor admin login | n/a (Django needs `django-otp`) | PARTIAL | `totp::*` ships RFC 6238 primitives; no admin enrollment UI (#367) | |
 | Custom dashboard | [admin templates override](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#overriding-admin-templates) | SHIPPED | Tera template override (drop your own `admin/index.html`) + `register_admin_view!` (#363) for custom routes + `register_admin_computed!` with `link =` (#349) for custom list cells + `register_admin_inline!` for inline panels. Closed #368 as already-supported. | |
 | Admin styling / branding | [admin templates](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/#overriding-admin-templates) | SHIPPED | `Storage`-backed per-tenant brand + theme tokens | |
-| Admin docs (`django.contrib.admindocs`) | [admindocs](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/admindocs/) | N/A | n/a | Rust doc-comments cover it. |
+| Admin docs (`django.contrib.admindocs`) | [admindocs](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/admindocs/) | SHIPPED | In-admin model reference (closed #1011, PR #1023) — browsable per-model field/relation reference inside the admin, complementing Rust doc-comments + cargo doc. | |
 
-Summary: **35 SHIPPED / 1 PARTIAL / 0 MISSING / 1 N/A**.
+Summary: **36 SHIPPED / 1 PARTIAL / 0 MISSING / 0 N/A** (refreshed 2026-06-15: admindocs N/A→SHIPPED, #1011/PR #1023).
 
 ---
 
@@ -694,14 +696,14 @@ Summary: **22 SHIPPED / 0 PARTIAL / 1 MISSING / 0 N/A**.
 | `syndication` (RSS / Atom feeds) | [syndication](https://docs.djangoproject.com/en/6.0/ref/contrib/syndication/) | SHIPPED | `syndication::*` (v0.23) | |
 | `flatpages` | [flatpages](https://docs.djangoproject.com/en/6.0/ref/contrib/flatpages/) | SHIPPED | `flatpages::*` (v0.22) | |
 | `redirects` | [redirects](https://docs.djangoproject.com/en/6.0/ref/contrib/redirects/) | SHIPPED | `redirects::*` (v0.22) | |
-| `admindocs` | [admindocs](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/admindocs/) | N/A | Rust doc-comments + cargo doc | |
+| `admindocs` | [admindocs](https://docs.djangoproject.com/en/6.0/ref/contrib/admin/admindocs/) | SHIPPED | In-admin model reference (#1011, PR #1023) + Rust doc-comments + cargo doc | |
 | `postgres` (ArrayField, JSONField, RangeField, HStoreField, CITextField) | (sec 4) | SHIPPED | All five shipped: JSONField + CITextField (#344); ArrayField via `Array<T>` (#341); RangeField via `Range<T>` (#343); HStoreField via `HStore` (#342) | |
 | `gis` (GeoDjango) | [gis](https://docs.djangoproject.com/en/6.0/ref/contrib/gis/) | MISSING | [#58](https://github.com/ujeenet/rustango/issues/58) | |
-| `gis.geos` (geometry types) | (above) | MISSING | (above) (#443) | |
+| `gis.geos` (geometry types) | (above) | MISSING | (above) (#443) | Geometry breadth beyond `Point` (LineString / Polygon / Multi*) tracked in [#1009](https://github.com/ujeenet/rustango/issues/1009) (open, `django-parity`). |
 | `gis.gdal` (raster) | (above) | MISSING | (above) (#444) | |
 | Generic relations admin (GenericTabularInline) | [generic-inline](https://docs.djangoproject.com/en/6.0/ref/contrib/contenttypes/#generic-relations-and-aggregation) | SHIPPED | `register_admin_inline_generic!` | |
 
-Summary: **12 SHIPPED / 1 PARTIAL / 3 MISSING / 2 N/A** (within Django contrib scope).
+Summary: **13 SHIPPED / 1 PARTIAL / 3 MISSING / 1 N/A** (within Django contrib scope; refreshed 2026-06-15: admindocs N/A→SHIPPED, #1011/PR #1023).
 
 ---
 
@@ -847,10 +849,10 @@ Run locally: `docker-compose up -d`, then per backend —
 
 | Django 6.0 feature | Status | Evidence (test) | Issue |
 |---|---|---|---|
-| `StringAgg` database-agnostic (was contrib.postgres) | PG SHIPPED / MySQL + SQLite PINNED GAP (`AggregateNotSupportedInDialect`) | `django6_delta.rs::check_string_agg_dialect_matrix` | #1024 |
-| `AnyValue` aggregate (new) | MISSING — no `AggregateExpr` variant | compile-time absence | #1025 |
-| `Aggregate(order_by=...)` (new; deprecates PG `OrderableAggMixin`) | MISSING — `StringAgg` IR carries no ordering | compile-time absence | #1026 |
-| `JSONField` negative array index on SQLite (new) | PG SHIPPED / SQLite PINNED GAP (MySQL N/A upstream — `$[N]` is non-negative-only) | `django6_json_dates.rs::check_negative_index_dialect_matrix` | #1027 |
+| `StringAgg` database-agnostic (was contrib.postgres) | SHIPPED tri-dialect 2026-06-13 — lowers to `STRING_AGG` (PG) / `GROUP_CONCAT` (MySQL) / `group_concat` (SQLite), PR #1045 | `django6_delta.rs::check_string_agg_dialect_matrix` | #1024 (closed) |
+| `AnyValue` aggregate (new) | SHIPPED 2026-06-13 — `AnyValue` aggregate variant, PR #1046 | compile-time presence | #1025 (closed) |
+| `Aggregate(order_by=...)` (new; deprecates PG `OrderableAggMixin`) | SHIPPED 2026-06-13 — ordered `StringAgg`, PR #1047 | `django6_aggregation.rs` | #1026 (closed) |
+| `JSONField` negative array index on SQLite (new) | SHIPPED 2026-06-13 — synthesized on SQLite, PR #1042 (MySQL N/A upstream — `$[N]` is non-negative-only) | `django6_json_dates.rs::check_negative_index_dialect_matrix` | #1027 (closed) |
 | `GeneratedField` auto-refresh after `save()` via RETURNING | PINNED DIVERGENCE — DB value correct, struct never refreshed (any backend) | `django6_delta.rs::check_generated_column_not_refreshed_on_save` | #1028 |
 | `Model.NotUpdated` on forced 0-row update | DIVERGES — QuerySet `update_pool` surfaces rows-affected (0), instance `save_pool` silently `Ok(())` | `django6_writes.rs::check_zero_row_update_semantics` | #1029 |
 | `CompositePrimaryKey` in `raw()` / subquery lookups beyond `__in` | N/A BY ARCHITECTURE — composite-key idiom is surrogate `Auto<i64>` + `unique_together`; tuple-membership `(a,b) IN (SELECT…)` has no API (workaround: multi-predicate correlated EXISTS) | `django6_subquery.rs` header note | — |
@@ -861,6 +863,8 @@ Run locally: `docker-compose up -d`, then per backend —
 ### 26.2 Complex-query execution matrix
 
 Status per scenario group (PG / SQLite / MySQL). ✓ = passes asserting Django-equivalent semantics.
+
+> **Refresh note (2026-06-15):** the matrix below reflects the 2026-06-12 execution pass. Several PINNED items have since been fixed (groups B/C/E/G/H — #1027/#1032/#1033/#1034/#1036/#1037 + #1031 Part 1 + #1035 Part A, PRs #1041–#1051). The closed-vs-still-open ledger is in **§26.5**; re-run `tests/django6_*.rs` to re-pin the cells.
 
 | Group | Scenarios | PG | SQLite | MySQL | Test file | Findings |
 |---|---|---|---|---|---|---|
@@ -889,6 +893,41 @@ Status per scenario group (PG / SQLite / MySQL). ✓ = passes asserting Django-e
 - Inside a `.join()` `on` predicate, bare `Expr::Column` qualifies to the **joined** alias — refer to the outer table via `joins::aliased("<outer_table>", col)`.
 - `annotate_count`/`annotate_sum`… live on `QuerySet` and return `AggregateBuilder` — two relation aggregates in one query is not expressible (#1038); grouping by a related column (`values("author__name").annotate(...)`) is also inexpressible since `AggregateQuery` carries no joins (#1040).
 - Aggregate `.filter()` builder + `WindowBuilder`/`StringAgg` wrappers reject nesting (`NestedAggregateWrapper`) — Django's `StringAgg(..., filter=...)` shape included.
+
+### 26.5 Refresh 2026-06-15 — what shipped since the 2026-06-12 execution pass
+
+The 2026-06-12 pass (§26.1–§26.4) pinned a batch of gaps as live issues. PRs #1041–#1054 (all merged to `develop` ahead of the 0.43.0 tag) closed most of them. Ledger:
+
+**Closed (verify by re-running the linked `django6_*.rs` test, which the closing PR updated):**
+
+| Issue | What | PR |
+|---|---|---|
+| #1024 | `StringAgg` tri-dialect (`STRING_AGG` / `GROUP_CONCAT` / `group_concat`) | #1045 |
+| #1025 | `AnyValue` aggregate | #1046 |
+| #1026 | `Aggregate(order_by=…)` — ordered `StringAgg` | #1047 |
+| #1027 | `JSONField` negative array index on SQLite | #1042 |
+| #1030 | `QuerySet::exclude()` | #1044 |
+| #1032 | union per-branch aliased derived tables (MySQL 1248 fix) | #1048 |
+| #1033 | MySQL ranking windows decode losslessly (not `Bool`) | #1043 |
+| #1034 | union component-queryset slicing (per-component ORDER/LIMIT) | #1048 |
+| #1036 | scalar `Subquery` as a projected annotation | #1049 |
+| #1037 | `__quarter` synthesized on SQLite | #1041 |
+| #1031 **Part 1** | relation-spanning lookups in `filter()`/`exclude()` (`author__name__icontains`) | #1051 |
+| #1035 **Part A** | aggregate-as-window (`Sum/Avg/Min/Max/Count OVER`) | #1050 |
+| #1011 | in-admin model reference (admindocs) | #1023 |
+| #1010 | DRF epic — per-action throttling (#1022) + pluggable filter backends (#1021) | (epic closed) |
+| — | QuerySet terminals `fetch` / `count` / `exists` drop the `_pool` suffix | #1054 |
+
+**Still open (the genuine parity gaps as of this refresh):**
+
+- [#1009](https://github.com/ujeenet/rustango/issues/1009) — GeoDjango geometry breadth beyond `Point` (LineString / Polygon / Multi*). `django-parity`.
+- [#1028](https://github.com/ujeenet/rustango/issues/1028) — refresh `generated_as` columns on `save()` via RETURNING (Django 6.0).
+- [#1029](https://github.com/ujeenet/rustango/issues/1029) — surface `rows_affected` from `Model::save` update path (Django 6.0 `Model.NotUpdated`).
+- [#1031](https://github.com/ujeenet/rustango/issues/1031) **Part 2** — relation-spanning `order_by("author__name")` (filter/exclude shipped in Part 1).
+- [#1035](https://github.com/ujeenet/rustango/issues/1035) **remaining** — windowed query as a subquery source (top-N-per-group); aggregate-as-window shipped in Part A.
+- [#1038](https://github.com/ujeenet/rustango/issues/1038) — two relation-aggregate chains (`annotate_count` + `annotate_sum`) in one query.
+- [#1039](https://github.com/ujeenet/rustango/issues/1039) — `distinct_on` window fallback supporting joins on MySQL/SQLite.
+- [#1040](https://github.com/ujeenet/rustango/issues/1040) — `AggregateQuery` joins — `values("author__name").annotate(Count)` group-by-on-related-column shape.
 
 ---
 
@@ -946,7 +985,7 @@ Ranked by how often a real-world Django project hits the gap. Refreshed 2026-06-
 - `crates/rustango/src/tenancy/permissions.rs` (auth + permissions)
 - `~/.claude/projects/.../memory/future-backlog.md` (89-item backlog)
 - `~/.claude/projects/.../memory/framework-comparison-2026-05-02.md` (prior 5-dim audit)
-- `gh issue list --state open` (18 open issues, last checked 2026-05-21)
+- `gh issue list --state open` (open issues last checked 2026-06-15; the live `django-parity` / ORM-gap set is tracked in §26.5)
 - Django 6.0 docs (https://docs.djangoproject.com/en/6.0/) — all linked inline
 
-This audit is dated **2026-05-21** and represents rustango at the SHA on `main` right after PR #316 merged. Re-run on a quarterly cadence (or when ≥10 SHIPPED items accumulate) to keep the inventory honest.
+This audit was first cut **2026-05-21** (rustango at the SHA on `main` right after PR #316 merged), execution-verified **2026-06-12** (§26), and last refreshed **2026-06-15** for v0.43 (§26.5 — the `_pool`→bare method rename plus the #1041–#1054 gap closures). Re-run on a quarterly cadence (or when ≥10 SHIPPED items accumulate) to keep the inventory honest.
