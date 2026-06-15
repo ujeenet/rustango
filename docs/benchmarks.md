@@ -12,7 +12,9 @@ harness (see [Reproduce](#reproduce)). Nothing here is hand-waved.
 > **Rustango** handled **6×** the requests of Django and **12×** the requests of
 > Laravel on the non-cached index, while using **~25×** less memory and shipping
 > in the **smallest** container image. With a Redis page cache in front, the gap
-> widened to **7×** (Django) and **29×** (Laravel).
+> widened to **7×** (Django) and **29×** (Laravel). On a pure CPU workload
+> (summing primes) it ran **35×** faster than Django and **23×** faster than
+> Laravel — compiled vs interpreted.
 
 ---
 
@@ -28,8 +30,11 @@ rendering HTML pages:
 | `GET /post/{slug}` | post body + author + tags + every comment | no |
 | `GET /post/{slug}/cached` | same as detail | Redis, 60 s |
 | `GET /tag/{slug}` | posts carrying a tag | no |
+| `GET /compute` | sum of every prime below 20 000 (CPU-bound; no DB, no cache) | no |
 
-Each app loads its relations **eagerly** (no N+1): **Rustango** batches the
+The first five are I/O + render bound; `/compute` is a pure CPU workload — the
+identical trial-division algorithm in each language — to isolate raw runtime
+speed. Each app loads its relations **eagerly** (no N+1): **Rustango** batches the
 queries explicitly, Django uses `select_related` / `prefetch_related` /
 `annotate(Count)`, Laravel uses `with()` + `withCount()`. Templates are
 deliberately tiny and equivalent (Tera, Django templates, Blade) so we measure
@@ -75,9 +80,11 @@ the *framework*, not template effort.
 | detail, non-cached | **6 559** | 1 874 | 439 | 3.5× / 14.9× |
 | detail, **cached** | **43 044** | 4 250 | 848 | 10.1× / 50.8× |
 | tag, non-cached | **4 020** | 1 025 | 417 | 3.9× / 9.6× |
+| **compute** (CPU-bound) | **14 859** | 422 | 651 | 35.2× / 22.8× |
 
 On the cached post-detail page, **Rustango** served **43 000 requests/second** —
-ten times Django and fifty times Laravel from the same 4-core box.
+ten times Django and fifty times Laravel from the same 4-core box. And on the
+pure-compute endpoint it did **35×** Django's and **23×** Laravel's throughput.
 
 ### Latency — p50 / p95 / p99 in milliseconds (lower is better)
 
@@ -88,6 +95,7 @@ ten times Django and fifty times Laravel from the same 4-core box.
 | detail, non-cached | **7.5 / 8.4 / 9.8** | 25 / 47 / 54 | 109 / 160 / 171 |
 | detail, cached | **1.1 / 1.6 / 2.0** | 9.0 / 34 / 40 | 76 / 95 / 101 |
 | tag, non-cached | **12.2 / 13.7 / 16.9** | 47 / 80 / 93 | 114 / 160 / 170 |
+| compute (CPU-bound) | **3.4 / 5.3 / 6.0** | 118 / 169 / 202 | 91 / 103 / 113 |
 
 **Rustango**'s tail (p99) on the non-cached index — 12.7 ms — is lower than the
 *median* of either competitor, and its cached p99 (2.7 ms) is under Django's and
@@ -136,6 +144,27 @@ the render entirely — but the ranking and the multiples hold:
 Caching helps everyone, but it doesn't erase the gap — even when no application
 code runs, the HTTP-accept → cache-read → response path differs by runtime, and
 **Rustango**'s async core stays ahead.
+
+---
+
+## Raw computation: compiled vs interpreted
+
+The five page routes are dominated by the database and the template engine. The
+`/compute` route strips those away — it sums every prime below 20 000 by trial
+division, the *identical* algorithm in Rust, Python, and PHP. All three return
+the same answer (`21171191`); only the speed differs:
+
+| | **Rustango** | Django | Laravel |
+|---|--:|--:|--:|
+| Throughput | **14 859 req/s** | 422 | 651 |
+| p50 latency | **3.4 ms** | 117.8 ms | 90.6 ms |
+
+**Rustango** runs the loop ~**35×** faster than Django and ~**23×** faster than
+Laravel — the gap between a compiled native binary and a bytecode interpreter.
+Interestingly PHP 8.3 (with OPcache) edges out CPython on a tight integer loop,
+so Laravel *out-computes* Django here even though it loses on every I/O-bound
+page. This is the workload where the language, not the framework, dominates —
+and where pushing hot logic into **Rustango** pays off most.
 
 ---
 
