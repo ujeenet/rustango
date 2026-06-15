@@ -854,7 +854,7 @@ Run locally: `docker-compose up -d`, then per backend —
 | `Aggregate(order_by=...)` (new; deprecates PG `OrderableAggMixin`) | SHIPPED 2026-06-13 — ordered `StringAgg`, PR #1047 | `django6_aggregation.rs` | #1026 (closed) |
 | `JSONField` negative array index on SQLite (new) | SHIPPED 2026-06-13 — synthesized on SQLite, PR #1042 (MySQL N/A upstream — `$[N]` is non-negative-only) | `django6_json_dates.rs::check_negative_index_dialect_matrix` | #1027 (closed) |
 | `GeneratedField` auto-refresh after `save()` via RETURNING | SHIPPED (PG/SQLite) — decoded from the `INSERT … RETURNING` row back into the struct; MySQL deferred (no RETURNING), matches Django | `django6_delta.rs::check_generated_column_refreshed_on_save` | #1028 (closed) |
-| `Model.NotUpdated` on forced 0-row update | DIVERGES — QuerySet `update_pool` surfaces rows-affected (0), instance `save_pool` silently `Ok(())` | `django6_writes.rs::check_zero_row_update_semantics` | #1029 |
+| `Model.NotUpdated` on forced 0-row update | SHIPPED (analogue) — the whole save family returns `Result<u64, _>`: a 0-row UPDATE → `Ok(0)`, an INSERT → `Ok(1)`. No raise (rustango's no-exception convention); userland checks the count. | `django6_writes.rs::check_zero_row_update_semantics` | #1029 (closed) |
 | `CompositePrimaryKey` in `raw()` / subquery lookups beyond `__in` | N/A BY ARCHITECTURE — composite-key idiom is surrogate `Auto<i64>` + `unique_together`; tuple-membership `(a,b) IN (SELECT…)` has no API (workaround: multi-predicate correlated EXISTS) | `django6_subquery.rs` header note | — |
 | `bulk_create(update_conflicts=True, unique_fields, update_fields)` | SHIPPED — verified incl. two-column composite conflict target + update-listed-columns-only | `django6_writes.rs::check_bulk_upsert_*` | — |
 | `DEFAULT_AUTO_FIELD` → `BigAutoField` default | SHIPPED — `Auto<i64>` ↔ BIGSERIAL / BIGINT AUTO_INCREMENT / INTEGER PK on all three | `django6_delta.rs::check_auto_pk_is_big_auto_field` | — |
@@ -877,7 +877,7 @@ Status per scenario group (PG / SQLite / MySQL). ✓ = passes asserting Django-e
 | E. Set operations | union dedup/all, per-branch + combined ORDER/LIMIT, intersection, difference, `with_compound` | ✓ | ✓ | ✓* | `django6_setops.rs` | *Ordered/limited branches broken on MySQL — alias-less derived table, error 1248 (#1032, pinned). First-queryset ORDER/LIMIT always combined-scoped (#1034, pinned). INTERSECT/EXCEPT floor: MySQL 8.0.31+. |
 | G. JSON lookups | nested keys, key+index, array length, negative index | ✓ | ✓ (neg. index pinned) | ✓ (neg. index pinned) | `django6_json_dates.rs` | Negative index PG-only — #1027 (Django 6.0 supports SQLite). |
 | H. Date transforms | `__year__gte` chains, `__month`, `__quarter`, `.dates()`, `.datetimes()` | ✓ | ✓ (`__quarter` pinned) | ✓ | `django6_json_dates.rs` | `__quarter` errors on SQLite — #1037. `.dates()/.datetimes()` truncation identical tri-dialect. |
-| I. Complex writes | bulk_upsert (single + composite target), F-expression update, Case-in-UPDATE, 0-row semantics, get/update_or_create | ✓ | ✓ | ✓ | `django6_writes.rs` | 0-row instance-save divergence pinned — #1029. |
+| I. Complex writes | bulk_upsert (single + composite target), F-expression update, Case-in-UPDATE, 0-row semantics, get/update_or_create | ✓ | ✓ | ✓ | `django6_writes.rs` | save family returns rows-affected — 0-row UPDATE → `Ok(0)`, INSERT → `Ok(1)` (#1029, shipped). |
 
 ### 26.3 Corrections to earlier sections (claims disproven by execution)
 
@@ -922,12 +922,12 @@ The 2026-06-12 pass (§26.1–§26.4) pinned a batch of gaps as live issues. PRs
 | #1011 | in-admin model reference (admindocs) | #1023 |
 | #1010 | DRF epic — per-action throttling (#1022) + pluggable filter backends (#1021) | (epic closed) |
 | — | QuerySet terminals `fetch` / `count` / `exists` drop the `_pool` suffix | #1054 |
-| #1039 | `distinct_on` + join on MySQL/SQLite — fallback emits the join inside the windowed subquery | this PR |
+| #1039 | `distinct_on` + join on MySQL/SQLite — fallback emits the join inside the windowed subquery | #1062 |
+| #1029 | save family returns `Result<u64>` — 0-row UPDATE → `Ok(0)`, INSERT → `Ok(1)` (**breaking**) | this PR |
 
 **Still open (the genuine parity gaps as of this refresh):**
 
 - [#1009](https://github.com/ujeenet/rustango/issues/1009) — GeoDjango geometry breadth beyond `Point` (LineString / Polygon / Multi*). `django-parity`.
-- [#1029](https://github.com/ujeenet/rustango/issues/1029) — surface `rows_affected` from `Model::save` update path (Django 6.0 `Model.NotUpdated`).
 - [#1035](https://github.com/ujeenet/rustango/issues/1035) **remaining** — windowed query as a subquery source (top-N-per-group); aggregate-as-window shipped in Part A.
 
 ---
