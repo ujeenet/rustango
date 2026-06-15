@@ -853,7 +853,7 @@ Run locally: `docker-compose up -d`, then per backend —
 | `AnyValue` aggregate (new) | SHIPPED 2026-06-13 — `AnyValue` aggregate variant, PR #1046 | compile-time presence | #1025 (closed) |
 | `Aggregate(order_by=...)` (new; deprecates PG `OrderableAggMixin`) | SHIPPED 2026-06-13 — ordered `StringAgg`, PR #1047 | `django6_aggregation.rs` | #1026 (closed) |
 | `JSONField` negative array index on SQLite (new) | SHIPPED 2026-06-13 — synthesized on SQLite, PR #1042 (MySQL N/A upstream — `$[N]` is non-negative-only) | `django6_json_dates.rs::check_negative_index_dialect_matrix` | #1027 (closed) |
-| `GeneratedField` auto-refresh after `save()` via RETURNING | PINNED DIVERGENCE — DB value correct, struct never refreshed (any backend) | `django6_delta.rs::check_generated_column_not_refreshed_on_save` | #1028 |
+| `GeneratedField` auto-refresh after `save()` via RETURNING | SHIPPED (PG/SQLite) — decoded from the `INSERT … RETURNING` row back into the struct; MySQL deferred (no RETURNING), matches Django | `django6_delta.rs::check_generated_column_refreshed_on_save` | #1028 (closed) |
 | `Model.NotUpdated` on forced 0-row update | DIVERGES — QuerySet `update_pool` surfaces rows-affected (0), instance `save_pool` silently `Ok(())` | `django6_writes.rs::check_zero_row_update_semantics` | #1029 |
 | `CompositePrimaryKey` in `raw()` / subquery lookups beyond `__in` | N/A BY ARCHITECTURE — composite-key idiom is surrogate `Auto<i64>` + `unique_together`; tuple-membership `(a,b) IN (SELECT…)` has no API (workaround: multi-predicate correlated EXISTS) | `django6_subquery.rs` header note | — |
 | `bulk_create(update_conflicts=True, unique_fields, update_fields)` | SHIPPED — verified incl. two-column composite conflict target + update-listed-columns-only | `django6_writes.rs::check_bulk_upsert_*` | — |
@@ -906,6 +906,7 @@ The 2026-06-12 pass (§26.1–§26.4) pinned a batch of gaps as live issues. PRs
 | #1025 | `AnyValue` aggregate | #1046 |
 | #1026 | `Aggregate(order_by=…)` — ordered `StringAgg` | #1047 |
 | #1027 | `JSONField` negative array index on SQLite | #1042 |
+| #1028 | `GeneratedField` refresh on save via RETURNING (PG/SQLite; MySQL deferred) | this PR |
 | #1030 | `QuerySet::exclude()` | #1044 |
 | #1032 | union per-branch aliased derived tables (MySQL 1248 fix) | #1048 |
 | #1033 | MySQL ranking windows decode losslessly (not `Bool`) | #1043 |
@@ -924,7 +925,6 @@ The 2026-06-12 pass (§26.1–§26.4) pinned a batch of gaps as live issues. PRs
 **Still open (the genuine parity gaps as of this refresh):**
 
 - [#1009](https://github.com/ujeenet/rustango/issues/1009) — GeoDjango geometry breadth beyond `Point` (LineString / Polygon / Multi*). `django-parity`.
-- [#1028](https://github.com/ujeenet/rustango/issues/1028) — refresh `generated_as` columns on `save()` via RETURNING (Django 6.0).
 - [#1029](https://github.com/ujeenet/rustango/issues/1029) — surface `rows_affected` from `Model::save` update path (Django 6.0 `Model.NotUpdated`).
 - [#1031](https://github.com/ujeenet/rustango/issues/1031) **Part 3** — `__in` / `__isnull` / `__between` on relation spans (`filter`/`exclude` Part 1 + `order_by` Part 2 shipped; the binary + LIKE-family ops work, these non-binary ops against an aliased column remain).
 - [#1035](https://github.com/ujeenet/rustango/issues/1035) **remaining** — windowed query as a subquery source (top-N-per-group); aggregate-as-window shipped in Part A.

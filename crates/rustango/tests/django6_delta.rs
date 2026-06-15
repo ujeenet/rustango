@@ -10,8 +10,8 @@
 //!   `ANY_VALUE()`, SQLite `min()` fallback (#1025)
 //! - `GeneratedField` values are refreshed from the database after
 //!   `save()` on RETURNING-capable backends (PG/SQLite) — rustango
-//!   never refreshes: PINNED DIVERGENCE (DB value correct, struct
-//!   stale)
+//!   decodes them from the `INSERT … RETURNING` row (#1028); MySQL
+//!   defers (no RETURNING), matching Django 6.0
 //! - `DEFAULT_AUTO_FIELD` now defaults to `BigAutoField` — rustango's
 //!   `Auto<i64>` ↔ BIGSERIAL/BIGINT AUTO_INCREMENT already matches
 //!
@@ -181,12 +181,9 @@ mod scenarios {
     }
 
     /// Django 6.0: after `save()`, `GeneratedField`s refresh from the
-    /// database via RETURNING (PG/SQLite; deferred on MySQL).
-    /// rustango DIVERGENCE PIN: the DB computes the column correctly
-    /// but the in-memory struct is never refreshed — on ANY backend. Issue #1028.
-    /// Goes red (flip the audit row) when save() starts returning
-    /// generated columns.
-    pub async fn check_generated_column_not_refreshed_on_save(pool: &Pool) {
+    /// database via RETURNING (PG/SQLite; deferred on MySQL, which has no
+    /// `INSERT … RETURNING`). #1028.
+    pub async fn check_generated_column_refreshed_on_save(pool: &Pool) {
         let mut inv = Invoice {
             id: Auto::default(),
             price: 3,
@@ -194,12 +191,18 @@ mod scenarios {
             total: 0, // placeholder — DB computes 12
         };
         inv.save_pool(pool).await.expect("insert");
-        assert_eq!(
-            inv.total, 0,
-            "PINNED DIVERGENCE: struct not refreshed after save — Django 6.0 \
-             refreshes GeneratedFields via RETURNING; if this is now 12, update \
-             the audit + issue"
-        );
+        if pool.dialect().name() == "mysql" {
+            // No `INSERT … RETURNING` on MySQL — the generated column
+            // stays at its placeholder (deferred refresh, matching Django).
+            assert_eq!(inv.total, 0, "MySQL: generated-column refresh deferred");
+        } else {
+            // PG / SQLite decode the DB-computed value from the RETURNING
+            // row straight back into the struct (3 * 4 = 12).
+            assert_eq!(
+                inv.total, 12,
+                "PG/SQLite: generated column refreshed via RETURNING"
+            );
+        }
         let fetched: Vec<Invoice> = Invoice::objects().fetch(pool).await.expect("re-fetch");
         assert_eq!(fetched.len(), 1);
         assert_eq!(fetched[0].total, 12, "the DB-side value IS computed");
@@ -279,7 +282,7 @@ mod pg_live {
     pg_case!(check_string_agg_distinct);
     pg_case!(check_any_value);
     pg_case!(check_string_agg_ordered);
-    pg_case!(check_generated_column_not_refreshed_on_save);
+    pg_case!(check_generated_column_refreshed_on_save);
     pg_case!(check_auto_pk_is_big_auto_field);
 }
 
@@ -327,7 +330,7 @@ mod sqlite_live {
     sqlite_case!(check_string_agg_distinct);
     sqlite_case!(check_any_value);
     sqlite_case!(check_string_agg_ordered);
-    sqlite_case!(check_generated_column_not_refreshed_on_save);
+    sqlite_case!(check_generated_column_refreshed_on_save);
     sqlite_case!(check_auto_pk_is_big_auto_field);
 }
 
@@ -388,6 +391,6 @@ mod mysql_live {
     mysql_case!(check_string_agg_distinct);
     mysql_case!(check_any_value);
     mysql_case!(check_string_agg_ordered);
-    mysql_case!(check_generated_column_not_refreshed_on_save);
+    mysql_case!(check_generated_column_refreshed_on_save);
     mysql_case!(check_auto_pk_is_big_auto_field);
 }

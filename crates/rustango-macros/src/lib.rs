@@ -1976,6 +1976,11 @@ struct CollectedFields {
     /// the bulk_insert codegen to rebuild assigns against `_row_mut`
     /// instead of `self`.
     auto_field_idents: Vec<(syn::Ident, String)>,
+    /// #1028 — `(ident, column)` for each `generated_as` field. Drives
+    /// the PG/SQLite RETURNING refresh that decodes the DB-computed value
+    /// back into the struct after insert (MySQL has no RETURNING → the
+    /// field stays at its placeholder, deferred, matching Django 6.0).
+    generated_field_idents: Vec<(syn::Ident, String)>,
     /// Inner `T` of the first `Auto<T>` field, for the MySQL
     /// `LAST_INSERT_ID()` assignment in `AssignAutoPkPool`.
     first_auto_value_ty: Option<Type>,
@@ -2071,6 +2076,7 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
         returning_cols: Vec::new(),
         auto_assigns: Vec::new(),
         auto_field_idents: Vec::new(),
+        generated_field_idents: Vec::new(),
         first_auto_value_ty: None,
         bulk_pushes_no_auto: Vec::with_capacity(cap),
         bulk_pushes_all: Vec::with_capacity(cap),
@@ -2133,6 +2139,15 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                 column: info.column.clone(),
                 field_type_tokens: info.field_type_tokens,
             });
+            // #1028 — refresh the DB-computed value after insert on
+            // RETURNING-capable backends. The column joins `returning_cols`
+            // (so PG/SQLite `INSERT … RETURNING` includes it) and the
+            // ident is recorded so the `AssignAutoPkPool` impl decodes it
+            // back into the struct. MySQL has no `INSERT … RETURNING`, so
+            // it keeps the placeholder (deferred refresh, matching Django).
+            out.returning_cols.push(quote!(#column));
+            out.generated_field_idents
+                .push((ident.clone(), info.column.clone()));
             continue;
         }
         out.insert_columns.push(quote!(#column));
@@ -7676,6 +7691,29 @@ fn inherent_impl_tokens(
                 }
             })
             .collect();
+        // #1028 — decode each `generated_as` column from the same
+        // RETURNING row (PG/SQLite). Plain-typed fields, so the field's
+        // own type drives the decode (no `Auto<T>` wrapper).
+        let generated_assigns: Vec<TokenStream2> = fields
+            .generated_field_idents
+            .iter()
+            .map(|(ident, column)| {
+                quote! {
+                    self.#ident = #root::sql::try_get_returning(_returning_row, #column)?;
+                }
+            })
+            .collect();
+        let generated_assigns_sqlite: Vec<TokenStream2> = fields
+            .generated_field_idents
+            .iter()
+            .map(|(ident, column)| {
+                quote! {
+                    self.#ident = #root::sql::try_get_returning_sqlite(
+                        _returning_row, #column
+                    )?;
+                }
+            })
+            .collect();
         let mysql_body = if let Some(first) = fields.first_auto_ident.as_ref() {
             // The MySQL `LAST_INSERT_ID()` is always i64. Route through
             // `MysqlAutoIdSet` so Auto<i32> narrows safely and
@@ -7717,6 +7755,7 @@ fn inherent_impl_tokens(
                     _returning_row: &#root::sql::PgReturningRow,
                 ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     #( #auto_assigns )*
+                    #( #generated_assigns )*
                     ::core::result::Result::Ok(())
                 }
                 fn __rustango_assign_from_mysql_id(
@@ -7730,6 +7769,7 @@ fn inherent_impl_tokens(
                     _returning_row: &#root::sql::SqliteReturningRow,
                 ) -> ::core::result::Result<(), #root::sql::ExecError> {
                     #( #auto_assigns_sqlite )*
+                    #( #generated_assigns_sqlite )*
                     ::core::result::Result::Ok(())
                 }
             }
