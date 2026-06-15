@@ -995,8 +995,14 @@ pub mod extractors;
 ///
 /// The `router(prefix, &PgPool)` (static-pool) entry point keeps its
 /// PG-typed pool arg for source-compat; `tenant_router(prefix)`
-/// works on every dialect via the generic Tenant<DB>.pool() path.
-#[cfg(feature = "tenancy")]
+/// works on every dialect via the generic Tenant<DB>.pool() path
+/// (the latter is `#[cfg(feature = "tenancy")]`-gated inside the
+/// module; the static-pool CRUD ViewSet needs only `admin` — the
+/// feature that pulls axum into the dep graph). Available under
+/// either `admin` or `tenancy` so the fullstack template (admin, no
+/// tenancy) gets the CRUD ViewSet while tenant projects keep the
+/// `tenant_router` path.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
 pub mod viewset;
 
 /// Shared list-endpoint query-parameter helpers — single source of
@@ -1431,8 +1437,11 @@ pub use rustango_macros::Form;
 
 /// `#[derive(ViewSet)]` — generates a `router(prefix, pool) -> axum::Router`
 /// associated method on a marker struct, wiring the full CRUD ViewSet in one
-/// annotation. Re-exported only when the `tenancy` feature is on.
-#[cfg(feature = "tenancy")]
+/// annotation. Re-exported under `admin` or `tenancy` (the generated
+/// `router(...)` expands to `__axum::Router`, which `admin` provides); the
+/// generated `router(...)` works without tenancy, and `tenant_router(...)`
+/// adds the multi-tenant path when `tenancy` is also enabled.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
 pub use rustango_macros::ViewSet;
 
 /// `#[derive(Serializer)]` — implements [`serializer::ModelSerializer`] on a

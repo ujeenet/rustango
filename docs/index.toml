@@ -1,0 +1,23 @@
+# Documentation table of contents.
+#
+# rustangodocs reads this manifest to seed the docs site: each [[section]]
+# becomes a nav section, and every page (a markdown file in this directory)
+# becomes one documentation page, rendered in the order listed here. Files
+# not listed below are not published (e.g. internal audits / inventories).
+
+version = "0.43"
+
+[[section]]
+title = "Getting started"
+slug = "getting-started"
+pages = ["getting-started.md", "scaffolding.md"]
+
+[[section]]
+title = "Guides"
+slug = "guides"
+pages = ["admin.md", "orm.md", "manage.md", "security.md", "api-conventions.md"]
+
+[[section]]
+title = "Benchmarks"
+slug = "benchmarks"
+pages = ["benchmarks.md"]

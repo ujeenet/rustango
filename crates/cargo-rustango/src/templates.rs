@@ -43,6 +43,17 @@ dotenvy = "0.15"
 
 [dev-dependencies]
 tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
+
+# The `#[derive(Model)]` FromRow / LoadRelated impls are
+# `#[cfg(feature = "...")]`-gated on THIS crate's features, so a backend
+# feature must be enabled here for them to compile. `default` picks the
+# one `cargo run` uses; switch with e.g.
+# `cargo run --no-default-features --features sqlite`.
+[features]
+default = ["postgres"]
+postgres = ["rustango/postgres"]
+sqlite = ["rustango/sqlite"]
+mysql = ["rustango/mysql"]
 "#
     )
 }
@@ -271,8 +282,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the unified dispatcher
 //! that handles `cargo run` (runserver) AND `cargo run -- migrate` /
 //! `makemigrations` / `startapp` / etc. from one binary. No
-//! `src/bin/manage.rs` needed. Auto-admin is mounted via
-//! `urls::api()` which nests `admin_router(pool)` itself.
+//! `src/bin/manage.rs` needed. The auto-admin lives in
+//! `urls::admin_router(pool)`; nest it under `/admin` when you want
+//! it (see the getting-started guide).
 
 mod models;
 mod urls;
@@ -426,7 +438,10 @@ pub fn api() -> Router<()> {
 }
 
 pub fn admin_router(pool: PgPool) -> Router {
-    admin::Builder::new(pool).build()
+    // `admin_prefix` must match the path you nest the admin under in
+    // `main.rs` (e.g. `.nest(\"/admin\", urls::admin_router(pool))`) so
+    // the admin's own links + form actions resolve.
+    admin::Builder::new(pool).admin_prefix(\"/admin\").build()
 }
 "
             .to_owned()

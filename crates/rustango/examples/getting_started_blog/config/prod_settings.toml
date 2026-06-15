@@ -1,0 +1,20 @@
+# getting_started_blog — production tier
+# Loaded when RUSTANGO_ENV=prod. Strict-by-default; sensitive values
+# (database url, secret key) come from RUSTANGO__* env vars or your
+# secrets manager — leaving them out of source control.
+
+# [database]
+# url = "set via RUSTANGO__DATABASE__URL or your secrets manager"
+pool_min_size = 5
+pool_max_size = 50
+
+[server]
+bind                 = "0.0.0.0:8080"
+request_timeout_secs = 30
+
+[security]
+headers_preset    = "strict"
+hsts_max_age_secs = 31536000
+
+[audit]
+retention_days = 365

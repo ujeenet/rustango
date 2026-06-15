@@ -1,0 +1,49 @@
+[package]
+name = "getting_started_blog"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone — severs from the parent workspace so this builds as a
+# self-contained example (and so anyone can copy it out and `cargo
+# build`). This is the project the getting-started guide walks through
+# end to end; see `docs/getting-started.md`.
+[workspace]
+
+# Library target so the integration tests in `tests/` can import the
+# project's modules. The binary is a thin shim over the same code.
+[lib]
+name = "getting_started_blog"
+path = "src/lib.rs"
+
+[[bin]]
+name = "getting_started_blog"
+path = "src/main.rs"
+
+[dependencies]
+# In-repo example → path dep on the framework. A real project generated
+# by `cargo rustango new` uses `rustango = "0.43"` from crates.io instead.
+rustango = { path = "../.." }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
+tower = { version = "0.5", features = ["util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# The `#[derive(Model)]` FromRow / LoadRelated impls are
+# `#[cfg(feature = "...")]`-gated on THIS crate's features, so a backend
+# feature must be enabled here for them to compile. `default` picks the
+# one `cargo run` uses; switch with e.g.
+# `cargo run --no-default-features --features sqlite`.
+[features]
+default = ["postgres"]
+postgres = ["rustango/postgres"]
+sqlite = ["rustango/sqlite"]
+mysql = ["rustango/mysql"]
