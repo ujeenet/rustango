@@ -51,6 +51,7 @@ async fn count_distinct_returns_unique_count_not_row_count() {
     // Total rows = 6
     let total_q = AggregateQuery {
         model: CdTag::SCHEMA,
+        joins: Vec::new(),
         where_clause: WhereExpr::And(vec![]),
         group_by: vec![],
         aggregates: vec![("total".into(), AggregateExpr::Count(None))],
@@ -66,6 +67,7 @@ async fn count_distinct_returns_unique_count_not_row_count() {
     // Distinct categories = 3 (rust, django, go)
     let distinct_q = AggregateQuery {
         model: CdTag::SCHEMA,
+        joins: Vec::new(),
         where_clause: WhereExpr::And(vec![]),
         group_by: vec![],
         aggregates: vec![("uniq".into(), AggregateExpr::CountDistinct("category"))],
@@ -88,6 +90,7 @@ async fn count_distinct_respects_where_clause() {
     // WHERE category = 'rust' → 3 matching rows, 1 distinct value.
     let q = AggregateQuery {
         model: CdTag::SCHEMA,
+        joins: Vec::new(),
         where_clause: WhereExpr::Predicate(Filter {
             column: "category",
             op: Op::Eq,

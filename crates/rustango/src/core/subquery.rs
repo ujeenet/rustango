@@ -213,6 +213,7 @@ pub fn reverse_has_not_exists(rel: &ReverseRelation) -> WhereExpr {
 pub fn reverse_has_aggregate(rel: &ReverseRelation, agg: AggregateExpr) -> Expr {
     let inner = AggregateQuery {
         model: rel.child_schema,
+        joins: Vec::new(),
         where_clause: WhereExpr::ExprCompare {
             lhs: Expr::Column(rel.child_fk_column),
             op: Op::Eq,

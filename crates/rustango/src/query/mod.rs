@@ -4200,6 +4200,10 @@ impl<T: Model> AggregateBuilder<T> {
         // against a `published_only`-scoped model counts published
         // rows only, not the table's full row count).
         self.qs.apply_global_scopes();
+        // #1040 — carry the QuerySet's ad-hoc JOINs into the aggregate so
+        // it can group by a related column (`group_by("author.name")`).
+        // Empty for the common single-table aggregate.
+        let joins = std::mem::take(&mut self.qs.ad_hoc_joins);
         let model = T::SCHEMA;
         let where_clause = resolve_pending(model, self.qs.pending)?;
         // Walk each AggregateExpr for column-name typos. Today this
@@ -4248,7 +4252,9 @@ impl<T: Model> AggregateBuilder<T> {
             // belong to the model (caught early — typos otherwise
             // surface at the DB).
             for col in &self.group_by {
-                if model.field_by_column(col).is_none() {
+                // #1040 — a dotted `alias.col` references a JOINed table,
+                // validated by the JOIN's presence, not the base model.
+                if !col.contains('.') && model.field_by_column(col).is_none() {
                     return Err(QueryError::UnknownField {
                         model: model.name,
                         field: (*col).to_owned(),
@@ -4265,7 +4271,7 @@ impl<T: Model> AggregateBuilder<T> {
                 return Err(QueryError::ValuesRequiresAggregate { cols: cols.clone() });
             }
             for col in cols {
-                if model.field_by_column(col).is_none() {
+                if !col.contains('.') && model.field_by_column(col).is_none() {
                     return Err(QueryError::UnknownField {
                         model: model.name,
                         field: (*col).to_owned(),
@@ -4297,6 +4303,7 @@ impl<T: Model> AggregateBuilder<T> {
 
         Ok(AggregateQuery {
             model,
+            joins,
             where_clause,
             group_by,
             aggregates: self.aggregates,
