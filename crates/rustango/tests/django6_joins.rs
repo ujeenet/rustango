@@ -182,15 +182,49 @@ mod scenarios {
         assert_eq!(rows[0].author.value().expect("stitched").name, "Bob");
     }
 
-    /// GAP-PIN: `order_by("author__name")` relation-spanning ordering
-    /// — same out-of-scope story as the filter. Issue #1031.
-    pub async fn check_relation_spanning_order_by_is_rejected(pool: &Pool) {
-        let err = Post::objects()
+    /// Django's `order_by("author__name")` implicit-join ordering —
+    /// relation-spanning order keys now resolve the FK chain into LEFT
+    /// JOINs + an aliased ORDER BY term (#1031 Part 2), reusing the same
+    /// `resolve_span_chain` walk as the `filter()` path.
+    pub async fn check_relation_spanning_order_by_joins(pool: &Pool) {
+        // ASC by the related author name: Ada < Bob → "Hello" then "World".
+        let rows: Vec<Post> = Post::objects()
             .order_by(&[("author__name", false)])
             .fetch(pool)
             .await
+            .expect("relation-spanning order_by ASC");
+        let titles: Vec<&str> = rows.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, ["Hello", "World"]);
+
+        // DESC flips it.
+        let rows: Vec<Post> = Post::objects()
+            .order_by(&[("author__name", true)])
+            .fetch(pool)
+            .await
+            .expect("relation-spanning order_by DESC");
+        let titles: Vec<&str> = rows.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, ["World", "Hello"]);
+
+        // Span over a `select_related` path — the JOIN is deduped (alias
+        // `author` emitted once) and the parent rows still stitch.
+        let rows: Vec<Post> = Post::objects()
+            .select_related("author")
+            .order_by(&[("author__name", true)])
+            .fetch(pool)
+            .await
+            .expect("order_by span + select_related dedupe");
+        let titles: Vec<&str> = rows.iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, ["World", "Hello"]);
+        assert_eq!(rows[0].author.value().expect("stitched").name, "Bob");
+
+        // A trailing lookup suffix after the terminal column is not a
+        // valid order key (order_by has no `__icontains`-style grammar).
+        let err = Post::objects()
+            .order_by(&[("author__name__icontains", false)])
+            .fetch(pool)
+            .await
             .map(|rows: Vec<Post>| rows.len())
-            .expect_err("relation-spanning order_by must be rejected");
+            .expect_err("order_by suffix must be rejected");
         assert!(
             matches!(err, ExecError::Query(_)),
             "expected a compile-side QueryError, got {err:?}"
@@ -342,7 +376,7 @@ mod pg_live {
 
     pg_case!(check_three_hop_select_related_stitching);
     pg_case!(check_relation_spanning_filter_joins);
-    pg_case!(check_relation_spanning_order_by_is_rejected);
+    pg_case!(check_relation_spanning_order_by_joins);
     pg_case!(check_cross_table_filter_via_join);
     pg_case!(check_f_comparison_across_join);
     pg_case!(check_relation_counts_never_inflate);
@@ -386,7 +420,7 @@ mod sqlite_live {
 
     sqlite_case!(check_three_hop_select_related_stitching);
     sqlite_case!(check_relation_spanning_filter_joins);
-    sqlite_case!(check_relation_spanning_order_by_is_rejected);
+    sqlite_case!(check_relation_spanning_order_by_joins);
     sqlite_case!(check_cross_table_filter_via_join);
     sqlite_case!(check_f_comparison_across_join);
     sqlite_case!(check_relation_counts_never_inflate);
@@ -447,7 +481,7 @@ mod mysql_live {
 
     mysql_case!(check_three_hop_select_related_stitching);
     mysql_case!(check_relation_spanning_filter_joins);
-    mysql_case!(check_relation_spanning_order_by_is_rejected);
+    mysql_case!(check_relation_spanning_order_by_joins);
     mysql_case!(check_cross_table_filter_via_join);
     mysql_case!(check_f_comparison_across_join);
     mysql_case!(check_relation_counts_never_inflate);

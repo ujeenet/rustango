@@ -2257,8 +2257,16 @@ impl<T: Model> QuerySet<T> {
         // calls so a mixed chain emits in the order it was written.
         // `order_by` is the head-branch (or sole) ordering; the
         // combined-result ordering lowers separately below.
-        let order_by = lower_order_items(model, head_pending)?;
-        let compound_order_by = lower_order_items(model, comb_pending)?;
+        let (order_by, order_joins) = lower_order_items(model, head_pending)?;
+        let (compound_order_by, comb_order_joins) = lower_order_items(model, comb_pending)?;
+        // #1031 P2 — merge relation-span `order_by` JOINs into the SELECT
+        // join set, deduped by alias against the select_related / ad-hoc /
+        // filter-span joins already assembled above.
+        for j in order_joins.into_iter().chain(comb_order_joins) {
+            if !joins.iter().any(|e| e.alias == j.alias) {
+                joins.push(j);
+            }
+        }
         // Issue #264 / T1.2 — `.distinct_on(&[...])` requires the
         // listed columns to head the ORDER BY (Django enforces this
         // at runtime; we catch it at builder time). Empty list is
@@ -2724,21 +2732,65 @@ fn order_by_column_names(order_by: &[crate::core::OrderItem]) -> Vec<String> {
 fn lower_order_items(
     model: &'static ModelSchema,
     items: Vec<PendingOrderItem>,
-) -> Result<Vec<crate::core::OrderItem>, QueryError> {
+) -> Result<(Vec<crate::core::OrderItem>, Vec<crate::core::Join>), QueryError> {
     let mut out = Vec::with_capacity(items.len());
+    let mut joins: Vec<crate::core::Join> = Vec::new();
     for item in items {
         match item {
-            PendingOrderItem::Field { name, desc, nulls } => {
-                let field = model.field(&name).ok_or_else(|| QueryError::UnknownField {
-                    model: model.name,
-                    field: name.clone(),
-                })?;
-                out.push(crate::core::OrderItem::column_with_nulls(
-                    field.column,
-                    desc,
-                    nulls,
-                ));
-            }
+            PendingOrderItem::Field { name, desc, nulls } => match model.field(&name) {
+                Some(field) => {
+                    out.push(crate::core::OrderItem::column_with_nulls(
+                        field.column,
+                        desc,
+                        nulls,
+                    ));
+                }
+                // #1031 P2 — `order_by("author__name")` relation span:
+                // resolve the FK chain into LEFT JOINs + an aliased ORDER
+                // BY term, reusing the same walk as the `filter()` path.
+                // `order_by` has no lookup-suffix grammar, so a segment
+                // trailing the terminal column is a malformed key.
+                None if name.contains("__") => {
+                    let segs: Vec<&str> = name.split("__").collect();
+                    let (jns, prev_alias, current, term_i) = resolve_span_chain(model, &name)?;
+                    if term_i + 1 < segs.len() {
+                        return Err(QueryError::UnknownField {
+                            model: current.name,
+                            field: name.clone(),
+                        });
+                    }
+                    let term_field =
+                        current
+                            .field(segs[term_i])
+                            .ok_or_else(|| QueryError::UnknownField {
+                                model: current.name,
+                                field: segs[term_i].to_owned(),
+                            })?;
+                    // Dedupe joins by alias (a span over a path already
+                    // joined via `select_related` / a filter span emits
+                    // once); the compile() caller dedupes again against
+                    // the full join set.
+                    for j in jns {
+                        if !joins.iter().any(|e| e.alias == j.alias) {
+                            joins.push(j);
+                        }
+                    }
+                    out.push(crate::core::OrderItem::expr_with_nulls(
+                        crate::core::Expr::AliasedColumn {
+                            alias: prev_alias,
+                            column: term_field.column,
+                        },
+                        desc,
+                        nulls,
+                    ));
+                }
+                None => {
+                    return Err(QueryError::UnknownField {
+                        model: model.name,
+                        field: name,
+                    })
+                }
+            },
             PendingOrderItem::Expr { expr, desc, nulls } => {
                 out.push(crate::core::OrderItem::expr_with_nulls(expr, desc, nulls));
             }
@@ -2747,7 +2799,7 @@ fn lower_order_items(
             }
         }
     }
-    Ok(out)
+    Ok((out, joins))
 }
 
 /// Convert `select_related` field names into `Join`s — slice 9.0d,
@@ -3445,6 +3497,89 @@ fn resolve_span(
     raw_key: &str,
     value: SqlValue,
 ) -> Result<(Vec<crate::core::Join>, WhereExpr), QueryError> {
+    use crate::core::Expr;
+    let segs: Vec<&str> = raw_key.split("__").collect();
+    // FK-chain walk is shared with the `order_by` path (#1031 P2).
+    let (joins, prev_alias, current, term_i) = resolve_span_chain(model, raw_key)?;
+
+    let term_field = current
+        .field(segs[term_i])
+        .ok_or_else(|| QueryError::UnknownField {
+            model: current.name,
+            field: segs[term_i].to_owned(),
+        })?;
+    let suffix_segs = &segs[term_i + 1..];
+
+    // Re-parse any trailing suffix through the normal grammar; bare
+    // span (no suffix) is an exact match.
+    let (op, value, transform) = if suffix_segs.is_empty() {
+        (Op::Eq, value, None)
+    } else {
+        let synth = format!("{}__{}", term_field.name, suffix_segs.join("__"));
+        match parse_lookup(&synth, value) {
+            Ok(ParsedLookup::Raw { op, value, .. }) => (op, value, None),
+            Ok(ParsedLookup::DateTransform {
+                transform,
+                op,
+                value,
+                ..
+            }) => (op, value, Some(transform)),
+            // A trailing suffix that's still unknown is a genuine bad
+            // lookup on the terminal field.
+            Ok(ParsedLookup::RelationSpan { .. }) => {
+                return Err(QueryError::UnknownLookup {
+                    field: term_field.name.to_owned(),
+                    suffix: suffix_segs.join("__"),
+                })
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let column = Expr::AliasedColumn {
+        alias: prev_alias,
+        column: term_field.column,
+    };
+    let lhs = match transform {
+        None => column,
+        Some(kind) => Expr::Function {
+            kind,
+            args: vec![column],
+        },
+    };
+    let predicate = WhereExpr::ExprCompare {
+        lhs,
+        op,
+        rhs: Expr::Literal(value),
+    };
+    Ok((joins, predicate))
+}
+
+/// #1031 — walk a relation-span path's FK / O2O hops into LEFT JOINs.
+/// Shared by [`resolve_span`] (the `filter()` predicate path) and
+/// [`lower_order_items`] (the `order_by()` path) so the two can't drift.
+///
+/// Returns the accumulated JOINs, the alias of the table that holds the
+/// terminal column (`prev_alias`), the schema that table belongs to
+/// (`current`), and the index of the terminal segment (first non-FK, or
+/// the final segment) in the `__`-split key. The terminal column itself
+/// is `current.field(segs[term_i])` — the callers shape it into either a
+/// predicate or an `OrderItem`.
+///
+/// Errors with the original [`QueryError::UnknownLookup`] when the first
+/// segment isn't an FK at all (so non-span unknown keys keep their
+/// existing error).
+fn resolve_span_chain(
+    model: &'static ModelSchema,
+    raw_key: &str,
+) -> Result<
+    (
+        Vec<crate::core::Join>,
+        &'static str,
+        &'static ModelSchema,
+        usize,
+    ),
+    QueryError,
+> {
     use crate::core::{inventory, Expr, Join, JoinKind, ModelEntry, Relation};
     let segs: Vec<&str> = raw_key.split("__").collect();
     let mut joins: Vec<Join> = Vec::new();
@@ -3516,56 +3651,7 @@ fn resolve_span(
         });
     }
 
-    let term_field = current
-        .field(segs[term_i])
-        .ok_or_else(|| QueryError::UnknownField {
-            model: current.name,
-            field: segs[term_i].to_owned(),
-        })?;
-    let suffix_segs = &segs[term_i + 1..];
-
-    // Re-parse any trailing suffix through the normal grammar; bare
-    // span (no suffix) is an exact match.
-    let (op, value, transform) = if suffix_segs.is_empty() {
-        (Op::Eq, value, None)
-    } else {
-        let synth = format!("{}__{}", term_field.name, suffix_segs.join("__"));
-        match parse_lookup(&synth, value) {
-            Ok(ParsedLookup::Raw { op, value, .. }) => (op, value, None),
-            Ok(ParsedLookup::DateTransform {
-                transform,
-                op,
-                value,
-                ..
-            }) => (op, value, Some(transform)),
-            // A trailing suffix that's still unknown is a genuine bad
-            // lookup on the terminal field.
-            Ok(ParsedLookup::RelationSpan { .. }) => {
-                return Err(QueryError::UnknownLookup {
-                    field: term_field.name.to_owned(),
-                    suffix: suffix_segs.join("__"),
-                })
-            }
-            Err(e) => return Err(e),
-        }
-    };
-    let column = Expr::AliasedColumn {
-        alias: prev_alias,
-        column: term_field.column,
-    };
-    let lhs = match transform {
-        None => column,
-        Some(kind) => Expr::Function {
-            kind,
-            args: vec![column],
-        },
-    };
-    let predicate = WhereExpr::ExprCompare {
-        lhs,
-        op,
-        rhs: Expr::Literal(value),
-    };
-    Ok((joins, predicate))
+    Ok((joins, prev_alias, current, term_i))
 }
 
 /// #1031 — pre-pass over the pending filters that lowers every
