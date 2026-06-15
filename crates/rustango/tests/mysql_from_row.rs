@@ -320,6 +320,7 @@ fn fetch_aggregate_pool_is_callable() {
     fn _probe(pool: &rustango::sql::Pool) {
         let q = AggregateQuery {
             model: <User as Model>::SCHEMA,
+            joins: Vec::new(),
             where_clause: WhereExpr::And(vec![]),
             group_by: vec![],
             aggregates: vec![],

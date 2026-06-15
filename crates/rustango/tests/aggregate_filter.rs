@@ -30,6 +30,7 @@ pub struct Post {
 fn agg(expr: AggregateExpr) -> AggregateQuery {
     AggregateQuery {
         model: Post::SCHEMA,
+        joins: Vec::new(),
         where_clause: WhereExpr::And(vec![]),
         aggregates: vec![("agg".into(), expr)],
         aliases: vec![],

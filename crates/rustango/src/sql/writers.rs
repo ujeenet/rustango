@@ -479,54 +479,7 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
     b.sql.push_str(" FROM ");
     b.write_ident(query.model.table);
 
-    for join in &query.joins {
-        use crate::core::JoinKind;
-        // Reject dialect-incompatible kinds before emitting anything —
-        // gives users a clear error rather than a parse failure at the
-        // driver. PG supports all four; MySQL has no FULL OUTER JOIN;
-        // SQLite has neither RIGHT nor FULL.
-        let kind_kw = match (join.kind, b.d.name()) {
-            (JoinKind::Inner, _) => "INNER JOIN",
-            (JoinKind::Left, _) => "LEFT JOIN",
-            (JoinKind::Right, "sqlite") => {
-                return Err(SqlError::JoinKindNotSupported {
-                    kind: "RIGHT",
-                    dialect: b.d.name(),
-                });
-            }
-            (JoinKind::Right, _) => "RIGHT JOIN",
-            (JoinKind::Full, "postgres") => "FULL OUTER JOIN",
-            (JoinKind::Full, _) => {
-                return Err(SqlError::JoinKindNotSupported {
-                    kind: "FULL",
-                    dialect: b.d.name(),
-                });
-            }
-        };
-        // Empty `on` (e.g. `WhereExpr::And(vec![])`) is the legitimate
-        // "no WHERE filter" marker at the top of a SELECT/UPDATE, but
-        // inside an ON it would emit `ON ` with a literal hole — a
-        // parse error on every backend. Mirror of `EmptyCaseWhenCondition`.
-        if join.on.is_empty() {
-            return Err(SqlError::EmptyJoinOnCondition);
-        }
-        b.sql.push(' ');
-        b.sql.push_str(kind_kw);
-        b.sql.push(' ');
-        b.write_ident(join.target.table);
-        b.sql.push_str(" AS ");
-        b.write_ident(join.alias);
-        b.sql.push_str(" ON ");
-        // The ON predicate's unqualified `Filter` / `ColumnFilter`
-        // columns and bare `Expr::Column` refs (via `F()`) resolve
-        // to the joined alias for the duration of this write. Cross-
-        // references back to the outer (or to another joined alias)
-        // use `Expr::AliasedColumn` to escape the default.
-        let prior_qualify = b.current_qualify_alias.replace(join.alias);
-        let on_result = write_where_expr(b, &join.on, Some(join.alias), Some(join.target));
-        b.current_qualify_alias = prior_qualify;
-        on_result?;
-    }
+    write_model_joins(b, &query.joins)?;
 
     // Derived-table joins — `JOIN [LATERAL] (<subquery>) AS alias ON …`
     // (Eloquent joinSub / joinLateral, issue #828). Emitted after the
@@ -697,6 +650,61 @@ pub(super) fn write_count(b: &mut Sql<'_>, query: &CountQuery) -> Result<(), Sql
 // AGGREGATE
 // ====================================================================
 
+/// Emit the `KIND JOIN <target> AS <alias> ON <pred>` clauses shared by
+/// the SELECT writer and the aggregate writer (#1040 — group-by-on-a-
+/// joined-column). Rejects dialect-incompatible join kinds up front.
+fn write_model_joins(b: &mut Sql<'_>, joins: &[crate::core::Join]) -> Result<(), SqlError> {
+    use crate::core::JoinKind;
+    for join in joins {
+        // Reject dialect-incompatible kinds before emitting anything —
+        // gives users a clear error rather than a parse failure at the
+        // driver. PG supports all four; MySQL has no FULL OUTER JOIN;
+        // SQLite has neither RIGHT nor FULL.
+        let kind_kw = match (join.kind, b.d.name()) {
+            (JoinKind::Inner, _) => "INNER JOIN",
+            (JoinKind::Left, _) => "LEFT JOIN",
+            (JoinKind::Right, "sqlite") => {
+                return Err(SqlError::JoinKindNotSupported {
+                    kind: "RIGHT",
+                    dialect: b.d.name(),
+                });
+            }
+            (JoinKind::Right, _) => "RIGHT JOIN",
+            (JoinKind::Full, "postgres") => "FULL OUTER JOIN",
+            (JoinKind::Full, _) => {
+                return Err(SqlError::JoinKindNotSupported {
+                    kind: "FULL",
+                    dialect: b.d.name(),
+                });
+            }
+        };
+        // Empty `on` (e.g. `WhereExpr::And(vec![])`) is the legitimate
+        // "no WHERE filter" marker at the top of a SELECT/UPDATE, but
+        // inside an ON it would emit `ON ` with a literal hole — a
+        // parse error on every backend. Mirror of `EmptyCaseWhenCondition`.
+        if join.on.is_empty() {
+            return Err(SqlError::EmptyJoinOnCondition);
+        }
+        b.sql.push(' ');
+        b.sql.push_str(kind_kw);
+        b.sql.push(' ');
+        b.write_ident(join.target.table);
+        b.sql.push_str(" AS ");
+        b.write_ident(join.alias);
+        b.sql.push_str(" ON ");
+        // The ON predicate's unqualified `Filter` / `ColumnFilter`
+        // columns and bare `Expr::Column` refs (via `F()`) resolve
+        // to the joined alias for the duration of this write. Cross-
+        // references back to the outer (or to another joined alias)
+        // use `Expr::AliasedColumn` to escape the default.
+        let prior_qualify = b.current_qualify_alias.replace(join.alias);
+        let on_result = write_where_expr(b, &join.on, Some(join.alias), Some(join.target));
+        b.current_qualify_alias = prior_qualify;
+        on_result?;
+    }
+    Ok(())
+}
+
 pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), SqlError> {
     // Push the model onto the scope stack so any `Expr::Aggregate`
     // (issue #74) emitted inside the HAVING predicate has a model
@@ -708,14 +716,50 @@ pub(super) fn write_aggregate(b: &mut Sql<'_>, query: &AggregateQuery) -> Result
     r
 }
 
+/// Emit one group-by / projection column for the aggregate writer,
+/// qualified when JOINs are present (#1040). A dotted `alias.col` →
+/// `"alias"."col"`; a bare `col` with joins present → `"model_table"."col"`
+/// (disambiguates against joined tables); a bare `col` with no joins →
+/// `"col"` (the pre-#1040 shape). When `project` is set the SELECT-list
+/// form gets a stable `AS` label so the dict-row key is predictable:
+/// `alias__col` for a dotted ref, the bare column name otherwise.
+fn write_agg_group_col(
+    b: &mut Sql<'_>,
+    col: &str,
+    model_table: &str,
+    has_joins: bool,
+    project: bool,
+) {
+    if let Some((alias, c)) = col.split_once('.') {
+        b.write_ident(alias);
+        b.sql.push('.');
+        b.write_ident(c);
+        if project {
+            b.sql.push_str(" AS ");
+            b.write_ident(&format!("{alias}__{c}"));
+        }
+    } else if has_joins {
+        b.write_ident(model_table);
+        b.sql.push('.');
+        b.write_ident(col);
+        if project {
+            b.sql.push_str(" AS ");
+            b.write_ident(col);
+        }
+    } else {
+        b.write_ident(col);
+    }
+}
+
 fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), SqlError> {
     b.sql.push_str("SELECT ");
+    let has_joins = !query.joins.is_empty();
 
     for (i, col) in query.group_by.iter().enumerate() {
         if i > 0 {
             b.sql.push_str(", ");
         }
-        b.write_ident(col);
+        write_agg_group_col(b, col, query.model.table, has_joins, /*project=*/ true);
     }
     for (i, (alias, expr)) in query.aggregates.iter().enumerate() {
         if !query.group_by.is_empty() || i > 0 {
@@ -728,6 +772,9 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
 
     b.sql.push_str(" FROM ");
     b.write_ident(query.model.table);
+    // #1040 — JOINs for group-by-on-a-related-column. Emitted between
+    // FROM and WHERE, same position as the SELECT writer.
+    write_model_joins(b, &query.joins)?;
     write_where(b, &query.where_clause, Some(query.model))?;
 
     if !query.group_by.is_empty() {
@@ -736,7 +783,13 @@ fn write_aggregate_inner(b: &mut Sql<'_>, query: &AggregateQuery) -> Result<(), 
             if i > 0 {
                 b.sql.push_str(", ");
             }
-            b.write_ident(col);
+            write_agg_group_col(
+                b,
+                col,
+                query.model.table,
+                has_joins,
+                /*project=*/ false,
+            );
         }
     }
 

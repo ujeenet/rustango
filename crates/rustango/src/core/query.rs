@@ -1729,8 +1729,15 @@ impl AggregateExpr {
 #[derive(Debug, Clone)]
 pub struct AggregateQuery {
     pub model: &'static ModelSchema,
+    /// FK-chain / ad-hoc JOINs (#1040) — lets an aggregate group by a
+    /// *related* column (`values("author.name").annotate(Count)`). Empty
+    /// for the common single-table aggregate. Emitted between `FROM` and
+    /// `WHERE`, same shape as [`SelectQuery::joins`].
+    pub joins: Vec<Join>,
     pub where_clause: WhereExpr,
-    /// Columns to group by. Must be valid column names on `model`.
+    /// Columns to group by. A bare name (`"status"`) is a column on
+    /// `model`; a dotted name (`"author.name"`) references a JOINed
+    /// alias (#1040) and is emitted qualified + skips model validation.
     pub group_by: Vec<&'static str>,
     /// `(alias, expr)` pairs — the alias becomes the key in each result row.
     ///
@@ -1765,6 +1772,7 @@ pub struct AggregateQuery {
 impl PartialEq for AggregateQuery {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self.model, other.model)
+            && self.joins == other.joins
             && self.where_clause == other.where_clause
             && self.group_by == other.group_by
             && self.aggregates == other.aggregates

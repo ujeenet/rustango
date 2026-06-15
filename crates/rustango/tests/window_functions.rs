@@ -31,6 +31,7 @@ pub struct User {
 fn agg(expr: AggregateExpr) -> AggregateQuery {
     AggregateQuery {
         model: User::SCHEMA,
+        joins: Vec::new(),
         where_clause: WhereExpr::And(vec![]),
         aggregates: vec![("w".into(), expr)],
         aliases: vec![],

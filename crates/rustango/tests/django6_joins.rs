@@ -23,10 +23,11 @@
 //!   `AggregateBuilder::annotate_count` / `annotate_sum` / … chain off
 //!   the first relation annotate (#1038, shipped). Each lowers to its own
 //!   correlated subquery, so neither inflates.
-//! - Ad-hoc `.join()` does not compose with `.aggregate()` —
-//!   `AggregateQuery` carries no joins, so Django's join+GROUP BY
-//!   aggregate shape (`values("author__name").annotate(Count)`) must
-//!   go through relation aggregates or raw SQL. Issue #1040.
+//! - Ad-hoc `.join()` now composes with `.aggregate()` —
+//!   `AggregateQuery` carries `joins`, so Django's join+GROUP BY shape
+//!   (`values("author.name").annotate(Count)`) works via an explicit
+//!   join + aliased `group_by` (#1040, shipped). The `author__name`
+//!   sugar will ride #1031's `resolve_span_chain`.
 
 #[cfg(any(feature = "postgres", feature = "sqlite", feature = "mysql"))]
 mod scenarios {
@@ -327,6 +328,53 @@ mod scenarios {
             "sum of comment scores 5+12+20"
         );
     }
+
+    /// Django's most common reporting shape — group by a RELATED column:
+    /// `Post.objects.values("author__name").annotate(n=Count("id"))`. #1040.
+    /// Explicit `.join()` + aliased `group_by("author.name")` (the
+    /// `__`-sugar will ride #1031's resolver later). Each author has one
+    /// post (Ada → "Hello", Bob → "World"), so the grouped counts are 1/1.
+    pub async fn check_group_by_related_column(pool: &Pool) {
+        let rows = Post::objects()
+            .join(Join {
+                target: Author::SCHEMA,
+                alias: "author",
+                kind: JoinKind::Inner,
+                on: WhereExpr::ExprCompare {
+                    lhs: aliased("author", "id"),
+                    op: Op::Eq,
+                    rhs: aliased("d6join_post", "author"),
+                },
+                project: vec![],
+            })
+            .aggregate()
+            .group_by("author.name")
+            .annotate("n", rustango::core::AggregateExpr::Count(None))
+            .fetch(pool)
+            .await
+            .expect("group by author.name");
+        // Grouped column projects under the `<alias>__<col>` key.
+        let mut pairs: Vec<(String, i64)> = rows
+            .iter()
+            .map(|r| {
+                let name = match r.get("author__name") {
+                    Some(SqlValue::String(s)) => s.clone(),
+                    other => panic!("expected String author__name, got {other:?}"),
+                };
+                let n = match r.get("n") {
+                    Some(SqlValue::I64(n)) => *n,
+                    other => panic!("expected I64 n, got {other:?}"),
+                };
+                (name, n)
+            })
+            .collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![("Ada".to_string(), 1), ("Bob".to_string(), 1)],
+            "one post per author, grouped by the joined author.name"
+        );
+    }
 }
 
 // ------------------------------------------------------------- Postgres
@@ -388,6 +436,7 @@ mod pg_live {
     pg_case!(check_cross_table_filter_via_join);
     pg_case!(check_f_comparison_across_join);
     pg_case!(check_relation_counts_never_inflate);
+    pg_case!(check_group_by_related_column);
 }
 
 // --------------------------------------------------------------- SQLite
@@ -432,6 +481,7 @@ mod sqlite_live {
     sqlite_case!(check_cross_table_filter_via_join);
     sqlite_case!(check_f_comparison_across_join);
     sqlite_case!(check_relation_counts_never_inflate);
+    sqlite_case!(check_group_by_related_column);
 }
 
 // ---------------------------------------------------------------- MySQL
@@ -493,4 +543,5 @@ mod mysql_live {
     mysql_case!(check_cross_table_filter_via_join);
     mysql_case!(check_f_comparison_across_join);
     mysql_case!(check_relation_counts_never_inflate);
+    mysql_case!(check_group_by_related_column);
 }

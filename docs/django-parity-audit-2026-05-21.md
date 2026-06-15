@@ -873,7 +873,7 @@ Status per scenario group (PG / SQLite / MySQL). ✓ = passes asserting Django-e
 | B. Correlated subqueries | `Exists`+`OuterRef` (raw + typed `eq_expr`), NOT EXISTS, exclude-on-relation semantics, `IN (SELECT…)`, has-count, `annotate_count`, scalar `Subquery` in WHERE | ✓ | ✓ | ✓ | `django6_subquery.rs` | `where_doesnt_have_filter` reproduces Django's exclude-NOT-EXISTS semantics exactly (bookless parents included). `OuterRef` misuse pinned (`OuterRefOutsideSubquery`). Scalar `Subquery` as projected annotation inexpressible — #1036. |
 | C. Window functions | rank/dense_rank/lag(default)/first_value+ROWS frame/ntile, partitioned | ✓ | ✓ | ✓* | `django6_window.rs` | *MySQL ranking outputs decode as `SqlValue::Bool` (#1033, pinned). Required shape: `.aggregate().group_by(<every projected col>)`. `Sum(...) OVER` + windowed-subquery missing (#1035); top-N-per-group via `join_lateral` works PG/MySQL, `LateralJoinNotSupported` pinned on SQLite. |
 | K. distinct_on | first-row-per-group, +join | ✓ | ✓ (window fallback) | ✓ (window fallback) | `django6_window.rs` | Fallback rejects joins — pinned `OpNotSupportedInDialect` on SQLite/MySQL (#1039); PG native handles joins. |
-| D. Multi-join | 3-hop `select_related` stitching, cross-table filter via `.join()`+`aliased`, F-across-join, relation-count inflation | ✓ | ✓ | ✓ | `django6_joins.rs` | Relation-spanning `filter("author__name",…)` (Part 1) + `order_by("author__name")` (Part 2) now resolve the FK chain into LEFT JOINs — #1031 (`__in`/`__isnull`/`__between` on spans remain, Part 3). `annotate_count` never inflates (correlated subquery ≡ Django `distinct=True`), and two relation aggregates now chain in one query (#1038, shipped). Remaining: `.join()` doesn't compose with `.aggregate()` — `values("author__name").annotate(Count)` group-by-on-related-column shape inexpressible (#1040). |
+| D. Multi-join | 3-hop `select_related` stitching, cross-table filter via `.join()`+`aliased`, F-across-join, relation-count inflation | ✓ | ✓ | ✓ | `django6_joins.rs` | Relation-spanning `filter("author__name",…)` (Part 1) + `order_by("author__name")` (Part 2) now resolve the FK chain into LEFT JOINs — #1031 (`__in`/`__isnull`/`__between` on spans remain, Part 3). `annotate_count` never inflates (correlated subquery ≡ Django `distinct=True`), two relation aggregates chain in one query (#1038), and `.join()` now composes with `.aggregate()` so a group-by-on-a-related-column (`group_by("author.name")`) emits JOIN + GROUP BY (#1040, shipped). |
 | E. Set operations | union dedup/all, per-branch + combined ORDER/LIMIT, intersection, difference, `with_compound` | ✓ | ✓ | ✓* | `django6_setops.rs` | *Ordered/limited branches broken on MySQL — alias-less derived table, error 1248 (#1032, pinned). First-queryset ORDER/LIMIT always combined-scoped (#1034, pinned). INTERSECT/EXCEPT floor: MySQL 8.0.31+. |
 | G. JSON lookups | nested keys, key+index, array length, negative index | ✓ | ✓ (neg. index pinned) | ✓ (neg. index pinned) | `django6_json_dates.rs` | Negative index PG-only — #1027 (Django 6.0 supports SQLite). |
 | H. Date transforms | `__year__gte` chains, `__month`, `__quarter`, `.dates()`, `.datetimes()` | ✓ | ✓ (`__quarter` pinned) | ✓ | `django6_json_dates.rs` | `__quarter` errors on SQLite — #1037. `.dates()/.datetimes()` truncation identical tri-dialect. |
@@ -891,7 +891,7 @@ Status per scenario group (PG / SQLite / MySQL). ✓ = passes asserting Django-e
 
 - `.values(cols)` + window-only annotate → `QueryError::ValuesRequiresAggregate`; explicit `group_by` per projected column is the canonical window shape.
 - Inside a `.join()` `on` predicate, bare `Expr::Column` qualifies to the **joined** alias — refer to the outer table via `joins::aliased("<outer_table>", col)`.
-- `annotate_count`/`annotate_sum`… also live on `AggregateBuilder` now, so two relation aggregates compose in one query (#1038, shipped). Grouping by a related column (`values("author__name").annotate(...)`) is still inexpressible since `AggregateQuery` carries no joins (#1040).
+- `annotate_count`/`annotate_sum`… also live on `AggregateBuilder` now, so two relation aggregates compose in one query (#1038). Grouping by a related column also works (#1040): `AggregateQuery` carries `joins`, so an explicit join + aliased `group_by("author.name")` emits `… JOIN … GROUP BY "author"."name"`. The `author__name` sugar (auto-join) will ride #1031's `resolve_span_chain`.
 - Aggregate `.filter()` builder + `WindowBuilder`/`StringAgg` wrappers reject nesting (`NestedAggregateWrapper`) — Django's `StringAgg(..., filter=...)` shape included.
 
 ### 26.5 Refresh 2026-06-15 — what shipped since the 2026-06-12 execution pass
@@ -914,7 +914,8 @@ The 2026-06-12 pass (§26.1–§26.4) pinned a batch of gaps as live issues. PRs
 | #1037 | `__quarter` synthesized on SQLite | #1041 |
 | #1031 **Part 1** | relation-spanning lookups in `filter()`/`exclude()` (`author__name__icontains`) | #1051 |
 | #1031 **Part 2** | relation-spanning `order_by("author__name")` (shared `resolve_span_chain` walk) | #1057 |
-| #1038 | two relation aggregates in one query (chained `AggregateBuilder::annotate_count`/`_sum`/…) | this PR |
+| #1038 | two relation aggregates in one query (chained `AggregateBuilder::annotate_count`/`_sum`/…) | #1058 |
+| #1040 | group-by-on-a-related-column — `AggregateQuery.joins` + aliased `group_by("author.name")` | this PR |
 | #1035 **Part A** | aggregate-as-window (`Sum/Avg/Min/Max/Count OVER`) | #1050 |
 | #1011 | in-admin model reference (admindocs) | #1023 |
 | #1010 | DRF epic — per-action throttling (#1022) + pluggable filter backends (#1021) | (epic closed) |
@@ -928,7 +929,6 @@ The 2026-06-12 pass (§26.1–§26.4) pinned a batch of gaps as live issues. PRs
 - [#1031](https://github.com/ujeenet/rustango/issues/1031) **Part 3** — `__in` / `__isnull` / `__between` on relation spans (`filter`/`exclude` Part 1 + `order_by` Part 2 shipped; the binary + LIKE-family ops work, these non-binary ops against an aliased column remain).
 - [#1035](https://github.com/ujeenet/rustango/issues/1035) **remaining** — windowed query as a subquery source (top-N-per-group); aggregate-as-window shipped in Part A.
 - [#1039](https://github.com/ujeenet/rustango/issues/1039) — `distinct_on` window fallback supporting joins on MySQL/SQLite.
-- [#1040](https://github.com/ujeenet/rustango/issues/1040) — `AggregateQuery` joins — `values("author__name").annotate(Count)` group-by-on-related-column shape.
 
 ---
 

@@ -68,6 +68,7 @@ async fn cleanup(pool: &sqlx::PgPool) {
 fn agg_per_author(expr: AggregateExpr, alias: &'static str) -> AggregateQuery {
     AggregateQuery {
         model: <Post as rustango::core::Model>::SCHEMA,
+        joins: Vec::new(),
         where_clause: WhereExpr::And(vec![]),
         group_by: vec!["author"],
         aggregates: vec![(alias.into(), expr)],

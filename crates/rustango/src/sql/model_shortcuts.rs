@@ -150,6 +150,7 @@ where
     let col_static = resolve_col::<T>(col)?;
     let q = AggregateQuery {
         model: T::SCHEMA,
+        joins: Vec::new(),
         where_clause: WhereExpr::And(Vec::new()),
         group_by: Vec::new(),
         aggregates: vec![("v".into(), build(col_static))],

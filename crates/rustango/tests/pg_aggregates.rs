@@ -23,6 +23,7 @@ pub struct Post {
 fn aggregate_query(expr: AggregateExpr, alias: &'static str) -> AggregateQuery {
     AggregateQuery {
         model: <Post as rustango::core::Model>::SCHEMA,
+        joins: Vec::new(),
         where_clause: WhereExpr::And(vec![]),
         group_by: Vec::new(),
         aggregates: vec![(alias.into(), expr)],
@@ -267,6 +268,7 @@ fn jsonb_agg_rejected_on_non_pg() {
 fn array_agg_composes_with_group_by() {
     let q = AggregateQuery {
         model: <Post as rustango::core::Model>::SCHEMA,
+        joins: Vec::new(),
         where_clause: WhereExpr::And(vec![]),
         group_by: vec!["author"],
         aggregates: vec![("tags".into(), AggregateExpr::array_agg("tag"))],

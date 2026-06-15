@@ -926,6 +926,9 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         let select_q = self.compile()?;
         let aggregate_q = crate::core::AggregateQuery {
             model: <T as crate::core::Model>::SCHEMA,
+            // Carry any ad-hoc JOINs from the queryset (#1040) so a scalar
+            // aggregate over a joined column still resolves.
+            joins: select_q.joins,
             where_clause: select_q.where_clause,
             group_by: Vec::new(),
             aggregates: vec![("v".into(), build(col_static))],
