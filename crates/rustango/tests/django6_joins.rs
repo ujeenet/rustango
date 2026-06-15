@@ -19,10 +19,10 @@
 //!   so they can never inflate
 //!
 //! AUDIT NOTES:
-//! - Two relation-counts in ONE query (`annotate_count` twice) is not
-//!   expressible — `annotate_count` lives on `QuerySet` and returns an
-//!   `AggregateBuilder` with no further relation-annotate methods. One
-//!   relation aggregate per query today. Issue #1038.
+//! - Two relation aggregates in ONE query now compose —
+//!   `AggregateBuilder::annotate_count` / `annotate_sum` / … chain off
+//!   the first relation annotate (#1038, shipped). Each lowers to its own
+//!   correlated subquery, so neither inflates.
 //! - Ad-hoc `.join()` does not compose with `.aggregate()` —
 //!   `AggregateQuery` carries no joins, so Django's join+GROUP BY
 //!   aggregate shape (`values("author__name").annotate(Count)`) must
@@ -284,40 +284,48 @@ mod scenarios {
     }
 
     /// The Django join-duplication trap: `annotate(nc=Count("comments"),
-    /// nl=Count("likes"))` without `distinct=True` returns 6/6 for a
-    /// post with 3 comments × 2 likes. rustango's relation counts are
-    /// correlated subqueries — structurally immune. (One relation
-    /// aggregate per query — see AUDIT NOTES in the file header.)
+    /// nl=Count("likes"))` without `distinct=True` returns 6/6 for a post
+    /// with 3 comments × 2 likes. rustango lowers relation aggregates to
+    /// correlated subqueries — structurally immune — and #1038 lets two
+    /// of them chain in ONE query (`AggregateBuilder::annotate_count`).
     pub async fn check_relation_counts_never_inflate(pool: &Pool) {
-        let comment_rows = Post::objects()
+        // Two relation counts in ONE query (#1038). Post 1 has 3 comments
+        // + 2 likes, Post 2 has 0 comments + 1 like — never 6/6.
+        let rows = Post::objects()
             .annotate_count("comments")
-            .order_by(&[("id", false)])
-            .fetch(pool)
-            .await
-            .expect("comments_count");
-        let n_comments: Vec<i64> = comment_rows
-            .iter()
-            .map(|r| match r.get("comments_count") {
-                Some(SqlValue::I64(n)) => *n,
-                other => panic!("expected I64 comments_count, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(n_comments, vec![3, 0], "never 6 — no JOIN duplication");
-
-        let like_rows = Post::objects()
             .annotate_count("likes")
             .order_by(&[("id", false)])
             .fetch(pool)
             .await
-            .expect("likes_count");
-        let n_likes: Vec<i64> = like_rows
+            .expect("two relation counts in one query");
+        let pair = |r: &std::collections::HashMap<String, SqlValue>, k: &str| match r.get(k) {
+            Some(SqlValue::I64(n)) => *n,
+            other => panic!("expected I64 {k}, got {other:?}"),
+        };
+        let counts: Vec<(i64, i64)> = rows
             .iter()
-            .map(|r| match r.get("likes_count") {
-                Some(SqlValue::I64(n)) => *n,
-                other => panic!("expected I64 likes_count, got {other:?}"),
-            })
+            .map(|r| (pair(r, "comments_count"), pair(r, "likes_count")))
             .collect();
-        assert_eq!(n_likes, vec![2, 1]);
+        assert_eq!(
+            counts,
+            vec![(3, 2), (0, 1)],
+            "correlated subqueries never inflate to 6/6"
+        );
+
+        // Mixed count + sum in one pass: Post 1's comment scores 5+12+20.
+        let rows = Post::objects()
+            .annotate_count("comments")
+            .annotate_sum("comments", "score")
+            .order_by(&[("id", false)])
+            .fetch(pool)
+            .await
+            .expect("count + sum in one query");
+        assert_eq!(pair(&rows[0], "comments_count"), 3);
+        assert_eq!(
+            pair(&rows[0], "comments_sum_score"),
+            37,
+            "sum of comment scores 5+12+20"
+        );
     }
 }
 
