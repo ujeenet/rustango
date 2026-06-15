@@ -872,7 +872,7 @@ Status per scenario group (PG / SQLite / MySQL). ✓ = passes asserting Django-e
 | F. Grouping shapes | `values().annotate()` GROUP BY inference, filter-on-annotation → HAVING, `.alias()` non-projected | ✓ | ✓ | ✓ | `django6_aggregation.rs` | WHERE-vs-HAVING auto-routing verified live. |
 | B. Correlated subqueries | `Exists`+`OuterRef` (raw + typed `eq_expr`), NOT EXISTS, exclude-on-relation semantics, `IN (SELECT…)`, has-count, `annotate_count`, scalar `Subquery` in WHERE | ✓ | ✓ | ✓ | `django6_subquery.rs` | `where_doesnt_have_filter` reproduces Django's exclude-NOT-EXISTS semantics exactly (bookless parents included). `OuterRef` misuse pinned (`OuterRefOutsideSubquery`). Scalar `Subquery` as projected annotation inexpressible — #1036. |
 | C. Window functions | rank/dense_rank/lag(default)/first_value+ROWS frame/ntile, partitioned | ✓ | ✓ | ✓* | `django6_window.rs` | *MySQL ranking outputs decode as `SqlValue::Bool` (#1033, pinned). Required shape: `.aggregate().group_by(<every projected col>)`. `Sum(...) OVER` + windowed-subquery missing (#1035); top-N-per-group via `join_lateral` works PG/MySQL, `LateralJoinNotSupported` pinned on SQLite. |
-| K. distinct_on | first-row-per-group, +join | ✓ | ✓ (window fallback) | ✓ (window fallback) | `django6_window.rs` | Fallback rejects joins — pinned `OpNotSupportedInDialect` on SQLite/MySQL (#1039); PG native handles joins. |
+| K. distinct_on | first-row-per-group, +join | ✓ | ✓ (window fallback) | ✓ (window fallback) | `django6_window.rs` | distinct_on + join works tri-dialect (#1039, shipped): PG native DISTINCT ON; the MySQL/SQLite ROW_NUMBER fallback now emits the join inside the windowed subquery and qualifies the model's columns. |
 | D. Multi-join | 3-hop `select_related` stitching, cross-table filter via `.join()`+`aliased`, F-across-join, relation-count inflation | ✓ | ✓ | ✓ | `django6_joins.rs` | Relation-spanning `filter("author__name",…)` (Part 1) + `order_by("author__name")` (Part 2) + `__in`/`__isnull`/`__between` on spans (Part 3) all resolve the FK chain into LEFT JOINs — #1031 fully shipped. `annotate_count` never inflates (correlated subquery ≡ Django `distinct=True`), two relation aggregates chain in one query (#1038), and `.join()` now composes with `.aggregate()` so a group-by-on-a-related-column (`group_by("author.name")`) emits JOIN + GROUP BY (#1040, shipped). |
 | E. Set operations | union dedup/all, per-branch + combined ORDER/LIMIT, intersection, difference, `with_compound` | ✓ | ✓ | ✓* | `django6_setops.rs` | *Ordered/limited branches broken on MySQL — alias-less derived table, error 1248 (#1032, pinned). First-queryset ORDER/LIMIT always combined-scoped (#1034, pinned). INTERSECT/EXCEPT floor: MySQL 8.0.31+. |
 | G. JSON lookups | nested keys, key+index, array length, negative index | ✓ | ✓ (neg. index pinned) | ✓ (neg. index pinned) | `django6_json_dates.rs` | Negative index PG-only — #1027 (Django 6.0 supports SQLite). |
@@ -915,20 +915,20 @@ The 2026-06-12 pass (§26.1–§26.4) pinned a batch of gaps as live issues. PRs
 | #1037 | `__quarter` synthesized on SQLite | #1041 |
 | #1031 **Part 1** | relation-spanning lookups in `filter()`/`exclude()` (`author__name__icontains`) | #1051 |
 | #1031 **Part 2** | relation-spanning `order_by("author__name")` (shared `resolve_span_chain` walk) | #1057 |
-| #1031 **Part 3** | `__in` / `__isnull` / `__between` on relation spans (aliased-LHS `ExprCompare` writer) | this PR |
+| #1031 **Part 3** | `__in` / `__isnull` / `__between` on relation spans (aliased-LHS `ExprCompare` writer) | #1061 |
 | #1038 | two relation aggregates in one query (chained `AggregateBuilder::annotate_count`/`_sum`/…) | #1058 |
 | #1040 | group-by-on-a-related-column — `AggregateQuery.joins` + aliased `group_by("author.name")` | #1059 |
 | #1035 **Part A** | aggregate-as-window (`Sum/Avg/Min/Max/Count OVER`) | #1050 |
 | #1011 | in-admin model reference (admindocs) | #1023 |
 | #1010 | DRF epic — per-action throttling (#1022) + pluggable filter backends (#1021) | (epic closed) |
 | — | QuerySet terminals `fetch` / `count` / `exists` drop the `_pool` suffix | #1054 |
+| #1039 | `distinct_on` + join on MySQL/SQLite — fallback emits the join inside the windowed subquery | this PR |
 
 **Still open (the genuine parity gaps as of this refresh):**
 
 - [#1009](https://github.com/ujeenet/rustango/issues/1009) — GeoDjango geometry breadth beyond `Point` (LineString / Polygon / Multi*). `django-parity`.
 - [#1029](https://github.com/ujeenet/rustango/issues/1029) — surface `rows_affected` from `Model::save` update path (Django 6.0 `Model.NotUpdated`).
 - [#1035](https://github.com/ujeenet/rustango/issues/1035) **remaining** — windowed query as a subquery source (top-N-per-group); aggregate-as-window shipped in Part A.
-- [#1039](https://github.com/ujeenet/rustango/issues/1039) — `distinct_on` window fallback supporting joins on MySQL/SQLite.
 
 ---
 
