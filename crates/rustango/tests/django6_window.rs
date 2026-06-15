@@ -271,55 +271,41 @@ mod scenarios {
         );
     }
 
-    /// GAP-PIN: `distinct_on` + any join works on PG (native DISTINCT
-    /// ON) but the MySQL/SQLite ROW_NUMBER fallback rejects joins
-    /// (issue #1039).
-    /// Django supports `.distinct(*fields)` only on PG anyway, so the
-    /// PG-arm is the Django-parity surface — the pin documents the
-    /// fallback's limitation.
+    /// `distinct_on` + a join now works on every backend (#1039): PG runs
+    /// native `DISTINCT ON`; MySQL/SQLite go through the ROW_NUMBER
+    /// fallback, which emits the join inside the windowed subquery and
+    /// qualifies the model's own columns so they don't collide with the
+    /// joined table. Both tenants have a matching `Tenant`, so the INNER
+    /// JOIN drops nobody → same shape as the no-join distinct_on.
     pub async fn check_distinct_on_with_join_dialect_matrix(pool: &Pool) {
-        let qs = || {
-            Score::objects()
-                .distinct_on(&["tenant_id"])
-                .order_by(&[("tenant_id", false), ("points", true)])
-                .join(Join {
-                    target: Tenant::SCHEMA,
-                    alias: "t",
-                    kind: JoinKind::Inner,
-                    // Inside an `on` predicate bare columns resolve to
-                    // the joined alias — the outer side must be
-                    // explicitly aliased by its table name.
-                    on: WhereExpr::ExprCompare {
-                        lhs: aliased("t", "id"),
-                        op: Op::Eq,
-                        rhs: aliased("d6win_score", "tenant_id"),
-                    },
-                    project: vec![],
-                })
-        };
-        if pool.dialect().name() == "postgres" {
-            let rows: Vec<Score> = qs().fetch(pool).await.expect("PG DISTINCT ON + join");
-            assert_eq!(rows.len(), 2);
-        } else {
-            let err = qs()
-                .fetch(pool)
-                .await
-                .map(|rows: Vec<Score>| rows.len())
-                .expect_err("distinct_on + join must be rejected on the window fallback");
-            match err {
-                ExecError::Sql(SqlError::OpNotSupportedInDialect { op, dialect }) => {
-                    assert!(
-                        op.starts_with("DISTINCT ON combined with joins"),
-                        "unexpected op: {op}"
-                    );
-                    assert_eq!(dialect, pool.dialect().name());
-                }
-                other => panic!(
-                    "expected OpNotSupportedInDialect, got {other:?} — if the \
-                     fallback now supports joins, update the Django 6.0 parity audit"
-                ),
-            }
-        }
+        let rows: Vec<Score> = Score::objects()
+            .distinct_on(&["tenant_id"])
+            .order_by(&[("tenant_id", false), ("points", true)])
+            .join(Join {
+                target: Tenant::SCHEMA,
+                alias: "t",
+                // Inside an `on` predicate bare columns resolve to the
+                // joined alias — the outer side is explicitly aliased.
+                kind: JoinKind::Inner,
+                on: WhereExpr::ExprCompare {
+                    lhs: aliased("t", "id"),
+                    op: Op::Eq,
+                    rhs: aliased("d6win_score", "tenant_id"),
+                },
+                project: vec![],
+            })
+            .fetch(pool)
+            .await
+            .expect("distinct_on + join on every backend");
+        let got: Vec<(i64, String, i64)> = rows
+            .into_iter()
+            .map(|s| (s.tenant_id, s.player, s.points))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(1, "alice".into(), 35), (2, "dave".into(), 100)],
+            "best-scoring row per tenant, with the tenant join applied"
+        );
     }
 
     /// Django top-N-per-group (`annotate(rank=Window(...))` +

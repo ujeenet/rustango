@@ -277,6 +277,20 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     Ok(())
 }
 
+/// Write a model column for the distinct-on window fallback's inner
+/// SELECT — qualified with the model table when joins are present (#1039)
+/// so it can't collide with a joined table's same-named column. The outer
+/// SELECT reads from the `sub` derived table, so it always stays bare.
+fn write_distinct_inner_col(b: &mut Sql<'_>, table: &str, col: &str, qualify: bool) {
+    if qualify {
+        b.write_ident(table);
+        b.sql.push('.');
+        b.write_ident(col);
+    } else {
+        b.write_ident(col);
+    }
+}
+
 /// MySQL / SQLite portable fallback for PG's `SELECT DISTINCT ON (cols)`.
 /// Wraps the original SELECT in a subquery that adds
 /// `ROW_NUMBER() OVER (PARTITION BY cols ORDER BY <user_order>) AS __rn`
@@ -299,18 +313,11 @@ fn write_distinct_on_via_window(
     query: &SelectQuery,
     distinct_cols: &[&'static str],
 ) -> Result<(), SqlError> {
-    // v1 limitation: the window-function rewrite doesn't yet handle
-    // joins (`.select_related` / `.join`). Tracked as a follow-up;
-    // surface a clear error so users on MySQL/SQLite know the gap
-    // rather than seeing wrong-shape SQL.
-    if !query.joins.is_empty() {
-        return Err(SqlError::OpNotSupportedInDialect {
-            op: "DISTINCT ON combined with joins (workaround: pre-collapse \
-                 with a subquery, or run on Postgres which supports DISTINCT \
-                 ON natively)",
-            dialect: b.d.name(),
-        });
-    }
+    // #1039 — the inner SELECT below joins the related tables and
+    // qualifies the model's own columns with the model table so they
+    // can't collide with a joined column. The derived table `sub`
+    // re-exposes them by their bare names for the outer SELECT / ORDER BY.
+    let qualify = !query.joins.is_empty();
 
     // ---------- Outer SELECT — projection columns only (no __rn). ----------
     b.sql.push_str("SELECT ");
@@ -343,7 +350,7 @@ fn write_distinct_on_via_window(
                 b.sql.push_str(", ");
             }
             inner_first = false;
-            b.write_ident(col);
+            write_distinct_inner_col(b, query.model.table, col, qualify);
         }
     } else {
         for field in query.model.scalar_fields() {
@@ -351,7 +358,7 @@ fn write_distinct_on_via_window(
                 b.sql.push_str(", ");
             }
             inner_first = false;
-            b.write_ident(field.column);
+            write_distinct_inner_col(b, query.model.table, field.column, qualify);
         }
     }
     // ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) AS __rn
@@ -360,7 +367,7 @@ fn write_distinct_on_via_window(
         if i > 0 {
             b.sql.push_str(", ");
         }
-        b.write_ident(col);
+        write_distinct_inner_col(b, query.model.table, col, qualify);
     }
     if !query.order_by.is_empty() {
         b.sql.push_str(" ORDER BY ");
@@ -370,7 +377,7 @@ fn write_distinct_on_via_window(
             }
             match item {
                 crate::core::OrderItem::Column { column, desc, .. } => {
-                    b.write_ident(column);
+                    write_distinct_inner_col(b, query.model.table, column, qualify);
                     if *desc {
                         b.sql.push_str(" DESC");
                     }
@@ -393,6 +400,10 @@ fn write_distinct_on_via_window(
     }
     b.sql.push_str(") AS __rn FROM ");
     b.write_ident(query.model.table);
+    // #1039 — the FK-chain / ad-hoc joins live in the inner SELECT next to
+    // the ROW_NUMBER() partition, so they filter/correlate the rows the
+    // window ranks. The outer SELECT reads the survivors from `sub`.
+    write_model_joins(b, &query.joins)?;
     write_where(b, &query.where_clause, Some(query.model))?;
 
     b.sql.push_str(") sub WHERE sub.__rn = 1");
