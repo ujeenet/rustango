@@ -232,6 +232,48 @@ mod scenarios {
         );
     }
 
+    /// #1031 Part 3 — non-binary ops on relation spans: `__in` /
+    /// `__between` / `__isnull` against a JOINed alias column. The span
+    /// resolver builds `ExprCompare { AliasedColumn, op, … }` for any op,
+    /// and the writer emits `IN` / `BETWEEN` / `IS [NOT] NULL` for an
+    /// aliased LHS; this pins the full path end-to-end, tri-dialect.
+    pub async fn check_relation_spanning_filter_ops(pool: &Pool) {
+        // `author__name__in` — both authors match → both posts.
+        let rows: Vec<Post> = Post::objects()
+            .filter(
+                "author__name__in",
+                SqlValue::List(vec![
+                    SqlValue::String("Ada".into()),
+                    SqlValue::String("Bob".into()),
+                ]),
+            )
+            .order_by(&[("id", false)])
+            .fetch(pool)
+            .await
+            .expect("span __in");
+        assert_eq!(rows.len(), 2);
+
+        // `author__id__between [1,1]` — only Ada (author id 1) → "Hello".
+        let rows: Vec<Post> = Post::objects()
+            .filter(
+                "author__id__between",
+                SqlValue::List(vec![SqlValue::I64(1), SqlValue::I64(1)]),
+            )
+            .fetch(pool)
+            .await
+            .expect("span __between");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Hello");
+
+        // `author__id__isnull = false` — author id is never NULL → all rows.
+        let rows: Vec<Post> = Post::objects()
+            .filter("author__id__isnull", false)
+            .fetch(pool)
+            .await
+            .expect("span __isnull");
+        assert_eq!(rows.len(), 2);
+    }
+
     /// The explicit-join workaround for `filter(author__name="Ada")`:
     /// `.join()` + `col_filter` on the alias.
     pub async fn check_cross_table_filter_via_join(pool: &Pool) {
@@ -433,6 +475,7 @@ mod pg_live {
     pg_case!(check_three_hop_select_related_stitching);
     pg_case!(check_relation_spanning_filter_joins);
     pg_case!(check_relation_spanning_order_by_joins);
+    pg_case!(check_relation_spanning_filter_ops);
     pg_case!(check_cross_table_filter_via_join);
     pg_case!(check_f_comparison_across_join);
     pg_case!(check_relation_counts_never_inflate);
@@ -478,6 +521,7 @@ mod sqlite_live {
     sqlite_case!(check_three_hop_select_related_stitching);
     sqlite_case!(check_relation_spanning_filter_joins);
     sqlite_case!(check_relation_spanning_order_by_joins);
+    sqlite_case!(check_relation_spanning_filter_ops);
     sqlite_case!(check_cross_table_filter_via_join);
     sqlite_case!(check_f_comparison_across_join);
     sqlite_case!(check_relation_counts_never_inflate);
@@ -540,6 +584,7 @@ mod mysql_live {
     mysql_case!(check_three_hop_select_related_stitching);
     mysql_case!(check_relation_spanning_filter_joins);
     mysql_case!(check_relation_spanning_order_by_joins);
+    mysql_case!(check_relation_spanning_filter_ops);
     mysql_case!(check_cross_table_filter_via_join);
     mysql_case!(check_f_comparison_across_join);
     mysql_case!(check_relation_counts_never_inflate);
