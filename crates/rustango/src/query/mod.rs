@@ -1861,27 +1861,7 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn annotate_exists(self, name: &str) -> AggregateBuilder<T> {
         let mut builder = self.aggregate();
-        // Reuse the existence resolver (reverse-FK / M2M / GFK), then
-        // wrap whatever `[NOT ]EXISTS` it produced in a `CASE WHEN …
-        // THEN 1 ELSE 0` so it projects as an `I64(0|1)` column.
-        match Self::resolve_rel_exists(name, /*negated=*/ false) {
-            Some(exists) => {
-                let expr = AggregateExpr::RelatedAggregate(Box::new(
-                    crate::core::subquery::exists_as_int(exists),
-                ));
-                builder
-                    .aggregates
-                    .push((std::borrow::Cow::Owned(format!("{name}_exists")), expr));
-            }
-            None => {
-                builder
-                    .deferred_error
-                    .get_or_insert(QueryError::UnknownField {
-                        model: T::SCHEMA.name,
-                        field: name.to_owned(),
-                    });
-            }
-        }
+        builder.push_relation_exists(name);
         builder
     }
 
@@ -1904,91 +1884,11 @@ impl<T: Model> QuerySet<T> {
         agg: AggregateExpr,
         suffix: &str,
     ) -> AggregateBuilder<T> {
-        use crate::core::{subquery, RelAggKind};
+        // #1038 — the resolve-and-push worker lives on `AggregateBuilder`
+        // so it can be chained more than once (two relation aggregates in
+        // one query). QuerySet entry just opens a builder and delegates.
         let mut builder = self.aggregate();
-        // `<name>_count` (no column) or `<name>_<suffix>_<column>`.
-        let alias = || match column {
-            Some(col) => std::borrow::Cow::Owned(format!("{name}_{suffix}_{col}")),
-            None => std::borrow::Cow::Owned(format!("{name}_{suffix}")),
-        };
-        // Map the reverse-FK `AggregateExpr` onto the raw-table
-        // `RelAggKind` used by the M2M / GFK builders.
-        let rel_kind = |a: &AggregateExpr| match a {
-            AggregateExpr::Sum(_) => RelAggKind::Sum,
-            AggregateExpr::Avg(_) => RelAggKind::Avg,
-            AggregateExpr::Max(_) => RelAggKind::Max,
-            AggregateExpr::Min(_) => RelAggKind::Min,
-            _ => RelAggKind::Count,
-        };
-
-        // Reverse-FK relation — aggregate over the child table directly.
-        if let Some(rel) = T::reverse_relations().iter().find(|r| r.name == name) {
-            if let Some(col) = column {
-                if rel.child_schema.field_by_column(col).is_none() {
-                    builder
-                        .deferred_error
-                        .get_or_insert(QueryError::UnknownField {
-                            model: rel.child_schema.name,
-                            field: col.to_owned(),
-                        });
-                    return builder;
-                }
-            }
-            let expr = AggregateExpr::RelatedAggregate(Box::new(subquery::reverse_has_aggregate(
-                rel, agg,
-            )));
-            builder.aggregates.push((alias(), expr));
-            return builder;
-        }
-
-        // Many-to-many — `Count` over the junction; `Sum`/`Avg`/`Max`/
-        // `Min` over a target column reached through the junction. The
-        // target table has no `ModelSchema`, so `column` can't be
-        // validated here (a bad column surfaces at the database).
-        if let Some(m2m) = T::SCHEMA.m2m.iter().find(|m| m.name == name) {
-            let expr = AggregateExpr::RelatedAggregate(Box::new(subquery::m2m_has_aggregate(
-                m2m,
-                Self::self_pk_column(),
-                rel_kind(&agg),
-                column,
-            )));
-            builder.aggregates.push((alias(), expr));
-            return builder;
-        }
-
-        // Generic-FK — aggregate over the polymorphic child table,
-        // discriminated by content type.
-        if let Some(g) = T::generic_reverse_relations()
-            .iter()
-            .find(|g| g.name == name)
-        {
-            if let Some(col) = column {
-                if g.child_schema.field_by_column(col).is_none() {
-                    builder
-                        .deferred_error
-                        .get_or_insert(QueryError::UnknownField {
-                            model: g.child_schema.name,
-                            field: col.to_owned(),
-                        });
-                    return builder;
-                }
-            }
-            let expr = AggregateExpr::RelatedAggregate(Box::new(subquery::generic_has_aggregate(
-                g,
-                T::SCHEMA.table,
-                rel_kind(&agg),
-                column,
-            )));
-            builder.aggregates.push((alias(), expr));
-            return builder;
-        }
-
-        builder
-            .deferred_error
-            .get_or_insert(QueryError::UnknownField {
-                model: T::SCHEMA.name,
-                field: name.to_owned(),
-            });
+        builder.push_relation_aggregate(name, column, agg, suffix);
         builder
     }
 
@@ -3941,6 +3841,165 @@ impl<T: Model> AggregateBuilder<T> {
     #[must_use]
     pub fn annotate_subquery(self, alias: &'static str, inner: crate::core::SelectQuery) -> Self {
         self.annotate(alias, crate::core::subquery::scalar_subquery(inner))
+    }
+
+    /// #1038 — resolve a relation `name` (reverse-FK / M2M / generic-FK)
+    /// into a correlated `RelatedAggregate` and stage it on this builder.
+    /// Shared with [`QuerySet::annotate_count`] & co. so a relation
+    /// aggregate can be chained more than once in a single query. Errors
+    /// are deferred onto `self.deferred_error` to surface from `compile()`.
+    fn push_relation_aggregate(
+        &mut self,
+        name: &str,
+        column: Option<&'static str>,
+        agg: AggregateExpr,
+        suffix: &str,
+    ) {
+        use crate::core::{subquery, RelAggKind};
+        // `<name>_count` (no column) or `<name>_<suffix>_<column>`.
+        let alias = || match column {
+            Some(col) => std::borrow::Cow::Owned(format!("{name}_{suffix}_{col}")),
+            None => std::borrow::Cow::Owned(format!("{name}_{suffix}")),
+        };
+        let rel_kind = |a: &AggregateExpr| match a {
+            AggregateExpr::Sum(_) => RelAggKind::Sum,
+            AggregateExpr::Avg(_) => RelAggKind::Avg,
+            AggregateExpr::Max(_) => RelAggKind::Max,
+            AggregateExpr::Min(_) => RelAggKind::Min,
+            _ => RelAggKind::Count,
+        };
+
+        // Reverse-FK relation — aggregate over the child table directly.
+        if let Some(rel) = T::reverse_relations().iter().find(|r| r.name == name) {
+            if let Some(col) = column {
+                if rel.child_schema.field_by_column(col).is_none() {
+                    self.deferred_error.get_or_insert(QueryError::UnknownField {
+                        model: rel.child_schema.name,
+                        field: col.to_owned(),
+                    });
+                    return;
+                }
+            }
+            let expr = AggregateExpr::RelatedAggregate(Box::new(subquery::reverse_has_aggregate(
+                rel, agg,
+            )));
+            self.aggregates.push((alias(), expr));
+            return;
+        }
+
+        // Many-to-many — `Count` over the junction; `Sum`/`Avg`/`Max`/
+        // `Min` over a target column reached through the junction. The
+        // target table has no `ModelSchema`, so `column` can't be
+        // validated here (a bad column surfaces at the database).
+        if let Some(m2m) = T::SCHEMA.m2m.iter().find(|m| m.name == name) {
+            let pk = T::SCHEMA.primary_key().map_or("id", |f| f.column);
+            let expr = AggregateExpr::RelatedAggregate(Box::new(subquery::m2m_has_aggregate(
+                m2m,
+                pk,
+                rel_kind(&agg),
+                column,
+            )));
+            self.aggregates.push((alias(), expr));
+            return;
+        }
+
+        // Generic-FK — aggregate over the polymorphic child table,
+        // discriminated by content type.
+        if let Some(g) = T::generic_reverse_relations()
+            .iter()
+            .find(|g| g.name == name)
+        {
+            if let Some(col) = column {
+                if g.child_schema.field_by_column(col).is_none() {
+                    self.deferred_error.get_or_insert(QueryError::UnknownField {
+                        model: g.child_schema.name,
+                        field: col.to_owned(),
+                    });
+                    return;
+                }
+            }
+            let expr = AggregateExpr::RelatedAggregate(Box::new(subquery::generic_has_aggregate(
+                g,
+                T::SCHEMA.table,
+                rel_kind(&agg),
+                column,
+            )));
+            self.aggregates.push((alias(), expr));
+            return;
+        }
+
+        self.deferred_error.get_or_insert(QueryError::UnknownField {
+            model: T::SCHEMA.name,
+            field: name.to_owned(),
+        });
+    }
+
+    /// #1038 — `<name>_exists` companion of [`Self::push_relation_aggregate`]
+    /// (the `CASE WHEN EXISTS(...) THEN 1 ELSE 0` projection). Reuses the
+    /// `QuerySet` existence resolver so the reverse-FK / M2M / GFK logic
+    /// lives in one place.
+    fn push_relation_exists(&mut self, name: &str) {
+        match QuerySet::<T>::resolve_rel_exists(name, /*negated=*/ false) {
+            Some(exists) => {
+                let expr = AggregateExpr::RelatedAggregate(Box::new(
+                    crate::core::subquery::exists_as_int(exists),
+                ));
+                self.aggregates
+                    .push((std::borrow::Cow::Owned(format!("{name}_exists")), expr));
+            }
+            None => {
+                self.deferred_error.get_or_insert(QueryError::UnknownField {
+                    model: T::SCHEMA.name,
+                    field: name.to_owned(),
+                });
+            }
+        }
+    }
+
+    /// Chain a relation `COUNT` onto an existing aggregate builder
+    /// (#1038) — mirrors [`QuerySet::annotate_count`] so two relation
+    /// counts compose in ONE query:
+    /// `Post::objects().annotate_count("comments").annotate_count("likes")`.
+    #[must_use]
+    pub fn annotate_count(mut self, name: &str) -> Self {
+        self.push_relation_aggregate(name, None, AggregateExpr::Count(None), "count");
+        self
+    }
+
+    /// Chain a relation `SUM(<column>)` (#1038). See [`QuerySet::annotate_sum`].
+    #[must_use]
+    pub fn annotate_sum(mut self, name: &str, column: &'static str) -> Self {
+        self.push_relation_aggregate(name, Some(column), AggregateExpr::Sum(column), "sum");
+        self
+    }
+
+    /// Chain a relation `AVG(<column>)` (#1038). See [`QuerySet::annotate_avg`].
+    #[must_use]
+    pub fn annotate_avg(mut self, name: &str, column: &'static str) -> Self {
+        self.push_relation_aggregate(name, Some(column), AggregateExpr::Avg(column), "avg");
+        self
+    }
+
+    /// Chain a relation `MAX(<column>)` (#1038). See [`QuerySet::annotate_max`].
+    #[must_use]
+    pub fn annotate_max(mut self, name: &str, column: &'static str) -> Self {
+        self.push_relation_aggregate(name, Some(column), AggregateExpr::Max(column), "max");
+        self
+    }
+
+    /// Chain a relation `MIN(<column>)` (#1038). See [`QuerySet::annotate_min`].
+    #[must_use]
+    pub fn annotate_min(mut self, name: &str, column: &'static str) -> Self {
+        self.push_relation_aggregate(name, Some(column), AggregateExpr::Min(column), "min");
+        self
+    }
+
+    /// Chain a relation `<name>_exists` projection (#1038). See
+    /// [`QuerySet::annotate_exists`].
+    #[must_use]
+    pub fn annotate_exists(mut self, name: &str) -> Self {
+        self.push_relation_exists(name);
+        self
     }
 
     /// Django 3.2 `.alias()` — annotate without projecting. The expression
