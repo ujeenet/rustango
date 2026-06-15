@@ -172,11 +172,10 @@ mod scenarios {
     }
 
     /// Django 6.0 NEW: a forced update affecting 0 rows raises
-    /// `Model.NotUpdated`. rustango: the QuerySet update path DOES
-    /// surface rows-affected (0 here), but the instance-level
-    /// `save_pool` on a stale row silently returns `Ok(())` — the
-    /// macro discards rows-affected. DIVERGENCE PIN: this goes red — issue #1029 —
-    /// (and the audit row flips) if save ever starts surfacing it.
+    /// `Model.NotUpdated`. rustango's analogue (#1029): the whole save
+    /// family returns `Result<u64, _>` — a 0-row UPDATE surfaces as
+    /// `Ok(0)` and an INSERT as `Ok(1)`, so userland can `if n == 0 {…}`
+    /// (no exception, matching rustango's no-raise convention).
     pub async fn check_zero_row_update_semantics(pool: &Pool) {
         // QuerySet path: no match → 0 affected, no error. Same as
         // Django's `.update()` (which never raises NotUpdated).
@@ -199,10 +198,11 @@ mod scenarios {
             .await
             .expect("delete behind the instance's back");
         stale.qty = 99;
-        stale
-            .save_pool(pool)
-            .await
-            .expect("PINNED DIVERGENCE: rustango save() is silent on 0-row update; Django 6.0 raises Model.NotUpdated");
+        // #1029 — a 0-row UPDATE now surfaces as `Ok(0)` (rustango's
+        // analogue of Django 6.0's `Model.NotUpdated` — we return the
+        // count rather than raising) instead of a silent `Ok(())`.
+        let affected = stale.save_pool(pool).await.expect("save on a stale row");
+        assert_eq!(affected, 0, "stale-row save affected zero rows");
         assert_eq!(
             Sku::objects()
                 .filter("code", "stale")
@@ -211,8 +211,12 @@ mod scenarios {
                 .map(|rows: Vec<Sku>| rows.len())
                 .unwrap(),
             0,
-            "the silent save really did update nothing"
+            "the save really did update nothing"
         );
+        // A fresh row (Unset PK) inserts → exactly one row affected.
+        let mut fresh = sku("notupdated_fresh", 7, 7);
+        let inserted = fresh.save_pool(pool).await.expect("insert fresh");
+        assert_eq!(inserted, 1, "insert affects one row");
     }
 
     /// Django `get_or_create(code="goc")` — create-then-find.

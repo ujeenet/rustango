@@ -3231,7 +3231,7 @@ fn inherent_impl_tokens(
                     pub async fn save_pool(
                         &mut self,
                         pool: &#root::sql::Pool,
-                    ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                         let _query = #root::core::UpdateQuery {
                             model: <Self as #root::core::Model>::SCHEMA,
                             set: ::std::vec![ #( #assignments ),* ],
@@ -3254,10 +3254,10 @@ fn inherent_impl_tokens(
                                 #( #pairs ),*
                             ]),
                         };
-                        let _ = #root::audit::save_one_with_audit(
+                        let _affected = #root::audit::save_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await?;
-                        ::core::result::Result::Ok(())
+                        ::core::result::Result::Ok(_affected)
                     }
 
                     /// `save_pool` narrowed to a Rust-field allowlist — issue #66
@@ -3273,14 +3273,14 @@ fn inherent_impl_tokens(
                         &mut self,
                         fields: &[&str],
                         pool: &#root::sql::Pool,
-                    ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                         if fields.is_empty() {
                             #root::__tracing::warn!(
                                 target: "rustango::save_partial",
                                 model = <Self as #root::core::Model>::SCHEMA.name,
                                 "save_partial called with empty field list — no-op"
                             );
-                            return ::core::result::Result::Ok(());
+                            return ::core::result::Result::Ok(0);
                         }
                         let _schema = <Self as #root::core::Model>::SCHEMA;
                         let mut _wanted_cols: ::std::collections::HashSet<&'static str> =
@@ -3314,7 +3314,7 @@ fn inherent_impl_tokens(
                                 model = _schema.name,
                                 "save_partial: every named field maps to a non-assignable column — no-op"
                             );
-                            return ::core::result::Result::Ok(());
+                            return ::core::result::Result::Ok(0);
                         }
                         let _query = #root::core::UpdateQuery {
                             model: _schema,
@@ -3344,10 +3344,10 @@ fn inherent_impl_tokens(
                             source: #root::audit::current_source(),
                             changes: #root::audit::snapshot_changes(&_narrowed),
                         };
-                        let _ = #root::audit::save_one_with_audit(
+                        let _affected = #root::audit::save_one_with_audit(
                             pool, &_query, &_audit_entry,
                         ).await?;
-                        ::core::result::Result::Ok(())
+                        ::core::result::Result::Ok(_affected)
                     }
 
                     /// Typed-column counterpart of [`Self::save_partial`] —
@@ -3374,7 +3374,7 @@ fn inherent_impl_tokens(
                         &mut self,
                         fields: L,
                         pool: &#root::sql::Pool,
-                    ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                         let _names = fields.rust_field_names();
                         let _refs: ::std::vec::Vec<&str> =
                             _names.iter().copied().collect();
@@ -3386,7 +3386,7 @@ fn inherent_impl_tokens(
             let dispatch_unset = if fields.pk_is_auto {
                 quote! {
                     if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                        return self.insert_pool(pool).await;
+                        return self.insert_pool(pool).await.map(|()| 1u64);
                     }
                 }
             } else {
@@ -3402,7 +3402,7 @@ fn inherent_impl_tokens(
                 pub async fn save_pool(
                     &mut self,
                     pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     #dispatch_unset
                     let _query = #root::core::UpdateQuery {
                         model: <Self as #root::core::Model>::SCHEMA,
@@ -3417,8 +3417,8 @@ fn inherent_impl_tokens(
                             }
                         ),
                     };
-                    let _ = #root::sql::update_pool(pool, &_query).await?;
-                    ::core::result::Result::Ok(())
+                    let _affected = #root::sql::update_pool(pool, &_query).await?;
+                    ::core::result::Result::Ok(_affected)
                 }
 
                 /// Save (UPDATE) only the listed Rust-side fields,
@@ -3453,14 +3453,14 @@ fn inherent_impl_tokens(
                     &mut self,
                     fields: &[&str],
                     pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     if fields.is_empty() {
                         #root::__tracing::warn!(
                             target: "rustango::save_partial",
                             model = <Self as #root::core::Model>::SCHEMA.name,
                             "save_partial called with empty field list — no-op"
                         );
-                        return ::core::result::Result::Ok(());
+                        return ::core::result::Result::Ok(0);
                     }
                     let _schema = <Self as #root::core::Model>::SCHEMA;
                     // Validate field names against the schema.
@@ -3501,7 +3501,7 @@ fn inherent_impl_tokens(
                             model = _schema.name,
                             "save_partial: every named field maps to a non-assignable column — no-op"
                         );
-                        return ::core::result::Result::Ok(());
+                        return ::core::result::Result::Ok(0);
                     }
                     let _query = #root::core::UpdateQuery {
                         model: _schema,
@@ -3516,8 +3516,8 @@ fn inherent_impl_tokens(
                             }
                         ),
                     };
-                    let _ = #root::sql::update_pool(pool, &_query).await?;
-                    ::core::result::Result::Ok(())
+                    let _affected = #root::sql::update_pool(pool, &_query).await?;
+                    ::core::result::Result::Ok(_affected)
                 }
 
                 /// Typed-column counterpart of [`Self::save_partial`] —
@@ -3545,7 +3545,7 @@ fn inherent_impl_tokens(
                     &mut self,
                     fields: L,
                     pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     let _names = fields.rust_field_names();
                     let _refs: ::std::vec::Vec<&str> =
                         _names.iter().copied().collect();
@@ -3735,7 +3735,7 @@ fn inherent_impl_tokens(
             let unset_dispatch = if fields.has_auto {
                 quote! {
                     if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                        return self.insert_pool(pool).await;
+                        return self.insert_pool(pool).await.map(|()| 1u64);
                     }
                 }
             } else {
@@ -3758,7 +3758,7 @@ fn inherent_impl_tokens(
                 pub async fn save_pool(
                     &mut self,
                     pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     #unset_dispatch
                     let _query = #root::core::UpdateQuery {
                         model: <Self as #root::core::Model>::SCHEMA,
@@ -6318,7 +6318,7 @@ fn inherent_impl_tokens(
         let dispatch_unset = if fields.pk_is_auto {
             quote! {
                 if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                    return self.insert_tx(tx).await;
+                    return self.insert_tx(tx).await.map(|()| 1u64);
                 }
             }
         } else {
@@ -6334,7 +6334,7 @@ fn inherent_impl_tokens(
             pub async fn save_tx(
                 &mut self,
                 tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 #dispatch_unset
                 let _query = #root::core::UpdateQuery {
                     model: <Self as #root::core::Model>::SCHEMA,
@@ -6349,8 +6349,8 @@ fn inherent_impl_tokens(
                         }
                     ),
                 };
-                let _ = #root::sql::update_tx(tx, &_query).await?;
-                ::core::result::Result::Ok(())
+                let _affected = #root::sql::update_tx(tx, &_query).await?;
+                ::core::result::Result::Ok(_affected)
             }
         }
     } else {
@@ -6599,7 +6599,7 @@ fn inherent_impl_tokens(
             pub async fn save(
                 &mut self,
                 pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 #pool_to_save_on
             }
 
@@ -6617,11 +6617,14 @@ fn inherent_impl_tokens(
             pub async fn save_on #executor_generics (
                 &mut self,
                 #executor_param,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
+            ) -> ::core::result::Result<u64, #root::sql::ExecError>
             #executor_where
             {
+                // #1029 — INSERT writes exactly one row → 1; UPDATE returns
+                // the rows-affected count (0 when the PK no longer exists,
+                // the Django 6.0 `Model.NotUpdated` signal).
                 if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                    return self.insert_on(#executor_passes_to_data_write).await;
+                    return self.insert_on(#executor_passes_to_data_write).await.map(|()| 1u64);
                 }
                 #audit_update_pre
                 let _query = #root::core::UpdateQuery {
@@ -6637,12 +6640,12 @@ fn inherent_impl_tokens(
                         }
                     ),
                 };
-                let _ = #root::sql::__macro_internals::update_on(
+                let _affected = #root::sql::__macro_internals::update_on(
                     #executor_passes_to_data_write,
                     &_query,
                 ).await?;
                 #audit_update_post
-                ::core::result::Result::Ok(())
+                ::core::result::Result::Ok(_affected)
             }
 
             /// Per-call override for the audit source. Runs
@@ -6660,7 +6663,7 @@ fn inherent_impl_tokens(
                 &mut self,
                 #executor_param,
                 source: #root::audit::AuditSource,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
+            ) -> ::core::result::Result<u64, #root::sql::ExecError>
             #executor_where
             {
                 #root::audit::with_source(source, self.save_on(_executor)).await

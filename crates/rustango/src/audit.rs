@@ -1407,7 +1407,7 @@ pub async fn save_one_with_diff<F1, F2, F3>(
     decode_before_pg: F1,
     decode_before_my: F2,
     decode_before_sqlite: F3,
-) -> Result<(), crate::sql::ExecError>
+) -> Result<u64, crate::sql::ExecError>
 where
     F1: FnOnce(&crate::sql::PgReturningRow) -> Vec<(&'static str, serde_json::Value)>,
     F2: FnOnce(&crate::sql::MyReturningRow) -> Vec<(&'static str, serde_json::Value)>,
@@ -1439,7 +1439,7 @@ where
                     _ => None,
                 };
             let mut wrapped = crate::sql::PoolTx::Postgres(tx);
-            finish_update_with_audit_diff(
+            let _affected = finish_update_with_audit_diff(
                 &mut wrapped,
                 &stmt,
                 before_pairs,
@@ -1449,7 +1449,7 @@ where
             )
             .await?;
             wrapped.commit().await?;
-            Ok(())
+            Ok(_affected)
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
@@ -1466,7 +1466,7 @@ where
                     _ => None,
                 };
             let mut wrapped = crate::sql::PoolTx::Mysql(tx);
-            finish_update_with_audit_diff(
+            let _affected = finish_update_with_audit_diff(
                 &mut wrapped,
                 &stmt,
                 before_pairs,
@@ -1476,7 +1476,7 @@ where
             )
             .await?;
             wrapped.commit().await?;
-            Ok(())
+            Ok(_affected)
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
@@ -1493,7 +1493,7 @@ where
                     _ => None,
                 };
             let mut wrapped = crate::sql::PoolTx::Sqlite(tx);
-            finish_update_with_audit_diff(
+            let _affected = finish_update_with_audit_diff(
                 &mut wrapped,
                 &stmt,
                 before_pairs,
@@ -1503,7 +1503,7 @@ where
             )
             .await?;
             wrapped.commit().await?;
-            Ok(())
+            Ok(_affected)
         }
     }
 }
@@ -1520,8 +1520,10 @@ async fn finish_update_with_audit_diff(
     after_pairs: &[(&'static str, serde_json::Value)],
     entity_table: &'static str,
     entity_pk: &str,
-) -> Result<(), crate::sql::ExecError> {
-    crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params.clone()).await?;
+) -> Result<u64, crate::sql::ExecError> {
+    // #1029 — surface the UPDATE's rows-affected (0 when the PK no
+    // longer exists, the Django 6.0 `Model.NotUpdated` signal).
+    let _affected = crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params.clone()).await?;
     if let Some(before) = before_pairs {
         let entry = PendingEntry {
             entity_table,
@@ -1532,5 +1534,5 @@ async fn finish_update_with_audit_diff(
         };
         emit_one_tx(tx, &entry).await?;
     }
-    Ok(())
+    Ok(_affected)
 }
