@@ -16,3 +16,8 @@ pages = ["getting-started.md", "scaffolding.md"]
 title = "Guides"
 slug = "guides"
 pages = ["orm.md", "manage.md", "security.md", "api-conventions.md"]
+
+[[section]]
+title = "Benchmarks"
+slug = "benchmarks"
+pages = ["benchmarks.md"]
