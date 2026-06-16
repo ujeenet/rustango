@@ -988,10 +988,12 @@ pub mod extractors;
 ///
 /// v0.38 — fully tri-dialect. Internal queries route through
 /// `select_rows_as_json` + `insert_returning_pool` etc., so the
-/// same ViewSet body runs on PG / MySQL / SQLite. The `.serializer()`
-/// row-render extension stays PG-only because it decodes via
-/// `T::from_row(&PgRow)`; non-PG ViewSets use the default field-level
-/// JSON projection.
+/// same ViewSet body runs on PG / MySQL / SQLite. v0.45 — the
+/// `.serializer()` render extension is tri-dialect too: it fetches
+/// typed `Vec<S::Model>` via `select_rows_pool_with_related` (which
+/// decodes on every backend) and renders list / retrieve / create
+/// responses through `S::from_model`, so the serializer's shape
+/// applies on PG, MySQL **and** SQLite.
 ///
 /// The `router(prefix, &PgPool)` (static-pool) entry point keeps its
 /// PG-typed pool arg for source-compat; `tenant_router(prefix)`

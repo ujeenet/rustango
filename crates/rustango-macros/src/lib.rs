@@ -85,6 +85,11 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 /// * `ordering = "a, -b"` — default list ordering; prefix `-` for DESC.
 /// * `page_size = N` — default page size (default: 20, max: 1000).
 /// * `read_only` — flag; wires only `list` + `retrieve` (no mutations).
+/// * `serializer = SomeSerializer` — render list / retrieve / create
+///   responses through a `#[derive(Serializer)]` type instead of the
+///   default field-level projection (`read_only` / `source` / `method`
+///   / `write_only` overrides apply). Tri-dialect. Requires the
+///   `serializer` feature.
 /// * `permissions(list = "...", retrieve = "...", create = "...",
 ///   update = "...", destroy = "...")` — codenames required per action.
 #[proc_macro_derive(ViewSet, attributes(viewset))]
@@ -12414,6 +12419,11 @@ struct ViewSetAttrs {
     page_size: Option<usize>,
     read_only: bool,
     perms: ViewSetPermsAttrs,
+    /// `#[viewset(serializer = SomeSerializer)]` — render list /
+    /// retrieve / create responses through this `#[derive(Serializer)]`
+    /// type instead of the default field-level projection (requires the
+    /// `serializer` feature). Tri-dialect.
+    serializer: Option<syn::Path>,
 }
 
 #[derive(Default)]
@@ -12495,6 +12505,15 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
         quote!()
     };
 
+    // `.serializer::<S>()` — reshape responses through a derived
+    // serializer. Requires the downstream crate to enable the
+    // `serializer` feature (the method is gated on it).
+    let serializer_call = if let Some(ref ser) = attrs.serializer {
+        quote!(.serializer::<#ser>())
+    } else {
+        quote!()
+    };
+
     let perms = &attrs.perms;
     let perms_call = if perms.list.is_empty()
         && perms.retrieve.is_empty()
@@ -12535,6 +12554,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #page_size_call
                     #perms_call
                     #read_only_call
+                    #serializer_call
                     .router(prefix, pool)
             }
         }
@@ -12550,6 +12570,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
     let mut page_size: Option<usize> = None;
     let mut read_only = false;
     let mut perms = ViewSetPermsAttrs::default();
+    let mut serializer: Option<syn::Path> = None;
 
     for attr in &input.attrs {
         if !attr.path().is_ident("viewset") {
@@ -12559,6 +12580,11 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
             if meta.path.is_ident("model") {
                 let path: syn::Path = meta.value()?.parse()?;
                 model = Some(path);
+                return Ok(());
+            }
+            if meta.path.is_ident("serializer") {
+                let path: syn::Path = meta.value()?.parse()?;
+                serializer = Some(path);
                 return Ok(());
             }
             if meta.path.is_ident("fields") {
@@ -12617,7 +12643,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
             }
             Err(meta.error(
                 "unknown viewset attribute (supported: model, fields, filter_fields, \
-                 search_fields, ordering, page_size, read_only, permissions(...))",
+                 search_fields, ordering, page_size, read_only, serializer, permissions(...))",
             ))
         })?;
     }
@@ -12635,6 +12661,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
         page_size,
         read_only,
         perms,
+        serializer,
     })
 }
 

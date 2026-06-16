@@ -98,6 +98,10 @@
 mod openapi;
 
 use std::collections::HashMap;
+use std::future::Future;
+#[cfg(feature = "serializer")]
+use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -255,21 +259,81 @@ impl PaginationStyle {
     }
 }
 
-/// Optional per-row render callback installed via
-/// [`ViewSet::serializer`]. When present, list / retrieve responses
-/// route every row through it instead of the default `row_to_json`
-/// projection. The closure decodes the row into the model's struct
-/// (`T::from_row`) then runs it through the serializer's `from_model`
-/// + `to_value`, so SerializerMethodField / read_only / source /
-/// many overrides all apply to the JSON output.
+/// Type-erased bridge that lets a `dyn`-routed [`ViewSet`] render rows
+/// through a concrete [`crate::serializer::ModelSerializer`].
 ///
-/// v0.38 — gated to `cfg(postgres)` because the closure is bound to
-/// `&PgRow` via `T::from_row(row)`. The tri-dialect ViewSet
-/// (`tenant_router` on sqlite/mysql) skips the closure path and
-/// uses the dialect-aware `select_rows_as_json` default
-/// projection.
-#[cfg(feature = "postgres")]
-type RowRender = std::sync::Arc<dyn Fn(&crate::sql::sqlx::postgres::PgRow) -> Value + Send + Sync>;
+/// `ViewSet` is stored without its model/serializer type (so a router
+/// can hold many of them), so it can't name `S` directly. Instead
+/// [`ViewSet::serializer`] boxes a [`Bridge<S>`] behind this trait.
+/// When set, list / retrieve / create responses route through the
+/// bridge instead of the default field-level `select_rows_as_json`
+/// projection, so `method` / `read_only` / `source` / `write_only`
+/// overrides all shape the JSON output.
+///
+/// Tri-dialect (v0.45): the bridge fetches typed `Vec<S::Model>` via
+/// [`crate::sql::select_rows_pool_with_related`] — which decodes `T`
+/// on Postgres, MySQL **and** SQLite — then maps each model through
+/// `S::from_model` + `to_value`. The pre-v0.45 implementation was a
+/// `Fn(&PgRow) -> Value` closure, which pinned the feature to Postgres.
+trait SerializerBridge: Send + Sync {
+    /// Fetch every row matching `q` and render it through the
+    /// serializer (replaces the default field-level projection).
+    fn render_rows<'a>(
+        &'a self,
+        acq: &'a mut AcquiredConn,
+        q: &'a SelectQuery,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, crate::sql::ExecError>> + Send + 'a>>;
+
+    /// Fetch the first row matching `q` and render it, or `None`.
+    fn render_one<'a>(
+        &'a self,
+        acq: &'a mut AcquiredConn,
+        q: &'a SelectQuery,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Value>, crate::sql::ExecError>> + Send + 'a>>;
+}
+
+/// Zero-sized carrier that pins a concrete serializer type `S` so the
+/// type-erased [`SerializerBridge`] trait object can call back into
+/// `S::from_model` / `S::Model`'s tri-dialect row decode.
+#[cfg(feature = "serializer")]
+struct Bridge<S>(PhantomData<S>);
+
+#[cfg(feature = "serializer")]
+impl<S> SerializerBridge for Bridge<S>
+where
+    S: crate::serializer::ModelSerializer + Send + Sync + 'static,
+    S::Model: crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    fn render_rows<'a>(
+        &'a self,
+        acq: &'a mut AcquiredConn,
+        q: &'a SelectQuery,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, crate::sql::ExecError>> + Send + 'a>> {
+        Box::pin(async move {
+            let models = acq.select_rows_typed::<S::Model>(q).await?;
+            Ok(models.iter().map(|m| S::from_model(m).to_value()).collect())
+        })
+    }
+
+    fn render_one<'a>(
+        &'a self,
+        acq: &'a mut AcquiredConn,
+        q: &'a SelectQuery,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Value>, crate::sql::ExecError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let models = acq.select_rows_typed::<S::Model>(q).await?;
+            Ok(models.first().map(|m| S::from_model(m).to_value()))
+        })
+    }
+}
 
 /// A pluggable filter backend (DRF `BaseFilterBackend` parity, #1010).
 ///
@@ -348,11 +412,11 @@ pub struct ViewSet {
     filter_backends: Vec<std::sync::Arc<dyn ViewSetFilter>>,
     /// Per-action request throttles (#1010). Default: unthrottled.
     throttle: ViewSetThrottle,
-    /// When set (PG only), list / retrieve responses run each row
-    /// through this callback instead of the default field-level
-    /// projection. Wired via [`Self::serializer`].
-    #[cfg(feature = "postgres")]
-    row_render: Option<RowRender>,
+    /// When set, list / retrieve / create responses render each row
+    /// through this serializer bridge instead of the default
+    /// field-level projection. Tri-dialect. Wired via
+    /// [`Self::serializer`].
+    serializer: Option<Arc<dyn SerializerBridge>>,
 }
 
 impl ViewSet {
@@ -371,46 +435,49 @@ impl ViewSet {
             pagination: PaginationStyle::PageNumber,
             filter_backends: Vec::new(),
             throttle: ViewSetThrottle::default(),
-            #[cfg(feature = "postgres")]
-            row_render: None,
+            serializer: None,
         }
     }
 
-    /// Render list / retrieve responses through `S` (a serializer
-    /// derived via `#[derive(Serializer)] #[serializer(model = T)]`)
-    /// instead of the default field-level projection.
+    /// Render list / retrieve / create responses through `S` (a
+    /// serializer derived via `#[derive(Serializer)]
+    /// #[serializer(model = T)]`) instead of the default field-level
+    /// projection.
     ///
     /// Apply when you want the ViewSet's JSON shape to match a typed
     /// serializer's `read_only` / `source` / `method` / `nested` /
-    /// `many` overrides. The serializer's `Model` associated type
-    /// must be the same model the ViewSet is built over.
+    /// `many` overrides. The serializer's `Model` associated type must
+    /// be the same model the ViewSet is built over.
     ///
-    /// Internally stores `Arc<dyn Fn(&PgRow) -> Value>` so the
-    /// ViewSet itself stays type-erased — non-breaking add-on.
+    /// Internally boxes a [`Bridge<S>`] behind a [`SerializerBridge`]
+    /// trait object so the `ViewSet` itself stays type-erased — a
+    /// non-breaking add-on.
     ///
-    /// v0.38 — PG-only because the serializer's `Model` requires
-    /// `FromRow<PgRow>`. Sqlite/MySQL ViewSets use the default
-    /// field-level JSON projection (no per-row callback); add a
-    /// tri-dialect serializer-like extension in v0.39 once
-    /// `T::from_row` is lifted to the backend-erasing trait.
-    #[cfg(all(feature = "serializer", feature = "postgres"))]
+    /// Tri-dialect (v0.45): works on Postgres, MySQL and SQLite. The
+    /// render path fetches typed `Vec<S::Model>` via the tri-dialect
+    /// `select_rows_pool_with_related` rather than a PG-only
+    /// `FromRow<PgRow>` closure.
+    ///
+    /// Note: `nested` / `many` fields need the related rows a flat
+    /// fetch doesn't load unless the ViewSet's query populated them via
+    /// `select_related`; those fields render as their `Default` value
+    /// otherwise. `method` / `read_only` / `source` / `write_only`
+    /// always apply because a real typed model is in hand.
+    #[cfg(feature = "serializer")]
     #[must_use]
     pub fn serializer<S>(mut self) -> Self
     where
-        S: crate::serializer::ModelSerializer + 'static,
-        S::Model:
-            for<'r> crate::sql::sqlx::FromRow<'r, crate::sql::sqlx::postgres::PgRow> + Send + Unpin,
+        S: crate::serializer::ModelSerializer + Send + Sync + 'static,
+        S::Model: crate::sql::MaybePgFromRow
+            + crate::sql::MaybeMyFromRow
+            + crate::sql::MaybeSqliteFromRow
+            + crate::sql::LoadRelated
+            + crate::sql::MaybeMyLoadRelated
+            + crate::sql::MaybeSqliteLoadRelated
+            + Send
+            + Unpin,
     {
-        let render: RowRender = std::sync::Arc::new(|row| {
-            match <S::Model as crate::sql::sqlx::FromRow<_>>::from_row(row) {
-                Ok(model) => {
-                    let s = S::from_model(&model);
-                    serde_json::to_value(&s).unwrap_or(Value::Null)
-                }
-                Err(_) => Value::Null,
-            }
-        });
-        self.row_render = Some(render);
+        self.serializer = Some(Arc::new(Bridge::<S>(PhantomData)));
         self
     }
 
@@ -723,6 +790,30 @@ impl AcquiredConn {
     ) -> Result<Option<Value>, crate::sql::ExecError> {
         let mut rows = crate::sql::select_rows_as_json(&self.pool, q, fields).await?;
         Ok(rows.pop())
+    }
+
+    /// Tri-dialect typed fetch — decode every row matching `q` into
+    /// `T` (the model struct) on Postgres, MySQL **or** SQLite. Used by
+    /// the serializer render path ([`SerializerBridge`]); mirrors
+    /// [`Self::select_rows_as_json`] but yields typed models instead of
+    /// the field-level JSON projection. Goes through `&self.pool`, so
+    /// it inherits the same tenant-scoping the JSON projection has.
+    #[cfg(feature = "serializer")]
+    async fn select_rows_typed<T>(
+        &mut self,
+        q: &SelectQuery,
+    ) -> Result<Vec<T>, crate::sql::ExecError>
+    where
+        T: crate::sql::MaybePgFromRow
+            + crate::sql::MaybeMyFromRow
+            + crate::sql::MaybeSqliteFromRow
+            + crate::sql::LoadRelated
+            + crate::sql::MaybeMyLoadRelated
+            + crate::sql::MaybeSqliteLoadRelated
+            + Send
+            + Unpin,
+    {
+        crate::sql::select_rows_pool_with_related::<T>(&self.pool, q).await
     }
 
     /// Insert a row and return the primary-key value of the new row
@@ -1291,15 +1382,11 @@ async fn handle_list(
             // keeps the handler simple — two short queries on the
             // same connection are typically faster than two pool
             // round-trips anyway.
-            // v0.38 — fetch as JSON directly via the tri-dialect
-            // `select_rows_as_json`; the optional row_render
-            // closure (PG-only, requires PgRow) is no longer applied
-            // here because the AcquiredConn is dialect-agnostic. PG
-            // projects that want the serializer extension can still
-            // mount the legacy `.serializer()` path under a separate
-            // builder if needed; default JSON projection is now
-            // tri-dialect.
-            let results = or_500!(acq.select_rows_as_json(&select_q, &fields).await);
+            // `render_list` renders through the registered serializer
+            // (typed tri-dialect fetch) when one is set, else falls
+            // back to the default field-level `select_rows_as_json`
+            // projection — both dialect-agnostic.
+            let results = or_500!(render_list(&state, &mut acq, &select_q, &fields).await);
             let count = or_500!(acq.count_rows(&count_q).await);
             let last_page = ((count - 1).max(0) / page_size) + 1;
             json_response(json!({
@@ -1355,7 +1442,7 @@ async fn handle_list(
                 where_clause,
                 search: search_clause,
             };
-            let results = or_500!(acq.select_rows_as_json(&select_q, &fields).await);
+            let results = or_500!(render_list(&state, &mut acq, &select_q, &fields).await);
             let count = or_500!(acq.count_rows(&count_q).await);
             json_response(json!({
                 "count": count,
@@ -1438,7 +1525,7 @@ async fn handle_list_cursor(
         limit: Some(page_size + 1),
         ..SelectQuery::new(state.vs.schema)
     };
-    let rows = or_500!(acq.select_rows_as_json(&select_q, &fields).await);
+    let rows = or_500!(render_list(state, acq, &select_q, &fields).await);
 
     let has_more = rows.len() as i64 > page_size;
     let page_rows: &[Value] = if has_more {
@@ -1508,7 +1595,7 @@ async fn handle_retrieve(
     let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
 
     let fields = state.effective_fields();
-    match acq.select_one_as_json(&select_q, &fields).await {
+    match render_single(&state, &mut acq, &select_q, &fields).await {
         Ok(Some(row)) => json_response(row),
         Ok(None) => json_error(StatusCode::NOT_FOUND, "not found"),
         Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -1799,11 +1886,41 @@ async fn fetch_by_pk(
 ) -> Option<Value> {
     // #562 — SelectQuery::by_pk replaces the 11-field literal.
     let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
-    let _ = state;
-    acq.select_one_as_json(&select_q, fields)
+    render_single(state, acq, &select_q, fields)
         .await
         .ok()
         .flatten()
+}
+
+/// Render the rows matching `select_q` for a list response: through
+/// the registered [`SerializerBridge`] when one is set
+/// ([`ViewSet::serializer`]), else the default field-level JSON
+/// projection. Single source of truth for the three list shapes.
+async fn render_list(
+    state: &ViewSetState,
+    acq: &mut AcquiredConn,
+    select_q: &SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Vec<Value>, crate::sql::ExecError> {
+    match &state.vs.serializer {
+        Some(bridge) => bridge.render_rows(acq, select_q).await,
+        None => acq.select_rows_as_json(select_q, fields).await,
+    }
+}
+
+/// Render the single row matching `select_q` for a retrieve / create /
+/// update response: through the registered serializer when set, else
+/// the default field-level JSON projection.
+async fn render_single(
+    state: &ViewSetState,
+    acq: &mut AcquiredConn,
+    select_q: &SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Option<Value>, crate::sql::ExecError> {
+    match &state.vs.serializer {
+        Some(bridge) => bridge.render_one(acq, select_q).await,
+        None => acq.select_one_as_json(select_q, fields).await,
+    }
 }
 
 /// Extract form data from both `application/x-www-form-urlencoded` and
