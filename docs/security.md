@@ -2,6 +2,8 @@
 
 This guide covers every security feature **Rustango** ships and how to combine them. If you come from Django, Laravel, or Rails, most of these will feel familiar — the names differ, but the ideas are the same. Each feature below is usually one line of setup. When you're ready to ship, run `manage check --deploy` for an automated audit.
 
+[![The hardened middleware stack wired in one chain: request IDs, access logging, rate limiting, CORS, and security headers](/static/img/security.png?v=1)](/static/img/security.png?v=1)
+
 ## Table of contents
 
 - [The defense-in-depth checklist](#the-defense-in-depth-checklist)
