@@ -85,6 +85,11 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 /// * `ordering = "a, -b"` — default list ordering; prefix `-` for DESC.
 /// * `page_size = N` — default page size (default: 20, max: 1000).
 /// * `read_only` — flag; wires only `list` + `retrieve` (no mutations).
+/// * `serializer = SomeSerializer` — render list / retrieve / create
+///   responses through a `#[derive(Serializer)]` type instead of the
+///   default field-level projection (`read_only` / `source` / `method`
+///   / `write_only` overrides apply). Tri-dialect. Requires the
+///   `serializer` feature.
 /// * `permissions(list = "...", retrieve = "...", create = "...",
 ///   update = "...", destroy = "...")` — codenames required per action.
 #[proc_macro_derive(ViewSet, attributes(viewset))]
@@ -12414,6 +12419,11 @@ struct ViewSetAttrs {
     page_size: Option<usize>,
     read_only: bool,
     perms: ViewSetPermsAttrs,
+    /// `#[viewset(serializer = SomeSerializer)]` — render list /
+    /// retrieve / create responses through this `#[derive(Serializer)]`
+    /// type instead of the default field-level projection (requires the
+    /// `serializer` feature). Tri-dialect.
+    serializer: Option<syn::Path>,
 }
 
 #[derive(Default)]
@@ -12495,6 +12505,15 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
         quote!()
     };
 
+    // `.serializer::<S>()` — reshape responses through a derived
+    // serializer. Requires the downstream crate to enable the
+    // `serializer` feature (the method is gated on it).
+    let serializer_call = if let Some(ref ser) = attrs.serializer {
+        quote!(.serializer::<#ser>())
+    } else {
+        quote!()
+    };
+
     let perms = &attrs.perms;
     let perms_call = if perms.list.is_empty()
         && perms.retrieve.is_empty()
@@ -12535,6 +12554,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #page_size_call
                     #perms_call
                     #read_only_call
+                    #serializer_call
                     .router(prefix, pool)
             }
         }
@@ -12550,6 +12570,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
     let mut page_size: Option<usize> = None;
     let mut read_only = false;
     let mut perms = ViewSetPermsAttrs::default();
+    let mut serializer: Option<syn::Path> = None;
 
     for attr in &input.attrs {
         if !attr.path().is_ident("viewset") {
@@ -12559,6 +12580,11 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
             if meta.path.is_ident("model") {
                 let path: syn::Path = meta.value()?.parse()?;
                 model = Some(path);
+                return Ok(());
+            }
+            if meta.path.is_ident("serializer") {
+                let path: syn::Path = meta.value()?.parse()?;
+                serializer = Some(path);
                 return Ok(());
             }
             if meta.path.is_ident("fields") {
@@ -12617,7 +12643,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
             }
             Err(meta.error(
                 "unknown viewset attribute (supported: model, fields, filter_fields, \
-                 search_fields, ordering, page_size, read_only, permissions(...))",
+                 search_fields, ordering, page_size, read_only, serializer, permissions(...))",
             ))
         })?;
     }
@@ -12635,6 +12661,7 @@ fn parse_viewset_attrs(input: &DeriveInput) -> syn::Result<ViewSetAttrs> {
         page_size,
         read_only,
         perms,
+        serializer,
     })
 }
 
@@ -12994,9 +13021,21 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
     });
-    let validate_method = if validator_calls.is_empty() && container.cross_validate.is_none() {
-        quote! {}
-    } else {
+    let has_validators = !validator_calls.is_empty() || container.cross_validate.is_some();
+    // Shared body: run per-field validators, then the cross-field hook.
+    let validate_body = quote! {
+        let mut __errors = #root::forms::FormErrors::default();
+        #( #validator_calls )*
+        #cross_validate_call
+        if __errors.is_empty() {
+            ::core::result::Result::Ok(())
+        } else {
+            ::core::result::Result::Err(__errors)
+        }
+    };
+    // Inherent `validate(&self)` — kept for back-compat with direct
+    // `serializer.validate()` calls that don't import `ModelSerializer`.
+    let validate_method = if has_validators {
         quote! {
             impl #struct_name {
                 /// Run every `#[serializer(validate = "...")]` per-field
@@ -13006,17 +13045,24 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 /// non-field keys the cross-field method adds).
                 /// Returns `Ok(())` when all pass.
                 pub fn validate(&self) -> ::core::result::Result<(), #root::forms::FormErrors> {
-                    let mut __errors = #root::forms::FormErrors::default();
-                    #( #validator_calls )*
-                    #cross_validate_call
-                    if __errors.is_empty() {
-                        ::core::result::Result::Ok(())
-                    } else {
-                        ::core::result::Result::Err(__errors)
-                    }
+                    #validate_body
                 }
             }
         }
+    } else {
+        quote! {}
+    };
+    // Trait-method override so the type-erased ViewSet write path can
+    // dispatch `ModelSerializer::validate` generically. When there are
+    // no validators the trait's default no-op is used instead.
+    let trait_validate_override = if has_validators {
+        quote! {
+            fn validate(&self) -> ::core::result::Result<(), #root::forms::FormErrors> {
+                #validate_body
+            }
+        }
+    } else {
+        quote! {}
     };
 
     // For every `#[serializer(many = S)]` field, emit a
@@ -13080,17 +13126,68 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // path accept those fields from the JSON body and try to bind
     // them to the SQL UPDATE — a silent no-op at best, a type
     // mismatch at worst.
+    let is_writable = |fi: &&FieldInfo| {
+        !fi.attrs.read_only
+            && !fi.attrs.skip
+            && fi.attrs.method.is_none()
+            && !fi.attrs.nested
+            && fi.attrs.many.is_none()
+            && fi.attrs.slug.is_none()
+    };
     let writable_lits: Vec<_> = fields_info
         .iter()
-        .filter(|fi| {
-            !fi.attrs.read_only
-                && !fi.attrs.skip
-                && fi.attrs.method.is_none()
-                && !fi.attrs.nested
-                && fi.attrs.many.is_none()
-                && fi.attrs.slug.is_none()
-        })
+        .filter(is_writable)
         .map(|fi| fi.ident.to_string())
+        .collect();
+
+    // `writable_source_fields`: the MODEL field names of writable
+    // serializer fields (source-resolved). The ViewSet write path skips
+    // every model column NOT in this set, so `read_only` / `method` /
+    // computed fields a client posts are ignored instead of written.
+    let writable_source_lits: Vec<String> = fields_info
+        .iter()
+        .filter(is_writable)
+        .map(|fi| {
+            fi.attrs
+                .source
+                .clone()
+                .unwrap_or_else(|| fi.ident.to_string())
+        })
+        .collect();
+
+    // `from_writable_json`: build a partial instance for input
+    // validation. Writable fields are parsed from the JSON body (keyed
+    // by serializer field name); every other field defaults. Per-field
+    // type errors collect into `FormErrors` keyed by the field name.
+    // Construction is field-by-field (not `Self::default()`) so it works
+    // for serializers regardless of a struct-level `Default`.
+    let from_writable_json_inits: Vec<_> = fields_info
+        .iter()
+        .map(|fi| {
+            let ident = &fi.ident;
+            let fname = ident.to_string();
+            let ty = &fi.ty;
+            if is_writable(&fi) {
+                quote! {
+                    #ident: match __obj.and_then(|__o| __o.get(#fname)) {
+                        ::core::option::Option::Some(__v) => {
+                            match #root::__serde_json::from_value::<#ty>(
+                                ::core::clone::Clone::clone(__v),
+                            ) {
+                                ::core::result::Result::Ok(__x) => __x,
+                                ::core::result::Result::Err(__e) => {
+                                    __errors.add(#fname.to_owned(), __e.to_string());
+                                    ::core::default::Default::default()
+                                }
+                            }
+                        }
+                        ::core::option::Option::None => ::core::default::Default::default(),
+                    }
+                }
+            } else {
+                quote! { #ident: ::core::default::Default::default() }
+            }
+        })
         .collect();
 
     // OpenAPI: emit `impl OpenApiSchema` when our `openapi` feature is on.
@@ -13150,6 +13247,27 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
             fn writable_fields() -> &'static [&'static str] {
                 &[ #( #writable_lits ),* ]
             }
+
+            fn writable_source_fields() -> &'static [&'static str] {
+                &[ #( #writable_source_lits ),* ]
+            }
+
+            fn from_writable_json(
+                __body: &#root::__serde_json::Value,
+            ) -> ::core::result::Result<Self, #root::forms::FormErrors> {
+                let mut __errors = #root::forms::FormErrors::default();
+                let __obj = __body.as_object();
+                let __out = Self {
+                    #( #from_writable_json_inits ),*
+                };
+                if __errors.is_empty() {
+                    ::core::result::Result::Ok(__out)
+                } else {
+                    ::core::result::Result::Err(__errors)
+                }
+            }
+
+            #trait_validate_override
         }
 
         impl #root::__serde::Serialize for #struct_name {

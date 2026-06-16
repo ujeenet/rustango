@@ -483,7 +483,19 @@ pub struct PostSerializer {
 
 Each serializer field's type mirrors the matching model field, so `id` and `published_at` keep their `Auto<…>` wrapper from the model (an `Auto<i64>` still serializes to a plain JSON integer). Then register the module by adding `mod post_serializer;` alongside the other `mod` declarations in `src/main.rs`.
 
-(Auto-wiring this into the ViewSet response shape is on the roadmap. For now, use the serializer manually in custom handlers.)
+Wire the serializer into the ViewSet with the `serializer` attribute — list, retrieve, and create responses are then rendered through it (the field-level `fields` projection is bypassed in favor of the serializer's shape):
+
+```rust
+#[derive(ViewSet)]
+#[viewset(
+    model = Post,
+    serializer = crate::post_serializer::PostSerializer,
+    ordering = "-published_at",
+)]
+pub struct PostViewSet;
+```
+
+This works identically on PostgreSQL, MySQL, and SQLite. `method` / `read_only` / `source` / `write_only` overrides all apply to the response. (Note: `nested` / `many` serializer fields need the related rows loaded via `select_related`; otherwise they render as their default. Request-body validation through the serializer is separate — for now, validate in a custom handler.)
 
 ---
 
