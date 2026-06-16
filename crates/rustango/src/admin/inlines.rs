@@ -762,10 +762,12 @@ pub async fn render_form_for_parent(
             let cells: Vec<serde_json::Value> = display_fields
                 .iter()
                 .map(|f| {
-                    let raw_str = row
-                        .get(f.column)
-                        .map(value_as_form_string)
-                        .unwrap_or_default();
+                    // Route through the same formatter the main change form
+                    // uses (#datetime-local fix) so DateTime/Json/Array values
+                    // are normalised to what each `<input>` accepts — a bare
+                    // `value_as_form_string` clone left e.g. a `DateTime`'s
+                    // `+00:00` offset in place, which `datetime-local` rejects.
+                    let raw_str = crate::admin::render::render_value_for_input_json(row, f);
                     let input_html = render_prefixed_input(f, &raw_str, &prefix, idx, false);
                     serde_json::json!({
                         "label": f.display_label(),
@@ -860,21 +862,6 @@ fn render_prefixed_input(
     let new_id = format!(r#"id="{prefix}-{idx}-{}""#, field.name);
     base.replacen(&target_name, &new_name, 1)
         .replacen(&target_id, &new_id, 1)
-}
-
-/// Convert a JSON value into the string form an HTML `<input>` would
-/// have produced for it. Mirrors `render::render_value_for_input_json`
-/// at the rough level needed for inline rows — JSON / Binary fall
-/// back to the raw text representation so the operator can still see
-/// the value.
-fn value_as_form_string(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
 }
 
 // ============================================================ POST processing (slice 2)
@@ -1223,10 +1210,12 @@ pub async fn render_form_generic_for_parent(
             let cells: Vec<serde_json::Value> = display_fields
                 .iter()
                 .map(|f| {
-                    let raw_str = row
-                        .get(f.column)
-                        .map(value_as_form_string)
-                        .unwrap_or_default();
+                    // Route through the same formatter the main change form
+                    // uses (#datetime-local fix) so DateTime/Json/Array values
+                    // are normalised to what each `<input>` accepts — a bare
+                    // `value_as_form_string` clone left e.g. a `DateTime`'s
+                    // `+00:00` offset in place, which `datetime-local` rejects.
+                    let raw_str = crate::admin::render::render_value_for_input_json(row, f);
                     let input_html = render_prefixed_input(f, &raw_str, &prefix, idx, false);
                     serde_json::json!({
                         "label": f.display_label(),
