@@ -48,6 +48,21 @@
 //! | `many = TagSerializer` | initializes to `Vec::new()`; populate via `set_<field>(&[Tag])` helper | included | no |
 //! | `slug = "name"` | clones `model.<source>.value()?.name` (DRF SlugRelatedField) | included | no |
 //! | `validate = "fn"` | per-field validator called by `Self::validate(&self)` | n/a | n/a |
+//! | `max_length = N` | caps string length on write (DRF `MaxLengthValidator`) | n/a | n/a |
+//! | `min_length = N` | min string length on write (DRF `MinLengthValidator`) | n/a | n/a |
+//! | `min = N` / `max = N` | inclusive integer bounds on write (DRF `Min/MaxValueValidator`) | n/a | n/a |
+//!
+//! ## Declarative field validators
+//!
+//! `max_length` / `min_length` / `min` / `max` are checked on **write**
+//! (create/update through a ViewSet) and surface DRF-shape `400`s. They
+//! **auto-inherit from the model**: every writable field is validated
+//! against the model's [`crate::core::FieldSchema`] (`max_length`, `min`,
+//! `max`, and `choices`) even with no attribute; a per-field attribute
+//! overrides the inherited value. `min_length` is serializer-only (no
+//! model column). `choices` is inherited from the model (no attribute).
+//! String length is measured in characters. For arbitrary rules, use
+//! `validate = "fn"` (per-field) or the container `validate` (cross-field).
 //!
 //! ## Nested serializers — auto-resolved via `#[serializer(nested)]`
 //!

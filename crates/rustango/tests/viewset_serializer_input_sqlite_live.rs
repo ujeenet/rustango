@@ -187,3 +187,158 @@ async fn partial_update_ignores_read_only_field() {
         "read_only field must stay at its server value: {v}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Declarative field validators: max_length / min / max / choices, inherited
+// from the model's FieldSchema unless a per-field attr overrides.
+// ---------------------------------------------------------------------------
+
+#[derive(Model, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[rustango(table = "vs_in_widget")]
+#[rustango(app = "vs_in_app")]
+pub struct Widget {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 8)]
+    pub code: String,
+    #[rustango(max_length = 50)]
+    pub note: String,
+    #[rustango(min = 1, max = 3)]
+    pub priority: i64,
+    #[rustango(max_length = 20, choices = "draft:Draft, live:Live")]
+    pub status: String,
+}
+
+#[derive(Serializer, serde::Deserialize, Default)]
+#[serializer(model = Widget)]
+struct WidgetSerializer {
+    pub code: String, // inherits max_length = 8 from the model
+    #[serializer(max_length = 4)] // overrides the model's 50
+    pub note: String,
+    pub priority: i64,  // inherits min = 1, max = 3
+    pub status: String, // inherits choices
+}
+
+async fn widget_router() -> axum::Router {
+    let sq = sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool");
+    sqlx::query(
+        "CREATE TABLE vs_in_widget (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            code TEXT NOT NULL, note TEXT NOT NULL, \
+            priority INTEGER NOT NULL, status TEXT NOT NULL)",
+    )
+    .execute(&sq)
+    .await
+    .expect("create");
+    rustango::viewset::ViewSet::for_model(Widget::SCHEMA)
+        .serializer::<WidgetSerializer>()
+        .router_pool("/widgets", Pool::Sqlite(sq))
+}
+
+/// Helper: POST a widget body, return (status, body).
+async fn post_widget(app: &axum::Router, body: &str) -> (StatusCode, serde_json::Value) {
+    let resp = app.clone().oneshot(post("/widgets", body)).await.unwrap();
+    let status = resp.status();
+    (status, json_body(resp).await)
+}
+
+#[tokio::test]
+async fn max_length_inherited_from_model() {
+    let app = widget_router().await;
+    // code = 9 chars > the model's max_length = 8.
+    let (status, v) = post_widget(
+        &app,
+        r#"{"code":"abcdefghi","note":"ok","priority":1,"status":"draft"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "inherited max_length: {v}");
+    assert!(
+        v["code"][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("at most 8 characters"),
+        "model max_length inherited: {v}"
+    );
+}
+
+#[tokio::test]
+async fn max_length_attr_overrides_model() {
+    let app = widget_router().await;
+    // note = 5 chars > the serializer attr max_length = 4 (model allows 50).
+    let (status, v) = post_widget(
+        &app,
+        r#"{"code":"ok","note":"toolong","priority":1,"status":"draft"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "override max_length: {v}");
+    assert!(
+        v["note"][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("at most 4 characters"),
+        "serializer attr overrides model max_length: {v}"
+    );
+}
+
+#[tokio::test]
+async fn min_max_inherited_from_model() {
+    let app = widget_router().await;
+    // priority = 9 > model max = 3.
+    let (status, v) = post_widget(
+        &app,
+        r#"{"code":"ok","note":"ok","priority":9,"status":"draft"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        v["priority"][0].as_str().unwrap_or("").contains("≤ 3"),
+        "max inherited: {v}"
+    );
+    // priority = 0 < model min = 1.
+    let (status, v) = post_widget(
+        &app,
+        r#"{"code":"ok","note":"ok","priority":0,"status":"draft"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        v["priority"][0].as_str().unwrap_or("").contains("≥ 1"),
+        "min inherited: {v}"
+    );
+}
+
+#[tokio::test]
+async fn choices_inherited_from_model() {
+    let app = widget_router().await;
+    let (status, v) = post_widget(
+        &app,
+        r#"{"code":"ok","note":"ok","priority":1,"status":"bogus"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        v["status"][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("valid choice"),
+        "model choices inherited: {v}"
+    );
+}
+
+#[tokio::test]
+async fn valid_widget_passes_all_constraints() {
+    let app = widget_router().await;
+    let (status, v) = post_widget(
+        &app,
+        r#"{"code":"ok","note":"abc","priority":2,"status":"live"}"#,
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "all constraints satisfied → success: {status} {v}"
+    );
+    assert_eq!(v["code"], "ok");
+    assert_eq!(v["priority"], 2);
+}

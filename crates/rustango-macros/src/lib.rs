@@ -152,6 +152,9 @@ pub fn derive_form(input: TokenStream) -> TokenStream {
 /// - `#[serializer(many = ChildSerializer)]` — collection of nested serializers; populated via macro-emitted `set_<field>(&[Child::Model])`; excluded from `writable_fields()`
 /// - `#[serializer(slug = "name")]` — DRF `SlugRelatedField`: clones `model.<source>.value()?.name`; excluded from `writable_fields()` (v0.44)
 /// - `#[serializer(validate = "fn_name")]` — per-field validator surfaced by `Self::validate(&self)`
+/// - `#[serializer(max_length = N)]` / `min_length` / `min` / `max` — declarative bounds checked on
+///   write; auto-inherit from the model's `FieldSchema` (`max_length`/`min`/`max`/`choices`) when
+///   no attr is given, override it when given (`min_length` is serializer-only)
 ///
 /// The macro also emits a custom `impl serde::Serialize` — do **not** also `#[derive(Serialize)]`.
 #[proc_macro_derive(Serializer, attributes(serializer))]
@@ -12728,6 +12731,19 @@ struct SerializerFieldAttrs {
     /// `nested`. Source defaults to the field name; override with
     /// `source = "..."`. v0.44.
     slug: Option<String>,
+    /// `#[serializer(max_length = N)]` — DRF `MaxLengthValidator`. Caps
+    /// the character count of a string field on write. Overrides the
+    /// model's `max_length`; when absent the model value is inherited.
+    max_length: Option<u64>,
+    /// `#[serializer(min_length = N)]` — DRF `MinLengthValidator`.
+    /// Serializer-only (the model has no `min_length` column).
+    min_length: Option<u64>,
+    /// `#[serializer(min = N)]` — DRF `MinValueValidator`. Inclusive
+    /// integer lower bound; overrides the model's `min` when given.
+    min: Option<i64>,
+    /// `#[serializer(max = N)]` — DRF `MaxValueValidator`. Inclusive
+    /// integer upper bound; overrides the model's `max` when given.
+    max: Option<i64>,
 }
 
 fn parse_serializer_container_attrs(input: &DeriveInput) -> syn::Result<SerializerContainerAttrs> {
@@ -12829,10 +12845,31 @@ fn parse_serializer_field_attrs(field: &syn::Field) -> syn::Result<SerializerFie
                 out.slug = Some(s.value());
                 return Ok(());
             }
+            if meta.path.is_ident("max_length") {
+                let lit: syn::LitInt = meta.value()?.parse()?;
+                out.max_length = Some(lit.base10_parse::<u64>()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("min_length") {
+                let lit: syn::LitInt = meta.value()?.parse()?;
+                out.min_length = Some(lit.base10_parse::<u64>()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("min") {
+                let lit: syn::LitInt = meta.value()?.parse()?;
+                out.min = Some(lit.base10_parse::<i64>()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("max") {
+                let lit: syn::LitInt = meta.value()?.parse()?;
+                out.max = Some(lit.base10_parse::<i64>()?);
+                return Ok(());
+            }
             Err(meta.error(
                 "unknown serializer field attribute (supported: \
                  `read_only`, `write_only`, `source`, `skip`, `method`, \
-                 `validate`, `nested`, `many`, `slug`)",
+                 `validate`, `nested`, `many`, `slug`, `max_length`, \
+                 `min_length`, `min`, `max`)",
             ))
         })?;
     }
@@ -12989,6 +13026,73 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     });
 
+    // is_writable predicate (also used by writable_lits /
+    // writable_source_lits below).
+    let is_writable = |fi: &&FieldInfo| {
+        !fi.attrs.read_only
+            && !fi.attrs.skip
+            && fi.attrs.method.is_none()
+            && !fi.attrs.nested
+            && fi.attrs.many.is_none()
+            && fi.attrs.slug.is_none()
+    };
+
+    // Declarative field constraints (DRF `validators=[...]`): one block
+    // per writable field, run inside `validate()`. Each resolves its
+    // bounds as the serializer attr when given (`#[serializer(max_length
+    // = N)]`), else the model's `FieldSchema` (`max_length` / `min` /
+    // `max` / `choices`), then dispatches on the field's JSON value via
+    // `forms::validators::check_value` (string → length/choices, integer
+    // → min/max).
+    let opt_usize = |v: Option<u64>| match v {
+        Some(n) => {
+            let n = n as usize;
+            quote!(::core::option::Option::Some(#n))
+        }
+        None => quote!(::core::option::Option::None),
+    };
+    let opt_i64 = |v: Option<i64>| match v {
+        Some(n) => quote!(::core::option::Option::Some(#n)),
+        None => quote!(::core::option::Option::None),
+    };
+    let constraint_blocks: Vec<_> = fields_info
+        .iter()
+        .filter(is_writable)
+        .map(|fi| {
+            let ident = &fi.ident;
+            let fname = ident.to_string();
+            let mname = fi
+                .attrs
+                .source
+                .clone()
+                .unwrap_or_else(|| fi.ident.to_string());
+            let attr_max_len = opt_usize(fi.attrs.max_length);
+            let attr_min_len = opt_usize(fi.attrs.min_length);
+            let attr_min = opt_i64(fi.attrs.min);
+            let attr_max = opt_i64(fi.attrs.max);
+            quote! {
+                {
+                    let __sf = <#model_path as #root::core::Model>::SCHEMA.field(#mname);
+                    let __max_length: ::core::option::Option<usize> = #attr_max_len
+                        .or_else(|| __sf.and_then(|__f| __f.max_length).map(|__n| __n as usize));
+                    let __min_length: ::core::option::Option<usize> = #attr_min_len;
+                    let __min: ::core::option::Option<i64> =
+                        #attr_min.or_else(|| __sf.and_then(|__f| __f.min));
+                    let __max: ::core::option::Option<i64> =
+                        #attr_max.or_else(|| __sf.and_then(|__f| __f.max));
+                    let __choices = __sf.and_then(|__f| __f.choices);
+                    let __v = #root::__serde_json::to_value(&self.#ident)
+                        .unwrap_or(#root::__serde_json::Value::Null);
+                    #root::forms::validators::check_value(
+                        #fname, &__v, __max_length, __min_length, __min, __max, __choices,
+                        &mut __errors,
+                    );
+                }
+            }
+        })
+        .collect();
+    let has_constraints = !constraint_blocks.is_empty();
+
     // Per-field validators (DRF-shape `validators=[...]`). Emit a
     // `validate(&self)` method that runs each user-defined validator
     // and aggregates errors into `FormErrors`.
@@ -13022,9 +13126,15 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     });
     let has_validators = !validator_calls.is_empty() || container.cross_validate.is_some();
-    // Shared body: run per-field validators, then the cross-field hook.
+    // Anything to run? Declarative constraints (for any writable field) +
+    // per-field validators + cross-field hook.
+    let has_run_validations = has_validators || has_constraints;
+    // Shared body: declarative field constraints first (length / range /
+    // choices, serializer-attr-or-model), then per-field validators, then
+    // the cross-field hook.
     let validate_body = quote! {
         let mut __errors = #root::forms::FormErrors::default();
+        #( #constraint_blocks )*
         #( #validator_calls )*
         #cross_validate_call
         if __errors.is_empty() {
@@ -13035,15 +13145,17 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
     // Inherent `validate(&self)` — kept for back-compat with direct
     // `serializer.validate()` calls that don't import `ModelSerializer`.
+    // Emitted only when the serializer declares per-field/cross-field
+    // validators (unchanged rule) so it never collides with a
+    // hand-written inherent `validate`.
     let validate_method = if has_validators {
         quote! {
             impl #struct_name {
-                /// Run every `#[serializer(validate = "...")]` per-field
-                /// validator and, when declared, the container-level
-                /// cross-field validator. Aggregates errors into
-                /// `FormErrors` keyed by the field name (plus any
-                /// non-field keys the cross-field method adds).
-                /// Returns `Ok(())` when all pass.
+                /// Run the declarative field constraints, every
+                /// `#[serializer(validate = "...")]` per-field validator,
+                /// and (when declared) the container-level cross-field
+                /// validator. Aggregates errors into `FormErrors` keyed by
+                /// the field name. Returns `Ok(())` when all pass.
                 pub fn validate(&self) -> ::core::result::Result<(), #root::forms::FormErrors> {
                     #validate_body
                 }
@@ -13053,9 +13165,10 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         quote! {}
     };
     // Trait-method override so the type-erased ViewSet write path can
-    // dispatch `ModelSerializer::validate` generically. When there are
-    // no validators the trait's default no-op is used instead.
-    let trait_validate_override = if has_validators {
+    // dispatch `ModelSerializer::validate` generically. Emitted whenever
+    // there's anything to run (declarative constraints inherited from the
+    // model count); otherwise the trait's default no-op is used.
+    let trait_validate_override = if has_run_validations {
         quote! {
             fn validate(&self) -> ::core::result::Result<(), #root::forms::FormErrors> {
                 #validate_body
@@ -13126,14 +13239,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // path accept those fields from the JSON body and try to bind
     // them to the SQL UPDATE — a silent no-op at best, a type
     // mismatch at worst.
-    let is_writable = |fi: &&FieldInfo| {
-        !fi.attrs.read_only
-            && !fi.attrs.skip
-            && fi.attrs.method.is_none()
-            && !fi.attrs.nested
-            && fi.attrs.many.is_none()
-            && fi.attrs.slug.is_none()
-    };
+    // (`is_writable` is defined above, near the constraint codegen.)
     let writable_lits: Vec<_> = fields_info
         .iter()
         .filter(is_writable)
