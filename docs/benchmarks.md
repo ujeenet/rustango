@@ -16,6 +16,8 @@ harness (see [Reproduce](#reproduce)). Nothing here is hand-waved.
 > (summing primes) it ran **35×** faster than Django and **23×** faster than
 > Laravel — compiled vs interpreted.
 
+[![Requests per second on the non-cached blog index — Rustango 4,982 vs Django 812 (6.1× slower) vs Laravel 396 (12.6× slower), on identical hardware](/static/img/benchmarks.png?v=1)](/static/img/benchmarks.png?v=1)
+
 ---
 
 ## The setup

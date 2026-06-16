@@ -6,6 +6,8 @@ This walkthrough takes you from an empty directory to a deployed blog: posts, an
 >
 > **Runnable version:** every step below is mirrored in a tested, compilable example at [`crates/rustango/examples/getting_started_blog`](../crates/rustango/examples/getting_started_blog). If a step ever looks off, diff against it.
 
+[![Build a blog with Rustango: generate the migration, apply it, boot the server, and hit the JSON API — all from one binary](/static/img/getting-started.png?v=1)](/static/img/getting-started.png?v=1)
+
 ---
 
 ## What you need first
