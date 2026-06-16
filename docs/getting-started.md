@@ -495,7 +495,7 @@ Wire the serializer into the ViewSet with the `serializer` attribute — list, r
 pub struct PostViewSet;
 ```
 
-This works identically on PostgreSQL, MySQL, and SQLite. `method` / `read_only` / `source` / `write_only` overrides all apply to the response. (Note: `nested` / `many` serializer fields need the related rows loaded via `select_related`; otherwise they render as their default. Request-body validation through the serializer is separate — for now, validate in a custom handler.)
+This works identically on PostgreSQL, MySQL, and SQLite. `method` / `read_only` / `source` / `write_only` overrides all apply to the response, and **request bodies are validated through the serializer too**: `create` / `update` run its `validate()` (per-field and cross-field), returning a DRF-shape `400` (`{field: [messages]}`) on failure, and read-only / computed fields a client posts are ignored. (Note: `nested` / `many` serializer fields need the related rows loaded via `select_related`; otherwise they render as their default.) See the [ViewSets guide](viewsets.md) for the full input + output behavior.
 
 ---
 
