@@ -290,6 +290,17 @@ trait SerializerBridge: Send + Sync {
         acq: &'a mut AcquiredConn,
         q: &'a SelectQuery,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Value>, crate::sql::ExecError>> + Send + 'a>>;
+
+    /// Run the serializer's input validation against a JSON request body:
+    /// parse the writable fields (DRF read shape) then call the
+    /// serializer's `validate()` hook. `Err` carries DRF-shape field
+    /// errors for a 400 response.
+    fn validate_body(&self, body: &Value) -> Result<(), crate::forms::FormErrors>;
+
+    /// The **model** field names the serializer accepts on write
+    /// (`source`-resolved). The write path skips every other model column
+    /// so `read_only` / computed fields can't be set by a client.
+    fn writable_model_fields(&self) -> &'static [&'static str];
 }
 
 /// Zero-sized carrier that pins a concrete serializer type `S` so the
@@ -332,6 +343,17 @@ where
             let models = acq.select_rows_typed::<S::Model>(q).await?;
             Ok(models.first().map(|m| S::from_model(m).to_value()))
         })
+    }
+
+    fn validate_body(&self, body: &Value) -> Result<(), crate::forms::FormErrors> {
+        // Parse the writable fields into a partial serializer instance
+        // (surfacing per-field type errors), then run its validation hook.
+        let s = S::from_writable_json(body)?;
+        s.validate()
+    }
+
+    fn writable_model_fields(&self) -> &'static [&'static str] {
+        S::writable_source_fields()
     }
 }
 
@@ -999,6 +1021,49 @@ fn json_error(status: StatusCode, msg: &str) -> Response {
     json_with_status(status, json!({ "error": msg }))
 }
 
+/// `400` from serializer validation, DRF shape:
+/// `{"<field>": ["msg", …], …, "non_field_errors": [ … ]}`.
+fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
+    let mut map = serde_json::Map::new();
+    for (field, msgs) in errs.fields() {
+        map.insert(field.clone(), json!(msgs));
+    }
+    if !errs.non_field().is_empty() {
+        map.insert("non_field_errors".to_owned(), json!(errs.non_field()));
+    }
+    json_with_status(StatusCode::BAD_REQUEST, Value::Object(map))
+}
+
+/// When a serializer is registered, validate the JSON request body (if
+/// present) through it and compute the extra model fields to skip on
+/// write — every column the serializer doesn't accept (`read_only` /
+/// computed). Returns the 400 response on a validation failure so the
+/// caller can short-circuit. No-op (`Ok(vec![])`) without a serializer.
+fn serializer_write_prep(
+    state: &ViewSetState,
+    json: Option<&Value>,
+) -> Result<Vec<&'static str>, Response> {
+    match &state.vs.serializer {
+        Some(bridge) => {
+            if let Some(body) = json {
+                if let Err(errs) = bridge.validate_body(body) {
+                    return Err(json_form_errors(&errs));
+                }
+            }
+            let writable = bridge.writable_model_fields();
+            let extra_skip = state
+                .vs
+                .schema
+                .scalar_fields()
+                .map(|f| f.name)
+                .filter(|n| !writable.contains(n))
+                .collect();
+            Ok(extra_skip)
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Unwrap-or-return-500. Collapses the `match expr { Ok(v) => v,
 /// Err(e) => return json_error(INTERNAL_SERVER_ERROR, &e.to_string()) }`
 /// shape that recurred ~5× in handler bodies. Issue #808 (item 4).
@@ -1628,7 +1693,9 @@ async fn handle_create(
     };
 
     match create_body {
-        CreateBody::Single(form) => create_one(&state, &mut acq, &form, &skip, pk_field).await,
+        CreateBody::Single(form, json) => {
+            create_one(&state, &mut acq, &form, json.as_ref(), &skip, pk_field).await
+        }
         CreateBody::Bulk(rows) => create_many(&state, &mut acq, &rows, &skip, pk_field).await,
     }
 }
@@ -1683,10 +1750,19 @@ async fn create_one(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
     form: &HashMap<String, String>,
+    json: Option<&Value>,
     skip: &[&str],
     pk_field: &'static crate::core::FieldSchema,
 ) -> Response {
-    let collected = or_400!(collect_values(state.vs.schema, form, skip));
+    // When a serializer is registered: run its input validation and
+    // skip every model column it doesn't accept (read_only / computed).
+    let extra_skip = match serializer_write_prep(state, json) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let mut all_skip: Vec<&str> = skip.to_vec();
+    all_skip.extend(extra_skip);
+    let collected = or_400!(collect_values(state.vs.schema, form, &all_skip));
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let fields = state.effective_fields();
     match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields).await {
@@ -1706,7 +1782,7 @@ async fn create_one(
 async fn create_many(
     state: &Arc<ViewSetState>,
     acq: &mut AcquiredConn,
-    rows: &[HashMap<String, String>],
+    rows: &[(HashMap<String, String>, Option<Value>)],
     skip: &[&str],
     pk_field: &'static crate::core::FieldSchema,
 ) -> Response {
@@ -1719,8 +1795,15 @@ async fn create_many(
     // INSERTs committed. DRF's default ListSerializer.create has
     // the same shape — validate the whole list before any save.
     let mut prepared: Vec<(Vec<&'static str>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
-    for (i, row) in rows.iter().enumerate() {
-        let collected = match collect_values(state.vs.schema, row, skip) {
+    for (i, (row, json)) in rows.iter().enumerate() {
+        // Serializer validation + non-writable skip, per entry.
+        let extra_skip = match serializer_write_prep(state, json.as_ref()) {
+            Ok(s) => s,
+            Err(resp) => return resp,
+        };
+        let mut all_skip: Vec<&str> = skip.to_vec();
+        all_skip.extend(extra_skip);
+        let collected = match collect_values(state.vs.schema, row, &all_skip) {
             Ok(v) => v,
             Err(e) => {
                 return json_error(StatusCode::BAD_REQUEST, &format!("bulk entry {i}: {e}"));
@@ -1793,11 +1876,21 @@ async fn update_inner(
         Err(resp) => return resp,
     };
 
-    let form = or_400!(extract_form_body(parts, body).await);
+    let (form, json) = or_400!(extract_form_body(parts, body).await);
+
+    // Serializer (when set): validate the body + the set of model
+    // columns it doesn't accept (read_only / computed), which we skip.
+    let non_writable = match serializer_write_prep(&state, json.as_ref()) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
 
     let mut assignments: Vec<Assignment> = Vec::new();
     for field in state.vs.schema.scalar_fields() {
         if field.primary_key || field.auto {
+            continue;
+        }
+        if non_writable.contains(&field.name) {
             continue;
         }
         if partial && !form.contains_key(field.name) {
@@ -1928,9 +2021,9 @@ async fn render_single(
 async fn extract_form_body(
     parts: axum::http::request::Parts,
     body: Body,
-) -> Result<HashMap<String, String>, String> {
+) -> Result<(HashMap<String, String>, Option<Value>), String> {
     match extract_create_body(parts, body).await? {
-        CreateBody::Single(form) => Ok(form),
+        CreateBody::Single(form, json) => Ok((form, json)),
         CreateBody::Bulk(_) => Err("expected a JSON object; got an array".into()),
     }
 }
@@ -1944,8 +2037,11 @@ async fn extract_form_body(
 /// single records (multi-row form encoding doesn't have a portable
 /// shape).
 pub(crate) enum CreateBody {
-    Single(HashMap<String, String>),
-    Bulk(Vec<HashMap<String, String>>),
+    /// `(stringified form, raw JSON value)`. The JSON value is `Some`
+    /// for `application/json` bodies (used for typed serializer
+    /// validation) and `None` for form-urlencoded.
+    Single(HashMap<String, String>, Option<Value>),
+    Bulk(Vec<(HashMap<String, String>, Option<Value>)>),
 }
 
 pub(crate) async fn extract_create_body(
@@ -1967,25 +2063,28 @@ pub(crate) async fn extract_create_body(
     if content_type.contains("application/json") {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         if let Some(array) = value.as_array() {
-            // Bulk shape: each element must be an object.
-            let mut bulk: Vec<HashMap<String, String>> = Vec::with_capacity(array.len());
+            // Bulk shape: each element must be an object. Keep the raw
+            // JSON entry alongside the stringified form for serializer
+            // validation.
+            let mut bulk: Vec<(HashMap<String, String>, Option<Value>)> =
+                Vec::with_capacity(array.len());
             for (i, entry) in array.iter().enumerate() {
                 let obj = entry
                     .as_object()
                     .ok_or_else(|| format!("bulk entry {i} is not a JSON object"))?;
-                bulk.push(json_object_to_form(obj));
+                bulk.push((json_object_to_form(obj), Some(entry.clone())));
             }
             return Ok(CreateBody::Bulk(bulk));
         }
         let obj = value
             .as_object()
             .ok_or("expected a JSON object or array of objects")?;
-        Ok(CreateBody::Single(json_object_to_form(obj)))
+        Ok(CreateBody::Single(json_object_to_form(obj), Some(value)))
     } else {
-        // form-urlencoded (default) — single only.
+        // form-urlencoded (default) — single only, no typed JSON value.
         let form = serde_urlencoded::from_bytes::<HashMap<String, String>>(&bytes)
             .map_err(|e| e.to_string())?;
-        Ok(CreateBody::Single(form))
+        Ok(CreateBody::Single(form, None))
     }
 }
 

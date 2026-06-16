@@ -173,6 +173,47 @@ pub trait ModelSerializer: serde::Serialize + Sized {
     /// and `skip` fields). Used by the ViewSet write path to filter the
     /// incoming JSON body.
     fn writable_fields() -> &'static [&'static str];
+
+    /// The **model** field names of the writable serializer fields
+    /// (`source`-resolved). The ViewSet write path skips every model
+    /// column NOT in this set, so `read_only` / `method` / computed
+    /// fields a client posts are ignored instead of written.
+    ///
+    /// For a field with `#[serializer(source = "x")]` this is `"x"`; for
+    /// a plain field it's the field name. Defaults to
+    /// [`Self::writable_fields`] (correct when no `source` rename is in
+    /// play); the derive macro overrides it with the resolved names.
+    fn writable_source_fields() -> &'static [&'static str] {
+        Self::writable_fields()
+    }
+
+    /// Build a partial instance from a JSON request body for **input
+    /// validation**: writable fields are parsed (by serializer field
+    /// name); read-only / computed fields default. Per-field type errors
+    /// land in [`crate::forms::FormErrors`] keyed by the field name. The
+    /// derive macro generates this; the default errors out so a manual
+    /// impl that forgets it fails loudly rather than silently skipping
+    /// validation.
+    ///
+    /// # Errors
+    /// A `FormErrors` carrying every field that failed to parse.
+    fn from_writable_json(body: &Value) -> Result<Self, crate::forms::FormErrors> {
+        let _ = body;
+        let mut errors = crate::forms::FormErrors::default();
+        errors.add_non_field("from_writable_json not implemented for this serializer");
+        Err(errors)
+    }
+
+    /// Cross-field / per-field validation hook (DRF `validate`). The
+    /// derive macro overrides this when the serializer declares any
+    /// `#[serializer(validate = "...")]` field validator or a container
+    /// `validate = "..."` cross-field method. Default: no-op.
+    ///
+    /// # Errors
+    /// A [`crate::forms::FormErrors`] aggregating every failed rule.
+    fn validate(&self) -> Result<(), crate::forms::FormErrors> {
+        Ok(())
+    }
 }
 
 /// Django-shape `UniqueTogetherValidator` — pre-save check that a
