@@ -66,6 +66,11 @@ pub mod csrf;
 /// HTTP request payload keyed `<prefix>-<N>-<field>`. Issue #49.
 pub mod formset;
 
+/// Reusable declarative field-constraint validators (`max_length` /
+/// `min_length` / `min` / `max` / `choices`), shared by the serializer
+/// write path. Messages match the admin `DynamicForm`.
+pub mod validators;
+
 // ------------------------------------------------------------------ FormErrors
 
 /// All validation errors collected from a form submission.

@@ -566,3 +566,71 @@ mod advanced_attrs {
         assert!(title_errs[0].contains("3 chars"));
     }
 }
+
+// ============================================================================
+// Declarative field validators (max_length / min_length / min / max), with
+// auto-inherit from the model's FieldSchema. No DB needed — `validate()` is
+// pure and reads `Model::SCHEMA` (a const).
+// ============================================================================
+
+mod declarative_validators {
+    use rustango::serializer::ModelSerializer;
+    use rustango::sql::Auto;
+    use rustango::Serializer;
+
+    #[derive(rustango::Model, Clone)]
+    #[rustango(table = "dv_widget")]
+    pub struct DvWidget {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 5)]
+        pub code: String,
+        #[rustango(min = 1, max = 3)]
+        pub level: i64,
+    }
+
+    #[derive(Serializer, serde::Deserialize, Default)]
+    #[serializer(model = DvWidget)]
+    struct DvWidgetSer {
+        pub code: String, // inherits max_length = 5
+        #[serializer(min = 0, max = 10)] // overrides the model's min/max
+        pub level: i64,
+    }
+
+    #[test]
+    fn inherits_model_max_length() {
+        let s = DvWidgetSer {
+            code: "toolong".into(), // 7 > model's 5
+            level: 5,
+        };
+        let err = s.validate().expect_err("should fail");
+        assert!(
+            err.get("code")[0].contains("at most 5 characters"),
+            "code inherits the model's max_length: {:?}",
+            err.fields()
+        );
+    }
+
+    #[test]
+    fn attr_overrides_model_min_max() {
+        let s = DvWidgetSer {
+            code: "ok".into(),
+            level: 20, // > the serializer attr max = 10 (model max is 3)
+        };
+        let err = s.validate().expect_err("should fail");
+        assert!(
+            err.get("level")[0].contains("≤ 10"),
+            "level uses the serializer attr bound, not the model's: {:?}",
+            err.fields()
+        );
+    }
+
+    #[test]
+    fn passes_within_all_bounds() {
+        let s = DvWidgetSer {
+            code: "ok".into(),
+            level: 7,
+        };
+        assert!(s.validate().is_ok());
+    }
+}
