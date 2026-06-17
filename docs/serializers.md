@@ -63,7 +63,7 @@ pub struct PostSerializer {
 Use it:
 
 ```rust
-let post = Post::objects().get_pool(&pool, 42).await?;
+let post = Post::objects().find(42, &pool).await?.expect("post 42");
 
 let one  = PostSerializer::from_model(&post).to_value();   // a JSON object
 let many = PostSerializer::many_to_value(&posts);          // a JSON array
@@ -120,6 +120,11 @@ Everything is controlled by `#[serializer(...)]` on each field. The full set:
 
 **Mutually exclusive** (compile errors if combined): `read_only` + `write_only`;
 `method` + `source`; `slug` + any of `method` / `nested` / `many`.
+
+**Declarative validators.** `max_length = N`, `min_length = N`, `min = N`, and
+`max = N` add write-time validation to a field without changing its output shape
+(and a field with none of them inherits the model's bounds). See
+[Validation](#validation).
 
 `write_only` is for inbound-only data (a password, a one-time token): present in
 `writable_fields()`, absent from output. `skip` is the opposite escape hatch —
@@ -235,9 +240,34 @@ unloaded; it's display-only (not writable).
 
 ## Validation
 
-Two layers, both surfacing as `rustango::forms::FormErrors`.
+Three layers, all surfacing as `rustango::forms::FormErrors` (and, on a ViewSet
+write, a DRF-shape `400`). They run in this order: declarative constraints, then
+per-field validators, then the cross-field hook.
 
-**Per-field** — declare `validate = "fn"` and write
+**Declarative constraints (DRF `validators`, auto-inherited).** `max_length`,
+`min_length`, `min`, and `max` are field attributes — and when you omit them a
+field **inherits the model's** `max_length` / `min` / `max` / `choices`. So a
+`#[rustango(max_length = 200)]` column is length-checked with no serializer
+attribute at all (DRF `ModelSerializer` behaviour). They're checked on every
+writable field, turning would-be database-constraint `500`s into friendly `400`s:
+
+```rust
+#[serializer(model = Widget)]
+struct WidgetSerializer {
+    pub code: String,               // inherits the model's max_length
+    #[serializer(max_length = 4)]   // overrides the model's bound
+    pub note: String,
+    pub priority: i64,              // inherits the model's min / max
+    pub status: String,             // inherits the model's choices
+}
+```
+
+Messages match Django/DRF: `"Ensure this value has at most N characters."`,
+`"Ensure this value has at least N characters."`, `"Ensure this value is ≥ N."` /
+`"≤ N"`, and `"Select a valid choice."`. (`min_length` is serializer-only;
+`choices` is inherited from the model — there's no `choices` attribute.)
+
+**Per-field** (custom) — declare `validate = "fn"` and write
 `fn(value: &FieldType) -> Result<(), String>`:
 
 ```rust
@@ -282,11 +312,12 @@ impl PostSerializer {
 `FormErrors` separates **field** errors (`add(field, msg)`, a
 `HashMap<String, Vec<String>>`) from **non-field** errors
 (`add_non_field(msg)`). Inspect with `.fields()`, `.non_field()`, `.get(field)`,
-`.is_empty()`, and combine with `.merge(other)`. There are **no built-in
-validators** (no `max_length` / `email` magic) — every rule is a function you
-write, which keeps validation explicit and testable. The framework doesn't
-auto-render `FormErrors` to an HTTP body; map it to your 400 response (the
-field/non-field split lines up with DRF's error JSON).
+`.is_empty()`, and combine with `.merge(other)`. Beyond the declarative
+constraints above (`max_length` / `min_length` / `min` / `max` / inherited
+`choices`), custom rules are plain functions — there's no `email`/regex magic,
+which keeps custom validation explicit and testable. Outside a ViewSet the
+framework doesn't auto-render `FormErrors` to an HTTP body; map it to your 400
+response (the field/non-field split lines up with DRF's error JSON).
 
 ---
 
@@ -381,7 +412,7 @@ You can also use a serializer **standalone** — map a row and emit its JSON fro
 any handler:
 
 ```rust
-let post = Post::objects().get_pool(&pool, 42).await?;
+let post = Post::objects().find(42, &pool).await?.expect("post 42");
 let body = PostSerializer::from_model(&post).to_value();   // shaped JSON
 ```
 
@@ -448,8 +479,10 @@ A few sharp edges and escape hatches worth knowing:
   bespoke JSON object when the attributes aren't enough.
 - **Writable nested objects** aren't supported — `nested` / `many` / `slug`
   fields are output-only. Accept writes as scalar ids and resolve them yourself.
-- **No built-in validators** — `max_length`, `email`, regex, etc. are functions
-  you write (see [Validation](#validation)).
+- **Built-in validators are length/range/choice only** — `max_length` /
+  `min_length` / `min` / `max` (and inherited `choices`) are declarative; other
+  rules (`email`, regex, …) are functions you write (see
+  [Validation](#validation)).
 - **One per-field validator per field.** For multiple rules on a field, combine
   them in that field's function, or add a cross-field `validate(&self)`.
 - **The serializer doesn't persist.** Map → validate → hand the data to the ORM;

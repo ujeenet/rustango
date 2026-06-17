@@ -166,7 +166,13 @@ impl PostSerializer {
 ```
 
 Register the module — add `pub mod post_serializer;` to `src/blog/mod.rs`.
-(See the [serializers guide](serializers.md) for every field attribute.)
+
+Note we only wrote one validator (`title_min_3`); the fields also **inherit the
+model's constraints** automatically — `title` is length-checked against the
+model's `max_length = 200`, and a `choices`/`min`/`max` column would be checked
+too, all returning friendly `400`s on write. Add `max_length` / `min_length` /
+`min` / `max` serializer attributes to override a field's bound. (See the
+[serializers guide](serializers.md#validation) for the full validation story.)
 
 ### Step 5 — Scaffold the ViewSet and wire the serializer
 
@@ -580,9 +586,18 @@ for very large tables. `?cursor=<token>&page_size=20`:
 ## Validation
 
 With a **serializer wired**, the create/update path runs the serializer's
-validators and returns DRF-shape `400`s — that's the recommended way to validate
-(see [the marriage](#the-serializer-marriage-input--output) and the
-[serializers guide](serializers.md)).
+validators and returns DRF-shape `400`s — the recommended way to validate (see
+[the marriage](#the-serializer-marriage-input--output) and the
+[serializers guide](serializers.md#validation)). Three layers run:
+
+- **Declarative constraints** — `max_length` / `min_length` / `min` / `max`, and
+  by default the field **inherits the model's** `max_length` / `min` / `max` /
+  `choices`. So a `#[rustango(max_length = 200)]` column is length-checked on the
+  API with no extra config (DRF `ModelSerializer` behaviour), turning would-be
+  DB-constraint `500`s into friendly `400`s like
+  `{"title":["Ensure this value has at most 200 characters."]}`.
+- **Per-field** `validate = "fn"` and a **cross-field** `validate` hook — your
+  custom rules (formats, cross-field, business logic).
 
 Independently of a serializer, the write path always enforces the **schema**:
 
@@ -590,11 +605,12 @@ Independently of a serializer, the write path always enforces the **schema**:
   value is a `400` naming the field.
 - **Required / NOT NULL** — a missing non-nullable field (or empty string for a
   non-nullable `String`) is a `400`; nullable fields accept empty → `NULL`.
-- **Database constraints** — unique, `VARCHAR(n)` length (PG/MySQL), foreign
-  keys and check constraints surface as a `400` on INSERT/UPDATE.
+- **Database constraints** — unique, foreign keys and check constraints surface
+  as a `400` on INSERT/UPDATE.
 
 So even without a serializer you get type + required + DB-constraint validation;
-add a serializer for application-level rules (formats, ranges, cross-field).
+wire a serializer to get declarative length/range/choice checks (auto-inherited)
+plus your own per-field and cross-field rules.
 
 ---
 
