@@ -170,6 +170,44 @@ and where pushing hot logic into **Rustango** pays off most.
 
 ---
 
+## Robust runtimes: Octane & ASGI
+
+A fair question: the tables above run Django and Laravel in their *conventional*
+production deployments (gunicorn, php-fpm). What if you reach for their
+heavier-duty runtimes? The harness measures those too — Django on an ASGI server
+(**Hypercorn**) and Laravel on a persistent worker runtime (**Octane + Swoole**)
+— on the same hardware cap, data, and endpoints, **added alongside** the standard
+setups, not replacing them. Throughput in req/s (100 % success throughout):
+
+| Endpoint | Django (gunicorn) | Django + Hypercorn | Laravel (fpm) | Laravel + Octane |
+|---|--:|--:|--:|--:|
+| index, non-cached | 819 | 886 | 393 | **1 185** |
+| index, cached | 3 982 | 1 653 | 1 179 | **5 753** |
+| detail, cached | 4 108 | 1 168 | 786 | **5 658** |
+| compute (CPU-bound) | 419 | 395 | 693 | **1 502** |
+
+**Laravel on Octane (Swoole) is a 3–7× jump** over php-fpm (cached post-detail
+786 → 5 658 req/s, ~7.2×; non-cached index 393 → 1 185, ~3.0×). Booting Laravel
+once into a resident worker removes the per-request framework bootstrap php-fpm
+pays on every hit — the closest thing in this lineup to **Rustango**'s
+always-resident binary, and the single biggest configuration win measured.
+
+**Django on Hypercorn (ASGI) is roughly flat — and slower on the cached paths**
+(cached index 3 982 → 1 653). The blog's views are *synchronous*, so an ASGI
+server runs each in a threadpool: overhead without the concurrency payoff that
+*async* views would bring, and gunicorn's thread pool already saturates this
+I/O-bound workload. The honest takeaway: a more robust runtime only helps if the
+app is written to use it.
+
+Either way the heavier runtimes **narrow but don't close** the gap — Octane'd
+Laravel (1 185 req/s) and the best Django (886) still trail **Rustango**'s 4 951
+on the non-cached index, and the pure-compute result is unchanged (it's
+language-bound, not runtime-bound). The numbers above are one consistent run;
+the conventional-deployment columns match the headline tables within run-to-run
+noise.
+
+---
+
 ## Honest caveats
 
 A benchmark you can't poke holes in isn't worth publishing. So:
@@ -183,9 +221,11 @@ A benchmark you can't poke holes in isn't worth publishing. So:
   using all cores with cheap tasks; Django and Laravel use fixed pools of
   worker processes/threads. That difference *is* part of the result, and the
   worker counts were set to sensible per-CPU values, not tuned to favor anyone.
-- Both competitors can go faster than their standard setups here: **Laravel on
-  Octane/FrankenPHP** and **Django on an async ASGI stack** would narrow the
-  gap. We benchmarked the conventional production deployment of each.
+- The headline tables use each framework's **conventional** production
+  deployment. Their heavier-duty runtimes are measured separately above
+  ([Robust runtimes](#robust-runtimes-octane--asgi)): **Laravel on Octane is
+  3–7× faster**; **Django on ASGI** (sync views) is roughly flat. Both narrow the
+  gap; neither closes it.
 
 The point isn't that Django or Laravel are slow — they power a huge slice of the
 web. It's that **Rustango** gives you that same batteries-included developer
