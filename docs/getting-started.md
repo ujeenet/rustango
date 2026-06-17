@@ -75,6 +75,25 @@ There is a single binary: `cargo run` boots the HTTP server, and every Django-st
 
 `Cargo.toml` is the dependency manifest (like `composer.json` or a `Gemfile`). Open it and confirm `rustango` is listed under `[dependencies]`.
 
+> **Confirm the `[features]` block — pick a database backend.** `#[derive(Model)]`
+> cfg-gates its generated `FromRow` / `LoadRelated` impls on **your** crate's
+> features (a `cfg` inside a derive macro resolves against the destination crate,
+> not rustango), so a backend feature must be enabled here or the first model
+> won't compile. A current scaffold includes:
+>
+> ```toml
+> [features]
+> default  = ["postgres"]            # the backend `cargo run` uses
+> postgres = ["rustango/postgres"]
+> sqlite   = ["rustango/sqlite"]
+> mysql    = ["rustango/mysql"]
+> ```
+>
+> If your generated `Cargo.toml` has **no** `[features]` block (an older
+> `cargo-rustango`), add the one above by hand — that always fixes it. Without it
+> the build fails with *"the trait bound `…: MaybePgFromRow` is not satisfied"*
+> plus a tell-tale `warning: unexpected cfg condition value: postgres`.
+
 ---
 
 ## Step 3: Set up your environment

@@ -20,7 +20,8 @@ with `redirect_to_view(...)`. The API surface mirrors Django's
 - [Register a named URL](#register-a-named-url)
 - [Reverse in Rust](#reverse-in-rust) · [Reverse in templates](#reverse-in-templates)
 - [Redirect by name](#redirect-by-name) · [Namespacing](#namespacing)
-- [Inspect the URL map](#inspect-the-url-map) · [Errors](#errors) · [Notes & limits](#notes-and-limits)
+- [Inspect the URL map](#inspect-the-url-map) · [Errors](#errors)
+- [Regex & typed path patterns](#regex--typed-path-patterns) · [Notes & limits](#notes-and-limits)
 
 ---
 
@@ -200,6 +201,65 @@ rather than rendering a broken link.
 
 ---
 
+## Regex & typed path patterns
+
+**Rustango has no `re_path`, and no path converter is ever enforced.** A pattern
+segment is either a literal (`/posts/new`) or a `{name}` placeholder that captures
+exactly one segment; `{*name}` captures the rest of the path. That's the whole
+vocabulary — there is no `r'(?P<year>[0-9]{4})'`, and `{int:id}` does **not**
+constrain `id` to an integer.
+
+### Why — the matcher isn't a regex engine
+
+Routing *is* [axum](https://docs.rs/axum) 0.8, and axum matches paths with
+[`matchit`](https://docs.rs/matchit), a **radix-trie** router. It walks the URL
+one segment at a time down a prefix tree, so a match costs O(path length) and is
+independent of how many routes you've registered. A regex router does the
+opposite: Django evaluates `urlpatterns` top-to-bottom, running each entry's
+regex against the path until one matches. The trie buys constant-time matching
+and an unambiguous "most-specific literal wins" precedence — at the cost of not
+expressing character-class constraints *in the path itself*.
+
+Rustango inherits that matcher wholesale. There is **no second, regex-based
+resolver** layered on top, and `register_url!` deliberately records the *same*
+`{name}` strings the router already understands — it never compiles a regex. So
+regex paths aren't "turned off"; the routing layer was simply never a regex
+engine to begin with.
+
+The `{int:id}` form is accepted only as a **porting affordance** for `reverse()`:
+the builder splits the placeholder on `:` and keeps just the name, discarding the
+type prefix ([`urls.rs`](../crates/rustango/src/urls.rs)). That lets `reverse()`
+run on a pattern copied verbatim from a Django `path("<int:id>/", …)` — but
+nothing validates that the supplied value is actually an integer.
+
+### How to express a constrained route
+
+Match the segment with a plain `{placeholder}`, then enforce its shape where the
+value is used. Django's `re_path(r'^articles/(?P<year>[0-9]{4})/$', …)` becomes:
+
+```rust
+register_url!("article-by-year", "/articles/{year}");
+// router:
+.route("/articles/{year}", get(article_by_year))
+
+async fn article_by_year(Path(year): Path<String>) -> impl IntoResponse {
+    // the router accepted any single segment; enforce [0-9]{4} here
+    match year.parse::<u16>() {
+        Ok(y) if (1000..=9999).contains(&y) => render_year(y).await,
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+```
+
+To reject *before* the handler runs (closer to Django's converter semantics), put
+the check in a custom axum extractor (`FromRequestParts`) and take that type as
+the handler argument instead of `Path<String>` — the framework doesn't ship one,
+but axum's extractor trait is the intended seam. The `regex` crate is already a
+dependency (the ORM uses it for `__regex` lookups), so a validating extractor can
+compile a `Regex` once and reuse it across requests.
+
+---
+
 ## Notes and limits
 
 - **Registration is link-time.** A `register_url!` only takes effect if its
@@ -212,4 +272,6 @@ rather than rendering a broken link.
 - **Values are percent-encoded** by `reverse`, so they're safe to drop into a
   `Location` header or an `href`.
 - **No regex/typed converters** in patterns (Django's `<int:pk>`); placeholders
-  are plain `{name}` and values are substituted as-is (after encoding).
+  are plain `{name}` and values are substituted as-is (after encoding). See
+  [Regex & typed path patterns](#regex--typed-path-patterns) for why, and how to
+  constrain a route instead.
