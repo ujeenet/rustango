@@ -30,6 +30,10 @@ use sha2::{Digest, Sha256};
 /// implementation shared with the always-on call sites (`pagination`,
 /// `row_to_json`). Kept here so HMAC callers don't need to rewrite
 /// their import paths.
+// Conditionally used: the callers (storage::s3, hmac_auth) are
+// feature-gated, so this is dead in a build that pulls in `crypto` but
+// none of its consumers. Allow rather than delete — it's live elsewhere.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     crate::hex::hex_encode(bytes)
@@ -37,6 +41,7 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 
 /// `SHA-256(bytes)` rendered as a lowercase hex string. Used by the
 /// SigV4 canonical-request hash and HMAC auth body hash.
+#[allow(dead_code)] // see `hex_encode` above — live under s3/hmac, dead otherwise
 #[must_use]
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();

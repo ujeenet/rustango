@@ -918,15 +918,6 @@ macro_rules! bind_match_sqlite {
     };
 }
 
-// Sibling-module access to the bind macros (values.rs and future
-// extractions need them at `super::` scope).
-#[cfg(feature = "postgres")]
-pub(super) use bind_match;
-#[cfg(feature = "mysql")]
-pub(super) use bind_match_mysql;
-#[cfg(feature = "sqlite")]
-pub(super) use bind_match_sqlite;
-
 #[cfg(feature = "postgres")]
 pub(super) fn bind_query_as<T>(
     q: QueryAs<'_, sqlx::Postgres, T, PgArguments>,

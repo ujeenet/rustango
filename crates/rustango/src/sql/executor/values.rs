@@ -31,11 +31,11 @@ use crate::sql::{
 };
 
 #[cfg(feature = "postgres")]
-use super::{bind_match, bind_query};
+use super::bind_query;
 #[cfg(feature = "mysql")]
-use super::{bind_match_mysql, bind_query_my};
+use super::bind_query_my;
 #[cfg(feature = "sqlite")]
-use super::{bind_match_sqlite, bind_query_sqlite};
+use super::bind_query_sqlite;
 
 /// Decode one per-dialect raw `SqlValue` from the i-th column of a row.
 /// Same probe order as the aggregate-row decoder so the two paths agree
