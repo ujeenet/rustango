@@ -13,6 +13,20 @@ env:
   # pre-push hook treats warnings as warnings; CI now does the
   # same. Real type errors / broken tests still fail the build.
   DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+  # Strip debuginfo from every build profile in CI. The `postgres_test`
+  # job links the full workspace `--all-features`, which is ~450
+  # statically-linked integration-test binaries; with the default
+  # `debug = true` on both `[profile.dev]` (dependency rlibs) and
+  # `[profile.test]` (the test crates), full DWARF dominates each binary
+  # and the cumulative `target/` blows past the runner's free disk at
+  # link time (`ld: final link failed: No space left on device`) — even
+  # after `jlumbroso/free-disk-space` reclaims ~35 GB. CI never debugs
+  # interactively, so dropping debuginfo is free here: panic messages +
+  # the failing test's name still surface; only backtrace line numbers
+  # go. Set on both profiles because `cargo test` builds the dependency
+  # graph with `dev` and the test targets with `test`.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   fmt:
