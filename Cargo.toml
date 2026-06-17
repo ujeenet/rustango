@@ -91,7 +91,7 @@ chacha20poly1305 = "0.10"
 dotenvy   = "0.15"
 # 7.4+ uses `libc::__errno_location` which is Linux-only; pin to 7.3
 # until rpassword adopts a portable errno call.
-rpassword = "=7.3.1"
+rpassword = "=7.5.0"
 
 # Admin (HTTP)
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query", "original-uri"] }
