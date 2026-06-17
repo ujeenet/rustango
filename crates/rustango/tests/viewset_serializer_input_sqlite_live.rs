@@ -342,3 +342,111 @@ async fn valid_widget_passes_all_constraints() {
     assert_eq!(v["code"], "ok");
     assert_eq!(v["priority"], 2);
 }
+
+// ── source-renamed writable field: input uses the serializer field name ──
+//
+// Regression: a `#[serializer(source = "body")]` writable field renamed on
+// OUTPUT (`body` → `content`) must also accept the serializer field name
+// (`content`) on INPUT and persist it to the model column (`body`). Before the
+// fix the write path read the raw body by model column, so posting `content`
+// 400'd with "required field `body` missing".
+
+#[derive(Model, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[rustango(table = "vs_in_doc")]
+#[rustango(app = "vs_in_app")]
+pub struct Doc {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 200)]
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Serializer, serde::Deserialize, Default)]
+#[serializer(model = Doc)]
+struct DocSerializer {
+    pub id: Auto<i64>,
+    pub title: String,
+    /// JSON key `content`, model column `body`.
+    #[serializer(source = "body")]
+    pub content: String,
+}
+
+async fn doc_router() -> axum::Router {
+    let sq = sqlx::SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool");
+    sqlx::query(
+        "CREATE TABLE vs_in_doc (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            title TEXT NOT NULL, \
+            body TEXT NOT NULL)",
+    )
+    .execute(&sq)
+    .await
+    .expect("create");
+    rustango::viewset::ViewSet::for_model(Doc::SCHEMA)
+        .serializer::<DocSerializer>()
+        .router_pool("/docs", Pool::Sqlite(sq))
+}
+
+#[tokio::test]
+async fn source_renamed_field_accepts_serializer_name_on_create() {
+    let app = doc_router().await;
+    // Client posts the SERIALIZER field name `content` (DRF shape), not `body`.
+    let resp = app
+        .clone()
+        .oneshot(post(
+            "/docs",
+            r#"{"title":"Hello","content":"the body text"}"#,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "posting the serializer field name should succeed, got {}",
+        resp.status()
+    );
+    let v = json_body(resp).await;
+    // The value round-trips: written to `body`, rendered back as `content`.
+    assert_eq!(
+        v["content"], "the body text",
+        "source-renamed field must persist on write + render on read: {v}"
+    );
+    assert_eq!(v["title"], "Hello");
+}
+
+#[tokio::test]
+async fn source_renamed_field_updates_on_partial_update() {
+    let app = doc_router().await;
+    let created = app
+        .clone()
+        .oneshot(post("/docs", r#"{"title":"Orig","content":"orig body"}"#))
+        .await
+        .unwrap();
+    assert!(created.status().is_success());
+
+    let patched = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/docs/1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"content":"patched body"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        patched.status().is_success(),
+        "PATCH with the serializer field name should succeed, got {}",
+        patched.status()
+    );
+    let v = json_body(patched).await;
+    assert_eq!(
+        v["content"], "patched body",
+        "PATCH on a source-renamed field must update the model column: {v}"
+    );
+    assert_eq!(v["title"], "Orig", "untouched field preserved");
+}
