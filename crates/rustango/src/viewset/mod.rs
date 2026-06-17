@@ -301,6 +301,13 @@ trait SerializerBridge: Send + Sync {
     /// (`source`-resolved). The write path skips every other model column
     /// so `read_only` / computed fields can't be set by a client.
     fn writable_model_fields(&self) -> &'static [&'static str];
+
+    /// The **serializer** field names of the writable fields — the JSON
+    /// keys a client sends (DRF read/write shape). Parallel to
+    /// [`Self::writable_model_fields`]; the two differ only where a field
+    /// declares `#[serializer(source = "…")]`, which the write path uses
+    /// to translate the inbound key to its model column.
+    fn writable_field_names(&self) -> &'static [&'static str];
 }
 
 /// Zero-sized carrier that pins a concrete serializer type `S` so the
@@ -354,6 +361,10 @@ where
 
     fn writable_model_fields(&self) -> &'static [&'static str] {
         S::writable_source_fields()
+    }
+
+    fn writable_field_names(&self) -> &'static [&'static str] {
+        S::writable_fields()
     }
 }
 
@@ -1039,6 +1050,42 @@ fn json_form_errors(errs: &crate::forms::FormErrors) -> Response {
 /// write — every column the serializer doesn't accept (`read_only` /
 /// computed). Returns the 400 response on a validation failure so the
 /// caller can short-circuit. No-op (`Ok(vec![])`) without a serializer.
+/// Translate inbound form keys from serializer field names to model
+/// columns for any `#[serializer(source = "…")]`-renamed **writable**
+/// field, so a client POSTs the serializer field name (DRF shape) — e.g.
+/// `content` for a field declared `#[serializer(source = "body")]` — and
+/// the persist step (which reads model columns) still finds the value.
+///
+/// Returns `None` when nothing needs renaming (no serializer, or no
+/// renamed writable key present in the body) — the common case, so no
+/// allocation. Otherwise returns a remapped clone of the form.
+fn serializer_input_renamed_form(
+    state: &ViewSetState,
+    form: &HashMap<String, String>,
+) -> Option<HashMap<String, String>> {
+    let bridge = state.vs.serializer.as_ref()?;
+    // `writable_field_names()` (JSON keys) and `writable_model_fields()`
+    // (model columns) are parallel; they differ only at `source` renames.
+    let renames: Vec<(&'static str, &'static str)> = bridge
+        .writable_field_names()
+        .iter()
+        .zip(bridge.writable_model_fields().iter())
+        .filter(|(name, col)| name != col && form.contains_key(**name))
+        .map(|(name, col)| (*name, *col))
+        .collect();
+    if renames.is_empty() {
+        return None;
+    }
+    let mut out = form.clone();
+    for (name, col) in renames {
+        if let Some(v) = out.remove(name) {
+            // Don't clobber an explicit model-column key if a client sent both.
+            out.entry(col.to_owned()).or_insert(v);
+        }
+    }
+    Some(out)
+}
+
 fn serializer_write_prep(
     state: &ViewSetState,
     json: Option<&Value>,
@@ -1762,6 +1809,10 @@ async fn create_one(
     };
     let mut all_skip: Vec<&str> = skip.to_vec();
     all_skip.extend(extra_skip);
+    // Translate `source`-renamed writable keys (serializer field name →
+    // model column) so the client can POST the serializer field name.
+    let renamed = serializer_input_renamed_form(state, form);
+    let form = renamed.as_ref().unwrap_or(form);
     let collected = or_400!(collect_values(state.vs.schema, form, &all_skip));
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let fields = state.effective_fields();
@@ -1803,6 +1854,8 @@ async fn create_many(
         };
         let mut all_skip: Vec<&str> = skip.to_vec();
         all_skip.extend(extra_skip);
+        let renamed = serializer_input_renamed_form(state, row);
+        let row = renamed.as_ref().unwrap_or(row);
         let collected = match collect_values(state.vs.schema, row, &all_skip) {
             Ok(v) => v,
             Err(e) => {
@@ -1884,6 +1937,11 @@ async fn update_inner(
         Ok(s) => s,
         Err(resp) => return resp,
     };
+
+    // Translate `source`-renamed writable keys (serializer field name →
+    // model column) before the per-column update loop reads the form.
+    let renamed = serializer_input_renamed_form(&state, &form);
+    let form = renamed.as_ref().unwrap_or(&form);
 
     let mut assignments: Vec<Assignment> = Vec::new();
     for field in state.vs.schema.scalar_fields() {
