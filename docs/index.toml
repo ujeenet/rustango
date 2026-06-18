@@ -18,6 +18,11 @@ slug = "guides"
 pages = ["admin.md", "orm.md", "serializers.md", "viewsets.md", "urls.md", "manage.md", "security.md", "api-conventions.md"]
 
 [[section]]
+title = "Authentication"
+slug = "authentication"
+pages = ["auth-passwords.md", "auth-sessions.md"]
+
+[[section]]
 title = "Benchmarks"
 slug = "benchmarks"
 pages = ["benchmarks.md"]
