@@ -67,7 +67,11 @@ use subtle::ConstantTimeEq;
 
 pub mod providers;
 pub mod registry;
-#[cfg(feature = "admin")]
+// The router only needs axum, which arrives via `manage` (and `admin`
+// implies `manage`, so existing admin builds keep it). Gating on `admin`
+// was a stale proxy for "axum present" that made `oauth2_router`
+// unreachable for non-admin apps that enable just `oauth2` + `manage`.
+#[cfg(feature = "manage")]
 pub mod router;
 
 pub use registry::OAuth2Registry;
