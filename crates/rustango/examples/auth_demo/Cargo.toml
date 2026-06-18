@@ -1,0 +1,51 @@
+[package]
+name = "auth_demo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone — severs from the parent workspace so it builds self-contained.
+# Companion to the docs/auth-*.md authentication deep-dives; each
+# tests/auth_<flow>.rs is the runnable, CI-tested backing for one doc.
+[workspace]
+
+[lib]
+name = "auth_demo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "auth_demo"
+path = "src/main.rs"
+
+[dependencies]
+# Every auth feature is enabled BY NAME (not via rustango's default set) so the
+# crate is the source of truth for "which feature each flow needs" and is robust
+# to a future default-set trim. `passkey` + `tenancy` are the two auth features
+# not in rustango's defaults; the rest are listed for self-documentation.
+# `default-features = false` is required for the backend selector below.
+rustango = { path = "../..", default-features = false, features = [
+    "manage", "runserver", "admin", "config", "forms", "serializer",
+    "template_views", "cache", "signals", "email",
+    "passwords", "sessions", "jwt", "api_keys", "hmac-auth", "totp",
+    "oauth2", "passkey", "signed_url", "auth_flows", "csrf", "tenancy",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
+tower = { version = "0.5", features = ["util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+dotenvy = "0.15"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# Backend selector — `#[derive(Model)]`'s FromRow impls are cfg-gated on THIS
+# crate's backend feature (a cfg inside a derive resolves against the
+# destination crate). postgres is default so `cargo run -- migrate` + `cargo
+# test` work with no flags; the CI matrix and local SQLite runs flip it.
+[features]
+default = ["postgres"]
+postgres = ["rustango/postgres"]
+sqlite = ["rustango/sqlite"]
+mysql = ["rustango/mysql"]

@@ -338,6 +338,8 @@ Hashing uses **argon2id** (the OWASP-recommended default since 2023 — it resis
 
 The built-in **strength check** is intentionally minimal. For serious deployments, also check passwords against the HIBP / pwned-passwords API to reject ones known to be leaked.
 
+> **Deep dive:** [Passwords](auth-passwords.md) — argon2id internals, automatic salting, timing-safe logins (`verify_dummy`), and where the hash lives. Once authenticated, hand off to a [Session](auth-sessions.md) (browser) or a [JWT](auth-jwt.md) (API).
+
 ---
 
 ## Issuing and refreshing JWTs

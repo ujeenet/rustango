@@ -485,6 +485,11 @@ jobs:
             migrate: false
           - example: admin_demo
             migrate: true
+          # Authentication deep-dive docs (docs/auth-*.md). `migrate: false` for
+          # now — the current flow tests (passwords, sessions) are pure /
+          # in-memory; flips to true once DB-backed flow tests land.
+          - example: auth_demo
+            migrate: false
     services:
       # See `postgres_test`'s comment for the AWS Public ECR mirror
       # rationale (CI Docker Hub timeouts after PR #848 / #866).
