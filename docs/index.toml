@@ -20,7 +20,7 @@ pages = ["admin.md", "orm.md", "serializers.md", "viewsets.md", "urls.md", "mana
 [[section]]
 title = "Authentication"
 slug = "authentication"
-pages = ["auth-passwords.md", "auth-sessions.md"]
+pages = ["auth-passwords.md", "auth-sessions.md", "auth-decorators.md", "auth-jwt.md", "auth-jwt-api.md"]
 
 [[section]]
 title = "Benchmarks"
