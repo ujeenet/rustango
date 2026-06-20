@@ -16,7 +16,7 @@ scaffolding, models, a serializer, the ViewSet, all six CRUD endpoints, input
 validation, filtering/search/pagination, and tests — then the rest of the page
 is a reference for every knob.
 
-[![A Rustango ViewSet wired to a serializer: one #[viewset(serializer = …)] block gives typed JSON output and validated input across the six CRUD routes](/static/img/viewsets.png?v=2)](/static/img/viewsets.png?v=2)
+[![A Rustango ViewSet wired to a serializer: one #[viewset(serializer = …)] block gives typed JSON output and validated input across the six CRUD routes](img/viewsets.png)](img/viewsets.png)
 
 > **Runnable version:** the blog built here mirrors the tested, compilable
 > [`getting_started_blog`](../crates/rustango/examples/getting_started_blog)

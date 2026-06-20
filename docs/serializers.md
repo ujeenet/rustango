@@ -13,7 +13,7 @@ JSON (`from_model` → `to_value`), declares which fields are writable, and
 validates. You compose it with the ORM and ViewSets rather than routing writes
 *through* it.
 
-[![A Rustango serializer: read_only, source rename, a computed method field, a nested FK, and a write_only field — declared on one struct](/static/img/serializers.png?v=1)](/static/img/serializers.png?v=1)
+[![A Rustango serializer: read_only, source rename, a computed method field, a nested FK, and a write_only field — declared on one struct](img/serializers.png)](img/serializers.png)
 
 > **Runnable versions:** the minimal serializer ships in the tested
 > [`getting_started_blog`](../crates/rustango/examples/getting_started_blog/src/post_serializer.rs)
@@ -435,6 +435,9 @@ With the `openapi` feature on, the derive also emits an `OpenApiSchema` impl:
 field types map to JSON-schema types, `Option<T>` becomes nullable-and-not-
 required, and `write_only` fields are excluded from the response schema. This is
 what feeds the generated API docs — no separate schema to maintain.
+
+> **Deep dive:** [OpenAPI](openapi.md) — turn this schema (plus your ViewSet's
+> CRUD paths) into a full OpenAPI 3.1 spec served with Swagger UI / Redoc.
 
 ---
 

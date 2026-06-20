@@ -9,7 +9,7 @@ trail; and a live model reference. Everything below is configured declaratively
 in an `admin(...)` block on the derive, or with a handful of `Builder` methods
 and module-scope registration macros.
 
-[![The auto-generated admin: a posts list with filter facets, search, bulk actions, and pagination — all from one `admin(...)` block](/static/img/admin.png?v=2)](/static/img/admin.png?v=2)
+[![The auto-generated admin: a posts list with filter facets, search, bulk actions, and pagination — all from one `admin(...)` block](img/admin.png)](img/admin.png)
 
 > **Runnable version:** every feature on this page is exercised in a tested,
 > compilable example at
@@ -71,7 +71,7 @@ The admin root (`GET /<prefix>`) lists every registered model, grouped by app,
 with each model's table name and field count — plus a **Recent actions** feed
 of the latest audited changes.
 
-[![The admin home: every registered model grouped by app with table and field counts, and a recent-actions activity feed](/static/img/admin-home.png?v=1)](/static/img/admin-home.png?v=1)
+[![The admin home: every registered model grouped by app with table and field counts, and a recent-actions activity feed](img/admin-home.png)](img/admin-home.png)
 
 ---
 
@@ -144,7 +144,7 @@ the active filter shows as a chip with a **clear** link, and the row count and
 facet counts update. Filters, search, sorting and the date hierarchy all
 compose in the query string and can be combined.
 
-[![The posts list filtered by status=published: an active filter chip, the matching facet highlighted, search box, and the bulk-action picker](/static/img/admin-list-filtered.png?v=1)](/static/img/admin-list-filtered.png?v=1)
+[![The posts list filtered by status=published: an active filter chip, the matching facet highlighted, search box, and the bulk-action picker](img/admin-list-filtered.png)](img/admin-list-filtered.png)
 
 **Sorting.** Click a column header to sort; click again to flip direction
 (`?sort=col&order=asc|desc`). The default comes from `ordering`.
@@ -170,7 +170,7 @@ using tri-dialect date extraction (Postgres `EXTRACT`, MySQL, SQLite `strftime`)
 (edit) render the form. `fieldsets` groups the inputs into titled sections;
 without it, all editable fields appear in one block.
 
-[![The Post change form grouped into Content and Publishing fieldsets, each field with the right input widget for its type](/static/img/admin-fieldsets.png?v=1)](/static/img/admin-fieldsets.png?v=1)
+[![The Post change form grouped into Content and Publishing fieldsets, each field with the right input widget for its type](img/admin-fieldsets.png)](img/admin-fieldsets.png)
 
 Submitting a form validates the input, writes the row, records an audit entry,
 and redirects to the read-only **detail** view
@@ -239,7 +239,7 @@ place). Options: `kind` (`Tabular` — one table row per child, or `Stacked` —
 fieldset per child), `label`, `fields` (default: every scalar except the FK),
 `extra` (blank rows offered for adding), `max_num`, and `readonly_fields`.
 
-[![A post's detail page: read-only fields, the Comments inline table, and the audit-trail card showing the create entry as a JSON diff](/static/img/admin-detail.png?v=1)](/static/img/admin-detail.png?v=1)
+[![A post's detail page: read-only fields, the Comments inline table, and the audit-trail card showing the create entry as a JSON diff](img/admin-detail.png)](img/admin-detail.png)
 
 For child rows attached by a generic foreign key (content-type + object-pk pair)
 rather than a single FK column, use `register_admin_inline_generic!(parent, child,
@@ -304,7 +304,7 @@ fingerprint. Two places surface it:
   newest first, with facet cards for entity / operation / source and a cleanup
   form to purge entries older than N days (itself recorded as an audit entry).
 
-[![The Activity feed: every audited change across models with JSON diffs, facet cards by table/operation/source, and a cleanup form](/static/img/admin-audit.png?v=1)](/static/img/admin-audit.png?v=1)
+[![The Activity feed: every audited change across models with JSON diffs, facet cards by table/operation/source, and a cleanup form](img/admin-audit.png)](img/admin-audit.png)
 
 ---
 
@@ -477,7 +477,7 @@ Every admin ships a live model reference (Django's admindocs) at
 fields, columns, types, flags (PK, unique, …) and relations. Nothing to
 configure; it's generated from your models, so it never drifts from the schema.
 
-[![The model reference: every model's fields with column name, Rust type, flags, and relations — generated from the models](/static/img/admin-model-reference.png?v=1)](/static/img/admin-model-reference.png?v=1)
+[![The model reference: every model's fields with column name, Rust type, flags, and relations — generated from the models](img/admin-model-reference.png)](img/admin-model-reference.png)
 
 ---
 

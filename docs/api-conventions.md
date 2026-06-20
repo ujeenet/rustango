@@ -2,7 +2,7 @@
 
 This page explains the patterns **Rustango**'s API follows, so you can predict how any method behaves before you read its docs. If you're contributing or auditing a feature, these are the rules.
 
-[![Rustango's naming convention: the method suffix tells you what it takes — `*_on` for a typed pool, bare for the multi-backend pool, and pool-free signals](/static/img/api-conventions.png?v=1)](/static/img/api-conventions.png?v=1)
+[![Rustango's naming convention: the method suffix tells you what it takes — `*_on` for a typed pool, bare for the multi-backend pool, and pool-free signals](img/api-conventions.png)](img/api-conventions.png)
 
 ## Table of contents
 
