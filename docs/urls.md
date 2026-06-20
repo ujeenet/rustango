@@ -7,7 +7,7 @@ Rust with `reverse(...)`, in templates with `{{ url(...) }}`, and in redirects
 with `redirect_to_view(...)`. The API surface mirrors Django's
 `reverse()` / `{% url %}` / `resolve_url()` / `redirect()`.
 
-[![Django-style reverse URLs: register_url! names a pattern, reverse() builds the URL in Rust, and {{ url(...) }} builds it in a template](/static/img/urls.png?v=1)](/static/img/urls.png?v=1)
+[![Django-style reverse URLs: register_url! names a pattern, reverse() builds the URL in Rust, and {{ url(...) }} builds it in a template](img/urls.png)](img/urls.png)
 
 > **Source:** `rustango::urls` (`register_url!`, `reverse`, `reverse_owned`,
 > `all_routes`, `duplicates`, `register_url_tag`) and `rustango::shortcuts`
