@@ -40,7 +40,12 @@ fn dummy_success() -> OnAuthSuccess {
 async fn login_redirects_with_secure_flow_cookie_without_admin() {
     let registry = OAuth2Registry::new();
     registry.register("acme", providers::google("cid", "csec", "https://app/cb"));
-    let app = oauth2_router(registry, b"flow-signing-secret".to_vec(), true, dummy_success());
+    let app = oauth2_router(
+        registry,
+        b"flow-signing-secret".to_vec(),
+        true,
+        dummy_success(),
+    );
 
     let resp = app
         .oneshot(
@@ -53,16 +58,34 @@ async fn login_redirects_with_secure_flow_cookie_without_admin() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let loc = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap();
-    assert!(loc.contains("accounts.google.com"), "redirects to provider: {loc}");
-    let cookie = resp.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap();
+    let loc = resp
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        loc.contains("accounts.google.com"),
+        "redirects to provider: {loc}"
+    );
+    let cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(cookie.contains("HttpOnly") && cookie.contains("Secure"));
 }
 
 #[tokio::test]
 async fn unknown_provider_is_404_without_admin() {
     let registry = OAuth2Registry::new();
-    let app = oauth2_router(registry, b"flow-signing-secret".to_vec(), true, dummy_success());
+    let app = oauth2_router(
+        registry,
+        b"flow-signing-secret".to_vec(),
+        true,
+        dummy_success(),
+    );
     let resp = app
         .oneshot(
             Request::builder()

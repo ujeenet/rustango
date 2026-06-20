@@ -409,6 +409,8 @@ jwt.revoke(&refresh_token);
 
 The default in-memory blacklist (`InMemoryJtiStore`) cleans out expired entries on its own, but it lives in one process and forgets every revocation on restart. For multi-process deployments, install a shared, durable store via `JwtLifecycle::new(secret).with_jti_store(store)` — `store` is any `Arc<dyn JtiStore>` (for example a Redis- or DB-backed one). Without a shared store, a token you revoke on one replica can still be replayed on another until it expires.
 
+> **Deep dive:** [JWT auth API](auth-jwt-api.md) — the built-in `/api/auth/login|refresh|logout|me` router, sliding refresh, and the JTI revocation store. For a single self-managed token, see [JWT (standalone)](auth-jwt.md). To gate browser/API routes by login, see [access decorators](auth-decorators.md).
+
 ---
 
 ## Authenticating with API keys
