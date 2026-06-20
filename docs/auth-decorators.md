@@ -5,7 +5,7 @@ Once a user is authenticated, you gate routes. **Rustango** ships Django's
 and anonymous requests are turned away — 302'd to your login page (browser flow)
 or answered with 401/403 (API flow) — before they ever reach the handler.
 
-[![Access decorators: login_required 302s anonymous browsers to /login?next=, the _or_403 family returns 401/403 for APIs, superuser_required gates by role](/static/img/auth-decorators.png?v=1)](/static/img/auth-decorators.png?v=1)
+[![Access decorators: login_required 302s anonymous browsers to /login?next=, the _or_403 family returns 401/403 for APIs, superuser_required gates by role](img/auth-decorators.png)](img/auth-decorators.png)
 
 > **Source:** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,

@@ -6,7 +6,7 @@ API needs the whole **lifecycle**: a short-lived *access* token, a long-lived
 ships that as `JwtLifecycle` — and a batteries-included router that mounts
 `POST /api/auth/login`, `/refresh`, `/logout`, and `GET /me` for you.
 
-[![JWT auth API: login issues an access+refresh pair, refresh rotates and blacklists the old token, logout revokes via a JTI store](/static/img/auth-jwt-api.png?v=1)](/static/img/auth-jwt-api.png?v=1)
+[![JWT auth API: login issues an access+refresh pair, refresh rotates and blacklists the old token, logout revokes via a JTI store](img/auth-jwt-api.png)](img/auth-jwt-api.png)
 
 > **Source:** `rustango::tenancy::jwt_lifecycle` (`JwtLifecycle`, `JwtTokenPair`,
 > `JwtClaims`) and `rustango::tenancy::auth_routes` (`jwt_router`, `Config`) +
