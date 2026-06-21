@@ -1,15 +1,22 @@
 # ViewSets — CRUD REST APIs
 
-A ViewSet turns a model into a full REST resource — list, create, retrieve,
-update, partial-update and delete — from one declaration. It's **Rustango**'s
-equivalent of a Django REST Framework `ModelViewSet` or a Laravel API resource
-controller.
+A ViewSet turns a model into a full REST resource — endpoints to **list,
+create, read, update and delete** records — from one declaration. (It's
+**Rustango**'s equivalent of a Django REST Framework `ModelViewSet` or a Laravel
+API resource controller, if you've used those.)
 
-Pair a ViewSet with a [`Serializer`](serializers.md) and you get the full
-**DRF marriage on both sides of the wire**: the serializer shapes every
-**response** (rename, hide, compute, nest) *and* governs every **request**
-(field validation with DRF-shape errors, and read-only / computed fields a
-client posts are ignored). It works the same on PostgreSQL, MySQL and SQLite.
+> **New to REST APIs?** This guide assumes you know what an *endpoint*, an *HTTP
+> verb* (GET / POST / …) and a *JSON request and response* are. If any of those
+> are fuzzy, the [glossary](glossary.md#web-api-basics) is a five-minute primer —
+> read it first, then come back here.
+
+Pair a ViewSet with a [serializer](serializers.md) — the piece that shapes your
+JSON — and it guards **both directions** at once: the serializer formats every
+**response** (rename, hide, compute or nest fields) *and* governs every
+**request** (it validates incoming data and silently ignores fields a client
+shouldn't be allowed to set). Rejected input comes back in the familiar DRF
+shape — a JSON object keyed by field name. It all works the same on PostgreSQL,
+MySQL and SQLite.
 
 This guide is tutorial-first: we **build a complete REST blog API** end to end —
 scaffolding, models, a serializer, the ViewSet, all six CRUD endpoints, input
@@ -18,6 +25,9 @@ is a reference for every knob.
 
 [![A Rustango ViewSet wired to a serializer: one #[viewset(serializer = …)] block gives typed JSON output and validated input across the six CRUD routes](img/viewsets.png)](img/viewsets.png)
 
+> **Source:** `rustango::viewset` (`ViewSet`, `#[derive(ViewSet)]`, the
+> `#[viewset(...)]` options + the `for_model` builder) — always compiled.
+>
 > **Runnable version:** the blog built here mirrors the tested, compilable
 > [`getting_started_blog`](../crates/rustango/examples/getting_started_blog)
 > example (its `Post` / `PostSerializer` / `PostViewSet`), and every behavior is
@@ -27,8 +37,8 @@ is a reference for every knob.
 
 ---
 
-## Contents
-
+## Table of contents
+- [API views vs HTML views](#api-views-vs-html-views) — JSON for clients, or HTML pages?
 - [Build a REST blog API](#build-a-rest-blog-api) — the full walkthrough
 - [The serializer marriage: input + output](#the-serializer-marriage-input--output)
 - [The two ways to define a ViewSet](#the-two-ways-to-define-a-viewset)
@@ -37,6 +47,36 @@ is a reference for every knob.
 - [Filtering, search & ordering](#filtering-search-and-ordering) · [Pagination](#pagination)
 - [Validation](#validation) · [Permissions & throttling](#permissions-and-throttling) · [Custom actions](#custom-actions-beyond-crud)
 - [Mounting](#mounting) · [Backends](#backend-support)
+
+---
+
+## API views vs HTML views
+
+Before the tutorial, one fork in the road. **Rustango** has two ways to turn a
+model into endpoints, and a ViewSet is one of them:
+
+- A **ViewSet** (this guide) is an **API view** — it speaks **JSON**, for
+  frontend frameworks, mobile apps, and other services.
+- A **template view** ([HTML views](html-views.md)) is an **HTML view** — it
+  renders **server-side pages** through Tera, for browsers and server-rendered
+  sites.
+
+Same model underneath; what differs is what comes out and who's calling.
+
+| | **API view** — ViewSet (here) | **HTML view** — [template views](html-views.md) |
+|---|---|---|
+| Module | `rustango::viewset` | `rustango::template_views` |
+| Sends back | **JSON data** | a **server-rendered HTML page** |
+| Built for | SPAs, mobile, other services | browsers, server-rendered sites, admin-style CRUD |
+| A "create" | `POST` JSON → `201` + the object | `POST` a form → `303` redirect (Post/Redirect/Get) |
+| On bad input | `400` + a field-keyed JSON error map | re-render the form with the errors shown |
+| A "list" is | a paginated JSON envelope | a loop over rows in your template |
+| Usually authed by | tokens / JWT / API keys | session cookies |
+| Django analogue | DRF `ModelViewSet` | generic class-based views |
+
+Pick per resource — and you can mount **both on the same model** (a public JSON
+API *and* internal CRUD pages). The rest of this guide is the JSON/API side; for
+the HTML side see [HTML views — server-rendered pages](html-views.md).
 
 ---
 
@@ -431,7 +471,7 @@ let router = PostViewSet::router("/api/posts", pool);
 ```
 
 **2. The builder** — `ViewSet::for_model(...)`, programmatic, tri-dialect
-(Postgres / SQLite / MySQL) and tenancy-aware; wire a serializer with
+(PostgreSQL / SQLite / MySQL) and tenancy-aware; wire a serializer with
 `.serializer::<S>()`:
 
 ```rust
@@ -558,6 +598,12 @@ unless you set `.ordering_fields([...])` to restrict it. Without a param, the
 
 ## Pagination
 
+> **Pitfall — paginate on a deterministic order.** Page-number and
+> limit/offset pagination assume a stable sort; ordering on a non-unique column
+> (or none) lets rows shift between pages — duplicated or skipped. Always add a
+> unique tiebreaker, e.g. `ordering = "-published_at, id"`. (Both also run
+> `COUNT(*)` per call; cursor pagination skips it for large tables.)
+
 Three styles; page-number is the default. The list envelope differs per style:
 
 **Page-number** (default) — `?page=2&page_size=20`:
@@ -615,6 +661,11 @@ plus your own per-field and cross-field rules.
 ---
 
 ## Permissions and throttling
+
+> **A ViewSet is public by default.** Mounting one exposes all six CRUD verbs
+> to anyone — there is no built-in authentication. Gate it with `permissions(...)`
+> (below), put it behind the [auth middleware](auth-backends.md) (`require_auth`),
+> or both, before exposing writes.
 
 **Permissions** gate each action on codenames (OR within an action):
 
@@ -693,9 +744,9 @@ let api = urls::api()
 
 ## Backend support
 
-- **Builder + `router_pool` / `tenant_router`** is **tri-dialect** — Postgres,
+- **Builder + `router_pool` / `tenant_router`** is **tri-dialect** — PostgreSQL,
   SQLite and MySQL — and is the recommended path.
-- **The derive macro's `router(prefix, PgPool)`** captures a `PgPool` (Postgres).
+- **The derive macro's `router(prefix, PgPool)`** captures a `PgPool` (PostgreSQL).
 - **Serializer input + output** now works on **all three backends** (the
   per-row render is tri-dialect; the old PG-only gate is gone).
 - Filtering, search, ordering, the three pagination modes, permissions,
@@ -718,3 +769,12 @@ cargo test --features sqlite,tenancy --test viewset_serializer_render_sqlite_liv
 cargo test --features sqlite,tenancy --test viewset_serializer_input_sqlite_live
 cargo test --features sqlite,tenancy --test viewset_sqlite_live
 ```
+
+---
+
+## See also
+
+- [Serializers](serializers.md) — shape the JSON a ViewSet sends and validates.
+- [HTML views](html-views.md) — the server-rendered counterpart to this JSON API.
+- [OpenAPI](openapi.md) — generate a spec + Swagger UI from your ViewSets.
+- [URLs & routing](urls.md) — compose ViewSet routers into your app.

@@ -54,6 +54,8 @@ let app = Router::new()
 
 Security headers tell the browser how to protect your users (block clickjacking, force HTTPS, stop content-type sniffing). `SecurityHeadersLayer` sets the standard set with one line — the same headers Django ships by default. (A "layer" is **Rustango**'s term for middleware; you attach it to your router.)
 
+> Deep dive: [Middleware](middleware.md) covers how layers work, ordering, the full built-in catalog, and writing your own (locale-, timezone-aware, headers, CSRF).
+
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};
 
@@ -143,6 +145,8 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 When exhausted: `429 Too Many Requests` with `Retry-After` header. Every successful response includes `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
+> **Behind a reverse proxy, pair `per_ip` with `real_ip`.** `RateLimitLayer::per_ip` keys on the connecting socket (`ConnectInfo`), which behind a proxy is the *proxy's* IP — so every client shares one bucket and the limit is useless. Put `real_ip::RealIpLayer` (reads `X-Forwarded-For` / `X-Real-IP`) ahead of it so the true client IP is used.
+
 `RateLimitLayer` is **process-local** — it counts requests only within one running instance, which is fine if you run a single instance. If you run several instances (replicas) behind a load balancer, each would keep its own count, so the real limit multiplies. To share one count across all replicas, use `rate_limit_cache::CacheRateLimitLayer`, which delegates to any `cache::Cache` impl (pair with `cache::RedisCache` for a shared counter incremented atomically by Redis `INCRBY`):
 
 ```rust
@@ -151,7 +155,7 @@ use rustango::rate_limit::KeyBy;
 use rustango::rate_limit_cache::{CacheRateLimitLayer, CacheRateLimitRouterExt};
 
 let cache: rustango::cache::BoxedCache =
-    std::sync::Arc::new(RedisCache::connect("redis://localhost").await?);
+    std::sync::Arc::new(RedisCache::new("redis://localhost").await?);
 
 let app = axum::Router::new()
     .route("/api/login", axum::routing::post(login))
@@ -197,6 +201,12 @@ If your reverse proxy forwards `X-Forwarded-For`, configure it to set `RemoteAdd
 ---
 
 ## Protecting against CSRF
+
+> **CSRF and token APIs.** CSRF protects **cookie-authenticated** requests. A
+> pure token / Bearer / [JWT](auth-jwt.md) API isn't a CSRF target — don't apply
+> the CSRF layer to it (or you'll 403 legitimate clients). For an SPA that *does*
+> use cookies, read the `rustango_csrf` cookie and echo it in the `X-CSRF-Token`
+> header.
 
 CSRF (cross-site request forgery) is when another site tricks a logged-in user's browser into submitting a request to your app. The defense is a secret token on every form, just like Django's `{% csrf_token %}`. The CSRF middleware lives in `rustango::forms::csrf` (behind the `csrf` feature, which is turned on automatically by the `admin` feature):
 
@@ -497,6 +507,8 @@ Common uses:
 
 Before signing, the query params are sorted into a fixed order, so an attacker can't reorder them (for example moving `?expires=...`) to change what the signature covers and forge a valid-looking link.
 
+> Deep dive: [Account flows](auth-flows.md) builds password reset, email verification, and magic-link login on this signed-URL primitive.
+
 ---
 
 ## Verifying incoming webhooks
@@ -645,3 +657,11 @@ Already shipped (don't reach for these on the roadmap):
 - **Distributed rate limiting** — `rate_limit_cache::CacheRateLimitLayer` (see [Rate limiting requests](#rate-limiting-requests))
 
 Until the unshipped items land, glue them yourself using the primitives above (`signed_url::sign` for password reset tokens, etc.).
+
+---
+
+## See also
+
+- [Middleware](middleware.md) — how the security layers attach, their order, and the full catalog.
+- [Authentication](auth-passwords.md) — passwords, sessions, JWTs, API keys, HMAC, auth backends, and account flows, each in depth.
+- [API conventions](api-conventions.md) — the error-type and return-type rules behind these APIs.

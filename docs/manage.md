@@ -12,6 +12,16 @@ cargo run -- --help                # full subcommand list
 
 [![One binary runs every manage verb — server, migrations, scaffolders, database utilities, and system commands — like Django's manage.py or Laravel's artisan](img/manage.png)](img/manage.png)
 
+> **Source:** `rustango::manage` (`Cli`, the verb dispatcher) — behind the
+> `manage` feature (on by default).
+>
+> **Runnable version:** every verb here runs in a scaffolded project; the
+> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog)
+> example is driven by `cargo run -- migrate` and friends.
+
+> **New to a term here?** *scaffold*, *migration*, *tenant* — see the
+> [glossary](glossary.md).
+
 The command router lives in [`rustango::manage::Cli`](https://docs.rs/rustango/latest/rustango/manage/struct.Cli.html);
 your `src/main.rs` wires it up like this:
 
@@ -805,7 +815,7 @@ with the ORM:
 ```rust
 let profile = UserProfile::objects()
     .where_(UserProfile::user_id.eq(user.id.get().copied().unwrap()))
-    .fetch_one(&pool).await?;
+    .first(&pool).await?;            // Option<UserProfile>
 ```
 
 Tradeoff: one extra row and a JOIN on every access. Upside: zero risk of
@@ -1133,3 +1143,14 @@ specially and waits the full mDNS timeout before falling back to
 Confirm with `curl -w "%{time_connect}\n"`: if `time_connect`
 shows ~5s but it drops to milliseconds with
 `--resolve acme.local:8080:127.0.0.1`, you're hitting mDNS.
+
+
+---
+
+## See also
+
+- [ORM cookbook](orm.md)
+- [Scaffolding](scaffolding.md)
+- [ViewSets](viewsets.md)
+- [Serializers](serializers.md)
+- [Security guide](security.md)

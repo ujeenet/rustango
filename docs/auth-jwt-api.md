@@ -19,14 +19,16 @@ ships that as `JwtLifecycle` — and a batteries-included router that mounts
 > tenant-scoped and exercised end-to-end by the framework's own
 > `crates/rustango/tests/tenant_auth_live.rs`.
 
+> **New to a term here?** *access/refresh token*, *rotation*, *revocation* —
+> see the [glossary](glossary.md).
+
 > Deep dive companion to the [Security guide](security.md)'s "Issuing and
 > refreshing JWTs" section. For a single, manually-managed token instead, see
 > [JWT (standalone)](auth-jwt.md).
 
 ---
 
-## Contents
-
+## Table of contents
 - [The built-in router](#the-built-in-router) · [Wiring it up](#wiring-it-up)
 - [The token engine](#the-token-engine-jwtlifecycle) · [Refresh & rotation](#refresh-and-rotation)
 - [Revocation & the JTI store](#revocation-and-the-jti-store) · [Custom claims](#custom-claims)
@@ -201,3 +203,13 @@ Custom claims survive `refresh` (carried onto the new pair) unless you use
   to authenticate arbitrary routes from the `Authorization: Bearer` header.
 - **HS256 signing**, 32-byte key floor — same algorithm and constraints as
   [standalone JWT](auth-jwt.md#security-model).
+
+
+---
+
+## See also
+
+- [JWT (standalone)](auth-jwt.md)
+- [Auth backends](auth-backends.md)
+- [Sessions](auth-sessions.md)
+- [Security guide](security.md)

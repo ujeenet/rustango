@@ -20,10 +20,12 @@ control, the same types let you hand-build any spec.
 > schema, and router types are additionally covered by the framework's own unit
 > tests (`crates/rustango/src/openapi/`).
 
+> **New to a term here?** *OpenAPI*, *schema*, *serializer*, *ViewSet* — see the
+> [glossary](glossary.md).
+
 ---
 
-## Contents
-
+## Table of contents
 - [Quick start](#quick-start) — generate + serve in one screen
 - [Schemas from serializers](#schemas-from-serializers) · [Paths from ViewSets](#paths-from-viewsets)
 - [Serving it](#serving-the-spec-swagger-ui--redoc) · [Hand-building a spec](#hand-building-a-spec)

@@ -56,13 +56,13 @@ template effort.
 
 ### What makes it a fair fight
 
-- **Identical data.** One Postgres schema and a deterministic seed shared by all
+- **Identical data.** One PostgreSQL schema and a deterministic seed shared by all
   four apps — they read the *same tables*: 10 authors, 30 tags, **1 000 posts**,
   2 600 post-tag links, **10 000 comments**. The index shows the same 20 posts in
   the same order on every framework, and the rendered HTML is byte-identical
   (modulo each engine's entity-escaping style).
 - **Identical hardware budget.** Every app runs in a container capped to
-  **4 CPUs / 2 GB RAM**. Postgres and Redis are shared and identical.
+  **4 CPUs / 2 GB RAM**. PostgreSQL and Redis are shared and identical.
 - **One at a time.** Apps are load-tested sequentially so they never compete for
   the host (a 12-core / 18 GB machine). Load generator:
   [`oha`](https://github.com/hatoo/oha), 50 concurrent connections, 10 s per
@@ -248,7 +248,7 @@ hand-tuned Go service while handing you the framework Go makes you build.
 
 ## Reproduce
 
-The full harness — the four apps, the shared Postgres schema + deterministic
+The full harness — the four apps, the shared PostgreSQL schema + deterministic
 seed, the Docker Compose setup, and the runner — is a self-contained project
 (`rustango-bench`). From its directory:
 
@@ -261,3 +261,11 @@ DURATION=10s CONCURRENCY=50 bench/run.sh
 Requirements: Docker + Compose and Rust (for `cargo install oha`). Tune the
 hardware cap in `.env` (`CAP_CPUS`, `CAP_MEM`) and the load with `DURATION` /
 `CONCURRENCY`. Raw per-run output lands in `bench/results/`.
+
+
+---
+
+## See also
+
+- [Getting started](getting-started.md)
+- [ORM cookbook](orm.md)
