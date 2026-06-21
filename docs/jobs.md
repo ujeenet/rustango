@@ -29,6 +29,8 @@ failures. This is Django-Q / Celery / Laravel queues, in Rust.
 - [Step 1 — Define a job](#step-1--define-a-job)
 - [Step 2 — Start a queue](#step-2--start-a-queue)
 - [Step 3 — Dispatch from a handler](#step-3--dispatch-from-a-handler)
+- [Step 4 — Wire it into your app](#step-4--wire-it-into-your-app) — the full example
+- [Running the workers (CLI + production)](#running-the-workers-cli--production)
 - [Retries and backoff](#retries-and-backoff)
 - [The dead-letter handler](#the-dead-letter-handler)
 - [The persistent queue (production)](#the-persistent-queue-production)
@@ -42,6 +44,9 @@ failures. This is Django-Q / Celery / Laravel queues, in Rust.
 A job is a serializable struct that implements `Job`. The payload is what gets
 queued (serialized to JSON); `run()` is the work. `NAME` routes a queued payload
 back to its handler, so it must be unique.
+
+Scaffold a skeleton with the CLI — `cargo run -- make:job WelcomeEmail` — or
+write it by hand:
 
 ```rust
 use rustango::jobs::{Job, JobError};
@@ -119,6 +124,114 @@ for user_id in 1..=3 {
 }
 // → all three WelcomeEmail::run() calls execute on the worker pool
 ```
+
+---
+
+## Step 4 — Wire it into your app
+
+Putting Steps 1–3 together: build the queue and register every job **once at
+boot**, start the workers, hand the queue to your routes so handlers can reach
+it, then drain on shutdown. The queue lives in your `main.rs`:
+
+```rust
+// src/main.rs
+use std::sync::Arc;
+use rustango::jobs::{InMemoryJobQueue, JobQueue};
+use rustango::manage::Cli;
+
+#[rustango::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Build the queue + register every job type BEFORE starting workers.
+    let queue = Arc::new(InMemoryJobQueue::with_workers(4));
+    queue.register::<WelcomeEmail>().await;
+    queue
+        .on_dead_letter(|dl| async move {
+            tracing::error!(job = dl.name, attempts = dl.attempts, error = %dl.error,
+                            "job dead-lettered");
+        })
+        .await;
+
+    // 2. Start the workers — tokio tasks that run inside THIS process.
+    queue.start().await;
+
+    // 3. Share the queue with handlers (axum extension/state).
+    let app = urls::api().layer(axum::Extension(queue.clone()));
+
+    // 4. Boot the server. Cli::run() blocks until Ctrl-C / SIGTERM.
+    Cli::new().api(app).with_health().run().await?;
+
+    // 5. On shutdown: drain in-flight jobs, then stop.
+    queue.shutdown().await;
+    Ok(())
+}
+```
+
+A handler dispatches by reading the queue back out of the request:
+
+```rust
+use axum::Extension;
+use std::sync::Arc;
+use rustango::jobs::{InMemoryJobQueue, JobQueue};
+
+async fn signup(Extension(queue): Extension<Arc<InMemoryJobQueue>>) -> StatusCode {
+    // ... create the user ...
+    queue.dispatch(&WelcomeEmail { user_id: 42 }).await.ok();  // returns instantly
+    StatusCode::CREATED
+}
+```
+
+> **Store the concrete queue type.** The `JobQueue` trait is **not object-safe**
+> (its `register`/`dispatch` are generic), so you can't hold `Arc<dyn JobQueue>`
+> in state — keep the concrete `Arc<InMemoryJobQueue>` (or `Arc<DatabaseJobQueue>`).
+
+---
+
+## Running the workers (CLI + production)
+
+`start()` spawns the workers as **tokio tasks inside the current process**. So
+when you launch your app with the CLI — `cargo run` (which runs the server) —
+the workers run right alongside it. For most apps that's all you need: **one
+process serves requests *and* drains the queue**; there's no separate worker
+command.
+
+```bash
+cargo run                 # starts the server AND the in-process workers
+cargo run -- make:job WelcomeEmail   # scaffold a new job type
+```
+
+### A dedicated worker process (production)
+
+At scale you often want workers **separate** from the web tier — so a traffic
+spike can't starve jobs, and you scale each independently. With the
+[persistent queue](#the-persistent-queue-production) every process pulls from the
+same `rustango_jobs` table, so just run a second, server-less binary that builds
+the queue, starts it, and blocks until a signal:
+
+```rust
+// src/bin/worker.rs — run with `cargo run --bin worker`
+use std::sync::Arc;
+use rustango::jobs::{DatabaseJobQueue, JobQueue};
+
+#[rustango::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = /* connect your tri-dialect Pool */;
+    DatabaseJobQueue::ensure_table_pool(&pool).await?;
+
+    let queue = Arc::new(DatabaseJobQueue::with_workers_pool(pool, 8));
+    queue.register::<WelcomeEmail>().await;   // register the SAME job types
+    queue.start().await;
+
+    tokio::signal::ctrl_c().await?;            // block until Ctrl-C / SIGTERM
+    queue.shutdown().await;                     // drain in-flight, then exit
+    Ok(())
+}
+```
+
+Deploy it as its own container/service and scale to **N replicas** — they all
+pull from the shared table safely. The web process then only needs to
+`dispatch` (it doesn't have to `start()` workers). Pair the worker with a
+periodic [`reclaim_stuck_jobs_pool`](#the-persistent-queue-production) sweep to
+recover jobs from a crashed worker.
 
 ---
 
