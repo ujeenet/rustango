@@ -15,7 +15,7 @@ pages = ["getting-started.md", "scaffolding.md", "glossary.md"]
 [[section]]
 title = "Guides"
 slug = "guides"
-pages = ["orm.md", "admin.md", "serializers.md", "viewsets.md", "html-views.md", "openapi.md", "urls.md", "manage.md", "middleware.md", "jobs.md", "caching.md", "files.md", "i18n.md", "email.md", "testing.md", "security.md"]
+pages = ["models.md", "orm.md", "admin.md", "serializers.md", "viewsets.md", "html-views.md", "openapi.md", "urls.md", "manage.md", "middleware.md", "jobs.md", "caching.md", "files.md", "i18n.md", "email.md", "testing.md", "security.md"]
 
 [[section]]
 title = "Authentication"
