@@ -205,7 +205,7 @@ src/blog/
 
 ## Step 8: Define a model
 
-A model is a database table described as a Rust struct, like a Django model or an Eloquent/Active Record class. Open `src/blog/models.rs` and define your `Post`:
+A model is a database table described as a Rust struct, like a Django model or an Eloquent/Active Record class. Open `src/blog/models.rs` and define your `Post`. (For the full reference — every field type, custom primary keys, and all attributes — see the [Models guide](models.md).)
 
 ```rust
 use rustango::{Auto, Model};

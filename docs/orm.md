@@ -1793,6 +1793,7 @@ A quick checklist for keeping queries fast as the data grows:
 
 ## See also
 
+- [Models](models.md) — declaring a model: field types, primary keys, every attribute (the companion to this query guide).
 - [Serializers](serializers.md) — shape model rows into JSON.
 - [ViewSets](viewsets.md) — turn a model into a JSON CRUD API.
 - [The admin](admin.md) — an auto-generated UI over the same models.
