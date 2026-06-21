@@ -17,13 +17,15 @@ first choice. You never store, log, or compare the plaintext.
 > [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_passwords.rs)
 > example — `cargo test -p auth_demo --test auth_passwords`.
 
+> **New to a term here?** *hash*, *salt*, *argon2id*, *PHC string* — see the
+> [glossary](glossary.md).
+
 > This is the deep dive for the [Security guide](security.md)'s "Hashing and
 > checking passwords" section.
 
 ---
 
-## Contents
-
+## Table of contents
 - [Quick start](#quick-start) · [Why argon2id](#why-argon2id)
 - [Hashing on signup](#hashing-on-signup) · [Verifying on login](#verifying-on-login)
 - [Timing-safe logins](#timing-safe-logins-account-enumeration) · [Strength checks](#strength-checks)
@@ -203,3 +205,13 @@ browser apps) or issue a [JWT](auth-jwt.md) (for APIs).
 - For multi-tenant apps with the framework's user store, prefer
   `rustango::tenancy::password` (same argon2id, integrated with the tenant user
   model). This module is the standalone version for apps that own their User table.
+
+
+---
+
+## See also
+
+- [Sessions](auth-sessions.md)
+- [Account flows](auth-flows.md)
+- [Auth backends](auth-backends.md)
+- [Security guide](security.md)

@@ -17,13 +17,15 @@ them back, HS256 under the hood.
 > [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_jwt.rs) —
 > `cargo test -p auth_demo --test auth_jwt`.
 
+> **New to a term here?** *JWT*, *claims*, *stateless*, *secret* — see the
+> [glossary](glossary.md).
+
 > Deep dive companion to the [Security guide](security.md)'s "Issuing and
 > refreshing JWTs" section.
 
 ---
 
-## Contents
-
+## Table of contents
 - [Quick start](#quick-start) · [When to use it](#when-to-use-standalone-jwt)
 - [Building claims](#building-claims) · [Verifying](#verifying-a-token)
 - [Security model](#security-model) — read this · [Inspecting without trust](#inspecting-without-verifying)
@@ -189,3 +191,13 @@ guarantee.
   liability precisely because they can't be revoked.
 - Pair issuance with [Passwords](auth-passwords.md) (verify, then issue) and
   gate API routes via the [auth backend chain](auth-backends.md)'s `JwtBackend`.
+
+
+---
+
+## See also
+
+- [JWT auth API](auth-jwt-api.md)
+- [Auth backends](auth-backends.md)
+- [API keys](auth-api-keys.md)
+- [Sessions](auth-sessions.md)

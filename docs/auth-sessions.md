@@ -10,12 +10,16 @@ request.
 [![Sessions in rustango: the cookie holds only an opaque id, the SessionStore keeps the data in Redis, and destroy() revokes it everywhere](img/auth-sessions.png)](img/auth-sessions.png)
 
 > **Source:** `rustango::sessions` (`Session`, `SessionStore`) +
-> `rustango::cache` (`BoxedCache`, `InMemoryCache`, `RedisCache`) — behind the
-> `sessions` feature (on by default; pulls `cache`).
+> `rustango::cache` (`BoxedCache`, `InMemoryCache`) — behind the `sessions`
+> feature (on by default; pulls `cache`). For a Redis-backed store in
+> production, add the `cache-redis` feature (off by default) to get `RedisCache`.
 >
 > **Runnable version:** snippets below are copied from the tested
 > [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_sessions.rs)
 > example — `cargo test -p auth_demo --test auth_sessions`.
+
+> **New to a term here?** *session*, *opaque id*, *cookie*, *cache* — see the
+> [glossary](glossary.md).
 
 > Deep dive companion to the [Security guide](security.md). Gating routes behind
 > a logged-in session is covered in [Auth decorators](auth-decorators.md); for
@@ -23,8 +27,7 @@ request.
 
 ---
 
-## Contents
-
+## Table of contents
 - [Quick start](#quick-start) · [Sessions vs JWT](#sessions-vs-jwt)
 - [The session bag](#the-session-bag) · [The cookie](#the-cookie)
 - [Picking a backend](#picking-a-backend) · [Expiry & sliding renewal](#expiry-and-sliding-renewal)
@@ -175,3 +178,13 @@ store.save_with_id(&sid, &s).await?;
 - **Mint a fresh session id on privilege change** (e.g. right after login) to
   avoid session fixation — `save` already does this since it always generates a
   new id.
+
+
+---
+
+## See also
+
+- [Auth decorators](auth-decorators.md)
+- [JWT](auth-jwt.md)
+- [Auth backends](auth-backends.md)
+- [Security guide](security.md)
