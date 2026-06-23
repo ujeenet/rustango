@@ -192,6 +192,9 @@ pub(crate) async fn post_authed(
     let ctx = super::tools::McpContext {
         pool: t.pool().clone(),
         agent,
+        // Progress + cancellation are wired per-call by `call_tool_with`.
+        progress: super::progress::ProgressReporter::disabled(),
+        cancel: super::progress::CancelToken::never(),
     };
     handle_message(&state, &body, Some(ctx)).await
 }

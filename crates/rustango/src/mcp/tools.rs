@@ -31,6 +31,12 @@ pub struct McpContext {
     pub pool: Pool,
     /// The verified, tenant-pinned agent making the call.
     pub agent: McpAgent,
+    /// Progress sink for this call (active only when the caller sent a
+    /// `progressToken`). Follow-up #1090.
+    pub progress: super::progress::ProgressReporter,
+    /// Cooperative cancellation flag — poll `is_cancelled()` at await
+    /// points. Follow-up #1090.
+    pub cancel: super::progress::CancelToken,
 }
 
 /// Error a tool handler may return. Converts to a JSON-RPC error response.
@@ -146,6 +152,17 @@ pub fn list_tools(agent: &McpAgent) -> Value {
 /// JSON-RPC errors for a missing/forbidden tool or invalid arguments; the
 /// tool never executes in those cases.
 pub async fn call_tool(ctx: McpContext, params: Value) -> Result<Value, JsonRpcError> {
+    call_tool_with(ctx, params, None).await
+}
+
+/// [`call_tool`] plus the JSON-RPC `request_id`, used by the dispatcher to
+/// register the call for cancellation (`notifications/cancelled`) and to
+/// wire the `progressToken`. Follow-up #1090.
+pub(crate) async fn call_tool_with(
+    mut ctx: McpContext,
+    params: Value,
+    request_id: Option<&str>,
+) -> Result<Value, JsonRpcError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -169,13 +186,24 @@ pub async fn call_tool(ctx: McpContext, params: Value) -> Result<Value, JsonRpcE
         ));
     }
 
+    // Wire progress (from `_meta.progressToken`) + cancellation (keyed by the
+    // JSON-RPC request id) for the duration of the call.
+    ctx.progress =
+        super::progress::ProgressReporter::with_token(super::progress::progress_token(&params));
+    let cancel_id = request_id.map(str::to_owned);
+    if let Some(id) = &cancel_id {
+        ctx.cancel = super::progress::register(id);
+    }
+
     // Keep what we need for the audit trail before `ctx` moves into the tool.
     let pool = ctx.pool.clone();
     let agent_id = ctx.agent.agent_id;
 
-    let result = (tool.handler)(ctx, args.clone())
-        .await
-        .map_err(McpError::into_jsonrpc)?;
+    let result = (tool.handler)(ctx, args.clone()).await;
+    if let Some(id) = &cancel_id {
+        super::progress::deregister(id);
+    }
+    let result = result.map_err(McpError::into_jsonrpc)?;
 
     audit_tool_call(&pool, agent_id, &name, &args).await;
     Ok(call_tool_result(result))

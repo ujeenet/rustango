@@ -50,13 +50,33 @@ pub(crate) async fn handle_message(
     };
 
     if request.is_notification() {
-        // Slice 1 has no notification side effects (e.g. `notifications/
-        // initialized` is a no-op); just acknowledge.
+        // `notifications/cancelled { requestId }` trips the in-flight call's
+        // cancel token (#1090); other notifications (e.g. `initialized`) are
+        // no-ops. Either way a notification gets no JSON-RPC response.
+        if request.method == "notifications/cancelled" {
+            if let Some(rid) = request
+                .params
+                .as_ref()
+                .and_then(|p| p.get("requestId"))
+                .map(jsonrpc_id_string)
+            {
+                super::progress::cancel(&rid);
+            }
+        }
         return StatusCode::ACCEPTED.into_response();
     }
 
     let id = request.id.clone().unwrap_or(Value::Null);
-    match dispatch(state, &request.method, request.params, ctx).await {
+    let request_id = jsonrpc_id_string(&id);
+    match dispatch(
+        state,
+        &request.method,
+        request.params,
+        ctx,
+        Some(request_id.as_str()),
+    )
+    .await
+    {
         Ok(result) => Json(JsonRpcResponse::success(id, result)).into_response(),
         Err(err) => Json(JsonRpcResponse::failure(id, err)).into_response(),
     }
@@ -85,4 +105,13 @@ pub(crate) async fn sse_handler() -> impl IntoResponse {
 
 fn json_error(id: Value, error: JsonRpcError) -> Response {
     Json(JsonRpcResponse::failure(id, error)).into_response()
+}
+
+/// Normalize a JSON-RPC id (string or number) to a stable registry key so
+/// a `notifications/cancelled { requestId }` matches the in-flight call.
+fn jsonrpc_id_string(id: &Value) -> String {
+    match id {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }

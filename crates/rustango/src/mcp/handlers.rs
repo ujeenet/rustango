@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::pagination::paginate;
 use super::router::McpState;
-use super::tools::{call_tool, list_tools, McpContext};
+use super::tools::{list_tools, McpContext};
 
 /// Read the opaque `cursor` param for a `*/list` call, if present.
 fn cursor_of(params: &Option<Value>) -> Option<&str> {
@@ -30,6 +30,7 @@ pub(crate) async fn dispatch(
     method: &str,
     params: Option<Value>,
     ctx: Option<McpContext>,
+    request_id: Option<&str>,
 ) -> Result<Value, JsonRpcError> {
     match method {
         "initialize" => initialize(params),
@@ -45,7 +46,7 @@ pub(crate) async fn dispatch(
         }
         "tools/call" => {
             let ctx = ctx.ok_or_else(auth_required)?;
-            call_tool(ctx, params.unwrap_or_else(|| json!({}))).await
+            super::tools::call_tool_with(ctx, params.unwrap_or_else(|| json!({})), request_id).await
         }
         "prompts/list" => {
             let ctx = ctx.ok_or_else(auth_required)?;
