@@ -174,12 +174,16 @@ pub(crate) async fn post_authed(
     let Some(token) = bearer(&headers) else {
         return unauthorized();
     };
-    let Some(_agent) = verify_agent_token(jwt, token, &t.org.slug) else {
+    let Some(agent) = verify_agent_token(jwt, token, &t.org.slug) else {
         return unauthorized();
     };
-    // Agent verified + tenant-pinned. Slice 1's initialize/ping don't use
-    // the principal yet; Slice 3's `tools/call` will thread `_agent` in.
-    handle_message(&state, &body).await
+    // Agent verified + tenant-pinned: hand the tools layer the resolved
+    // tenant pool + principal so `tools/call` runs against the right tenant.
+    let ctx = super::tools::McpContext {
+        pool: t.pool().clone(),
+        agent,
+    };
+    handle_message(&state, &body, Some(ctx)).await
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {

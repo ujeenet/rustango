@@ -26,11 +26,18 @@
 pub mod auth;
 mod handlers;
 mod router;
+pub mod tools;
 mod transport;
 mod types;
 
 pub use auth::{issue_agent_token, verify_agent_token, McpAgent};
 pub use router::{router, secure_tenant_router, tenant_router, tenant_router_authed};
+pub use tools::{
+    call_tool, list_tools, McpContext, McpError, McpTool, McpToolFuture, McpToolHandler,
+};
+// Hidden, but must be `pub` for the `register_mcp_tool!` expansion.
+#[doc(hidden)]
+pub use tools::{JsonValue, __deserialize_args, __schema_of};
 pub use types::{
     codes, Implementation, InitializeResult, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
     ServerCapabilities, JSONRPC_VERSION, PROTOCOL_VERSION,

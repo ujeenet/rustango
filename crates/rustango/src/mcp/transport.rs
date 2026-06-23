@@ -23,13 +23,20 @@ use super::types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 ///   body, per JSON-RPC 2.0 §4.1.
 /// - A request gets a `200` JSON-RPC success/error response.
 pub(crate) async fn post_handler(State(state): State<McpState>, body: Bytes) -> Response {
-    handle_message(&state, &body).await
+    // Unauthed Slice-1 transport: no agent principal, so `tools/*` are
+    // refused with "authentication required".
+    handle_message(&state, &body, None).await
 }
 
 /// Parse + dispatch one JSON-RPC message and build the HTTP response.
 /// Shared by the unauthed handler above and the authed handler in
-/// [`super::auth`] (which runs agent-JWT verification first).
-pub(crate) async fn handle_message(state: &McpState, body: &[u8]) -> Response {
+/// [`super::auth`] (which runs agent-JWT verification first and passes the
+/// resolved [`McpContext`]).
+pub(crate) async fn handle_message(
+    state: &McpState,
+    body: &[u8],
+    ctx: Option<super::tools::McpContext>,
+) -> Response {
     // Two-step parse so a syntactically valid but structurally wrong
     // message still recovers its `id` for the error response.
     let value: Value = match serde_json::from_slice(body) {
@@ -49,7 +56,7 @@ pub(crate) async fn handle_message(state: &McpState, body: &[u8]) -> Response {
     }
 
     let id = request.id.clone().unwrap_or(Value::Null);
-    match dispatch(state, &request.method, request.params).await {
+    match dispatch(state, &request.method, request.params, ctx).await {
         Ok(result) => Json(JsonRpcResponse::success(id, result)).into_response(),
         Err(err) => Json(JsonRpcResponse::failure(id, err)).into_response(),
     }

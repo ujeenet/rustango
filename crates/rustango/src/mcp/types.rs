@@ -129,6 +129,11 @@ pub mod codes {
     pub const METHOD_NOT_FOUND: i64 = -32601;
     pub const INVALID_PARAMS: i64 = -32602;
     pub const INTERNAL_ERROR: i64 = -32603;
+    // MCP server-defined range (-32000..-32099).
+    /// `tools/call` named a tool that isn't registered.
+    pub const TOOL_NOT_FOUND: i64 = -32002;
+    /// `tools/call` named a tool the agent isn't authorized for.
+    pub const TOOL_FORBIDDEN: i64 = -32003;
 }
 
 // ------------------------------------------------------------- initialize

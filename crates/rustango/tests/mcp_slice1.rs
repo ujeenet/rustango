@@ -46,8 +46,11 @@ async fn initialize_handshake_returns_protocol_and_server_info() {
         rustango::mcp::PROTOCOL_VERSION
     );
     assert_eq!(body["result"]["serverInfo"]["name"], "rustango");
-    // Slice 1 advertises no capabilities yet → empty object.
-    assert_eq!(body["result"]["capabilities"], json!({}));
+    // Slice 3 lights up the `tools` capability.
+    assert_eq!(
+        body["result"]["capabilities"],
+        json!({ "tools": { "listChanged": false } })
+    );
     assert!(body.get("error").is_none());
 }
 
@@ -61,7 +64,8 @@ async fn ping_returns_empty_result() {
 
 #[tokio::test]
 async fn unknown_method_is_method_not_found() {
-    let (status, body) = post(json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call"})).await;
+    let (status, body) =
+        post(json!({"jsonrpc": "2.0", "id": 7, "method": "totally/unknown"})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["error"]["code"],
