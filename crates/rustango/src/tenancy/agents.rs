@@ -338,7 +338,10 @@ pub struct AgentSkillTool {
 
 /// A skill granted to an agent. `UNIQUE(agent_id, skill_id)`.
 #[derive(crate::Model, Debug, Clone)]
-#[rustango(table = "rustango_agent_grants")]
+#[rustango(
+    table = "rustango_agent_grants",
+    admin(list_display = "agent_id, skill_id", ordering = "agent_id")
+)]
 pub struct AgentGrant {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

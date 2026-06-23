@@ -46,11 +46,14 @@ async fn initialize_handshake_returns_protocol_and_server_info() {
         rustango::mcp::PROTOCOL_VERSION
     );
     assert_eq!(body["result"]["serverInfo"]["name"], "rustango");
-    // Slice 3 lights up the `tools` capability.
+    // Slices 3 + 5 advertise tools / prompts / resources (asserted
+    // individually so new capabilities don't break this).
     assert_eq!(
-        body["result"]["capabilities"],
-        json!({ "tools": { "listChanged": false } })
+        body["result"]["capabilities"]["tools"]["listChanged"],
+        false
     );
+    assert!(body["result"]["capabilities"]["prompts"].is_object());
+    assert!(body["result"]["capabilities"]["resources"].is_object());
     assert!(body.get("error").is_none());
 }
 

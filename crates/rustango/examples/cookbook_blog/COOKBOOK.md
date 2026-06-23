@@ -3235,3 +3235,104 @@ load_all_pool` / `Fixture::load_into_pool` all run on any backend.
   just the test models. A `Dialect::supports_model(&ModelSchema)`
   filter (or per-model dialect-compat flag) would let
   `apply_all_pool` skip incompatible models cleanly.
+
+---
+
+## Chapter 17 — v0.43 — MCP server: expose tools to ML agents
+
+The `mcp` feature turns a rustango app into a **Model Context Protocol**
+server: external ML agents authenticate as tenant-scoped identities, are
+granted **skills** (bundles of tools + a prompt + resources), and call
+your framework-exposed **tools** over JSON-RPC 2.0 / Streamable HTTP.
+
+```toml
+# Cargo.toml
+rustango = { version = "0.43", features = ["mcp"] }
+# mcp pulls tenancy + sse + serializer + openapi automatically.
+```
+
+### 1. Register a tool
+
+A tool is a typed-input async handler registered at compile time. The
+input type provides the MCP `inputSchema` (via `OpenApiSchema`) and is
+used to validate arguments before the handler runs.
+
+```rust
+use rustango::mcp::{McpContext, McpError};
+use rustango::openapi::{OpenApiSchema, Schema};
+
+#[derive(serde::Deserialize)]
+struct AddInput { a: i64, b: i64 }
+
+impl OpenApiSchema for AddInput {
+    fn openapi_schema() -> Schema {
+        Schema::object()
+            .property("a", Schema::integer())
+            .property("b", Schema::integer())
+            .required(["a", "b"])
+    }
+}
+
+rustango::register_mcp_tool!(
+    "math.add", "Add two integers", AddInput,
+    |ctx: McpContext, input: AddInput| async move {
+        // `ctx.pool` is the caller's tenant pool; `ctx.agent` the principal.
+        let _ = &ctx.pool;
+        Ok::<_, McpError>(serde_json::json!({ "sum": input.a + input.b }))
+    },
+);
+```
+
+A static, always-available resource:
+
+```rust
+rustango::register_mcp_resource!(
+    "rustango://about", "About", "text/plain",
+    || "This server is powered by rustango.".to_string(),
+);
+```
+
+### 2. Mount the router (multi-tenant)
+
+```rust
+let api = axum::Router::new()
+    .nest("/mcp", rustango::mcp::secure_tenant_router());  // agent-guarded
+// or from settings: rustango::mcp::secure_tenant_router_from_settings(&settings.mcp)
+```
+
+`secure_tenant_router` adds `POST /mcp/token` (credential exchange) and
+guards the JSON-RPC `POST /mcp` behind a tenant-pinned agent JWT, signed
+with `RUSTANGO_SESSION_SECRET`.
+
+### 3. Provision agents + skills (CLI)
+
+```sh
+manage create-agent  acme ci-bot              # prints a one-time secret
+manage create-skill  acme math --name "Math" --tools math.add \
+                       --instructions "You can do arithmetic."
+manage grant-skill   acme ci-bot math         # ci-bot can now call math.add
+manage list-agents   acme
+manage list-skills   acme
+manage rotate-agent-secret acme ci-bot        # new secret; old one dies
+manage revoke-skill  acme ci-bot math
+```
+
+### 4. The agent's flow
+
+```text
+POST /mcp/token  {"name":"ci-bot","secret":"<prefix.secret>"}
+   → { "access_token": "<jwt>", "token_type": "Bearer", "expires_in": 900 }
+
+POST /mcp   Authorization: Bearer <jwt>
+   initialize → capabilities
+   tools/list → only the tools the agent's skills grant
+   tools/call {"name":"math.add","arguments":{"a":2,"b":3}} → {"sum":5}
+   prompts/get {"name":"math"} → the skill's instructions
+   resources/read {"uri":"rustango://about"} → the resource body
+```
+
+Authorization is **fail-closed**: a tool/prompt/resource outside the
+agent's granted skills is never listed and never executed, and a token
+minted for tenant A is refused on tenant B. Every `tools/call` is
+audited. Configure the mount prefix, token TTL, SSE, CORS, and rate
+limit under `[mcp]` in your settings file.

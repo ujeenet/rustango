@@ -219,7 +219,15 @@ fn unauthorized() -> Response {
 /// falling back to a per-process random key with a warning so dev still
 /// works but operators are nudged to set a stable secret.
 pub(crate) fn default_jwt() -> Arc<JwtLifecycle> {
-    let secret = std::env::var("RUSTANGO_SESSION_SECRET")
+    Arc::new(JwtLifecycle::new(jwt_secret()))
+}
+
+/// HMAC key for MCP agent tokens — `RUSTANGO_SESSION_SECRET` (shared with
+/// the rest of the framework), falling back to a per-process random key
+/// with a warning so dev works but operators are nudged to set a stable
+/// secret. `manage check --deploy` flags the missing/short secret.
+pub(crate) fn jwt_secret() -> Vec<u8> {
+    std::env::var("RUSTANGO_SESSION_SECRET")
         .ok()
         .map(String::into_bytes)
         .filter(|s| s.len() >= 32)
@@ -233,6 +241,5 @@ pub(crate) fn default_jwt() -> Arc<JwtLifecycle> {
             let mut key = vec![0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut key);
             key
-        });
-    Arc::new(JwtLifecycle::new(secret))
+        })
 }
