@@ -120,10 +120,25 @@ pub fn tenant_bootstrap_migration_for<U: TenantUserModel>() -> Migration {
     }
 }
 
-/// Snapshot containing **all three** tenancy tables, regardless of
-/// scope. Both bootstrap migrations share this snapshot so the
-/// lex-greatest one (`0001_rustango_tenant_initial`) leaves the
+/// Snapshot containing **all** the framework's per-tenant tables,
+/// regardless of scope. Both bootstrap migrations share this snapshot
+/// so the lex-greatest one (`0001_rustango_tenant_initial`) leaves the
 /// world looking complete to a downstream `make_migrations`.
+///
+/// This includes the MCP agent/skill tables (`rustango_agents`,
+/// `rustango_agent_skills`, `…_skill_tools`, `…_agent_grants`,
+/// `…_skill_resources`) — they're plain tenancy models (not gated behind
+/// the `mcp` feature; only the *server* in `crate::mcp` is). They are also
+/// created on demand by `ensure_*_table_pool` the first time the MCP layer
+/// touches them, so runtime is unaffected whether or not the bootstrap
+/// migration that contains them has been applied.
+///
+/// **Upgrade note (epic #1013):** projects that ran `init_tenancy` before
+/// these models existed have bootstrap JSON on disk *without* the agent
+/// tables, so the next `make_migrations` may report an `AddTable` drift for
+/// them. Either is safe: run `make_migrations` to capture the new tables in a
+/// follow-up migration, or ignore it — `ensure_*_table_pool` creates them
+/// lazily at first use regardless.
 fn full_snapshot_for<U: TenantUserModel>() -> SchemaSnapshot {
     if let Err(e) = validate_tenant_user_schema(&U::SCHEMA) {
         panic!("invalid TenantUserModel: {e}");
