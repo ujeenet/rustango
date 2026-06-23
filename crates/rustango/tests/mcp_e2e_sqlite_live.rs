@@ -90,7 +90,7 @@ async fn full_agent_loop() {
     .expect("resource");
 
     // 3. Grant the skill to the agent.
-    grant_skill_pool(&pool, "e2e-bot", "greeter")
+    grant_skill_pool(&pool, "acme", "e2e-bot", "greeter")
         .await
         .expect("grant");
 

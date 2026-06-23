@@ -205,7 +205,7 @@ where
 {
     let (slug, agent, skill) = three_positionals(args, "grant-skill", GRANT_HELP)?;
     let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
-    crate::tenancy::grant_skill_pool(&scoped, &agent, &skill)
+    crate::tenancy::grant_skill_pool(&scoped, &slug, &agent, &skill)
         .await
         .map_err(|e| TenancyError::Validation(e.to_string()))?;
     writeln!(
@@ -227,7 +227,7 @@ where
 {
     let (slug, agent, skill) = three_positionals(args, "revoke-skill", REVOKE_HELP)?;
     let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
-    crate::tenancy::revoke_skill_pool(&scoped, &agent, &skill)
+    crate::tenancy::revoke_skill_pool(&scoped, &slug, &agent, &skill)
         .await
         .map_err(|e| TenancyError::Validation(e.to_string()))?;
     writeln!(

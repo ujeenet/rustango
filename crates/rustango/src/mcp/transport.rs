@@ -82,16 +82,38 @@ pub(crate) async fn handle_message(
     }
 }
 
-/// `GET {prefix}` — open an SSE stream that relays server→client
-/// notification frames published on the [`McpState`] bus. Slice 1 sends
-/// nothing; the stream stays open with keep-alive pings so follow-up
-/// slices have a channel to push on.
-pub(crate) async fn sse_handler() -> impl IntoResponse {
+/// `GET {prefix}` — authenticated SSE stream relaying server→client
+/// notifications for the **connected agent only** (#1092). Requires the same
+/// tenant-pinned agent Bearer as the JSON-RPC endpoint, then filters the
+/// process-global bus so an agent never sees another agent's / tenant's
+/// `progress` or `list_changed` frames.
+pub(crate) async fn sse_handler(
+    t: crate::extractors::Tenant,
+    axum::extract::State(state): axum::extract::State<McpState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let Some(jwt) = state.jwt.as_ref() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "mcp auth not configured").into_response();
+    };
+    let Some(token) = super::auth::bearer(&headers) else {
+        return super::auth::unauthorized(&headers);
+    };
+    let Some(agent) = super::auth::verify_agent_token(jwt, token, &t.org.slug) else {
+        return super::auth::unauthorized(&headers);
+    };
+    let tenant = agent.tenant.clone();
+    let agent_id = agent.agent_id;
+
     let mut rx = super::notifications::bus().subscribe();
     let stream = async_stream::stream! {
         loop {
             match rx.recv().await {
-                Ok(frame) => yield Ok::<Event, std::convert::Infallible>(Event::default().data(frame)),
+                Ok(frame) => {
+                    if super::notifications::frame_visible(&frame, &tenant, agent_id) {
+                        yield Ok::<Event, std::convert::Infallible>(Event::default().data(frame.body));
+                    }
+                    // else: not for this agent — drop silently.
+                }
                 // Slow consumer fell behind the buffer — skip and continue
                 // rather than tearing the connection down.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -100,7 +122,9 @@ pub(crate) async fn sse_handler() -> impl IntoResponse {
             }
         }
     };
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 fn json_error(id: Value, error: JsonRpcError) -> Response {

@@ -18,11 +18,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{json, Value};
 
-/// Emits `notifications/progress` for a call's `progressToken`. A reporter
-/// with no token (the default) is a silent no-op.
+/// Emits `notifications/progress` for a call's `progressToken`, scoped to the
+/// calling agent so frames never leak to other agents/tenants (#1092). A
+/// reporter with no token (the default) is a silent no-op.
 #[derive(Clone, Default)]
 pub struct ProgressReporter {
     token: Option<Value>,
+    tenant: String,
+    agent_id: i64,
 }
 
 impl ProgressReporter {
@@ -32,8 +35,14 @@ impl ProgressReporter {
         Self::default()
     }
 
-    pub(crate) fn with_token(token: Option<Value>) -> Self {
-        Self { token }
+    /// A reporter bound to the calling agent. `token` is the call's
+    /// `_meta.progressToken` (`None` ⇒ no-op).
+    pub(crate) fn for_agent(token: Option<Value>, tenant: String, agent_id: i64) -> Self {
+        Self {
+            token,
+            tenant,
+            agent_id,
+        }
     }
 
     /// `true` if the caller requested progress (a token is present).
@@ -42,7 +51,8 @@ impl ProgressReporter {
         self.token.is_some()
     }
 
-    /// Emit one progress update. No-op when there's no token.
+    /// Emit one progress update. No-op when there's no token. The frame is
+    /// scoped to the calling agent (only that agent's SSE stream sees it).
     pub fn report(&self, progress: f64, total: Option<f64>, message: Option<&str>) {
         let Some(token) = &self.token else { return };
         let mut params = json!({ "progressToken": token, "progress": progress });
@@ -52,13 +62,17 @@ impl ProgressReporter {
         if let Some(m) = message {
             params["message"] = json!(m);
         }
-        let frame = json!({
+        let body = json!({
             "jsonrpc": "2.0",
             "method": "notifications/progress",
             "params": params,
         })
         .to_string();
-        super::notifications::bus().send(frame);
+        super::notifications::bus().send(super::notifications::ScopedFrame {
+            tenant: self.tenant.clone(),
+            agent_id: Some(self.agent_id),
+            body,
+        });
     }
 }
 
@@ -153,14 +167,20 @@ mod tests {
     async fn progress_emits_when_token_present_and_silent_otherwise() {
         let mut rx = super::super::notifications::bus().subscribe();
         ProgressReporter::disabled().report(0.5, Some(1.0), Some("half"));
-        ProgressReporter::with_token(Some(json!("p1-unit"))).report(0.5, Some(1.0), Some("half"));
+        ProgressReporter::for_agent(Some(json!("p1-unit")), "acme".into(), 5).report(
+            0.5,
+            Some(1.0),
+            Some("half"),
+        );
         // The notification bus is process-global; parallel tests share it, so
         // scan for *our* frame rather than assuming it's first.
         for _ in 0..200 {
             let Ok(frame) = rx.recv().await else { continue };
-            let v: Value = serde_json::from_str(&frame).unwrap();
+            let v: Value = serde_json::from_str(&frame.body).unwrap();
             if v["method"] == "notifications/progress" && v["params"]["progressToken"] == "p1-unit"
             {
+                assert_eq!(frame.tenant, "acme");
+                assert_eq!(frame.agent_id, Some(5));
                 assert_eq!(v["params"]["progress"], 0.5);
                 return;
             }

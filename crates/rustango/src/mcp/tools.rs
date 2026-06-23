@@ -188,8 +188,11 @@ pub(crate) async fn call_tool_with(
 
     // Wire progress (from `_meta.progressToken`) + cancellation (keyed by the
     // JSON-RPC request id) for the duration of the call.
-    ctx.progress =
-        super::progress::ProgressReporter::with_token(super::progress::progress_token(&params));
+    ctx.progress = super::progress::ProgressReporter::for_agent(
+        super::progress::progress_token(&params),
+        ctx.agent.tenant.clone(),
+        ctx.agent.agent_id,
+    );
     let cancel_id = request_id.map(str::to_owned);
     if let Some(id) = &cancel_id {
         ctx.cancel = super::progress::register(id);
