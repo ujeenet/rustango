@@ -230,7 +230,7 @@ pub(crate) async fn post_authed(
     handle_message(&state, &body, Some(ctx)).await
 }
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)?
         .to_str()
@@ -242,7 +242,7 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 /// `401` with an RFC 9728 `WWW-Authenticate: Bearer resource_metadata=…`
 /// challenge so spec-compliant MCP clients can discover the auth server
 /// (#1088). Points at the origin-root protected-resource metadata.
-fn unauthorized(headers: &HeaderMap) -> Response {
+pub(crate) fn unauthorized(headers: &HeaderMap) -> Response {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())

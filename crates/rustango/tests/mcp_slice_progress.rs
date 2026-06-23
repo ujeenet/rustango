@@ -63,10 +63,13 @@ async fn progress_notifications_are_emitted_for_a_progress_token() {
     .expect("call");
     assert_eq!(out["structuredContent"]["done"], true);
 
-    // Two progress frames should have been pushed for pt-1.
+    // Two progress frames should have been pushed for pt-1, scoped to this
+    // agent (tenant "acme", agent_id 1 — see `ctx()`).
     let mut seen = 0;
     while let Ok(frame) = rx.try_recv() {
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame.tenant, "acme");
+        assert_eq!(frame.agent_id, Some(1));
+        let v: serde_json::Value = serde_json::from_str(&frame.body).unwrap();
         if v["method"] == "notifications/progress" && v["params"]["progressToken"] == "pt-1" {
             seen += 1;
         }

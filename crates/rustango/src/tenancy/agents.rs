@@ -518,6 +518,7 @@ pub async fn list_skills_pool(pool: &Pool) -> Result<Vec<AgentSkill>, AgentError
 /// [`AgentError::NotFound`] if the agent or skill doesn't exist.
 pub async fn grant_skill_pool(
     pool: &Pool,
+    slug: &str,
     agent_name: &str,
     skill_codename: &str,
 ) -> Result<(), AgentError> {
@@ -543,6 +544,7 @@ pub async fn grant_skill_pool(
             data: serde_json::json!({}),
         };
         grant.insert_pool(pool).await?;
+        notify_grants_changed(slug, agent_id);
     }
     Ok(())
 }
@@ -553,6 +555,7 @@ pub async fn grant_skill_pool(
 /// [`AgentError::NotFound`] if the agent or skill doesn't exist.
 pub async fn revoke_skill_pool(
     pool: &Pool,
+    slug: &str,
     agent_name: &str,
     skill_codename: &str,
 ) -> Result<(), AgentError> {
@@ -568,10 +571,28 @@ pub async fn revoke_skill_pool(
         .where_(AgentGrant::skill_id.eq(skill_id))
         .fetch(pool)
         .await?;
+    let had_grant = !grants.is_empty();
     for grant in grants {
         grant.delete_pool(pool).await?;
     }
+    if had_grant {
+        notify_grants_changed(slug, agent_id);
+    }
     Ok(())
+}
+
+/// Notify in-process MCP clients that an agent's granted tools / prompts /
+/// resources changed (review fix #1093). No-op without the `mcp` feature and
+/// a no-op in a separate process (e.g. the `manage` CLI) — see the
+/// notifications module's cross-process caveat.
+#[allow(unused_variables)]
+fn notify_grants_changed(slug: &str, agent_id: i64) {
+    #[cfg(feature = "mcp")]
+    {
+        crate::mcp::notify_tools_list_changed(slug, Some(agent_id));
+        crate::mcp::notify_prompts_list_changed(slug, Some(agent_id));
+        crate::mcp::notify_resources_list_changed(slug, Some(agent_id));
+    }
 }
 
 /// Resolve `(agent_id, skill_id)` from human identifiers, erroring if either
