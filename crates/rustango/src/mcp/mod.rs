@@ -25,6 +25,7 @@
 
 pub mod auth;
 mod handlers;
+pub mod pagination;
 pub mod resources;
 mod router;
 pub mod tools;

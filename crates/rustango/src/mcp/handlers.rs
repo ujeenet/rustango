@@ -5,8 +5,17 @@
 
 use serde_json::{json, Value};
 
+use super::pagination::paginate;
 use super::router::McpState;
 use super::tools::{call_tool, list_tools, McpContext};
+
+/// Read the opaque `cursor` param for a `*/list` call, if present.
+fn cursor_of(params: &Option<Value>) -> Option<&str> {
+    params
+        .as_ref()
+        .and_then(|p| p.get("cursor"))
+        .and_then(Value::as_str)
+}
 use super::types::{
     codes, Implementation, InitializeResult, JsonRpcError, ServerCapabilities, PROTOCOL_VERSION,
 };
@@ -17,7 +26,7 @@ use super::types::{
 /// tenant router, `None` on the unauthed Slice-1 routers. `initialize` /
 /// `ping` don't need it; the `tools/*` methods require it (fail-closed).
 pub(crate) async fn dispatch(
-    _state: &McpState,
+    state: &McpState,
     method: &str,
     params: Option<Value>,
     ctx: Option<McpContext>,
@@ -27,7 +36,12 @@ pub(crate) async fn dispatch(
         "ping" => Ok(json!({})),
         "tools/list" => {
             let ctx = ctx.ok_or_else(auth_required)?;
-            Ok(list_tools(&ctx.agent))
+            paginate(
+                list_tools(&ctx.agent),
+                "tools",
+                cursor_of(&params),
+                state.page_size,
+            )
         }
         "tools/call" => {
             let ctx = ctx.ok_or_else(auth_required)?;
@@ -35,7 +49,8 @@ pub(crate) async fn dispatch(
         }
         "prompts/list" => {
             let ctx = ctx.ok_or_else(auth_required)?;
-            super::resources::list_prompts(&ctx).await
+            let full = super::resources::list_prompts(&ctx).await?;
+            paginate(full, "prompts", cursor_of(&params), state.page_size)
         }
         "prompts/get" => {
             let ctx = ctx.ok_or_else(auth_required)?;
@@ -43,7 +58,8 @@ pub(crate) async fn dispatch(
         }
         "resources/list" => {
             let ctx = ctx.ok_or_else(auth_required)?;
-            super::resources::list_resources(&ctx).await
+            let full = super::resources::list_resources(&ctx).await?;
+            paginate(full, "resources", cursor_of(&params), state.page_size)
         }
         "resources/read" => {
             let ctx = ctx.ok_or_else(auth_required)?;

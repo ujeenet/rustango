@@ -35,6 +35,9 @@ pub(crate) struct McpState {
     /// Agent-JWT lifecycle (Slice 2). `Some` on the authed tenant router;
     /// `None` on the unauthed Slice-1 routers.
     pub(crate) jwt: Option<Arc<JwtLifecycle>>,
+    /// Page size for the `*/list` methods (`[mcp].max_tools_listed`).
+    /// `None`/0 ⇒ pagination off (single page). Follow-up #1089.
+    pub(crate) page_size: Option<usize>,
 }
 
 impl McpState {
@@ -45,6 +48,7 @@ impl McpState {
             // client doesn't immediately lag out of the broadcast window.
             bus: EventBus::new(256),
             jwt: None,
+            page_size: None,
         }
     }
 }
@@ -89,7 +93,15 @@ pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings)
     let jwt = Arc::new(
         JwtLifecycle::new(super::auth::jwt_secret()).with_access_ttl(settings.token_ttl_secs()),
     );
-    tenant_router_authed(jwt)
+    let state = McpState {
+        jwt: Some(jwt),
+        page_size: settings.max_tools_listed,
+        ..McpState::new(None)
+    };
+    Router::new()
+        .route("/", post(post_authed).get(sse_handler))
+        .route("/token", post(agent_token))
+        .with_state(state)
 }
 
 /// Like [`secure_tenant_router`] but with a caller-supplied
