@@ -90,16 +90,17 @@ pub(crate) async fn handle_message(
 pub(crate) async fn sse_handler(
     t: crate::extractors::Tenant,
     axum::extract::State(state): axum::extract::State<McpState>,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: axum::http::HeaderMap,
 ) -> Response {
     let Some(jwt) = state.jwt.as_ref() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "mcp auth not configured").into_response();
     };
     let Some(token) = super::auth::bearer(&headers) else {
-        return super::auth::unauthorized(&headers);
+        return super::auth::unauthorized(&headers, &uri);
     };
     let Some(agent) = super::auth::verify_agent_token(jwt, token, &t.org.slug) else {
-        return super::auth::unauthorized(&headers);
+        return super::auth::unauthorized(&headers, &uri);
     };
     let tenant = agent.tenant.clone();
     let agent_id = agent.agent_id;

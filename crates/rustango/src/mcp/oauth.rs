@@ -14,11 +14,14 @@
 //!   exchanges `client_id`/`client_secret` (its name/secret) for the same
 //!   scoped JWT the bespoke `/token` issues.
 //!
-//! For strict RFC layout the `.well-known/*` documents belong at the origin
-//! root; the handlers are `pub` so an app can also mount them there.
+//! The advertised URLs track the actual mount prefix via the request's
+//! [`axum::extract::OriginalUri`] (#1094), so they stay correct whether the
+//! MCP router is nested under `/mcp`, `/api/mcp`, or the origin root. Apps that
+//! prefer the strict-RFC origin-root layout can additionally re-serve these
+//! `.well-known/*` documents at `/` themselves.
 
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Form, Json};
 use serde::Deserialize;
@@ -52,30 +55,14 @@ pub fn authorization_server_metadata(issuer: &str, token_endpoint: &str) -> Valu
     })
 }
 
-/// Best-effort origin (`scheme://host`) from request headers. Honors
-/// `X-Forwarded-Proto`; defaults to `http` for localhost, `https` otherwise.
-fn origin(headers: &HeaderMap) -> String {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("localhost");
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|h| h.to_str().ok())
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            if host.starts_with("localhost") || host.starts_with("127.") {
-                "http".into()
-            } else {
-                "https".into()
-            }
-        });
-    format!("{scheme}://{host}")
-}
-
-/// `GET {prefix}/.well-known/oauth-protected-resource`
-pub(crate) async fn well_known_protected_resource(headers: HeaderMap) -> Response {
-    let base = origin(&headers);
+/// `GET {prefix}/.well-known/oauth-protected-resource`. URLs track the real
+/// mount prefix via [`OriginalUri`] (#1094): the `resource` is `{origin}{prefix}`
+/// and the authorization server points back under the same prefix.
+pub(crate) async fn well_known_protected_resource(
+    headers: HeaderMap,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+) -> Response {
+    let base = super::auth::mount_base(&headers, &uri, "/.well-known/oauth-protected-resource");
     Json(protected_resource_metadata(
         &base,
         &format!("{base}/.well-known/oauth-authorization-server"),
@@ -83,9 +70,13 @@ pub(crate) async fn well_known_protected_resource(headers: HeaderMap) -> Respons
     .into_response()
 }
 
-/// `GET {prefix}/.well-known/oauth-authorization-server`
-pub(crate) async fn well_known_authorization_server(headers: HeaderMap) -> Response {
-    let base = origin(&headers);
+/// `GET {prefix}/.well-known/oauth-authorization-server`. URLs track the real
+/// mount prefix via [`OriginalUri`] (#1094).
+pub(crate) async fn well_known_authorization_server(
+    headers: HeaderMap,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+) -> Response {
+    let base = super::auth::mount_base(&headers, &uri, "/.well-known/oauth-authorization-server");
     Json(authorization_server_metadata(
         &base,
         &format!("{base}/oauth/token"),
