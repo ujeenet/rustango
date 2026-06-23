@@ -21,9 +21,10 @@
 //! `.well-known/*` documents at `/` themselves.
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Form, Json};
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -49,7 +50,7 @@ pub fn authorization_server_metadata(issuer: &str, token_endpoint: &str) -> Valu
         "issuer": issuer,
         "token_endpoint": token_endpoint,
         "grant_types_supported": ["client_credentials"],
-        "token_endpoint_auth_methods_supported": ["client_secret_post"],
+        "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
         "response_types_supported": [],
         "scopes_supported": [],
     })
@@ -87,19 +88,37 @@ pub(crate) async fn well_known_authorization_server(
 #[derive(Debug, Deserialize)]
 pub(crate) struct OAuthTokenForm {
     pub grant_type: String,
-    pub client_id: String,
-    pub client_secret: String,
+    // Optional in the body: RFC 6749 §2.3.1 allows the client to authenticate
+    // via HTTP Basic instead (`client_secret_basic`). Required if Basic is absent.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub client_secret: Option<String>,
     #[serde(default)]
     #[allow(dead_code)] // accepted for spec-compliance; scope is derived from grants
     pub scope: Option<String>,
 }
 
+/// Decode an `Authorization: Basic base64(client_id:client_secret)` header
+/// (RFC 6749 §2.3.1 / RFC 7617). `None` if absent or malformed.
+fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
+    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let b64 = raw.strip_prefix("Basic ")?.trim();
+    let decoded = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let creds = String::from_utf8(decoded).ok()?;
+    let (id, secret) = creds.split_once(':')?;
+    Some((id.to_owned(), secret.to_owned()))
+}
+
 /// `POST {prefix}/oauth/token` — OAuth 2.1 client-credentials grant. The
-/// `client_id` / `client_secret` are the agent's name / secret; the issued
-/// access token is the same scoped JWT as the bespoke endpoint.
+/// `client_id` / `client_secret` are the agent's name / secret, supplied either
+/// via HTTP Basic (`client_secret_basic`, preferred) or form fields
+/// (`client_secret_post`). The issued access token is the same scoped JWT as
+/// the bespoke endpoint.
 pub(crate) async fn oauth_token(
     t: Tenant,
     State(state): State<McpState>,
+    headers: HeaderMap,
     Form(form): Form<OAuthTokenForm>,
 ) -> Response {
     let Some(jwt) = state.jwt.as_ref() else {
@@ -116,15 +135,19 @@ pub(crate) async fn oauth_token(
             "only client_credentials is supported",
         );
     }
-    match mint_agent_jwt(
-        jwt,
-        t.pool(),
-        &t.org.slug,
-        &form.client_id,
-        &form.client_secret,
-    )
-    .await
-    {
+    // HTTP Basic wins over body params (RFC 6749 §2.3.1).
+    let creds = basic_auth(&headers).or_else(|| match (form.client_id, form.client_secret) {
+        (Some(id), Some(secret)) => Some((id, secret)),
+        _ => None,
+    });
+    let Some((client_id, client_secret)) = creds else {
+        return oauth_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            "missing client credentials (HTTP Basic or client_id/client_secret)",
+        );
+    };
+    match mint_agent_jwt(jwt, t.pool(), &t.org.slug, &client_id, &client_secret).await {
         Ok(m) => Json(json!({
             "access_token": m.token,
             "token_type": "Bearer",
@@ -175,5 +198,37 @@ mod tests {
         assert_eq!(asm["issuer"], "https://app.example");
         assert_eq!(asm["token_endpoint"], "https://app.example/oauth/token");
         assert_eq!(asm["grant_types_supported"][0], "client_credentials");
+        // Both client-auth methods are advertised (#1099: Basic + post).
+        let methods = asm["token_endpoint_auth_methods_supported"]
+            .as_array()
+            .unwrap();
+        assert!(methods.iter().any(|m| m == "client_secret_basic"));
+        assert!(methods.iter().any(|m| m == "client_secret_post"));
+    }
+
+    #[test]
+    fn basic_auth_decodes_client_credentials() {
+        let mut h = HeaderMap::new();
+        // base64("bot:s3cret") = "Ym90OnMzY3JldA=="
+        let b64 = base64::engine::general_purpose::STANDARD.encode("bot:s3cret");
+        h.insert(
+            header::AUTHORIZATION,
+            format!("Basic {b64}").parse().unwrap(),
+        );
+        assert_eq!(
+            basic_auth(&h),
+            Some(("bot".to_owned(), "s3cret".to_owned()))
+        );
+
+        // Secret may itself contain ':' — only the first split counts.
+        let b64 = base64::engine::general_purpose::STANDARD.encode("bot:a:b");
+        h.insert(
+            header::AUTHORIZATION,
+            format!("Basic {b64}").parse().unwrap(),
+        );
+        assert_eq!(basic_auth(&h), Some(("bot".to_owned(), "a:b".to_owned())));
+
+        // Missing / non-Basic → None.
+        assert_eq!(basic_auth(&HeaderMap::new()), None);
     }
 }
