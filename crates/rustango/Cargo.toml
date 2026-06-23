@@ -131,6 +131,13 @@ sse = ["dep:tokio"]
 # tokio-tungstenite via the `axum/ws` feature.
 websocket = ["admin", "sse", "axum/ws"]
 
+# Model Context Protocol server (`rustango::mcp`) — expose tools / prompts
+# / resources to external ML agents over JSON-RPC 2.0 + Streamable HTTP.
+# Tenant-scoped agent identities + scoped-JWT auth (Slice 2+). `tenancy`
+# brings the agent/skill models + per-request pool; `sse` the server→client
+# notification bus; `serializer`/`openapi` the tool inputSchema. Epic #1013.
+mcp = ["tenancy", "sse", "serializer", "openapi", "dep:axum", "dep:tokio", "dep:async-stream"]
+
 # OAuth2 / OIDC swiss-knife (`rustango::oauth2`) — works for pure OAuth2
 # providers (GitHub, Discord) AND OIDC providers (Google, Microsoft,
 # Apple, Keycloak) via the `/userinfo` endpoint as identity source.
@@ -383,6 +390,10 @@ uuid         = { workspace = true }
 
 # `config` feature dep — optional.
 toml = { workspace = true, optional = true }
+
+# `mcp` feature dep — optional. SSE stream macro for the server→client
+# notification channel (same crate the `sse` module's docs point at).
+async-stream = { workspace = true, optional = true }
 
 # `admin` feature deps — optional.
 axum           = { workspace = true, optional = true }

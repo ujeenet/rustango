@@ -69,6 +69,9 @@ time = ">=0.3, <0.3.48"
 # Async-trait for dyn-dispatchable async traits (e.g. OrgResolver)
 async-trait = "0.1"
 
+# SSE stream macro — used by the `mcp` feature's server→client channel.
+async-stream = "0.3"
+
 # HTTP types — used by rustango-tenancy resolvers to inspect request parts
 http = "1"
 
