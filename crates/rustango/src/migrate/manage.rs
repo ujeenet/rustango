@@ -4284,6 +4284,37 @@ pub fn settings_audit_check(
             ));
         }
     }
+
+    // [mcp] deploy audit (#1099) — only when the MCP server is compiled in.
+    // The agent-token HMAC key (RUSTANGO_SESSION_SECRET) is already audited in
+    // the env pass; here we flag MCP-specific config that affects access.
+    if crate::config::Settings::detected_features()
+        .iter()
+        .any(|f| *f == "mcp")
+    {
+        if settings.mcp.allowed_origins.is_empty() {
+            out.info.push(
+                "[mcp] allowed_origins = [] in prod tier — the MCP endpoint is same-origin only. \
+                 If browser-based agents call it cross-origin, populate the CORS allow-list; \
+                 server-to-server agents (no browser) don't need it."
+                    .into(),
+            );
+        }
+        if matches!(settings.mcp.enable_sse, Some(false)) {
+            out.info.push(
+                "[mcp] enable_sse = false in prod tier — no server→client notifications \
+                 (list_changed / progress); agents must re-list to observe capability changes."
+                    .into(),
+            );
+        }
+        if settings.mcp.rate_limit_per_minute.is_none() {
+            out.info.push(
+                "[mcp] rate_limit_per_minute unset in prod tier — the agent token + JSON-RPC \
+                 endpoints are unthrottled. Set a per-IP cap to blunt credential-stuffing / abuse."
+                    .into(),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
