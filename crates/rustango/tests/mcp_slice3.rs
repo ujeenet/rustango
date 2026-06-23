@@ -42,6 +42,19 @@ rustango::register_mcp_tool!(
     },
 );
 
+// A tool that panics — must be caught and surfaced as an internal error
+// (#1096), not unwound into the transport.
+rustango::register_mcp_tool!(
+    "boom",
+    "Panics on purpose",
+    AddInput,
+    |_ctx: McpContext, _input: AddInput| async move {
+        panic!("kaboom");
+        #[allow(unreachable_code)]
+        Ok::<_, McpError>(json!({}))
+    },
+);
+
 async fn ctx_with_tools(tools: &[&str]) -> McpContext {
     let pool = Pool::Sqlite(
         sqlx::SqlitePool::connect("sqlite::memory:")
@@ -116,6 +129,19 @@ async fn tool_outside_agent_set_is_forbidden() {
     .await
     .expect_err("forbidden");
     assert_eq!(err.code, rustango::mcp::codes::TOOL_FORBIDDEN);
+}
+
+#[tokio::test]
+async fn panicking_handler_becomes_internal_error_not_unwind() {
+    let ctx = ctx_with_tools(&["boom"]).await;
+    let err = call_tool(
+        ctx,
+        json!({ "name": "boom", "arguments": { "a": 1, "b": 2 } }),
+    )
+    .await
+    .expect_err("panic is caught and converted to an error");
+    assert_eq!(err.code, rustango::mcp::codes::INTERNAL_ERROR);
+    assert!(err.message.contains("panicked"));
 }
 
 #[tokio::test]
