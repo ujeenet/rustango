@@ -153,12 +153,19 @@ mod tests {
     async fn progress_emits_when_token_present_and_silent_otherwise() {
         let mut rx = super::super::notifications::bus().subscribe();
         ProgressReporter::disabled().report(0.5, Some(1.0), Some("half"));
-        ProgressReporter::with_token(Some(json!("p1"))).report(0.5, Some(1.0), Some("half"));
-        let frame = rx.recv().await.unwrap(); // only the active reporter emitted
-        let v: Value = serde_json::from_str(&frame).unwrap();
-        assert_eq!(v["method"], "notifications/progress");
-        assert_eq!(v["params"]["progressToken"], "p1");
-        assert_eq!(v["params"]["progress"], 0.5);
+        ProgressReporter::with_token(Some(json!("p1-unit"))).report(0.5, Some(1.0), Some("half"));
+        // The notification bus is process-global; parallel tests share it, so
+        // scan for *our* frame rather than assuming it's first.
+        for _ in 0..200 {
+            let Ok(frame) = rx.recv().await else { continue };
+            let v: Value = serde_json::from_str(&frame).unwrap();
+            if v["method"] == "notifications/progress" && v["params"]["progressToken"] == "p1-unit"
+            {
+                assert_eq!(v["params"]["progress"], 0.5);
+                return;
+            }
+        }
+        panic!("did not observe the progress notification");
     }
 
     #[test]

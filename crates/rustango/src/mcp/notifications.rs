@@ -57,10 +57,16 @@ mod tests {
     async fn emits_a_jsonrpc_list_changed_frame() {
         let mut rx = bus().subscribe();
         notify_prompts_list_changed();
-        let frame = rx.recv().await.expect("frame");
-        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
-        assert_eq!(v["jsonrpc"], "2.0");
-        assert_eq!(v["method"], "notifications/prompts/list_changed");
-        assert!(v.get("id").is_none()); // notification, not a request
+        // Process-global bus shared by parallel tests; scan for our frame.
+        for _ in 0..200 {
+            let Ok(frame) = rx.recv().await else { continue };
+            let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            if v["method"] == "notifications/prompts/list_changed" {
+                assert_eq!(v["jsonrpc"], "2.0");
+                assert!(v.get("id").is_none()); // notification, not a request
+                return;
+            }
+        }
+        panic!("did not observe the prompts/list_changed frame");
     }
 }
