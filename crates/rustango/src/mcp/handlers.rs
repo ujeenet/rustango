@@ -96,9 +96,11 @@ fn initialize(_params: Option<Value>) -> Result<Value, JsonRpcError> {
         capabilities: ServerCapabilities {
             // Slices 3 + 5 light up tools / prompts / resources.
             // `listChanged` is wired by follow-up #1087; false until then.
-            tools: Some(json!({ "listChanged": false })),
-            prompts: Some(json!({ "listChanged": false })),
-            resources: Some(json!({ "listChanged": false, "subscribe": false })),
+            // Follow-up #1087: the server emits `*/list_changed` over SSE
+            // for in-process changes, so `listChanged` is advertised true.
+            tools: Some(json!({ "listChanged": true })),
+            prompts: Some(json!({ "listChanged": true })),
+            resources: Some(json!({ "listChanged": true, "subscribe": false })),
             // Follow-up #1091: logging + completion utilities.
             logging: Some(json!({})),
             completions: Some(json!({})),

@@ -15,7 +15,6 @@ use std::sync::Arc;
 use axum::routing::post;
 use axum::Router;
 
-use crate::sse::EventBus;
 use crate::tenancy::jwt_lifecycle::JwtLifecycle;
 
 use super::auth::{agent_token, default_jwt, post_authed};
@@ -29,9 +28,6 @@ pub(crate) struct McpState {
     /// Stashed now; first read by `tools/call` in Slice 3 (#1016).
     #[allow(dead_code)]
     pub(crate) pool: Option<crate::sql::Pool>,
-    /// Server→client notification bus. Frames pushed here are relayed to
-    /// every open SSE stream. Empty in Slice 1.
-    pub(crate) bus: EventBus<String>,
     /// Agent-JWT lifecycle (Slice 2). `Some` on the authed tenant router;
     /// `None` on the unauthed Slice-1 routers.
     pub(crate) jwt: Option<Arc<JwtLifecycle>>,
@@ -44,9 +40,6 @@ impl McpState {
     fn new(pool: Option<crate::sql::Pool>) -> Self {
         Self {
             pool,
-            // 256-frame buffer: generous enough that a briefly-stalled
-            // client doesn't immediately lag out of the broadcast window.
-            bus: EventBus::new(256),
             jwt: None,
             page_size: None,
         }

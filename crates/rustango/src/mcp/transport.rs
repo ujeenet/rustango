@@ -66,8 +66,8 @@ pub(crate) async fn handle_message(
 /// notification frames published on the [`McpState`] bus. Slice 1 sends
 /// nothing; the stream stays open with keep-alive pings so follow-up
 /// slices have a channel to push on.
-pub(crate) async fn sse_handler(State(state): State<McpState>) -> impl IntoResponse {
-    let mut rx = state.bus.subscribe();
+pub(crate) async fn sse_handler() -> impl IntoResponse {
+    let mut rx = super::notifications::bus().subscribe();
     let stream = async_stream::stream! {
         loop {
             match rx.recv().await {
