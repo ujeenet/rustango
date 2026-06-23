@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Router;
 
 use crate::tenancy::jwt_lifecycle::JwtLifecycle;
@@ -91,10 +91,7 @@ pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings)
         page_size: settings.max_tools_listed,
         ..McpState::new(None)
     };
-    Router::new()
-        .route("/", post(post_authed).get(sse_handler))
-        .route("/token", post(agent_token))
-        .with_state(state)
+    authed_routes(state)
 }
 
 /// Like [`secure_tenant_router`] but with a caller-supplied
@@ -107,8 +104,25 @@ pub fn tenant_router_authed(jwt: Arc<JwtLifecycle>) -> Router {
         jwt: Some(jwt),
         ..McpState::new(None)
     };
+    authed_routes(state)
+}
+
+/// The agent-guarded route set: JSON-RPC + SSE on `/`, the bespoke
+/// `/token`, and the OAuth 2.1 discovery + `client_credentials` endpoints
+/// (#1088).
+fn authed_routes(state: McpState) -> Router {
+    use super::oauth;
     Router::new()
         .route("/", post(post_authed).get(sse_handler))
         .route("/token", post(agent_token))
+        .route("/oauth/token", post(oauth::oauth_token))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::well_known_protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::well_known_authorization_server),
+        )
         .with_state(state)
 }

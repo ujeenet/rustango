@@ -122,6 +122,58 @@ pub(crate) struct AgentTokenOutput {
     pub expires_in: i64,
 }
 
+/// Outcome of [`mint_agent_jwt`] — a scoped token + its granted scope, or a
+/// typed failure both token endpoints render in their own shape.
+pub(crate) struct MintedToken {
+    pub token: String,
+    pub expires_in: i64,
+    /// Space-delimited granted skills (OAuth `scope`).
+    pub scope: String,
+}
+
+pub(crate) enum MintError {
+    /// Bad agent name/secret.
+    Unauthorized,
+    /// Server-side failure (DB / issuance).
+    Internal,
+}
+
+/// Shared minting path: authenticate `{name, secret}` against the tenant,
+/// resolve grants, and issue a tenant-pinned scoped JWT. Used by both the
+/// bespoke JSON `/token` and the OAuth 2.1 client-credentials `/oauth/token`.
+pub(crate) async fn mint_agent_jwt(
+    jwt: &JwtLifecycle,
+    pool: &crate::sql::Pool,
+    slug: &str,
+    name: &str,
+    secret: &str,
+) -> Result<MintedToken, MintError> {
+    let agent = match crate::tenancy::authenticate_agent_pool(pool, name, secret).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return Err(MintError::Unauthorized),
+        Err(e) => {
+            tracing::warn!(error = %e, "mcp agent authentication failed");
+            return Err(MintError::Internal);
+        }
+    };
+    let agent_id = agent.id.get().copied().unwrap_or_default();
+    let (skills, tools) = crate::tenancy::resolve_agent_grants_pool(pool, agent_id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "mcp grant resolution failed");
+            MintError::Internal
+        })?;
+    let token = issue_agent_token(jwt, agent_id, slug, &skills, &tools).map_err(|e| {
+        tracing::error!(error = %e, "mcp token issuance failed");
+        MintError::Internal
+    })?;
+    Ok(MintedToken {
+        token,
+        expires_in: jwt.access_ttl_secs,
+        scope: skills.join(" "),
+    })
+}
+
 /// `POST {prefix}/token` — exchange `{name, secret}` for a scoped agent
 /// JWT pinned to the resolved request tenant. Client-credentials style.
 pub(crate) async fn agent_token(
@@ -132,38 +184,17 @@ pub(crate) async fn agent_token(
     let Some(jwt) = state.jwt.as_ref() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "mcp auth not configured").into_response();
     };
-
-    let agent = match crate::tenancy::authenticate_agent_pool(t.pool(), &input.name, &input.secret)
-        .await
-    {
-        Ok(Some(a)) => a,
-        Ok(None) => return (StatusCode::UNAUTHORIZED, "invalid agent credentials").into_response(),
-        Err(e) => {
-            tracing::warn!(error = %e, "mcp agent authentication failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "authentication error").into_response();
-        }
-    };
-
-    let agent_id = agent.id.get().copied().unwrap_or_default();
-    // Resolve the agent's granted skills → flattened tool set and bake them
-    // into the token so `tools/list` / `tools/call` authorize against it.
-    let (skills, tools) = match crate::tenancy::resolve_agent_grants_pool(t.pool(), agent_id).await
-    {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::warn!(error = %e, "mcp grant resolution failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "authorization error").into_response();
-        }
-    };
-    match issue_agent_token(jwt, agent_id, &t.org.slug, &skills, &tools) {
-        Ok(token) => Json(AgentTokenOutput {
-            access_token: token,
+    match mint_agent_jwt(jwt, t.pool(), &t.org.slug, &input.name, &input.secret).await {
+        Ok(m) => Json(AgentTokenOutput {
+            access_token: m.token,
             token_type: "Bearer",
-            expires_in: jwt.access_ttl_secs,
+            expires_in: m.expires_in,
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "mcp token issuance failed");
+        Err(MintError::Unauthorized) => {
+            (StatusCode::UNAUTHORIZED, "invalid agent credentials").into_response()
+        }
+        Err(MintError::Internal) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "token issuance failed").into_response()
         }
     }
@@ -182,10 +213,10 @@ pub(crate) async fn post_authed(
         return (StatusCode::INTERNAL_SERVER_ERROR, "mcp auth not configured").into_response();
     };
     let Some(token) = bearer(&headers) else {
-        return unauthorized();
+        return unauthorized(&headers);
     };
     let Some(agent) = verify_agent_token(jwt, token, &t.org.slug) else {
-        return unauthorized();
+        return unauthorized(&headers);
     };
     // Agent verified + tenant-pinned: hand the tools layer the resolved
     // tenant pool + principal so `tools/call` runs against the right tenant.
@@ -208,10 +239,25 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .map(str::trim)
 }
 
-fn unauthorized() -> Response {
+/// `401` with an RFC 9728 `WWW-Authenticate: Bearer resource_metadata=…`
+/// challenge so spec-compliant MCP clients can discover the auth server
+/// (#1088). Points at the origin-root protected-resource metadata.
+fn unauthorized(headers: &HeaderMap) -> Response {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost");
+    let scheme = if host.starts_with("localhost") || host.starts_with("127.") {
+        "http"
+    } else {
+        "https"
+    };
+    let challenge = format!(
+        r#"Bearer resource_metadata="{scheme}://{host}/.well-known/oauth-protected-resource""#
+    );
     (
         StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Bearer")],
+        [(header::WWW_AUTHENTICATE, challenge)],
         "missing or invalid agent token",
     )
         .into_response()
