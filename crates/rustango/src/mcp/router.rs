@@ -79,6 +79,7 @@ pub fn secure_tenant_router() -> Router {
 
 /// Defensive cap on a JSON-RPC request body (tighter than axum's 2 MiB
 /// default). MCP messages are small; this bounds a hostile oversized payload.
+#[cfg(feature = "config")]
 const MCP_MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Agent-guarded tenant router configured from `[mcp]` settings. Applies the

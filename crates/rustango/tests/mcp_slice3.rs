@@ -55,6 +55,18 @@ rustango::register_mcp_tool!(
     },
 );
 
+// A tool that ran and failed with a domain error — MCP isError semantics
+// (#1099) surface this as a successful result with isError:true, not a
+// JSON-RPC error.
+rustango::register_mcp_tool!(
+    "flaky",
+    "Always fails at runtime",
+    AddInput,
+    |_ctx: McpContext, _input: AddInput| async move {
+        Err::<serde_json::Value, _>(McpError::internal("upstream API unavailable"))
+    },
+);
+
 async fn ctx_with_tools(tools: &[&str]) -> McpContext {
     let pool = Pool::Sqlite(
         sqlx::SqlitePool::connect("sqlite::memory:")
@@ -129,6 +141,25 @@ async fn tool_outside_agent_set_is_forbidden() {
     .await
     .expect_err("forbidden");
     assert_eq!(err.code, rustango::mcp::codes::TOOL_FORBIDDEN);
+}
+
+#[tokio::test]
+async fn handler_error_becomes_iserror_result_not_jsonrpc_error() {
+    let ctx = ctx_with_tools(&["flaky"]).await;
+    let out = call_tool(
+        ctx,
+        json!({ "name": "flaky", "arguments": { "a": 1, "b": 2 } }),
+    )
+    .await
+    .expect("a tool execution failure is a successful isError result");
+    assert_eq!(out["isError"], true);
+    assert_eq!(out["content"][0]["type"], "text");
+    assert!(out["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("upstream API unavailable"));
+    // No structuredContent on an error result.
+    assert!(out.get("structuredContent").is_none());
 }
 
 #[tokio::test]
