@@ -23,12 +23,14 @@
 //! ack — and can `ping` to check liveness, all over the single `POST`
 //! endpoint.
 
+pub mod auth;
 mod handlers;
 mod router;
 mod transport;
 mod types;
 
-pub use router::{router, tenant_router};
+pub use auth::{issue_agent_token, verify_agent_token, McpAgent};
+pub use router::{router, secure_tenant_router, tenant_router, tenant_router_authed};
 pub use types::{
     codes, Implementation, InitializeResult, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
     ServerCapabilities, JSONRPC_VERSION, PROTOCOL_VERSION,

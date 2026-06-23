@@ -784,7 +784,7 @@ where
 /// Open a short-lived `PgPool` scoped to `slug`'s tenant — schema
 /// mode pre-sets `search_path`; database mode reuses the cached
 /// per-tenant pool. Shared by `set-superuser` / `reset-password`.
-async fn scoped_tenant_pool<DB: Database>(
+pub(super) async fn scoped_tenant_pool<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
     slug: &str,
