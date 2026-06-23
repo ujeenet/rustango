@@ -186,26 +186,29 @@ pub(crate) async fn call_tool_with(
         ));
     }
 
-    // Wire progress (from `_meta.progressToken`) + cancellation (keyed by the
-    // JSON-RPC request id) for the duration of the call.
-    ctx.progress = super::progress::ProgressReporter::for_agent(
-        super::progress::progress_token(&params),
-        ctx.agent.tenant.clone(),
-        ctx.agent.agent_id,
-    );
-    let cancel_id = request_id.map(str::to_owned);
-    if let Some(id) = &cancel_id {
-        ctx.cancel = super::progress::register(id);
-    }
-
-    // Keep what we need for the audit trail before `ctx` moves into the tool.
+    // Keep what we need (audit + scoping) before `ctx` moves into the tool.
     let pool = ctx.pool.clone();
+    let tenant = ctx.agent.tenant.clone();
     let agent_id = ctx.agent.agent_id;
 
-    let result = (tool.handler)(ctx, args.clone()).await;
-    if let Some(id) = &cancel_id {
-        super::progress::deregister(id);
+    // Wire progress (from `_meta.progressToken`) + cancellation, both scoped to
+    // the calling agent. The cancel registration is RAII (`CancelGuard`) keyed
+    // by `(tenant, agent_id, request_id)`, so it can't be tripped by another
+    // agent and is removed on drop even if the handler panics (#1095).
+    ctx.progress = super::progress::ProgressReporter::for_agent(
+        super::progress::progress_token(&params),
+        tenant.clone(),
+        agent_id,
+    );
+    let mut _cancel_guard = None;
+    if let Some(id) = request_id {
+        let guard = super::progress::CancelGuard::register(&tenant, agent_id, id);
+        ctx.cancel = guard.token();
+        _cancel_guard = Some(guard);
     }
+
+    let result = (tool.handler)(ctx, args.clone()).await;
+    // `_cancel_guard` is still alive here; it deregisters when this fn returns.
     let result = result.map_err(McpError::into_jsonrpc)?;
 
     audit_tool_call(&pool, agent_id, &name, &args).await;

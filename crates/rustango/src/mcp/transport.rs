@@ -51,16 +51,20 @@ pub(crate) async fn handle_message(
 
     if request.is_notification() {
         // `notifications/cancelled { requestId }` trips the in-flight call's
-        // cancel token (#1090); other notifications (e.g. `initialized`) are
-        // no-ops. Either way a notification gets no JSON-RPC response.
+        // cancel token (#1090), scoped to the requesting agent so it can only
+        // cancel its own calls (#1095). Without an authenticated agent (the
+        // unauthed Slice-1 transport) there are no cancellable calls, so it's a
+        // no-op. Other notifications (e.g. `initialized`) are no-ops too.
         if request.method == "notifications/cancelled" {
-            if let Some(rid) = request
-                .params
-                .as_ref()
-                .and_then(|p| p.get("requestId"))
-                .map(jsonrpc_id_string)
-            {
-                super::progress::cancel(&rid);
+            if let (Some(ctx), Some(rid)) = (
+                ctx.as_ref(),
+                request
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("requestId"))
+                    .map(jsonrpc_id_string),
+            ) {
+                super::progress::cancel(&ctx.agent.tenant, ctx.agent.agent_id, &rid);
             }
         }
         return StatusCode::ACCEPTED.into_response();

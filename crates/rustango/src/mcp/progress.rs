@@ -5,9 +5,11 @@
 //!   the handler gets a live [`ProgressReporter`] on its [`McpContext`];
 //!   each `report(..)` emits a `notifications/progress` over the SSE bus.
 //! * **Cancellation** — an inbound `notifications/cancelled { requestId }`
-//!   trips a process-global [`CancelToken`] keyed by the in-flight call's
-//!   JSON-RPC id; the handler observes it cooperatively via
-//!   `ctx.cancel.is_cancelled()` and bails out.
+//!   trips a process-global [`CancelToken`] keyed by
+//!   `(tenant, agent_id, request_id)` (so one agent can't cancel another's
+//!   call, #1095); the handler observes it cooperatively via
+//!   `ctx.cancel.is_cancelled()` and bails out. Registration is RAII
+//!   ([`CancelGuard`]) so a panicking handler never leaks an entry.
 //!
 //! Both ride the same in-process model as #1087 (the bus + registry are
 //! process-local); cross-process cancellation is out of scope.
@@ -119,34 +121,60 @@ impl CancelToken {
     }
 }
 
-fn registry() -> &'static Mutex<HashMap<String, CancelToken>> {
-    static R: OnceLock<Mutex<HashMap<String, CancelToken>>> = OnceLock::new();
+/// Registry key — a request id is only unique *within* an agent, and numeric
+/// JSON-RPC ids collide trivially across agents. Keying by
+/// `(tenant, agent_id, request_id)` stops agent A cancelling agent B's call
+/// (#1095).
+type CancelKey = (String, i64, String);
+
+fn registry() -> &'static Mutex<HashMap<CancelKey, CancelToken>> {
+    static R: OnceLock<Mutex<HashMap<CancelKey, CancelToken>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Register a fresh [`CancelToken`] for an in-flight request id.
-pub(crate) fn register(request_id: &str) -> CancelToken {
-    let token = CancelToken::never();
-    registry()
-        .lock()
-        .expect("cancel registry")
-        .insert(request_id.to_owned(), token.clone());
-    token
+/// Lock the registry, recovering from a poisoned mutex rather than panicking
+/// (a tool handler that panicked mid-lock must not wedge cancellation for the
+/// whole process). #1095.
+fn registry_lock() -> std::sync::MutexGuard<'static, HashMap<CancelKey, CancelToken>> {
+    registry().lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Remove a request id from the registry (call completed).
-pub(crate) fn deregister(request_id: &str) {
-    registry()
-        .lock()
-        .expect("cancel registry")
-        .remove(request_id);
+/// RAII registration of an in-flight call's [`CancelToken`], scoped to the
+/// calling agent. The entry is removed on `Drop` — so a handler that returns
+/// early, errors, or **panics** never leaks a registry entry (#1095). Replaces
+/// the old manual `register`/`deregister` pair.
+pub(crate) struct CancelGuard {
+    key: CancelKey,
+    token: CancelToken,
 }
 
-/// Cancel an in-flight request by id — invoked from a
-/// `notifications/cancelled`. No-op if the id isn't (or is no longer)
-/// in-flight.
-pub fn cancel(request_id: &str) {
-    if let Some(token) = registry().lock().expect("cancel registry").get(request_id) {
+impl CancelGuard {
+    /// Register a fresh token for `(tenant, agent_id, request_id)`.
+    pub(crate) fn register(tenant: &str, agent_id: i64, request_id: &str) -> Self {
+        let key = (tenant.to_owned(), agent_id, request_id.to_owned());
+        let token = CancelToken::never();
+        registry_lock().insert(key.clone(), token.clone());
+        Self { key, token }
+    }
+
+    /// The cooperative cancel token to hand the running handler.
+    pub(crate) fn token(&self) -> CancelToken {
+        self.token.clone()
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        registry_lock().remove(&self.key);
+    }
+}
+
+/// Cancel an in-flight request — invoked from a `notifications/cancelled`,
+/// scoped to the requesting agent so it can only cancel **its own** calls.
+/// No-op if no matching call is (still) in-flight.
+pub fn cancel(tenant: &str, agent_id: i64, request_id: &str) {
+    let key = (tenant.to_owned(), agent_id, request_id.to_owned());
+    if let Some(token) = registry_lock().get(&key) {
         token.trip();
     }
 }
@@ -189,13 +217,22 @@ mod tests {
     }
 
     #[test]
-    fn cancel_trips_the_registered_token() {
-        let token = register("req-42");
+    fn cancel_is_agent_scoped_and_guard_deregisters_on_drop() {
+        let guard = CancelGuard::register("acme", 1, "req-42");
+        let token = guard.token();
         assert!(!token.is_cancelled());
-        cancel("req-42");
+
+        // Same request id, different agent / tenant → must NOT trip it (#1095).
+        cancel("acme", 2, "req-42");
+        cancel("evil", 1, "req-42");
+        assert!(!token.is_cancelled());
+
+        // The matching (tenant, agent_id, request_id) cancels.
+        cancel("acme", 1, "req-42");
         assert!(token.is_cancelled());
-        deregister("req-42");
-        // After deregister, cancelling again is a harmless no-op.
-        cancel("req-42");
+
+        // Dropping the guard removes the entry; cancelling again is a no-op.
+        drop(guard);
+        cancel("acme", 1, "req-42");
     }
 }
