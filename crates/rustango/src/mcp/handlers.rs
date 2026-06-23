@@ -66,6 +66,12 @@ pub(crate) async fn dispatch(
             let ctx = ctx.ok_or_else(auth_required)?;
             super::resources::read_resource(&ctx, params.unwrap_or_else(|| json!({}))).await
         }
+        // We expose no URI templates, but the spec method must exist (return an
+        // empty list) rather than 404 with `method not found` (#1099).
+        "resources/templates/list" => {
+            ctx.ok_or_else(auth_required)?;
+            Ok(json!({ "resourceTemplates": [] }))
+        }
         "logging/setLevel" => {
             ctx.ok_or_else(auth_required)?;
             super::utilities::set_log_level(params.unwrap_or_else(|| json!({})))
