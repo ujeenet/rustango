@@ -645,3 +645,162 @@ pub async fn resolve_agent_grants_pool(
     }
     Ok((skill_codenames, tools))
 }
+
+// ====================================================== resources (Slice 5)
+
+/// A resource attached to a skill (epic #1013, Slice 5 / #1018). The body is
+/// carried in `data.text`; `mime` is the advertised MIME type.
+#[derive(crate::Model, Debug, Clone)]
+#[rustango(table = "rustango_agent_skill_resources")]
+pub struct AgentSkillResource {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "rustango_agent_skills", on = "id", on_delete = "cascade")]
+    pub skill_id: i64,
+    #[rustango(max_length = 500)]
+    pub resource_uri: String,
+    #[rustango(max_length = 100)]
+    pub mime: String,
+    #[rustango(default = "'{}'")]
+    pub data: serde_json::Value,
+}
+
+const RESOURCES_ENSURE_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS "rustango_agent_skill_resources" (
+    "id"           BIGSERIAL    PRIMARY KEY,
+    "skill_id"     BIGINT       NOT NULL REFERENCES "rustango_agent_skills"("id") ON DELETE CASCADE,
+    "resource_uri" VARCHAR(500) NOT NULL,
+    "mime"         VARCHAR(100) NOT NULL DEFAULT 'text/plain',
+    "data"         JSONB        NOT NULL DEFAULT '{}'
+);"#;
+
+const RESOURCES_ENSURE_SQL_SQLITE: &str = r#"
+CREATE TABLE IF NOT EXISTS "rustango_agent_skill_resources" (
+    "id"           INTEGER PRIMARY KEY AUTOINCREMENT,
+    "skill_id"     INTEGER NOT NULL REFERENCES "rustango_agent_skills"("id") ON DELETE CASCADE,
+    "resource_uri" TEXT    NOT NULL,
+    "mime"         TEXT    NOT NULL DEFAULT 'text/plain',
+    "data"         TEXT    NOT NULL DEFAULT '{}'
+);"#;
+
+const RESOURCES_ENSURE_SQL_MYSQL: &str = r#"
+CREATE TABLE IF NOT EXISTS `rustango_agent_skill_resources` (
+    `id`           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `skill_id`     BIGINT       NOT NULL,
+    `resource_uri` VARCHAR(500) NOT NULL,
+    `mime`         VARCHAR(100) NOT NULL DEFAULT 'text/plain',
+    `data`         JSON,
+    CONSTRAINT `rustango_agent_skill_resources_fk` FOREIGN KEY (`skill_id`)
+        REFERENCES `rustango_agent_skills`(`id`) ON DELETE CASCADE
+);"#;
+
+async fn ensure_resources_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
+    let ddl = match pool.dialect().name() {
+        "sqlite" => RESOURCES_ENSURE_SQL_SQLITE,
+        "mysql" => RESOURCES_ENSURE_SQL_MYSQL,
+        _ => RESOURCES_ENSURE_SQL,
+    };
+    for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        crate::sql::raw_execute_pool(pool, stmt, Vec::new())
+            .await
+            .map_err(|e| match e {
+                ExecError::Driver(err) => err,
+                other => sqlx::Error::Protocol(format!("{other}")),
+            })?;
+    }
+    Ok(())
+}
+
+/// Attach a resource (uri + mime + text body) to a skill.
+///
+/// # Errors
+/// [`AgentError::NotFound`] if the skill codename doesn't exist.
+pub async fn add_skill_resource_pool(
+    pool: &Pool,
+    skill_codename: &str,
+    uri: &str,
+    mime: &str,
+    body: &str,
+) -> Result<AgentSkillResource, AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
+    ensure_skill_tables_pool(pool).await?;
+    ensure_resources_table_pool(pool).await?;
+
+    let skill_id = AgentSkill::objects()
+        .where_(AgentSkill::codename.eq(skill_codename))
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| AgentError::NotFound(skill_codename.to_owned()))?
+        .id
+        .get()
+        .copied()
+        .unwrap_or_default();
+
+    let mut res = AgentSkillResource {
+        id: Auto::default(),
+        skill_id,
+        resource_uri: uri.to_owned(),
+        mime: mime.to_owned(),
+        data: serde_json::json!({ "text": body }),
+    };
+    res.insert_pool(pool).await?;
+    Ok(res)
+}
+
+/// Fetch the granted skills (by codename) — each is an MCP prompt source
+/// (its `instructions` is the prompt body).
+///
+/// # Errors
+/// Propagates DB errors.
+pub async fn skills_by_codenames_pool(
+    pool: &Pool,
+    codenames: &[String],
+) -> Result<Vec<AgentSkill>, AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    ensure_skill_tables_pool(pool).await?;
+    if codenames.is_empty() {
+        return Ok(vec![]);
+    }
+    Ok(AgentSkill::objects()
+        .where_(AgentSkill::codename.is_in(codenames.to_vec()))
+        .order_by(&[("codename", false)])
+        .fetch(pool)
+        .await?)
+}
+
+/// Fetch the resources of the agent's granted skills (by skill codename).
+///
+/// # Errors
+/// Propagates DB errors.
+pub async fn resources_for_skills_pool(
+    pool: &Pool,
+    codenames: &[String],
+) -> Result<Vec<AgentSkillResource>, AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    ensure_skill_tables_pool(pool).await?;
+    ensure_resources_table_pool(pool).await?;
+    if codenames.is_empty() {
+        return Ok(vec![]);
+    }
+    let skill_ids: Vec<i64> = AgentSkill::objects()
+        .where_(AgentSkill::codename.is_in(codenames.to_vec()))
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .map(|s| s.id.get().copied().unwrap_or_default())
+        .collect();
+    if skill_ids.is_empty() {
+        return Ok(vec![]);
+    }
+    Ok(AgentSkillResource::objects()
+        .where_(AgentSkillResource::skill_id.is_in(skill_ids))
+        .fetch(pool)
+        .await?)
+}
