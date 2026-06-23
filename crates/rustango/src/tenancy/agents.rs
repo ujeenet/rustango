@@ -270,6 +270,10 @@ pub async fn authenticate_agent_pool(
 
     ensure_agents_table_pool(pool).await?;
 
+    // Accept either `prefix.secret` or the bare secret half (secrets are
+    // hex, so the part after the last `.` is the secret).
+    let secret_half = secret.rsplit('.').next().unwrap_or(secret);
+
     let Some(agent) = Agent::objects()
         .where_(Agent::name.eq(name))
         .limit(1)
@@ -279,12 +283,13 @@ pub async fn authenticate_agent_pool(
         .next()
         .filter(|a| a.active)
     else {
+        // Unknown / inactive agent: still spend an argon2 verification against a
+        // fixed dummy hash so the response time doesn't reveal whether the agent
+        // name exists (timing oracle → agent enumeration). #1099.
+        super::password::verify_dummy(secret_half);
         return Ok(None);
     };
 
-    // Accept either `prefix.secret` or the bare secret half (secrets are
-    // hex, so the part after the last `.` is the secret).
-    let secret_half = secret.rsplit('.').next().unwrap_or(secret);
     match super::password::verify(secret_half, &agent.secret_hash) {
         Ok(true) => Ok(Some(agent)),
         _ => Ok(None),
