@@ -26,6 +26,7 @@
 pub mod auth;
 mod handlers;
 pub mod notifications;
+pub mod oauth;
 pub mod pagination;
 pub mod progress;
 pub mod resources;
@@ -39,6 +40,7 @@ pub use auth::{issue_agent_token, verify_agent_token, McpAgent};
 pub use notifications::{
     notify_prompts_list_changed, notify_resources_list_changed, notify_tools_list_changed,
 };
+pub use oauth::{authorization_server_metadata, protected_resource_metadata};
 pub use progress::{cancel, CancelToken, ProgressReporter};
 pub use resources::{get_prompt, list_prompts, list_resources, read_resource, McpResource};
 #[cfg(feature = "config")]
