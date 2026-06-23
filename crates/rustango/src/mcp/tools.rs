@@ -207,21 +207,32 @@ pub(crate) async fn call_tool_with(
         _cancel_guard = Some(guard);
     }
 
-    // Run the handler under a panic guard: a buggy `register_mcp_tool!` handler
-    // that panics must not unwind into the transport (dropping the connection /
-    // DoS) — convert it to an internal error instead (#1096). The `_cancel_guard`
-    // still deregisters when this fn returns.
-    let result = match catch_unwind((tool.handler)(ctx, args.clone())).await {
-        Ok(r) => r,
+    // Run the handler under a panic guard (#1096): a buggy `register_mcp_tool!`
+    // handler that panics must not unwind into the transport (dropping the
+    // connection / DoS). The `_cancel_guard` still deregisters when this fn
+    // returns.
+    let outcome = catch_unwind((tool.handler)(ctx, args.clone())).await;
+
+    // Audit every executed call (arguments redacted, #1097) — success or failure.
+    audit_tool_call(&pool, agent_id, &name, &args).await;
+
+    // MCP `isError` semantics (#1099): a tool that *ran and failed* (returned
+    // `Err`) yields a successful `CallToolResult` with `isError: true` so the
+    // client can surface/retry it. Protocol-level rejections (bad args,
+    // unknown/forbidden tool) stay JSON-RPC errors; a panic is an unhandled
+    // internal fault → JSON-RPC internal error.
+    match outcome {
+        Ok(Ok(value)) => Ok(call_tool_result(value)),
+        Ok(Err(e)) if is_protocol_error(e.code) => Err(e.into_jsonrpc()),
+        Ok(Err(e)) => Ok(call_tool_error_result(&e.message)),
         Err(_panic) => {
             tracing::error!(tool = %name, agent_id, "mcp tool handler panicked");
-            Err(McpError::internal("tool handler panicked"))
+            Err(JsonRpcError::new(
+                codes::INTERNAL_ERROR,
+                "tool handler panicked",
+            ))
         }
-    };
-    let result = result.map_err(McpError::into_jsonrpc)?;
-
-    audit_tool_call(&pool, agent_id, &name, &args).await;
-    Ok(call_tool_result(result))
+    }
 }
 
 /// Poll `fut` to completion, catching a panic from any individual `poll` and
@@ -254,6 +265,33 @@ fn call_tool_result(value: Value) -> Value {
         "structuredContent": value,
         "isError": false,
     })
+}
+
+/// An MCP `CallToolResult` for a tool that ran but failed: the error message as
+/// a text content block + `isError: true`. This is a *successful* JSON-RPC
+/// response (the protocol call worked; the tool reported an error), per the MCP
+/// convention (#1099).
+fn call_tool_error_result(message: &str) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": message }],
+        "isError": true,
+    })
+}
+
+/// JSON-RPC / MCP protocol-level error codes — the *request* was rejected (bad
+/// args, unknown/forbidden tool, …) and the tool never produced a result, so
+/// these stay JSON-RPC errors. Any other handler error means the tool ran and
+/// failed → an `isError: true` result (#1099).
+fn is_protocol_error(code: i64) -> bool {
+    matches!(
+        code,
+        codes::PARSE_ERROR
+            | codes::INVALID_REQUEST
+            | codes::METHOD_NOT_FOUND
+            | codes::INVALID_PARAMS
+            | codes::TOOL_NOT_FOUND
+            | codes::TOOL_FORBIDDEN
+    )
 }
 
 /// Key names whose values are scrubbed before a tool call's arguments are

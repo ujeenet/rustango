@@ -84,10 +84,18 @@ async fn cancelled_call_observes_the_flag() {
     // completes its work). The dispatcher registers + trips the token from
     // an inbound `notifications/cancelled`; here we inject a cancelled token
     // directly to exercise the handler-side contract.
+    //
+    // The handler returns an `Err` (code -32004), which is a *tool execution*
+    // failure, so MCP `isError` semantics (#1099) make it a successful result
+    // with `isError: true` rather than a JSON-RPC error.
     let mut ctx = ctx().await;
     ctx.cancel = CancelToken::cancelled();
-    let err = call_tool(ctx, json!({ "name": "work", "arguments": {} }))
+    let out = call_tool(ctx, json!({ "name": "work", "arguments": {} }))
         .await
-        .expect_err("cancelled");
-    assert_eq!(err.code, -32004);
+        .expect("cancelled call returns an isError result");
+    assert_eq!(out["isError"], true);
+    assert!(out["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("cancelled"));
 }
