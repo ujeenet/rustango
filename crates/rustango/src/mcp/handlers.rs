@@ -42,6 +42,7 @@ pub(crate) async fn dispatch(
                 "tools",
                 cursor_of(&params),
                 state.page_size,
+                ctx.agent.agent_id,
             )
         }
         "tools/call" => {
@@ -51,7 +52,14 @@ pub(crate) async fn dispatch(
         "prompts/list" => {
             let ctx = ctx.ok_or_else(auth_required)?;
             let full = super::resources::list_prompts(&ctx).await?;
-            paginate(full, "prompts", cursor_of(&params), state.page_size)
+            let agent_id = ctx.agent.agent_id;
+            paginate(
+                full,
+                "prompts",
+                cursor_of(&params),
+                state.page_size,
+                agent_id,
+            )
         }
         "prompts/get" => {
             let ctx = ctx.ok_or_else(auth_required)?;
@@ -60,7 +68,14 @@ pub(crate) async fn dispatch(
         "resources/list" => {
             let ctx = ctx.ok_or_else(auth_required)?;
             let full = super::resources::list_resources(&ctx).await?;
-            paginate(full, "resources", cursor_of(&params), state.page_size)
+            let agent_id = ctx.agent.agent_id;
+            paginate(
+                full,
+                "resources",
+                cursor_of(&params),
+                state.page_size,
+                agent_id,
+            )
         }
         "resources/read" => {
             let ctx = ctx.ok_or_else(auth_required)?;
