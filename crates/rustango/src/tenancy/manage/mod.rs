@@ -39,6 +39,7 @@
 //!   [`super::server::run`]).
 //! - [`args`] — shared positional / flag parsing helpers.
 
+mod agents;
 mod args;
 mod audit;
 #[cfg(feature = "postgres")]
@@ -257,6 +258,11 @@ where
         "grant-perm" => roles::grant_perm_cmd(pools, &args[1..], writer).await,
         "revoke-perm" => roles::revoke_perm_cmd(pools, &args[1..], writer).await,
         "create-api-key" => roles::create_api_key_cmd(pools, &args[1..], writer).await,
+        "create-agent" => agents::create_agent_cmd(pools, registry_url, &args[1..], writer).await,
+        "rotate-agent-secret" => {
+            agents::rotate_agent_secret_cmd(pools, registry_url, &args[1..], writer).await
+        }
+        "list-agents" => agents::list_agents_cmd(pools, registry_url, &args[1..], writer).await,
         "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
@@ -497,6 +503,17 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "                       Issue a Bearer API key for a tenant user."
     )?;
+    writeln!(w, "  create-agent <slug> <name>")?;
+    writeln!(
+        w,
+        "                       Provision an MCP agent (prints its secret once)."
+    )?;
+    writeln!(w, "  rotate-agent-secret <slug> <name>")?;
+    writeln!(
+        w,
+        "                       Issue a fresh secret for an MCP agent."
+    )?;
+    writeln!(w, "  list-agents <slug>   List a tenant's MCP agents.")?;
     writeln!(w, "  seed-permissions [--slug <s>]")?;
     writeln!(
         w,

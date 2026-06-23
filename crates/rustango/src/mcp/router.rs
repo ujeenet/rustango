@@ -10,11 +10,15 @@
 //! Both return a `Router<()>` you `.merge(...)` into your API router and
 //! hand to `Cli::api(...)` / tenancy `Builder::api(...)`.
 
+use std::sync::Arc;
+
 use axum::routing::post;
 use axum::Router;
 
 use crate::sse::EventBus;
+use crate::tenancy::jwt_lifecycle::JwtLifecycle;
 
+use super::auth::{agent_token, default_jwt, post_authed};
 use super::transport::{post_handler, sse_handler};
 
 /// Shared state for the MCP handlers.
@@ -28,6 +32,9 @@ pub(crate) struct McpState {
     /// Server→client notification bus. Frames pushed here are relayed to
     /// every open SSE stream. Empty in Slice 1.
     pub(crate) bus: EventBus<String>,
+    /// Agent-JWT lifecycle (Slice 2). `Some` on the authed tenant router;
+    /// `None` on the unauthed Slice-1 routers.
+    pub(crate) jwt: Option<Arc<JwtLifecycle>>,
 }
 
 impl McpState {
@@ -37,6 +44,7 @@ impl McpState {
             // 256-frame buffer: generous enough that a briefly-stalled
             // client doesn't immediately lag out of the broadcast window.
             bus: EventBus::new(256),
+            jwt: None,
         }
     }
 }
@@ -56,7 +64,34 @@ pub fn router(pool: crate::sql::Pool) -> Router {
 
 /// Multi-tenant MCP router — for tenancy `Builder::api(...)` mounts, where
 /// each request resolves its own tenant pool via the `Tenant` extractor.
+/// Unauthenticated transport only (Slice 1); use [`tenant_router_authed`]
+/// for the agent-guarded surface.
 #[must_use]
 pub fn tenant_router() -> Router {
     routes(McpState::new(None))
+}
+
+/// Multi-tenant MCP router **with agent auth** (Slice 2). Adds
+/// `POST {prefix}/token` (client-credentials `{name, secret}` → scoped
+/// JWT) and guards the JSON-RPC `POST {prefix}` behind a tenant-pinned
+/// agent token. Signs with `RUSTANGO_SESSION_SECRET` (see [`default_jwt`]).
+#[must_use]
+pub fn secure_tenant_router() -> Router {
+    tenant_router_authed(default_jwt())
+}
+
+/// Like [`secure_tenant_router`] but with a caller-supplied
+/// [`JwtLifecycle`] — set a stable secret, custom TTLs, or a shared
+/// (Redis/DB) `JtiStore` for multi-instance revocation. Also the seam the
+/// tests issue + revoke through.
+#[must_use]
+pub fn tenant_router_authed(jwt: Arc<JwtLifecycle>) -> Router {
+    let state = McpState {
+        jwt: Some(jwt),
+        ..McpState::new(None)
+    };
+    Router::new()
+        .route("/", post(post_authed).get(sse_handler))
+        .route("/token", post(agent_token))
+        .with_state(state)
 }

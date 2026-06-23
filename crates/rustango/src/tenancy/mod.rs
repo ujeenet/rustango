@@ -60,6 +60,7 @@
 // the user at database-mode.
 #[cfg(feature = "admin")]
 pub mod admin;
+pub mod agents;
 pub mod auth;
 pub mod auth_backends;
 pub mod auth_routes;
@@ -93,6 +94,10 @@ pub mod session;
 pub mod server;
 pub mod tenant_console;
 
+pub use agents::{
+    authenticate_agent_pool, create_agent_pool, ensure_agents_table_pool, list_agents_pool,
+    rotate_agent_secret_pool, Agent, AgentError, AgentSecret,
+};
 #[cfg(feature = "postgres")]
 pub use auth::{authenticate_operator, authenticate_user};
 pub use auth::{
