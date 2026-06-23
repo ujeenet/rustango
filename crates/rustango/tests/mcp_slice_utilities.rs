@@ -23,6 +23,8 @@ async fn ctx(skills: &[&str]) -> McpContext {
             tools: vec![],
             jti: "t".into(),
         },
+        progress: rustango::mcp::ProgressReporter::disabled(),
+        cancel: rustango::mcp::CancelToken::never(),
     }
 }
 

@@ -52,6 +52,8 @@ fn ctx(pool: &Pool, agent: &rustango::mcp::McpAgent) -> McpContext {
     McpContext {
         pool: pool.clone(),
         agent: agent.clone(),
+        progress: rustango::mcp::ProgressReporter::disabled(),
+        cancel: rustango::mcp::CancelToken::never(),
     }
 }
 
