@@ -206,6 +206,7 @@ pub(crate) async fn agent_token(
 pub(crate) async fn post_authed(
     t: Tenant,
     State(state): State<McpState>,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -213,10 +214,10 @@ pub(crate) async fn post_authed(
         return (StatusCode::INTERNAL_SERVER_ERROR, "mcp auth not configured").into_response();
     };
     let Some(token) = bearer(&headers) else {
-        return unauthorized(&headers);
+        return unauthorized(&headers, &uri);
     };
     let Some(agent) = verify_agent_token(jwt, token, &t.org.slug) else {
-        return unauthorized(&headers);
+        return unauthorized(&headers, &uri);
     };
     // Agent verified + tenant-pinned: hand the tools layer the resolved
     // tenant pool + principal so `tools/call` runs against the right tenant.
@@ -239,22 +240,57 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
         .map(str::trim)
 }
 
-/// `401` with an RFC 9728 `WWW-Authenticate: Bearer resource_metadata=…`
-/// challenge so spec-compliant MCP clients can discover the auth server
-/// (#1088). Points at the origin-root protected-resource metadata.
-pub(crate) fn unauthorized(headers: &HeaderMap) -> Response {
+/// Best-effort request origin (`scheme://host`) from headers. Honors
+/// `X-Forwarded-Proto`; defaults to `http` for localhost, `https` otherwise.
+/// Shared by [`unauthorized`] and the OAuth metadata handlers.
+pub(crate) fn origin(headers: &HeaderMap) -> String {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost");
-    let scheme = if host.starts_with("localhost") || host.starts_with("127.") {
-        "http"
-    } else {
-        "https"
-    };
-    let challenge = format!(
-        r#"Bearer resource_metadata="{scheme}://{host}/.well-known/oauth-protected-resource""#
-    );
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            if host.starts_with("localhost") || host.starts_with("127.") {
+                "http".into()
+            } else {
+                "https".into()
+            }
+        });
+    format!("{scheme}://{host}")
+}
+
+/// Public base URL the MCP surface is actually mounted at, derived from the
+/// request origin + the *original* (pre-nest) request path with `strip_suffix`
+/// removed and any trailing slash trimmed. This makes RFC-9728 / RFC-8414 URLs
+/// track the real `.nest(prefix)` mount instead of assuming origin-root (#1094).
+///
+/// E.g. origin `https://h`, original path `/mcp/.well-known/oauth-protected-resource`,
+/// `strip_suffix = "/.well-known/oauth-protected-resource"` → `https://h/mcp`.
+/// For the JSON-RPC endpoint itself the path *is* the prefix, so pass `""`.
+pub(crate) fn mount_base(
+    headers: &HeaderMap,
+    original: &axum::http::Uri,
+    strip_suffix: &str,
+) -> String {
+    let path = original.path();
+    let prefix = path
+        .strip_suffix(strip_suffix)
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    format!("{}{}", origin(headers), prefix)
+}
+
+/// `401` with an RFC 9728 `WWW-Authenticate: Bearer resource_metadata=…`
+/// challenge so spec-compliant MCP clients can discover the auth server
+/// (#1088). The metadata URL tracks the actual mount prefix via the request's
+/// [`OriginalUri`] (#1094), not the origin root.
+pub(crate) fn unauthorized(headers: &HeaderMap, original: &axum::http::Uri) -> Response {
+    let base = mount_base(headers, original, "");
+    let challenge =
+        format!(r#"Bearer resource_metadata="{base}/.well-known/oauth-protected-resource""#);
     (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, challenge)],
@@ -291,4 +327,63 @@ pub(crate) fn jwt_secret() -> Vec<u8> {
             rand::rngs::OsRng.fill_bytes(&mut key);
             key
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Uri;
+
+    fn headers(host: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, host.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn mount_base_tracks_the_nest_prefix() {
+        let h = headers("app.example");
+        // JSON-RPC endpoint: the path *is* the prefix (strip nothing).
+        let uri: Uri = "/mcp".parse().unwrap();
+        assert_eq!(mount_base(&h, &uri, ""), "https://app.example/mcp");
+        // Well-known doc: strip the suffix to recover the prefix.
+        let uri: Uri = "/api/mcp/.well-known/oauth-protected-resource"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            mount_base(&h, &uri, "/.well-known/oauth-protected-resource"),
+            "https://app.example/api/mcp"
+        );
+        // Origin-root mount → empty prefix (no trailing slash artifact).
+        let uri: Uri = "/.well-known/oauth-protected-resource".parse().unwrap();
+        assert_eq!(
+            mount_base(&h, &uri, "/.well-known/oauth-protected-resource"),
+            "https://app.example"
+        );
+    }
+
+    #[test]
+    fn unauthorized_challenge_points_at_the_mount_prefix() {
+        let h = headers("app.example");
+        let uri: Uri = "/mcp".parse().unwrap();
+        let resp = unauthorized(&h, &uri);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let challenge = resp
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            challenge,
+            r#"Bearer resource_metadata="https://app.example/mcp/.well-known/oauth-protected-resource""#
+        );
+    }
+
+    #[test]
+    fn localhost_origin_uses_http() {
+        let h = headers("localhost:8080");
+        let uri: Uri = "/mcp".parse().unwrap();
+        assert_eq!(mount_base(&h, &uri, ""), "http://localhost:8080/mcp");
+    }
 }
