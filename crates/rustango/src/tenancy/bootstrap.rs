@@ -48,7 +48,7 @@ use std::path::Path;
 use crate::core::Model as _;
 use crate::migrate::{Migration, MigrationScope, Operation, SchemaChange, SchemaSnapshot};
 
-use super::agents::{Agent, AgentGrant, AgentSkill, AgentSkillTool};
+use super::agents::{Agent, AgentGrant, AgentSkill, AgentSkillResource, AgentSkillTool};
 use super::auth::{validate_tenant_user_schema, Operator, TenantUserModel, User};
 use super::auth_backends::ApiKey;
 use super::error::TenancyError;
@@ -141,6 +141,7 @@ fn full_snapshot_for<U: TenantUserModel>() -> SchemaSnapshot {
         AgentSkill::SCHEMA,
         AgentSkillTool::SCHEMA,
         AgentGrant::SCHEMA,
+        AgentSkillResource::SCHEMA,
     ])
 }
 

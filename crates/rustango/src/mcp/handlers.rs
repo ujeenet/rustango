@@ -33,6 +33,22 @@ pub(crate) async fn dispatch(
             let ctx = ctx.ok_or_else(auth_required)?;
             call_tool(ctx, params.unwrap_or_else(|| json!({}))).await
         }
+        "prompts/list" => {
+            let ctx = ctx.ok_or_else(auth_required)?;
+            super::resources::list_prompts(&ctx).await
+        }
+        "prompts/get" => {
+            let ctx = ctx.ok_or_else(auth_required)?;
+            super::resources::get_prompt(&ctx, params.unwrap_or_else(|| json!({}))).await
+        }
+        "resources/list" => {
+            let ctx = ctx.ok_or_else(auth_required)?;
+            super::resources::list_resources(&ctx).await
+        }
+        "resources/read" => {
+            let ctx = ctx.ok_or_else(auth_required)?;
+            super::resources::read_resource(&ctx, params.unwrap_or_else(|| json!({}))).await
+        }
         other => Err(JsonRpcError::method_not_found(other)),
     }
 }
@@ -54,9 +70,11 @@ fn initialize(_params: Option<Value>) -> Result<Value, JsonRpcError> {
     let result = InitializeResult {
         protocol_version: PROTOCOL_VERSION,
         capabilities: ServerCapabilities {
-            // Slice 3 lights up tools. `listChanged` is wired by the
-            // follow-up #1087; advertise it as false until then.
+            // Slices 3 + 5 light up tools / prompts / resources.
+            // `listChanged` is wired by follow-up #1087; false until then.
             tools: Some(json!({ "listChanged": false })),
+            prompts: Some(json!({ "listChanged": false })),
+            resources: Some(json!({ "listChanged": false, "subscribe": false })),
             ..ServerCapabilities::default()
         },
         server_info: Implementation {

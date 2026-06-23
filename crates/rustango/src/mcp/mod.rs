@@ -25,12 +25,14 @@
 
 pub mod auth;
 mod handlers;
+pub mod resources;
 mod router;
 pub mod tools;
 mod transport;
 mod types;
 
 pub use auth::{issue_agent_token, verify_agent_token, McpAgent};
+pub use resources::{get_prompt, list_prompts, list_resources, read_resource, McpResource};
 pub use router::{router, secure_tenant_router, tenant_router, tenant_router_authed};
 pub use tools::{
     call_tool, list_tools, McpContext, McpError, McpTool, McpToolFuture, McpToolHandler,
