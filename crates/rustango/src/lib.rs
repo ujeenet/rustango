@@ -956,6 +956,13 @@ pub mod ws;
 #[cfg(feature = "oauth2")]
 pub mod oauth2;
 
+/// Model Context Protocol (MCP) server — expose tools / prompts /
+/// resources to external ML agents over JSON-RPC 2.0 + Streamable HTTP.
+/// Mount via [`mcp::router`] (single-tenant) or [`mcp::tenant_router`]
+/// (tenancy). Epic #1013; Slice 1 = transport + `initialize` + `ping`.
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
 /// Opinionated HTTP client — `reqwest` wrapper with sane timeouts,
 /// retry on idempotent verbs / transient failures, default User-Agent.
 /// See [`http_client::HttpClient`].
