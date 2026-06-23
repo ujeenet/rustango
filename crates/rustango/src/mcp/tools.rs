@@ -207,12 +207,38 @@ pub(crate) async fn call_tool_with(
         _cancel_guard = Some(guard);
     }
 
-    let result = (tool.handler)(ctx, args.clone()).await;
-    // `_cancel_guard` is still alive here; it deregisters when this fn returns.
+    // Run the handler under a panic guard: a buggy `register_mcp_tool!` handler
+    // that panics must not unwind into the transport (dropping the connection /
+    // DoS) — convert it to an internal error instead (#1096). The `_cancel_guard`
+    // still deregisters when this fn returns.
+    let result = match catch_unwind((tool.handler)(ctx, args.clone())).await {
+        Ok(r) => r,
+        Err(_panic) => {
+            tracing::error!(tool = %name, agent_id, "mcp tool handler panicked");
+            Err(McpError::internal("tool handler panicked"))
+        }
+    };
     let result = result.map_err(McpError::into_jsonrpc)?;
 
     audit_tool_call(&pool, agent_id, &name, &args).await;
     Ok(call_tool_result(result))
+}
+
+/// Poll `fut` to completion, catching a panic from any individual `poll` and
+/// returning it as `Err`. A dependency-free async `catch_unwind` (we don't pull
+/// in `futures` just for this); the tool future is `Send + 'static`, and a
+/// caught panic surfaces as a `std::thread::Result::Err`. (#1096)
+async fn catch_unwind<F: Future>(fut: F) -> std::thread::Result<F::Output> {
+    use std::task::Poll;
+    let mut fut = Box::pin(fut);
+    std::future::poll_fn(move |cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
+            Err(panic) => Poll::Ready(Err(panic)),
+        }
+    })
+    .await
 }
 
 /// Wrap a handler's JSON result in an MCP `CallToolResult`. The value is
