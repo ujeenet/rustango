@@ -145,7 +145,17 @@ pub(crate) async fn agent_token(
     };
 
     let agent_id = agent.id.get().copied().unwrap_or_default();
-    match issue_agent_token(jwt, agent_id, &t.org.slug, &[], &[]) {
+    // Resolve the agent's granted skills → flattened tool set and bake them
+    // into the token so `tools/list` / `tools/call` authorize against it.
+    let (skills, tools) = match crate::tenancy::resolve_agent_grants_pool(t.pool(), agent_id).await
+    {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "mcp grant resolution failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "authorization error").into_response();
+        }
+    };
+    match issue_agent_token(jwt, agent_id, &t.org.slug, &skills, &tools) {
         Ok(token) => Json(AgentTokenOutput {
             access_token: token,
             token_type: "Bearer",
