@@ -62,7 +62,7 @@ async fn ctx_with_tools(tools: &[&str]) -> McpContext {
 
 #[tokio::test]
 async fn registered_tool_appears_in_list_with_schema() {
-    let agent = ctx_with_tools(&[]).await.agent;
+    let agent = ctx_with_tools(&["add"]).await.agent;
     let listed = list_tools(&agent);
     let tools = listed["tools"].as_array().expect("tools array");
     let add = tools
@@ -77,7 +77,7 @@ async fn registered_tool_appears_in_list_with_schema() {
 
 #[tokio::test]
 async fn call_tool_runs_handler_and_wraps_result() {
-    let ctx = ctx_with_tools(&[]).await; // empty set = Slice-3 "all allowed"
+    let ctx = ctx_with_tools(&["add"]).await; // agent granted the tool
     let out = call_tool(
         ctx,
         json!({ "name": "add", "arguments": { "a": 2, "b": 3 } }),
@@ -118,7 +118,7 @@ async fn tool_outside_agent_set_is_forbidden() {
 
 #[tokio::test]
 async fn invalid_arguments_return_structured_error() {
-    let ctx = ctx_with_tools(&[]).await;
+    let ctx = ctx_with_tools(&["add"]).await;
     // `b` missing → deserialize fails → INVALID_PARAMS, handler never runs.
     let err = call_tool(ctx, json!({ "name": "add", "arguments": { "a": 1 } }))
         .await

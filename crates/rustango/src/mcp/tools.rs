@@ -120,13 +120,13 @@ pub(crate) fn find_tool(name: &str) -> Option<&'static McpTool> {
 }
 
 /// `tools/list` result — `{ "tools": [ {name, description, inputSchema} ] }`.
-/// Filters to the agent's granted tool set once that's populated (Slice 4);
-/// an empty set (Slice 3) lists every registered tool.
+/// Fail-closed (Slice 4): only the tools in the agent's granted set are
+/// listed. An agent with no grants sees an empty list.
 #[must_use]
 pub fn list_tools(agent: &McpAgent) -> Value {
     let tools: Vec<Value> = inventory::iter::<McpTool>
         .into_iter()
-        .filter(|t| agent.tools.is_empty() || agent.tools.iter().any(|n| n == t.name))
+        .filter(|t| agent.tools.iter().any(|n| n == t.name))
         .map(|t| {
             json!({
                 "name": t.name,
@@ -159,10 +159,10 @@ pub async fn call_tool(ctx: McpContext, params: Value) -> Result<Value, JsonRpcE
     let tool = find_tool(&name)
         .ok_or_else(|| JsonRpcError::new(codes::TOOL_NOT_FOUND, format!("unknown tool: {name}")))?;
 
-    // Fail-closed authorization: once the agent carries a tool set (Slice 4),
-    // a tool outside it is refused and never executed. Empty set = Slice 3
-    // (all registered tools allowed).
-    if !ctx.agent.tools.is_empty() && !ctx.agent.tools.iter().any(|n| n == &name) {
+    // Fail-closed authorization: the agent's granted tool set (resolved from
+    // its skills at token-issue) is authoritative. A tool outside it — or any
+    // tool for an agent with no grants — is refused and never executed.
+    if !ctx.agent.tools.iter().any(|n| n == &name) {
         return Err(JsonRpcError::new(
             codes::TOOL_FORBIDDEN,
             format!("tool `{name}` is not authorized for this agent"),
