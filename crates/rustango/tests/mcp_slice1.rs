@@ -75,6 +75,21 @@ async fn unknown_method_is_method_not_found() {
 }
 
 #[tokio::test]
+async fn resources_templates_list_is_routed_not_method_not_found() {
+    // #1099: the spec method exists. Over the unauthed transport it's
+    // auth-required (INVALID_REQUEST) — crucially NOT method-not-found, which
+    // proves the dispatch arm is wired (returns an empty list once authed).
+    let (status, body) =
+        post(json!({"jsonrpc": "2.0", "id": 9, "method": "resources/templates/list"})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["error"]["code"], rustango::mcp::codes::INVALID_REQUEST);
+    assert_ne!(
+        body["error"]["code"],
+        rustango::mcp::codes::METHOD_NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn notification_is_accepted_with_no_body() {
     // No `id` → notification: 202, empty body, no JSON-RPC response.
     let (status, body) =
