@@ -77,9 +77,16 @@ pub fn secure_tenant_router() -> Router {
     tenant_router_authed(default_jwt())
 }
 
-/// Agent-guarded tenant router configured from `[mcp]` settings — applies
-/// the `token_ttl_secs` knob to the agent-token lifetime. Signs with
-/// `RUSTANGO_SESSION_SECRET` (see [`default_jwt`]). Slice 6 (#1019).
+/// Defensive cap on a JSON-RPC request body (tighter than axum's 2 MiB
+/// default). MCP messages are small; this bounds a hostile oversized payload.
+const MCP_MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// Agent-guarded tenant router configured from `[mcp]` settings. Applies the
+/// full knob set (#1098): `token_ttl_secs` → agent-token lifetime,
+/// `max_tools_listed` → `*/list` page size, `enable_sse` → whether the
+/// `GET {prefix}` stream is mounted, `allowed_origins` → a CORS layer,
+/// `rate_limit_per_minute` → a per-IP rate limit, plus a defensive body cap.
+/// Signs with `RUSTANGO_SESSION_SECRET` (see [`default_jwt`]). Slice 6 (#1019).
 #[cfg(feature = "config")]
 #[must_use]
 pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings) -> Router {
@@ -91,29 +98,55 @@ pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings)
         page_size: settings.max_tools_listed,
         ..McpState::new(None)
     };
-    authed_routes(state)
+    let mut router = authed_routes(state, settings.sse_enabled());
+
+    // CORS allow-list — empty means no layer (same-origin only).
+    if !settings.allowed_origins.is_empty() {
+        use crate::cors::{CorsLayer, CorsRouterExt};
+        router = router.cors(CorsLayer::new().allow_origins(settings.allowed_origins.clone()));
+    }
+    // Per-IP rate limit (`capacity` requests per 60s window).
+    if let Some(rpm) = settings.rate_limit_per_minute {
+        use crate::rate_limit::{RateLimitLayer, RateLimitRouterExt};
+        router = router.rate_limit(RateLimitLayer::per_ip(
+            rpm,
+            std::time::Duration::from_secs(60),
+        ));
+    }
+    // Defensive body cap on every MCP route.
+    {
+        use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt};
+        router = router.body_limit(BodyLimitLayer::new(MCP_MAX_BODY_BYTES));
+    }
+    router
 }
 
 /// Like [`secure_tenant_router`] but with a caller-supplied
 /// [`JwtLifecycle`] — set a stable secret, custom TTLs, or a shared
 /// (Redis/DB) `JtiStore` for multi-instance revocation. Also the seam the
-/// tests issue + revoke through.
+/// tests issue + revoke through. SSE is enabled (use
+/// [`secure_tenant_router_from_settings`] to gate it via `enable_sse`).
 #[must_use]
 pub fn tenant_router_authed(jwt: Arc<JwtLifecycle>) -> Router {
     let state = McpState {
         jwt: Some(jwt),
         ..McpState::new(None)
     };
-    authed_routes(state)
+    authed_routes(state, true)
 }
 
-/// The agent-guarded route set: JSON-RPC + SSE on `/`, the bespoke
-/// `/token`, and the OAuth 2.1 discovery + `client_credentials` endpoints
-/// (#1088).
-fn authed_routes(state: McpState) -> Router {
+/// The agent-guarded route set: JSON-RPC on `/` (plus the SSE stream when
+/// `enable_sse`), the bespoke `/token`, and the OAuth 2.1 discovery +
+/// `client_credentials` endpoints (#1088).
+fn authed_routes(state: McpState, enable_sse: bool) -> Router {
     use super::oauth;
+    let root = if enable_sse {
+        post(post_authed).get(sse_handler)
+    } else {
+        post(post_authed)
+    };
     Router::new()
-        .route("/", post(post_authed).get(sse_handler))
+        .route("/", root)
         .route("/token", post(agent_token))
         .route("/oauth/token", post(oauth::oauth_token))
         .route(
