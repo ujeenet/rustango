@@ -256,14 +256,61 @@ fn call_tool_result(value: Value) -> Value {
     })
 }
 
-/// Best-effort audit of a tool invocation (never fails the call).
+/// Key names whose values are scrubbed before a tool call's arguments are
+/// written to the audit log — secrets must never land in the audit table
+/// (#1097). Mirrors the framework's access-log redaction set
+/// (`access_log::default_redact_params`) plus a few MCP-relevant names.
+const SENSITIVE_ARG_KEYS: &[&str] = &[
+    "password",
+    "passwd",
+    "token",
+    "secret",
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "signature",
+    "auth",
+    "authorization",
+    "client_secret",
+    "private_key",
+];
+
+/// Recursively redact the values of sensitive keys in `value`, returning a
+/// scrubbed clone. Key matching is case-insensitive and exact (so `token_count`
+/// is *not* redacted); a matched key's entire value becomes `"[redacted]"`.
+fn redact_json(value: &Value) -> Value {
+    fn is_sensitive(key: &str) -> bool {
+        let k = key.to_ascii_lowercase();
+        SENSITIVE_ARG_KEYS.iter().any(|s| *s == k)
+    }
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| {
+                    if is_sensitive(k) {
+                        (k.clone(), Value::String("[redacted]".into()))
+                    } else {
+                        (k.clone(), redact_json(v))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_json).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Best-effort audit of a tool invocation (never fails the call). Arguments are
+/// redacted (#1097) so a tool taking a `password`/`token`/… never leaks it into
+/// the audit table.
 async fn audit_tool_call(pool: &Pool, agent_id: i64, tool: &str, args: &Value) {
     let entry = crate::audit::PendingEntry {
         entity_table: "rustango_agents",
         entity_pk: agent_id.to_string(),
         operation: crate::audit::AuditOp::Action,
         source: crate::audit::AuditSource::Custom(format!("mcp:agent:{agent_id}")),
-        changes: json!({ "tool": tool, "arguments": args }),
+        changes: json!({ "tool": tool, "arguments": redact_json(args) }),
     };
     if let Err(e) = crate::audit::emit_one_pool(pool, &entry).await {
         tracing::debug!(error = %e, tool, "mcp tools/call audit not recorded");
@@ -312,4 +359,30 @@ macro_rules! register_mcp_tool {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_json_scrubs_sensitive_keys_recursively() {
+        let args = json!({
+            "username": "alice",
+            "password": "hunter2",
+            "API_KEY": "sk-123",
+            "token_count": 42,                       // not sensitive (exact match)
+            "nested": { "client_secret": "shh", "ok": true },
+            "list": [ { "secret": "s" }, { "keep": "v" } ],
+        });
+        let red = redact_json(&args);
+        assert_eq!(red["username"], "alice");
+        assert_eq!(red["password"], "[redacted]");
+        assert_eq!(red["API_KEY"], "[redacted]"); // case-insensitive
+        assert_eq!(red["token_count"], 42); // exact-match: kept
+        assert_eq!(red["nested"]["client_secret"], "[redacted]");
+        assert_eq!(red["nested"]["ok"], true);
+        assert_eq!(red["list"][0]["secret"], "[redacted]");
+        assert_eq!(red["list"][1]["keep"], "v");
+    }
 }
