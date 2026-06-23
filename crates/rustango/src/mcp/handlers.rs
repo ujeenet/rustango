@@ -65,6 +65,14 @@ pub(crate) async fn dispatch(
             let ctx = ctx.ok_or_else(auth_required)?;
             super::resources::read_resource(&ctx, params.unwrap_or_else(|| json!({}))).await
         }
+        "logging/setLevel" => {
+            ctx.ok_or_else(auth_required)?;
+            super::utilities::set_log_level(params.unwrap_or_else(|| json!({})))
+        }
+        "completion/complete" => {
+            let ctx = ctx.ok_or_else(auth_required)?;
+            super::utilities::complete(&ctx, params.unwrap_or_else(|| json!({}))).await
+        }
         other => Err(JsonRpcError::method_not_found(other)),
     }
 }
@@ -91,7 +99,9 @@ fn initialize(_params: Option<Value>) -> Result<Value, JsonRpcError> {
             tools: Some(json!({ "listChanged": false })),
             prompts: Some(json!({ "listChanged": false })),
             resources: Some(json!({ "listChanged": false, "subscribe": false })),
-            ..ServerCapabilities::default()
+            // Follow-up #1091: logging + completion utilities.
+            logging: Some(json!({})),
+            completions: Some(json!({})),
         },
         server_info: Implementation {
             name: "rustango",

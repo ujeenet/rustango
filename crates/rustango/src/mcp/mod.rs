@@ -31,6 +31,7 @@ mod router;
 pub mod tools;
 mod transport;
 mod types;
+pub mod utilities;
 
 pub use auth::{issue_agent_token, verify_agent_token, McpAgent};
 pub use resources::{get_prompt, list_prompts, list_resources, read_resource, McpResource};
