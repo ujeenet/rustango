@@ -80,6 +80,18 @@ pub fn secure_tenant_router() -> Router {
     tenant_router_authed(default_jwt())
 }
 
+/// Agent-guarded tenant router configured from `[mcp]` settings — applies
+/// the `token_ttl_secs` knob to the agent-token lifetime. Signs with
+/// `RUSTANGO_SESSION_SECRET` (see [`default_jwt`]). Slice 6 (#1019).
+#[cfg(feature = "config")]
+#[must_use]
+pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings) -> Router {
+    let jwt = Arc::new(
+        JwtLifecycle::new(super::auth::jwt_secret()).with_access_ttl(settings.token_ttl_secs()),
+    );
+    tenant_router_authed(jwt)
+}
+
 /// Like [`secure_tenant_router`] but with a caller-supplied
 /// [`JwtLifecycle`] — set a stable secret, custom TTLs, or a shared
 /// (Redis/DB) `JtiStore` for multi-instance revocation. Also the seam the

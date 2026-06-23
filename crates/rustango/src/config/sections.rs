@@ -72,6 +72,12 @@ pub struct Settings {
     /// from TOML so deployments don't have to instantiate it in
     /// code; see [`crate::i18n::Translator::from_settings`].
     pub i18n: I18nSettings,
+
+    /// `[mcp]` — Model Context Protocol server knobs: mount prefix,
+    /// agent-token TTL, SSE toggle, CORS origins, rate limit, and the
+    /// `tools/list` cap. Epic #1013, Slice 6 (#1019). Inert unless the
+    /// `mcp` feature is compiled in.
+    pub mcp: McpSettings,
 }
 
 impl Settings {
@@ -130,7 +136,45 @@ impl Settings {
         feat!("uploads");
         feat!("media");
         feat!("runserver");
+        feat!("mcp");
         out
+    }
+}
+
+/// `[mcp]` — Model Context Protocol server configuration (epic #1013).
+/// All fields are optional; accessors supply the framework defaults.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct McpSettings {
+    /// URL prefix the MCP router mounts under. Default `/mcp`.
+    pub prefix: Option<String>,
+    /// Agent access-token lifetime in seconds. Default 900 (15 min).
+    pub token_ttl_secs: Option<i64>,
+    /// Serve the `GET {prefix}` SSE notification stream. Default `true`.
+    pub enable_sse: Option<bool>,
+    /// CORS allow-list of origins for the MCP endpoint (empty = none).
+    pub allowed_origins: Vec<String>,
+    /// Per-IP request cap per minute (`None` = unlimited).
+    pub rate_limit_per_minute: Option<u32>,
+    /// Max tools returned by `tools/list` (`None` = unlimited).
+    pub max_tools_listed: Option<usize>,
+}
+
+impl McpSettings {
+    /// Mount prefix, defaulting to `/mcp`.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        self.prefix.as_deref().unwrap_or("/mcp")
+    }
+    /// Token TTL in seconds, defaulting to 900 (15 minutes).
+    #[must_use]
+    pub fn token_ttl_secs(&self) -> i64 {
+        self.token_ttl_secs.unwrap_or(900)
+    }
+    /// Whether the SSE notification stream is served (default `true`).
+    #[must_use]
+    pub fn sse_enabled(&self) -> bool {
+        self.enable_sse.unwrap_or(true)
     }
 }
 
