@@ -143,6 +143,19 @@ impl Settings {
 
 /// `[mcp]` — Model Context Protocol server configuration (epic #1013).
 /// All fields are optional; accessors supply the framework defaults.
+///
+/// Example `config/default.toml` (all keys shown with their defaults; uncomment
+/// to override):
+///
+/// ```toml
+/// [mcp]
+/// # prefix = "/mcp"                 # URL prefix the MCP router mounts under
+/// # token_ttl_secs = 900            # agent access-token lifetime (15 min)
+/// # enable_sse = true               # serve the GET {prefix} SSE stream
+/// # allowed_origins = []            # CORS allow-list (empty = same-origin only)
+/// # rate_limit_per_minute = 0       # per-IP cap (0/unset = unlimited)
+/// # max_tools_listed = 0            # tools/list page size (0/unset = unlimited)
+/// ```
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct McpSettings {
