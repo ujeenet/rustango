@@ -6,6 +6,261 @@
   "snapshot": {
     "tables": [
       {
+        "name": "rustango_agent_grants",
+        "model": "AgentGrant",
+        "fields": [
+          {
+            "name": "agent_id",
+            "column": "agent_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_agents",
+              "on": "id"
+            }
+          },
+          {
+            "name": "data",
+            "column": "data",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false,
+            "default": "'{}'"
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "skill_id",
+            "column": "skill_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_agent_skills",
+              "on": "id"
+            }
+          }
+        ]
+      },
+      {
+        "name": "rustango_agent_skill_resources",
+        "model": "AgentSkillResource",
+        "fields": [
+          {
+            "name": "data",
+            "column": "data",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false,
+            "default": "'{}'"
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "mime",
+            "column": "mime",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "resource_uri",
+            "column": "resource_uri",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 500
+          },
+          {
+            "name": "skill_id",
+            "column": "skill_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_agent_skills",
+              "on": "id"
+            }
+          }
+        ]
+      },
+      {
+        "name": "rustango_agent_skill_tools",
+        "model": "AgentSkillTool",
+        "fields": [
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "skill_id",
+            "column": "skill_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_agent_skills",
+              "on": "id"
+            }
+          },
+          {
+            "name": "tool_name",
+            "column": "tool_name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 150
+          }
+        ]
+      },
+      {
+        "name": "rustango_agent_skills",
+        "model": "AgentSkill",
+        "fields": [
+          {
+            "name": "codename",
+            "column": "codename",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100,
+            "unique": true
+          },
+          {
+            "name": "data",
+            "column": "data",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false,
+            "default": "'{}'"
+          },
+          {
+            "name": "description",
+            "column": "description",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 500
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "instructions",
+            "column": "instructions",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "name",
+            "column": "name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 150
+          }
+        ]
+      },
+      {
+        "name": "rustango_agents",
+        "model": "Agent",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "data",
+            "column": "data",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false,
+            "default": "'{}'"
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "name",
+            "column": "name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 150,
+            "unique": true
+          },
+          {
+            "name": "secret_hash",
+            "column": "secret_hash",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "secret_prefix",
+            "column": "secret_prefix",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 16,
+            "unique": true
+          },
+          {
+            "name": "secret_rotated_at",
+            "column": "secret_rotated_at",
+            "ty": "datetime",
+            "nullable": true,
+            "primary_key": false
+          }
+        ]
+      },
+      {
         "name": "rustango_api_keys",
         "model": "ApiKey",
         "fields": [
@@ -62,7 +317,12 @@
             "column": "user_id",
             "ty": "i64",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_users",
+              "on": "id"
+            }
           }
         ]
       },
@@ -291,7 +551,12 @@
             "column": "role_id",
             "ty": "i64",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_roles",
+              "on": "id"
+            }
           }
         ]
       },
@@ -374,7 +639,12 @@
             "column": "user_id",
             "ty": "i64",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_users",
+              "on": "id"
+            }
           }
         ]
       },
@@ -395,14 +665,24 @@
             "column": "role_id",
             "ty": "i64",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_roles",
+              "on": "id"
+            }
           },
           {
             "name": "user_id",
             "column": "user_id",
             "ty": "i64",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_users",
+              "on": "id"
+            }
           }
         ]
       },
