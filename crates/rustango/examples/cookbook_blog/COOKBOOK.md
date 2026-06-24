@@ -3304,6 +3304,18 @@ let api = axum::Router::new()
 guards the JSON-RPC `POST /mcp` behind a tenant-pinned agent JWT, signed
 with `RUSTANGO_SESSION_SECRET`.
 
+#### MCP is an optional feature — its tables aren't in the universal bootstrap
+
+The agent/skill models (`rustango_agents`, `rustango_agent_skills`,
+`…_skill_tools`, `…_agent_grants`, `…_skill_resources`) are gated behind the
+`mcp` feature, so a tenancy project that doesn't enable `mcp` never compiles
+them and never carries them in its bootstrap migration. Like the framework's
+other optional tables (`content_types`, `audit_log`, `permissions`), they're
+created via the lazy ensure-table path the first time the MCP layer touches
+them (`manage create-agent` / `create-skill` / `grant-skill`), not by the core
+tenant bootstrap. App `make_migrations` never emits create/drop for `rustango_*`
+tables — the framework reserves that prefix for tables it manages itself.
+
 ### 3. Provision agents + skills (CLI)
 
 ```sh

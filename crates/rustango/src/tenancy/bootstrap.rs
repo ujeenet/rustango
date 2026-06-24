@@ -48,7 +48,6 @@ use std::path::Path;
 use crate::core::Model as _;
 use crate::migrate::{Migration, MigrationScope, Operation, SchemaChange, SchemaSnapshot};
 
-use super::agents::{Agent, AgentGrant, AgentSkill, AgentSkillResource, AgentSkillTool};
 use super::auth::{validate_tenant_user_schema, Operator, TenantUserModel, User};
 use super::auth_backends::ApiKey;
 use super::error::TenancyError;
@@ -120,25 +119,19 @@ pub fn tenant_bootstrap_migration_for<U: TenantUserModel>() -> Migration {
     }
 }
 
-/// Snapshot containing **all** the framework's per-tenant tables,
+/// Snapshot containing the framework's **core** per-tenant tables,
 /// regardless of scope. Both bootstrap migrations share this snapshot
 /// so the lex-greatest one (`0001_rustango_tenant_initial`) leaves the
 /// world looking complete to a downstream `make_migrations`.
 ///
-/// This includes the MCP agent/skill tables (`rustango_agents`,
-/// `rustango_agent_skills`, `…_skill_tools`, `…_agent_grants`,
-/// `…_skill_resources`) — they're plain tenancy models (not gated behind
-/// the `mcp` feature; only the *server* in `crate::mcp` is). They are also
-/// created on demand by `ensure_*_table_pool` the first time the MCP layer
-/// touches them, so runtime is unaffected whether or not the bootstrap
-/// migration that contains them has been applied.
-///
-/// **Upgrade note (epic #1013):** projects that ran `init_tenancy` before
-/// these models existed have bootstrap JSON on disk *without* the agent
-/// tables, so the next `make_migrations` may report an `AddTable` drift for
-/// them. Either is safe: run `make_migrations` to capture the new tables in a
-/// follow-up migration, or ignore it — `ensure_*_table_pool` creates them
-/// lazily at first use regardless.
+/// The MCP agent/skill tables (`rustango_agents`, `rustango_agent_skills`,
+/// `…_skill_tools`, `…_agent_grants`, `…_skill_resources`) are deliberately
+/// **NOT** here — MCP is an optional feature, so baking its tables into every
+/// tenancy project's bootstrap was wrong (#1101). The models are gated behind
+/// `#[cfg(feature = "mcp")]`, so a project that enables `mcp` will have
+/// `make_migrations` emit a `CreateModel` migration for them (and a
+/// `DropModel` if `mcp` is later disabled) — the normal Django-style flow for
+/// adding/removing an app. The core tenancy bootstrap stays MCP-free.
 fn full_snapshot_for<U: TenantUserModel>() -> SchemaSnapshot {
     if let Err(e) = validate_tenant_user_schema(&U::SCHEMA) {
         panic!("invalid TenantUserModel: {e}");
@@ -152,11 +145,6 @@ fn full_snapshot_for<U: TenantUserModel>() -> SchemaSnapshot {
         UserRole::SCHEMA,
         UserPermission::SCHEMA,
         ApiKey::SCHEMA,
-        Agent::SCHEMA,
-        AgentSkill::SCHEMA,
-        AgentSkillTool::SCHEMA,
-        AgentGrant::SCHEMA,
-        AgentSkillResource::SCHEMA,
     ])
 }
 
@@ -254,6 +242,29 @@ mod tests {
         assert!(names.contains(&"rustango_orgs"));
         assert!(names.contains(&"rustango_operators"));
         assert!(names.contains(&"rustango_users"));
+    }
+
+    #[test]
+    fn bootstrap_snapshot_is_mcp_free() {
+        // MCP is optional (#1101): its `rustango_agent*` tables must NOT be
+        // baked into the universal tenant bootstrap — non-MCP projects
+        // shouldn't carry them. When the `mcp` feature is on, the tables are
+        // created via the lazy ensure-table path (like `content_types` /
+        // `audit_log` / `permissions`), never the core bootstrap.
+        let s = full_snapshot_for::<User>();
+        let names: Vec<&str> = s.tables.iter().map(|t| t.name.as_str()).collect();
+        for t in [
+            "rustango_agents",
+            "rustango_agent_skills",
+            "rustango_agent_skill_tools",
+            "rustango_agent_grants",
+            "rustango_agent_skill_resources",
+        ] {
+            assert!(
+                !names.contains(&t),
+                "`{t}` must not be in the core tenant bootstrap (MCP is optional)"
+            );
+        }
     }
 
     /// Custom user model with an extra column. Mirrors every required
