@@ -119,10 +119,19 @@ pub fn tenant_bootstrap_migration_for<U: TenantUserModel>() -> Migration {
     }
 }
 
-/// Snapshot containing **all three** tenancy tables, regardless of
-/// scope. Both bootstrap migrations share this snapshot so the
-/// lex-greatest one (`0001_rustango_tenant_initial`) leaves the
+/// Snapshot containing the framework's **core** per-tenant tables,
+/// regardless of scope. Both bootstrap migrations share this snapshot
+/// so the lex-greatest one (`0001_rustango_tenant_initial`) leaves the
 /// world looking complete to a downstream `make_migrations`.
+///
+/// The MCP agent/skill tables (`rustango_agents`, `rustango_agent_skills`,
+/// `…_skill_tools`, `…_agent_grants`, `…_skill_resources`) are deliberately
+/// **NOT** here — MCP is an optional feature, so baking its tables into every
+/// tenancy project's bootstrap was wrong (#1101). The models are gated behind
+/// `#[cfg(feature = "mcp")]`, so a project that enables `mcp` will have
+/// `make_migrations` emit a `CreateModel` migration for them (and a
+/// `DropModel` if `mcp` is later disabled) — the normal Django-style flow for
+/// adding/removing an app. The core tenancy bootstrap stays MCP-free.
 fn full_snapshot_for<U: TenantUserModel>() -> SchemaSnapshot {
     if let Err(e) = validate_tenant_user_schema(&U::SCHEMA) {
         panic!("invalid TenantUserModel: {e}");
@@ -233,6 +242,29 @@ mod tests {
         assert!(names.contains(&"rustango_orgs"));
         assert!(names.contains(&"rustango_operators"));
         assert!(names.contains(&"rustango_users"));
+    }
+
+    #[test]
+    fn bootstrap_snapshot_is_mcp_free() {
+        // MCP is optional (#1101): its `rustango_agent*` tables must NOT be
+        // baked into the universal tenant bootstrap — non-MCP projects
+        // shouldn't carry them. When the `mcp` feature is on, the tables are
+        // created via the lazy ensure-table path (like `content_types` /
+        // `audit_log` / `permissions`), never the core bootstrap.
+        let s = full_snapshot_for::<User>();
+        let names: Vec<&str> = s.tables.iter().map(|t| t.name.as_str()).collect();
+        for t in [
+            "rustango_agents",
+            "rustango_agent_skills",
+            "rustango_agent_skill_tools",
+            "rustango_agent_grants",
+            "rustango_agent_skill_resources",
+        ] {
+            assert!(
+                !names.contains(&t),
+                "`{t}` must not be in the core tenant bootstrap (MCP is optional)"
+            );
+        }
     }
 
     /// Custom user model with an extra column. Mirrors every required

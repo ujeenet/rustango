@@ -62,7 +62,12 @@
             "column": "user_id",
             "ty": "i64",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_users",
+              "on": "id"
+            }
           }
         ]
       },
@@ -291,7 +296,12 @@
             "column": "role_id",
             "ty": "i64",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_roles",
+              "on": "id"
+            }
           }
         ]
       },
@@ -374,7 +384,12 @@
             "column": "user_id",
             "ty": "i64",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_users",
+              "on": "id"
+            }
           }
         ]
       },
@@ -395,14 +410,24 @@
             "column": "role_id",
             "ty": "i64",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_roles",
+              "on": "id"
+            }
           },
           {
             "name": "user_id",
             "column": "user_id",
             "ty": "i64",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_users",
+              "on": "id"
+            }
           }
         ]
       },

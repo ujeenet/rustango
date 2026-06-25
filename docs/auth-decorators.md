@@ -16,13 +16,15 @@ or answered with 401/403 (API flow) — before they ever reach the handler.
 > [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_decorators.rs) —
 > `cargo test -p auth_demo --test auth_decorators`.
 
+> **New to a term here?** *middleware/layer*, *extractor*, *401/403* — see the
+> [glossary](glossary.md).
+
 > Deep dive companion to the [Security guide](security.md). The gates read the
 > session set at login — see [Sessions](auth-sessions.md).
 
 ---
 
-## Contents
-
+## Table of contents
 - [Quick start](#quick-start) · [Browser vs API gates](#browser-vs-api-gates)
 - [The gate family](#the-gate-family) · [Predicate & role gates](#predicate-and-role-gates)
 - [Permission gates](#permission-gates) · [The `?next=` round-trip](#the-next-round-trip)
@@ -176,3 +178,12 @@ assert_eq!(safe_next("%2F%2Fevil.example/x"),   None);   // decodes to //evil
   engine) — mount it under the tenant; an untenant'd route 500s.
 - The redirect's `?next=` is always percent-encoded, so CRLF / response-splitting
   can't leak into the `Location` header.
+
+
+---
+
+## See also
+
+- [Auth backends](auth-backends.md)
+- [Sessions](auth-sessions.md)
+- [Security guide](security.md)

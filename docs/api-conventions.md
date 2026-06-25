@@ -1,5 +1,7 @@
 # API conventions
 
+> **Who this page is for.** This is an **advanced reference for Rust developers** working *with* or *on* the framework's code — it explains the naming, return-type and module conventions behind Rustango's Rust API. It is **not** a guide to *calling* a Rustango app's REST API over HTTP. If that's what you want, start with [ViewSets](viewsets.md) (build a REST API) and the [glossary](glossary.md) (plain-language terms); come back here once you're writing Rust against the framework.
+
 This page explains the patterns **Rustango**'s API follows, so you can predict how any method behaves before you read its docs. If you're contributing or auditing a feature, these are the rules.
 
 [![Rustango's naming convention: the method suffix tells you what it takes — `*_on` for a typed pool, bare for the multi-backend pool, and pool-free signals](img/api-conventions.png)](img/api-conventions.png)
@@ -257,9 +259,13 @@ A *feature* is a Cargo build flag (`Cargo.toml`'s `[features]`) that switches a 
 
 ```toml
 default = [
-    "postgres", "admin", "config", "forms", "serializer",
-    "cache", "signals", "email", "storage", "scheduler",
-    "secrets", "totp", "webhook", "api_keys", "passwords", "signed_url",
+    "postgres", "manage", "admin", "config", "forms", "serializer",
+    "cache", "signals", "email", "storage", "scheduler", "secrets", "totp",
+    "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url",
+    "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse",
+    "websocket", "oauth2", "http-client", "compression", "openapi",
+    "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3",
+    "media", "runserver", "template_views",
 ]
 ```
 

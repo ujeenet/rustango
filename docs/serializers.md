@@ -13,8 +13,15 @@ JSON (`from_model` → `to_value`), declares which fields are writable, and
 validates. You compose it with the ORM and ViewSets rather than routing writes
 *through* it.
 
+> **New to a term here?** — *serializer*, *model*, *ORM*, *DRF*? The
+> [glossary](glossary.md) defines each in plain language.
+
 [![A Rustango serializer: read_only, source rename, a computed method field, a nested FK, and a write_only field — declared on one struct](img/serializers.png)](img/serializers.png)
 
+> **Source:** `rustango::serializer` (`ModelSerializer`, `#[derive(Serializer)]`,
+> the `#[serializer(...)]` field attributes) — behind the `serializer` feature
+> (on by default).
+>
 > **Runnable versions:** the minimal serializer ships in the tested
 > [`getting_started_blog`](../crates/rustango/examples/getting_started_blog/src/post_serializer.rs)
 > example, and the derive's full behavior is covered by the framework's own
@@ -23,14 +30,13 @@ validates. You compose it with the ORM and ViewSets rather than routing writes
 
 ---
 
-## Contents
-
+## Table of contents
 - [Quick start](#quick-start) · [The `ModelSerializer` trait](#the-modelserializer-trait)
 - [Field attributes](#field-attributes) — the full reference
 - [Computed fields](#computed-fields) · [Nested serializers](#nested-serializers) · [Collections](#collections-many) · [Slug fields](#slug-related-fields)
 - [Validation](#validation) · [Unique-together](#unique-together-validation)
 - [Hyperlinked output](#hyperlinked-output) · [Serializing lists](#serializing-lists)
-- [Wiring into a ViewSet](#wiring-into-a-viewset) · [Writes & partial updates](#writes-and-partial-updates)
+- [Using a serializer with a ViewSet](#using-a-serializer-with-a-viewset) · [Validating in a custom handler](#validating-in-a-custom-handler)
 - [OpenAPI](#openapi-schemas) · [Scaffolding](#scaffolding) · [Tweaks & limits](#tweaks-and-current-limits)
 
 ---
@@ -130,6 +136,12 @@ Everything is controlled by `#[serializer(...)]` on each field. The full set:
 `writable_fields()`, absent from output. `skip` is the opposite escape hatch —
 the field isn't read from the model and isn't writable, so you populate it by
 hand after `from_model` (e.g. a list of tag ids you fetch separately).
+
+> **`write_only` does not transform the value.** A `write_only` field is
+> accepted on write and persisted **verbatim** — the serializer never hashes or
+> encrypts it. For a password, hash it yourself (see [Passwords](auth-passwords.md))
+> before `save()`; `read_only` fields, conversely, are silently ignored on write
+> rather than rejected.
 
 ---
 
@@ -378,8 +390,11 @@ if you want them gone).
 wrap a page of them in the standard envelope:
 
 ```json
-{ "count": 100, "next": "?page=2", "previous": null, "results": [ { … }, { … } ] }
+{ "count": 100, "page": 1, "page_size": 20, "last_page": 5, "results": [ { … }, { … } ] }
 ```
+
+(That's the default page-number envelope; see [Pagination](viewsets.md#pagination)
+for the cursor and limit/offset shapes.)
 
 ---
 
@@ -506,3 +521,12 @@ cd crates/rustango
 cargo test --test serializer_derive          # field attrs, method, nested, many, slug, OpenAPI
 cargo test --test serializer_cross_validate  # per-field + cross-field validation aggregation
 ```
+
+---
+
+## See also
+
+- [ViewSets](viewsets.md) — wire a serializer into a JSON CRUD API.
+- [HTML views](html-views.md) — the server-rendered alternative to a JSON API.
+- [OpenAPI](openapi.md) — a serializer's fields become a component schema.
+- [ORM cookbook](orm.md) — the models serializers map from.

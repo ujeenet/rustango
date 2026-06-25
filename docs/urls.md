@@ -13,10 +13,12 @@ with `redirect_to_view(...)`. The API surface mirrors Django's
 > `all_routes`, `duplicates`, `register_url_tag`) and `rustango::shortcuts`
 > (`resolve_url`, `redirect_to_view`).
 
+> **New to a term here?** *route*, *reverse*, *namespacing* — see the
+> [glossary](glossary.md).
+
 ---
 
-## Contents
-
+## Table of contents
 - [Register a named URL](#register-a-named-url)
 - [Reverse in Rust](#reverse-in-rust) · [Reverse in templates](#reverse-in-templates)
 - [Redirect by name](#redirect-by-name) · [Namespacing](#namespacing)
@@ -275,3 +277,12 @@ compile a `Regex` once and reuse it across requests.
   are plain `{name}` and values are substituted as-is (after encoding). See
   [Regex & typed path patterns](#regex--typed-path-patterns) for why, and how to
   constrain a route instead.
+
+
+---
+
+## See also
+
+- [HTML views](html-views.md)
+- [ViewSets](viewsets.md)
+- [Middleware](middleware.md)

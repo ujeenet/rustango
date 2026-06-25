@@ -60,6 +60,13 @@
 // the user at database-mode.
 #[cfg(feature = "admin")]
 pub mod admin;
+// Agents + skills are an MCP-only concept (the grant unit for tool
+// authorization). Gated behind `mcp` so non-MCP tenancy projects don't
+// compile the models, register them for `makemigrations`, or carry their
+// tables in the bootstrap. Enabling `mcp` makes `makemigrations` emit the
+// `CreateModel`; disabling it emits the `DropModel`.
+#[cfg(feature = "mcp")]
+pub mod agents;
 pub mod auth;
 pub mod auth_backends;
 pub mod auth_routes;
@@ -93,6 +100,14 @@ pub mod session;
 pub mod server;
 pub mod tenant_console;
 
+#[cfg(feature = "mcp")]
+pub use agents::{
+    add_skill_resource_pool, authenticate_agent_pool, create_agent_pool, create_skill_pool,
+    ensure_agents_table_pool, ensure_skill_tables_pool, grant_skill_pool, list_agents_pool,
+    list_skills_pool, resolve_agent_grants_pool, resources_for_skills_pool, revoke_skill_pool,
+    rotate_agent_secret_pool, skills_by_codenames_pool, Agent, AgentError, AgentGrant, AgentSecret,
+    AgentSkill, AgentSkillResource, AgentSkillTool,
+};
 #[cfg(feature = "postgres")]
 pub use auth::{authenticate_operator, authenticate_user};
 pub use auth::{

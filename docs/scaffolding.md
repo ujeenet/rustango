@@ -7,6 +7,17 @@
 
 [![`cargo rustango new` scaffolds a complete, ready-to-run project — Cargo manifest, config tiers, Docker, migrations, and src — in one command](img/scaffolding.png)](img/scaffolding.png)
 
+## Table of contents
+
+- [Install the generator](#install-the-generator)
+- [Create a project: `cargo rustango new`](#create-a-project-cargo-rustango-new)
+- [What gets generated](#what-gets-generated)
+- [Add a feature module: `manage startapp`](#add-a-feature-module-manage-startapp)
+- [Generate single files: the `make:*` commands](#generate-single-files-the-make-commands)
+- [A typical flow](#a-typical-flow)
+
+---
+
 ## Install the generator
 
 `cargo rustango` is a Cargo subcommand. Install it once, globally:
@@ -16,6 +27,8 @@ cargo install cargo-rustango
 ```
 
 That puts a `cargo-rustango` binary on your `PATH`; Cargo then exposes it as `cargo rustango` (the same way `django-admin` or the `laravel` installer give you a global command).
+
+---
 
 ## Create a project: `cargo rustango new`
 
@@ -42,6 +55,8 @@ cargo rustango new myblog                      # fullstack (the default)
 cargo rustango new api_demo  --template api
 cargo rustango new shop      --template tenant
 ```
+
+---
 
 ## What gets generated
 
@@ -113,6 +128,8 @@ cargo run                   # serve
 cargo run -- --help         # see every manage verb
 ```
 
+---
+
 ## Add a feature module: `manage startapp`
 
 This is Django's `startapp` — scaffold a self-contained module of related models, views, and routes:
@@ -128,6 +145,8 @@ Options:
 - **`--into <dir>`** — scaffold under a base directory other than `src/` (e.g. a workspace member).
 - **`--with-manage-bin`** — also emit a `bin/manage.rs` (for layouts that prefer a separate manage binary).
 - **`--with-bootstrap-migration`** — drop a starter migration alongside the new app.
+
+---
 
 ## Generate single files: the `make:*` commands
 
@@ -149,6 +168,8 @@ cargo run -- make:viewset PostViewSet --model Post
 cargo run -- make:serializer PostSerializer --model Post
 cargo run -- make:test post_smoke
 ```
+
+---
 
 ## A typical flow
 

@@ -205,7 +205,7 @@ src/blog/
 
 ## Step 8: Define a model
 
-A model is a database table described as a Rust struct, like a Django model or an Eloquent/Active Record class. Open `src/blog/models.rs` and define your `Post`:
+A model is a database table described as a Rust struct, like a Django model or an Eloquent/Active Record class. Open `src/blog/models.rs` and define your `Post`. (For the full reference — every field type, custom primary keys, and all attributes — see the [Models guide](models.md).)
 
 ```rust
 use rustango::{Auto, Model};
@@ -562,7 +562,7 @@ let roles: Vec<String> = claims.get("roles").unwrap_or_default();
 
 ## Step 15: Add security middleware
 
-Middleware wraps every request to add cross-cutting behavior. Here you stack request IDs, access logging, rate limiting, CORS, and security headers in one chain. Each `.method(...)` adds one layer, similar to Django middleware or Laravel's middleware stack.
+Middleware wraps every request to add cross-cutting behavior. Here you stack request IDs, access logging, rate limiting, CORS, and security headers in one chain. Each `.method(...)` adds one layer, similar to Django middleware or Laravel's middleware stack. See the [Middleware guide](middleware.md) for the full layer catalog and ordering rules.
 
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};
@@ -716,6 +716,8 @@ Make sure your reverse proxy:
 | Runnable version of this guide | [`examples/getting_started_blog`](../crates/rustango/examples/getting_started_blog) |
 | Every `manage` subcommand | [`docs/manage.md`](manage.md) |
 | ORM cookbook (advanced filters, aggregations, M2M, soft delete) | [`docs/orm.md`](orm.md) |
+| Middleware (the full layer catalog + ordering) | [`docs/middleware.md`](middleware.md) |
+| Performance benchmarks (vs Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | API conventions (naming, builder patterns, feature gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Security features in depth | [`docs/security.md`](security.md) |
 | Django parity audit | [`docs/django-parity-audit-2026-05-21.md`](django-parity-audit-2026-05-21.md) |

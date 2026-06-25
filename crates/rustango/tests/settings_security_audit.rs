@@ -112,6 +112,39 @@ fn well_formed_proxy_ssl_header_is_silent() {
     );
 }
 
+// #1099 — the [mcp] deploy rule fires only when the MCP server is compiled in.
+#[cfg(feature = "mcp")]
+#[test]
+fn mcp_prod_audit_flags_empty_origins_and_no_rate_limit() {
+    let out = audit_prod(|_| {});
+    assert!(
+        out.info.iter().any(|m| m.contains("[mcp] allowed_origins")),
+        "expected [mcp] allowed_origins info; got: {:?}",
+        out.info
+    );
+    assert!(
+        out.info
+            .iter()
+            .any(|m| m.contains("[mcp] rate_limit_per_minute")),
+        "expected [mcp] rate-limit info; got: {:?}",
+        out.info
+    );
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn mcp_prod_audit_silent_when_configured() {
+    let out = audit_prod(|s| {
+        s.mcp.allowed_origins = vec!["https://app.example".into()];
+        s.mcp.rate_limit_per_minute = Some(120);
+    });
+    assert!(
+        !out.info.iter().any(|m| m.contains("[mcp]")),
+        "configured [mcp] should be silent; got: {:?}",
+        out.info
+    );
+}
+
 #[test]
 fn dev_tier_does_not_run_security_audit() {
     let mut s = Settings::default();

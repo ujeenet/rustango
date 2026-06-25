@@ -39,6 +39,9 @@
 //!   [`super::server::run`]).
 //! - [`args`] — shared positional / flag parsing helpers.
 
+// Agent / skill verbs are MCP-only (see `super::agents`, gated the same way).
+#[cfg(feature = "mcp")]
+mod agents;
 mod args;
 mod audit;
 #[cfg(feature = "postgres")]
@@ -257,6 +260,22 @@ where
         "grant-perm" => roles::grant_perm_cmd(pools, &args[1..], writer).await,
         "revoke-perm" => roles::revoke_perm_cmd(pools, &args[1..], writer).await,
         "create-api-key" => roles::create_api_key_cmd(pools, &args[1..], writer).await,
+        #[cfg(feature = "mcp")]
+        "create-agent" => agents::create_agent_cmd(pools, registry_url, &args[1..], writer).await,
+        #[cfg(feature = "mcp")]
+        "rotate-agent-secret" => {
+            agents::rotate_agent_secret_cmd(pools, registry_url, &args[1..], writer).await
+        }
+        #[cfg(feature = "mcp")]
+        "list-agents" => agents::list_agents_cmd(pools, registry_url, &args[1..], writer).await,
+        #[cfg(feature = "mcp")]
+        "create-skill" => agents::create_skill_cmd(pools, registry_url, &args[1..], writer).await,
+        #[cfg(feature = "mcp")]
+        "grant-skill" => agents::grant_skill_cmd(pools, registry_url, &args[1..], writer).await,
+        #[cfg(feature = "mcp")]
+        "revoke-skill" => agents::revoke_skill_cmd(pools, registry_url, &args[1..], writer).await,
+        #[cfg(feature = "mcp")]
+        "list-skills" => agents::list_skills_cmd(pools, registry_url, &args[1..], writer).await,
         "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
@@ -497,6 +516,34 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "                       Issue a Bearer API key for a tenant user."
     )?;
+    // MCP agent/skill verbs only exist when the `mcp` feature is compiled in.
+    #[cfg(feature = "mcp")]
+    {
+        writeln!(w, "  create-agent <slug> <name>")?;
+        writeln!(
+            w,
+            "                       Provision an MCP agent (prints its secret once)."
+        )?;
+        writeln!(w, "  rotate-agent-secret <slug> <name>")?;
+        writeln!(
+            w,
+            "                       Issue a fresh secret for an MCP agent."
+        )?;
+        writeln!(w, "  list-agents <slug>   List a tenant's MCP agents.")?;
+        writeln!(
+            w,
+            "  create-skill <slug> <codename> [--name ..] [--tools a,b] [--instructions ..]"
+        )?;
+        writeln!(
+            w,
+            "                       Define an MCP skill (a bundle of tools)."
+        )?;
+        writeln!(w, "  grant-skill <slug> <agent> <skill>")?;
+        writeln!(w, "                       Grant a skill to an agent.")?;
+        writeln!(w, "  revoke-skill <slug> <agent> <skill>")?;
+        writeln!(w, "                       Revoke a skill from an agent.")?;
+        writeln!(w, "  list-skills <slug>   List a tenant's MCP skills.")?;
+    }
     writeln!(w, "  seed-permissions [--slug <s>]")?;
     writeln!(
         w,

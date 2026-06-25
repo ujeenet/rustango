@@ -11,16 +11,22 @@ and module-scope registration macros.
 
 [![The auto-generated admin: a posts list with filter facets, search, bulk actions, and pagination — all from one `admin(...)` block](img/admin.png)](img/admin.png)
 
+> **Source:** `rustango::admin` (the `admin(...)` derive options, the `Builder`
+> API, and the registration macros) — behind the `admin` feature (on by
+> default).
+>
 > **Runnable version:** every feature on this page is exercised in a tested,
 > compilable example at
 > [`crates/rustango/examples/admin_demo`](../crates/rustango/examples/admin_demo).
 > The screenshots on this page are that example. If a snippet looks off, diff
 > against it.
 
+> **New to a term here?** *model*, *fieldset*, *audit trail* — see the
+> [glossary](glossary.md).
+
 ---
 
-## Contents
-
+## Table of contents
 - [Mount it](#mount-it) · [The home page](#the-home-page)
 - [Configure a model: the `admin(...)` block](#configure-a-model-the-admin-block)
 - [The list view](#the-list-view) — columns, search, filters, date hierarchy, sorting, pagination
@@ -35,6 +41,11 @@ and module-scope registration macros.
 ---
 
 ## Mount it
+
+> **The admin is open by default.** It auto-discovers and serves *every* model —
+> list, create, edit, delete — with no authentication until you add it. Don't
+> expose it publicly before wiring login: see [Authentication](#authentication)
+> below.
 
 The admin is an `axum::Router` you build from a database pool and nest under a
 path:
@@ -155,12 +166,12 @@ skip the `SELECT COUNT(*)` (the pager then shows "Page N" without a grand
 total); a per-request `?count=skip` does the same ad hoc.
 
 **Search.** When `search_fields` is set, a search box appears and matches those
-fields with `ILIKE` (Postgres) / `LIKE` (MySQL, SQLite). `search_help_text`
+fields with `ILIKE` (PostgreSQL) / `LIKE` (MySQL, SQLite). `search_help_text`
 renders as its caption.
 
 **Date hierarchy.** With `date_hierarchy` set, a year → month → day breadcrumb
 sits above the table; drilling in adds half-open range filters on that column
-using tri-dialect date extraction (Postgres `EXTRACT`, MySQL, SQLite `strftime`).
+using tri-dialect date extraction (PostgreSQL `EXTRACT`, MySQL, SQLite `strftime`).
 
 ---
 
@@ -331,7 +342,7 @@ an `<a>`.
 **Custom list filters** — filter logic the auto-facets can't express:
 
 ```rust
-fn by_status(value: &str) -> Vec<rustango::admin::Filter> { /* map value → predicates */ }
+fn by_status(value: &str) -> Vec<rustango::core::Filter> { /* map value → predicates */ }
 
 rustango::register_admin_list_filter!(
     "posts", "status", "Status",
@@ -419,7 +430,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 
 | Method | Purpose |
 |---|---|
-| `new(pool)` | Construct from any pool (Postgres / MySQL / SQLite). Defaults: prefix `/__admin`, dev cookies. |
+| `new(pool)` | Construct from any pool (PostgreSQL / MySQL / SQLite). Defaults: prefix `/__admin`, dev cookies. |
 | `from_settings(pool, &settings)` | Construct from parsed config (`config` feature). |
 | `title(s)` / `subtitle(s)` | Sidebar header / subheader. |
 | `admin_prefix(p)` | URL prefix — **must match the nest path**. Default `/__admin`. |
@@ -493,3 +504,13 @@ cargo run                # seeds demo data, serves the admin at /admin
 Then open <http://localhost:8080/admin> and click into **Posts** to see the
 filters, search, date hierarchy, actions, fieldsets, inline comments, audit
 trail, and model reference — every screenshot on this page — in one place.
+
+
+---
+
+## See also
+
+- [The ORM cookbook](orm.md) — the models the admin is generated from (incl. the shared audit trail).
+- [HTML views](html-views.md) — the generic class-based views the admin is built on.
+- [Auth backends](auth-backends.md) · [Sessions](auth-sessions.md) — securing the admin behind a login.
+- [Security guide](security.md) — hardening before you expose it.

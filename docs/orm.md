@@ -4,6 +4,16 @@ Patterns for the **Rustango** ORM beyond the basics. If you come from Django's O
 
 [![Type-checked ORM queries: chained filters, ordering, limits, and aggregation — all without raw SQL](img/orm.png)](img/orm.png)
 
+> **Source:** `rustango::sql` (`QuerySet`, the `Q!` macro / `Qb` builder) and the
+> `#[derive(Model)]` query API — always compiled; pick a backend feature
+> (`postgres` / `mysql` / `sqlite`).
+>
+> **Runnable version:** the patterns here run in the tested
+> [`orm_cookbook`](../crates/rustango/examples/orm_cookbook) example.
+>
+> **New to a term here?** The [glossary](glossary.md) defines *model*, *queryset*,
+> *pool*, and *migration* in plain language.
+
 A few Rust terms recur throughout. `&pool` is a shared reference to the database connection pool; you pass it to the methods that actually run SQL. `.await` runs an async call and waits for the result. `Option<T>` is a value that may be present (`Some`) or absent (`None`) — Rust's null. `Result` is success-or-error; the trailing `?` on a call returns early on error. `Auto<i64>` is an auto-incrementing primary key that's either `Set` (loaded from the DB) or `Unset` (not yet inserted).
 
 ## What's new (v0.41 / v0.42)
@@ -271,11 +281,11 @@ Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prio
 
 | Dialect | Behaviour |
 |---|---|
-| Postgres | Full support — every flag emits its native syntax. |
+| PostgreSQL | Full support — every flag emits its native syntax. |
 | MySQL 8.0.1+ | Supports everything except `NO KEY` — that flag falls back to plain `FOR UPDATE` (the stricter lock). |
 | SQLite | No row-level lock syntax. The writer emits no clause at all; transactions hold an implicit write lock for the whole database. Use a different strategy for SQLite (typically a busy-wait loop on the transaction itself). |
 
-**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on Postgres (the implicit single-statement tx releases the lock immediately) and an error on MySQL. Pair with `pool.begin()` (or `rustango::sql::atomic`).
+**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. Pair with `pool.begin()` (or `rustango::sql::atomic`).
 
 ### Combining queries (union, intersection, difference)
 
@@ -321,7 +331,7 @@ let mixed = qs_a
     .fetch(&pool).await?;
 ```
 
-**Tri-dialect**: Postgres + SQLite support all four operators on every version **Rustango** supports. MySQL 8.0+ supports `UNION`/`UNION ALL`; `INTERSECT`/`EXCEPT` landed in MySQL 8.0.31. Older MySQL versions surface the driver's syntax error at fetch time — there's no client-side gate.
+**Tri-dialect**: PostgreSQL + SQLite support all four operators on every version **Rustango** supports. MySQL 8.0+ supports `UNION`/`UNION ALL`; `INTERSECT`/`EXCEPT` landed in MySQL 8.0.31. Older MySQL versions surface the driver's syntax error at fetch time — there's no client-side gate.
 
 **Error path on the typed builder**: `.union(other_qs)` (and `.intersection()` / `.difference()`) compiles the branch eagerly and panics if the branch fails to compile (typo'd column, etc.). For fallible composition where the caller wants a `Result`, compile the branch first and pass it via `.with_compound(SetOp::Union, branch)` — one generic entry point covers every operator. The panic shape matches Django's: a bad branch is a programmer error, not a runtime data condition.
 
@@ -348,7 +358,7 @@ while let Some(post) = iter.next_row(&pool).await? {
 
 **Set an `order_by`.** `OFFSET` against a query with no stable sort returns unpredictable rows across chunks — typically `.order_by(&[("pk", false)])` so each chunk picks up cleanly. The method doesn't enforce ordering (some queries legitimately want no sort, e.g. a one-shot drain), but unsorted iteration is a footgun.
 
-**Trade-off vs server-side cursors.** This is a simple LIMIT/OFFSET chunker. On a btree-indexed sort column, Postgres scans the first N rows before returning the (N+1)th — so deep pagination is `O(n²)` total work. For a 10M-row drain this matters; for 100k rows it usually doesn't. The chunker wins on portability (works on all backends with no transaction overhead) and simplicity (no cursor lifecycle management). For truly streaming reads on PG, drop into `pool.begin()` + raw `sqlx::query(...).fetch(&mut *tx)` Stream API directly — the extended protocol streams from the server without offset reseek.
+**Trade-off vs server-side cursors.** This is a simple LIMIT/OFFSET chunker. On a btree-indexed sort column, PostgreSQL scans the first N rows before returning the (N+1)th — so deep pagination is `O(n²)` total work. For a 10M-row drain this matters; for 100k rows it usually doesn't. The chunker wins on portability (works on all backends with no transaction overhead) and simplicity (no cursor lifecycle management). For truly streaming reads on PG, drop into `pool.begin()` + raw `sqlx::query(...).fetch(&mut *tx)` Stream API directly — the extended protocol streams from the server without offset reseek.
 
 **Mixing `next_chunk` and `next_row` on the same iterator is safe.** The internal `VecDeque` buffer drains in row order before any new DB fetch, so `next_chunk` after a partial `next_row` drain yields the remaining buffered rows first, then continues with fresh chunks.
 
@@ -509,7 +519,7 @@ User::objects()
 
 Without one, the query emits valid `REGEXP` SQL that SQLite rejects at execution with `no such function: regexp` (parser-clean — `tests/regex_sqlite_live.rs` pins this).
 
-**Pattern dialect differs across backends.** Postgres uses POSIX extended regex; MySQL uses ICU-based regex with its own flavor; SQLite delegates to whatever the user-function implements (typically Rust's `regex` crate). Patterns that lean on dialect-specific syntax (e.g. PG's `\m` / `\M` word boundaries) don't round-trip — stick to the portable subset (`^`, `$`, `.`, `*`, `+`, `?`, `[...]`, `()`, `|`) if the same model is queried from multiple backends.
+**Pattern dialect differs across backends.** PostgreSQL uses POSIX extended regex; MySQL uses ICU-based regex with its own flavor; SQLite delegates to whatever the user-function implements (typically Rust's `regex` crate). Patterns that lean on dialect-specific syntax (e.g. PG's `\m` / `\M` word boundaries) don't round-trip — stick to the portable subset (`^`, `$`, `.`, `*`, `+`, `?`, `[...]`, `()`, `|`) if the same model is queried from multiple backends.
 
 **Non-string values are rejected at `.compile()`** — passing `SqlValue::I64(42)` to `__regex` surfaces `QueryError::InvalidLookupValue { suffix: "regex", expected: "SqlValue::String(<regex pattern>)", … }` rather than silently casting.
 
@@ -1360,6 +1370,12 @@ Internally lowers to `save_partial` — same audit narrowing, same `Auto::Unset`
 
 ## Bulk operations
 
+> **Pitfall — bulk ops skip per-row hooks.** `bulk_insert`, queryset
+> `.update().execute()`, and `.delete()` run as set-based SQL: they do **not**
+> fire signals, write the audit trail, route through soft-delete, or run
+> per-row validation. Use them for speed; drop to per-row `save()` / `delete()`
+> when you need those side effects.
+
 Insert, update, or delete many rows in one statement instead of one per row — Django's `bulk_create`, `QuerySet.update()`, and `QuerySet.delete()`. The `as _` import brings a trait's methods into scope without naming the trait directly.
 
 ```rust
@@ -1411,6 +1427,12 @@ Post::bulk_upsert_pool(
 ---
 
 ## Transactions
+
+> **Pitfall — don't mix `&pool` calls inside a transaction.** Every call
+> between `pool.begin()` and `commit` must target the transaction handle
+> (`&mut *tx`). A stray `&pool` / `fetch()` / `save_on(&pool)` checks out a
+> *second* connection and can deadlock the pool under load. Thread the `tx`
+> through, or use `rustango::sql::atomic`.
 
 Run several writes as a unit that either all succeed or all roll back — Django's `transaction.atomic()`. Open one with `pool.begin()` and run every statement against the transaction's connection via the `_on` methods (`fetch_on`, `save_on`), so the work lands on the in-flight transaction rather than a fresh pooled connection.
 
@@ -1766,3 +1788,13 @@ A quick checklist for keeping queries fast as the data grows:
 - **`upsert_on` for idempotent imports** — `ON CONFLICT` is faster than SELECT-then-INSERT.
 - **`transaction` for related writes** — reduces commit overhead and keeps consistency.
 - **Cache hot reads** with `cache::get_or_set` — invalidate on `connect_post_save<T>(...)` signal handler.
+
+---
+
+## See also
+
+- [Models](models.md) — declaring a model: field types, primary keys, every attribute (the companion to this query guide).
+- [Serializers](serializers.md) — shape model rows into JSON.
+- [ViewSets](viewsets.md) — turn a model into a JSON CRUD API.
+- [The admin](admin.md) — an auto-generated UI over the same models.
+- [`manage` CLI](manage.md) — `makemigrations` / `migrate` for schema changes.
