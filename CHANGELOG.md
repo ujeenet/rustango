@@ -6,6 +6,36 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 _Nothing yet — next development cycle._
 
+## [0.44.0] — 2026-06-25
+
+Headline: the **MCP server** — rustango can now expose its skills, tools, prompts, and resources to AI agents over the Model Context Protocol (Streamable HTTP transport, OAuth 2.1, scoped-JWT agent identity). Plus **ViewSets married to serializers** (declarative render + validate, tri-dialect), a batch of **Django-parity ORM** features (relation-spanning `order_by`, related-column `GROUP BY`, `distinct_on` on MySQL/SQLite, `generated_as` refresh on save), and a comprehensive documentation pass. Folds in the never-tagged v0.43.1 scaffolder/`rpassword` patch.
+
+### Added
+
+- **MCP server (`mcp` feature)** — expose rustango's capabilities to AI agents over the Model Context Protocol. JSON-RPC 2.0 core over a Streamable HTTP transport (#1014); Agent identity backed by scoped JWTs (#1015); a tool registry with `tools/list` + `tools/call` (#1016); a skills catalog with per-agent grants + tool authorization (#1017); `prompts` + `resources` projected from skills (#1018); settings, admin integration, e2e + cookbook (#1019). Follow-ups: OAuth 2.1 discovery interop (#1088), `tools/call` progress + cancellation (#1090), `list_changed` notifications (#1087), `logging/setLevel` + `completion/complete` (#1091), cursor pagination for `*/list` (#1089), `resources/templates/list`, HTTP Basic client auth on the OAuth token endpoint, `isError` semantics for `tools/call`, and signed + agent-bound pagination cursors (#1098/#1099). The `[mcp]` settings block is wired and `manage check --deploy` enforces MCP deployment rules. Documented with a guide + runnable demo.
+- **ViewSets ↔ serializers** (#1067) — ViewSets now render and validate through serializers end-to-end, tri-dialect (PG / MySQL / SQLite).
+- **Declarative serializer field validators** (#1069) — `max_length` / `min` / `max` / `choices`, auto-inherited from the model's field definitions.
+- **`distinct_on` + join on MySQL / SQLite** (#1039 / #1062) — tri-dialect `DISTINCT ON`.
+- **`generated_as` columns refresh on save via `RETURNING`** (#1028 / #1060).
+- **`GROUP BY` a related column** (#1040 / #1059) — `AggregateQuery` emits the implicit join.
+- **Chain multiple relation aggregates in one query** (#1038 / #1058).
+- **Relation-spanning `order_by("author__name")`** (#1031 Part 2, #1057) — implicit-join ordering; the companion to the `filter()`/`exclude()` relation lookups shipped in 0.43.0. Part 3 (#1061) pins relation-spanning `__in` / `__isnull` / `__between`.
+- **Comprehensive documentation set** — MCP server guide + runnable demo; Models reference (field types, custom PKs, every attribute); jobs wiring + worker-CLI example; auth deep-dives (JWT standalone + API, passwords, sessions, access decorators) with a runnable `auth_demo`; benchmarks vs Go; OpenAPI guide; ViewSet guide rewrite + REST-blog tutorial; "URL names & reverse" guide; screenshots across every guide.
+
+### Changed
+
+- **BREAKING — the instance `save` family returns `Result<u64, ExecError>`** (#1029 / #1063), was `Result<()>`. Affects `save` / `save_on` / `save_on_with` / `save_tx` / `save_pool` / `save_partial` / `save_partial_typed`. An INSERT returns `Ok(1)`; an UPDATE returns the rows-affected count (`Ok(0)` when the PK no longer exists — rustango's analogue of Django 6.0's `Model.NotUpdated`, returned rather than raised). `?`-propagating callers are unaffected; callers that bind/match `Ok(())` from a save must switch to `let _ =` (or use the count). The count threads through the audited save paths too.
+- **`_pool` suffix dropped from the QuerySet terminals** (#1054) — `fetch` / `count` / `exists` are the canonical names now (the `_pool` siblings that carry PG-only variants are unaffected).
+- **MCP is an opt-in feature, out of the universal bootstrap** (#1101) — non-MCP apps don't pay for it.
+
+### Fixed
+
+- **MCP hardening** — constant-time agent authentication (#1099); redact sensitive tool args before they reach the audit log (#1097); catch panics in tool handlers instead of unwinding the transport (#1096); scope the cancellation registry to `(tenant, agent, id)` with an RAII guard (#1095); track the mount prefix in `WWW-Authenticate` + `.well-known` URLs (#1094); scope the notification bus + authenticate SSE (#1092 / #1093).
+- **ViewSet** — apply the serializer `source` rename on the write path (#1072).
+- **admin** — render inline `DateTime` fields in `datetime-local` format (#1064); hide `rustango_admin_users` when `session_auth` isn't configured (rustango-cms#291).
+- **tenancy** — bump the default `database_pool_max_connections` from 4 to 16.
+- **scaffolder** — refresh the stale tenant bootstrap, add the `[mcp]` config block, and guard the version pin so generated projects compile out of the box; visible logging hint in the generated `main.rs` + `.env.example` (rustango-cms#305). Folds in the never-tagged v0.43.1 patch: backend `[features]` block + the `rpassword` 7.3.1 pin for macOS builds.
+
 ## [0.43.0] — 2026-06-13
 
 Django-parity batch since the v0.42.0 tag — each item below landed as its own PR. Headlines: **relation-spanning lookups** in `filter()`/`exclude()` (`author__name__icontains`, #1031), **aggregate window functions** (`SUM`/`AVG`/`MIN`/`MAX`/`COUNT OVER`, #1035), scalar **`Subquery()` annotations** (#1036), **union component-queryset slicing** + aliased derived tables (#1032/#1034), and the full **Django 6.0 aggregate family** (`StringAgg`→`GROUP_CONCAT`, `AnyValue`, ordered aggregates, #1024–#1026) — plus i18n/RTL, `CITextField`, `DatabaseCache`, `managed=false`, and 50+ Eloquent query shortcuts.
