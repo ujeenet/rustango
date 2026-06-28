@@ -7,7 +7,7 @@ click it — and **Rustango** builds them on one substrate: **signed URLs**. A
 signed URL is a normal URL with an HMAC signature appended, so the server can
 trust its parameters without storing anything.
 
-[![Account flows in rustango: signed_url::sign appends an HMAC signature + expiry; the three flows (password reset, email verification, magic link) issue a link, email it, and verify on click](img/auth-flows.png)](img/auth-flows.png)
+[![Account flows in Rustango: signed_url::sign appends an HMAC signature + expiry; the three flows (password reset, email verification, magic link) issue a link, email it, and verify on click](img/auth-flows.png)](img/auth-flows.png)
 
 > **New to a term here?** *HMAC*, *token*, *expiry* — see the [glossary](glossary.md).
 

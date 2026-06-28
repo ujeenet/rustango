@@ -6,7 +6,7 @@ on the way in, `verify` on the way out — backed by **argon2id**, the
 memory-hard winner of the Password Hashing Competition and the current OWASP
 first choice. You never store, log, or compare the plaintext.
 
-[![Passwords in rustango: hash() produces a salted argon2id PHC string, verify() checks an attempt against it, and verify_dummy() equalizes login timing](img/auth-passwords.png)](img/auth-passwords.png)
+[![Passwords in Rustango: hash() produces a salted argon2id PHC string, verify() checks an attempt against it, and verify_dummy() equalizes login timing](img/auth-passwords.png)](img/auth-passwords.png)
 
 > **Source:** `rustango::passwords` (`hash`, `verify`, `verify_dummy`,
 > `strength_score`, `StrengthIssue`) — behind the `passwords` feature (on by

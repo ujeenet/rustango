@@ -7,7 +7,7 @@ work onto a queue: the handler returns immediately, and a pool of workers runs
 the job moments later, with **automatic retries** and a **dead-letter** path for
 failures. This is Django-Q / Celery / Laravel queues, in Rust.
 
-[![Background jobs in rustango: a handler dispatches a Job onto a queue, worker tasks run it, retryable failures back off and retry, fatal ones go to a dead-letter handler](img/jobs.png)](img/jobs.png)
+[![Background jobs in Rustango: a handler dispatches a Job onto a queue, worker tasks run it, retryable failures back off and retry, fatal ones go to a dead-letter handler](img/jobs.png)](img/jobs.png)
 
 > **New to a term here?** *queue*, *worker*, *retry/backoff*, *dead-letter* — see
 > the [glossary](glossary.md).

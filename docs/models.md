@@ -8,7 +8,7 @@ reference: every field type, every primary-key option, and every
 `#[rustango(...)]` attribute. For *querying* models once they're declared, see
 the [ORM cookbook](orm.md).
 
-[![Models in rustango: a #[derive(Model)] struct maps Rust field types to per-dialect columns, the primary key can be an auto-increment Auto<i64> or a custom application-assigned key, and the derive generates SCHEMA + objects() + save/find](img/models.png)](img/models.png)
+[![Models in Rustango: a #[derive(Model)] struct maps Rust field types to per-dialect columns, the primary key can be an auto-increment Auto<i64> or a custom application-assigned key, and the derive generates SCHEMA + objects() + save/find](img/models.png)](img/models.png)
 
 > **New to a term here?** *model*, *primary key*, *foreign key*, *migration*,
 > *nullable* — see the [glossary](glossary.md).
