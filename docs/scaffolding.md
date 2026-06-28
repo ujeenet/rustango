@@ -5,7 +5,7 @@
 1. **The project generator** — `cargo rustango new` creates a whole new project from a template.
 2. **In-project generators** — `manage startapp` and the `manage make:*` family add apps, views, serializers, jobs, and more inside an existing project.
 
-[![`cargo Rustango new` scaffolds a complete, ready-to-run project — Cargo manifest, config tiers, Docker, migrations, and src — in one command](img/scaffolding.png)](img/scaffolding.png)
+[![`cargo rustango new` scaffolds a complete, ready-to-run project — Cargo manifest, config tiers, Docker, migrations, and src — in one command](img/scaffolding.png)](img/scaffolding.png)
 
 ## Table of contents
 
