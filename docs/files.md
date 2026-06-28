@@ -7,7 +7,7 @@ disk, S3-compatible object storage, in-memory for tests), a safe multipart
 library — a database-backed `MediaManager` with presigned URLs. Write your code
 once against the trait; switch from local disk to S3 with a one-line change.
 
-[![Files in rustango: a multipart upload is size- and extension-checked then written through the Storage trait; the same trait backs local disk, S3, and in-memory, and url() returns a public address](img/files.png)](img/files.png)
+[![Files in Rustango: a multipart upload is size- and extension-checked then written through the Storage trait; the same trait backs local disk, S3, and in-memory, and url() returns a public address](img/files.png)](img/files.png)
 
 > **New to a term here?** *storage backend*, *multipart*, *object storage*,
 > *presigned URL* — see the [glossary](glossary.md).

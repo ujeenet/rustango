@@ -7,7 +7,7 @@ tests), so the cookie carries no secrets and a session can be **revoked
 instantly** — delete the entry and every replica sees the logout on the next
 request.
 
-[![Sessions in rustango: the cookie holds only an opaque id, the SessionStore keeps the data in Redis, and destroy() revokes it everywhere](img/auth-sessions.png)](img/auth-sessions.png)
+[![Sessions in Rustango: the cookie holds only an opaque id, the SessionStore keeps the data in Redis, and destroy() revokes it everywhere](img/auth-sessions.png)](img/auth-sessions.png)
 
 > **Source:** `rustango::sessions` (`Session`, `SessionStore`) +
 > `rustango::cache` (`BoxedCache`, `InMemoryCache`) — behind the `sessions`

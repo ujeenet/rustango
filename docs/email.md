@@ -7,7 +7,7 @@ a fluent `Email` builder with header-injection protection, and template
 rendering. Write `mailer.send(&email)` once; switch from printing to your
 terminal to real SMTP with a one-line change — like Django's email framework.
 
-[![Email in rustango: an Email builder (to/subject/body/html) is validated against header injection, then sent through the Mailer trait — ConsoleMailer in dev, SmtpMailer in prod, InMemoryMailer in tests](img/email.png)](img/email.png)
+[![Email in Rustango: an Email builder (to/subject/body/html) is validated against header injection, then sent through the Mailer trait — ConsoleMailer in dev, SmtpMailer in prod, InMemoryMailer in tests](img/email.png)](img/email.png)
 
 > **New to a term here?** *transactional email*, *SMTP*, *mailer backend* — see
 > the [glossary](glossary.md).

@@ -11,7 +11,7 @@ These are **Rustango**'s equivalent of Django's generic class-based views
 resource controllers returning Blade views. They render through [Tera](https://keats.github.io/tera/)
 templates.
 
-[![HTML views in rustango: one model feeds ListView, DetailView and CreateView/UpdateView/DeleteView, each rendering a Tera template into a server-rendered page](img/html-views.png)](img/html-views.png)
+[![HTML views in Rustango: one model feeds ListView, DetailView and CreateView/UpdateView/DeleteView, each rendering a Tera template into a server-rendered page](img/html-views.png)](img/html-views.png)
 
 > **New to a term here?** If *model*, *template*, *router* or *server-rendered* are
 > unfamiliar, the [glossary](glossary.md) explains each in plain language.

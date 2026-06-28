@@ -7,7 +7,7 @@ production MCP server: register a tool with one macro, mount a router, and any
 MCP client can discover and call it over the standard JSON-RPC transport — with
 per-agent, **fail-closed** authorization and OAuth 2.1 built in.
 
-[![MCP server in rustango: an LLM agent connects over JSON-RPC + SSE; the server authenticates the agent's JWT, lists only the tools its granted skills allow, and runs the tool handler against your app's pool](img/mcp.png)](img/mcp.png)
+[![MCP server in Rustango: an LLM agent connects over JSON-RPC + SSE; the server authenticates the agent's JWT, lists only the tools its granted skills allow, and runs the tool handler against your app's pool](img/mcp.png)](img/mcp.png)
 
 > **New to a term here?** *MCP*, *JSON-RPC*, *tool/resource/prompt*, *agent*,
 > *JWT*, *OAuth* — see the [glossary](glossary.md).
@@ -42,7 +42,7 @@ per-agent, **fail-closed** authorization and OAuth 2.1 built in.
 
 ## What MCP gives you
 
-A rustango MCP server exposes three things an agent can use, all **hand-registered
+A **Rustango** MCP server exposes three things an agent can use, all **hand-registered
 for explicit control** (nothing is auto-exposed):
 
 | Primitive | What it is | How it's declared |
@@ -63,7 +63,7 @@ MCP is the optional `mcp` feature (off by default). Turn it on:
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.43", features = ["mcp"] }
+rustango = { version = "0.44", features = ["mcp"] }
 ```
 
 It pulls in `tenancy` (agents/skills), `sse` (the notification stream),
@@ -164,7 +164,7 @@ The `initialize` handshake is a plain JSON-RPC POST and works on any mount:
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.43.1" },
+    "serverInfo": { "name": "rustango", "version": "0.44.0" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
@@ -313,7 +313,7 @@ Switch to the **Tools** tab and click **List Tools** — you'll see *only* the
 `add` tool the agent's skill grants, with its JSON Schema. Select it, enter
 `a = 2`, `b = 3`, and **Run Tool**:
 
-[![The MCP Inspector connected to the rustango demo over Streamable HTTP, showing the granted `add` tool and its a/b input schema](img/mcp-inspector-tools.png)](img/mcp-inspector-tools.png)
+[![The MCP Inspector connected to the Rustango demo over Streamable HTTP, showing the granted `add` tool and its a/b input schema](img/mcp-inspector-tools.png)](img/mcp-inspector-tools.png)
 
 The call returns a structured result — `{ "sum": 5 }` — and the request shows up
 in the History pane (`initialize` → `tools/list` → `tools/call`):
