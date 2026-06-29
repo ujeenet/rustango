@@ -39,11 +39,24 @@
 //! render; templates read them as plain variables — no special tag
 //! needed for `{% get_current_language %}` etc.
 //!
+//! ## Pluralization
+//!
+//! CLDR plural rules ship as the `translate_plural` function (#1102) — the
+//! function-form port of `{% blocktranslate count … %}`:
+//!
+//! ```jinja
+//! {{ translate_plural(key="Deleted {count} page(s).", n=num, locale=LANG, count=num) }}
+//! ```
+//!
+//! The catalog stores a per-category object per key
+//! (`{"one": …, "few": …, "many": …, "other": …}`); the form is chosen by the
+//! locale's rule. See [`crate::i18n::plural_category`] /
+//! [`crate::i18n::Translator::translate_plural`].
+//!
 //! ## What's missing vs Django
 //! - `{% blocktranslate %}…{% endblocktranslate %}` block form (Tera
-//!   has no block-tag extension API).
-//! - `{% plural %}` pluralization rules (no plural-rules table yet
-//!   in `rustango::i18n`).
+//!   has no block-tag extension API — use the `translate` / `translate_plural`
+//!   function shapes instead).
 //! - `{% language 'fr' %}…{% endlanguage %}` override blocks.
 //!
 //! Workaround for blocks: precompute the translated string in
@@ -80,6 +93,40 @@ pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
                 tera::Error::msg("translate filter: input must be a string (the translation key)")
             })?;
             Ok(Value::String(do_translate(&t_filter, key, args)))
+        },
+    );
+
+    // #1102 — count-aware translation (CLDR plural rules). Selects the plural
+    // form for `n` in the active locale, then interpolates the remaining args.
+    // Pass the count itself (commonly as `count`) so the chosen form's
+    // `{count}` placeholder fills in:
+    //
+    //   {{ translate_plural(key="Deleted {count} page(s).", n=num, locale=LANG, count=num) }}
+    //
+    // A missing plural entry falls back to the scalar source string (with
+    // `{count}` interpolated), so English / untranslated keys still render.
+    let t_plural = Arc::clone(&translator);
+    tera.register_function(
+        "translate_plural",
+        move |args: &HashMap<String, Value>| -> tera::Result<Value> {
+            let key = args.get("key").and_then(Value::as_str).ok_or_else(|| {
+                tera::Error::msg("translate_plural(): missing required `key` argument")
+            })?;
+            let n = args.get("n").and_then(Value::as_i64).ok_or_else(|| {
+                tera::Error::msg("translate_plural(): missing required integer `n` argument")
+            })?;
+            let locale = args.get("locale").and_then(Value::as_str).unwrap_or("");
+            let interp = collect_interp(args, &["key", "n", "locale"]);
+            let interp_refs: Vec<(&str, &str)> = interp
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            Ok(Value::String(t_plural.translate_plural(
+                locale,
+                key,
+                n,
+                &interp_refs,
+            )))
         },
     );
 
@@ -143,15 +190,23 @@ pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
 /// substitutions are supported).
 fn do_translate(translator: &Translator, key: &str, args: &HashMap<String, Value>) -> String {
     let locale = args.get("locale").and_then(Value::as_str).unwrap_or("");
-    // Collect string-valued interp args. Allocate owned strings up
-    // front so the `&str` slice we pass into `translate` stays alive.
-    let interp_owned: Vec<(String, String)> = args
+    let interp_owned = collect_interp(args, &["key", "locale"]);
+    let interp_refs: Vec<(&str, &str)> = interp_owned
         .iter()
-        .filter(|(k, _)| k.as_str() != "key" && k.as_str() != "locale")
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    translator.translate(locale, key, &interp_refs)
+}
+
+/// Collect string-valued interpolation args from a Tera call, excluding the
+/// control keys in `exclude` (e.g. `key` / `locale` / `n`). Owned strings are
+/// allocated up front so the `&str` slice handed to the translator stays alive.
+/// Numbers / bools render via `Display` so `count=3` interpolates as `"3"`;
+/// other value kinds are dropped (Django-style `string|string` substitution).
+fn collect_interp(args: &HashMap<String, Value>, exclude: &[&str]) -> Vec<(String, String)> {
+    args.iter()
+        .filter(|(k, _)| !exclude.contains(&k.as_str()))
         .filter_map(|(k, v)| {
-            // Strings pass through; numbers / bools render via Display
-            // so `{{ translate(key=..., count=3) }}` interpolates as
-            // "3" rather than failing.
             let rendered = match v {
                 Value::String(s) => s.clone(),
                 Value::Number(n) => n.to_string(),
@@ -160,12 +215,7 @@ fn do_translate(translator: &Translator, key: &str, args: &HashMap<String, Value
             };
             Some((k.clone(), rendered))
         })
-        .collect();
-    let interp_refs: Vec<(&str, &str)> = interp_owned
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    translator.translate(locale, key, &interp_refs)
+        .collect()
 }
 
 #[cfg(test)]
@@ -411,5 +461,32 @@ mod tests {
             joined.contains("key"),
             "expected error chain to mention `key`, got: {joined}"
         );
+    }
+
+    #[test]
+    fn translate_plural_function_renders_per_locale() {
+        // Polish three-form catalog, plus an English fallback via the source key.
+        let mut pl_entry = HashMap::new();
+        pl_entry.insert("one".to_owned(), "{count} strona".to_owned());
+        pl_entry.insert("few".to_owned(), "{count} strony".to_owned());
+        pl_entry.insert("many".to_owned(), "{count} stron".to_owned());
+        let mut pl: HashMap<String, HashMap<String, String>> = HashMap::new();
+        pl.insert("Pages: {count}".to_owned(), pl_entry);
+        let t =
+            Arc::new(Translator::new(Locale::new("en")).add_plural_locale(Locale::new("pl"), pl));
+
+        let tmpl = r#"{{ translate_plural(key="Pages: {count}", n=num, locale=LANG, count=num) }}"#;
+        let render_n = |lang: &str, num: i64| {
+            let mut ctx = Context::new();
+            ctx.insert("LANG", lang);
+            ctx.insert("num", &num);
+            render(tmpl, &ctx, Arc::clone(&t))
+        };
+        // Polish picks one/few/many by the CLDR rule.
+        assert_eq!(render_n("pl", 1), "1 strona");
+        assert_eq!(render_n("pl", 3), "3 strony");
+        assert_eq!(render_n("pl", 5), "5 stron");
+        // English has no plural entry → source key, {count} interpolated.
+        assert_eq!(render_n("en", 2), "Pages: 2");
     }
 }

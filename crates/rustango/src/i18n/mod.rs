@@ -320,6 +320,11 @@ pub struct Translator {
     /// [`crate::i18n::db::refresh_overrides_pool`]). Refreshing from the
     /// DB keeps `translate` synchronous — no per-render query.
     overrides: RwLock<HashMap<Locale, HashMap<String, String>>>,
+    /// Plural catalogs (#1102): `locale → key → (CLDR category → template)`.
+    /// Parallel to `catalogs`, consulted only by [`Self::translate_plural`], so
+    /// the flat scalar path is untouched. Each entry holds the per-form variants
+    /// (`one`/`few`/`many`/`other`) for one source key.
+    plural_catalogs: RwLock<HashMap<Locale, HashMap<String, HashMap<String, String>>>>,
 }
 
 impl Translator {
@@ -331,6 +336,7 @@ impl Translator {
             fallback_chain: Vec::new(),
             catalogs: RwLock::new(HashMap::new()),
             overrides: RwLock::new(HashMap::new()),
+            plural_catalogs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -381,6 +387,35 @@ impl Translator {
     /// Mutably add a catalog (use with `let mut t = ...`).
     pub fn insert_locale(&self, locale: Locale, catalog: HashMap<String, String>) {
         self.catalogs
+            .write()
+            .expect("translator poisoned")
+            .insert(locale, catalog);
+    }
+
+    /// Add a **plural** catalog for `locale` (#1102). Each key maps to a small
+    /// object of CLDR plural-category → template, e.g.
+    /// `{"one": "Deleted {count} page.", "other": "Deleted {count} pages."}`.
+    /// Replaces any existing plural catalog for the same locale.
+    #[must_use]
+    pub fn add_plural_locale(
+        self,
+        locale: Locale,
+        catalog: HashMap<String, HashMap<String, String>>,
+    ) -> Self {
+        self.plural_catalogs
+            .write()
+            .expect("translator poisoned")
+            .insert(locale, catalog);
+        self
+    }
+
+    /// Mutably add a plural catalog (use with `let mut t = ...`).
+    pub fn insert_plural_locale(
+        &self,
+        locale: Locale,
+        catalog: HashMap<String, HashMap<String, String>>,
+    ) {
+        self.plural_catalogs
             .write()
             .expect("translator poisoned")
             .insert(locale, catalog);
@@ -439,6 +474,72 @@ impl Translator {
             .unwrap_or_else(|| key.to_owned());
 
         substitute(&template, params)
+    }
+
+    /// Resolve the plural template for `key`/`category` in `locale`, walking the
+    /// same locale chain as [`Self::translate`] but over the plural catalogs:
+    /// exact → base language → explicit fallback chain → default locale. Within a
+    /// matched entry, prefer the exact `category`, then `"other"`, then any form
+    /// (so a partially-authored entry never yields `None` once the key exists).
+    fn resolve_plural_template(&self, req: &Locale, key: &str, category: &str) -> Option<String> {
+        let pc = self.plural_catalogs.read().expect("translator poisoned");
+        let pick = |entry: &HashMap<String, String>| -> Option<String> {
+            entry
+                .get(category)
+                .or_else(|| entry.get("other"))
+                .or_else(|| entry.values().next())
+                .cloned()
+        };
+        if let Some(v) = pc.get(req).and_then(|c| c.get(key)).and_then(&pick) {
+            return Some(v);
+        }
+        let base = Locale::new(req.base_language());
+        if let Some(v) = pc.get(&base).and_then(|c| c.get(key)).and_then(&pick) {
+            return Some(v);
+        }
+        for fb in &self.fallback_chain {
+            if let Some(v) = pc.get(fb).and_then(|c| c.get(key)).and_then(&pick) {
+                return Some(v);
+            }
+        }
+        pc.get(&self.default_locale)
+            .and_then(|c| c.get(key))
+            .and_then(&pick)
+    }
+
+    /// Count-aware translation (#1102) — the `ngettext` shape. Picks the plural
+    /// form for `n` via `locale`'s CLDR rule ([`plural_category`]), then
+    /// substitutes `params` (pass the count itself, e.g.
+    /// `&[("count", &n.to_string())]`, so the chosen form's `{count}` fills in).
+    ///
+    /// When no plural entry exists for `key` in any locale, this falls back to
+    /// the scalar [`Self::translate`] — i.e. a flat catalog entry if present,
+    /// else the source `key` itself — so untranslated / English strings still
+    /// render (with `{count}` interpolated) instead of a blank or raw id.
+    ///
+    /// ```ignore
+    /// // en plural catalog: "Deleted {count} page(s)." =>
+    /// //   {"one": "Deleted {count} page.", "other": "Deleted {count} pages."}
+    /// let n = 3;
+    /// t.translate_plural("en", "Deleted {count} page(s).", n, &[("count", &n.to_string())]);
+    /// // => "Deleted 3 pages."
+    /// ```
+    #[must_use]
+    pub fn translate_plural(
+        &self,
+        locale: &str,
+        key: &str,
+        n: i64,
+        params: &[(&str, &str)],
+    ) -> String {
+        let req = Locale::new(locale);
+        let category = plural_category(locale, n);
+        if let Some(tpl) = self.resolve_plural_template(&req, key, category) {
+            return substitute(&tpl, params);
+        }
+        // No plural catalog entry anywhere → scalar path handles flat keys, the
+        // source-string fallback, and substitution.
+        self.translate(locale, key, params)
     }
 
     /// `true` when a catalog is registered for `locale` (or its base language).
@@ -707,18 +808,24 @@ impl Translator {
     /// the same as [`Self::translate`]; missing entries fall back
     /// to the supplied source strings.
     ///
-    /// This implements the **English** plural rule (`n == 1` →
-    /// singular; everything else → plural). Languages with more
-    /// complex plural categories (Russian's three forms, Arabic's
-    /// six, etc.) need a CLDR plural-rules resolver — out of scope
-    /// for v1; track in #426 / future-backlog.
+    /// The plural form is selected by `locale`'s CLDR rule
+    /// ([`plural_category`]): the `"one"` category picks `singular`, every
+    /// other category picks `plural`. This is correct for two-form languages
+    /// (en/de: `n == 1`; fr: `0` and `1` are singular). Languages with three+
+    /// forms (Polish/Ukrainian `few`/`many`, Arabic's six) can't be fully
+    /// expressed with a singular/plural pair — use
+    /// [`Self::translate_plural`] with a per-category catalog for those (#1102).
     ///
     /// `count` is bound to the `{count}` placeholder automatically
     /// so templates can read `"You have {count} unread messages"`
     /// without the caller threading it in.
     #[must_use]
     pub fn ngettext(&self, locale: &str, singular: &str, plural: &str, count: i64) -> String {
-        let key = if count == 1 { singular } else { plural };
+        let key = if plural_category(locale, count) == "one" {
+            singular
+        } else {
+            plural
+        };
         let count_str = count.to_string();
         self.translate(locale, key, &[("count", &count_str)])
     }
@@ -736,7 +843,11 @@ impl Translator {
         count: i64,
         params: &[(&str, &str)],
     ) -> String {
-        let key = if count == 1 { singular } else { plural };
+        let key = if plural_category(locale, count) == "one" {
+            singular
+        } else {
+            plural
+        };
         let count_str = count.to_string();
         let mut all: Vec<(&str, &str)> = Vec::with_capacity(params.len() + 1);
         all.push(("count", &count_str));
@@ -753,6 +864,73 @@ fn substitute(template: &str, params: &[(&str, &str)]) -> String {
         out = out.replace(&placeholder, value);
     }
     out
+}
+
+/// CLDR cardinal plural category for integer `n` in `locale` (#1102) — one of
+/// `"one"`, `"few"`, `"many"`, `"other"`. Drives [`Translator::translate_plural`]
+/// (and the binary [`Translator::ngettext`], which maps `one`→singular).
+///
+/// Selection is on the base language (`pl-PL` ≡ `pl`) and the absolute value of
+/// `n`. The launch set + common European/East-Asian languages are modeled;
+/// unknown locales use the English one/other rule. Fraction-only categories
+/// aren't modeled — admin counts are whole numbers.
+///
+/// ```
+/// use rustango::i18n::plural_category;
+/// assert_eq!(plural_category("en", 1), "one");
+/// assert_eq!(plural_category("en", 5), "other");
+/// assert_eq!(plural_category("fr", 0), "one");        // French: 0 is "one"
+/// assert_eq!(plural_category("pl", 2), "few");        // Polish three-form
+/// assert_eq!(plural_category("pl", 5), "many");
+/// assert_eq!(plural_category("uk", 21), "one");       // Ukrainian: …1 (not 11)
+/// assert_eq!(plural_category("ja", 7), "other");      // no count distinction
+/// ```
+#[must_use]
+pub fn plural_category(locale: &str, n: i64) -> &'static str {
+    let base = Locale::new(locale);
+    let n = n.unsigned_abs();
+    let r10 = n % 10;
+    let r100 = n % 100;
+    match base.base_language() {
+        // East-Asian + others with no count-based form distinction.
+        "zh" | "ja" | "ko" | "th" | "vi" | "id" | "ms" | "lo" | "km" | "my" => "other",
+        // French / Brazilian-Portuguese style: 0 and 1 are "one".
+        "fr" | "pt" | "ff" | "hy" | "kab" => {
+            if n == 0 || n == 1 {
+                "one"
+            } else {
+                "other"
+            }
+        }
+        // West-Slavic (Polish): one / few / many.
+        "pl" => {
+            if n == 1 {
+                "one"
+            } else if (2..=4).contains(&r10) && !(12..=14).contains(&r100) {
+                "few"
+            } else {
+                "many"
+            }
+        }
+        // East-Slavic (Ukrainian, Russian, Belarusian): one / few / many.
+        "uk" | "ru" | "be" => {
+            if r10 == 1 && r100 != 11 {
+                "one"
+            } else if (2..=4).contains(&r10) && !(12..=14).contains(&r100) {
+                "few"
+            } else {
+                "many"
+            }
+        }
+        // Germanic / Romance / default: one / other (n == 1 → one).
+        _ => {
+            if n == 1 {
+                "one"
+            } else {
+                "other"
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------------ Accept-Language negotiation
@@ -1190,5 +1368,105 @@ mod tests {
             &[("item", "book"), ("customer", "Alice")],
         );
         assert_eq!(s, "2 books sold to Alice.");
+    }
+
+    // ---- #1102 CLDR plural rules + translate_plural ----
+
+    #[test]
+    fn plural_category_covers_launch_locales() {
+        // one / other (English, German, default).
+        assert_eq!(plural_category("en", 1), "one");
+        for n in [0, 2, 5, 11, 21, 100] {
+            assert_eq!(plural_category("en", n), "other", "en {n}");
+        }
+        assert_eq!(plural_category("de", 1), "one");
+        assert_eq!(plural_category("de", 7), "other");
+        // French: 0 and 1 are "one".
+        assert_eq!(plural_category("fr", 0), "one");
+        assert_eq!(plural_category("fr", 1), "one");
+        assert_eq!(plural_category("fr", 2), "other");
+        assert_eq!(plural_category("fr-FR", 0), "one"); // base-language match
+                                                        // East-Asian: always "other".
+        for n in [0, 1, 2, 5, 100] {
+            assert_eq!(plural_category("zh-Hans", n), "other", "zh {n}");
+            assert_eq!(plural_category("ja", n), "other", "ja {n}");
+        }
+        // Polish: one / few / many.
+        assert_eq!(plural_category("pl", 1), "one");
+        for n in [2, 3, 4, 22, 23, 24] {
+            assert_eq!(plural_category("pl", n), "few", "pl {n}");
+        }
+        for n in [0, 5, 11, 12, 14, 25, 111] {
+            assert_eq!(plural_category("pl", n), "many", "pl {n}");
+        }
+        // Ukrainian: …1 (not 11) is one; …2-4 (not 12-14) few; rest many.
+        for n in [1, 21, 31, 101] {
+            assert_eq!(plural_category("uk", n), "one", "uk {n}");
+        }
+        for n in [2, 3, 4, 22, 23, 24] {
+            assert_eq!(plural_category("uk", n), "few", "uk {n}");
+        }
+        for n in [0, 5, 11, 12, 13, 14, 25] {
+            assert_eq!(plural_category("uk", n), "many", "uk {n}");
+        }
+    }
+
+    #[test]
+    fn translate_plural_selects_form_three_way() {
+        let mut entry = HashMap::new();
+        entry.insert("one".to_owned(), "Usunięto {count} stronę.".to_owned());
+        entry.insert("few".to_owned(), "Usunięto {count} strony.".to_owned());
+        entry.insert("many".to_owned(), "Usunięto {count} stron.".to_owned());
+        let key = "Deleted {count} page(s).";
+        let mut pl: HashMap<String, HashMap<String, String>> = HashMap::new();
+        pl.insert(key.to_owned(), entry);
+        let t = Translator::new(Locale::new("en")).add_plural_locale(Locale::new("pl"), pl);
+
+        let tr = |n: i64| t.translate_plural("pl", key, n, &[("count", &n.to_string())]);
+        assert_eq!(tr(1), "Usunięto 1 stronę."); // one
+        assert_eq!(tr(2), "Usunięto 2 strony."); // few
+        assert_eq!(tr(22), "Usunięto 22 strony."); // few
+        assert_eq!(tr(5), "Usunięto 5 stron."); // many
+        assert_eq!(tr(25), "Usunięto 25 stron."); // many
+    }
+
+    #[test]
+    fn translate_plural_picks_other_when_category_absent() {
+        // Entry only has one/other → French "other" is used for n=2, and a
+        // Polish-style "few"/"many" request also degrades to "other".
+        let mut entry = HashMap::new();
+        entry.insert("one".to_owned(), "{count} élément".to_owned());
+        entry.insert("other".to_owned(), "{count} éléments".to_owned());
+        let key = "count_items";
+        let mut fr: HashMap<String, HashMap<String, String>> = HashMap::new();
+        fr.insert(key.to_owned(), entry);
+        let t = Translator::new(Locale::new("en")).add_plural_locale(Locale::new("fr"), fr);
+        assert_eq!(
+            t.translate_plural("fr", key, 1, &[("count", "1")]),
+            "1 élément"
+        );
+        assert_eq!(
+            t.translate_plural("fr", key, 9, &[("count", "9")]),
+            "9 éléments"
+        );
+    }
+
+    #[test]
+    fn translate_plural_falls_back_to_scalar_and_source() {
+        // No plural catalog at all → source key, with {count} interpolated
+        // (so English / untranslated still renders, never a blank).
+        let t = Translator::new(Locale::new("en"));
+        assert_eq!(
+            t.translate_plural("en", "Deleted {count} page(s).", 3, &[("count", "3")]),
+            "Deleted 3 page(s)."
+        );
+        // A flat scalar catalog entry is honoured when there's no plural entry.
+        let mut en = HashMap::new();
+        en.insert("flat_msg".to_owned(), "{count} thing(s)".to_owned());
+        let t = Translator::new(Locale::new("en")).add_locale(Locale::new("en"), en);
+        assert_eq!(
+            t.translate_plural("en", "flat_msg", 2, &[("count", "2")]),
+            "2 thing(s)"
+        );
     }
 }
