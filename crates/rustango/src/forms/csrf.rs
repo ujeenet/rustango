@@ -118,6 +118,15 @@ pub struct CsrfConfig {
     /// attacker steals the cookie token, they can't submit from a
     /// different origin.
     pub trusted_origins: Vec<String>,
+    /// URL path prefixes exempt from CSRF enforcement on unsafe
+    /// methods. Default `[]`. Intended for `navigator.sendBeacon`
+    /// collector endpoints (e.g. analytics), which cannot set an
+    /// `X-CSRF-Token` header and — when the page is served from a CDN
+    /// cache that strips `Set-Cookie` — may have no CSRF cookie at all.
+    /// Each entry is matched with `req.uri().path().starts_with(prefix)`,
+    /// so keep prefixes narrow and only exempt append-only endpoints
+    /// that read/write no auth state.
+    pub exempt_prefixes: Vec<String>,
 }
 
 impl Default for CsrfConfig {
@@ -127,6 +136,7 @@ impl Default for CsrfConfig {
             header_name: CSRF_HEADER.to_owned(),
             secure: true,
             trusted_origins: Vec::new(),
+            exempt_prefixes: Vec::new(),
         }
     }
 }
@@ -161,6 +171,18 @@ impl CsrfConfig {
         S: Into<String>,
     {
         self.trusted_origins = origins.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Builder — exempt a URL path prefix from CSRF enforcement on
+    /// unsafe methods. For beacon/collector endpoints posted via
+    /// `navigator.sendBeacon` (which cannot set a custom header) and
+    /// reachable from CDN-cached pages that never received a CSRF
+    /// cookie. Only exempt append-only endpoints that touch no auth
+    /// state; keep the prefix narrow.
+    #[must_use]
+    pub fn exempt_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.exempt_prefixes.push(prefix.into());
         self
     }
 }
@@ -297,8 +319,11 @@ where
         Box::pin(async move {
             let cookie_value = read_csrf_cookie(&req, &cfg.cookie_name);
 
-            // Enforce on unsafe methods.
-            let req = if !is_safe_method(req.method()) {
+            // Enforce on unsafe methods — unless the path is exempt
+            // (beacon/collector endpoints; see `CsrfConfig::exempt_prefix`).
+            let req = if !is_safe_method(req.method())
+                && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes)
+            {
                 // Origin-header defense-in-depth. Skipped when
                 // `trusted_origins` is empty (back-compat default).
                 if !origin_allowed(&req, &cfg.trusted_origins) {
@@ -380,6 +405,12 @@ where
 /// — the middleware can't safely buffer megabyte-scale form
 /// payloads in memory just to verify a token.
 const BODY_BUFFER_LIMIT: usize = 64 * 1024;
+
+/// `true` when `path` starts with any configured exempt prefix. Used to
+/// skip CSRF enforcement for beacon/collector endpoints.
+fn path_is_exempt(path: &str, prefixes: &[String]) -> bool {
+    prefixes.iter().any(|p| path.starts_with(p.as_str()))
+}
 
 fn is_safe_method(m: &Method) -> bool {
     matches!(
@@ -702,6 +733,26 @@ mod tests {
         assert!(!is_safe_method(&Method::POST));
         assert!(!is_safe_method(&Method::PUT));
         assert!(!is_safe_method(&Method::DELETE));
+    }
+
+    #[test]
+    fn exempt_prefix_matches_only_configured_paths() {
+        let prefixes = vec!["/__cms__/collect".to_owned()];
+        // Exact + sub-path match (prefix semantics).
+        assert!(path_is_exempt("/__cms__/collect", &prefixes));
+        assert!(path_is_exempt("/__cms__/collect/extra", &prefixes));
+        // Unrelated paths still enforced.
+        assert!(!path_is_exempt("/__cms__/other", &prefixes));
+        assert!(!path_is_exempt("/forms/submit/1", &prefixes));
+        assert!(!path_is_exempt("/", &prefixes));
+        // Empty config exempts nothing (back-compat default).
+        assert!(!path_is_exempt("/__cms__/collect", &[]));
+    }
+
+    #[test]
+    fn exempt_prefix_builder_appends() {
+        let cfg = CsrfConfig::default().exempt_prefix("/__cms__/collect");
+        assert_eq!(cfg.exempt_prefixes, vec!["/__cms__/collect".to_owned()]);
     }
 
     #[test]

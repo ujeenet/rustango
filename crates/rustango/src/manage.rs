@@ -1513,6 +1513,7 @@ mod tests {
             header_name: "X-Custom-CSRF".into(),
             secure: true,
             trusted_origins: Vec::new(),
+            exempt_prefixes: Vec::new(),
         });
         let csrf = cli.csrf.expect("with_csrf_config should set csrf");
         assert_eq!(csrf.cookie_name, "custom_csrf");
