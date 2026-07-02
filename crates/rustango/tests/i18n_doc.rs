@@ -114,3 +114,30 @@ fn rtl_detection() {
     assert!(is_rtl_language("he")); // Hebrew
     assert!(!is_rtl_language("en"));
 }
+
+#[test]
+fn capability_registry_reports_core_support() {
+    use rustango::i18n::{known_locales, locale_info};
+
+    let fr = locale_info("fr-CA");
+    assert!(fr.known); // core has display/RTL metadata
+    assert_eq!(fr.display_name, "French");
+    assert!(fr.has_plural_rules); // language-specific CLDR rule modeled
+
+    let ar = locale_info("ar");
+    assert!(ar.is_rtl && ar.direction == "rtl");
+
+    let xx = locale_info("xx"); // a made-up code
+    assert!(!xx.known); // display_name == "Unknown", LTR, generic plurals
+    assert_eq!(xx.display_name, "Unknown");
+    assert!(!xx.has_plural_rules);
+
+    // English deliberately reports no *explicit* rule — the generic
+    // one/other fallback is already correct for it.
+    assert!(!locale_info("en").has_plural_rules);
+
+    // Picker roster: every code with metadata, English-named.
+    let codes: Vec<&str> = known_locales().map(|(c, _)| c).collect();
+    assert!(codes.contains(&"en") && codes.contains(&"ar"));
+    assert!(!codes.contains(&"iw")); // retired aliases resolve, aren't listed
+}
