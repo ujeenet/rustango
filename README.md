@@ -32,11 +32,13 @@ rustango = { version = "0.44", features = ["postgres", "sqlite"] }
 orm = { package = "rustango", version = "0.44" }
 ```
 
+### What's new in v0.45.0 (July 2026) — i18n depth
+
+**CLDR plural-rules + a locale capability registry.** `plural_category(lang, n)` returns the CLDR category (`one` / `few` / `many` / `other` / …) and `translate_plural` picks the matching message ([#1103](https://github.com/ujeenet/rustango/pull/1103)); `locale_info(code)` / `known_locales()` expose core's static per-locale metadata (display + native name, direction / RTL, whether an explicit plural rule is modeled) so callers can query support instead of string-matching `"Unknown"`. Plus `CsrfConfig::exempt_prefix` — a narrow CSRF escape hatch for `sendBeacon` collector endpoints (e.g. analytics) that can't send a token header. See [docs/i18n.md](docs/i18n.md) and the [CHANGELOG](CHANGELOG.md).
+
 ### What's new in v0.44.0 (June 2026) — MCP server + ViewSets↔serializers
 
 **Headline: the [MCP server](docs/mcp.md).** Rustango can expose its skills, tools, prompts, and resources to AI agents over the Model Context Protocol — JSON-RPC 2.0 over Streamable HTTP, OAuth 2.1 discovery, scoped-JWT agent identity — opt-in via the `mcp` feature. Plus **ViewSets married to serializers** (declarative render + validate, tri-dialect), a batch of **Django-parity ORM** features (relation-spanning `order_by`, related-column `GROUP BY`, `distinct_on` on MySQL/SQLite, `generated_as` refresh on save via `RETURNING`), and a comprehensive documentation pass. Full detail in the [CHANGELOG](CHANGELOG.md).
-
-_Landed since 0.44.0 (in `develop`, not yet tagged):_ CLDR plural-rules (`plural_category` / `translate_plural`, [#1103](https://github.com/ujeenet/rustango/pull/1103)), a locale capability registry (`locale_info` / `known_locales`), and `CsrfConfig::exempt_prefix` for beacon/collector endpoints.
 
 ### What's new in v0.42.0 (May 2026) — Django-parity gap-closure batch
 
