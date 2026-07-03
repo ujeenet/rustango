@@ -6,6 +6,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 _Nothing yet — next development cycle._
 
+## [0.45.0] — 2026-07-03
+
+Headline: **i18n depth** — CLDR plural-rules and a locale capability registry — plus a CSRF escape hatch for beacon/collector endpoints.
+
+### Added
+
+- **CLDR plural-rules** (#1103) — `plural_category(lang, n)` returns the CLDR plural category (`one` / `few` / `many` / `other` / …) for a count, and `translate_plural` selects the matching per-category message from a catalog. Language-specific rules for the common families (Slavic few/many, French 0-is-one, …); the generic one/other fallback covers the rest.
+- **Locale capability registry** — `locale_info(code) -> LocaleInfo` exposes core's static per-locale metadata (display + native name, text direction / RTL, whether an explicit CLDR plural rule is modeled, and a `known` flag), and `known_locales()` yields the English-named roster. Lets callers query what core supports instead of string-matching `"Unknown"`.
+- **`CsrfConfig::exempt_prefix`** — exempt URL path prefixes from CSRF enforcement on unsafe methods. Intended for `navigator.sendBeacon` collector endpoints (e.g. analytics) that cannot set an `X-CSRF-Token` header and — behind a CDN cache that strips `Set-Cookie` — may carry no CSRF cookie at all.
+
+### Changed
+
+- **Docs** — capitalize "Rustango" in prose, fix `cargo` command casing, refresh version references to 0.44+, document the locale capability registry and CLDR plural support, and link the live docs site from the README.
+
 ## [0.44.0] — 2026-06-25
 
 Headline: the **MCP server** — rustango can now expose its skills, tools, prompts, and resources to AI agents over the Model Context Protocol (Streamable HTTP transport, OAuth 2.1, scoped-JWT agent identity). Plus **ViewSets married to serializers** (declarative render + validate, tri-dialect), a batch of **Django-parity ORM** features (relation-spanning `order_by`, related-column `GROUP BY`, `distinct_on` on MySQL/SQLite, `generated_as` refresh on save), and a comprehensive documentation pass. Folds in the never-tagged v0.43.1 scaffolder/`rpassword` patch.
