@@ -10,25 +10,33 @@
 
 Every feature works on every supported backend out of the box. The only PG-specific surface is schema-mode tenancy, a connection-pool optimization for high-N SaaS — see the [storage modes table](#multi-tenancy) below for when it matters.
 
+📚 **Documentation:** full guides & tutorials at **[rustango.im-fullstack.dev](https://rustango.im-fullstack.dev)** · [getting started](docs/getting-started.md) · [all guides](docs/) · [CHANGELOG](CHANGELOG.md). API reference (published releases): [docs.rs/rustango](https://docs.rs/rustango).
+
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.42"
+rustango = "0.44"
 
 # SQLite — file-backed or in-memory, full tri-dialect framework
-rustango = { version = "0.42", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.44", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.42", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.44", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 
 # Multiple backends in one binary
-rustango = { version = "0.42", features = ["postgres", "sqlite"] }
+rustango = { version = "0.44", features = ["postgres", "sqlite"] }
 
 # Renaming the dep — `#[derive(Model)]` etc. resolve the crate root
 # via `proc-macro-crate` (issue #142), so importing under a custom
 # name works without any extra wiring.
-orm = { package = "rustango", version = "0.42" }
+orm = { package = "rustango", version = "0.44" }
 ```
+
+### What's new in v0.44.0 (June 2026) — MCP server + ViewSets↔serializers
+
+**Headline: the [MCP server](docs/mcp.md).** Rustango can expose its skills, tools, prompts, and resources to AI agents over the Model Context Protocol — JSON-RPC 2.0 over Streamable HTTP, OAuth 2.1 discovery, scoped-JWT agent identity — opt-in via the `mcp` feature. Plus **ViewSets married to serializers** (declarative render + validate, tri-dialect), a batch of **Django-parity ORM** features (relation-spanning `order_by`, related-column `GROUP BY`, `distinct_on` on MySQL/SQLite, `generated_as` refresh on save via `RETURNING`), and a comprehensive documentation pass. Full detail in the [CHANGELOG](CHANGELOG.md).
+
+_Landed since 0.44.0 (in `develop`, not yet tagged):_ CLDR plural-rules (`plural_category` / `translate_plural`, [#1103](https://github.com/ujeenet/rustango/pull/1103)), a locale capability registry (`locale_info` / `known_locales`), and `CsrfConfig::exempt_prefix` for beacon/collector endpoints.
 
 ### What's new in v0.42.0 (May 2026) — Django-parity gap-closure batch
 
@@ -3052,10 +3060,11 @@ Then verify your stack has:
 
 ## Documentation
 
-- **API docs**: <https://docs.rs/rustango>
-- **Tutorial**: see `docs/getting-started.md`
-- **CHANGELOG**: see `CHANGELOG.md`
-- **Source**: <https://github.com/cot-rs/rustango>
+- **Guides & tutorials (latest)**: <https://rustango.im-fullstack.dev> — getting started, ORM, auth, admin, jobs, MCP, i18n, and more.
+- **API reference**: <https://docs.rs/rustango> (published releases)
+- **In-repo guides**: [`docs/`](docs/) — e.g. [getting-started](docs/getting-started.md), [models](docs/models.md), [orm](docs/orm.md), [auth-flows](docs/auth-flows.md), [admin](docs/admin.md), [mcp](docs/mcp.md), [i18n](docs/i18n.md).
+- **CHANGELOG**: [`CHANGELOG.md`](CHANGELOG.md)
+- **Source**: <https://github.com/ujeenet/rustango>
 
 ---
 
