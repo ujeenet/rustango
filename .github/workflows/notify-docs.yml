@@ -1,0 +1,36 @@
+name: Notify docs site of release
+
+# On every published release, ping the docs site (ujeenet/rustango-docs) so it
+# re-syncs its versioned docs. The docs site pulls each curated release tag's
+# docs/ straight from GitHub, so this just triggers its re-seed/redeploy.
+#
+# Requires a repo secret DOCS_DISPATCH_TOKEN: a (fine-grained) PAT allowed to
+# send repository_dispatch to ujeenet/rustango-docs (Contents: read + the
+# repo's "Dispatch" permission). Absent → the job no-ops with a warning.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: repository_dispatch → rustango-docs
+        env:
+          TOKEN: ${{ secrets.DOCS_DISPATCH_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::DOCS_DISPATCH_TOKEN not set — skipping docs-site notification for $TAG."
+            exit 0
+          fi
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/ujeenet/rustango-docs/dispatches \
+            -d "{\"event_type\":\"docs-release\",\"client_payload\":{\"tag\":\"${TAG}\"}}"
+          echo "Notified rustango-docs of release ${TAG}."
