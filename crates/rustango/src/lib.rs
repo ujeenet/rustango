@@ -975,6 +975,12 @@ pub mod http_client;
 #[cfg(feature = "admin")]
 pub mod http_query;
 
+/// Method-adaptive params extractor — [`params::Params`] reads the
+/// querystring on GET/HEAD and the body on QUERY, so one handler serves
+/// both transports. Issue #1109.
+#[cfg(feature = "admin")]
+pub mod params;
+
 /// Response compression middleware — gzip + deflate via flate2.
 /// Honors `Accept-Encoding`, skips already-compressed bodies and binary
 /// content-types. See [`compression::CompressionLayer`].
