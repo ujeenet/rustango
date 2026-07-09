@@ -732,6 +732,15 @@ impl ViewSet {
         } else {
             get(handle_list).post(handle_create)
         };
+        // RFC 10008 QUERY collection action (#1112) — same filtered list as
+        // GET, criteria in the body. Gated on `admin` since the QUERY
+        // routing shim lives in the `admin`-gated `http_query` module; a
+        // `tenancy`-only ViewSet build keeps GET/POST without QUERY.
+        #[cfg(feature = "admin")]
+        let collection_route = {
+            use crate::http_query::QueryRouterExt as _;
+            collection_route.query(handle_query)
+        };
 
         let item_route = if self.read_only {
             axum::routing::MethodRouter::new().get(handle_retrieve)
@@ -1362,11 +1371,23 @@ async fn handle_list(
     Query(params): Query<HashMap<String, String>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (_parts, _body, mut acq) = match enter(&state, req, &state.vs.perms.list, "list").await {
+    let (_parts, _body, acq) = match enter(&state, req, &state.vs.perms.list, "list").await {
         Ok(x) => x,
         Err(resp) => return resp,
     };
+    run_list(state, params, acq).await
+}
 
+/// Core `list` logic shared by the GET `list` action and the RFC 10008
+/// QUERY action (#1112): builds filters / search / ordering / pagination
+/// from `params` and renders the paginated envelope. `params` arrive from
+/// the querystring on GET and from the request body on QUERY, so the two
+/// transports return byte-identical results for equivalent criteria.
+async fn run_list(
+    state: Arc<ViewSetState>,
+    params: HashMap<String, String>,
+    mut acq: AcquiredConn,
+) -> Response {
     let page_size: i64 = params
         .get("page_size")
         .and_then(|p| p.parse().ok())
@@ -1563,6 +1584,106 @@ async fn handle_list(
                 "results": results,
             }))
         }
+    }
+}
+
+/// RFC 10008 QUERY action on the collection (#1112) — the same filtered,
+/// paginated `list`, but with the criteria in the request body instead of
+/// the querystring. A ViewSet gets this for free (no trait method to
+/// implement); `QUERY /things` with body `status=draft&ordering=-created`
+/// returns exactly what `GET /things?status=draft&ordering=-created`
+/// would. Permissions / throttles reuse the `list` codenames via `enter`.
+#[cfg(feature = "admin")]
+async fn handle_query(
+    State(state): State<Arc<ViewSetState>>,
+    req: axum::extract::Request,
+) -> Response {
+    // `enter` returns the body unconsumed (it only reads `parts` for
+    // throttle + permission checks), so we can parse params from it here.
+    let (parts, body, acq) = match enter(&state, req, &state.vs.perms.list, "query").await {
+        Ok(x) => x,
+        Err(resp) => return resp,
+    };
+    let params = match parse_query_body_params(&parts, body).await {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    run_list(state, params, acq).await
+}
+
+/// Parse a QUERY request body into the same `HashMap<String, String>`
+/// param shape `run_list` consumes for GET. Dispatches on `Content-Type`:
+/// urlencoded (or none) via the querystring codepath, JSON objects flattened
+/// to string values (scalars stringified, arrays comma-joined so
+/// `{"status__in":["a","b"]}` matches `status__in=a,b`), anything else 415.
+#[cfg(feature = "admin")]
+async fn parse_query_body_params(
+    parts: &axum::http::request::Parts,
+    body: Body,
+) -> Result<HashMap<String, String>, Response> {
+    const CAP: usize = 1 << 20;
+    let essence = parts
+        .headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let bytes = match axum::body::to_bytes(body, CAP).await {
+        Ok(b) => b,
+        Err(_) => {
+            return Err(json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "QUERY body too large",
+            ))
+        }
+    };
+
+    if essence == "application/json" || essence.ends_with("+json") {
+        let value: Value = serde_json::from_slice(&bytes).map_err(|e| {
+            json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                &format!("invalid JSON QUERY body: {e}"),
+            )
+        })?;
+        let Value::Object(obj) = value else {
+            return Err(json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "QUERY JSON body must be an object of criteria",
+            ));
+        };
+        Ok(obj
+            .iter()
+            .map(|(k, v)| (k.clone(), json_value_to_param(v)))
+            .collect())
+    } else if essence.is_empty() || essence == "application/x-www-form-urlencoded" {
+        serde_urlencoded::from_bytes::<HashMap<String, String>>(&bytes)
+            .map_err(|e| json_error(StatusCode::BAD_REQUEST, &format!("invalid QUERY body: {e}")))
+    } else {
+        Err(json_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "QUERY body must be application/x-www-form-urlencoded or application/json",
+        ))
+    }
+}
+
+/// Flatten a JSON value to the string form `run_list`'s filter parser
+/// expects: strings verbatim, arrays comma-joined (for `__in` lookups),
+/// null → empty, numbers / bools via their JSON text.
+#[cfg(feature = "admin")]
+fn json_value_to_param(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(json_value_to_param)
+            .collect::<Vec<_>>()
+            .join(","),
+        Value::Null => String::new(),
+        other => other.to_string(),
     }
 }
 
