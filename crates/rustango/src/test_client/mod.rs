@@ -275,6 +275,14 @@ impl TestClient {
         self.request(Method::HEAD, path)
     }
 
+    /// Build a `QUERY` request to `path` (RFC 10008). Pair with
+    /// `.form(...)` or `.json(...)` to send the query criteria in the
+    /// body; see [`crate::http_query`] and [`crate::params::Params`].
+    #[must_use]
+    pub fn query(&self, path: impl Into<String>) -> RequestBuilder<'_> {
+        self.request(crate::http_query::QUERY.clone(), path)
+    }
+
     /// Build a request with the given method.
     #[must_use]
     pub fn request(&self, method: Method, path: impl Into<String>) -> RequestBuilder<'_> {
@@ -517,6 +525,12 @@ impl RequestFactory {
     pub fn options(self, path: &str) -> FactoryRequestBuilder {
         FactoryRequestBuilder::new(Method::OPTIONS, path)
     }
+
+    /// Build a `QUERY` request to `path` (RFC 10008).
+    #[must_use]
+    pub fn query(self, path: &str) -> FactoryRequestBuilder {
+        FactoryRequestBuilder::new(crate::http_query::QUERY.clone(), path)
+    }
 }
 
 /// Chained builder returned by [`RequestFactory`] verb methods. Finalize
@@ -701,6 +715,7 @@ fn url_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http_query::QueryRouterExt;
     use axum::routing::{get, post};
     use serde_json::json;
 
@@ -708,6 +723,10 @@ mod tests {
         Router::new()
             .route("/hello", get(|| async { "hi" }))
             .route("/echo", post(|body: String| async move { body }))
+            .route(
+                "/search",
+                get(|| async { "list" }).query(|body: String| async move { format!("q:{body}") }),
+            )
             .route(
                 "/json",
                 post(|body: axum::Json<serde_json::Value>| async move {
@@ -746,6 +765,25 @@ mod tests {
         let r = c.post("/echo").body("hello world").send().await;
         assert_eq!(r.status, 200);
         assert_eq!(r.text(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn query_builder_sends_query_method_with_body() {
+        let c = TestClient::new(app());
+        // GET and QUERY share the path; the QUERY builder hits the QUERY
+        // handler and its body round-trips.
+        let g = c.get("/search").send().await;
+        assert_eq!(g.text(), "list");
+        let r = c.query("/search").form(&[("q", "x")]).send().await;
+        assert_eq!(r.status, 200);
+        assert_eq!(r.text(), "q:q=x");
+    }
+
+    #[tokio::test]
+    async fn request_factory_builds_query_request() {
+        let req = RequestFactory::new().query("/search").build();
+        assert_eq!(req.method().as_str(), "QUERY");
+        assert_eq!(req.uri().path(), "/search");
     }
 
     #[tokio::test]

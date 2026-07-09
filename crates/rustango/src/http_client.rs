@@ -154,6 +154,14 @@ impl HttpClient {
     pub fn head(&self, url: impl IntoUrl) -> RequestBuilder {
         self.request(Method::HEAD, url)
     }
+    /// Build a `QUERY` request (RFC 10008) — a safe, idempotent read with
+    /// a body. Classified idempotent, so it's retried by default like GET.
+    pub fn query(&self, url: impl IntoUrl) -> RequestBuilder {
+        self.request(
+            Method::from_bytes(b"QUERY").expect("QUERY is a valid method token"),
+            url,
+        )
+    }
 
     pub fn request(&self, method: Method, url: impl IntoUrl) -> RequestBuilder {
         RequestBuilder {
@@ -481,6 +489,28 @@ mod tests {
         let resp = client.get(url).send().await.unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.text().await.unwrap(), "hello");
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn query_method_and_body_go_over_the_wire() {
+        // `any` accepts the extension method; the handler echoes method +
+        // body so we can prove the connector sent QUERY with its body.
+        let app = Router::new().route(
+            "/",
+            axum::routing::any(|m: Method, body: String| async move { format!("{m}:{body}") }),
+        );
+        let (url, srv) = start(app).await;
+
+        let client = HttpClient::builder().build().unwrap();
+        let resp = client
+            .query(url)
+            .body(b"q=x".to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "QUERY:q=x");
         srv.abort();
     }
 
