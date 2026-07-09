@@ -570,3 +570,172 @@ async fn host_header_partitions_cache_by_default() {
     );
     assert_eq!(COUNTER.load(Ordering::SeqCst), 2);
 }
+
+// ---------------------------------------------------------------- QUERY (#1111)
+
+use rustango::http_query::QueryRouterExt as _;
+
+/// Build a `QUERY` request to `/page` with `body`.
+fn query_req(body: &'static str) -> Request<Body> {
+    Request::builder()
+        .method(Method::from_bytes(b"QUERY").unwrap())
+        .uri("/page")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+fn query_app(counter: &'static AtomicU32, cache: Arc<InMemoryCache>, cache_query: bool) -> Router {
+    Router::new()
+        .route(
+            "/page",
+            get(|| async { "list" }).query(move |body: String| async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                format!("q{n}:{body}")
+            }),
+        )
+        .layer(CachePageLayer::new(cache).cache_query(cache_query))
+}
+
+#[tokio::test]
+async fn query_caching_off_by_default() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+    let cache = Arc::new(InMemoryCache::new());
+    // cache_query defaults to false → QUERY bypasses the cache.
+    let app = query_app(&COUNTER, cache, false);
+
+    for _ in 0..2 {
+        let resp = app.clone().oneshot(query_req("q=x")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("x-cache-status").is_none());
+    }
+    assert_eq!(
+        COUNTER.load(Ordering::SeqCst),
+        2,
+        "both QUERYs reached the handler"
+    );
+}
+
+#[tokio::test]
+async fn query_same_body_hits_cache_when_enabled() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+    let cache = Arc::new(InMemoryCache::new());
+    let app = query_app(&COUNTER, cache, true);
+
+    let r1 = app.clone().oneshot(query_req("q=x")).await.unwrap();
+    assert_eq!(
+        r1.headers()
+            .get("x-cache-status")
+            .and_then(|h| h.to_str().ok()),
+        Some("MISS")
+    );
+    assert_eq!(body_to_string(r1.into_body()).await, "q0:q=x");
+
+    // Byte-identical body → HIT; handler does not run again.
+    let r2 = app.clone().oneshot(query_req("q=x")).await.unwrap();
+    assert_eq!(
+        r2.headers()
+            .get("x-cache-status")
+            .and_then(|h| h.to_str().ok()),
+        Some("HIT")
+    );
+    assert_eq!(body_to_string(r2.into_body()).await, "q0:q=x");
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn query_different_body_misses() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+    let cache = Arc::new(InMemoryCache::new());
+    let app = query_app(&COUNTER, cache, true);
+
+    let r1 = app.clone().oneshot(query_req("q=x")).await.unwrap();
+    assert_eq!(body_to_string(r1.into_body()).await, "q0:q=x");
+    // Different body → different cache key → MISS, handler runs again.
+    let r2 = app.clone().oneshot(query_req("q=y")).await.unwrap();
+    assert_eq!(
+        r2.headers()
+            .get("x-cache-status")
+            .and_then(|h| h.to_str().ok()),
+        Some("MISS")
+    );
+    assert_eq!(body_to_string(r2.into_body()).await, "q1:q=y");
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn query_response_forced_private() {
+    // A QUERY handler that (mistakenly) marks its result publicly
+    // cacheable must not leak into shared caches — the layer downgrades
+    // it to `private` while preserving freshness.
+    let cache = Arc::new(InMemoryCache::new());
+    let app: Router = Router::new()
+        .route(
+            "/page",
+            get(|| async { "list" }).query(|_body: String| async move {
+                ([(header::CACHE_CONTROL, "public, max-age=60")], "results")
+            }),
+        )
+        .layer(CachePageLayer::new(cache).cache_query(true));
+
+    let resp = app.clone().oneshot(query_req("q=x")).await.unwrap();
+    let cc = resp
+        .headers()
+        .get(header::CACHE_CONTROL)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(cc.contains("private"), "must be private: {cc}");
+    assert!(!cc.contains("public"), "public must be stripped: {cc}");
+    assert!(cc.contains("max-age=60"), "freshness preserved: {cc}");
+}
+
+#[tokio::test]
+async fn query_body_over_cap_is_413() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+    let cache = Arc::new(InMemoryCache::new());
+    let app = query_app(&COUNTER, cache, true);
+
+    // 1 MiB + 1 byte QUERY body exceeds the cacheable cap.
+    let big = "a".repeat((1 << 20) + 1);
+    let req = Request::builder()
+        .method(Method::from_bytes(b"QUERY").unwrap())
+        .uri("/page")
+        .body(Body::from(big))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        resp.headers()
+            .get("x-cache-status")
+            .and_then(|h| h.to_str().ok()),
+        Some("BYPASS")
+    );
+    // The handler never ran (body rejected before dispatch).
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn get_and_query_do_not_collide() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+    let cache = Arc::new(InMemoryCache::new());
+    let app = query_app(&COUNTER, cache, true);
+
+    // GET and QUERY share the path but must not share a cache entry
+    // (method is in the key), so the GET handler's "list" is never
+    // served to a QUERY and vice versa.
+    let g = app
+        .clone()
+        .oneshot(Request::builder().uri("/page").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(body_to_string(g.into_body()).await, "list");
+
+    let q = app.clone().oneshot(query_req("q=x")).await.unwrap();
+    assert_eq!(body_to_string(q.into_body()).await, "q0:q=x");
+}
