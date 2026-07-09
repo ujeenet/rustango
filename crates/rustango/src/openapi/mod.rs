@@ -1,4 +1,7 @@
-//! OpenAPI 3.1 spec builder + optional Swagger UI router.
+//! OpenAPI 3.1 spec builder + optional Swagger UI router. A spec that
+//! attaches a `QUERY` operation (RFC 10008) via [`PathItem::query`] is
+//! emitted as OpenAPI 3.2.0 (which added the `query` Path Item field);
+//! specs without one stay 3.1.0.
 //!
 //! Two flavors of usage:
 //!
@@ -117,6 +120,12 @@ impl OpenApiSpec {
 
     #[must_use]
     pub fn add_path(mut self, path: impl Into<String>, item: PathItem) -> Self {
+        // OpenAPI 3.2 introduced the `query` Path Item field (RFC 10008).
+        // A spec that uses one must declare 3.2.0; specs without QUERY
+        // stay 3.1.0 for maximum tooling compatibility.
+        if item.query.is_some() {
+            self.openapi = "3.2.0".into();
+        }
         self.paths.insert(path.into(), item);
         self
     }
@@ -253,6 +262,11 @@ pub struct PathItem {
     pub head: Option<Operation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Operation>,
+    /// RFC 10008 `QUERY` operation — a first-class Path Item field in
+    /// OpenAPI 3.2. A spec containing one is emitted as `openapi: 3.2.0`
+    /// (see [`OpenApiSpec::add_path`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<Operation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub parameters: Vec<Parameter>,
 }
@@ -292,6 +306,13 @@ impl PathItem {
     #[must_use]
     pub fn delete(mut self, op: Operation) -> Self {
         self.delete = Some(op);
+        self
+    }
+    /// Attach the RFC 10008 `QUERY` operation (OpenAPI 3.2). Adding this
+    /// to a spec's path bumps the emitted `openapi` version to 3.2.0.
+    #[must_use]
+    pub fn query(mut self, op: Operation) -> Self {
+        self.query = Some(op);
         self
     }
     #[must_use]
@@ -1056,6 +1077,56 @@ mod tests {
                 ["schema"]["items"]["$ref"],
             "#/components/schemas/Post"
         );
+    }
+
+    #[test]
+    fn query_operation_serializes_and_bumps_version_to_3_2() {
+        // A path with a `query` operation (RFC 10008) is emitted under the
+        // `query` Path Item field and forces the spec version to 3.2.0.
+        let spec = OpenApiSpec::new("API", "1.0")
+            .add_schema("Post", Schema::object().property("title", Schema::string()))
+            .add_path(
+                "/posts",
+                PathItem::new()
+                    .get(
+                        Operation::new()
+                            .summary("List posts")
+                            .response("200", Response::new("OK")),
+                    )
+                    .query(
+                        Operation::new()
+                            .summary("Search posts")
+                            .operation_id("search_posts")
+                            .request_body(RequestBody::json(Schema::ref_("Post")))
+                            .response(
+                                "200",
+                                Response::new("OK")
+                                    .json_content(Schema::array_of(Schema::ref_("Post"))),
+                            ),
+                    ),
+            );
+        let v: serde_json::Value = serde_json::from_str(&spec.to_json()).unwrap();
+        assert_eq!(v["openapi"], "3.2.0", "QUERY op must bump the version");
+        assert_eq!(v["paths"]["/posts"]["query"]["summary"], "Search posts");
+        assert_eq!(v["paths"]["/posts"]["query"]["operationId"], "search_posts");
+        assert_eq!(
+            v["paths"]["/posts"]["query"]["requestBody"]["content"]["application/json"]["schema"]
+                ["$ref"],
+            "#/components/schemas/Post"
+        );
+        // GET on the same path is unaffected.
+        assert_eq!(v["paths"]["/posts"]["get"]["summary"], "List posts");
+    }
+
+    #[test]
+    fn spec_without_query_stays_3_1() {
+        let spec = OpenApiSpec::new("API", "1.0").add_path(
+            "/posts",
+            PathItem::new().get(Operation::new().response("200", Response::new("OK"))),
+        );
+        let v: serde_json::Value = serde_json::from_str(&spec.to_json()).unwrap();
+        assert_eq!(v["openapi"], "3.1.0");
+        assert!(v["paths"]["/posts"].get("query").is_none());
     }
 
     #[test]
