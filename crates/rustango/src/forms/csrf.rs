@@ -127,6 +127,26 @@ pub struct CsrfConfig {
     /// so keep prefixes narrow and only exempt append-only endpoints
     /// that read/write no auth state.
     pub exempt_prefixes: Vec<String>,
+    /// Enforce CSRF on the HTTP `QUERY` method (RFC 10008). Default
+    /// `false` — QUERY is a *safe* method, browsers can't form-submit it,
+    /// and a cross-origin `fetch` with method `QUERY` is never a
+    /// CORS-safelisted "simple request", so it always triggers a preflight
+    /// and carries no ambient-credential CSRF vector. It is therefore
+    /// exempt like GET/HEAD/OPTIONS/TRACE. Set `true` for pure
+    /// defense-in-depth if you want a token required on QUERY anyway.
+    ///
+    /// The default exemption stays safe only while two things hold — both
+    /// true out of the box:
+    /// - **QUERY handlers are side-effect-free.** RFC 10008 defines QUERY
+    ///   as safe + idempotent; mount only read-only handlers on it (a
+    ///   mutation on QUERY would have no token check under the default).
+    /// - **`QUERY` is never added to the method-override allow-list**
+    ///   ([`crate::method_override`], default `[PUT, PATCH, DELETE]`).
+    ///   Allowing a form POST to be rewritten to QUERY would manufacture
+    ///   the ambient-credential request the exemption assumes can't exist.
+    ///
+    /// If you can't guarantee both, set this to `true`.
+    pub require_csrf_on_query: bool,
 }
 
 impl Default for CsrfConfig {
@@ -137,6 +157,7 @@ impl Default for CsrfConfig {
             secure: true,
             trusted_origins: Vec::new(),
             exempt_prefixes: Vec::new(),
+            require_csrf_on_query: false,
         }
     }
 }
@@ -321,7 +342,7 @@ where
 
             // Enforce on unsafe methods — unless the path is exempt
             // (beacon/collector endpoints; see `CsrfConfig::exempt_prefix`).
-            let req = if !is_safe_method(req.method())
+            let req = if !method_is_csrf_exempt(req.method(), &cfg)
                 && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes)
             {
                 // Origin-header defense-in-depth. Skipped when
@@ -417,6 +438,15 @@ fn is_safe_method(m: &Method) -> bool {
         *m,
         Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
     )
+}
+
+/// Whether `m` is exempt from CSRF token enforcement. The classic safe
+/// methods always are; the RFC 10008 `QUERY` method is too (a safe method
+/// with no browser CSRF vector) unless [`CsrfConfig::require_csrf_on_query`]
+/// opts it back in. `QUERY` is matched by name so this stays independent
+/// of the `admin`-gated `http_query` module.
+fn method_is_csrf_exempt(m: &Method, cfg: &CsrfConfig) -> bool {
+    is_safe_method(m) || (!cfg.require_csrf_on_query && m.as_str() == "QUERY")
 }
 
 fn read_csrf_cookie(req: &Request<Body>, name: &str) -> Option<String> {
@@ -733,6 +763,28 @@ mod tests {
         assert!(!is_safe_method(&Method::POST));
         assert!(!is_safe_method(&Method::PUT));
         assert!(!is_safe_method(&Method::DELETE));
+    }
+
+    #[test]
+    fn query_method_is_csrf_exempt_by_default() {
+        let query = Method::from_bytes(b"QUERY").unwrap();
+        let cfg = CsrfConfig::default();
+        // QUERY exempt by default (safe method, no browser CSRF vector)…
+        assert!(method_is_csrf_exempt(&query, &cfg));
+        // …but still not a mutating method like POST.
+        assert!(!method_is_csrf_exempt(&Method::POST, &cfg));
+    }
+
+    #[test]
+    fn require_csrf_on_query_opts_query_back_in() {
+        let query = Method::from_bytes(b"QUERY").unwrap();
+        let cfg = CsrfConfig {
+            require_csrf_on_query: true,
+            ..CsrfConfig::default()
+        };
+        assert!(!method_is_csrf_exempt(&query, &cfg));
+        // Classic safe methods are unaffected by the knob.
+        assert!(method_is_csrf_exempt(&Method::GET, &cfg));
     }
 
     #[test]

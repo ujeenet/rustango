@@ -386,7 +386,10 @@ impl RequestBuilder {
 }
 
 fn is_method_idempotent(m: &Method) -> bool {
-    matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS)
+    // QUERY (RFC 10008) is safe + idempotent, so it's retry-safe like GET.
+    // Matched by name to stay independent of the `admin`-gated `http_query`
+    // module.
+    matches!(*m, Method::GET | Method::HEAD | Method::OPTIONS) || m.as_str() == "QUERY"
 }
 
 fn is_status_retryable(s: StatusCode) -> bool {
@@ -434,6 +437,8 @@ mod tests {
         assert!(!is_method_idempotent(&Method::PUT));
         assert!(!is_method_idempotent(&Method::PATCH));
         assert!(!is_method_idempotent(&Method::DELETE));
+        // QUERY (RFC 10008) is safe + idempotent → retry-safe.
+        assert!(is_method_idempotent(&Method::from_bytes(b"QUERY").unwrap()));
     }
 
     #[test]

@@ -22,7 +22,7 @@
 //!
 //! let cors = CorsLayer::new()
 //!     .allow_origins(vec!["https://app.example.com", "https://admin.example.com"])
-//!     .allow_methods(vec!["GET", "POST", "PUT", "PATCH", "DELETE"])
+//!     .allow_methods(vec!["GET", "POST", "PUT", "PATCH", "DELETE", "QUERY"])
 //!     .allow_headers(vec!["content-type", "authorization"])
 //!     .allow_credentials(true)
 //!     .max_age(Duration::from_secs(3600));
@@ -101,6 +101,10 @@ impl CorsLayer {
                 "DELETE".into(),
                 "HEAD".into(),
                 "OPTIONS".into(),
+                // RFC 10008 — QUERY always triggers a preflight (never
+                // CORS-safelisted), so it must be advertised here to work
+                // cross-origin.
+                "QUERY".into(),
             ],
             allow_headers: vec!["*".into()],
             expose_headers: Vec::new(),
@@ -175,7 +179,9 @@ impl CorsLayer {
         Some(
             Self::new()
                 .allow_origins(s.cors_allowed_origins.iter().cloned())
-                .allow_methods(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+                .allow_methods([
+                    "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "QUERY",
+                ])
                 .allow_headers(["Content-Type", "Authorization"])
                 .max_age(Duration::from_secs(3600)),
         )
@@ -433,6 +439,18 @@ mod tests {
     fn permissive_allows_any() {
         let l = CorsLayer::permissive();
         assert!(l.resolve_origin(Some("https://anywhere.test")).is_some());
+    }
+
+    #[test]
+    fn permissive_advertises_query_method() {
+        // RFC 10008 QUERY always triggers a preflight, so it must be in
+        // Access-Control-Allow-Methods to work cross-origin.
+        let l = CorsLayer::permissive();
+        assert!(
+            l.allow_methods.iter().any(|m| m == "QUERY"),
+            "permissive CORS must allow QUERY: {:?}",
+            l.allow_methods
+        );
     }
 
     // ---- #87 wiring: from_settings ----
