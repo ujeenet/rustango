@@ -20,6 +20,18 @@ path = "src/lib.rs"
 name = "cookbook_blog"
 path = "src/main.rs"
 
+# `#[derive(Model)]` emits backend-specific `sqlx::FromRow` impls gated on
+# THIS crate's feature flags (`#[cfg(feature = "postgres")]` etc.), so the
+# example must define matching features forwarding to rustango — otherwise
+# the FromRow impls compile out and models don't satisfy `MaybePgFromRow`.
+# `default = ["postgres"]` because the chapters run against Postgres.
+# Mirrors `orm_cookbook`.
+[features]
+default = ["postgres"]
+postgres = ["rustango/postgres"]
+mysql = ["rustango/mysql"]
+sqlite = ["rustango/sqlite"]
+
 [dependencies]
 rustango = { path = "../..", default-features = false, features = [
     "postgres", "mysql", "manage", "admin", "config", "forms", "serializer",

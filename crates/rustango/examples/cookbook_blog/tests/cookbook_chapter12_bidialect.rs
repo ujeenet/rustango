@@ -60,7 +60,7 @@ async fn cookbook_rating_round_trips_against_mysql() {
     assert!(id > 0, "MySQL AUTO_INCREMENT must assign positive id");
 
     let rows: Vec<Rating> = Rating::objects()
-        .filter("id", Op::Eq, id)
+        .filter_op("id", Op::Eq, id)
         .fetch(&p).await.expect("fetch against mysql");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].score, 4);
@@ -95,7 +95,7 @@ async fn mysql_multi_auto_inserts_then_refetches_for_remaining_fields() {
     // path — same shape as Django apps that .refresh_from_db() after
     // save when they need server-set timestamps.
     let rows: Vec<Author> = Author::objects()
-        .filter("id", Op::Eq, id)
+        .filter_op("id", Op::Eq, id)
         .fetch(&p).await.unwrap();
     assert_eq!(rows.len(), 1);
     let loaded_joined_at = match rows[0].joined_at {
