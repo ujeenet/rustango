@@ -486,8 +486,13 @@ jobs:
           # The 16-chapter COOKBOOK.md example. Chapters manage their own
           # DB setup (reset/migrate per test), so migrate: false like
           # orm_cookbook. Gated here so it can't silently bit-rot (#1124).
+          # `--test-threads=1`: the chapters create/reset tables in the
+          # shared `public` schema, so they must run serially (as every
+          # chapter's doc comment already documents) — parallel DDL races
+          # on `pg_class`/`pg_type`.
           - example: cookbook_blog
             migrate: false
+            test_args: "-- --test-threads=1"
           - example: admin_demo
             migrate: true
           # Authentication deep-dive docs (docs/auth-*.md). `migrate: false` for
@@ -526,4 +531,4 @@ jobs:
         run: cargo run -- migrate
       - name: Test
         working-directory: crates/rustango/examples/${{ matrix.example }}
-        run: cargo test
+        run: cargo test ${{ matrix.test_args }}

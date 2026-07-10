@@ -194,6 +194,10 @@ async fn aggregate_count_and_sum() {
     let q = Post::objects()
         .filter_op("published", Op::Eq, true)
         .aggregate()
+        // `.values(&[])` → a scalar aggregate that projects only the
+        // annotations (one summary row), rather than grouping by / emitting
+        // the base columns per row.
+        .values(&[])
         .annotate("total", AggregateExpr::Count(None))
         .annotate("views", AggregateExpr::Sum("view_count"))
         .compile()

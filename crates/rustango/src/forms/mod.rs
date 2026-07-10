@@ -1367,10 +1367,16 @@ impl<T: crate::core::Model> ModelFormFor<T> {
             if !all_present {
                 continue;
             }
-            // Build `SELECT 1 FROM <table> WHERE c1 = ? AND c2 = ? [...] [AND pk <> ?] LIMIT 1`
-            // with dialect-aware quoting + placeholders.
+            // Build `SELECT COUNT(*) FROM <table> WHERE c1 = ? AND c2 = ?
+            // [...] [AND pk <> ?]` with dialect-aware quoting + placeholders.
+            //
+            // `COUNT(*)` (not `SELECT 1 … LIMIT 1`) because the result is
+            // decoded as `(i64,)`: PG types the literal `1` as `INT4`, so
+            // `SELECT 1` fails to decode into `i64` on Postgres (the
+            // SQLite-only test never caught it). `COUNT(*)` is `bigint` on
+            // PG / MySQL / SQLite alike, so `(i64,)` decodes everywhere.
             let table_q = dialect.quote_ident(T::SCHEMA.table);
-            let mut sql = format!("SELECT 1 FROM {table_q} WHERE ");
+            let mut sql = format!("SELECT COUNT(*) FROM {table_q} WHERE ");
             let mut binds: Vec<crate::core::SqlValue> = Vec::new();
             let mut sep = "";
             for (i, (col, val)) in bound.iter().enumerate() {
@@ -1388,18 +1394,16 @@ impl<T: crate::core::Model> ModelFormFor<T> {
                 sql.push_str(&format!(" AND {pk_col} <> {ph}"));
                 binds.push(pk_v.clone());
             }
-            sql.push_str(" LIMIT 1");
             // #561 — was a 3-arm `match pool` each doing the same
             // bind-loop via per-backend `bind_sql_value_inline*` helpers
             // then `fetch_optional`. The executor's `raw_query_pool` plus
             // the canonical `bind_match!` macros already handle every
-            // backend's bind shape — collapse to one call. SELECT
-            // shape is `SELECT 1 FROM <table> WHERE ... LIMIT 1`, so
-            // `(i64,)` tuple decodes positionally and `is_empty()` on
-            // the returned Vec answers the existence check.
+            // backend's bind shape — collapse to one call. `SELECT COUNT(*)`
+            // returns exactly one row whose `(i64,)` count answers the
+            // existence check (`> 0`).
             let exists = crate::sql::raw_query_pool::<(i64,)>(&sql, binds, pool)
                 .await
-                .map(|rows| !rows.is_empty())
+                .map(|rows| rows.first().is_some_and(|(n,)| *n > 0))
                 .map_err(|e| match e {
                     crate::sql::ExecError::Driver(err) => err,
                     other => crate::sql::sqlx::Error::Protocol(format!("{other}")),

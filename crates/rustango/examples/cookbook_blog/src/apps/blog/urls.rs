@@ -213,7 +213,7 @@ fn edit_form(id: i64, a: &Author, error: Option<&str>) -> Html<String> {
 
 /// `GET /whoami` — demonstrates the [`SessionUser`] cookie extractor.
 ///
-/// Anonymous → 401. Logged-in (via the tenant `__login` cookie flow) →
+/// Anonymous → 401. Logged-in (via the tenant `/login` cookie flow) →
 /// 200 with `{ "username": ..., "is_superuser": ... }`. The extractor
 /// resolves the request's tenant via [`rustango::extractors::TenantContext`]
 /// and validates the cookie against that tenant's slug — a cookie minted
