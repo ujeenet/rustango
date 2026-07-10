@@ -2339,6 +2339,42 @@ gone.
 9.116b (typed permissions), 9.117 (OpenAPI auto-derive),
 9.118 (response shaping via `.fields(&[...])`) queued for Slice 9b.*
 
+## Chapter 9e — Searching with the HTTP `QUERY` method (RFC 10008)
+
+3 tests, **no DB** — one product-search handler serving both `GET` and
+`QUERY` from the same code. Run with
+`cargo test --test cookbook_chapter09e_query_search`.
+
+`QUERY` is the "safe GET with a body": safe + idempotent like `GET`, but
+the search criteria travel in the request body — so a search too big or
+too structured for a querystring (long filter lists, arrays, nested
+criteria) doesn't have to masquerade as a `POST`. Two pieces combine:
+`QueryRouterExt::query` routes `QUERY` alongside `GET` on one path, and
+the `Params<T>` extractor reads `T` from the querystring on `GET` and
+from the body on `QUERY`.
+
+```rust,ignore
+use rustango::params::Params;
+use rustango::http_query::QueryRouterExt;
+use axum::routing::get;
+
+async fn search(Params(q): Params<ProductQuery>) -> Json<Value> { /* filter */ }
+
+Router::new().route("/products", get(search).query(search));
+```
+
+* §9.119 — `GET /products?q=cable&max_price=15` and the same criteria in
+  a urlencoded `QUERY` body return identical results.
+  → `get_and_query_urlencoded_agree`
+* §9.119 — a `QUERY` JSON body carries a real array (`{"tags":["usb","hdmi"]}`)
+  — awkward in a querystring, natural in a body. → `query_json_body_matches_multiple_tags`
+* §9.119 — an empty `QUERY` body returns the whole catalog.
+  → `empty_query_returns_everything`
+
+See the [QUERY method guide](../../../../docs/query-method.md) for the
+full framework surface (routing, CSRF/CORS, caching, ViewSet `query`
+action, OpenAPI 3.2).
+
 ## Chapter 10 — Templates + static
 
 3 tests on the Tera template surface that the admin (Chapter 8) +

@@ -8,7 +8,6 @@
 use cookbook_blog::apps::blog::models::*;
 use rustango::core::Op;
 use rustango::sql::{sqlx, Auto, };
-use rustango::Model;
 
 fn url() -> Option<String> {
     std::env::var("DATABASE_URL").ok()
@@ -87,7 +86,7 @@ async fn filter_eq_fetch_returns_matching_rows() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let published: Vec<Post> = Post::objects()
-        .filter("published", Op::Eq, true).fetch_on(&pool).await.unwrap();
+        .filter_op("published", Op::Eq, true).fetch_on(&pool).await.unwrap();
     assert_eq!(published.len(), 3, "3 of 5 posts are published");
     for p in &published { assert!(p.published, "filter must keep only published"); }
 }
@@ -100,7 +99,7 @@ async fn filter_with_gt_lt_op() {
     let popular: Vec<Post> = Post::objects()
         // Bind as i64 — the column is BIGINT, and `90` would otherwise
         // infer as i32 and trip rustango's TypeMismatch guard.
-        .filter("view_count", Op::Gt, 90i64).fetch_on(&pool).await.unwrap();
+        .filter_op("view_count", Op::Gt, 90i64).fetch_on(&pool).await.unwrap();
     assert_eq!(popular.len(), 2, "view_count>90: rust-orm(100) + django-shape(250)");
     let titles: Vec<&str> = popular.iter().map(|p| p.title.as_str()).collect();
     assert!(titles.contains(&"Rust ORM"));
@@ -113,7 +112,7 @@ async fn filter_with_ilike_case_insensitive() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let drafts: Vec<Post> = Post::objects()
-        .filter("title", Op::ILike, "%draft%").fetch_on(&pool).await.unwrap();
+        .filter_op("title", Op::ILike, "%draft%").fetch_on(&pool).await.unwrap();
     assert_eq!(drafts.len(), 2);
 }
 
@@ -124,7 +123,7 @@ async fn filter_with_in_list() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let picks: Vec<Post> = Post::objects()
-        .filter("slug", Op::In, SqlValue::List(vec![
+        .filter_op("slug", Op::In, SqlValue::List(vec![
             SqlValue::String("rust-orm".into()),
             SqlValue::String("axum-101".into()),
         ])).fetch_on(&pool).await.unwrap();
@@ -138,7 +137,7 @@ async fn filter_with_between_range() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let mid: Vec<Post> = Post::objects()
-        .filter("view_count", Op::Between, SqlValue::List(vec![
+        .filter_op("view_count", Op::Between, SqlValue::List(vec![
             SqlValue::I64(50), SqlValue::I64(150),
         ])).fetch_on(&pool).await.unwrap();
     assert_eq!(mid.len(), 2, "axum-101(80) + rust-orm(100) within [50, 150]");
@@ -151,7 +150,7 @@ async fn filter_with_is_null_unpublished() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let drafts: Vec<Post> = Post::objects()
-        .filter("published_at", Op::IsNull, SqlValue::Bool(true)).fetch_on(&pool).await.unwrap();
+        .filter_op("published_at", Op::IsNull, SqlValue::Bool(true)).fetch_on(&pool).await.unwrap();
     assert_eq!(drafts.len(), 2, "draft-1 + draft-2 have NULL published_at");
 }
 
@@ -161,7 +160,7 @@ async fn order_by_view_count_desc() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
     let by_views: Vec<Post> = Post::objects()
-        .filter("published", Op::Eq, true)
+        .filter_op("published", Op::Eq, true)
         // QuerySet::order_by uses (column, desc): true = DESC, false = ASC.
         .order_by(&[("view_count", true)]).fetch_on(&pool).await.unwrap();
     assert_eq!(by_views[0].slug, "django-shape", "250 views first");
@@ -193,13 +192,17 @@ async fn aggregate_count_and_sum() {
     let _ = fresh_blog(&pool).await;
 
     let q = Post::objects()
-        .filter("published", Op::Eq, true)
+        .filter_op("published", Op::Eq, true)
         .aggregate()
+        // `.values(&[])` → a scalar aggregate that projects only the
+        // annotations (one summary row), rather than grouping by / emitting
+        // the base columns per row.
+        .values(&[])
         .annotate("total", AggregateExpr::Count(None))
         .annotate("views", AggregateExpr::Sum("view_count"))
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     assert_eq!(rows.len(), 1, "no GROUP BY → one summary row");
     let row = &rows[0];
     match row.get("total") {
@@ -234,7 +237,7 @@ async fn save_inserts_then_updates_in_place() {
     p.save(&pool).await.unwrap();
 
     let back: Vec<Post> = Post::objects()
-        .filter("id", Op::Eq, id).fetch_on(&pool).await.unwrap();
+        .filter_op("id", Op::Eq, id).fetch_on(&pool).await.unwrap();
     assert_eq!(back[0].body, "v2");
     assert!(back[0].published);
 }
@@ -325,7 +328,7 @@ async fn where_expr_not_negates_predicate() {
     for p in &drafts { assert!(!p.published); }
 }
 
-// §3.43 — bulk_insert in one round-trip via BulkInsertQuery.
+// §3.43 — bulk_insert_on in one round-trip via BulkInsertQuery.
 #[tokio::test]
 async fn bulk_insert_writes_many_rows_in_one_round_trip() {
     use rustango::core::{BulkInsertQuery, SqlValue};
@@ -357,7 +360,7 @@ async fn bulk_insert_writes_many_rows_in_one_round_trip() {
         returning: vec!["id"],
         on_conflict: None,
     };
-    let returned = bulk_insert(&pool, &q).await.expect("bulk insert");
+    let returned = bulk_insert_on(&pool, &q).await.expect("bulk insert");
     assert_eq!(returned.len(), 4, "4 RETURNING rows");
 
     let count: i64 = sqlx::query_scalar(

@@ -98,30 +98,30 @@ fn router(pool: sqlx::PgPool, tera: Arc<Tera>) -> axum::Router {
                 .filter_fields(&["name"])
                 .search_fields(&["name", "email"])
                 .ordering_fields(&["name", "id"])
-                .router("/authors", tera.clone(), pool.clone()),
+                .router("/authors", tera.clone(), pool.clone().into()),
         )
         .merge(
             DetailView::for_model(Author::SCHEMA)
                 .template("cookbook_author_detail.html")
-                .router("/authors", tera.clone(), pool.clone()),
+                .router("/authors", tera.clone(), pool.clone().into()),
         )
         .merge(
             CreateView::for_model(Author::SCHEMA)
                 .template("cookbook_author_form.html")
                 .success_url("/authors/{pk}")
-                .router("/authors", tera.clone(), pool.clone()),
+                .router("/authors", tera.clone(), pool.clone().into()),
         )
         .merge(
             UpdateView::for_model(Author::SCHEMA)
                 .template("cookbook_author_form.html")
                 .success_url("/authors/{pk}")
-                .router("/authors", tera.clone(), pool.clone()),
+                .router("/authors", tera.clone(), pool.clone().into()),
         )
         .merge(
             DeleteView::for_model(Author::SCHEMA)
                 .template("cookbook_author_confirm_delete.html")
                 .success_url("/authors")
-                .router("/authors", tera, pool),
+                .router("/authors", tera, pool.into()),
         )
 }
 

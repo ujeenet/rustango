@@ -4,7 +4,7 @@
 //!
 //! | Pattern | Identifies | When to reach for it |
 //! |---|---|---|
-//! | [`SessionUser`] extractor | The browser-cookie tenant user | Multi-tenant HTML / JSON routes that share the admin's `__login` cookie. Returns `None` for anonymous — never rejects. |
+//! | [`SessionUser`] extractor | The browser-cookie tenant user | Multi-tenant HTML / JSON routes that share the admin's `/login` cookie. Returns `None` for anonymous — never rejects. |
 //! | [`CurrentUser`] extractor + `RouterAuthExt::require_auth` | An [`AuthenticatedUser`] resolved by a backend chain | Single-pool API routes. Middleware short-circuits with 401 when no backend matches. |
 //! | [`ApiKeyBackend`] inside the chain | `Authorization: Bearer <prefix.secret>` | Headless clients (CI, scripts) that cannot present a cookie. |
 //!
@@ -103,7 +103,7 @@ async fn wait_ready() {
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
         if reqwest::Client::new()
-            .get(format!("http://{BIND}/__login"))
+            .get(format!("http://{BIND}/login"))
             .header("Host", format!("{TENANT}.{APEX}"))
             .send()
             .await
@@ -201,9 +201,9 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 401, "anonymous /whoami should be 401");
 
-    // Step 2 — log in via the tenant `__login` cookie route.
+    // Step 2 — log in via the tenant `/login` cookie route.
     let resp = client
-        .post(format!("http://{BIND}/__login"))
+        .post(format!("http://{BIND}/login"))
         .header("Host", &host)
         .form(&[("username", USERNAME), ("password", PASSWORD)])
         .send()
@@ -293,7 +293,7 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
     }
     let app: Router = Router::new()
         .route("/profile", get(profile))
-        .require_auth(backends, pool.clone());
+        .require_auth(backends, pool.clone().into());
 
     // (a) No credentials → 401.
     let (status, _body) = oneshot(app.clone(), Method::GET, "/profile", None, None).await;

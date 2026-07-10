@@ -21,12 +21,21 @@ async fn pool() -> Option<sqlx::PgPool> {
 }
 
 // §4.56 — embed_migrations! covered in chapter01; here we re-assert
-// the const carries our 0001_initial.json so apps relying on it ship
-// migrations baked into the binary.
+// the const carries the cookbook's own tables migration so apps relying
+// on it ship migrations baked into the binary.
 #[test]
 fn embedded_migrations_const_is_loaded() {
     assert!(!cookbook_blog::EMBEDDED.is_empty());
-    assert!(cookbook_blog::EMBEDDED.iter().any(|(name, _)| *name == "0001_initial"));
+    assert!(
+        cookbook_blog::EMBEDDED
+            .iter()
+            .any(|(name, _)| *name == "0002_cookbook_tables"),
+        "embedded names: {:?}",
+        cookbook_blog::EMBEDDED
+            .iter()
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>()
+    );
 }
 
 // §4.55 / §4.57 / §4.58 — migration file format: serde_json round-trip

@@ -12,7 +12,6 @@ use axum::response::{Html, IntoResponse, Json, Redirect};
 use axum::routing::get;
 use axum::Router;
 
-use rustango::core::Op;
 use rustango::extractors::{SessionUser, Tenant};
 use rustango::forms::ModelFormFor;
 use rustango::sql::Auto;
@@ -37,7 +36,7 @@ async fn retrieve(
     Path(id): Path<i64>,
 ) -> Result<Json<AuthorOut>, (StatusCode, String)> {
     let row: Vec<Author> = Author::objects()
-        .filter("id", Op::Eq, id)
+        .filter("id", id)
         .fetch_on(tenant.conn())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -136,7 +135,7 @@ async fn show_edit_form(
     Path(id): Path<i64>,
 ) -> Result<Html<String>, (StatusCode, String)> {
     let mut rows: Vec<Author> = Author::objects()
-        .filter("id", Op::Eq, id)
+        .filter("id", id)
         .fetch_on(tenant.conn())
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -214,7 +213,7 @@ fn edit_form(id: i64, a: &Author, error: Option<&str>) -> Html<String> {
 
 /// `GET /whoami` — demonstrates the [`SessionUser`] cookie extractor.
 ///
-/// Anonymous → 401. Logged-in (via the tenant `__login` cookie flow) →
+/// Anonymous → 401. Logged-in (via the tenant `/login` cookie flow) →
 /// 200 with `{ "username": ..., "is_superuser": ... }`. The extractor
 /// resolves the request's tenant via [`rustango::extractors::TenantContext`]
 /// and validates the cookie against that tenant's slug — a cookie minted
