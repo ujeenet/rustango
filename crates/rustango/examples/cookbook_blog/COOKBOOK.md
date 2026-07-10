@@ -3384,3 +3384,43 @@ agent's granted skills is never listed and never executed, and a token
 minted for tenant A is refused on tenant B. Every `tools/call` is
 audited. Configure the mount prefix, token TTL, SSE, CORS, and rate
 limit under `[mcp]` in your settings file.
+
+## Chapter 18 — Internationalization (i18n)
+
+6 tests, **no DB** — `rustango::i18n::Translator`, Django's `gettext`
+family in Rust. Run with `cargo test --test cookbook_chapter18_i18n`.
+
+`Translator` holds per-locale message catalogs and resolves a key with
+base-language fallback (`fr-CA` → `fr` → default), `{name}` placeholder
+substitution, and CLDR-correct pluralization. Pair it with
+`Accept-Language` negotiation and RTL detection for a fully localized UI.
+
+```rust,ignore
+use rustango::i18n::{Locale, Translator};
+
+let t = Translator::new(Locale::new("en"))
+    .add_locale(Locale::new("fr"), /* {"welcome": "Bienvenue, {name} !"} */);
+
+t.translate("fr", "welcome", &[("name", "Ada")]); // "Bienvenue, Ada !"
+```
+
+* §18.140 — `gettext` lookup + missing-key / unknown-locale / regional
+  (`fr-CA` → `fr`) fallback. → `gettext_lookup_and_fallback`
+* §18.141 — `{name}` placeholder substitution via `translate`.
+  → `placeholder_substitution`
+* §18.142 — `ngettext` (singular/plural) + CLDR `plural_category` +
+  per-category `translate_plural` (Polish one/few/many).
+  → `pluralization`
+* §18.143 — `Accept-Language` negotiation picks the best supported
+  language (`negotiate_language`). → `accept_language_negotiation`
+* §18.144 — RTL detection + `text_direction` (`dir="rtl"`).
+  → `rtl_and_direction`
+* §18.145 — the `{% translate %}` Tera tag (function form) renders through
+  the same catalogs, driven by the active `LANG` locale.
+  → `tera_translate_function`
+
+The **DB-override layer + admin translation editor** (#532) — file-seeded
+catalogs overridden per-tenant in the DB and edited live in the admin —
+and `Accept-Language` middleware are documented in
+[docs/i18n.md](../../../../docs/i18n.md); this chapter covers the
+in-process `Translator` core.
