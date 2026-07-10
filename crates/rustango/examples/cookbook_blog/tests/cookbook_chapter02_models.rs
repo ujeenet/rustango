@@ -9,7 +9,7 @@
 //! drops + recreates its tables so reruns are deterministic.
 
 use cookbook_blog::apps::blog::models::*;
-use rustango::core::{Model as _, Op};
+use rustango::core::Op;
 use rustango::sql::{sqlx, Auto, };
 
 fn url() -> Option<String> {
@@ -559,8 +559,8 @@ async fn generic_fk_schema_and_content_type_lookup() {
 
     // ContentType lookup against an arbitrary registered model — Author
     // is registered by this binary's inventory.
-    rustango::contenttypes::ensure_seeded(&pool).await.expect("seed contenttypes");
-    let ct = rustango::contenttypes::ContentType::for_model::<Author>(&pool)
+    rustango::contenttypes::ensure_seeded(&pool.clone().into()).await.expect("seed contenttypes");
+    let ct = rustango::contenttypes::ContentType::for_model::<Author>(&pool.clone().into())
         .await
         .expect("ContentType lookup")
         .expect("ContentType row should exist after ensure_seeded");

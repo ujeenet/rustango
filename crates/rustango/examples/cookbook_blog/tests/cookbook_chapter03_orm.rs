@@ -8,7 +8,6 @@
 use cookbook_blog::apps::blog::models::*;
 use rustango::core::Op;
 use rustango::sql::{sqlx, Auto, };
-use rustango::Model;
 
 fn url() -> Option<String> {
     std::env::var("DATABASE_URL").ok()
@@ -199,7 +198,7 @@ async fn aggregate_count_and_sum() {
         .annotate("views", AggregateExpr::Sum("view_count"))
         .compile()
         .unwrap();
-    let rows = fetch_aggregate(&q, &pool).await.unwrap();
+    let rows = fetch_aggregate_on(&q, &pool).await.unwrap();
     assert_eq!(rows.len(), 1, "no GROUP BY → one summary row");
     let row = &rows[0];
     match row.get("total") {
@@ -325,7 +324,7 @@ async fn where_expr_not_negates_predicate() {
     for p in &drafts { assert!(!p.published); }
 }
 
-// §3.43 — bulk_insert in one round-trip via BulkInsertQuery.
+// §3.43 — bulk_insert_on in one round-trip via BulkInsertQuery.
 #[tokio::test]
 async fn bulk_insert_writes_many_rows_in_one_round_trip() {
     use rustango::core::{BulkInsertQuery, SqlValue};
@@ -357,7 +356,7 @@ async fn bulk_insert_writes_many_rows_in_one_round_trip() {
         returning: vec!["id"],
         on_conflict: None,
     };
-    let returned = bulk_insert(&pool, &q).await.expect("bulk insert");
+    let returned = bulk_insert_on(&pool, &q).await.expect("bulk insert");
     assert_eq!(returned.len(), 4, "4 RETURNING rows");
 
     let count: i64 = sqlx::query_scalar(

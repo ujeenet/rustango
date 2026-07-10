@@ -148,7 +148,8 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
         resolver,
         session_secret: SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec()),
         operator_secret: SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-y".to_vec()),
-        registry: pool.clone(),
+        // v0.30 unification: the registry pool now lives inside `pools`
+        // (TenantPools); TenantContext no longer has a `registry` field.
     });
 
     // §9.116 / §9.116b — same builder chain that works for the static

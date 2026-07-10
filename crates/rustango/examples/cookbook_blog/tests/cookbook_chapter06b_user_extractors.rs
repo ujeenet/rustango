@@ -293,7 +293,7 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
     }
     let app: Router = Router::new()
         .route("/profile", get(profile))
-        .require_auth(backends, pool.clone());
+        .require_auth(backends, pool.clone().into());
 
     // (a) No credentials → 401.
     let (status, _body) = oneshot(app.clone(), Method::GET, "/profile", None, None).await;

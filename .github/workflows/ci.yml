@@ -483,6 +483,11 @@ jobs:
             migrate: true
           - example: orm_cookbook
             migrate: false
+          # The 16-chapter COOKBOOK.md example. Chapters manage their own
+          # DB setup (reset/migrate per test), so migrate: false like
+          # orm_cookbook. Gated here so it can't silently bit-rot (#1124).
+          - example: cookbook_blog
+            migrate: false
           - example: admin_demo
             migrate: true
           # Authentication deep-dive docs (docs/auth-*.md). `migrate: false` for

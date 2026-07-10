@@ -5,7 +5,7 @@
 //! form re-render would carry the raw Postgres error (`duplicate
 //! key value violates unique constraint "..."`).
 //!
-//! `ModelFormFor::validate_unique_together(&pool, pk_value)` walks
+//! `ModelFormFor::validate_unique_together(&pool.clone().into(), pk_value)` walks
 //! every composite-unique index on the model and SELECTs the
 //! conflicting tuple before the INSERT/UPDATE. Hits become friendly
 //! per-field FormErrors keyed by every column in the conflict.
@@ -50,7 +50,7 @@ async fn validator_accepts_when_no_existing_pair() {
     fresh(&pool).await;
 
     let mf = ModelFormFor::<Membership>::parse(&payload("10", "20", "owner")).unwrap();
-    mf.validate_unique_together(&pool, None).await.expect("no conflict");
+    mf.validate_unique_together(&pool.clone().into(), None).await.expect("no conflict");
 }
 
 // §7e.2 — existing (org, user) → validator rejects with per-field
@@ -67,7 +67,7 @@ async fn validator_rejects_with_per_field_errors_on_create() {
     // Now a new form with the same (10, 20) pair must fail validation
     // BEFORE any INSERT.
     let mf = ModelFormFor::<Membership>::parse(&payload("10", "20", "viewer")).unwrap();
-    let err = mf.validate_unique_together(&pool, None).await
+    let err = mf.validate_unique_together(&pool.clone().into(), None).await
         .expect_err("validator must reject the duplicate pair");
     let s = format!("{err:?}");
     // Errors are keyed by both columns — DRF-shape per-field surface.
@@ -88,10 +88,10 @@ async fn validator_accepts_different_pair() {
 
     // (10, 99) is a different tuple — ok.
     let mf = ModelFormFor::<Membership>::parse(&payload("10", "99", "viewer")).unwrap();
-    mf.validate_unique_together(&pool, None).await.expect("(10,99) is unique vs (10,20)");
+    mf.validate_unique_together(&pool.clone().into(), None).await.expect("(10,99) is unique vs (10,20)");
     // (99, 20) likewise.
     let mf = ModelFormFor::<Membership>::parse(&payload("99", "20", "viewer")).unwrap();
-    mf.validate_unique_together(&pool, None).await.expect("(99,20) is unique vs (10,20)");
+    mf.validate_unique_together(&pool.clone().into(), None).await.expect("(99,20) is unique vs (10,20)");
 }
 
 // §7e.4 — UPDATE: pass the row's own PK so its existing tuple isn't
@@ -110,7 +110,7 @@ async fn validator_excludes_own_row_on_update() {
     // pk_value the validator would reject (the row's own tuple is its
     // own conflict). Passing pk_value skips it.
     let mf = ModelFormFor::<Membership>::parse(&payload("10", "20", "admin")).unwrap();
-    mf.validate_unique_together(&pool, Some(&SqlValue::I64(pk))).await
+    mf.validate_unique_together(&pool.clone().into(), Some(&SqlValue::I64(pk))).await
         .expect("own row excluded — UPDATE is fine");
 
     // But if we set a DIFFERENT row's tuple, validator still rejects.
@@ -120,6 +120,6 @@ async fn validator_excludes_own_row_on_update() {
 
     // Try to UPDATE row #2 to row #1's tuple → conflict.
     let mf = ModelFormFor::<Membership>::parse(&payload("10", "20", "viewer")).unwrap();
-    mf.validate_unique_together(&pool, Some(&SqlValue::I64(pk2))).await
+    mf.validate_unique_together(&pool.clone().into(), Some(&SqlValue::I64(pk2))).await
         .expect_err("conflicting pair on a different row must reject");
 }
