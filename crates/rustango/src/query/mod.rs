@@ -1165,7 +1165,12 @@ impl<T: Model> QuerySet<T> {
     ///     .fetch(&pool).await?;
     /// ```
     #[must_use]
-    pub fn join_sub(self, sub: SelectQuery, alias: &'static str, on: WhereExpr) -> Self {
+    pub fn join_sub(
+        self,
+        sub: impl Into<crate::core::DerivedSource>,
+        alias: &'static str,
+        on: WhereExpr,
+    ) -> Self {
         self.push_subquery_join(
             sub,
             alias,
@@ -1178,7 +1183,12 @@ impl<T: Model> QuerySet<T> {
     /// `LEFT JOIN (<subquery>) AS <alias> ON <on>` — left-join counterpart
     /// of [`Self::join_sub`] (Eloquent `leftJoinSub`). Issue #828.
     #[must_use]
-    pub fn left_join_sub(self, sub: SelectQuery, alias: &'static str, on: WhereExpr) -> Self {
+    pub fn left_join_sub(
+        self,
+        sub: impl Into<crate::core::DerivedSource>,
+        alias: &'static str,
+        on: WhereExpr,
+    ) -> Self {
         self.push_subquery_join(
             sub,
             alias,
@@ -1199,7 +1209,12 @@ impl<T: Model> QuerySet<T> {
     /// the writer raises [`crate::sql::SqlError::LateralJoinNotSupported`]
     /// at compile time.
     #[must_use]
-    pub fn join_lateral(self, sub: SelectQuery, alias: &'static str, on: WhereExpr) -> Self {
+    pub fn join_lateral(
+        self,
+        sub: impl Into<crate::core::DerivedSource>,
+        alias: &'static str,
+        on: WhereExpr,
+    ) -> Self {
         self.push_subquery_join(
             sub,
             alias,
@@ -1215,7 +1230,12 @@ impl<T: Model> QuerySet<T> {
     /// (the natural shape for "latest order per customer, customers
     /// without orders included"). **PG / MySQL only.** Issue #828.
     #[must_use]
-    pub fn left_join_lateral(self, sub: SelectQuery, alias: &'static str, on: WhereExpr) -> Self {
+    pub fn left_join_lateral(
+        self,
+        sub: impl Into<crate::core::DerivedSource>,
+        alias: &'static str,
+        on: WhereExpr,
+    ) -> Self {
         self.push_subquery_join(
             sub,
             alias,
@@ -1229,14 +1249,14 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     fn push_subquery_join(
         mut self,
-        sub: SelectQuery,
+        sub: impl Into<crate::core::DerivedSource>,
         alias: &'static str,
         kind: crate::core::JoinKind,
         on: WhereExpr,
         lateral: bool,
     ) -> Self {
         self.subquery_joins.push(crate::core::SubqueryJoin {
-            subquery: Box::new(sub),
+            subquery: sub.into(),
             alias,
             kind,
             on,

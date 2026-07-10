@@ -528,11 +528,16 @@ fn write_select_inner(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlErr
             b.sql.push_str(" LATERAL");
         }
         b.sql.push_str(" (");
-        // `write_select` pushes/pops the subquery's own scope frame, so a
-        // correlated `OuterRef` inside a LATERAL subquery resolves to the
-        // enclosing query; explicit `AliasedColumn` refs to the outer
-        // table work regardless (LATERAL exposes earlier FROM items).
-        write_select(b, &sj.subquery)?;
+        // `write_select` / `write_aggregate` push/pop the subquery's own
+        // scope frame, so a correlated `OuterRef` inside a LATERAL subquery
+        // resolves to the enclosing query; explicit `AliasedColumn` refs to
+        // the outer table work regardless (LATERAL exposes earlier FROM
+        // items). The `Aggregate` variant (#1035) lets a window/aggregate
+        // query be joined as a derived table.
+        match &sj.subquery {
+            crate::core::DerivedSource::Select(s) => write_select(b, s)?,
+            crate::core::DerivedSource::Aggregate(a) => write_aggregate(b, a)?,
+        }
         b.sql.push_str(") AS ");
         b.write_ident(sj.alias);
         // Empty `on` → `ON true` (the LATERAL shape, where the
