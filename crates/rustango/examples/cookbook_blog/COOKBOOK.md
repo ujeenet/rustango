@@ -3452,3 +3452,32 @@ let app = Router::new()
 * §19.147 — `per_header` buckets are independent — one client exhausting
   its quota doesn't block another (`x-api-key` = `alice` vs `bob`).
   → `per_header_buckets_are_independent`
+## Chapter 20 — Health checks
+
+3 tests, **no DB** — `rustango::health::HealthRouter`. Run with
+`cargo test --test cookbook_chapter20_health`.
+
+`/health` is liveness (always `200 {"status":"ok"}`, probes nothing —
+point your load balancer here). `/ready` is readiness: it pings the DB
+(`SELECT 1`) and runs every registered check, returning `200` when all
+pass and `503` (with the failing check named) when any fails — the shape
+a rollout / deploy gate wants.
+
+```rust,ignore
+use rustango::health::HealthRouter;
+
+let health = HealthRouter::new(pool)
+    .tcp_probe("redis", "127.0.0.1:6379")
+    .check("payments", || async { ping_gateway().await })
+    .into_router();
+app.merge(health);
+```
+
+* §20.148 — `/health` liveness → 200 `{"status":"ok"}`. → `health_liveness_is_ok`
+* §20.149 — `/ready` with all checks passing → 200, each check reports
+  `status` + `latency_ms`. → `ready_ok_when_all_checks_pass`
+* §20.150 — a failing check flips `/ready` to `503` and names the
+  unhealthy downstream. → `ready_503_when_a_check_fails`
+
+(`.tcp_probe` / `.cache_probe` / `.http_probe` add ready-probes for
+downstreams; `.skip_db_probe()` drops the built-in `SELECT 1`.)
