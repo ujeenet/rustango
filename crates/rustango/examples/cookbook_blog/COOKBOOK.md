@@ -3424,3 +3424,31 @@ catalogs overridden per-tenant in the DB and edited live in the admin —
 and `Accept-Language` middleware are documented in
 [docs/i18n.md](../../../../docs/i18n.md); this chapter covers the
 in-process `Translator` core.
+
+## Chapter 19 — Rate limiting
+
+2 tests, **no DB** — `rustango::rate_limit::RateLimitLayer`, a token-bucket
+middleware. Run with `cargo test --test cookbook_chapter19_rate_limit`.
+
+Three keying strategies: `per_ip` (needs `ConnectInfo` — mount with
+`into_make_service_with_connect_info`), `per_header` (e.g. `x-api-key`,
+one bucket per value), and `global` (one bucket for the whole route).
+Under the limit the request passes through with `X-RateLimit-Limit` /
+`X-RateLimit-Remaining` headers; over it you get `429 Too Many Requests`
+with `Retry-After` and a JSON body — the handler never runs.
+
+```rust,ignore
+use std::time::Duration;
+use rustango::rate_limit::{RateLimitLayer, RateLimitRouterExt};
+
+let app = Router::new()
+    .route("/api", get(handler))
+    .rate_limit(RateLimitLayer::per_ip(5, Duration::from_secs(60))); // 5 req/min/IP
+```
+
+* §19.146 — a `global` bucket allows N then returns `429` + `Retry-After`;
+  success responses carry the `X-RateLimit-*` budget headers.
+  → `global_bucket_allows_then_blocks`
+* §19.147 — `per_header` buckets are independent — one client exhausting
+  its quota doesn't block another (`x-api-key` = `alice` vs `bob`).
+  → `per_header_buckets_are_independent`
