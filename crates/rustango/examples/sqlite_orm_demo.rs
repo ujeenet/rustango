@@ -286,8 +286,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n== 10. aggregate over Author — MIN / MAX / AVG age ==");
+    // `.values(&[])` = a table-wide *scalar* aggregate (Django's
+    // `.aggregate(Min("age"))`): no base columns, no GROUP BY, one row.
+    // Without it, `.annotate(...)` alone groups by every model column.
     let agg_query = Author::objects()
-        .aggregate()
+        .values(&[])
         .annotate("min_age", AggregateExpr::Min("age"))
         .annotate("max_age", AggregateExpr::Max("age"))
         .annotate("avg_age", AggregateExpr::Avg("age"))

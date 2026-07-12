@@ -30,10 +30,12 @@ quotes from a real, compiling, test-covered file.
 10. [Templates + static](#chapter-10--templates--static)
 11. [Async / IO / extensions](#chapter-11--async--io--extensions)
 12. [Tri-dialect + cross-cutting](#chapter-12--tri-dialect--cross-cutting)
-13. [SQLite backend (v0.27 / v0.28)](#chapter-13--sqlite-backend-v027--v028)
-14. [v0.30 cycle: do less work](#chapter-14--v030-cycle-do-less-work) — `inspectdb`, `wizard`, ListView bulk + fk_display, admin COUNT skip, settings-driven logging
-15. [v0.31 — tenant admin no longer catches every URL](#chapter-15--v031--tenant-admin-no-longer-catches-every-url)
-16. [v0.38 — every feature, every backend](#chapter-16--v038--every-feature-every-backend)
+13. [SQLite backend](#chapter-13--sqlite-backend)
+14. [Doing less work](#chapter-14--doing-less-work) — `inspectdb`, `wizard`, ListView bulk + fk_display, admin COUNT skip, settings-driven logging
+15. [Tenant admin URL scoping](#chapter-15--tenant-admin-url-scoping)
+16. [Every feature on every backend](#chapter-16--every-feature-on-every-backend)
+17. [MCP server](#chapter-17--mcp-server-expose-tools-to-ai-agents)
+18. [Internationalization (i18n)](#chapter-18--internationalization-i18n)
 
 ---
 
@@ -2592,14 +2594,14 @@ DB-defaulted timestamp — the same pattern as a Django app calling
 
 ---
 
-## Chapter 13 — SQLite backend (v0.27 / v0.28)
+## Chapter 13 — SQLite backend
 
-v0.27 lights up SQLite as a third dialect alongside Postgres and
-MySQL. Same `Pool` enum, same `_pool` ORM surface — the macro now
-emits `FromRow<SqliteRow>` + `LoadRelatedSqlite` + a SQLite arm in
-`AssignAutoPkPool` so every existing model with `Auto<T>` PK or
-`ForeignKey<T>` works against `Pool::Sqlite` without recompilation
-of the model itself, only a flip of the rustango feature set.
+SQLite is a third dialect alongside Postgres and MySQL. Same `Pool`
+enum, same ORM surface — the macro emits `FromRow<SqliteRow>` +
+`LoadRelatedSqlite` + a SQLite arm in `AssignAutoPkPool` so every
+existing model with an `Auto<T>` PK or `ForeignKey<T>` works against
+`Pool::Sqlite` with no change to the model itself, only a flip of the
+rustango feature set.
 
 Cookbook-grade smoke test for the dialect lives at
 [crates/rustango/examples/sqlite_orm_demo.rs](../sqlite_orm_demo.rs)
@@ -2671,6 +2673,11 @@ Every `_pool` executor function has a SQLite arm now. The
 | Raw SQL (typed)               | `raw_query_pool::<T>(sql, binds, &pool)`     |
 | Raw SQL (rows affected)       | `raw_execute_pool(&pool, sql, binds)`        |
 
+> **Tip**: for a table-wide *scalar* aggregate (Django's
+> `.aggregate(Min("age"))`), call `.values(&[])` before `.annotate(...)`.
+> `.annotate(...)` on its own groups by every model column (Django's
+> "each row + a derived aggregate" shape).
+
 ### 13.154 ILIKE → `LOWER(col) LIKE LOWER(?)` translation
 
 What:        SQLite has no native `ILIKE`. The dialect rewrites
@@ -2695,7 +2702,7 @@ Three frictions surface when running on SQLite:
    SQL that PG/MySQL accept; for SQLite the demo skips this loop.
    FK referential integrity is enforced anyway by manual ordering
    (insert parents before children) when `PRAGMA foreign_keys = ON`
-   is off (sqlx-sqlite default). Tracked for v0.28.
+   is off (the sqlx-sqlite default).
 
 2. **`sqlite_*` table names are reserved.** SQLite treats any
    identifier starting with `sqlite_` as internal-use only. The
@@ -2832,13 +2839,13 @@ hygiene regression test:
 
 ---
 
-## Chapter 14 — v0.30 cycle: do less work
+## Chapter 14 — Doing less work
 
-The v0.30 release cycle (2026-05-08 → 2026-05-10) collapsed several
-common verb-chains and config writes into one-call APIs. Each
-recipe below maps a 4-5 step setup to a single line.
+This chapter collects the shortcuts that collapse a multi-step setup
+or config write into a single call. Each recipe below maps a 4–5 step
+chain to one line.
 
-### 14.1 `manage inspectdb` — adopt rustango against an existing DB (v0.30.13)
+### 14.1 `manage inspectdb` — adopt rustango against an existing DB
 
 **What**: Connects to `DATABASE_URL`, walks `information_schema`,
 emits `#[derive(Model)]` source for every base table — Django's
