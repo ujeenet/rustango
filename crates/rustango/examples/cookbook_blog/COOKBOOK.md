@@ -2883,8 +2883,7 @@ empty comment.
 
 ---
 
-### 14.2 `manage wizard` — interactive one-call setup (v0.30.14)
-
+### 14.2 `manage wizard` — interactive one-call setup
 **What**: Five opt-in prompts: scaffold app → init tenancy →
 migrate registry → create operator → create tenant + first
 superuser. Each step is `[Y/n]`-skippable. Defaults echoed
@@ -2921,20 +2920,20 @@ dispatcher wiring.
 
 ### 14.3 HTML CBV: bulk actions + delete-confirmation + FK display
 
-`template_views::ListView` shipped three Django-admin-shape
-flags this cycle. They stack:
+`template_views::ListView` has three Django-admin-shape flags.
+They stack:
 
 ```rust,ignore
 use rustango::template_views::{DeleteView, ListView};
 
 ListView::for_model(Item::SCHEMA)
-    .bulk_actions(true)                    // v0.30.4 — built-in delete_selected
-    .with_delete_confirmation(true)        // v0.30.7 — two-step confirm before bulk DELETE
-    .with_fk_display(true)                 // v0.30.8 — FK columns auto-resolve to display
+    .bulk_actions(true)                    // built-in delete_selected
+    .with_delete_confirmation(true)        // two-step confirm before bulk DELETE
+    .with_fk_display(true)                 // FK columns auto-resolve to display
     .tenant_router("/items", tera.clone())
 ```
 
-#### v0.30.4 `bulk_actions(true)` + `tenant_action(...)`
+#### `bulk_actions(true)` + `tenant_action(...)`
 
 Mounts `POST <prefix>` alongside the GET list. Built-in
 `delete_selected` handler always available; user actions stack
@@ -2959,13 +2958,13 @@ fields.
 </form>
 ```
 
-**v0.30.17 fix**: `handle_list` / `handle_list_tenant` now stamp
-the CSRF token into the Tera context. Pre-fix the form rendered
-with `value=""` and every legitimate POST 403'd under any
-CSRF-protected setup. Regression test:
-`tests/template_views_bulk_actions_live::list_get_stamps_csrf_token_into_context`.
+> **Note**: `handle_list` / `handle_list_tenant` stamp the CSRF token
+> into the Tera context, so the bulk-action form carries a valid
+> `_csrf` and POSTs aren't rejected under CSRF-protected setups.
+> Verified by
+> `tests/template_views_bulk_actions_live::list_get_stamps_csrf_token_into_context`.
 
-#### v0.30.7 `with_delete_confirmation(true)` — bulk-confirm page
+#### `with_delete_confirmation(true)` — bulk-confirm page
 
 When on, the first POST with `action=delete_selected` renders
 `<table>_confirm_bulk_delete.html` instead of running the
@@ -2975,7 +2974,7 @@ data so the template can show *what* will be deleted),
 which short-circuits the render and runs the DELETE → 303 to
 the list.
 
-#### v0.30.8 `with_fk_display(true)` — resolve FK ints to display
+#### `with_fk_display(true)` — resolve FK ints to display
 
 For every FK column on the schema, runs one batched
 `SELECT pk, <display_field> FROM <target> WHERE pk = ANY(...)`
@@ -2995,8 +2994,7 @@ confirm-page renders).
 
 ---
 
-### 14.4 Admin pager `SELECT COUNT(*)` skip (v0.30.9)
-
+### 14.4 Admin pager `SELECT COUNT(*)` skip
 **What**: On tables in the millions of rows, the admin's
 `SELECT COUNT(*) FROM <table> WHERE <filters>` runs every page
 render and takes seconds even with indexes. Two opt-outs:
@@ -3015,8 +3013,7 @@ has-next-page detection (we fetch `page_size + 1` and trim).
 
 ---
 
-### 14.5 Settings-driven logging (v0.30.11)
-
+### 14.5 Settings-driven logging
 **What**: `Cli::with_logging()` drives `tracing-subscriber`
 from a `[logging]` TOML section.
 
@@ -3047,10 +3044,10 @@ rustango::manage::Cli::new()
 `access_log` middleware emits per-request lines like
 `method=GET path=/items status=200 duration_ms=43 ip=192.168.65.1`.
 
-**v0.30.16 fix**: the IP field used to log `"-"` because the
-framework's `axum::serve` calls didn't enable `ConnectInfo`.
-Now both `manage.rs` and `server/builder.rs` use
-`into_make_service_with_connect_info::<SocketAddr>()`.
+The client IP is captured via `ConnectInfo` — both `manage.rs` and
+`server/builder.rs` serve with
+`into_make_service_with_connect_info::<SocketAddr>()`, so the access
+log records the real peer address rather than `"-"`.
 
 For projects behind a reverse proxy:
 ```rust,ignore
@@ -3066,8 +3063,7 @@ back to `X-Real-IP` → fall back to ConnectInfo. Off by default
 
 ---
 
-### 14.6 `make:viewset` auto-detects tenancy (v0.30.5)
-
+### 14.6 `make:viewset` auto-detects tenancy
 **What**: `cargo run -- make:viewset Foo --model Bar` reads the
 project's `Cargo.toml`. If the `tenancy` feature is enabled on
 the `rustango` dep, emits a `tenant_router(...)` scaffold;
@@ -3083,21 +3079,17 @@ wrote src/new_product_view_set.rs
 
 ---
 
-### 14.7 Other v0.30 niceties worth knowing
+### 14.7 Other niceties worth knowing
 
-- `Cli::with_welcome()` no longer panics when your `urls::api()`
-  already routes `GET /` ([v0.30.15](../../../../CHANGELOG.md))
-  — emits a `tracing::warn!` and skips. Welcome page itself
-  polished with cards-grid layout + version pill
-  ([v0.30.10](../../../../CHANGELOG.md)) + real `icon.png` brand
-  mark ([v0.30.19](../../../../CHANGELOG.md)).
-- Admin `AdminError::Internal` redacts DB errors before
-  responding; raw text goes to `tracing::error!` with a
-  `correlation_id` the user can report
-  ([v0.30.12](../../../../CHANGELOG.md)).
-- `CountQuery.search` bug fix: pager total now matches visible
-  rows when `?q=...` is set
-  ([v0.30.1](../../../../CHANGELOG.md)).
+- `Cli::with_welcome()` skips (with a `tracing::warn!`) instead of
+  panicking when your `urls::api()` already routes `GET /`. The
+  welcome page has a cards-grid layout, a version pill, and an
+  `icon.png` brand mark.
+- Admin `AdminError::Internal` redacts DB errors before responding;
+  the raw text goes to `tracing::error!` with a `correlation_id` the
+  user can quote in a bug report.
+- The admin pager total matches the visible rows when `?q=...` is set
+  — the count honors the search filter.
 
 ---
 
