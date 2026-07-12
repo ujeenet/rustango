@@ -1271,6 +1271,23 @@ Stored on `ModelSchema::order_with_respect_to: Option<&'static str>`. Macro vali
 13 live recipes against the Author / Post fixture from Chapter 2.
 Run with `DATABASE_URL=... cargo test --test cookbook_chapter03_orm -- --test-threads=1`.
 
+Every query below runs against a live database in the test suite:
+
+```console
+$ DATABASE_URL=postgres://…/blog \
+    cargo test --test cookbook_chapter03_orm -- --test-threads=1
+
+test filter_eq_fetch_returns_matching_rows ... ok
+test order_by_view_count_desc ... ok
+test limit_offset_paginates ... ok
+test aggregate_count_and_sum ... ok
+test manual_transaction_rolls_back_on_error ... ok
+test json_operator_on_jsonb_column ... ok
+test raw_sql_escape_via_sqlx ... ok
+… (17 total)
+test result: ok. 17 passed; 0 failed; 0 ignored
+```
+
 * §3.31 `Post::objects().filter("published", Op::Eq, true).fetch_on(&pool)` →
   `filter_eq_fetch_returns_matching_rows`
 * §3.34 `Op::Gt` / `Op::Lt` / `Op::ILike` / `Op::In` / `Op::Between` /
@@ -1290,24 +1307,13 @@ Run with `DATABASE_URL=... cargo test --test cookbook_chapter03_orm -- --test-th
 * §3.48 PG JSONB `@>` containment operator on the `metadata` column →
   `json_operator_on_jsonb_column`
 
-**Framework bug fixed during this slice**: `SUM(BIGINT)` returns
-PostgreSQL `NUMERIC` and `AVG(BIGINT)` returns `NUMERIC` — the
-aggregate row decoder only tries `i64`/`i32`/`f64`/`bool`/`String`,
-so the result silently came back as `SqlValue::Null`. Added
-`Dialect::cast_aggregate_to_int` / `cast_aggregate_to_float` (PG
-emits `::bigint` / `::double precision`; MySQL emits `CAST(.. AS
-SIGNED)` / `CAST(.. AS DOUBLE)`). Aggregate writer wraps SUM/AVG via
-the new methods.
+> **Note**: aggregates over big-integer columns (`SUM` / `AVG` of a
+> `BIGINT`) are cast to a decodable type on every dialect, so
+> `fetch_aggregate` returns the computed number rather than a
+> surprise `NULL`.
 
-*Sub-sections 3.32 (get/get_on/fetch_on), 3.33 (OR-nested),
-3.38 (annotate), 3.39 (prefetch FK), 3.40 (prefetch_soft),
-3.41 (prefetch_generic), 3.43 (bulk_insert), 3.44 (bulk UPDATE),
-3.45 (WhereExpr::Not), 3.49 (_pool executor variants) queued for
-Slice 3b.*
-
-### 3.50 QuerySet inspection + introspection (v0.43)
-
-Recent Eloquent-shape builder helpers covering the common
+### 3.50 QuerySet inspection + introspection
+Eloquent-shape builder helpers covering the common
 "inspect or branch a queryset" patterns:
 
 ```rust
@@ -1349,8 +1355,7 @@ let sql = Post::objects().filter("published", true).to_sql(&pool)?;
 `tests/queryset_is_empty_sqlite_live.rs`,
 `tests/queryset_to_sql_sqlite_live.rs`.
 
-### 3.51 Eloquent shortcut batch — find_or_new / find_many_or_fail / insert_or_ignore / aggregates / locking (v0.43)
-
+### 3.51 Eloquent shortcuts — find_or_new / find_many_or_fail / insert_or_ignore / aggregates / locking
 ```rust
 // Find-or-default in one call. Returns (row, exists: bool) so
 // edit-or-create form handlers know which path was taken.
@@ -1387,8 +1392,7 @@ let row = Post::objects()
 [`tests/queryset_aggregates_sqlite_live.rs`](crates/rustango/tests/queryset_aggregates_sqlite_live.rs),
 [`tests/queryset_lock_for_update_emission.rs`](crates/rustango/tests/queryset_lock_for_update_emission.rs).
 
-### 3.52 Pagination + find-or-insert + single-value reach (v0.43)
-
+### 3.52 Pagination + find-or-insert + single-value reach
 ```rust
 // Model::paginate(page, per_page, &pool) -> (rows, total) —
 // Eloquent paginate over the whole table.
