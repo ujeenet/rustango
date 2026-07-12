@@ -3481,3 +3481,31 @@ app.merge(health);
 
 (`.tcp_probe` / `.cache_probe` / `.http_probe` add ready-probes for
 downstreams; `.skip_db_probe()` drops the built-in `SELECT 1`.)
+## Chapter 21 — Secrets manager
+
+2 tests, **no DB** — `rustango::secrets::Secrets`, a pluggable secrets
+backend. Run with `cargo test --test cookbook_chapter21_secrets`.
+
+Pull secrets out of code and config: `EnvSecrets` (env vars, optional
+prefix), `InMemorySecrets` (tests / static config), or your own
+`impl Secrets` (AWS Secrets Manager, Vault, …). `get` returns `Option`;
+`require` errors on a missing key so you fail fast at startup, not at
+first use. Store it as `BoxedSecrets` (`Arc<dyn Secrets>`) and the rest of
+the app is backend-agnostic.
+
+```rust,ignore
+use rustango::secrets::{BoxedSecrets, EnvSecrets, Secrets};
+use std::sync::Arc;
+
+let secrets: BoxedSecrets = Arc::new(EnvSecrets::with_prefix("MYAPP_"));
+let db_pw = secrets.require("DB_PASSWORD").await?; // reads MYAPP_DB_PASSWORD
+```
+
+* §21.151 — pluggable backend: `get` is `Option`, `require` errors on a
+  missing key. → `in_memory_backend_get_and_require`
+* §21.152 — the env backend applies its prefix
+  (`with_prefix("COOKBOOK_")` + `get("DB_PASSWORD")` → `COOKBOOK_DB_PASSWORD`).
+  → `env_backend_with_prefix`
+
+A custom backend is just an `impl Secrets` — the app depends only on
+`BoxedSecrets`, so swapping backends never touches call sites.
