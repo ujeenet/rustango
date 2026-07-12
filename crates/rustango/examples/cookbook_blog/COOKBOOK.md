@@ -2153,16 +2153,15 @@ the `rustango_csrf` cookie when missing, so templates can render:
 </form>
 ```
 
-POST validation is a separate layer. As of v0.29.10 the recommended
+POST validation is a separate layer. The recommended
 shortcut is `Cli::with_csrf()` — see
-[Auto-mounting CSRF](#auto-mounting-csrf--for-form-driven-cbvs-v02910).
+[Auto-mounting CSRF](#auto-mounting-csrf--for-form-driven-cbvs).
 For projects not using `Cli`, mount `forms::csrf::layer()` directly
 on the router to enforce that the `_csrf` form field matches the
 cookie value. Without it the `csrf_token` context var still
 populates, but POSTs aren't validated.
 
-### Bulk actions on `ListView` (v0.30.4)
-
+### Bulk actions on `ListView`
 Django-admin shape: row checkboxes + an action `<select>` that
 applies the same operation to every selected row. Opt in with
 `.bulk_actions(true)`:
@@ -2216,8 +2215,7 @@ a captured pool) and mount via `.tenant_router(...)` instead of
 mounting via `.tenant_router()` — surfaces a clear runtime error
 on dispatch.
 
-#### FK display in list rows (v0.30.8)
-
+#### FK display in list rows
 Admin-shape lists usually want to show the FK target's name, not
 its raw integer ID. Opt in with `.with_fk_display(true)`:
 
@@ -2241,8 +2239,7 @@ The `default(value=...)` keeps the template robust when the FK
 target is unregistered, lacks a `display` field, or points at a
 deleted row.
 
-#### Confirmation step for destructive actions (v0.30.7)
-
+#### Confirmation step for destructive actions
 `delete_selected` is a hard-to-undo operation; opt into a Django-
 admin-shape confirmation page with `.with_delete_confirmation(true)`:
 
@@ -2265,8 +2262,7 @@ flag — matches Django's convention (only `delete_selected` is
 confirmed by default). Build your own confirm-then-submit shape if
 a custom action needs it.
 
-### Business validation — `.validator(...)` and `.form::<T>()` (v0.30.2)
-
+### Business validation — `.validator(...)` and `.form::<T>()`
 Schema-level checks (`max_length`, `min`, `max`) ship for free.
 Business validation (`min_length`, `regex`, custom validator fns,
 cross-field checks) hooks in via two builder methods on
@@ -2363,8 +2359,7 @@ The ViewSet builder also exposes `.search_fields` (?search=…),
 (see Chapter 6 §6.80 for the typed-perm shortcut). All exercised
 live in rustango's own viewset / order_by_annotate_live tests.
 
-## Chapter 9d — `tenant_router` for tenancy projects (v0.30, #80)
-
+## Chapter 9d — `tenant_router` for tenancy projects
 5 live tests against `ViewSet::for_model(...).tenant_router(...)`
 mounted under a real `TenantContext` extension with header-based
 tenant resolution. Run with
@@ -2373,7 +2368,7 @@ tenant resolution. Run with
 * §9.116 — paginated list against the per-request tenant connection.
   → `tenant_router_lists_paginated_payload`
 * §9.116 — `?search=…` ILIKE narrowing matches `count` to results
-  (regression guard for the v0.30.1 `CountQuery.search` fix).
+  (the paginated `count` reflects the search filter, not the whole table).
   → `tenant_router_search_param_narrows_count_and_results`
 * §9.116 — `?{field}=…` exact filter via `filter_fields`.
   → `tenant_router_filter_param_exact_match`
@@ -2408,16 +2403,10 @@ let posts_router = ViewSet::for_model(Post::SCHEMA)
 axum::Router::new().merge(posts_router)
 ```
 
-v0.30 unification: every builder knob that worked for `router(...)`
-now works identically for `tenant_router(...)` — including
-permissions (the `has_perm` check runs against the same per-request
-connection, no second pool acquire). The earlier v0.27 v1 of
-`tenant_router` was filter-less and perm-less; that limitation is
-gone.
-
-*Sub-sections 9.114 (full pagination — count + next + prev),
-9.116b (typed permissions), 9.117 (OpenAPI auto-derive),
-9.118 (response shaping via `.fields(&[...])`) queued for Slice 9b.*
+Every builder knob that works for `router(...)` works identically for
+`tenant_router(...)` — including permissions (the `has_perm` check
+runs against the same per-request connection, with no second pool
+acquire).
 
 ## Chapter 9e — Searching with the HTTP `QUERY` method (RFC 10008)
 
@@ -2461,6 +2450,11 @@ action, OpenAPI 3.2).
 operator console use. No DB needed.
 Run with `cargo test --test cookbook_chapter10_templates`.
 
+```console
+$ cargo test --test cookbook_chapter10_templates
+test result: ok. 3 passed; 0 failed; 0 ignored
+```
+
 * §10.119 `tera::Tera::default() + add_raw_template + render(name, ctx)`
   → `tera_template_renders_with_context`
 * §10.119 `t.autoescape_on(vec!["html"])` — HTML special chars in
@@ -2471,11 +2465,7 @@ Run with `cargo test --test cookbook_chapter10_templates`.
 The `render_generic_fk_link` helper (§10.121) is exercised live in
 Chapter 2's `generic_fk_schema_and_content_type_lookup`.
 
-*Sub-section 10.120 (Tera rendering from view handlers) and 10.123
-(static-file serving) queued for Slice 10b.*
-
-### Auto-mounting `/static` — no boilerplate (v0.29.9)
-
+### Auto-mounting `/static` — no boilerplate
 Same builder shape as `with_health()`:
 
 ```rust,ignore
@@ -2496,8 +2486,7 @@ For finer control (immutable hash-named bundles, `.well-known`
 whitelisting), keep mounting `static_router` directly on your own
 router and skip the shortcut.
 
-### Auto-mounting CSRF — for form-driven CBVs (v0.29.10)
-
+### Auto-mounting CSRF — for form-driven CBVs
 `template_views` `CreateView` / `UpdateView` / `DeleteView` need the
 `_csrf` cookie + form field cycle wired. Same shape:
 
@@ -2525,6 +2514,11 @@ don't need this — `with_csrf()` is opt-in for that reason.
 7 tests on the most-used extension surfaces. No DB / network needed.
 Run with `cargo test --test cookbook_chapter11_extensions`.
 
+```console
+$ cargo test --test cookbook_chapter11_extensions
+test result: ok. 7 passed; 0 failed; 0 ignored
+```
+
 * §11.135 `cache::get_or_set(&dyn Cache, key, factory, ttl)` —
   loader runs once; subsequent reads hit the cached value.
   → `cache_get_or_set_memoizes_loader`,
@@ -2543,17 +2537,16 @@ Run with `cargo test --test cookbook_chapter11_extensions`.
   jobs at the given period; `Handle::shutdown()` stops further fires.
   → `scheduler_every_fires_periodic_job`
 
-*Sub-sections 11.124 (WS hub), 11.125 (SSE), 11.127 (jobs queue),
-11.129 (http_client retry/UA), 11.130 (email backends),
-11.131 (storage filesystem), 11.132 (storage S3), 11.133 (media uploads),
-11.134 (notifications), 11.137 (signals — wire receivers to model
-save/delete events), 11.138 (compression middleware), 11.139 (CSP nonce)
-queued for Slice 11b. Several have framework-level live tests under
-rustango/tests already.*
+**Also available in the framework** (no dedicated cookbook recipe yet,
+but each has live tests under `rustango/tests`): the WebSocket hub and
+SSE, the background jobs queue, the retrying HTTP client, email
+backends, filesystem + S3 storage, media uploads, notifications,
+signals (wiring receivers to model save/delete events), compression
+middleware, and CSP-nonce injection.
 
 ## Chapter 12 — Tri-dialect + cross-cutting
 
-2 live tests against a docker MySQL 8.0 container, exercising the
+3 live tests against a docker MySQL 8.0 container, exercising the
 same cookbook model that PG tests use through the dialect-agnostic
 `Pool` + `save_pool` / `fetch_pool` ORM API. Run with:
 
@@ -2567,28 +2560,35 @@ MYSQL_TEST_URL=mysql://rustango:rustango@127.0.0.1:3406/cookbook_blog_my \
   cargo test --test cookbook_chapter12_bidialect
 ```
 
+The same model code that runs on Postgres round-trips on MySQL:
+
+```console
+$ MYSQL_TEST_URL=mysql://…/cookbook_blog_my \
+    cargo test --test cookbook_chapter12_bidialect
+
+running 3 tests
+test cookbook_rating_round_trips_against_mysql ... ok
+test mysql_multi_auto_inserts_then_refetches_for_remaining_fields ... ok
+test mysql_decodes_multi_row_select ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored
+```
+
 * §12.140 / §12.141 — `Rating` model save + fetch + multi-row decode
   via `Pool::Mysql` and `save_pool` / `fetch_pool`. Exercises
-  AUTO_INCREMENT for `Auto<i64>`, BIGINT round-trip, and the
-  Backend trait dispatch the v0.17.1 macro refactor enabled.
+  AUTO_INCREMENT for `Auto<i64>`, BIGINT round-trip, and per-backend
+  trait dispatch.
   → `cookbook_rating_round_trips_against_mysql`,
   `mysql_decodes_multi_row_select`
 
-**Surfaced limitation**: the cookbook's `Author` model can't run on
-MySQL because it has two `Auto<T>` columns (`id: Auto<i64>` PK +
-`joined_at: Auto<DateTime>` from `auto_now_add`). MySQL only supports
-single-column RETURNING via `LAST_INSERT_ID()`, so `save_pool` errors
-with `OperatorNotSupportedInDialect { op: "multi-column RETURNING",
-dialect: "mysql" }`. Not a bug — a known dialect divergence the
-framework surfaces as a clear runtime error. Workaround: drop the
-`auto_now_add` mixin on MySQL-targeted models, or split the timestamp
-column off into a trigger-managed shape.
-
-*Sub-sections 12.142 (connection-pool tuning), 12.143 (tracing
-subscriber + structured logs), 12.144 (manage check warnings),
-12.145 (health endpoint), 12.146 (graceful shutdown), 12.147 (test
-client utilities), 12.148 (inventory mechanism), 12.149 (macro
-hygiene), 12.150 (project-shape conventions) queued for Slice 12b.*
+**Dialect note — multi-`Auto` models on MySQL**: the cookbook's
+`Author` has two `Auto<T>` columns (`id: Auto<i64>` PK + `joined_at:
+Auto<DateTime>` from `auto_now_add`). Postgres fills both in one
+`INSERT ... RETURNING`; MySQL has only single-column
+`LAST_INSERT_ID()`, so `save_pool` fills the PK and leaves the other
+`Auto` fields `Unset`. Re-fetch the row by PK to materialize the
+DB-defaulted timestamp — the same pattern as a Django app calling
+`.refresh_from_db()` after save when it needs a server-set value.
+(This used to error hard; it now succeeds on both backends.)
 
 ---
 
