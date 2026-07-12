@@ -3340,10 +3340,10 @@ load_all_pool` / `Fixture::load_into_pool` all run on any backend.
 
 ---
 
-## Chapter 17 — v0.43 — MCP server: expose tools to ML agents
+## Chapter 17 — MCP server: expose tools to AI agents
 
 The `mcp` feature turns a rustango app into a **Model Context Protocol**
-server: external ML agents authenticate as tenant-scoped identities, are
+server: external AI agents authenticate as tenant-scoped identities, are
 granted **skills** (bundles of tools + a prompt + resources), and call
 your framework-exposed **tools** over JSON-RPC 2.0 / Streamable HTTP.
 
@@ -3456,6 +3456,11 @@ limit under `[mcp]` in your settings file.
 6 tests, **no DB** — `rustango::i18n::Translator`, Django's `gettext`
 family in Rust. Run with `cargo test --test cookbook_chapter18_i18n`.
 
+```console
+$ cargo test --test cookbook_chapter18_i18n
+test result: ok. 6 passed; 0 failed; 0 ignored
+```
+
 `Translator` holds per-locale message catalogs and resolves a key with
 base-language fallback (`fr-CA` → `fr` → default), `{name}` placeholder
 substitution, and CLDR-correct pluralization. Pair it with
@@ -3485,7 +3490,7 @@ t.translate("fr", "welcome", &[("name", "Ada")]); // "Bienvenue, Ada !"
   the same catalogs, driven by the active `LANG` locale.
   → `tera_translate_function`
 
-The **DB-override layer + admin translation editor** (#532) — file-seeded
+The **DB-override layer + admin translation editor** — file-seeded
 catalogs overridden per-tenant in the DB and edited live in the admin —
 and `Accept-Language` middleware are documented in
 [docs/i18n.md](../../../../docs/i18n.md); this chapter covers the
