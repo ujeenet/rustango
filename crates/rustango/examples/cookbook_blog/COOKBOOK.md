@@ -3093,17 +3093,19 @@ wrote src/new_product_view_set.rs
 
 ---
 
-## Chapter 15 — v0.31 — tenant admin no longer catches every URL
+## Chapter 15 — Tenant admin URL scoping
 
-The big architectural fix this cycle. Through v0.30 the tenancy
-[`server::Builder`](../../../crates/rustango/src/server/builder.rs)
-attached the tenant admin as `Router::fallback_service(...)` on the
-merged user router. Axum semantics: that **overrides** any
-`.fallback()` set inside the user's API router — so a
-CMS-style public site at `/` was impossible. Every unmatched URL
-got the admin's `/{table}` catch-all and returned
-`{"error":"table not found"}` instead of running the user's
-resolver.
+The tenant admin claims only an explicit set of routes; every other
+URL falls through to your API router's `.fallback()`. That is what
+lets a CMS-style public site live at `/` on the same tenant subdomain
+as the admin.
+
+(The admin used to be attached as `Router::fallback_service(...)` on
+the merged router, which by axum's semantics **overrides** any
+`.fallback()` in your API router — so every unmatched URL hit the
+admin's `/{table}` catch-all and returned `{"error":"table not
+found"}`. Explicit routes fix that; the design rationale below still
+applies.)
 
 ### What changed
 
@@ -3123,7 +3125,7 @@ if no fallback is set).
 ### What this enables
 
 The headline use case is a CMS-style public site on the same
-tenant subdomain as the admin. The companion `rustango-cms` 0.1
+tenant subdomain as the admin. The companion `rustango-cms`
 crate ships a working setup:
 
 ```rust
@@ -3165,43 +3167,33 @@ After this:
 | Hardcoded `/admin/*` or `/__admin/*` links | Unchanged. |
 | Apps that *intentionally* relied on the admin catching random URLs | Will break — set a custom `.fallback()` on your API router to keep the old behavior. |
 
-### Companion fixes shipped in `rustango-cms` 0.1
+### Integrating a CMS-style site (`rustango-cms`)
 
-The `rustango-cms` admin was unusable against the v0.30
-serialization shape; v0.31's matching `rustango-cms` release
-fixes the template / handler bugs that surfaced building the
-end-to-end demo:
+A few things worth knowing when you wire `rustango-cms` (or any
+template-driven site) alongside the tenant admin:
 
-- **Template `.Set` references** — `Auto<T>` now serializes as the
-  bare value (e.g. `1`), not enum-tagged `{"Set": 1}`. The
-  R-CMS admin templates were stuck on the old shape and 500'd
-  with `Variable t.id.Set not found in context`. Replaced with
-  `{{ x.id }}` everywhere.
-- **Edit-form action URL** — the form POSTed to
-  `/cms-admin/pages/{id}` but the actual route is
-  `/cms-admin/pages/{id}/edit`. Saving a page worked because
-  the redirect-chain mostly worked out; the underlying mismatch
-  was real.
-- **`slug` field `required` attribute** — root pages need an
-  empty slug (the resolver matches `WHERE slug = ''`) but the
-  form blocked empty submit. The `required` is now conditional
-  on `parent` so root creation works.
-- **`AdminError::IntoResponse`** walks `Error::source()` so Tera
-  errors surface the actual cause line instead of the generic
-  "Failed to render 'template.html'".
-- **`render(t, tera, page, url_prefix)`** — new `url_prefix`
-  parameter, injected as `{{ url_prefix }}` into the Tera
-  context so user templates can build breadcrumb / sibling
+- **`Auto<T>` serializes as the bare value** (`1`), not an enum-tagged
+  `{"Set": 1}` — so templates reference `{{ x.id }}`, not
+  `{{ x.id.Set }}`.
+- **CMS edit forms POST to `/cms-admin/pages/{id}/edit`** — the edit
+  route carries the `/edit` suffix.
+- **Root pages use an empty slug** (the resolver matches
+  `WHERE slug = ''`), so the `slug` field's `required` attribute is
+  conditional on having a `parent` — root creation submits an empty
+  slug.
+- **`AdminError` walks `Error::source()`** so Tera errors surface the
+  actual cause line instead of a generic "Failed to render
+  'template.html'".
+- **`render(t, tera, page, url_prefix)`** injects `{{ url_prefix }}`
+  into the Tera context, so templates build breadcrumb / sibling
   links without hardcoding the host's URL layout.
-- **`router_at(prefix, tera)`** — kept alongside `router(tera)`
-  for projects that want their CMS at a non-root prefix (e.g.
-  `/blog/` alongside other site content). Includes a permanent
-  308 redirect for `{prefix}/` → `{prefix}` to handle axum's
-  strict trailing-slash matching.
-- **"View live ↗" button** on every published row of the CMS
-  admin's page list, and on the edit form header. URLs are
-  pre-computed server-side via a single-pass `build_live_url_map`
-  walk in tree order.
+- **`router_at(prefix, tera)`** (alongside `router(tera)`) mounts the
+  CMS at a non-root prefix (e.g. `/blog/` beside other content), with
+  a 308 redirect for `{prefix}/` → `{prefix}`.
+- **A "View live ↗" button** on every published row of the CMS admin's
+  page list and on the edit-form header; URLs are pre-computed
+  server-side via a single-pass `build_live_url_map` walk in tree
+  order.
 
 ---
 
