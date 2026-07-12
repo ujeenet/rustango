@@ -3197,11 +3197,10 @@ template-driven site) alongside the tenant admin:
 
 ---
 
-## Chapter 16 — v0.38 — every feature, every backend
+## Chapter 16 — Every feature on every backend
 
-v0.38 is the "tri-dialect everywhere" release. Every framework
-surface that was previously PG-only now runs on PostgreSQL, MySQL
-8+, and SQLite out of the box. Concretely:
+"Tri-dialect everywhere": every framework surface runs on
+PostgreSQL, MySQL 8+, and SQLite out of the box. Concretely:
 
 ### 16.220 — Multi-tenant runserver on any backend
 
@@ -3311,7 +3310,7 @@ load_all_pool` / `Fixture::load_into_pool` all run on any backend.
 
 * PG live tests — every existing suite still green (1386 lib tests
   on PG; 22 PG media live; 4 PG jobs live; 3 PG inspectdb live).
-* SQLite live tests added in v0.38:
+* SQLite live tests:
   * `media_sqlite_live` — save → get → delete → purge round-trip;
     collection CRUD; tag lifecycle (ON CONFLICT, IGNORE, subquery
     DELETE, popular_tags aggregate).
@@ -3322,25 +3321,21 @@ load_all_pool` / `Fixture::load_into_pool` all run on any backend.
 
 ---
 
-## Gaps surfaced while writing this cookbook
+## Known backend limitations
 
-*(populated as we discover them per chapter)*
-
-- **Chapter 13 / SQLite (v0.27, 2026-05-07):** the
-  `ddl::create_constraints_sql_with_dialect` emitter still produces
-  `ALTER TABLE … ADD CONSTRAINT FOREIGN KEY` SQL, which SQLite's
-  parser rejects (FK constraints must be inline at CREATE TABLE).
-  The `sqlite_orm_demo` example skips that loop on SQLite as a
-  workaround. Real fix: refactor the emitter to put FK constraints
-  in the inline column list when the dialect doesn't support
-  ALTER-style FK addition. Tracked for v0.28.
-- **Chapter 13 / SQLite (v0.27):** `apply_all_pool` walks the full
-  `inventory::registered_models()` list, which on a default build
-  includes framework models (Org, Operator, Job, etc.) whose DDL
-  emits Postgres-shape SQL — those CREATE TABLE statements fail
-  on SQLite. Workaround used in the demo: emit DDL manually for
-  just the test models. A `Dialect::supports_model(&ModelSchema)`
-  filter (or per-model dialect-compat flag) would let
+- **SQLite — adding foreign keys:**
+  `ddl::create_constraints_sql_with_dialect` emits `ALTER TABLE …
+  ADD CONSTRAINT FOREIGN KEY`, which SQLite's parser rejects (FK
+  constraints must be inline at CREATE TABLE). The `sqlite_orm_demo`
+  example skips that loop on SQLite. A fuller fix would move FK
+  constraints into the inline column list when the dialect doesn't
+  support ALTER-style FK addition.
+- **SQLite — `apply_all_pool` and framework models:**
+  `apply_all_pool` walks the full `inventory::registered_models()`
+  list, which on a default build includes framework models (Org,
+  Operator, Job, …) whose DDL emits Postgres-shape SQL that fails on
+  SQLite. The demo emits DDL by hand for just its own models. A
+  `Dialect::supports_model(&ModelSchema)` filter would let
   `apply_all_pool` skip incompatible models cleanly.
 
 ---
