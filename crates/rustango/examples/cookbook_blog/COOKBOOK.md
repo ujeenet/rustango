@@ -1721,6 +1721,11 @@ cargo run -- reset-password acme alice --generate
 7 live tests on the password / API-key / JWT / permission primitives.
 No DB needed — pure crypto. Run with `cargo test --test cookbook_chapter06_auth`.
 
+```console
+$ cargo test --test cookbook_chapter06_auth
+test result: ok. 7 passed; 0 failed; 0 ignored
+```
+
 * §6.83 `passwords::hash` (Argon2 with random salt) +
   `passwords::verify` round-trip + `strength_score` issue list.
   → `passwords_hash_and_verify_round_trip`,
@@ -1739,17 +1744,29 @@ No DB needed — pure crypto. Run with `cargo test --test cookbook_chapter06_aut
   → Django-shape `{app}.{action}_{model}` strings.
   → `permission_codename_for_model_resolves_app_action_model`
 
-*Sub-sections 6.77 (User/Role/Permission models — registry-side, see
-framework's tenant_auth_live), 6.80 (ViewSet typed perms),
-6.81 (auth backends), 6.82 (auth middleware), 6.86 (sessions),
-6.87 (CSRF), 6.88 (HMAC-auth), 6.89 (TOTP), 6.90 (OAuth2),
-6.91 (auth_flows), 6.92 (signed URLs) queued for Slice 6b.*
-
 ## Chapter 7 — Forms + serializer
 
 6 tests covering `ModelFormFor<T>` parse/from_json/error aggregation/
 bound-validation/null handling/insert-query emission. No DB needed.
 Run with `cargo test --test cookbook_chapter07_forms`.
+
+The forms core, the serializer derive, and each serializer extension
+(nested / method / many / validators / ViewSet wiring) all ship with
+passing tests:
+
+```console
+$ cargo test --test cookbook_chapter07_forms \
+             --test cookbook_chapter07b_serializer \
+             --test cookbook_chapter07f_serializer_method_and_validators \
+             --test cookbook_chapter07g_nested_serializer \
+             --test cookbook_chapter07h_many_serializer
+
+cookbook_chapter07_forms .................................. ok (6)
+cookbook_chapter07b_serializer ............................ ok (6)
+cookbook_chapter07f_serializer_method_and_validators ...... ok (4)
+cookbook_chapter07g_nested_serializer ..................... ok (4)
+cookbook_chapter07h_many_serializer ....................... ok (4)
+```
 
 * §7.95 `ModelFormFor::<T>::parse(&HashMap<String,String>)` — form-
   encoded payload → `(columns, values)` with per-field bound
@@ -1767,11 +1784,10 @@ Run with `cargo test --test cookbook_chapter07_forms`.
 * §7.99 `into_insert_query()` emits an `InsertQuery` against the
   model's table. → `modelform_into_insert_query_targets_model_table`
 
-**Framework bug fixed during this slice**: `ModelFormFor::parse`
-required EVERY field including `auto_now_add` columns (e.g.
-`joined_at: Auto<DateTime<Utc>>`), which the macro skips on INSERT
-because `DEFAULT NOW()` fills them. Fix: skip every `auto = true`
-field (was: only `auto && primary_key`).
+> **Note**: `ModelFormFor::parse` skips every auto-populated field —
+> `auto_now_add` timestamps like `joined_at: Auto<DateTime<Utc>>` and
+> `Auto<T>` primary keys — because the database fills them on INSERT.
+> Your form only has to carry the fields a user actually enters.
 
 ### 7.99b `#[derive(Serializer)]` — DRF-shape JSON façade
 
@@ -1793,31 +1809,29 @@ serializer derive against the cookbook's `Author` model. Run with
 * `many_to_value` — batches a `Vec<Model>` into a JSON array. →
   `many_to_value_batches_into_json_array`
 
-**Framework fix during this slice**: `Auto<T>` was missing an
-`OpenApiSchema` impl, so `#[derive(Serializer)]` failed to build with
-the `openapi` feature on for any model with `Auto<T>` fields. Added
-`impl<T: OpenApiSchema> OpenApiSchema for Auto<T>` (forwards to T's
-schema).
+**Beyond the core derive**, `#[derive(Serializer)]` also supports:
 
-**Gaps tracked in [v0.18 DRF parity roadmap](../../../../../.claude/projects/-Users-ievgeniisvyryd-projects-rustango/memory/v018-drf-parity.md)**:
-
-1. **Auto-nested FK** — `#[serializer(nested = AuthorSerializer)]`
-   that lazy-loads + nests the parent. Today: manual.
-2. **`SerializerMethodField`** — `#[serializer(method = "fn_name")]`
-   computed fields. Today: manual after `from_model`.
+1. **Nested FK** — `#[serializer(nested)]` on a field whose type is
+   itself a serializer and whose model source is a `ForeignKey<Parent>`
+   emits the nesting glue. The FK must be loaded first (`.get(&pool)`
+   or `.select_related(...)`).
+   → `tests/cookbook_chapter07g_nested_serializer.rs`
+2. **Computed fields** — `#[serializer(method = "fn_name")]` calls an
+   inherent `fn(model: &T) -> FieldType` during `from_model`.
+   → `tests/cookbook_chapter07f_serializer_method_and_validators.rs`
 3. **ViewSet ↔ Serializer wiring** —
-   `ViewSet::for_model(...).serializer::<T>()`. Today: ViewSet
-   serializes the bare model.
-4. **M2M many-relations** —
-   `#[serializer(many = TagSerializer, source = "tags")]`. Today: no
-   automatic M2M traversal in serializers.
-5. **Per-field validators chain** —
-   `#[serializer(validate = "fn_name")]` per-field validator
-   callable. Today: only model-level `min`/`max`/`max_length`.
-
-*Sub-sections 7.93 (raw `Form` derive), 7.94 (admin's hand-rolled
-ModelForm engine), 7.97 (parse_form_value per type), 7.98b (custom
-validators) queued for Slice 7c.*
+   `ViewSet::for_model(...).serializer::<S>()` runs list/detail output
+   through the serializer instead of the bare model.
+   → `tests/cookbook_chapter09b_viewset_serializer.rs`
+4. **Collections (M2M / one-to-many)** —
+   `#[serializer(many = ChildSerializer)]` emits a typed
+   `set_<field>(&mut self, &[ChildModel])` setter; fetch the children
+   (accessors are async), call the setter, then serialize.
+   → `tests/cookbook_chapter07h_many_serializer.rs`
+5. **Per-field validators** — `#[serializer(validate = "fn_name")]`
+   runs a per-field validator, on top of model-level
+   `min`/`max`/`max_length`.
+   → `tests/cookbook_chapter07f_serializer_method_and_validators.rs`
 
 ## Chapter 8 — Admin
 
