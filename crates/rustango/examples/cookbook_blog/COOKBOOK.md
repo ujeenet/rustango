@@ -496,6 +496,35 @@ Live tests against docker PG in
 [tests/cookbook_chapter02_models.rs](tests/cookbook_chapter02_models.rs).
 Run with `DATABASE_URL=... cargo test --test cookbook_chapter02_models -- --test-threads=1`.
 
+Every recipe below is a real, executable test. Running the chapter's two
+suites against a live Postgres exercises each schema feature — auto PKs,
+FKs, one-to-one, many-to-many, generic FKs, JSON columns, table/column
+checks, soft-delete, and composite unique indexes:
+
+```console
+$ DATABASE_URL=postgres://…/blog \
+    cargo test --test cookbook_chapter02_models \
+               --test cookbook_chapter02c_unique_together -- --test-threads=1
+
+running 15 tests
+test save_assigns_auto_pk ... ok
+test fk_column_round_trips ... ok
+test o2o_unique_fk_rejects_duplicate ... ok
+test m2m_through_junction_table_round_trips ... ok
+test generic_fk_schema_and_content_type_lookup ... ok
+test jsonb_field_round_trips_structured_data ... ok
+test table_level_check_rejects_invalid_row ... ok
+test soft_delete_column_round_trips_and_deleted_at_defaults_null ... ok
+… (15 total)
+test result: ok. 15 passed; 0 failed; 0 ignored
+
+running 3 tests
+test unique_together_emits_composite_unique_index_in_schema ... ok
+test unique_together_explicit_name_lands_in_schema ... ok
+test unique_together_rejects_duplicate_pair ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored
+```
+
 ### 2.11 / 2.12 `#[derive(Model)]` + `Auto<i64>` / `Auto<i32>`
 
 **What**: Derive macro registers the struct with the global inventory and emits `objects()` / typed save / FromRow impls. `Auto<T>` PKs translate to `BIGSERIAL` (i64) / `SERIAL` (i32); the macro skips them on INSERT and assigns the returning value.
@@ -582,7 +611,7 @@ pub struct Author {
 
 ### 2.18b `#[rustango(unique_together = "col1, col2")]` — composite UNIQUE
 
-**What**: Container-level Django-shape `unique_together`. Emits `CREATE UNIQUE INDEX <table>_<col1>_<col2>_uq ON <table> (col1, col2)` so the DB rejects duplicate pairs even though neither column on its own is unique. Sister attr `index_together = "..."` for non-unique composite indexes. Both auto-derive the index name from the column list (override pending — see [v0.19 roadmap](../../../../../.claude/projects/-Users-ievgeniisvyryd-projects-rustango/memory/v019-unique-together.md)).
+**What**: Container-level Django-shape `unique_together`. Emits `CREATE UNIQUE INDEX <table>_<col1>_<col2>_uq ON <table> (col1, col2)` so the DB rejects duplicate pairs even though neither column on its own is unique. Sister attr `index_together = "..."` for non-unique composite indexes. Both auto-derive the index name from the column list.
 
 **Recipe** ([models.rs](src/apps/blog/models.rs)):
 
@@ -605,10 +634,10 @@ pub struct Membership {
 `unique_together_rejects_duplicate_pair`
 
 **Caveat**: today the duplicate surfaces as the raw Postgres
-`duplicate key value violates unique constraint "..."` message. A
-DRF-style `UniqueTogetherValidator` that pre-checks at form
-validation time and emits friendly per-field errors is tracked as
-v0.19.1.
+`duplicate key value violates unique constraint "..."` message. For
+friendly per-field errors at validation time instead, use the
+serializer's `validate_unique_together` (see Chapter 7 — Forms &
+serializers).
 
 **Also during this slice** — the legacy container-level
 `#[rustango(index = "col1, col2", unique, name = "...")]` syntax was
@@ -673,7 +702,7 @@ syn `parse_nested_meta` API). Removed the broken trailing-flag block;
 )]
 pub struct Post { ... }
 
-// CRUD on the junction — bare-name methods (v0.43+):
+// CRUD on the junction — bare-name methods:
 post.tags_m2m().all(&pool).await?;                  // -> Vec<i64>
 post.tags_m2m().add(42, &pool).await?;
 post.tags_m2m().remove(42, &pool).await?;
@@ -682,7 +711,7 @@ post.tags_m2m().clear(&pool).await?;
 let has = post.tags_m2m().contains(42, &pool).await?;
 ```
 
-The `_pool` aliases (`all_pool` / `add_pool` / etc.) stay as `#[deprecated]` forwarders for source-compat with pre-#941 code — they emit one warning each.
+The older `_pool`-suffixed names (`all_pool` / `add_pool` / …) still work but are deprecated forwarders to the bare-name methods — each emits one deprecation warning.
 
 **Verified by**: `m2m_through_junction_table_round_trips`
 
@@ -707,7 +736,7 @@ WHERE <far_fk_column> IN (
 )
 ```
 
-Built via `WhereExpr::InSubquery` — portable across PG / MySQL / SQLite, no LATERAL or backend-specific syntax. Issue [#817](https://github.com/ujeenet/rustango/issues/817).
+Built via `WhereExpr::InSubquery` — portable across PG / MySQL / SQLite, no LATERAL or backend-specific syntax.
 
 **Recipe** (`Country hasManyThrough Post via User`):
 
@@ -755,7 +784,7 @@ Identifiers are **SQL column / table names** (not Rust field names) — sidestep
 | `<name>_exists_expr()` | `WhereExpr` | `whereHas` |
 | `<name>_not_exists_expr()` | `WhereExpr` | `whereDoesntHave` |
 
-Built via `WhereExpr::Exists` + `Expr::OuterRef` (whereHas branch) and `QuerySet::filter` (accessor / count / fetch branch) — both portable across PG / MySQL / SQLite. The writer's scope-stack resolves `OuterRef(col)` to the outer queryset's table at SQL-emit time. Issue [#830](https://github.com/ujeenet/rustango/issues/830).
+Built via `WhereExpr::Exists` + `Expr::OuterRef` (whereHas branch) and `QuerySet::filter` (accessor / count / fetch branch) — both portable across PG / MySQL / SQLite. The writer's scope-stack resolves `OuterRef(col)` to the outer queryset's table at SQL-emit time.
 
 **Recipe** (`Post hasMany Comment`):
 
@@ -800,7 +829,7 @@ Same SQL-column-name convention as `through(...)` — sidesteps the multi-hop fi
 
 ### 2.22d `#[rustango(global_scope(name, apply))]` — Eloquent global scopes
 
-**What**: Container-level attribute that declares an auto-applied filter — every `QuerySet` built for that model implicitly carries the scope's `WHERE` without the caller chaining `.filter(...)`. The substrate Eloquent uses for soft-delete hiding, tenant isolation, "published only" lenses, etc. Issue [#820](https://github.com/ujeenet/rustango/issues/820).
+**What**: Container-level attribute that declares an auto-applied filter — every `QuerySet` built for that model implicitly carries the scope's `WHERE` without the caller chaining `.filter(...)`. The substrate Eloquent uses for soft-delete hiding, tenant isolation, "published only" lenses, etc.
 
 Scopes fold in at **every compile entry** — SELECT (`fetch_pool` / `Model::all`), DELETE (`compile_delete`), aggregate (`count_pool` / `Model::count`), UPDATE. `ValuesQuerySet` / dates / etc. inherit via their delegating `compile()`.
 
@@ -961,8 +990,7 @@ act.save(&pool).await?;
 
 **Verified by**: `generic_fk_schema_and_content_type_lookup`
 
-### 2.24b Typed `<name>_pool` accessor on the GFK target (#239)
-
+### 2.24b Typed `<name>_pool` accessor on the GFK target
 **What**: The `Model` derive emits one `<name>_pool(&pool)` async method per `#[rustango(generic_fk(name = "..."))]` declaration. Reads `self.<ct_column>` + `self.<pk_column>`, calls `ContentType::by_id`, and fetches the target row as a `serde_json::Value`. Stand-in for Django's `activity.target` lazy accessor.
 
 **Recipe**:
@@ -981,8 +1009,7 @@ Returns `Ok(None)` gracefully when the ContentType is stale or the target row wa
 
 **Verified by**: `tests/gfk_typed_accessors.rs::typed_accessor_resolves_to_target_row_as_json`. Live in [`examples/gfk_demo`](../gfk_demo/).
 
-### 2.24c Typed `set_<name>_for::<T>` setter (#240)
-
+### 2.24c Typed `set_<name>_for::<T>` setter
 **What**: Companion to 2.24b — `Model` derive emits `set_<name>_for::<T: Model>(&pool, target_pk)` per declaration. Resolves the ContentType for `T` via the cached registry and assigns both columns on `self`. Stand-in for Django's `activity.target = post` one-liner.
 
 **Recipe**:
@@ -1003,8 +1030,7 @@ Two columns assigned in one call — caller never deals with the integer CT id b
 
 **Verified by**: `tests/gfk_typed_accessors.rs::typed_setter_assigns_ct_and_pk_for_target_model`. Live in [`examples/gfk_demo`](../gfk_demo/).
 
-### 2.24d Admin list view collapses GFK pair into one link (#241)
-
+### 2.24d Admin list view collapses GFK pair into one link
 **What**: When `list_display` names a `generic_fk` relation by its `name`, the admin renders a single column whose cells are `<a href="/{target_table}/{pk}">{app_label}.{model_name} #{pk}</a>` — same shape `contenttypes::render_generic_fk_link` emits on the detail page.
 
 **Recipe**:
@@ -1024,18 +1050,15 @@ Implementation prefetches the page's distinct CT ids once before the row loop (u
 
 **Verified by**: `tests/admin_gfk_list_render_live.rs`.
 
-### 2.25 Django Meta parity (v0.42 batch)
+### 2.25 Django Meta parity
+One recipe per attr — A set of container-level `Meta`-shape attributes. Every one is parsed by `#[derive(Model)]`, validated at compile time, and exposed on `ModelSchema::<field>` so future codegen / admin / DRF surfaces can read the metadata without re-parsing.
 
-One recipe per attr — eleven container-level `Meta`-shape attrs landed in the v0.42 series. Every one is parsed by `#[derive(Model)]`, validated at compile time, and exposed on `ModelSchema::<field>` so future codegen / admin / DRF surfaces can read the metadata without re-parsing.
-
-#### 2.25.1 `#[rustango(managed = false)]` (PR #558)
-
+#### 2.25.1 `#[rustango(managed = false)]`
 **What**: Django `Meta.managed = False` — `makemigrations` skips the model entirely (the operator owns the table's DDL). Useful for views, partitioned tables, foreign tables, or any schema the framework shouldn't touch.
 
 **Recipe**: `#[rustango(table = "external_view", managed = false)]`. The model still gets ORM read access; nothing emits CREATE / ALTER / DROP.
 
-#### 2.25.2 `#[rustango(db_table_comment = "...")]` (PR #589)
-
+#### 2.25.2 `#[rustango(db_table_comment = "...")]`
 **What**: Django 4.2+ `Meta.db_table_comment` — attached to the DB catalog so ops tooling (data-lineage docs, schema explorers) sees it.
 
 **Render shape**:
@@ -1047,8 +1070,7 @@ One recipe per attr — eleven container-level `Meta`-shape attrs landed in the 
 #[rustango(table = "orders", db_table_comment = "Customer purchase records — see /docs/orders.md")]
 ```
 
-#### 2.25.3 `#[rustango(get_latest_by = "col" | "-col")]` (PR #590)
-
+#### 2.25.3 `#[rustango(get_latest_by = "col" | "-col")]`
 **What**: Django `Meta.get_latest_by` — default sort column for `QuerySet::latest_default(&pool)` / `earliest_default(&pool)` when the caller doesn't pass a field name explicitly. `-col` reverses (descending).
 
 **Recipe**:
@@ -1062,8 +1084,7 @@ let newest = Post::objects().latest_default(&pool).await?;
 let oldest = Post::objects().earliest_default(&pool).await?;
 ```
 
-#### 2.25.4 `#[rustango(citext)]` (PR #566 / #344)
-
+#### 2.25.4 `#[rustango(citext)]`
 **What**: Django postgres-contrib `CITextField` — case-insensitive comparisons without query-side `LOWER(...)` wrapping. Field-level (lives on a `String` column).
 
 **Render shape**:
@@ -1075,8 +1096,7 @@ let oldest = Post::objects().earliest_default(&pool).await?;
 #[rustango(max_length = 200, citext)] pub email: String,
 ```
 
-#### 2.25.5 `#[rustango(fk = "...", on_delete = "...")]` (PR #592)
-
+#### 2.25.5 `#[rustango(fk = "...", on_delete = "...")]`
 **What**: Django `ForeignKey(on_delete=...)` — referential-integrity action when the parent row is deleted.
 
 **Accepted values** (case-insensitive): `cascade` / `restrict` / `set_null` / `set_default` / `no_action`. Omitting falls back to the dialect default (`NO ACTION` everywhere). Macro errors at compile time if `on_delete` is set without `fk` / `o2o`, or if the action name is unknown.
@@ -1086,8 +1106,7 @@ let oldest = Post::objects().earliest_default(&pool).await?;
 pub post_id: i64,    // delete the parent post → comment goes too
 ```
 
-#### 2.25.6 `#[rustango(extra_permissions = "code:Label, ...")]` (PR #591)
-
+#### 2.25.6 `#[rustango(extra_permissions = "code:Label, ...")]`
 **What**: Django `Meta.permissions = [(codename, name), ...]` — extra permission codenames seeded alongside the auto-generated `add` / `change` / `delete` / `view`. `auto_create_permissions_pool` writes one row per pair under `<table>.<codename>`.
 
 ```rust
@@ -1096,16 +1115,14 @@ pub post_id: i64,    // delete the parent post → comment goes too
 
 Granted via the usual `set_user_perm_pool` / role machinery.
 
-#### 2.25.7 `#[rustango(default_permissions = "view,change")]` (PR #594)
-
+#### 2.25.7 `#[rustango(default_permissions = "view,change")]`
 **What**: Django `Meta.default_permissions` — opt out of the full CRUD set. Empty (the default) seeds all four; `"view,change"` seeds only view + change. Useful for read-mostly reference tables where `add` / `delete` are operator-only.
 
 ```rust
 #[rustango(table = "country", permissions, default_permissions = "view")]
 ```
 
-#### 2.25.8 `#[rustango(exclude(...))]` (PR #593)
-
+#### 2.25.8 `#[rustango(exclude(...))]`
 **What**: Django postgres-contrib `ExclusionConstraint` — "no two rows of group X may overlap in column Y" via PG `EXCLUDE USING gist (...)`. Container-level, multi-instance.
 
 ```rust
@@ -1126,8 +1143,7 @@ Granted via the usual `set_user_perm_pool` / role machinery.
 
 **PG-only**: MySQL/SQLite have no equivalent; the migration writer skips emission with a `tracing::warn!` so the rest of the migration applies cleanly.
 
-#### 2.25.9 `#[rustango(index_when(...))]` (PR #599)
-
+#### 2.25.9 `#[rustango(index_when(...))]`
 **What**: Django `Index(fields=[...], condition=Q(...))` — non-unique partial index. Sibling of `unique_when` (UNIQUE variant). Container-level.
 
 ```rust
@@ -1145,20 +1161,17 @@ Granted via the usual `set_user_perm_pool` / role machinery.
 - PG + SQLite: `CREATE INDEX ... WHERE <expr>` (native partial-index support)
 - MySQL: plain `CREATE INDEX` with the condition dropped + a tracing warning
 
-#### 2.25.10 `#[rustango(default_related_name = "...")]` (PR #600)
-
+#### 2.25.10 `#[rustango(default_related_name = "...")]`
 **What**: Django `Meta.default_related_name` — the accessor name reverse-relation managers use when an FK / M2M field doesn't override it. Validated at compile time as snake_case ASCII.
 
 **Recipe**: `#[rustango(table = "post", default_related_name = "posts")]`. Stored on `ModelSchema::default_related_name`. Declarative-only today (rustango doesn't auto-emit reverse managers yet) — the metadata is the foundation for that work.
 
-#### 2.25.11 `#[rustango(base_manager_name = "...")]` (PR #601)
-
+#### 2.25.11 `#[rustango(base_manager_name = "...")]`
 **What**: Django `Meta.base_manager_name` — Manager subclass that `<instance>.<relation>_set` uses when resolving reverse-relation managers. Distinct from `default_manager_name` (what `Model.objects` returns at the class level).
 
 **Recipe**: `#[rustango(base_manager_name = "PostManagerExt")]`. Validated as a Rust identifier so it's safe to re-emit as code later. Same declarative-only posture as `default_related_name`.
 
-#### 2.25.12 `#[rustango(required_db_vendor = "...")]` (PR #602)
-
+#### 2.25.12 `#[rustango(required_db_vendor = "...")]`
 **What**: Django `Meta.required_db_vendor` — declares which DB backend the model is intended to run against. `manage check --deploy` walks every model and warns when the declared vendor doesn't match the active `pool.dialect().name()` — catches "I forgot to switch DATABASE_URL" at deploy time rather than the first runtime hit on a backend-specific feature.
 
 **Accepted values**: `postgres` (aliases: `postgresql`, `pg`) / `mysql` (alias: `mariadb`) / `sqlite` (alias: `sqlite3`). Macro normalizes to the canonical dialect name.
@@ -1176,8 +1189,7 @@ Run `manage check --deploy` against a SQLite pool:
           backend-specific features may fail
 ```
 
-#### 2.25.13 `#[rustango(required_db_features = "...")]` (PR #604)
-
+#### 2.25.13 `#[rustango(required_db_features = "...")]`
 **What**: Django `Meta.required_db_features` — finer-grained sibling of `required_db_vendor`. Lists capability tokens the model depends on (e.g. `"json_path"`, `"listen_notify"`, `"hstore"`, `"gist_index"`, `"window_functions"`). `manage check --deploy` walks every model and warns when the active `Dialect::supports(token)` returns `false`.
 
 **Tokens advertised by default impl** (portable across all three backends): `window_functions`, `recursive_cte`, `cte`, `json_extract`, `expression_index`, plus dialect-conditional `partial_index` + `returning`.
@@ -1206,8 +1218,7 @@ Composes with `required_db_vendor` — set both for fail-fast deploy validation:
 
 `manage check --deploy` on a SQLite pool produces one warning per unsupported token + one for the vendor mismatch.
 
-#### 2.25.14 `include = "..."` on `index_when` / `unique_when` (PR #605)
-
+#### 2.25.14 `include = "..."` on `index_when` / `unique_when`
 **What**: Django `Index(fields=..., include=[...])` covering-index parity. Optional sub-attr on both `index_when(...)` and `unique_when(...)`. Lists non-key columns that travel along with the index leaf so PG can serve queries entirely from the index without a heap visit (index-only scans).
 
 **Render shape**:
@@ -1234,8 +1245,7 @@ Composes with `required_db_vendor` — set both for fail-fast deploy validation:
 
 Reads `SELECT title, created_at FROM post WHERE status = 'published' AND deleted_at IS NULL` get index-only scans without touching the heap.
 
-#### 2.25.16 `#[rustango(order_with_respect_to = "...")]` (PR #610)
-
+#### 2.25.16 `#[rustango(order_with_respect_to = "...")]`
 **What**: Django `Meta.order_with_respect_to = "parent_fk"` — names the FK field this model's instances are ordered relative to. Django auto-generates a `_order` integer column + admin reordering UI when set.
 
 ```rust
