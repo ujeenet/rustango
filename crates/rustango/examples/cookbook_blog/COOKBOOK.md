@@ -39,6 +39,36 @@ quotes from a real, compiling, test-covered file.
 
 ## Chapter 1 — Project shape & manage commands
 
+Everything a project needs — scaffolding, migrations, users, config — runs
+through one CLI: `cargo run -- <verb>`. Here's the verb list (`cargo run -- --help`):
+
+```console
+$ cargo run -- --help
+rustango manage CLI — tenancy-aware dispatcher
+
+USAGE:
+  cargo run -- <verb> [args]
+
+TENANT MANAGEMENT:
+  create-tenant <slug> [--display-name <s>] [--mode schema|database] …
+  drop-tenant   <slug> [--confirm <slug>]        Soft-delete (data preserved).
+  purge-tenant  <slug> [--confirm <slug>]        Hard-delete: drops schema/DB.
+  list-tenants                                   Print every tenant.
+
+USER / OPERATOR MANAGEMENT:
+  create-operator <username> [--password <p> | --generate]
+  create-user <slug> <username> [--password <p>] [--superuser]
+  reset-password <slug> <username> [--password <p> | --generate]
+  set-superuser <slug> <username> [--on|--off]
+  …
+
+QUICK START:
+  wizard | init        Interactive setup — fresh project → working tenant +
+                       operator + superuser, one opt-in prompt at a time.
+```
+
+The rest of this chapter walks the verbs you'll reach for most.
+
 ### 1.1 `cargo rustango startproject` / `manage startapp`
 
 **What**: Scaffolder that emits the canonical Django-shape project layout.
@@ -47,9 +77,9 @@ quotes from a real, compiling, test-covered file.
 
 **API**: [`cargo-rustango`](../../../cargo-rustango/src/main.rs) for `startproject`; [`manage::startapp`](../../src/manage/scaffold.rs) for `startapp`.
 
-**Recipe**: this very project was scaffolded by hand to match the layout `cargo rustango new --template tenant` produces. v0.16's unified `Cli::new()` dispatcher means there is no `src/bin/manage.rs` and no second binary — `cargo run` is `runserver`, `cargo run -- <verb>` is everything else.
+**Recipe**: this project matches the layout `cargo rustango new --template tenant` produces. A single `Cli::new()` dispatcher means there's no separate `manage` binary — `cargo run` starts the server, and `cargo run -- <verb>` runs everything else.
 
-**Polished output (v0.28.3, #63)**: `manage startapp <name>` ships:
+**Generated starter app**: `manage startapp <name>` ships:
 
 - A **singularized starter model** — `startapp posts` produces `pub struct Post` on table `"post"`. Conservative trailing-`s` strip on names of length ≥ 5 (`comments → comment`, `users → user`); `news` / `address` / `bus` / short names stay untouched. Rename the struct or table literal freely.
 - An `admin(...)` config block (`list_display = "name, active, created_at"`, `search_fields = "name"`, `ordering = "-created_at"`) so the list view is usable out of the box.
@@ -135,7 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **What**: Default verb. Opens the pool, applies migrations, mounts the user's API router, serves on `RUSTANGO_BIND` (default `0.0.0.0:8080`). Tenancy variant defers to [`server::Builder`](../../src/server/mod.rs) which wires the apex/subdomain host split + operator console.
 
-**When**: Always — replaces hand-rolled axum wiring AND the second `manage` binary projects used to write.
+**When**: Always — this one entry point replaces hand-rolled axum wiring.
 
 **API**: [`manage::Cli::run`](../../src/manage.rs)
 
@@ -155,15 +185,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **Recipe**: `cargo run -- create-operator admin --password letmein` then `cargo run -- create-user acme alice --password hunter2 --superuser`.
 
-**First-user auto-superuser (v0.27.6)**: when `create-user <slug> <name>` runs and `rustango_users` for that tenant is empty, the new row is forced `is_superuser = true` regardless of `--superuser`. This avoids the cold-start trap where the first onboarded user lands on an admin index with an empty sidebar (no perms granted, no role assignments yet). A `note: auto-promoted because first user of tenant` line is emitted to stderr so onboarding scripts can detect the promotion.
+**First-user auto-superuser**: when `create-user <slug> <name>` runs and a tenant has no users yet, the new row is forced to `is_superuser = true` regardless of `--superuser`. This avoids the cold-start trap where the first user lands on an admin with an empty sidebar (no permissions or roles assigned yet). A `note: auto-promoted because first user of tenant` line is printed so onboarding scripts can detect it.
 
 **Verified by**: `tests/cookbook_chapter01_manage.rs::cli_dispatcher_recognises_create_operator_verb`
 
 ---
 
-### 1.6b Recovery + setup CLI verbs (v0.27.6+)
+### 1.6b Recovery + setup CLI verbs
 
-**What**: Six verbs the v0.16 unified `Cli` dispatches into `tenancy::manage::run` for password / superuser / pool maintenance.
+**What**: Six verbs for password / superuser / pool maintenance.
 
 | Verb | Purpose |
 |---|---|
@@ -196,11 +226,11 @@ cargo run -- prewarm-pools
 
 ---
 
-### 1.6c Dev-iteration verbs (v0.29 — #82, #84a, #61, #84b)
+### 1.6c Dev-iteration verbs
 
-**What**: Four verbs that close the dev-loop friction surfaced by
-the 2026-05 batch. None of them touch applied rows; each is safe to
-run unattended and idempotent or refuse-on-conflict.
+**What**: Four verbs that smooth the local dev loop. None of them
+touch already-applied migrations; each is safe to run unattended and is
+either idempotent or refuses on conflict.
 
 | Verb | Purpose |
 |---|---|
@@ -264,13 +294,13 @@ const EMBEDDED: &[rustango::migrate::Migration] =
 
 ### 1.8 Settings layering (`default.toml` → `<env>_settings.toml` → env vars)
 
-**What**: Tiered TOML config loader (#87, v0.29). Three layers, last writer wins:
+**What**: Tiered TOML config loader. Three layers, last writer wins:
 
 1. `config/default.toml` — required. Shared knobs across every environment.
 2. `config/<RUSTANGO_ENV>_settings.toml` — tier overlay (`dev_settings.toml`,
-   `staging_settings.toml`, `prod_settings.toml`). The legacy `<env>.toml`
-   shape (pre-v0.29) still loads when no `_settings` variant exists; the
-   `_settings` form wins when both are present.
+   `staging_settings.toml`, `prod_settings.toml`). A plain `<env>.toml`
+   (without the `_settings` suffix) also loads when no `_settings` variant
+   exists; the `_settings` form wins when both are present.
 3. `RUSTANGO__SECTION__KEY=value` env vars — final override. Double
    underscore is the path separator (`RUSTANGO__DATABASE__URL` overrides
    `[database] url`).
@@ -300,7 +330,7 @@ let feats = rustango::config::Settings::detected_features();
 // → ["postgres", "tenancy", "admin", "manage", "config", ...]
 ```
 
-**Wiring into `Cli` (v0.29)**:
+**Wiring into `Cli`**:
 
 ```rust
 // One-liner that loads via load_from_env() and applies the entire
