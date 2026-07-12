@@ -1469,6 +1469,19 @@ One comprehensive live test that provisions two tenants in schema
 mode, then exercises every resolver against the seeded registry.
 Run with `DATABASE_URL=... cargo test --test cookbook_chapter05_tenancy -- --test-threads=1`.
 
+```console
+$ DATABASE_URL=postgres://…/blog \
+    cargo test --test cookbook_chapter05_tenancy -- --test-threads=1
+
+running 1 test
+test provision_two_tenants_then_resolve_and_lazy_pool ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored
+```
+
+The admin RBAC and change-password recipes (§5.83–§5.84) are each
+covered by their own live browser test — see the **Verified by**
+pointers on those sections.
+
 * §5.66 `SubdomainResolver::new(apex)` — extracts `acme` from
   `acme.cookbook-test.local` then DB-loads the matching `Org`.
 * §5.68 `HeaderResolver::default()` — reads `X-Org` header slug.
@@ -1523,13 +1536,7 @@ test.
   → see [docs/manage.md "Custom user model"](../../../../docs/manage.md#custom-user-model-extra-columns-on-rustango_users)
     for the full step-by-step recipe.
 
-*Sub-sections 5.67 (PathPrefixResolver), 5.69 (PortResolver),
-5.72 (database-per-tenant via `--database-url`), 5.75 (per-tenant
-auth: Operator vs User scoping), 5.76 (org bootstrap migration
-templates) queued for Slice 5b.*
-
-### 5.78 `TenantPoolsConfig` — pool tuning (v0.27.7)
-
+### 5.78 `TenantPoolsConfig` — pool tuning
 **What**: Knobs on the database-mode pool builder. Pre-0.27.7 every tenant pool was `PgPoolOptions::new().max_connections(N)` and nothing else, leaving sqlx defaults to drive timeouts / lifetimes. Apps hitting slow upstreams (vault-resolved DSNs, distant databases) had no way to tune them without bypassing `TenantPools` entirely.
 
 **When**: Production tenants that get regular traffic and want sub-second first-request latency; deployments behind PG load balancers with `idle_in_transaction_session_timeout`; clouds with rotating IAM credentials.
@@ -1555,15 +1562,14 @@ let cfg = TenantPoolsConfig {
 let pools = TenantPools::with_config(registry_pool, cfg);
 ```
 
-Defaults preserve pre-0.27.7 behavior: `min_connections = 0`, `prewarm_active_tenants = false`. The `prewarm-pools` manage verb (§1.6b) runs the same warm-up loop one-shot.
+Defaults are conservative: `min_connections = 0`, `prewarm_active_tenants = false`. The `prewarm-pools` manage verb (§1.6b) runs the same warm-up loop one-shot.
 
 **Verified by**: `tests/pools_live.rs` + `pools::tests::*` unit tests.
 
 ---
 
-### 5.79 `RouteConfig` — configurable URL prefixes (v0.28.0)
-
-**What**: One struct that drives every framework-mounted URL prefix on the tenant admin (login, logout, admin, audit, static, brand). Defaults match the legacy `__login` / `__admin` / `__static__` / `__brand__` paths so v0.27 → v0.28 is a no-op upgrade. `RouteConfig::friendly()` flips them all to underscore-free shapes (`/login`, `/admin`, `/audit`, `/_static`, `/_brand`) for projects that prefer Django-style URLs.
+### 5.79 `RouteConfig` — configurable URL prefixes
+**What**: One struct that drives every framework-mounted URL prefix on the tenant admin (login, logout, admin, audit, static, brand). Defaults are the underscore-prefixed `__login` / `__admin` / `__static__` / `__brand__` paths. `RouteConfig::friendly()` flips them all to underscore-free shapes (`/login`, `/admin`, `/audit`, `/_static`, `/_brand`) for projects that prefer Django-style URLs.
 
 **When**: Apps that want public-facing tenant admins on clean paths instead of the framework's `__`-prefixed defaults; or apps hosting a tenant admin alongside their own routes that already use `/admin/...`.
 
@@ -1588,14 +1594,13 @@ rustango::server::Builder::new(api_router)
     .await?;
 ```
 
-Also exposes session TTLs (`tenant_session_ttl`, `operator_session_ttl`, `impersonation_ttl`) and the basic-auth realm string. The full URL builder `audit_full_url()` joins admin + audit prefixes for callers (`/admin/audit` for the v0.29+ friendly default, `/__admin/__audit` if you opt back into `RouteConfig::legacy()`).
+Also exposes session TTLs (`tenant_session_ttl`, `operator_session_ttl`, `impersonation_ttl`) and the basic-auth realm string. The full URL builder `audit_full_url()` joins admin + audit prefixes for callers (`/admin/audit` with the friendly default, `/__admin/__audit` with `RouteConfig::legacy()`).
 
 **Verified by**: `routes::tests::*` (4 unit tests covering defaults, friendly preset, joined audit URL, TTL defaults).
 
 ---
 
-### 5.80 Operator-as-superuser tenant impersonation (v0.27.8)
-
+### 5.80 Operator-as-superuser tenant impersonation
 **What**: From the operator console org-edit page (`/orgs/{slug}/edit`), an operator can click "Open admin as superuser →" to get an HMAC-signed cross-domain cookie that logs them into that tenant's admin with implicit superuser rights. No password reset, no shadow account. The tenant admin renders a sticky warning banner ("You are impersonating tenant `acme` as operator `admin` — [End impersonation]") on every page so the privileged context is visible at all times.
 
 **When**: Customer support — operator needs to reproduce a tenant-side bug; admin maintenance — fix a malformed model row in a tenant DB; onboarding — sanity-check a freshly-provisioned tenant before handing it over.
@@ -1613,8 +1618,7 @@ RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS=900   # 15 min
 
 ---
 
-### 5.81 Registry-scope filter on tenant admin (v0.27.7)
-
+### 5.81 Registry-scope filter on tenant admin
 **What**: A `tenant_mode()` Builder flag on `admin::Builder` that filters out registry-scoped models (Org, Operator, Permission registry, etc.) from the tenant-side admin sidebar and request resolver. Without it, a tenant superuser would see — and could route to — `Org` / `Operator` rows that live in the registry DB; the request would actually resolve those rows out of the tenant pool's `search_path` fallback, leaking cross-tenant data.
 
 **When**: Always — `server::Builder` sets it for you. Only call manually if you're hand-rolling the inner admin router (e.g. mounting the admin alongside an unusual host shape).
@@ -1627,8 +1631,7 @@ RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS=900   # 15 min
 
 ---
 
-### 5.82 `admin_prefix` template variable (v0.27.9)
-
+### 5.82 `admin_prefix` template variable
 **What**: Every admin Tera template gets `{{ admin_prefix }}` injected (default `/__admin`) so links inside `_sidebar.html` / `index.html` / `form.html` / `detail.html` / `list.html` / `audit_log.html` follow the admin URL chosen by `RouteConfig`. Pre-0.27.9 the templates had hardcoded `/__admin/...` strings that would 404 if the admin was mounted under a different prefix.
 
 **When**: Anyone using `RouteConfig::friendly()` or any custom `admin_url`. The framework keeps `/__admin` as the default so apps that don't override `RouteConfig` see no behavior change.
@@ -1641,9 +1644,8 @@ RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS=900   # 15 min
 
 ---
 
-### 5.83 Users / roles / permissions admin pages (v0.28.1)
-
-**What**: Five framework auth + RBAC tables exposed in the tenant admin: `rustango_users` (already had admin config), `rustango_roles` (already), `rustango_role_permissions`, `rustango_user_roles`, `rustango_user_permissions`. The three junction models picked up `admin(...)` config in v0.28.1 so list pages show useful columns instead of every field raw.
+### 5.83 Users / roles / permissions admin pages
+**What**: Five framework auth + RBAC tables exposed in the tenant admin: `rustango_users` (already had admin config), `rustango_roles` (already), `rustango_role_permissions`, `rustango_user_roles`, `rustango_user_permissions`. The three junction models carry `admin(...)` config so list pages show useful columns instead of every field raw.
 
 **When**: Operators want to inspect or edit role memberships, role-level codename grants, and per-user overrides without reaching for SQL or the `assign_role` / `grant_role_perm` / `set_user_perm` Rust APIs.
 
@@ -1667,12 +1669,11 @@ cargo run -- create-user acme alice --password hunter2
 
 **Verified by**: `tests/admin_user_roles_panel_live.rs::user_detail_page_renders_roles_and_effective_perms` (provisions a user with one role granting two codenames, one direct grant, one explicit denial; asserts the panel renders the role + effective grants and that the denial suppresses the role-granted codename); plus `tenancy::permissions::admin_config_tests` (asserts every junction model carries `admin(...)` and stays in `ModelScope::Tenant`).
 
-**Out of scope (v0.29 follow-ups)**: inline assign/revoke buttons on the user detail panel (currently read-only — manage via junction tables); `rustango_permissions` catalog as an admin page (it has no Rust `Model` today; adding one would diff against existing tenants' bootstrap snapshots — needs a schema-aware migration).
+**Out of scope**: inline assign/revoke buttons on the user detail panel (currently read-only — manage via junction tables); `rustango_permissions` catalog as an admin page (it has no Rust `Model` today; adding one would diff against existing tenants' bootstrap snapshots — needs a schema-aware migration).
 
 ---
 
-### 5.84 Self-serve change-password page + `--generate` (v0.28.2)
-
+### 5.84 Self-serve change-password page + `--generate`
 **What**: A self-serve change-password flow on the tenant admin (`/__change-password`) — the user enters their current password plus a new one and the framework verifies + rotates without operator involvement. Plus a `change-password` / `change-operator-password` CLI counterpart and a `--generate` flag on every password verb.
 
 **When**: Whenever the user remembers their current password (rotation, periodic refresh, switching from a generated bootstrap password). Operator-driven recovery for locked-out users still uses `reset-password` / `reset-operator-password`.
@@ -1709,9 +1710,11 @@ cargo run -- reset-password acme alice --generate
 - 3 live tests in `tests/manage_change_password_live.rs` (CLI round-trip, `--generate` prints + verifies, mutually-exclusive flags rejected).
 - 4 live tests in `tests/admin_change_password_ui_live.rs` (anonymous → 303 to login; authenticated GET renders form; POST with correct current rotates the hash; POST with wrong current shows error and leaves hash unchanged).
 
-**Out of scope (v0.29 follow-ups)**: operator-driven password reset on a tenant user via the operator console UI (the `reset-password` CLI verb already covers this path; UI sugar deferred); password strength enforcement at the form layer (the `passwords::strength_score` helper exists but isn't wired in).
+**Out of scope**: operator-driven password reset on a tenant user via the operator console UI (the `reset-password` CLI verb already covers this path; UI sugar deferred); password strength enforcement at the form layer (the `passwords::strength_score` helper exists but isn't wired in).
 
-**Shipped in v0.28.4**: `password_changed_at` column on `User` / `Operator` is stamped to `NOW()` on every password rotation path. The session payload now carries `iat` (issued-at); `validate_session` and `require_session` reject cookies whose `iat` is strictly less than `password_changed_at.timestamp()`. Pre-0.28.4 cookies stay parseable (`#[serde(default)]` on `iat` decodes as `0`) — they're invalidated by any future password change, which is the intended security posture. Verified by `tenant_console::tests::new_payload_stamps_iat_at_construction_time`, `tenant_console::tests::legacy_pre_v0_28_4_cookie_decodes_with_iat_zero`, and the live test `admin_change_password_ui_live::session_minted_before_password_rotation_is_rejected`.
+**Password rotation invalidates older sessions**: a `password_changed_at` column on `User` / `Operator` is stamped to `NOW()` on every password change. Session cookies carry an issued-at (`iat`) claim, and `validate_session` / `require_session` reject any cookie whose `iat` predates `password_changed_at` — so changing a password logs out every session minted before the change.
+
+**Verified by**: `tenant_console::tests::new_payload_stamps_iat_at_construction_time` and the live test `admin_change_password_ui_live::session_minted_before_password_rotation_is_rejected`.
 
 ## Chapter 6 — Auth + permissions
 
