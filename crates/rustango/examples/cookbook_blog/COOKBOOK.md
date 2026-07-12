@@ -1837,6 +1837,29 @@ serializer derive against the cookbook's `Author` model. Run with
 
 Two parts: in-process router smoke + a real-browser playwright session.
 
+**What it looks like.** These are live captures of the auto-admin
+served by the [`admin_demo`](../admin_demo) companion (a plain,
+non-tenanted admin so the pages render without tenant host-routing —
+see [screenshots/README.md](screenshots/README.md)). The same widgets
+back the cookbook's own admin.
+
+The model index groups every registered model by app and lists a
+recent-actions log:
+
+![Admin dashboard — models grouped by app, recent actions](screenshots/ch08-admin-dashboard.png)
+
+A model's `admin(...)` block drives the list view — `list_display`
+columns, a `list_filter` sidebar, `search_fields` with help text, bulk
+actions, and pagination:
+
+![Post list view — columns, filters, search, bulk actions, pagination](screenshots/ch08-post-list.png)
+
+The detail page renders the record, an inline child table
+(`register_admin_inline!` — the post's comments), and an audit trail
+with a per-write JSON diff:
+
+![Post detail — inline comments and audit trail](screenshots/ch08-post-edit.png)
+
 ### Part A — in-process smoke (no socket, no browser)
 
 `tests/cookbook_chapter08_admin.rs` boots `admin::Builder::new(pool)
@@ -1871,13 +1894,11 @@ test comes to a real browser session without playwright in the loop.
 
 Run: `DATABASE_URL=... cargo test --test cookbook_chapter08b_browser_forms -- --test-threads=1`.
 
-**Framework bug fixed during this slice**: `forms::collect_values`
-(used by the admin's hand-rolled create handler) demanded every
-non-PK auto field — same shape as the Chapter 7 ModelFormFor bug.
-Posting an Author through the admin returned "required field
-`joined_at` was missing from the form" because `auto_now_add` columns
-should be skipped server-side. Added `field.auto` to the auto-skip
-filter alongside the explicit `skip` list.
+> **Note**: the admin's create/edit handler skips auto-populated
+> fields server-side — `auto_now_add` timestamps and `Auto<T>` PKs
+> are filled by the database, so posting a new Author through the
+> admin never asks for `joined_at`. (Same rule as `ModelForm::parse`
+> in Chapter 7.)
 
 ### Part D — real-browser session (playwright MCP)
 
@@ -1910,22 +1931,14 @@ Verified browser-side via playwright MCP:
   models), `contenttypes` (rustango_content_types), `tenancy`
   (rustango_users + friends).
 
-**Surfaced gap**: tenant admin returns a JSON 500 (`relation
+**Caveat**: the tenant admin returns a JSON 500 (`relation
 "cookbook_author" does not exist`) when a tenant-scoped model's table
 isn't materialized in the tenant's schema. The cookbook's models live
 in inventory but no `make-migrations` has been run for them, so the
-admin shows them in the index then errors on browse. A friendlier
-"table not yet migrated — run `migrate-tenants`" message would close
-this UX gap. Tracked in Gaps section below.
+admin lists them on the index then errors on browse — run
+`migrate-tenants` first to materialize the tables.
 
-*Sub-sections 8.102 (detail view), 8.104 (FK display widget),
-8.105 (FK search widget), 8.106 (M2M widget), 8.107 (JSONB editor),
-8.108 (generic-FK link rendering), 8.109 (basic-auth wrap),
-8.110 (custom actions), 8.111 (inline editing) queued for Slice 8b
-which would need a tenant-scoped cookbook migration applied.*
-
-### 8.112 `register_admin_inline!` — read-only inline display (#50 slice 1, PR #237)
-
+### 8.112 `register_admin_inline!` — read-only inline display
 **What**: Render N child rows under a parent's admin detail page,
 keyed on a single FK column. Each row links into the child's admin
 detail. Foundation for the editable variant in 8.113.
@@ -1949,8 +1962,7 @@ supported — each registration produces a separate panel.
 
 **Verified by**: `tests/admin_inlines_live.rs`.
 
-### 8.113 `register_admin_inline!` — editable inlines + FormSet POST (#50 slice 2, PR #238)
-
+### 8.113 `register_admin_inline!` — editable inlines + FormSet POST
 **What**: Same registration shape as 8.112; rows on the **edit** page
 become editable inputs. `extra` blank rows let the operator add new
 children, each existing row gets a hidden PK + a `DELETE` checkbox.
@@ -1974,8 +1986,7 @@ The full Django FormSet shape is rendered: `<prefix>-TOTAL_FORMS`,
 
 **Verified by**: `tests/admin_inlines_edit_live.rs`.
 
-### 8.114 `register_admin_inline_generic!` — generic admin inlines (#242 + #243, epic #246)
-
+### 8.114 `register_admin_inline_generic!` — generic admin inlines
 **What**: Generic variant of 8.112/8.113. Keys on a
 `(content_type_id, object_pk)` pair instead of a single FK column —
 Django's `GenericTabularInline` / `GenericStackedInline` shape.
@@ -2005,8 +2016,7 @@ row to a different parent.
 `tests/admin_inline_generic_edit_live.rs` (editable + reparenting-
 attack pin).
 
-### 8.115 GFK `<select>` picker on the standalone create/edit form (#244)
-
+### 8.115 GFK `<select>` picker on the standalone create/edit form
 **What**: When a model carries `#[rustango(generic_fk(...))]`, its
 standalone `/__admin/<table>/new` and `/__admin/<table>/<pk>/edit`
 pages render the `ct_column` as a `<select>` populated from
@@ -2020,8 +2030,7 @@ integer CT ids.
 
 **Verified by**: `tests/admin_gfk_picker_live.rs`.
 
-### 8.116 Full GFK demo (#245)
-
+### 8.116 Full GFK demo
 The complete polymorphic-relations surface — declaration, accessor,
 setter, list-view link, both inline variants, and the picker — is
 exercised end-to-end in [`examples/gfk_demo`](../gfk_demo/). Run
