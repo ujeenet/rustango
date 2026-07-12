@@ -639,11 +639,9 @@ friendly per-field errors at validation time instead, use the
 serializer's `validate_unique_together` (see Chapter 7 — Forms &
 serializers).
 
-**Also during this slice** — the legacy container-level
-`#[rustango(index = "col1, col2", unique, name = "...")]` syntax was
-found unparseable (the trailing-flag block didn't compose under the
-syn `parse_nested_meta` API). Removed the broken trailing-flag block;
-`index = "..."` is now bare-only (composite, non-unique).
+> **Note**: `#[rustango(index = "col1, col2")]` declares a composite,
+> *non-unique* index. For a unique composite constraint use
+> `unique_together` (above) — not trailing flags on `index`.
 
 ---
 
@@ -1427,8 +1425,24 @@ let email: Option<String> = User::objects()
 
 ## Chapter 4 — Migrations
 
-5 live recipes against docker PG verifying the migration lifecycle.
+5 live recipes against a live database verifying the migration lifecycle.
 Run with `DATABASE_URL=... cargo test --test cookbook_chapter04_migrations -- --test-threads=1`.
+
+The suite applies migrations, rolls them back, and round-trips every
+operation shape through JSON:
+
+```console
+$ DATABASE_URL=postgres://…/blog \
+    cargo test --test cookbook_chapter04_migrations -- --test-threads=1
+
+running 5 tests
+test apply_then_unapply_round_trip ... ok
+test migration_serde_round_trips_schema_and_data_ops ... ok
+test embedded_migrations_const_is_loaded ... ok
+test alter_column_ops_serialize_with_external_tag ... ok
+test composite_fk_ops_serialize_round_trip ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored
+```
 
 * §4.51 / 4.53 / 4.54 / 4.61 — `migrate(&pool, &dir)` applies pending,
   `unapply(&pool, &dir, name)` rolls back. Verifies schema catalog
@@ -1446,12 +1460,8 @@ Run with `DATABASE_URL=... cargo test --test cookbook_chapter04_migrations -- --
   `AlterColumnDefault` (and friends) round-trip via the same
   externally-tagged JSON. → `alter_column_ops_serialize_with_external_tag`
 * §4.64 — `AddCompositeFk { table, name, to, from, on }` /
-  `DropCompositeFk { table, name }` (v0.15-F.5b) round-trip.
+  `DropCompositeFk { table, name }` round-trip.
   → `composite_fk_ops_serialize_round_trip`
-
-*Sub-sections 4.51b (make_migrations from inventory diff),
-4.52 (per-app), 4.60 (rename), 4.65 (per-app ledger) queued for
-Slice 4b.*
 
 ## Chapter 5 — Multi-tenancy
 
