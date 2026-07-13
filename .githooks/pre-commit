@@ -11,6 +11,7 @@
 #   PRECOMMIT_SKIP_SECRETS=1 skip secret-pattern scan
 #   PRECOMMIT_SKIP_DEBRIS=1  skip stray-debugger scan
 #   PRECOMMIT_TYPOS=1        opt-in `typos` if installed
+#   PRECOMMIT_TRIVY=1        opt-in trivy secret+misconfig scan if installed
 #
 # Install once per clone: `bin/install-hooks.sh` (or
 # `git config core.hooksPath .githooks`).
@@ -123,6 +124,21 @@ if [ "${PRECOMMIT_TYPOS:-0}" = "1" ] && command -v typos >/dev/null 2>&1; then
   if ! typos --quiet "${STAGED_FILES[@]}"; then
     red "[pre-commit] typos check failed"
     yellow "[pre-commit] auto-fix with: typos -w"
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------- trivy (opt-in)
+# Fast secret + IaC/misconfiguration scan. The heavier vulnerability
+# (Cargo.lock CVE) scan lives in pre-push (PREPUSH_TRIVY=1) and CI, so
+# commits stay snappy. `target/` is skipped so build artifacts don't
+# balloon the scan.
+if [ "${PRECOMMIT_TRIVY:-0}" = "1" ] && command -v trivy >/dev/null 2>&1; then
+  gray "[pre-commit] trivy fs --scanners secret,misconfig"
+  if ! trivy fs --scanners secret,misconfig --severity HIGH,CRITICAL \
+        --skip-dirs target --exit-code 1 --no-progress --quiet . 2>&1 | tail -20; then
+    red "[pre-commit] trivy found secrets or misconfigurations"
+    yellow "[pre-commit] triage the finding, or override with: git commit --no-verify"
     exit 1
   fi
 fi

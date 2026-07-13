@@ -9,6 +9,7 @@
 #   PREPUSH_SKIP_CLIPPY=1    skip cargo clippy
 #   PREPUSH_SKIP_TESTS=1     skip cargo test --lib
 #   PREPUSH_DENY=1           opt-in cargo deny check (heaviest)
+#   PREPUSH_TRIVY=1          opt-in trivy vulnerability scan if installed
 #
 # Install once per clone: `bin/install-hooks.sh`.
 
@@ -62,6 +63,19 @@ if [ "${PREPUSH_DENY:-0}" = "1" ] && command -v cargo-deny >/dev/null 2>&1; then
   gray "[pre-push] cargo deny check"
   if ! cargo deny check 2>&1 | tail -10; then
     red "[pre-push] cargo deny check failed"
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------- trivy vuln (opt-in)
+# Cargo.lock vulnerability (CVE) scan — the same gate CI enforces on
+# every PR. Blocks on HIGH/CRITICAL with a fix available.
+if [ "${PREPUSH_TRIVY:-0}" = "1" ] && command -v trivy >/dev/null 2>&1; then
+  gray "[pre-push] trivy fs --scanners vuln (Cargo.lock CVEs)"
+  if ! trivy fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+        --skip-dirs target --exit-code 1 --no-progress --quiet . 2>&1 | tail -20; then
+    red "[pre-push] trivy found HIGH/CRITICAL vulnerabilities"
+    yellow "[pre-push] triage/upgrade the dependency, or override with: PREPUSH_TRIVY=0 git push"
     exit 1
   fi
 fi
