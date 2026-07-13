@@ -8,7 +8,7 @@ response to assert on. Add transaction-rollback isolation for database tests and
 a set of response assertions, and you have Django's test client + `TestCase`, in
 Rust.
 
-[![Testing in rustango: TestClient wraps your Router and sends in-process requests through the real handler stack; the TestResponse exposes status, text, and JSON to assert on — no socket, no server](img/testing.png)](img/testing.png)
+[![Testing in Rustango: TestClient wraps your Router and sends in-process requests through the real handler stack; the TestResponse exposes status, text, and JSON to assert on — no socket, no server](img/testing.png)](img/testing.png)
 
 > **New to a term here?** *router*, *handler*, *fixture*, *rollback* — see the
 > [glossary](glossary.md).

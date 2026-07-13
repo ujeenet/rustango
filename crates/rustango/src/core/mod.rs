@@ -26,9 +26,10 @@ pub use expr::{BinOp, CaseBranch, Expr, JsonPathStep, ScalarFn, VectorMetric, F}
 pub use field_type::{ArrayElem, FieldType, RangeElem};
 pub use query::{
     AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery, ColumnFilter,
-    CompoundBranch, ConflictClause, CountQuery, CtFilter, DeleteQuery, DistinctMode, Filter,
-    InsertQuery, Join, JoinKind, LockMode, NullsOrder, Op, OrderClause, OrderItem, RelAggKind,
-    RelCorrelation, SearchClause, SelectQuery, SetOp, SubqueryJoin, UpdateQuery, WhereExpr,
+    CompoundBranch, ConflictClause, CountQuery, CtFilter, DeleteQuery, DerivedSource, DistinctMode,
+    Filter, InsertQuery, Join, JoinKind, LockMode, NullsOrder, Op, OrderClause, OrderItem,
+    RelAggKind, RelCorrelation, SearchClause, SelectQuery, SetOp, SubqueryJoin, UpdateQuery,
+    WhereExpr,
 };
 pub use schema::{
     infer_app_label_from_module_path, AdminConfig, CheckConstraint, CompositeFkRelation,

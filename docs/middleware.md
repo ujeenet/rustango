@@ -8,7 +8,7 @@ makes writing your own a few lines. If you come from Django, this is the
 `MIDDLEWARE` list; from Express, it's `app.use()`; from Laravel, it's the HTTP
 kernel — same idea, attached to your router.
 
-[![Middleware in rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](img/middleware.png)](img/middleware.png)
+[![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](img/middleware.png)](img/middleware.png)
 
 > **Source:** middleware is built on [`tower::Layer`](https://docs.rs/tower) +
 > `axum::middleware::from_fn`. Built-ins live across `rustango::{access_log,
@@ -356,8 +356,10 @@ In Tera templates, `{{ csrf_token }}` gives the raw token and `{{ csrf_input }}`
 a ready-made hidden `<input name="_csrf">` — drop one in every form. Override
 the cookie/header names or the `Secure` flag with `csrf::with_config(CsrfConfig)`;
 for SPA setups, add `.with_trusted_origins([...])` to enable the Origin-header
-defense-in-depth check on top of the token. The auto-admin enables CSRF on
-every mutation with no opt-out.
+defense-in-depth check on top of the token. For append-only collector endpoints
+hit via `navigator.sendBeacon` (e.g. analytics) that can't send a token header,
+`CsrfConfig::exempt_prefix("/path")` skips enforcement for a narrow path prefix.
+The auto-admin enables CSRF on every mutation with no opt-out.
 
 ---
 

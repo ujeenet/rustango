@@ -118,6 +118,35 @@ pub struct CsrfConfig {
     /// attacker steals the cookie token, they can't submit from a
     /// different origin.
     pub trusted_origins: Vec<String>,
+    /// URL path prefixes exempt from CSRF enforcement on unsafe
+    /// methods. Default `[]`. Intended for `navigator.sendBeacon`
+    /// collector endpoints (e.g. analytics), which cannot set an
+    /// `X-CSRF-Token` header and — when the page is served from a CDN
+    /// cache that strips `Set-Cookie` — may have no CSRF cookie at all.
+    /// Each entry is matched with `req.uri().path().starts_with(prefix)`,
+    /// so keep prefixes narrow and only exempt append-only endpoints
+    /// that read/write no auth state.
+    pub exempt_prefixes: Vec<String>,
+    /// Enforce CSRF on the HTTP `QUERY` method (RFC 10008). Default
+    /// `false` — QUERY is a *safe* method, browsers can't form-submit it,
+    /// and a cross-origin `fetch` with method `QUERY` is never a
+    /// CORS-safelisted "simple request", so it always triggers a preflight
+    /// and carries no ambient-credential CSRF vector. It is therefore
+    /// exempt like GET/HEAD/OPTIONS/TRACE. Set `true` for pure
+    /// defense-in-depth if you want a token required on QUERY anyway.
+    ///
+    /// The default exemption stays safe only while two things hold — both
+    /// true out of the box:
+    /// - **QUERY handlers are side-effect-free.** RFC 10008 defines QUERY
+    ///   as safe + idempotent; mount only read-only handlers on it (a
+    ///   mutation on QUERY would have no token check under the default).
+    /// - **`QUERY` is never added to the method-override allow-list**
+    ///   ([`crate::method_override`], default `[PUT, PATCH, DELETE]`).
+    ///   Allowing a form POST to be rewritten to QUERY would manufacture
+    ///   the ambient-credential request the exemption assumes can't exist.
+    ///
+    /// If you can't guarantee both, set this to `true`.
+    pub require_csrf_on_query: bool,
 }
 
 impl Default for CsrfConfig {
@@ -127,6 +156,8 @@ impl Default for CsrfConfig {
             header_name: CSRF_HEADER.to_owned(),
             secure: true,
             trusted_origins: Vec::new(),
+            exempt_prefixes: Vec::new(),
+            require_csrf_on_query: false,
         }
     }
 }
@@ -161,6 +192,18 @@ impl CsrfConfig {
         S: Into<String>,
     {
         self.trusted_origins = origins.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Builder — exempt a URL path prefix from CSRF enforcement on
+    /// unsafe methods. For beacon/collector endpoints posted via
+    /// `navigator.sendBeacon` (which cannot set a custom header) and
+    /// reachable from CDN-cached pages that never received a CSRF
+    /// cookie. Only exempt append-only endpoints that touch no auth
+    /// state; keep the prefix narrow.
+    #[must_use]
+    pub fn exempt_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.exempt_prefixes.push(prefix.into());
         self
     }
 }
@@ -297,8 +340,11 @@ where
         Box::pin(async move {
             let cookie_value = read_csrf_cookie(&req, &cfg.cookie_name);
 
-            // Enforce on unsafe methods.
-            let req = if !is_safe_method(req.method()) {
+            // Enforce on unsafe methods — unless the path is exempt
+            // (beacon/collector endpoints; see `CsrfConfig::exempt_prefix`).
+            let req = if !method_is_csrf_exempt(req.method(), &cfg)
+                && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes)
+            {
                 // Origin-header defense-in-depth. Skipped when
                 // `trusted_origins` is empty (back-compat default).
                 if !origin_allowed(&req, &cfg.trusted_origins) {
@@ -381,11 +427,26 @@ where
 /// payloads in memory just to verify a token.
 const BODY_BUFFER_LIMIT: usize = 64 * 1024;
 
+/// `true` when `path` starts with any configured exempt prefix. Used to
+/// skip CSRF enforcement for beacon/collector endpoints.
+fn path_is_exempt(path: &str, prefixes: &[String]) -> bool {
+    prefixes.iter().any(|p| path.starts_with(p.as_str()))
+}
+
 fn is_safe_method(m: &Method) -> bool {
     matches!(
         *m,
         Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
     )
+}
+
+/// Whether `m` is exempt from CSRF token enforcement. The classic safe
+/// methods always are; the RFC 10008 `QUERY` method is too (a safe method
+/// with no browser CSRF vector) unless [`CsrfConfig::require_csrf_on_query`]
+/// opts it back in. `QUERY` is matched by name so this stays independent
+/// of the `admin`-gated `http_query` module.
+fn method_is_csrf_exempt(m: &Method, cfg: &CsrfConfig) -> bool {
+    is_safe_method(m) || (!cfg.require_csrf_on_query && m.as_str() == "QUERY")
 }
 
 fn read_csrf_cookie(req: &Request<Body>, name: &str) -> Option<String> {
@@ -702,6 +763,48 @@ mod tests {
         assert!(!is_safe_method(&Method::POST));
         assert!(!is_safe_method(&Method::PUT));
         assert!(!is_safe_method(&Method::DELETE));
+    }
+
+    #[test]
+    fn query_method_is_csrf_exempt_by_default() {
+        let query = Method::from_bytes(b"QUERY").unwrap();
+        let cfg = CsrfConfig::default();
+        // QUERY exempt by default (safe method, no browser CSRF vector)…
+        assert!(method_is_csrf_exempt(&query, &cfg));
+        // …but still not a mutating method like POST.
+        assert!(!method_is_csrf_exempt(&Method::POST, &cfg));
+    }
+
+    #[test]
+    fn require_csrf_on_query_opts_query_back_in() {
+        let query = Method::from_bytes(b"QUERY").unwrap();
+        let cfg = CsrfConfig {
+            require_csrf_on_query: true,
+            ..CsrfConfig::default()
+        };
+        assert!(!method_is_csrf_exempt(&query, &cfg));
+        // Classic safe methods are unaffected by the knob.
+        assert!(method_is_csrf_exempt(&Method::GET, &cfg));
+    }
+
+    #[test]
+    fn exempt_prefix_matches_only_configured_paths() {
+        let prefixes = vec!["/__cms__/collect".to_owned()];
+        // Exact + sub-path match (prefix semantics).
+        assert!(path_is_exempt("/__cms__/collect", &prefixes));
+        assert!(path_is_exempt("/__cms__/collect/extra", &prefixes));
+        // Unrelated paths still enforced.
+        assert!(!path_is_exempt("/__cms__/other", &prefixes));
+        assert!(!path_is_exempt("/forms/submit/1", &prefixes));
+        assert!(!path_is_exempt("/", &prefixes));
+        // Empty config exempts nothing (back-compat default).
+        assert!(!path_is_exempt("/__cms__/collect", &[]));
+    }
+
+    #[test]
+    fn exempt_prefix_builder_appends() {
+        let cfg = CsrfConfig::default().exempt_prefix("/__cms__/collect");
+        assert_eq!(cfg.exempt_prefixes, vec!["/__cms__/collect".to_owned()]);
     }
 
     #[test]

@@ -131,6 +131,42 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # Trivy security scan — the non-bypassable "detect vulnerabilities
+  # before releases" gate. Complements `deny` (RustSec advisories) with
+  # a broader vuln DB (GHSA), plus committed-secret and IaC/misconfig
+  # scanning. The git hooks run the same checks opt-in locally
+  # (PRECOMMIT_TRIVY / PREPUSH_TRIVY). Vulns + secrets block on
+  # HIGH/CRITICAL (fixable only); misconfig is report-only so a
+  # pre-existing finding never silently blocks a release.
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sudo sh -s -- -b /usr/local/bin
+          trivy --version
+      - name: Vulnerabilities + secrets (blocking)
+        run: |
+          trivy fs \
+            --scanners vuln,secret \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --skip-dirs target \
+            --no-progress \
+            .
+      - name: Misconfigurations (report-only)
+        run: |
+          trivy fs \
+            --scanners misconfig \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 \
+            --skip-dirs target \
+            --no-progress \
+            .
+
   # v0.40 tri-dialect litmus — proves a non-PG build of rustango with
   # tenancy still compiles. Catches regressions where PG-only types,
   # bind syntax, or feature wiring leak into the bi/tri-dialect paths.
@@ -483,6 +519,16 @@ jobs:
             migrate: true
           - example: orm_cookbook
             migrate: false
+          # The 16-chapter COOKBOOK.md example. Chapters manage their own
+          # DB setup (reset/migrate per test), so migrate: false like
+          # orm_cookbook. Gated here so it can't silently bit-rot (#1124).
+          # `--test-threads=1`: the chapters create/reset tables in the
+          # shared `public` schema, so they must run serially (as every
+          # chapter's doc comment already documents) — parallel DDL races
+          # on `pg_class`/`pg_type`.
+          - example: cookbook_blog
+            migrate: false
+            test_args: "-- --test-threads=1"
           - example: admin_demo
             migrate: true
           # Authentication deep-dive docs (docs/auth-*.md). `migrate: false` for
@@ -521,4 +567,4 @@ jobs:
         run: cargo run -- migrate
       - name: Test
         working-directory: crates/rustango/examples/${{ matrix.example }}
-        run: cargo test
+        run: cargo test ${{ matrix.test_args }}

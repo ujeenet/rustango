@@ -859,24 +859,6 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
             continue;
         }
 
-        let method_filter = match view.method {
-            Method::GET => MethodFilter::GET,
-            Method::POST => MethodFilter::POST,
-            Method::PUT => MethodFilter::PUT,
-            Method::DELETE => MethodFilter::DELETE,
-            Method::PATCH => MethodFilter::PATCH,
-            ref other => {
-                tracing::warn!(
-                    target: "rustango::admin",
-                    table = %view.table,
-                    suffix = %view.suffix,
-                    method = ?other,
-                    "custom admin view declared with an unsupported HTTP method — defaulting to GET"
-                );
-                MethodFilter::GET
-            }
-        };
-
         let table = view.table;
         let suffix = view.suffix.trim_start_matches('/');
         let path = format!("/{table}/{suffix}");
@@ -894,7 +876,33 @@ fn mount_custom_views(mut router: Router, state: AppState) -> Router {
             async move { handler(pool, req).await }
         };
 
-        router = router.route(&path, on(method_filter, mounted_handler));
+        // RFC 10008 QUERY can't be expressed as an axum `MethodFilter`
+        // (#1112), so route it through the `http_query` shim; every other
+        // method maps to a `MethodFilter` as before.
+        let route = if view.method.as_str() == "QUERY" {
+            crate::http_query::query(mounted_handler)
+        } else {
+            let method_filter = match view.method {
+                Method::GET => MethodFilter::GET,
+                Method::POST => MethodFilter::POST,
+                Method::PUT => MethodFilter::PUT,
+                Method::DELETE => MethodFilter::DELETE,
+                Method::PATCH => MethodFilter::PATCH,
+                ref other => {
+                    tracing::warn!(
+                        target: "rustango::admin",
+                        table = %view.table,
+                        suffix = %view.suffix,
+                        method = ?other,
+                        "custom admin view declared with an unsupported HTTP method — defaulting to GET"
+                    );
+                    MethodFilter::GET
+                }
+            };
+            on(method_filter, mounted_handler)
+        };
+
+        router = router.route(&path, route);
     }
 
     router

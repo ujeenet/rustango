@@ -12,6 +12,11 @@
 //!
 //! Requests without the header pass straight through unmodified.
 //!
+//! Note: the RFC 10008 `QUERY` method needs no `Idempotency-Key` — QUERY
+//! is idempotent by definition, so a retried QUERY is inherently safe.
+//! This middleware defaults to the mutating methods (POST/PUT/PATCH/DELETE)
+//! and deliberately does not cover QUERY.
+//!
 //! ## Quick start
 //!
 //! ```ignore

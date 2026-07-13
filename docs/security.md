@@ -220,6 +220,8 @@ let app = Router::new()
 
 `csrf::layer()` builds the layer with sensible defaults; `csrf::with_config(CsrfConfig)` lets you override the cookie/header names and the `Secure` flag. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` gives you a ready-made hidden `<input>` — drop one inside every form. It uses the double-submit cookie pattern: on unsafe methods (POST, PUT, PATCH, DELETE) the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
 
+**Exempting collector endpoints.** `CsrfConfig::exempt_prefix("/path")` (repeatable) skips CSRF enforcement for unsafe methods on requests whose path starts with the given prefix. This is for append-only, no-auth-state endpoints hit via `navigator.sendBeacon` — e.g. an analytics collector — which can't set an `X-CSRF-Token` header and, when the page is served from a CDN cache that strips `Set-Cookie`, may carry no CSRF cookie at all. Keep prefixes narrow and never exempt anything that reads or writes auth state.
+
 The auto-admin enables CSRF on every mutation by default, and there is no way to opt out.
 
 ---
@@ -644,19 +646,19 @@ For checks beyond what ships, extend with custom code in your `manage` binary be
 
 ## What's NOT yet shipped
 
-The framework comparison roadmap (memory:`framework-comparison-2026-05-02.md`) flags these as future work:
+A couple of end-to-end flows still need gluing together from the primitives below:
 
-- **OAuth2 social login** (Google, GitHub, etc.) — Tier 2
-- **Password reset + email verification end-to-end flow** (helpers exist; no built-in token+email+view+validate cycle)
-- **PII redaction of request body / headers** in access_log
+- **Password reset + email verification** — the token issue/verify helpers exist (`auth_flows::confirm_password_reset_pool`, plus email-verification round-trips) and the email pipeline ships separately, but there's no single prebuilt view + email + validate cycle wired for you.
+- **PII redaction of request body / headers** in `access_log` — field-level log redaction exists (see [Keeping secrets out of your logs](#keeping-secrets-out-of-your-logs)), but not automatic scrubbing of the request body or headers.
 
-Already shipped (don't reach for these on the roadmap):
+Already shipped (don't reach for a workaround):
 
-- **Per-account lockout** — `rustango::account_lockout::Lockout` (cache-backed; `is_locked` / `record_failure` / `clear`, configurable `max_attempts` + `lockout_duration`)
-- **CSP report endpoint** — `security_headers::csp_report_router(path)` + `SecurityHeadersLayer::csp_report_uri(uri)`
-- **Distributed rate limiting** — `rate_limit_cache::CacheRateLimitLayer` (see [Rate limiting requests](#rate-limiting-requests))
+- **OAuth2 / OIDC social login** — `oauth2::providers` ships Google, GitHub, Microsoft, GitLab, and Discord helpers (plus `OAuth2Provider::from_discovery` for any OIDC provider), and `oauth2::router::oauth2_router` mounts the login + callback routes, creates the user record, and sets the session cookie.
+- **Per-account lockout** — `rustango::account_lockout::Lockout` (cache-backed; `is_locked` / `record_failure` / `clear`, configurable `max_attempts` + `lockout_duration`).
+- **CSP report endpoint** — `security_headers::csp_report_router(path)` + `SecurityHeadersLayer::csp_report_uri(uri)`.
+- **Distributed rate limiting** — `rate_limit_cache::CacheRateLimitLayer` (see [Rate limiting requests](#rate-limiting-requests)).
 
-Until the unshipped items land, glue them yourself using the primitives above (`signed_url::sign` for password reset tokens, etc.).
+Until the unshipped flows land, glue them from the primitives above (`signed_url::sign` for password-reset tokens, the email pipeline for delivery, etc.).
 
 ---
 

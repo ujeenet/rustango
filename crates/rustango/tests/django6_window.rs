@@ -19,12 +19,13 @@
 //!   `.aggregate().group_by(<every projected column>)` shape —
 //!   `.values(cols)` + window-only annotate is rejected with
 //!   `QueryError::ValuesRequiresAggregate`.
-//! - A windowed query cannot be re-embedded as a subquery source
-//!   (windows compile to `AggregateQuery`; `join_sub` takes
-//!   `SelectQuery`), so Django's `qs.annotate(rank=Window(...))` then
-//!   `.filter(rank__lte=N)` outer-wrap has no direct equivalent —
-//!   `join_lateral` is the workaround (see
-//!   `check_top_n_per_group_via_lateral`).
+//! - A windowed query can now be re-embedded as a subquery source (#1035):
+//!   `join_sub` / `left_join_sub` accept an `AggregateQuery` (what a window
+//!   compiles to) via `impl Into<DerivedSource>`, so Django's
+//!   `qs.annotate(rank=Window(...))` then `.filter(rank__lte=N)` outer-wrap
+//!   has a direct equivalent — see
+//!   `subquery_join_sqlite_live::window_derived_table_yields_top_n_per_group`.
+//!   `join_lateral` remains an alternative (PG/MySQL only).
 
 #[cfg(any(feature = "postgres", feature = "sqlite", feature = "mysql"))]
 mod scenarios {

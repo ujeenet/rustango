@@ -6,7 +6,10 @@
 //! 1. [`CachePageLayer`] — a tower layer that caches successful GET
 //!    responses under a key derived from `(method, path, Vary-on
 //!    header values)`. Subsequent matching requests bypass the inner
-//!    service and return the cached response.
+//!    service and return the cached response. RFC 10008 `QUERY`
+//!    responses are cacheable too — opt in with
+//!    [`CachePageLayer::cache_query`], which folds a digest of the
+//!    request body into the key.
 //! 2. [`CacheControl`] — fluent builder for the `Cache-Control`
 //!    header (`max_age`, `public`, `private`, `no_cache`, `no_store`,
 //!    `must_revalidate`).
@@ -37,9 +40,13 @@
 //!
 //! ## Semantics
 //!
-//! - **GET-only.** POST / PUT / PATCH / DELETE / HEAD bypass the
-//!   cache (mutating methods invalidate semantics; HEAD is too rare
-//!   to be worth the body-stripping path).
+//! - **GET, and QUERY when opted in.** POST / PUT / PATCH / DELETE /
+//!   HEAD bypass the cache (mutating methods invalidate semantics; HEAD
+//!   is too rare to be worth the body-stripping path). RFC 10008 `QUERY`
+//!   is cached only when [`CachePageLayer::cache_query`] is enabled;
+//!   those responses are forced `private` so shared caches (which can't
+//!   key on the request body) never mis-serve them, and a QUERY body
+//!   over the 1 MiB cacheable cap gets `413`.
 //! - **Status 200-only.** Errors / redirects / 304s aren't cached so
 //!   transient failures don't poison the cache.
 //! - **`Cache-Control: no-store`** on the response disables caching
@@ -91,6 +98,7 @@ pub struct CachePageLayer {
     timeout: Duration,
     key_prefix: String,
     vary_on: Vec<HeaderName>,
+    cache_query: bool,
 }
 
 impl CachePageLayer {
@@ -103,6 +111,7 @@ impl CachePageLayer {
             timeout: Duration::from_secs(60),
             key_prefix: "rustango.cache_page".to_owned(),
             vary_on: Vec::new(),
+            cache_query: false,
         }
     }
 
@@ -144,6 +153,25 @@ impl CachePageLayer {
         }
         self
     }
+
+    /// Opt into caching RFC 10008 `QUERY` requests (default `false`).
+    ///
+    /// QUERY is safe + idempotent and its response is cacheable, keyed on
+    /// the request body (the query criteria). When enabled, a `QUERY`
+    /// request has its body buffered and a digest of it folded into the
+    /// cache key, so byte-identical query bodies hit the cache and
+    /// anything else misses. Off by default because buffering request
+    /// bodies has a cost and should be a deliberate choice.
+    ///
+    /// Buffering is capped at the cacheable limit (1 MiB); a QUERY body
+    /// larger than that is rejected with `413 Payload Too Large` (a
+    /// megabyte of search criteria is pathological). Pair with a request
+    /// body-limit layer to reject oversized bodies earlier and uniformly.
+    #[must_use]
+    pub fn cache_query(mut self, enabled: bool) -> Self {
+        self.cache_query = enabled;
+        self
+    }
 }
 
 impl<S> tower::Layer<S> for CachePageLayer {
@@ -155,6 +183,7 @@ impl<S> tower::Layer<S> for CachePageLayer {
             timeout: self.timeout,
             key_prefix: Arc::new(self.key_prefix.clone()),
             vary_on: Arc::new(self.vary_on.clone()),
+            cache_query: self.cache_query,
         }
     }
 }
@@ -167,6 +196,7 @@ pub struct CachePageService<S> {
     timeout: Duration,
     key_prefix: Arc<String>,
     vary_on: Arc<Vec<HeaderName>>,
+    cache_query: bool,
 }
 
 impl<S> Service<Request<Body>> for CachePageService<S>
@@ -191,21 +221,58 @@ where
         let timeout = self.timeout;
         let prefix = self.key_prefix.clone();
         let vary = self.vary_on.clone();
+        let cache_query = self.cache_query;
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
         Box::pin(async move {
-            // Bypass non-GET methods entirely.
-            if req.method() != axum::http::Method::GET {
+            // GET is always cacheable. QUERY (RFC 10008) is cacheable only
+            // when opted in; every other method bypasses the cache.
+            let is_get = req.method() == axum::http::Method::GET;
+            let is_query = cache_query && req.method().as_str() == "QUERY";
+            if !is_get && !is_query {
                 return inner.call(req).await;
             }
 
-            let key = compute_cache_key(&prefix, &req, &vary);
+            // For QUERY, buffer the body so we can (a) fold its digest into
+            // the cache key and (b) hand a fresh body to the inner service.
+            // A body over the cacheable cap is forwarded uncached rather
+            // than truncated. Buffering is bounded by any upstream
+            // body-limit layer (documented on `cache_query`).
+            let (req, body_digest) = if is_query {
+                let (parts, body) = req.into_parts();
+                match to_bytes(body, MAX_CACHEABLE_BODY_BYTES).await {
+                    Ok(bytes) => {
+                        let digest = query_body_digest(&bytes);
+                        (Request::from_parts(parts, Body::from(bytes)), Some(digest))
+                    }
+                    Err(_) => {
+                        // QUERY body exceeds the cacheable cap (or a read
+                        // error). `to_bytes` has consumed it and won't hand
+                        // the bytes back, so we can't forward it to the
+                        // handler untouched. Reject cleanly with 413 rather
+                        // than run the handler against a truncated/empty
+                        // body and return silently-wrong results — enabling
+                        // `cache_query` caps QUERY bodies at the cacheable
+                        // limit (documented). `_parts` intentionally
+                        // dropped; the request is not forwarded.
+                        let _ = parts;
+                        return Ok(payload_too_large());
+                    }
+                }
+            } else {
+                (req, None)
+            };
+
+            let key = compute_cache_key(&prefix, &req, &vary, body_digest.as_deref());
 
             // Cache hit?
             if let Ok(Some(serialized)) = cache.get(&key).await {
                 if let Ok(stored) = serde_json::from_str::<CachedResponse>(&serialized) {
-                    if let Some(resp) = stored.into_response(&vary) {
+                    if let Some(mut resp) = stored.into_response(&vary) {
+                        if is_query {
+                            mark_query_response_private(resp.headers_mut());
+                        }
                         return Ok(resp);
                     }
                 }
@@ -279,6 +346,11 @@ where
             // specific request headers, downstream caches need to
             // know so they can repeat the partitioning.
             apply_vary_header(headers, &vary);
+            // QUERY partitions on the request body, which `Vary` can't
+            // express — keep these responses out of shared caches.
+            if is_query {
+                mark_query_response_private(headers);
+            }
             Ok(rebuilt)
         })
     }
@@ -304,7 +376,12 @@ const X_CACHE_STATUS: HeaderName = HeaderName::from_static("x-cache-status");
 /// The `Host` header is included by default — multi-tenant apps
 /// serving different content per Host would otherwise see
 /// cross-tenant cache hits.
-fn compute_cache_key(prefix: &str, req: &Request<Body>, vary_on: &[HeaderName]) -> String {
+fn compute_cache_key(
+    prefix: &str,
+    req: &Request<Body>,
+    vary_on: &[HeaderName],
+    body_digest: Option<&str>,
+) -> String {
     use std::fmt::Write as _;
     let mut k = String::with_capacity(prefix.len() + 128);
     let _ = write!(&mut k, "{prefix}|");
@@ -328,7 +405,57 @@ fn compute_cache_key(prefix: &str, req: &Request<Body>, vary_on: &[HeaderName]) 
         write_lp(&mut k, name.as_str());
         write_lp(&mut k, v);
     }
+    // QUERY (RFC 10008) carries its criteria in the body, so the body
+    // digest partitions the cache — GET keys stay unchanged (`None`).
+    if let Some(digest) = body_digest {
+        write_lp(&mut k, digest);
+    }
     k
+}
+
+/// Mark a QUERY response `private` so shared/downstream caches (CDNs,
+/// reverse proxies) never store it. This layer keys QUERY on the request
+/// body, but HTTP `Vary` can't reference a body, so a shared cache keying
+/// on URL + headers alone would serve one query's result for a different
+/// query. `private` keeps QUERY responses out of shared caches while this
+/// layer's own body-keyed cache keeps working; a stray `public` from the
+/// handler is downgraded for safety. Freshness directives (`max-age`, …)
+/// are preserved.
+fn mark_query_response_private(headers: &mut HeaderMap) {
+    use axum::http::header::CACHE_CONTROL;
+    let existing = headers
+        .get(CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let mut directives: Vec<String> = existing
+        .split(',')
+        .map(|d| d.trim().to_owned())
+        .filter(|d| {
+            !d.is_empty() && !d.eq_ignore_ascii_case("public") && !d.eq_ignore_ascii_case("private")
+        })
+        .collect();
+    directives.insert(0, "private".to_owned());
+    if let Ok(v) = HeaderValue::from_str(&directives.join(", ")) {
+        headers.insert(CACHE_CONTROL, v);
+    }
+}
+
+/// Base64 SHA-256 of a QUERY request body — the cache-key component that
+/// makes byte-identical query bodies hit and anything else miss.
+fn query_body_digest(body: &[u8]) -> String {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    B64.encode(Sha256::digest(body))
+}
+
+/// `413 Payload Too Large` for a QUERY body over the cacheable cap.
+fn payload_too_large() -> Response<Body> {
+    let mut resp = Response::new(Body::from("QUERY body too large to cache"));
+    *resp.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+    resp.headers_mut()
+        .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
+    resp
 }
 
 /// Length-prefixed append: writes `<len-in-bytes>:<bytes>|` so the

@@ -1154,11 +1154,41 @@ pub struct Join {
 /// writer raises [`crate::sql::SqlError::LateralJoinNotSupported`] on
 /// SQLite.
 ///
+/// Source of a derived-table join (#828, #1035) — either a plain typed
+/// `SELECT` or an aggregate/window query. Window functions compile to an
+/// [`AggregateQuery`], so the [`DerivedSource::Aggregate`] variant lets a
+/// windowed result be joined as a derived table — the missing half of
+/// "filter on a window result" (e.g. keep rows where a per-group `rank`
+/// is `<= N`), which a subquery can express but a bare `WHERE` can't.
+///
+/// The four derived-table join builders
+/// ([`crate::query::QuerySet::join_sub`] et al.) take `impl Into<DerivedSource>`,
+/// so a `SelectQuery` or an `AggregateQuery` both work with no ceremony.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DerivedSource {
+    /// A plain typed `SELECT` derived table.
+    Select(Box<SelectQuery>),
+    /// An aggregate / window query derived table (#1035).
+    Aggregate(Box<AggregateQuery>),
+}
+
+impl From<SelectQuery> for DerivedSource {
+    fn from(q: SelectQuery) -> Self {
+        DerivedSource::Select(Box::new(q))
+    }
+}
+
+impl From<AggregateQuery> for DerivedSource {
+    fn from(q: AggregateQuery) -> Self {
+        DerivedSource::Aggregate(Box::new(q))
+    }
+}
+
 /// [`Expr::AliasedColumn`]: crate::core::Expr::AliasedColumn
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubqueryJoin {
-    /// The derived table — a compiled `SELECT`.
-    pub subquery: Box<SelectQuery>,
+    /// The derived table — a plain `SELECT` or an aggregate/window query.
+    pub subquery: DerivedSource,
     /// Alias the derived table is exposed under (`AS "<alias>"`).
     pub alias: &'static str,
     /// `INNER` or `LEFT` (the only kinds meaningful for a derived-table

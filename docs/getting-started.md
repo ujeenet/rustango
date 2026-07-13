@@ -78,7 +78,7 @@ There is a single binary: `cargo run` boots the HTTP server, and every Django-st
 > **Confirm the `[features]` block — pick a database backend.** `#[derive(Model)]`
 > cfg-gates its generated `FromRow` / `LoadRelated` impls on **your** crate's
 > features (a `cfg` inside a derive macro resolves against the destination crate,
-> not rustango), so a backend feature must be enabled here or the first model
+> not **Rustango**), so a backend feature must be enabled here or the first model
 > won't compile. A current scaffold includes:
 >
 > ```toml
@@ -174,7 +174,7 @@ You'll see:
 listening on http://0.0.0.0:8080
 ```
 
-Open <http://localhost:8080> in your browser. The scaffold ships a simple root handler (`views::index`) that greets you with **Hello from rustango!** and a link to the admin — that confirms **Rustango** is running. (Projects that don't define their own `/` route get a built-in welcome page instead, via `Cli::with_welcome()`.)
+Open <http://localhost:8080> in your browser. The scaffold ships a simple root handler (`views::index`) that greets you with **Hello from Rustango!** and a link to the admin — that confirms **Rustango** is running. (Projects that don't define their own `/` route get a built-in welcome page instead, via `Cli::with_welcome()`.)
 
 Press Ctrl-C to stop.
 

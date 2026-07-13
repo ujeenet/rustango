@@ -6,6 +6,44 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 _Nothing yet — next development cycle._
 
+## [0.46.0] — 2026-07-12
+
+Headline: **HTTP QUERY method (RFC 10008)** — first-class support for the "safe GET with a body" across routing, extraction, safe-method policy, per-view caching, ViewSets, the client/test surfaces, and OpenAPI 3.2. Plus an ORM derived-table source and a documentation overhaul (feature-focused README, cleaned runnable cookbook, new WebSockets/SSE guide).
+
+### Added
+
+- **HTTP QUERY routing** (#1108) — `routing::query()` + `QueryRouterExt::query()` register a QUERY handler on a path (via a `MethodRouter` fallback shim until axum lands native QUERY routing — tokio-rs/axum#3799), fixing the 405 `Allow` set.
+- **Method-adaptive `Params<T>` extractor** (#1109) — GET reads the querystring, QUERY reads the body by content-type (urlencoded / JSON), with 400 / 422 / 415 / 405 handling and parity between `GET /x?a=1` and `QUERY /x` with body `a=1`.
+- **QUERY treated as safe + idempotent across the sweep** (#1110) — CSRF exempts QUERY by default (opt back in with `CsrfConfig::require_csrf_on_query`), the HTTP client retries it, and CORS advertises it.
+- **Per-view caching of QUERY** (#1111) — `CachePageLayer::cache_query(true)` keys on a request-body digest; QUERY responses are forced `private`; bodies over 1 MiB return 413.
+- **ViewSet QUERY collection action** (#1112) — a body-driven list alongside `GET list`, plus QUERY support on admin custom views.
+- **Client `.query()` builders** (#1113) — on `TestClient`, `RequestFactory`, and the HTTP client (+ an HTTP/1.1 wire test).
+- **OpenAPI 3.2 QUERY operation** (#1114) — `PathItem::query(op)`; the spec bumps to `3.2.0` only when a QUERY operation is present. New `docs/query-method.md` guide.
+- **ORM derived-table source** (#1035) — a window / aggregate query can be used as a derived-table (subquery) source.
+- **Security scanning** (#1154) — a Trivy CI job gates every PR/release on HIGH/CRITICAL vulnerabilities (Cargo.lock CVEs) and committed secrets, complementing the existing cargo-deny (RustSec) job; the git hooks add the same checks opt-in (`PRECOMMIT_TRIVY` / `PREPUSH_TRIVY`).
+
+### Changed
+
+- **Documentation overhaul.** Cookbook cleaned of version/PR/changelog noise across every chapter, release-numbered chapters reorganized into topics, with real admin screenshots, captured test output, and live-MySQL evidence (#1153, epic #1131). README rewritten to be feature-focused — the embedded per-release changelog and version clutter removed in favor of a feature tour, a docs index, and a link to the runnable cookbook. New **WebSockets & SSE** guide (#1151) and cookbook chapters for i18n, rate limiting, health checks, and secrets (#1126–#1129). `docs/security.md` corrected to reflect shipped OAuth2/OIDC social login.
+
+### Fixed
+
+- **`sqlite_orm_demo` scalar aggregate** (#1152) — the aggregate example used `.annotate()` without `.values(&[])` (Django "Shape 3" — group by every model column) and failed to decode into a scalar tuple; switched to `.values(&[])` so the example runs to completion on SQLite.
+
+## [0.45.0] — 2026-07-03
+
+Headline: **i18n depth** — CLDR plural-rules and a locale capability registry — plus a CSRF escape hatch for beacon/collector endpoints.
+
+### Added
+
+- **CLDR plural-rules** (#1103) — `plural_category(lang, n)` returns the CLDR plural category (`one` / `few` / `many` / `other` / …) for a count, and `translate_plural` selects the matching per-category message from a catalog. Language-specific rules for the common families (Slavic few/many, French 0-is-one, …); the generic one/other fallback covers the rest.
+- **Locale capability registry** — `locale_info(code) -> LocaleInfo` exposes core's static per-locale metadata (display + native name, text direction / RTL, whether an explicit CLDR plural rule is modeled, and a `known` flag), and `known_locales()` yields the English-named roster. Lets callers query what core supports instead of string-matching `"Unknown"`.
+- **`CsrfConfig::exempt_prefix`** — exempt URL path prefixes from CSRF enforcement on unsafe methods. Intended for `navigator.sendBeacon` collector endpoints (e.g. analytics) that cannot set an `X-CSRF-Token` header and — behind a CDN cache that strips `Set-Cookie` — may carry no CSRF cookie at all.
+
+### Changed
+
+- **Docs** — capitalize "Rustango" in prose, fix `cargo` command casing, refresh version references to 0.44+, document the locale capability registry and CLDR plural support, and link the live docs site from the README.
+
 ## [0.44.0] — 2026-06-25
 
 Headline: the **MCP server** — rustango can now expose its skills, tools, prompts, and resources to AI agents over the Model Context Protocol (Streamable HTTP transport, OAuth 2.1, scoped-JWT agent identity). Plus **ViewSets married to serializers** (declarative render + validate, tri-dialect), a batch of **Django-parity ORM** features (relation-spanning `order_by`, related-column `GROUP BY`, `distinct_on` on MySQL/SQLite, `generated_as` refresh on save), and a comprehensive documentation pass. Folds in the never-tagged v0.43.1 scaffolder/`rpassword` patch.

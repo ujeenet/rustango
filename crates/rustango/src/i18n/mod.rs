@@ -154,113 +154,143 @@ impl Locale {
     }
 }
 
-/// English display name for a bare locale string — public so callers
-/// holding an `Accept-Language`-shaped `&str` can render it without
-/// constructing a [`Locale`].
-#[must_use]
-pub fn language_display_name(locale: &str) -> &'static str {
-    let lower = locale.to_ascii_lowercase();
-    let base = lower.split('-').next().unwrap_or(&lower);
+/// Canonical per-base-language display metadata: `(base code, English
+/// name, native name)`. Single source of truth for
+/// [`language_display_name`], [`language_native_name`], and
+/// [`known_locales`]. Retired / variant subtags (`iw`→`he`, `nb`/`nn`→
+/// `no`, `ji`→`yi`) resolve to their canonical row via `canonical_base`.
+const LANGUAGE_NAMES: &[(&str, &str, &str)] = &[
+    ("en", "English", "English"),
+    ("fr", "French", "français"),
+    ("de", "German", "Deutsch"),
+    ("es", "Spanish", "español"),
+    ("it", "Italian", "italiano"),
+    ("pt", "Portuguese", "português"),
+    ("nl", "Dutch", "Nederlands"),
+    ("ru", "Russian", "русский"),
+    ("ja", "Japanese", "日本語"),
+    ("zh", "Chinese", "中文"),
+    ("ko", "Korean", "한국어"),
+    ("ar", "Arabic", "العربية"),
+    ("he", "Hebrew", "עברית"),
+    ("fa", "Persian", "فارسی"),
+    ("ur", "Urdu", "اردو"),
+    ("tr", "Turkish", "Türkçe"),
+    ("pl", "Polish", "polski"),
+    ("uk", "Ukrainian", "українська"),
+    ("cs", "Czech", "čeština"),
+    ("sk", "Slovak", "slovenčina"),
+    ("hu", "Hungarian", "magyar"),
+    ("ro", "Romanian", "română"),
+    ("bg", "Bulgarian", "български"),
+    ("el", "Greek", "Ελληνικά"),
+    ("sv", "Swedish", "svenska"),
+    ("no", "Norwegian", "norsk"),
+    ("da", "Danish", "dansk"),
+    ("fi", "Finnish", "suomi"),
+    ("hi", "Hindi", "हिन्दी"),
+    ("bn", "Bengali", "বাংলা"),
+    ("ta", "Tamil", "தமிழ்"),
+    ("th", "Thai", "ไทย"),
+    ("vi", "Vietnamese", "Tiếng Việt"),
+    ("id", "Indonesian", "Bahasa Indonesia"),
+    ("ms", "Malay", "Bahasa Melayu"),
+    ("ps", "Pashto", "پښتو"),
+    ("yi", "Yiddish", "ייִדיש"),
+    ("dv", "Divehi", "ދިވެހި"),
+    ("ckb", "Sorani Kurdish", "کوردیی ناوەندی"),
+    ("ug", "Uyghur", "ئۇيغۇرچە"),
+    ("sd", "Sindhi", "سنڌي"),
+    ("syr", "Syriac", "ܠܫܢܐ ܣܘܪܝܝܐ"),
+];
+
+/// Resolve retired / variant language subtags to the canonical base code
+/// keyed in [`LANGUAGE_NAMES`].
+fn canonical_base(base: &str) -> &str {
     match base {
-        "en" => "English",
-        "fr" => "French",
-        "de" => "German",
-        "es" => "Spanish",
-        "it" => "Italian",
-        "pt" => "Portuguese",
-        "nl" => "Dutch",
-        "ru" => "Russian",
-        "ja" => "Japanese",
-        "zh" => "Chinese",
-        "ko" => "Korean",
-        "ar" => "Arabic",
-        "he" | "iw" => "Hebrew",
-        "fa" => "Persian",
-        "ur" => "Urdu",
-        "tr" => "Turkish",
-        "pl" => "Polish",
-        "uk" => "Ukrainian",
-        "cs" => "Czech",
-        "sk" => "Slovak",
-        "hu" => "Hungarian",
-        "ro" => "Romanian",
-        "bg" => "Bulgarian",
-        "el" => "Greek",
-        "sv" => "Swedish",
-        "no" | "nb" | "nn" => "Norwegian",
-        "da" => "Danish",
-        "fi" => "Finnish",
-        "hi" => "Hindi",
-        "bn" => "Bengali",
-        "ta" => "Tamil",
-        "th" => "Thai",
-        "vi" => "Vietnamese",
-        "id" => "Indonesian",
-        "ms" => "Malay",
-        "ps" => "Pashto",
-        "yi" | "ji" => "Yiddish",
-        "dv" => "Divehi",
-        "ckb" => "Sorani Kurdish",
-        "ug" => "Uyghur",
-        "sd" => "Sindhi",
-        "syr" => "Syriac",
-        // Unknown → return the input verbatim so the UI shows
-        // something. Static lifetime requires a tiny static fallback;
-        // leak the input on the cold path to satisfy &'static str.
-        _ => "Unknown",
+        "iw" => "he",        // retired Hebrew alias
+        "nb" | "nn" => "no", // Norwegian Bokmål / Nynorsk
+        "ji" => "yi",        // retired Yiddish alias
+        other => other,
     }
 }
 
+/// The [`LANGUAGE_NAMES`] row for a bare locale string (region-stripped,
+/// alias-resolved), or `None` when core has no metadata for the language.
+fn language_row(locale: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
+    let lower = locale.to_ascii_lowercase();
+    let base = canonical_base(lower.split('-').next().unwrap_or(&lower));
+    LANGUAGE_NAMES.iter().find(|(code, _, _)| *code == base)
+}
+
+/// English display name for a bare locale string — public so callers
+/// holding an `Accept-Language`-shaped `&str` can render it without
+/// constructing a [`Locale`]. Returns `"Unknown"` for locales core has
+/// no metadata for.
+#[must_use]
+pub fn language_display_name(locale: &str) -> &'static str {
+    language_row(locale).map_or("Unknown", |(_, en, _)| *en)
+}
+
 /// Native name for a bare locale string — sibling to
-/// [`language_display_name`].
+/// [`language_display_name`]. Returns `"Unknown"` for unknown locales.
 #[must_use]
 pub fn language_native_name(locale: &str) -> &'static str {
-    let lower = locale.to_ascii_lowercase();
-    let base = lower.split('-').next().unwrap_or(&lower);
-    match base {
-        "en" => "English",
-        "fr" => "français",
-        "de" => "Deutsch",
-        "es" => "español",
-        "it" => "italiano",
-        "pt" => "português",
-        "nl" => "Nederlands",
-        "ru" => "русский",
-        "ja" => "日本語",
-        "zh" => "中文",
-        "ko" => "한국어",
-        "ar" => "العربية",
-        "he" | "iw" => "עברית",
-        "fa" => "فارسی",
-        "ur" => "اردو",
-        "tr" => "Türkçe",
-        "pl" => "polski",
-        "uk" => "українська",
-        "cs" => "čeština",
-        "sk" => "slovenčina",
-        "hu" => "magyar",
-        "ro" => "română",
-        "bg" => "български",
-        "el" => "Ελληνικά",
-        "sv" => "svenska",
-        "no" | "nb" | "nn" => "norsk",
-        "da" => "dansk",
-        "fi" => "suomi",
-        "hi" => "हिन्दी",
-        "bn" => "বাংলা",
-        "ta" => "தமிழ்",
-        "th" => "ไทย",
-        "vi" => "Tiếng Việt",
-        "id" => "Bahasa Indonesia",
-        "ms" => "Bahasa Melayu",
-        "ps" => "پښتو",
-        "yi" | "ji" => "ייִדיש",
-        "dv" => "ދިވެހި",
-        "ckb" => "کوردیی ناوەندی",
-        "ug" => "ئۇيغۇرچە",
-        "sd" => "سنڌي",
-        "syr" => "ܠܫܢܐ ܣܘܪܝܝܐ",
-        _ => "Unknown",
+    language_row(locale).map_or("Unknown", |(_, _, native)| *native)
+}
+
+/// Every locale code core has display metadata for, as `(code, English
+/// name)` — canonical base codes only (retired aliases excluded). Powers
+/// "known locale" pickers / datalists so operators can pick codes core
+/// fully supports; free-text codes remain valid content locales, just
+/// without core metadata (see [`locale_info`]).
+pub fn known_locales() -> impl Iterator<Item = (&'static str, &'static str)> {
+    LANGUAGE_NAMES.iter().map(|(code, en, _)| (*code, *en))
+}
+
+/// Everything core statically knows about a locale, in one query — so a
+/// caller (e.g. a CMS managing its own DB locale roster) can decide how
+/// gracefully to degrade without string-comparing `"Unknown"` or
+/// re-implementing the metadata tables.
+///
+/// `known` is `true` when core has display metadata (name/RTL);
+/// `has_plural_rules` is `true` when the language hits a language-specific
+/// CLDR rule (see [`plural_category_is_explicit`] — note this is `false`
+/// for the generic English-style *one/other* rule, which is nonetheless
+/// *correct* for English/German/Spanish/etc.). A locale can be a perfectly
+/// usable content locale even when `known == false` — content translation
+/// is code-agnostic; only chrome/plural/RTL degrade.
+#[derive(Debug, Clone)]
+pub struct LocaleInfo {
+    /// The queried code, lowercased.
+    pub code: String,
+    /// Core has display/RTL metadata for this language.
+    pub known: bool,
+    /// English name, or `"Unknown"`.
+    pub display_name: &'static str,
+    /// Endonym, or `"Unknown"`.
+    pub native_name: &'static str,
+    /// `"ltr"` or `"rtl"`.
+    pub direction: &'static str,
+    /// Right-to-left script.
+    pub is_rtl: bool,
+    /// Core models a language-specific CLDR plural rule (not the generic
+    /// one/other fallback).
+    pub has_plural_rules: bool,
+}
+
+/// Query core's static knowledge of `code`. See [`LocaleInfo`].
+#[must_use]
+pub fn locale_info(code: &str) -> LocaleInfo {
+    let display_name = language_display_name(code);
+    LocaleInfo {
+        code: code.to_ascii_lowercase(),
+        known: display_name != "Unknown",
+        display_name,
+        native_name: language_native_name(code),
+        direction: text_direction(code),
+        is_rtl: is_rtl_language(code),
+        has_plural_rules: plural_category_is_explicit(code),
     }
 }
 
@@ -320,6 +350,11 @@ pub struct Translator {
     /// [`crate::i18n::db::refresh_overrides_pool`]). Refreshing from the
     /// DB keeps `translate` synchronous — no per-render query.
     overrides: RwLock<HashMap<Locale, HashMap<String, String>>>,
+    /// Plural catalogs (#1102): `locale → key → (CLDR category → template)`.
+    /// Parallel to `catalogs`, consulted only by [`Self::translate_plural`], so
+    /// the flat scalar path is untouched. Each entry holds the per-form variants
+    /// (`one`/`few`/`many`/`other`) for one source key.
+    plural_catalogs: RwLock<HashMap<Locale, HashMap<String, HashMap<String, String>>>>,
 }
 
 impl Translator {
@@ -331,6 +366,7 @@ impl Translator {
             fallback_chain: Vec::new(),
             catalogs: RwLock::new(HashMap::new()),
             overrides: RwLock::new(HashMap::new()),
+            plural_catalogs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -381,6 +417,35 @@ impl Translator {
     /// Mutably add a catalog (use with `let mut t = ...`).
     pub fn insert_locale(&self, locale: Locale, catalog: HashMap<String, String>) {
         self.catalogs
+            .write()
+            .expect("translator poisoned")
+            .insert(locale, catalog);
+    }
+
+    /// Add a **plural** catalog for `locale` (#1102). Each key maps to a small
+    /// object of CLDR plural-category → template, e.g.
+    /// `{"one": "Deleted {count} page.", "other": "Deleted {count} pages."}`.
+    /// Replaces any existing plural catalog for the same locale.
+    #[must_use]
+    pub fn add_plural_locale(
+        self,
+        locale: Locale,
+        catalog: HashMap<String, HashMap<String, String>>,
+    ) -> Self {
+        self.plural_catalogs
+            .write()
+            .expect("translator poisoned")
+            .insert(locale, catalog);
+        self
+    }
+
+    /// Mutably add a plural catalog (use with `let mut t = ...`).
+    pub fn insert_plural_locale(
+        &self,
+        locale: Locale,
+        catalog: HashMap<String, HashMap<String, String>>,
+    ) {
+        self.plural_catalogs
             .write()
             .expect("translator poisoned")
             .insert(locale, catalog);
@@ -441,12 +506,86 @@ impl Translator {
         substitute(&template, params)
     }
 
-    /// `true` when a catalog is registered for `locale` (or its base language).
+    /// Resolve the plural template for `key`/`category` in `locale`, walking the
+    /// same locale chain as [`Self::translate`] but over the plural catalogs:
+    /// exact → base language → explicit fallback chain → default locale. Within a
+    /// matched entry, prefer the exact `category`, then `"other"`, then any form
+    /// (so a partially-authored entry never yields `None` once the key exists).
+    fn resolve_plural_template(&self, req: &Locale, key: &str, category: &str) -> Option<String> {
+        let pc = self.plural_catalogs.read().expect("translator poisoned");
+        let pick = |entry: &HashMap<String, String>| -> Option<String> {
+            entry
+                .get(category)
+                .or_else(|| entry.get("other"))
+                .or_else(|| entry.values().next())
+                .cloned()
+        };
+        if let Some(v) = pc.get(req).and_then(|c| c.get(key)).and_then(&pick) {
+            return Some(v);
+        }
+        let base = Locale::new(req.base_language());
+        if let Some(v) = pc.get(&base).and_then(|c| c.get(key)).and_then(&pick) {
+            return Some(v);
+        }
+        for fb in &self.fallback_chain {
+            if let Some(v) = pc.get(fb).and_then(|c| c.get(key)).and_then(&pick) {
+                return Some(v);
+            }
+        }
+        pc.get(&self.default_locale)
+            .and_then(|c| c.get(key))
+            .and_then(&pick)
+    }
+
+    /// Count-aware translation (#1102) — the `ngettext` shape. Picks the plural
+    /// form for `n` via `locale`'s CLDR rule ([`plural_category`]), then
+    /// substitutes `params` (pass the count itself, e.g.
+    /// `&[("count", &n.to_string())]`, so the chosen form's `{count}` fills in).
+    ///
+    /// When no plural entry exists for `key` in any locale, this falls back to
+    /// the scalar [`Self::translate`] — i.e. a flat catalog entry if present,
+    /// else the source `key` itself — so untranslated / English strings still
+    /// render (with `{count}` interpolated) instead of a blank or raw id.
+    ///
+    /// ```ignore
+    /// // en plural catalog: "Deleted {count} page(s)." =>
+    /// //   {"one": "Deleted {count} page.", "other": "Deleted {count} pages."}
+    /// let n = 3;
+    /// t.translate_plural("en", "Deleted {count} page(s).", n, &[("count", &n.to_string())]);
+    /// // => "Deleted 3 pages."
+    /// ```
+    #[must_use]
+    pub fn translate_plural(
+        &self,
+        locale: &str,
+        key: &str,
+        n: i64,
+        params: &[(&str, &str)],
+    ) -> String {
+        let req = Locale::new(locale);
+        let category = plural_category(locale, n);
+        if let Some(tpl) = self.resolve_plural_template(&req, key, category) {
+            return substitute(&tpl, params);
+        }
+        // No plural catalog entry anywhere → scalar path handles flat keys, the
+        // source-string fallback, and substitution.
+        self.translate(locale, key, params)
+    }
+
+    /// `true` when strings are registered for `locale` (or its base
+    /// language) in **either** the file/programmatic catalogs or the DB
+    /// override layer (#532) — so a locale supplied only via
+    /// [`Self::load_overrides`] is reported as available too.
     #[must_use]
     pub fn has_locale(&self, locale: &str) -> bool {
-        let cats = self.catalogs.read().expect("translator poisoned");
         let req = Locale::new(locale);
-        cats.contains_key(&req) || cats.contains_key(&Locale::new(req.base_language()))
+        let base = Locale::new(req.base_language());
+        let cats = self.catalogs.read().expect("translator poisoned");
+        if cats.contains_key(&req) || cats.contains_key(&base) {
+            return true;
+        }
+        let ov = self.overrides.read().expect("translator poisoned");
+        ov.contains_key(&req) || ov.contains_key(&base)
     }
 
     /// All registered locale identifiers (for `negotiate_language`).
@@ -707,18 +846,24 @@ impl Translator {
     /// the same as [`Self::translate`]; missing entries fall back
     /// to the supplied source strings.
     ///
-    /// This implements the **English** plural rule (`n == 1` →
-    /// singular; everything else → plural). Languages with more
-    /// complex plural categories (Russian's three forms, Arabic's
-    /// six, etc.) need a CLDR plural-rules resolver — out of scope
-    /// for v1; track in #426 / future-backlog.
+    /// The plural form is selected by `locale`'s CLDR rule
+    /// ([`plural_category`]): the `"one"` category picks `singular`, every
+    /// other category picks `plural`. This is correct for two-form languages
+    /// (en/de: `n == 1`; fr: `0` and `1` are singular). Languages with three+
+    /// forms (Polish/Ukrainian `few`/`many`, Arabic's six) can't be fully
+    /// expressed with a singular/plural pair — use
+    /// [`Self::translate_plural`] with a per-category catalog for those (#1102).
     ///
     /// `count` is bound to the `{count}` placeholder automatically
     /// so templates can read `"You have {count} unread messages"`
     /// without the caller threading it in.
     #[must_use]
     pub fn ngettext(&self, locale: &str, singular: &str, plural: &str, count: i64) -> String {
-        let key = if count == 1 { singular } else { plural };
+        let key = if plural_category(locale, count) == "one" {
+            singular
+        } else {
+            plural
+        };
         let count_str = count.to_string();
         self.translate(locale, key, &[("count", &count_str)])
     }
@@ -736,7 +881,11 @@ impl Translator {
         count: i64,
         params: &[(&str, &str)],
     ) -> String {
-        let key = if count == 1 { singular } else { plural };
+        let key = if plural_category(locale, count) == "one" {
+            singular
+        } else {
+            plural
+        };
         let count_str = count.to_string();
         let mut all: Vec<(&str, &str)> = Vec::with_capacity(params.len() + 1);
         all.push(("count", &count_str));
@@ -753,6 +902,108 @@ fn substitute(template: &str, params: &[(&str, &str)]) -> String {
         out = out.replace(&placeholder, value);
     }
     out
+}
+
+/// CLDR cardinal plural category for integer `n` in `locale` (#1102) — one of
+/// `"one"`, `"few"`, `"many"`, `"other"`. Drives [`Translator::translate_plural`]
+/// (and the binary [`Translator::ngettext`], which maps `one`→singular).
+///
+/// Selection is on the base language (`pl-PL` ≡ `pl`) and the absolute value of
+/// `n`. The launch set + common European/East-Asian languages are modeled;
+/// unknown locales use the English one/other rule. Fraction-only categories
+/// aren't modeled — admin counts are whole numbers.
+///
+/// ```
+/// use rustango::i18n::plural_category;
+/// assert_eq!(plural_category("en", 1), "one");
+/// assert_eq!(plural_category("en", 5), "other");
+/// assert_eq!(plural_category("fr", 0), "one");        // French: 0 is "one"
+/// assert_eq!(plural_category("pl", 2), "few");        // Polish three-form
+/// assert_eq!(plural_category("pl", 5), "many");
+/// assert_eq!(plural_category("uk", 21), "one");       // Ukrainian: …1 (not 11)
+/// assert_eq!(plural_category("ja", 7), "other");      // no count distinction
+/// ```
+/// The CLDR plural *family* a base language belongs to, or `None` for the
+/// generic one/other rule (Germanic / Romance / everything unmodeled).
+/// Extracted so [`plural_category`] and [`plural_category_is_explicit`]
+/// share one classification and can't drift.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PluralFamily {
+    /// No count-based form distinction (always `other`).
+    NoDistinction,
+    /// French / Brazilian-Portuguese: 0 and 1 are `one`.
+    FrenchStyle,
+    /// West-Slavic (Polish): one / few / many.
+    WestSlavic,
+    /// East-Slavic (Ukrainian, Russian, Belarusian): one / few / many.
+    EastSlavic,
+}
+
+fn plural_family(base: &str) -> Option<PluralFamily> {
+    match base {
+        "zh" | "ja" | "ko" | "th" | "vi" | "id" | "ms" | "lo" | "km" | "my" => {
+            Some(PluralFamily::NoDistinction)
+        }
+        "fr" | "pt" | "ff" | "hy" | "kab" => Some(PluralFamily::FrenchStyle),
+        "pl" => Some(PluralFamily::WestSlavic),
+        "uk" | "ru" | "be" => Some(PluralFamily::EastSlavic),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn plural_category(locale: &str, n: i64) -> &'static str {
+    let base = Locale::new(locale);
+    let n = n.unsigned_abs();
+    let r10 = n % 10;
+    let r100 = n % 100;
+    match plural_family(base.base_language()) {
+        Some(PluralFamily::NoDistinction) => "other",
+        Some(PluralFamily::FrenchStyle) => {
+            if n == 0 || n == 1 {
+                "one"
+            } else {
+                "other"
+            }
+        }
+        Some(PluralFamily::WestSlavic) => {
+            if n == 1 {
+                "one"
+            } else if (2..=4).contains(&r10) && !(12..=14).contains(&r100) {
+                "few"
+            } else {
+                "many"
+            }
+        }
+        Some(PluralFamily::EastSlavic) => {
+            if r10 == 1 && r100 != 11 {
+                "one"
+            } else if (2..=4).contains(&r10) && !(12..=14).contains(&r100) {
+                "few"
+            } else {
+                "many"
+            }
+        }
+        // Germanic / Romance / default: one / other (n == 1 → one).
+        None => {
+            if n == 1 {
+                "one"
+            } else {
+                "other"
+            }
+        }
+    }
+}
+
+/// `true` when core models a *language-specific* CLDR plural rule for
+/// `locale` (French-style, West/East-Slavic, or no-distinction) — as
+/// opposed to the generic English one/other fallback. Note: this returns
+/// `false` for English/German/Spanish/etc., for which one/other is
+/// nonetheless correct; callers surfacing it should frame the fallback as
+/// "basic one/other", not an error. Backs [`LocaleInfo::has_plural_rules`].
+#[must_use]
+pub fn plural_category_is_explicit(locale: &str) -> bool {
+    plural_family(Locale::new(locale).base_language()).is_some()
 }
 
 // ------------------------------------------------------------------ Accept-Language negotiation
@@ -1014,6 +1265,48 @@ mod tests {
     }
 
     #[test]
+    fn locale_info_summarizes_core_support() {
+        let fr = locale_info("fr-CA");
+        assert!(fr.known);
+        assert_eq!(fr.display_name, "French");
+        assert!(!fr.is_rtl && fr.direction == "ltr");
+        assert!(fr.has_plural_rules); // French-style family
+
+        let ar = locale_info("ar");
+        assert!(ar.known && ar.is_rtl && ar.direction == "rtl");
+
+        let en = locale_info("EN");
+        assert_eq!(en.code, "en"); // lowercased
+        assert!(en.known && !en.has_plural_rules); // generic one/other
+
+        let xx = locale_info("xx");
+        assert!(!xx.known && xx.display_name == "Unknown" && !xx.is_rtl && !xx.has_plural_rules);
+    }
+
+    #[test]
+    fn known_locales_lists_canonical_codes_only() {
+        let codes: Vec<&str> = known_locales().map(|(c, _)| c).collect();
+        assert!(codes.contains(&"en") && codes.contains(&"zh") && codes.contains(&"ar"));
+        // Retired / variant aliases are excluded from the picker set …
+        assert!(!codes.contains(&"iw") && !codes.contains(&"nb") && !codes.contains(&"ji"));
+        // … but still resolve through the name lookups.
+        assert_eq!(language_display_name("iw"), "Hebrew");
+    }
+
+    #[test]
+    fn plural_explicit_flag_matches_families() {
+        for c in ["pl", "uk", "ru", "zh-Hans", "fr", "pt-BR", "ja"] {
+            assert!(
+                plural_category_is_explicit(c),
+                "{c} has a language-specific rule"
+            );
+        }
+        for c in ["en", "de", "es", "xx"] {
+            assert!(!plural_category_is_explicit(c), "{c} uses the generic rule");
+        }
+    }
+
+    #[test]
     fn bare_string_helpers_match_locale_methods() {
         for code in ["ar", "fa-IR", "he-IL", "iw"] {
             assert!(is_rtl_language(code), "{code} should be RTL");
@@ -1190,5 +1483,105 @@ mod tests {
             &[("item", "book"), ("customer", "Alice")],
         );
         assert_eq!(s, "2 books sold to Alice.");
+    }
+
+    // ---- #1102 CLDR plural rules + translate_plural ----
+
+    #[test]
+    fn plural_category_covers_launch_locales() {
+        // one / other (English, German, default).
+        assert_eq!(plural_category("en", 1), "one");
+        for n in [0, 2, 5, 11, 21, 100] {
+            assert_eq!(plural_category("en", n), "other", "en {n}");
+        }
+        assert_eq!(plural_category("de", 1), "one");
+        assert_eq!(plural_category("de", 7), "other");
+        // French: 0 and 1 are "one".
+        assert_eq!(plural_category("fr", 0), "one");
+        assert_eq!(plural_category("fr", 1), "one");
+        assert_eq!(plural_category("fr", 2), "other");
+        assert_eq!(plural_category("fr-FR", 0), "one"); // base-language match
+                                                        // East-Asian: always "other".
+        for n in [0, 1, 2, 5, 100] {
+            assert_eq!(plural_category("zh-Hans", n), "other", "zh {n}");
+            assert_eq!(plural_category("ja", n), "other", "ja {n}");
+        }
+        // Polish: one / few / many.
+        assert_eq!(plural_category("pl", 1), "one");
+        for n in [2, 3, 4, 22, 23, 24] {
+            assert_eq!(plural_category("pl", n), "few", "pl {n}");
+        }
+        for n in [0, 5, 11, 12, 14, 25, 111] {
+            assert_eq!(plural_category("pl", n), "many", "pl {n}");
+        }
+        // Ukrainian: …1 (not 11) is one; …2-4 (not 12-14) few; rest many.
+        for n in [1, 21, 31, 101] {
+            assert_eq!(plural_category("uk", n), "one", "uk {n}");
+        }
+        for n in [2, 3, 4, 22, 23, 24] {
+            assert_eq!(plural_category("uk", n), "few", "uk {n}");
+        }
+        for n in [0, 5, 11, 12, 13, 14, 25] {
+            assert_eq!(plural_category("uk", n), "many", "uk {n}");
+        }
+    }
+
+    #[test]
+    fn translate_plural_selects_form_three_way() {
+        let mut entry = HashMap::new();
+        entry.insert("one".to_owned(), "Usunięto {count} stronę.".to_owned());
+        entry.insert("few".to_owned(), "Usunięto {count} strony.".to_owned());
+        entry.insert("many".to_owned(), "Usunięto {count} stron.".to_owned());
+        let key = "Deleted {count} page(s).";
+        let mut pl: HashMap<String, HashMap<String, String>> = HashMap::new();
+        pl.insert(key.to_owned(), entry);
+        let t = Translator::new(Locale::new("en")).add_plural_locale(Locale::new("pl"), pl);
+
+        let tr = |n: i64| t.translate_plural("pl", key, n, &[("count", &n.to_string())]);
+        assert_eq!(tr(1), "Usunięto 1 stronę."); // one
+        assert_eq!(tr(2), "Usunięto 2 strony."); // few
+        assert_eq!(tr(22), "Usunięto 22 strony."); // few
+        assert_eq!(tr(5), "Usunięto 5 stron."); // many
+        assert_eq!(tr(25), "Usunięto 25 stron."); // many
+    }
+
+    #[test]
+    fn translate_plural_picks_other_when_category_absent() {
+        // Entry only has one/other → French "other" is used for n=2, and a
+        // Polish-style "few"/"many" request also degrades to "other".
+        let mut entry = HashMap::new();
+        entry.insert("one".to_owned(), "{count} élément".to_owned());
+        entry.insert("other".to_owned(), "{count} éléments".to_owned());
+        let key = "count_items";
+        let mut fr: HashMap<String, HashMap<String, String>> = HashMap::new();
+        fr.insert(key.to_owned(), entry);
+        let t = Translator::new(Locale::new("en")).add_plural_locale(Locale::new("fr"), fr);
+        assert_eq!(
+            t.translate_plural("fr", key, 1, &[("count", "1")]),
+            "1 élément"
+        );
+        assert_eq!(
+            t.translate_plural("fr", key, 9, &[("count", "9")]),
+            "9 éléments"
+        );
+    }
+
+    #[test]
+    fn translate_plural_falls_back_to_scalar_and_source() {
+        // No plural catalog at all → source key, with {count} interpolated
+        // (so English / untranslated still renders, never a blank).
+        let t = Translator::new(Locale::new("en"));
+        assert_eq!(
+            t.translate_plural("en", "Deleted {count} page(s).", 3, &[("count", "3")]),
+            "Deleted 3 page(s)."
+        );
+        // A flat scalar catalog entry is honoured when there's no plural entry.
+        let mut en = HashMap::new();
+        en.insert("flat_msg".to_owned(), "{count} thing(s)".to_owned());
+        let t = Translator::new(Locale::new("en")).add_locale(Locale::new("en"), en);
+        assert_eq!(
+            t.translate_plural("en", "flat_msg", 2, &[("count", "2")]),
+            "2 thing(s)"
+        );
     }
 }

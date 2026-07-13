@@ -66,6 +66,38 @@ fn pluralization_picks_singular_or_plural() {
 }
 
 #[test]
+fn cldr_plurals_pick_the_right_form() {
+    use rustango::i18n::plural_category;
+
+    // The CLDR category for a count, per language (drives `translate_plural`).
+    assert_eq!(plural_category("en", 1), "one");
+    assert_eq!(plural_category("en", 5), "other");
+    assert_eq!(plural_category("fr", 0), "one"); // French: 0 is "one"
+    assert_eq!(plural_category("pl", 2), "few"); // Polish: 2–4 → few
+    assert_eq!(plural_category("pl", 5), "many"); // 5+ → many
+
+    // A per-category plural catalog: one key → one form per CLDR category.
+    let mut pl: HashMap<String, HashMap<String, String>> = HashMap::new();
+    pl.insert(
+        "deleted_pages".to_owned(),
+        [
+            ("one", "Usunięto {count} stronę."),
+            ("few", "Usunięto {count} strony."),
+            ("many", "Usunięto {count} stron."),
+        ]
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect(),
+    );
+    let t = Translator::new(Locale::new("en")).add_plural_locale(Locale::new("pl"), pl);
+
+    let say = |n: i64| t.translate_plural("pl", "deleted_pages", n, &[("count", &n.to_string())]);
+    assert_eq!(say(1), "Usunięto 1 stronę."); // one
+    assert_eq!(say(2), "Usunięto 2 strony."); // few
+    assert_eq!(say(5), "Usunięto 5 stron."); // many
+}
+
+#[test]
 fn accept_language_negotiation() {
     // Pick the best supported language from a browser Accept-Language header.
     assert_eq!(

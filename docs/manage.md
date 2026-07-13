@@ -483,7 +483,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.43.0
+rustango 0.44.0
 ```
 
 ### `about`
@@ -495,7 +495,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.43.0
+  version:        0.44.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1130,7 +1130,7 @@ INFO crate::tenancy::pools: tenant pool connected (database mode)
 
 If you hit the tenant admin via `http://acme.local:8080/admin/`
 on macOS and see a 5-second pause on every request: that's
-**Bonjour / mDNS**, not rustango. macOS's resolver treats `.local`
+**Bonjour / mDNS**, not **Rustango**. macOS's resolver treats `.local`
 specially and waits the full mDNS timeout before falling back to
 `/etc/hosts`. Two fixes:
 

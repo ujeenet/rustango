@@ -2,7 +2,7 @@
 //!
 //! Spins up the actual `cookbook_blog` binary against an isolated DB,
 //! provisions two tenants + a tenant user, drives the admin form
-//! through HTTP (login → POST /__admin/<table> → verify list), then
+//! through HTTP (login → POST /admin/<table> → verify list), then
 //! exercises the tenant-aware /api/authors ViewSet from both tenants
 //! to confirm data isolation.
 //!
@@ -32,6 +32,15 @@ async fn db_url() -> Option<String> {
 async fn reset_db() {
     let Some(base) = url() else { return };
     let admin_pool = sqlx::PgPool::connect(&base).await.expect("connect to admin db");
+    // Terminate any lingering connections to the test DB before DROP,
+    // otherwise Postgres rejects with 55006 ("being accessed by other
+    // users"). Matches chapter06b's reset_db.
+    let _ = sqlx::query(&format!(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = '{DB_NAME}' AND pid <> pg_backend_pid()"
+    ))
+    .execute(&admin_pool)
+    .await;
     sqlx::query(&format!("DROP DATABASE IF EXISTS {DB_NAME}"))
         .execute(&admin_pool).await.unwrap();
     sqlx::query(&format!("CREATE DATABASE {DB_NAME}"))
@@ -120,7 +129,7 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
     // 1. Login as alice on acme tenant.
     let login_body = [("username", "alice"), ("password", "tenantpw")];
     let resp = client
-        .post(format!("http://{BIND}/__login"))
+        .post(format!("http://{BIND}/login"))
         .header("Host", "acme.localhost")
         .form(&login_body)
         .send().await.unwrap();
@@ -136,7 +145,7 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
         ("bio",   "first programmer"),
     ];
     let resp = client
-        .post(format!("http://{BIND}/__admin/cookbook_author"))
+        .post(format!("http://{BIND}/admin/cookbook_author"))
         .header("Host", "acme.localhost")
         .form(&create_body)
         .send().await.unwrap();

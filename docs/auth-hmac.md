@@ -8,7 +8,7 @@ query, timestamp, and body, so a tampered or stale request is rejected. It's the
 scheme AWS SigV4 and webhook signatures use, and **Rustango** ships it as one
 tower layer.
 
-[![HMAC signing in rustango: the client signs method+path+query+date+body-hash with a shared secret; HmacAuthLayer recomputes and constant-time compares, rejecting tampered or stale requests](img/auth-hmac.png)](img/auth-hmac.png)
+[![HMAC signing in Rustango: the client signs method+path+query+date+body-hash with a shared secret; HmacAuthLayer recomputes and constant-time compares, rejecting tampered or stale requests](img/auth-hmac.png)](img/auth-hmac.png)
 
 > **New to a term here?** *HMAC*, *shared secret*, *replay*, *constant-time compare* —
 > see the [glossary](glossary.md).

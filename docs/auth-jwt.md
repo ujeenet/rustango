@@ -6,7 +6,7 @@ no per-request database or cache lookup. **Rustango**'s `rustango::jwt` module i
 the minimal building block: `encode` to sign claims, `decode` to verify and read
 them back, HS256 under the hood.
 
-[![Standalone JWT in rustango: Claims carry sub/exp/custom fields, encode() signs with a shared secret, decode() verifies signature + expiry](img/auth-jwt.png)](img/auth-jwt.png)
+[![Standalone JWT in Rustango: Claims carry sub/exp/custom fields, encode() signs with a shared secret, decode() verifies signature + expiry](img/auth-jwt.png)](img/auth-jwt.png)
 
 > **Source:** `rustango::jwt` (`Claims`, `encode`, `decode`, `decode_at`,
 > `decode_unverified`, `JwtError`) — behind the `jwt` feature (on by default).

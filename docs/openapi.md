@@ -7,7 +7,7 @@ serializers and ViewSets you already wrote: field schemas come from
 router mounts `/openapi.json` + an interactive docs page. When you need full
 control, the same types let you hand-build any spec.
 
-[![rustango OpenAPI: serializer fields become a component schema, the ViewSet becomes CRUD paths, and openapi_router serves /openapi.json + Swagger UI](img/openapi.png)](img/openapi.png)
+[![Rustango OpenAPI: serializer fields become a component schema, the ViewSet becomes CRUD paths, and openapi_router serves /openapi.json + Swagger UI](img/openapi.png)](img/openapi.png)
 
 > **Source:** `rustango::openapi` (`OpenApiSpec`, `Schema`, `OpenApiSchema`,
 > `PathItem`, `Operation`, `SecurityScheme`, `router::openapi_router`) and
@@ -165,7 +165,7 @@ let app = axum::Router::new()
 ```
 
 The viewer pages are tiny HTML shells that load Swagger UI / Redoc from a CDN
-(`unpkg` / `jsdelivr`) — no JS is bundled into rustango. For an air-gapped
+(`unpkg` / `jsdelivr`) — no JS is bundled into **Rustango**. For an air-gapped
 deployment, write `spec.to_json()` to a file at startup and self-host the viewer
 assets from your own static dir.
 
@@ -221,7 +221,7 @@ Helpers: `SecurityScheme::bearer(fmt)`, `basic()`, `api_key_header(name)`,
 `api_key_query(name)`, `oauth2_authorization_code(auth_url, token_url, scopes)`.
 On an `Operation`, `.no_security()` marks a public endpoint and
 `.require_security(scheme, scopes)` overrides the global default. These line up
-with rustango's own auth (see the [Security guide](security.md#authenticating-users)):
+with **Rustango**'s own auth (see the [Security guide](security.md#authenticating-users)):
 JWT → `bearer`, API keys → `apiKey`, OAuth2 → `oauth2`.
 
 ---

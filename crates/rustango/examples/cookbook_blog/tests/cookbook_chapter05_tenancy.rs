@@ -67,7 +67,7 @@ async fn provision_two_tenants_then_resolve_and_lazy_pool() {
         let req = http::Request::get("http://cookbook_acme.cookbook-test.local/")
             .body(()).unwrap();
         let parts = req.into_parts().0;
-        let org = r.resolve(&parts, &registry).await.expect("resolve");
+        let org = r.resolve(&parts, &registry.clone().into()).await.expect("resolve");
         let org = org.expect("subdomain resolver should match seeded acme tenant");
         assert_eq!(org.slug, "cookbook_acme");
     }
@@ -78,7 +78,7 @@ async fn provision_two_tenants_then_resolve_and_lazy_pool() {
         let mut req = http::Request::get("http://localhost/").body(()).unwrap();
         req.headers_mut().insert("X-Org", "cookbook_globex".parse().unwrap());
         let parts = req.into_parts().0;
-        let org = r.resolve(&parts, &registry).await.expect("resolve");
+        let org = r.resolve(&parts, &registry.clone().into()).await.expect("resolve");
         let org = org.expect("X-Org should match seeded globex tenant");
         assert_eq!(org.slug, "cookbook_globex");
     }
@@ -92,7 +92,7 @@ async fn provision_two_tenants_then_resolve_and_lazy_pool() {
         let mut req = http::Request::get("http://localhost/").body(()).unwrap();
         req.headers_mut().insert("X-Org", "cookbook_acme".parse().unwrap());
         let parts = req.into_parts().0;
-        let org = r.resolve(&parts, &registry).await.expect("resolve");
+        let org = r.resolve(&parts, &registry.clone().into()).await.expect("resolve");
         let org = org.expect("chain should fall through to header arm");
         assert_eq!(org.slug, "cookbook_acme");
     }

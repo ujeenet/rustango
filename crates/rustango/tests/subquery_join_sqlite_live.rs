@@ -5,7 +5,8 @@
 //! the base model.
 
 use rustango::core::joins::aliased;
-use rustango::core::{Model as _, Op, WhereExpr};
+use rustango::core::window::row_number;
+use rustango::core::{Expr, Model as _, Op, SqlValue, WhereExpr};
 use rustango::sql::{sqlx, Auto, FetcherPool as _, ForeignKey, Pool};
 use rustango::Model;
 
@@ -120,6 +121,72 @@ async fn left_join_sub_keeps_unmatched_rows() {
     let mut names: Vec<String> = rows.into_iter().map(|c| c.name).collect();
     names.sort();
     assert_eq!(names, vec!["Alice", "Bob"]);
+}
+
+/// #1035 — "top-N per group" via a window query joined as a derived
+/// table. The inner query ranks each customer's orders by `total` DESC
+/// with `ROW_NUMBER() OVER (PARTITION BY customer_id ...)`; the outer
+/// query joins that ranked derived table back to the base rows and keeps
+/// only rank ≤ 2. Django's `annotate(rank=Window(...)).filter(rank__lte=2)`
+/// idiom, which previously had no rustango equivalent (windows compile to
+/// an `AggregateQuery`, which `join_sub` didn't accept).
+#[tokio::test]
+async fn window_derived_table_yields_top_n_per_group() {
+    let pool = make_pool().await;
+    let alice = add_customer(&pool, "Alice").await;
+    let bob = add_customer(&pool, "Bob").await;
+    // Alice: 100, 80, 40 → top-2 are 100, 80.
+    add_order(&pool, alice, 100).await;
+    add_order(&pool, alice, 80).await;
+    add_order(&pool, alice, 40).await;
+    // Bob: 200, 50 → top-2 are both (only two orders).
+    add_order(&pool, bob, 200).await;
+    add_order(&pool, bob, 50).await;
+
+    // Inner: ROW_NUMBER() per customer, ordered by total DESC, projected
+    // alongside the id + total so the outer query can join + filter on it.
+    let ranked = Order::objects()
+        .aggregate()
+        .group_by("id")
+        .group_by("customer_id")
+        .group_by("total")
+        .annotate(
+            "rn",
+            row_number()
+                .partition_by("customer_id")
+                .order_by(&[("total", true)]) // DESC
+                .into(),
+        )
+        .compile()
+        .unwrap();
+
+    // Outer: join the ranked derived table back to the base orders on id,
+    // keeping only the top-2 per customer (rn <= 2).
+    let rows = Order::objects()
+        .join_sub(
+            ranked,
+            "r",
+            WhereExpr::And(vec![
+                WhereExpr::ExprCompare {
+                    lhs: aliased("r", "id"),
+                    op: Op::Eq,
+                    rhs: aliased("sj_order", "id"),
+                },
+                WhereExpr::ExprCompare {
+                    lhs: aliased("r", "rn"),
+                    op: Op::Lte,
+                    rhs: Expr::Literal(SqlValue::I64(2)),
+                },
+            ]),
+        )
+        .fetch(&pool)
+        .await
+        .unwrap();
+
+    // 2 (Alice's top-2) + 2 (all of Bob's) = 4 rows; Alice's 40 is dropped.
+    let mut totals: Vec<i64> = rows.iter().map(|o| o.total).collect();
+    totals.sort_unstable();
+    assert_eq!(totals, vec![50, 80, 100, 200], "top-2 per customer");
 }
 
 #[tokio::test]

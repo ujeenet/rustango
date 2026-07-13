@@ -7,7 +7,7 @@ machines on the same routes. This is Django's `AUTHENTICATION_BACKENDS` idea,
 wired to axum. Pair it with `require_auth` / `require_perm` to gate routes and
 the `CurrentUser` extractor to read the result.
 
-[![Auth backends in rustango: a request flows through a chain of backends (ModelBackend, ApiKeyBackend, JwtBackend); the first to recognise the credential wins and injects CurrentUser, then require_perm checks a codename](img/auth-backends.png)](img/auth-backends.png)
+[![Auth backends in Rustango: a request flows through a chain of backends (ModelBackend, ApiKeyBackend, JwtBackend); the first to recognise the credential wins and injects CurrentUser, then require_perm checks a codename](img/auth-backends.png)](img/auth-backends.png)
 
 > **New to a term here?** *Backend*, *middleware*, *extractor*, *permission codename* —
 > see the [glossary](glossary.md).

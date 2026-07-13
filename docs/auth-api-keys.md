@@ -7,7 +7,7 @@ identifies the caller. **Rustango** gives you two layers: a standalone
 generate/verify helper you can wire to your own table, and a batteries-included
 backend that stores keys and authenticates `Authorization: Bearer` requests.
 
-[![API keys in rustango: generate_key returns a one-time token prefix.secret, you store the 8-char prefix plus an argon2id hash, and verify_key checks an incoming secret](img/auth-api-keys.png)](img/auth-api-keys.png)
+[![API keys in Rustango: generate_key returns a one-time token prefix.secret, you store the 8-char prefix plus an argon2id hash, and verify_key checks an incoming secret](img/auth-api-keys.png)](img/auth-api-keys.png)
 
 > **New to a term here?** *Token*, *hash*, *Bearer*, *argon2id* — the
 > [glossary](glossary.md) defines the building blocks.

@@ -277,7 +277,7 @@ default = [
 To trim a binary that doesn't need everything, opt out of the defaults and list only what you use:
 
 ```toml
-rustango = { version = "0.43", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.44", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

@@ -4,6 +4,7 @@
 //! `LATERAL` is PG / MySQL only and errors cleanly on SQLite.
 
 use rustango::core::joins::aliased;
+use rustango::core::window::row_number;
 use rustango::core::{Op, WhereExpr};
 use rustango::sql::{Dialect, MySql, Postgres, SqlError, Sqlite};
 use rustango::Model;
@@ -130,6 +131,105 @@ fn lateral_errors_cleanly_on_sqlite() {
         matches!(err, SqlError::LateralJoinNotSupported { dialect: "sqlite" }),
         "expected LateralJoinNotSupported, got: {err:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #1035 — a window/aggregate query as a derived-table source. Window
+// functions compile to an `AggregateQuery`; `join_sub` now accepts one
+// (via `impl Into<DerivedSource>`), so the "filter on a window result"
+// idiom (rank ≤ N per group) is expressible as a derived table.
+// ---------------------------------------------------------------------------
+
+/// `row_number() OVER (PARTITION BY customer_id ORDER BY total DESC)`,
+/// projected alongside the grouped columns so the outer query can join +
+/// filter on it.
+fn ranked_orders() -> rustango::core::AggregateQuery {
+    Order::objects()
+        .aggregate()
+        .group_by("id")
+        .group_by("customer_id")
+        .annotate(
+            "rn",
+            row_number()
+                .partition_by("customer_id")
+                .order_by(&[("total", true)])
+                .into(),
+        )
+        .compile()
+        .unwrap()
+}
+
+#[test]
+fn join_sub_accepts_window_aggregate_on_pg() {
+    let q = Customer::objects()
+        .join_sub(
+            ranked_orders(),
+            "r",
+            WhereExpr::ExprCompare {
+                lhs: aliased("r", "customer_id"),
+                op: Op::Eq,
+                rhs: aliased("customer", "id"),
+            },
+        )
+        .compile()
+        .unwrap();
+    let sql = Postgres.compile_select(&q).unwrap().sql;
+    // The aggregate/window query is wrapped as a derived table, OVER clause
+    // and all, and joined on the projected group column.
+    assert!(
+        sql.contains(r#"INNER JOIN (SELECT "#),
+        "derived table: {sql}"
+    );
+    assert!(sql.contains("OVER ("), "window OVER inside subquery: {sql}");
+    assert!(
+        sql.contains(r#") AS "r" ON "r"."customer_id" = "customer"."id""#),
+        "alias + ON: {sql}"
+    );
+}
+
+#[test]
+fn window_aggregate_derived_table_is_tri_dialect() {
+    let q = Customer::objects()
+        .join_sub(
+            ranked_orders(),
+            "r",
+            WhereExpr::ExprCompare {
+                lhs: aliased("r", "customer_id"),
+                op: Op::Eq,
+                rhs: aliased("customer", "id"),
+            },
+        )
+        .compile()
+        .unwrap();
+    // Window functions are supported on all three backends, so a
+    // (non-lateral) windowed derived table emits cleanly everywhere.
+    for (name, sql) in [
+        ("sqlite", Sqlite.compile_select(&q).unwrap().sql),
+        ("mysql", MySql.compile_select(&q).unwrap().sql),
+    ] {
+        assert!(sql.contains("OVER ("), "{name}: window missing: {sql}");
+        assert!(
+            sql.to_lowercase().contains("inner join (select"),
+            "{name}: derived table missing: {sql}"
+        );
+    }
+}
+
+#[test]
+fn join_lateral_accepts_window_aggregate_on_pg() {
+    // The window/aggregate derived table also composes with LATERAL
+    // (PG / MySQL). Emits `JOIN LATERAL (SELECT … OVER … ) AS r ON true`.
+    let q = Customer::objects()
+        .join_lateral(ranked_orders(), "r", WhereExpr::And(vec![]))
+        .compile()
+        .unwrap();
+    let sql = Postgres.compile_select(&q).unwrap().sql;
+    assert!(
+        sql.contains("INNER JOIN LATERAL (SELECT "),
+        "lateral kw: {sql}"
+    );
+    assert!(sql.contains("OVER ("), "window inside lateral: {sql}");
+    assert!(sql.contains(r#") AS "r" ON true"#), "on true: {sql}");
 }
 
 #[test]
