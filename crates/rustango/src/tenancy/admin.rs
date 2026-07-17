@@ -444,6 +444,20 @@ where
             return redeem_impersonation_handoff(&org, cfg, routes, parts.uri.query())
                 .into_response();
         }
+        // SSO (admin-sso) — per-Org OpenID Connect / social OAuth login.
+        // `{login}/sso` starts the handshake; `{login}/sso/callback`
+        // completes it. Both GET; exact-match so they don't collide with
+        // the bare `{login}` route below.
+        #[cfg(feature = "admin-sso")]
+        if method == axum::http::Method::GET {
+            if path == format!("{}{}", routes.login_url, super::sso::SSO_CALLBACK_SUFFIX) {
+                return super::sso::tenant_sso_callback(&org, &cfg.secret, &pool, routes, &parts)
+                    .await;
+            }
+            if path == format!("{}{}", routes.login_url, super::sso::SSO_BEGIN_SUFFIX) {
+                return super::sso::tenant_sso_begin(&org, &cfg.secret, routes, &parts).await;
+            }
+        }
         if path == routes.login_url {
             return match method {
                 axum::http::Method::GET => {
@@ -817,6 +831,18 @@ fn login_form(
     // come from RouteConfig so apps can flip to /login etc.
     ctx.insert("login_url", &routes.login_url);
     ctx.insert("static_url", &routes.static_url);
+    // SSO (admin-sso) — show a "Sign in with <provider>" button when the
+    // Org has SSO enabled + a provider set.
+    #[cfg(feature = "admin-sso")]
+    {
+        let sso_enabled = org.sso_enabled && org.sso_provider.is_some();
+        ctx.insert("sso_enabled", &sso_enabled);
+        ctx.insert("sso_provider", &org.sso_provider.clone().unwrap_or_default());
+        ctx.insert(
+            "sso_login_url",
+            &format!("{}{}", routes.login_url, super::sso::SSO_BEGIN_SUFFIX),
+        );
+    }
     // v0.27.5 — log render errors instead of silently rendering an
     // empty body. The previous `unwrap_or_default()` hid a real
     // template-include resolution bug from the operator.

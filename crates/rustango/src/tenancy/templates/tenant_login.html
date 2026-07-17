@@ -90,6 +90,21 @@
       cursor: pointer;
     }
     button:hover { background: var(--color-accent-hover); }
+    .sso-divider {
+      display: flex; align-items: center; text-align: center;
+      color: var(--color-text-muted, #888); font-size: 0.85em; margin: 1rem 0 0.75rem;
+    }
+    .sso-divider::before, .sso-divider::after {
+      content: ""; flex: 1; border-bottom: 1px solid var(--color-border, #ddd);
+    }
+    .sso-divider span { padding: 0 0.6rem; }
+    .sso-button {
+      display: block; width: 100%; box-sizing: border-box; text-align: center;
+      padding: 0.6rem 0.8rem; border: 1px solid var(--color-border, #ccc);
+      border-radius: var(--radius, 6px); background: var(--color-surface, #fff);
+      color: var(--color-text, #222); font: inherit; text-decoration: none; cursor: pointer;
+    }
+    .sso-button:hover { background: var(--color-surface-hover, #f3f3f3); }
     .error {
       color: var(--color-error-fg);
       background: var(--color-error-bg);
@@ -125,5 +140,9 @@
     <input type="hidden" name="next" value="{{ next }}">
     <button type="submit">Sign in</button>
   </form>
+  {% if sso_enabled %}
+  <div class="sso-divider"><span>or</span></div>
+  <a class="sso-button" href="{{ sso_login_url }}">Sign in with {{ sso_provider | capitalize }}</a>
+  {% endif %}
 </body>
 </html>
