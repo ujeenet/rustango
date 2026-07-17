@@ -71,7 +71,8 @@ async fn org_round_trip_insert_and_fetch() {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     acme.insert(&pool).await.unwrap();
     let acme_id = *acme.id.get().unwrap();
     assert!(acme_id > 0, "BIGSERIAL should assign a positive id");
@@ -119,7 +120,8 @@ async fn org_filter_by_slug_returns_single_match() {
             sso_provider: None,
             sso_issuer_url: None,
             sso_client_id: None,
-            sso_secret_ref: None,        };
+            sso_secret_ref: None,
+        };
         org.insert(&pool).await.unwrap();
     }
 
@@ -182,7 +184,8 @@ async fn org_inactive_orgs_are_persistable_and_queryable() {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     frozen.insert(&pool).await.unwrap();
 
     let fetched: Vec<Org> = Org::objects()

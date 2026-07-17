@@ -141,7 +141,8 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     org.insert(&pool).await.unwrap();
 
     // Header-based resolver so the test doesn't need DNS — same shape

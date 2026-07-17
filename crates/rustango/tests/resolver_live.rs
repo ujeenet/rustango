@@ -65,7 +65,8 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     acme.insert(pool).await.unwrap();
 
     // Header-only: no host_pattern, just the slug.
@@ -92,7 +93,8 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     globex.insert(pool).await.unwrap();
 
     // Port-based: dedicated port 9001, no host or path.
@@ -119,7 +121,8 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     initech.insert(pool).await.unwrap();
 
     // Inactive — every resolver should skip.
@@ -146,7 +149,8 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     frozen.insert(pool).await.unwrap();
 }
 

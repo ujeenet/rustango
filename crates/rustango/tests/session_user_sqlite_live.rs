@@ -77,7 +77,8 @@ fn fake_sqlite_org() -> Org {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    }
+        sso_secret_ref: None,
+    }
 }
 
 /// Handler that returns "anon" when no SessionUser is present.

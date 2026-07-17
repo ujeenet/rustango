@@ -94,7 +94,8 @@ async fn seed_db_mode_tenant(pool: &sqlx::PgPool, slug: &str, url: &str) -> Org 
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     org.insert(pool).await.unwrap();
     org
 }

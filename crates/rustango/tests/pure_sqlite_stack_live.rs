@@ -79,7 +79,8 @@ impl OrgResolver for HostResolver {
             sso_provider: None,
             sso_issuer_url: None,
             sso_client_id: None,
-            sso_secret_ref: None,        }))
+            sso_secret_ref: None,
+        }))
     }
 }
 

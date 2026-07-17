@@ -138,7 +138,8 @@ async fn upload_then_serve_round_trip() {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     org.insert(&pool).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
@@ -293,7 +294,8 @@ async fn tenant_admin_renders_brand_overrides() {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     org.insert(&pool).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));

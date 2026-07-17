@@ -39,7 +39,8 @@ fn fake_mysql_org(slug: &str, url: &str) -> Org {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    }
+        sso_secret_ref: None,
+    }
 }
 
 #[tokio::test]

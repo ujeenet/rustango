@@ -82,7 +82,8 @@ async fn migrate_tenant_storage_dry_run_prints_plan() {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     org.insert(&pool).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
@@ -157,7 +158,8 @@ async fn migrate_tenant_storage_rejects_same_mode_no_op() {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     org.insert(&pool).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
@@ -219,7 +221,8 @@ async fn migrate_tenant_storage_rejects_database_target_without_url() {
         sso_provider: None,
         sso_issuer_url: None,
         sso_client_id: None,
-        sso_secret_ref: None,    };
+        sso_secret_ref: None,
+    };
     org.insert(&pool).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
