@@ -63,7 +63,11 @@ fn fake_sqlite_org() -> Org {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    }
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    }
 }
 
 async fn handler(mut t: Tenant<sqlx::Sqlite>) -> impl IntoResponse {

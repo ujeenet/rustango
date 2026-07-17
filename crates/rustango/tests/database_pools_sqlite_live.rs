@@ -34,7 +34,11 @@ fn fake_sqlite_org(slug: &str) -> Org {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    }
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    }
 }
 
 #[tokio::test]

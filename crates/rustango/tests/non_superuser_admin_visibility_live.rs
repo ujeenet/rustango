@@ -137,6 +137,7 @@ async fn non_superuser_with_view_perm_sees_model_in_admin() {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ),
         password_hash: "x".into(),
+        email: None,
         is_superuser: false,
         active: true,
         created_at: chrono::Utc::now(),

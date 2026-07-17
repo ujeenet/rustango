@@ -71,6 +71,7 @@ async fn user_detail_page_renders_roles_and_effective_perms() {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ),
         password_hash: "x".into(),
+        email: None,
         is_superuser: false,
         active: true,
         created_at: chrono::Utc::now(),

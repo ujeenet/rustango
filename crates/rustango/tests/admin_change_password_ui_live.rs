@@ -90,7 +90,11 @@ async fn change_password_anonymous_redirects_to_login() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    };
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    };
     org.insert(&pool).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
@@ -155,7 +159,11 @@ async fn change_password_authenticated_get_renders_form() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    };
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    };
     org.insert(&pool).await.unwrap();
     // Seed a user so validate_session can look it up.
     let hash = rustango::tenancy::password::hash("old-pw-secret").unwrap();
@@ -240,7 +248,11 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    };
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    };
     org.insert(&pool).await.unwrap();
     let hash = rustango::tenancy::password::hash("old-pw-secret").unwrap();
     let user_id: i64 = sqlx::query_scalar(
@@ -331,7 +343,11 @@ async fn change_password_post_rejects_wrong_current() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    };
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    };
     org.insert(&pool).await.unwrap();
     let hash = rustango::tenancy::password::hash("real-current").unwrap();
     let user_id: i64 = sqlx::query_scalar(
@@ -434,7 +450,11 @@ async fn session_minted_before_password_rotation_is_rejected() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    };
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    };
     org.insert(&pool).await.unwrap();
     let hash = rustango::tenancy::password::hash("starting-pw").unwrap();
     let user_id: i64 = sqlx::query_scalar(

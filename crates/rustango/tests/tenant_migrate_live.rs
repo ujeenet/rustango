@@ -226,7 +226,11 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    };
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    };
     acme.insert(&pool).await.unwrap();
 
     let mut globex = Org {
@@ -248,7 +252,11 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    };
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    };
     globex.insert(&pool).await.unwrap();
 
     let dir = fresh_dir("tenant_fanout");
@@ -338,7 +346,11 @@ async fn tenant_migrate_skips_inactive_orgs() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    };
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    };
     active.insert(&pool).await.unwrap();
 
     let mut inactive = Org {
@@ -360,7 +372,11 @@ async fn tenant_migrate_skips_inactive_orgs() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
-    };
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,    };
     inactive.insert(&pool).await.unwrap();
 
     let dir = fresh_dir("inactive_skip");
