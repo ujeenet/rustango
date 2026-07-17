@@ -255,7 +255,7 @@ jobs:
       - run: |
           cargo test -p rustango \
             --no-default-features \
-            --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer,totp \
+            --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer,totp,testkit \
             --test access_admin_codename_sqlite_live \
             --test admin_sqlite_live \
             --test admin_list_display_links_sqlite_live \
