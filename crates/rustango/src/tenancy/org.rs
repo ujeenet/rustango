@@ -141,6 +141,37 @@ pub struct Org {
     /// treated as `"auto"` (follow `prefers-color-scheme`).
     #[rustango(max_length = 8)]
     pub theme_mode: Option<String>,
+
+    // ---- SSO / OpenID Connect (admin-sso feature) -------------------
+    // Per-tenant single-provider SSO for the tenant admin login. When
+    // `sso_enabled`, the login page offers "Sign in with <provider>";
+    // the verified IdP email must match an existing `rustango_users.email`
+    // (link-to-existing — SSO never auto-provisions).
+    /// `true` turns on the SSO login button for this tenant.
+    #[rustango(default = "false")]
+    pub sso_enabled: bool,
+
+    /// Provider key: a built-in preset (`"google"`, `"microsoft"`,
+    /// `"github"`, `"gitlab"`, `"discord"`) or `"oidc"` for a generic
+    /// OpenID Connect provider configured via `sso_issuer_url`.
+    #[rustango(max_length = 40)]
+    pub sso_provider: Option<String>,
+
+    /// OIDC issuer base URL (e.g. a Keycloak realm or Okta domain),
+    /// used with `sso_provider = "oidc"` to auto-discover endpoints via
+    /// `{issuer}/.well-known/openid-configuration`.
+    #[rustango(max_length = 300)]
+    pub sso_issuer_url: Option<String>,
+
+    /// OAuth2 client id issued by the IdP.
+    #[rustango(max_length = 300)]
+    pub sso_client_id: Option<String>,
+
+    /// **Reference** to the OAuth2 client secret — an `env://VAR` /
+    /// `vault://…` handle resolved by the tenancy `SecretsResolver` at
+    /// login time (mirrors `database_url`). Never store the raw secret.
+    #[rustango(max_length = 300)]
+    pub sso_secret_ref: Option<String>,
 }
 
 /// Convenience enum for [`Org::storage_mode`]. The model field stays
