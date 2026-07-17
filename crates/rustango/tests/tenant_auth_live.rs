@@ -118,6 +118,7 @@ async fn reset_users_table(pool: &sqlx::PgPool) {
             "id" BIGSERIAL NOT NULL PRIMARY KEY,
             "username" VARCHAR(150) NOT NULL UNIQUE,
             "password_hash" VARCHAR(255) NOT NULL DEFAULT '',
+            "email" VARCHAR(254),
             "is_superuser" BOOLEAN NOT NULL,
             "active" BOOLEAN NOT NULL,
             "data" JSONB NOT NULL DEFAULT '{}'::jsonb,
