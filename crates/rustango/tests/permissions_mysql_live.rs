@@ -86,6 +86,7 @@ async fn mysql_pool_or_skip() -> Option<Pool> {
             `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
             `username` VARCHAR(150) NOT NULL UNIQUE, \
             `password_hash` VARCHAR(255) NOT NULL DEFAULT '', \
+            `email` VARCHAR(254), \
             `is_superuser` BOOLEAN NOT NULL DEFAULT FALSE, \
             `active` BOOLEAN NOT NULL DEFAULT TRUE, \
             `data` JSON NOT NULL, \

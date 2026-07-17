@@ -46,7 +46,12 @@ const BOOTSTRAP_SQL: &str = r#"
         logo_path TEXT,
         favicon_path TEXT,
         primary_color TEXT,
-        theme_mode TEXT
+        theme_mode TEXT,
+        sso_enabled INTEGER NOT NULL DEFAULT 0,
+        sso_provider TEXT,
+        sso_issuer_url TEXT,
+        sso_client_id TEXT,
+        sso_secret_ref TEXT
     )
 "#;
 
