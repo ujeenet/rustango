@@ -211,6 +211,8 @@ pub(super) async fn tenant_sso_callback(
     let clear_flow = Cookie::build((SSO_FLOW_COOKIE, ""))
         .path("/")
         .http_only(true)
+        .same_site(SameSite::Lax)
+        .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(0))
         .build();
     let mut resp = Redirect::to(routes.admin_url.as_str()).into_response();
