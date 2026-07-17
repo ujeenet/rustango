@@ -27,81 +27,31 @@ use rustango::core::Column as _;
 use rustango::sql::{sqlx, Auto, FetcherPool as _, Pool};
 use rustango::tenancy::Org;
 
-const BOOTSTRAP_SQL: &str = r#"
-    CREATE TABLE rustango_orgs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        slug TEXT NOT NULL UNIQUE,
-        display_name TEXT NOT NULL,
-        storage_mode TEXT NOT NULL,
-        backend_kind TEXT NOT NULL DEFAULT 'sqlite',
-        database_url TEXT,
-        schema_name TEXT,
-        host_pattern TEXT,
-        port INTEGER,
-        path_prefix TEXT,
-        active INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL,
-        brand_name TEXT,
-        brand_tagline TEXT,
-        logo_path TEXT,
-        favicon_path TEXT,
-        primary_color TEXT,
-        theme_mode TEXT,
-        sso_enabled INTEGER NOT NULL DEFAULT 0,
-        sso_provider TEXT,
-        sso_issuer_url TEXT,
-        sso_client_id TEXT,
-        sso_secret_ref TEXT
-    )
-"#;
-
-/// Bootstrap a sqlite pool with `rustango_orgs` shaped by hand —
-/// `make_migrations` doesn't emit SQLite DDL yet. Once Phase B's
-/// migrate scaffold gains SQLite support, this becomes:
-///
-/// ```ignore
-/// migrate_registry(&pool, &migrations_dir).await?;
-/// ```
+/// Bootstrap a sqlite pool with `rustango_orgs` built from `Org::SCHEMA`
+/// via the same DDL emitter the migration runner uses — no hand-written
+/// DDL to drift when the model gains a column.
 async fn sqlite_registry() -> Pool {
     let sqlx_pool: sqlx::SqlitePool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
         .await
         .expect("connect");
-    sqlx::query(BOOTSTRAP_SQL)
-        .execute(&sqlx_pool)
+    let pool: Pool = sqlx_pool.into();
+    rustango::testkit::create_tables_for::<Org>(&pool)
         .await
         .expect("bootstrap rustango_orgs");
-    sqlx_pool.into()
+    pool
 }
 
 fn fake_sqlite_org(slug: &str) -> Org {
     Org {
-        id: Auto::Unset,
         slug: slug.to_owned(),
         display_name: slug.to_owned(),
-        storage_mode: "database".into(),
         backend_kind: "sqlite".into(),
         database_url: Some(format!(
             "sqlite:file:tenant_{slug}?mode=memory&cache=shared"
         )),
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     }
 }
 

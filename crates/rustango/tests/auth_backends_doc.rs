@@ -58,21 +58,10 @@ fn basic(user: &str, pass: &str) -> String {
 /// `post.add` grant for alice.
 async fn setup() -> (Pool, i64) {
     let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
-    rustango::sql::raw_execute_pool(
-        &pool,
-        "CREATE TABLE IF NOT EXISTS rustango_users (\
-            id INTEGER PRIMARY KEY AUTOINCREMENT, \
-            username TEXT NOT NULL UNIQUE, \
-            password_hash TEXT NOT NULL DEFAULT '', email TEXT, \
-            is_superuser INTEGER NOT NULL DEFAULT 0, \
-            active INTEGER NOT NULL DEFAULT 1, \
-            data TEXT NOT NULL DEFAULT '{}', \
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), \
-            password_changed_at TEXT)",
-        Vec::new(),
-    )
-    .await
-    .expect("create users");
+    // rustango_users from `User::SCHEMA` (no hand-written DDL to drift).
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
+        .await
+        .expect("create users");
     ensure_tables_pool(&pool).await.expect("ensure perm tables");
     ensure_api_keys_table_pool(&pool)
         .await
@@ -92,12 +81,15 @@ async fn seed_user(pool: &Pool, username: &str, password: &str) {
     let Pool::Sqlite(sq) = pool else {
         unreachable!()
     };
-    sqlx::query("INSERT INTO rustango_users (username, password_hash, active) VALUES (?, ?, 1)")
-        .bind(username)
-        .bind(&hash)
-        .execute(sq)
-        .await
-        .expect("seed user");
+    sqlx::query(
+        "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
+         VALUES (?, ?, 0, 1, datetime('now'))",
+    )
+    .bind(username)
+    .bind(&hash)
+    .execute(sq)
+    .await
+    .expect("seed user");
 }
 
 async fn user_id(pool: &Pool, username: &str) -> i64 {
