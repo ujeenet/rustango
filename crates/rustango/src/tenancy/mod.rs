@@ -92,11 +92,11 @@ mod pools;
 mod resolver;
 pub mod routes;
 mod secrets;
+pub mod session;
 /// Per-`Org` SSO (OpenID Connect / social OAuth) login for the tenant
 /// admin — the `admin-sso` feature. Reuses `crate::admin::sso`.
 #[cfg(feature = "admin-sso")]
 pub(crate) mod sso;
-pub mod session;
 // v0.38 slice 24 — `tenancy::server::run<DB>` is tri-dialect; the
 // operator console runs on whichever backend `TenantPools<DB>` was
 // built with, schema-mode dispatch only fires on PG (by language),

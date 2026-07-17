@@ -19,7 +19,7 @@
 
 use crate::oauth2::{providers, OAuth2Provider, OAuthError};
 
-pub use crate::oauth2::{seal_flow, open_flow, NormalizedUser, OAuth2Flow};
+pub use crate::oauth2::{open_flow, seal_flow, NormalizedUser, OAuth2Flow};
 
 /// Cookie the sealed [`OAuth2Flow`] round-trips in between the login
 /// redirect and the callback. Distinct from the standalone
@@ -262,7 +262,11 @@ async fn sso_begin(State(state): State<AppState>) -> Response {
 }
 
 // GET /login/sso/callback — finish the handshake, link, mint.
-async fn sso_callback(State(state): State<AppState>, headers: HeaderMap, Query(params): Query<CallbackParams>) -> Response {
+async fn sso_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<CallbackParams>,
+) -> Response {
     let Some(cfg) = state.config.sso.as_ref() else {
         return login_error(&state, "disabled");
     };
@@ -357,7 +361,11 @@ struct LinkedAdmin {
 /// when no row matches — the caller refuses the login (link-to-existing).
 async fn find_admin_user_by_email(pool: &crate::sql::Pool, email: &str) -> Option<LinkedAdmin> {
     use crate::core::{SelectQuery, SqlValue};
-    let select = SelectQuery::by_pk(AdminUser::SCHEMA, "email", SqlValue::String(email.to_owned()));
+    let select = SelectQuery::by_pk(
+        AdminUser::SCHEMA,
+        "email",
+        SqlValue::String(email.to_owned()),
+    );
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
     let row = crate::sql::select_one_row_as_json(pool, &select, &fields)
         .await
@@ -366,9 +374,18 @@ async fn find_admin_user_by_email(pool: &crate::sql::Pool, email: &str) -> Optio
     Some(LinkedAdmin {
         id: row.get("id").and_then(serde_json::Value::as_i64)?,
         username: row.get("username").and_then(|v| v.as_str())?.to_owned(),
-        password_hash: row.get("password_hash").and_then(|v| v.as_str())?.to_owned(),
-        is_superuser: row.get("is_superuser").and_then(serde_json::Value::as_bool).unwrap_or(false),
-        active: row.get("active").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        password_hash: row
+            .get("password_hash")
+            .and_then(|v| v.as_str())?
+            .to_owned(),
+        is_superuser: row
+            .get("is_superuser")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        active: row
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -391,7 +408,10 @@ mod tests {
         for name in ["google", "microsoft", "github", "gitlab", "discord"] {
             let p = build_provider(&cfg(name)).await.expect("preset builds");
             assert_eq!(p.client_id, "cid");
-            assert_eq!(p.redirect_uri, "https://app.example.com/login/sso/x/callback");
+            assert_eq!(
+                p.redirect_uri,
+                "https://app.example.com/login/sso/x/callback"
+            );
         }
     }
 

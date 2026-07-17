@@ -837,7 +837,10 @@ fn login_form(
     {
         let sso_enabled = org.sso_enabled && org.sso_provider.is_some();
         ctx.insert("sso_enabled", &sso_enabled);
-        ctx.insert("sso_provider", &org.sso_provider.clone().unwrap_or_default());
+        ctx.insert(
+            "sso_provider",
+            &org.sso_provider.clone().unwrap_or_default(),
+        );
         ctx.insert(
             "sso_login_url",
             &format!("{}{}", routes.login_url, super::sso::SSO_BEGIN_SUFFIX),
