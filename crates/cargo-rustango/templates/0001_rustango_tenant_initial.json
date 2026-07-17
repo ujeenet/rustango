@@ -253,6 +253,46 @@
             "unique": true
           },
           {
+            "name": "sso_client_id",
+            "column": "sso_client_id",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 300
+          },
+          {
+            "name": "sso_enabled",
+            "column": "sso_enabled",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "false"
+          },
+          {
+            "name": "sso_issuer_url",
+            "column": "sso_issuer_url",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 300
+          },
+          {
+            "name": "sso_provider",
+            "column": "sso_provider",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 40
+          },
+          {
+            "name": "sso_secret_ref",
+            "column": "sso_secret_ref",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 300
+          },
+          {
             "name": "storage_mode",
             "column": "storage_mode",
             "ty": "string",
@@ -455,6 +495,15 @@
             "nullable": false,
             "primary_key": false,
             "default": "'{}'"
+          },
+          {
+            "name": "email",
+            "column": "email",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 254,
+            "unique": true
           },
           {
             "name": "id",

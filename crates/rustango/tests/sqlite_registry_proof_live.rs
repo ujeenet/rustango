@@ -46,7 +46,12 @@ const BOOTSTRAP_SQL: &str = r#"
         logo_path TEXT,
         favicon_path TEXT,
         primary_color TEXT,
-        theme_mode TEXT
+        theme_mode TEXT,
+        sso_enabled INTEGER NOT NULL DEFAULT 0,
+        sso_provider TEXT,
+        sso_issuer_url TEXT,
+        sso_client_id TEXT,
+        sso_secret_ref TEXT
     )
 "#;
 
@@ -92,6 +97,11 @@ fn fake_sqlite_org(slug: &str) -> Org {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     }
 }
 

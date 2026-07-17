@@ -61,6 +61,11 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     };
     acme.insert(pool).await.unwrap();
 
@@ -84,6 +89,11 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     };
     globex.insert(pool).await.unwrap();
 
@@ -107,6 +117,11 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     };
     initech.insert(pool).await.unwrap();
 
@@ -130,6 +145,11 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     };
     frozen.insert(pool).await.unwrap();
 }

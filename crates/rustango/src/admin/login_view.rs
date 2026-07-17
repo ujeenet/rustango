@@ -90,11 +90,23 @@ fn login_response(
 
 fn render_login_form(state: &AppState, error: Option<&str>, csrf_input: &str) -> String {
     let admin_prefix = &state.config.admin_prefix;
+    // SSO button — shown when `with_sso` configured a provider (admin-sso).
+    #[cfg(feature = "admin-sso")]
+    let (sso_enabled, sso_provider) = state
+        .config
+        .sso
+        .as_ref()
+        .map_or((false, String::new()), |c| (true, c.provider.clone()));
+    #[cfg(not(feature = "admin-sso"))]
+    let (sso_enabled, sso_provider) = (false, String::new());
     let ctx = serde_json::json!({
         "title": "Sign in",
         "action": format!("{admin_prefix}/login"),
         "error": error,
         "csrf_input": csrf_input,
+        "sso_enabled": sso_enabled,
+        "sso_provider": sso_provider,
+        "sso_login_url": format!("{admin_prefix}/login/sso"),
         "admin_title": state
             .config
             .title

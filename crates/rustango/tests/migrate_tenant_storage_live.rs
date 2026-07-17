@@ -78,6 +78,11 @@ async fn migrate_tenant_storage_dry_run_prints_plan() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     };
     org.insert(&pool).await.unwrap();
 
@@ -149,6 +154,11 @@ async fn migrate_tenant_storage_rejects_same_mode_no_op() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     };
     org.insert(&pool).await.unwrap();
 
@@ -207,6 +217,11 @@ async fn migrate_tenant_storage_rejects_database_target_without_url() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     };
     org.insert(&pool).await.unwrap();
 

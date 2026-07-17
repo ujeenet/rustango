@@ -233,6 +233,8 @@ ALTER TABLE "rustango_users"
     ADD COLUMN IF NOT EXISTS "data" JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE "rustango_users"
     ADD COLUMN IF NOT EXISTS "password_changed_at" TIMESTAMPTZ NULL;
+ALTER TABLE "rustango_users"
+    ADD COLUMN IF NOT EXISTS "email" VARCHAR(254) NULL;
 "#;
 
 /// v0.38 — SQLite counterpart of [`ENSURE_SQL`].

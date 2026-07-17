@@ -75,6 +75,7 @@ async fn make_user(pool: &sqlx::PgPool, username_prefix: &str) -> i64 {
         id: Auto::default(),
         username,
         password_hash: "test-hash".to_owned(),
+        email: None,
         is_superuser: false,
         active: true,
         created_at: chrono::Utc::now(),

@@ -134,6 +134,11 @@ async fn upload_then_serve_round_trip() {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     };
     org.insert(&pool).await.unwrap();
 
@@ -285,6 +290,11 @@ async fn tenant_admin_renders_brand_overrides() {
         favicon_path: None,
         primary_color: Some("#2c5fb0".into()),
         theme_mode: Some("dark".into()),
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     };
     org.insert(&pool).await.unwrap();
 

@@ -90,6 +90,11 @@ async fn seed_db_mode_tenant(pool: &sqlx::PgPool, slug: &str, url: &str) -> Org 
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        sso_enabled: false,
+        sso_provider: None,
+        sso_issuer_url: None,
+        sso_client_id: None,
+        sso_secret_ref: None,
     };
     org.insert(pool).await.unwrap();
     org
@@ -113,6 +118,7 @@ async fn reset_users_table(pool: &sqlx::PgPool) {
             "id" BIGSERIAL NOT NULL PRIMARY KEY,
             "username" VARCHAR(150) NOT NULL UNIQUE,
             "password_hash" VARCHAR(255) NOT NULL DEFAULT '',
+            "email" VARCHAR(254),
             "is_superuser" BOOLEAN NOT NULL,
             "active" BOOLEAN NOT NULL,
             "data" JSONB NOT NULL DEFAULT '{}'::jsonb,

@@ -55,6 +55,11 @@ mod manage_admin;
 pub mod object_permissions;
 pub mod queryset_hooks;
 pub mod session;
+/// SSO (OpenID Connect / social OAuth) login for the admin — issue-driven
+/// by the `admin-sso` feature. Shared core reused by the bare admin and
+/// the tenant admin; access is link-to-existing (no auto-provisioning).
+#[cfg(feature = "admin-sso")]
+pub mod sso;
 /// Admin TOTP (two-factor) device persistence — issue #367. Gated on
 /// the `totp` feature; admin builds without it have no 2FA challenge.
 #[cfg(feature = "totp")]

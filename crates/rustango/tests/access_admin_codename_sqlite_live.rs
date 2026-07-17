@@ -30,7 +30,7 @@ async fn fresh_pool() -> Pool {
         "CREATE TABLE IF NOT EXISTS rustango_users (\
             id INTEGER PRIMARY KEY AUTOINCREMENT, \
             username TEXT NOT NULL UNIQUE, \
-            password_hash TEXT NOT NULL DEFAULT '', \
+            password_hash TEXT NOT NULL DEFAULT '', email TEXT, \
             is_superuser INTEGER NOT NULL DEFAULT 0, \
             active INTEGER NOT NULL DEFAULT 1, \
             data TEXT NOT NULL DEFAULT '{}', \

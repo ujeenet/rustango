@@ -78,6 +78,10 @@ pub struct Settings {
     /// `tools/list` cap. Epic #1013, Slice 6 (#1019). Inert unless the
     /// `mcp` feature is compiled in.
     pub mcp: McpSettings,
+    /// `[sso]` — global admin SSO (OpenID Connect / social OAuth) for a
+    /// non-tenanted app. Inert unless the `admin-sso` feature is
+    /// compiled in; multi-tenant apps configure SSO per-`Org`.
+    pub sso: SsoSettings,
 }
 
 impl Settings {
@@ -188,6 +192,56 @@ impl McpSettings {
     #[must_use]
     pub fn sse_enabled(&self) -> bool {
         self.enable_sse.unwrap_or(true)
+    }
+}
+
+/// Global SSO (OpenID Connect / social OAuth) for the admin login on a
+/// non-tenanted app (`admin-sso` feature). Read at boot by the admin
+/// `Builder`; the verified IdP email must match an existing admin user
+/// — SSO authenticates but never auto-provisions. Multi-tenant apps
+/// configure SSO per-`Org` instead of here.
+///
+/// ```toml
+/// [sso]
+/// # enabled = true
+/// # provider = "google"      # google | microsoft | github | gitlab | discord | oidc
+/// # issuer_url = ""          # required for provider = "oidc" (OIDC discovery base URL)
+/// # client_id = ""
+/// # client_secret = ""       # prefer the RUSTANGO__SSO__CLIENT_SECRET env overlay
+/// # redirect_uri = ""        # must match the mounted /login/sso/{provider}/callback
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SsoSettings {
+    /// Turns on the "Sign in with <provider>" button on the admin login.
+    pub enabled: Option<bool>,
+    /// Provider key: `"google"` / `"microsoft"` / `"github"` /
+    /// `"gitlab"` / `"discord"`, or `"oidc"` for a generic OpenID
+    /// Connect provider configured via `issuer_url`.
+    pub provider: Option<String>,
+    /// OIDC issuer base URL (used with `provider = "oidc"`).
+    pub issuer_url: Option<String>,
+    /// OAuth2 client id from the IdP.
+    pub client_id: Option<String>,
+    /// OAuth2 client secret. Prefer the `RUSTANGO__SSO__CLIENT_SECRET`
+    /// env overlay over committing it to TOML.
+    pub client_secret: Option<String>,
+    /// Redirect URI registered with the IdP; must match the mounted
+    /// callback route. When unset, the admin derives it from the
+    /// request host + login prefix.
+    pub redirect_uri: Option<String>,
+}
+
+impl SsoSettings {
+    /// Whether SSO login is enabled (default `false`).
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+    /// Provider key, if configured.
+    #[must_use]
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
     }
 }
 

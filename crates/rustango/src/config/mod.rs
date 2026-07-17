@@ -45,7 +45,7 @@ pub use loader::ConfigError;
 pub use sections::{
     AdminSettings, AuditSettings, AuthSettings, BrandSettings, CacheSettings, DatabaseSettings,
     I18nSettings, JobsSettings, JwtSettings, LoggingSettings, MailSettings, McpSettings,
-    RoutesSettings, SecuritySettings, ServerSettings, Settings, TenancySettings,
+    RoutesSettings, SecuritySettings, ServerSettings, Settings, SsoSettings, TenancySettings,
 };
 
 impl Settings {

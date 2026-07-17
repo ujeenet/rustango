@@ -99,6 +99,13 @@ pub struct User {
     /// PHC-format Argon2id hash.
     #[rustango(max_length = 255)]
     pub password_hash: String,
+    /// Email used to link an external SSO identity (OIDC / social
+    /// OAuth) to this tenant user. The `admin-sso` login matches the
+    /// IdP's verified email against this column; `None` means the
+    /// account can't sign in via SSO. Unique within the tenant, but
+    /// multiple `NULL`s are allowed.
+    #[rustango(max_length = 254, unique)]
+    pub email: Option<String>,
     /// Org-admin within this tenant. Renders write-buttons, allows
     /// edit/delete; non-superusers see read-only views (admin
     /// authorization is the v0.6.x story; slice 6 stores the flag).
@@ -225,6 +232,9 @@ pub async fn authenticate_user(
         id: Auto::Set(row.try_get::<i64, _>("id")?),
         username: row.try_get::<String, _>("username")?,
         password_hash: row.try_get::<String, _>("password_hash")?,
+        // Defensive get — tolerates rows from tenants not yet migrated
+        // to the SSO `email` column (mirrors `data` / `password_changed_at`).
+        email: row.try_get::<Option<String>, _>("email").ok().flatten(),
         is_superuser: row.try_get::<bool, _>("is_superuser")?,
         active: row.try_get::<bool, _>("active")?,
         created_at: row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")?,
