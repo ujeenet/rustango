@@ -16,7 +16,6 @@ use axum::{
     http::{header, request::Parts, HeaderValue},
     response::{IntoResponse, Redirect, Response},
 };
-use cookie::{time::Duration as CookieDuration, Cookie, SameSite};
 
 use crate::admin::sso::{
     build_provider, open_flow, seal_flow, verified_email, ResolvedSso, SSO_FLOW_COOKIE,
@@ -103,8 +102,19 @@ fn login_error(routes: &RouteConfig, code: &str) -> Response {
     Redirect::to(&format!("{}?sso_error={code}", routes.login_url)).into_response()
 }
 
-fn set_cookie(resp: &mut Response, cookie: Cookie<'_>) {
-    if let Ok(v) = HeaderValue::from_str(&cookie.to_string()) {
+/// `"; Secure"` on the prod tier (HTTPS), empty in dev so local-HTTP SSO
+/// works — the framework's session-cookie posture (audit H2), same as
+/// the tenant login cookie.
+fn secure_suffix() -> &'static str {
+    if crate::session::secure_cookies() {
+        "; Secure"
+    } else {
+        ""
+    }
+}
+
+fn set_cookie(resp: &mut Response, value: &str) {
+    if let Ok(v) = HeaderValue::from_str(value) {
         resp.headers_mut().append(header::SET_COOKIE, v);
     }
 }
@@ -129,15 +139,12 @@ pub(super) async fn tenant_sso_begin(
     };
     let (url, flow) = provider.begin();
     let sealed = seal_flow(&flow, secret.key());
-    let flow_cookie = Cookie::build((SSO_FLOW_COOKIE, sealed))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .secure(crate::session::secure_cookies())
-        .max_age(CookieDuration::seconds(600))
-        .build();
+    let flow_cookie = format!(
+        "{SSO_FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{}",
+        secure_suffix()
+    );
     let mut resp = Redirect::to(&url).into_response();
-    set_cookie(&mut resp, flow_cookie);
+    set_cookie(&mut resp, &flow_cookie);
     resp
 }
 
@@ -201,23 +208,18 @@ pub(super) async fn tenant_sso_callback(
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
     let payload = TenantSessionPayload::new(uid, &org.slug, ttl);
     let cookie_value = tenant_console::encode(secret, &payload);
-    let session_cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .secure(crate::session::secure_cookies())
-        .max_age(CookieDuration::seconds(ttl))
-        .build();
-    let clear_flow = Cookie::build((SSO_FLOW_COOKIE, ""))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .secure(crate::session::secure_cookies())
-        .max_age(CookieDuration::seconds(0))
-        .build();
+    let session_cookie = format!(
+        "{}={cookie_value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl}{}",
+        tenant_console::COOKIE_NAME,
+        secure_suffix()
+    );
+    let clear_flow = format!(
+        "{SSO_FLOW_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
+        secure_suffix()
+    );
     let mut resp = Redirect::to(routes.admin_url.as_str()).into_response();
-    set_cookie(&mut resp, session_cookie);
-    set_cookie(&mut resp, clear_flow);
+    set_cookie(&mut resp, &session_cookie);
+    set_cookie(&mut resp, &clear_flow);
     resp
 }
 
