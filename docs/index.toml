@@ -20,7 +20,7 @@ pages = ["models.md", "orm.md", "admin.md", "serializers.md", "viewsets.md", "ht
 [[section]]
 title = "Authentication"
 slug = "authentication"
-pages = ["auth-passwords.md", "auth-sessions.md", "auth-backends.md", "auth-decorators.md", "auth-jwt.md", "auth-jwt-api.md", "auth-api-keys.md", "auth-hmac.md", "auth-flows.md"]
+pages = ["auth-passwords.md", "auth-sessions.md", "auth-backends.md", "auth-decorators.md", "auth-jwt.md", "auth-jwt-api.md", "auth-api-keys.md", "auth-hmac.md", "auth-flows.md", "sso.md"]
 
 [[section]]
 title = "Benchmarks"
