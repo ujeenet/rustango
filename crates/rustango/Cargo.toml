@@ -316,6 +316,15 @@ admin = [
     "dep:tokio",
 ]
 
+# SSO for the admin login (`rustango::admin::sso`) — sign in with an
+# external IdP (OpenID Connect, Google, Microsoft/Azure AD, GitHub, …)
+# instead of a local password. Composes the existing `oauth2` client
+# (the OIDC/OAuth2 handshake) with `admin` (the session + user model).
+# Access is *link-to-existing* — the verified IdP email must match an
+# admin user; SSO never auto-provisions. Works for the bare admin
+# (global `[sso]` config) and, with `tenancy`, per-Org.
+admin-sso = ["admin", "oauth2"]
+
 # Multi-tenancy module (`rustango::tenancy`). Implies `admin` (the
 # tenant admin builder wraps `rustango::admin`). Pulls in Argon2 +
 # HMAC-SHA256 + cookie + tower for the per-tenant + operator
