@@ -24,6 +24,19 @@ fn live_lock() -> &'static Mutex<()> {
     M.get_or_init(|| Mutex::new(()))
 }
 
+/// Build `rustango_users` inside a per-tenant Postgres schema from
+/// `User::SCHEMA` (no hand-written DDL to drift). The schema-mode
+/// tenancy tests need the table under `"{schema}"."rustango_users"`.
+async fn create_users_in_schema(pool: &sqlx::PgPool, schema: &str) {
+    rustango::testkit::create_tables_in_schema(
+        &rustango::sql::Pool::Postgres(pool.clone()),
+        schema,
+        &[<rustango::tenancy::User as rustango::core::Model>::SCHEMA],
+    )
+    .await
+    .expect("create rustango_users in schema");
+}
+
 async fn lookup_org(pool: &sqlx::PgPool, slug: &str) -> Org {
     let mut rows: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.to_owned()))
@@ -163,27 +176,7 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(&format!(
-        // Mirrors the current canonical `rustango_users` schema —
-        // `data JSONB` and `password_changed_at` were added after this
-        // test's original write, so the framework's `create-user` /
-        // session-validation code paths now INSERT/UPDATE columns the
-        // hand-rolled CREATE TABLE used to omit.
-        r#"CREATE TABLE "{slug}"."rustango_users" (
-            "id" BIGSERIAL NOT NULL PRIMARY KEY,
-            "username" VARCHAR(150) NOT NULL,
-            "password_hash" VARCHAR(255) NOT NULL DEFAULT '',
-            "email" VARCHAR(254),
-            "is_superuser" BOOLEAN NOT NULL,
-            "active" BOOLEAN NOT NULL,
-            "data" JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-            "created_at" TIMESTAMPTZ NOT NULL,
-            "password_changed_at" TIMESTAMPTZ
-        )"#
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    create_users_in_schema(&pool, &slug).await;
 
     let pools = TenantPools::new(pool.clone());
     run(
@@ -257,27 +250,7 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(&format!(
-        // Mirrors the current canonical `rustango_users` schema —
-        // `data JSONB` and `password_changed_at` were added after this
-        // test's original write, so the framework's `create-user` /
-        // session-validation code paths now INSERT/UPDATE columns the
-        // hand-rolled CREATE TABLE used to omit.
-        r#"CREATE TABLE "{slug}"."rustango_users" (
-            "id" BIGSERIAL NOT NULL PRIMARY KEY,
-            "username" VARCHAR(150) NOT NULL,
-            "password_hash" VARCHAR(255) NOT NULL DEFAULT '',
-            "email" VARCHAR(254),
-            "is_superuser" BOOLEAN NOT NULL,
-            "active" BOOLEAN NOT NULL,
-            "data" JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-            "created_at" TIMESTAMPTZ NOT NULL,
-            "password_changed_at" TIMESTAMPTZ
-        )"#
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    create_users_in_schema(&pool, &slug).await;
 
     let pools = TenantPools::new(pool.clone());
     let op_user = unique("operator_only");
@@ -337,27 +310,7 @@ async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(&format!(
-        // Mirrors the current canonical `rustango_users` schema —
-        // `data JSONB` and `password_changed_at` were added after this
-        // test's original write, so the framework's `create-user` /
-        // session-validation code paths now INSERT/UPDATE columns the
-        // hand-rolled CREATE TABLE used to omit.
-        r#"CREATE TABLE "{slug}"."rustango_users" (
-            "id" BIGSERIAL NOT NULL PRIMARY KEY,
-            "username" VARCHAR(150) NOT NULL,
-            "password_hash" VARCHAR(255) NOT NULL DEFAULT '',
-            "email" VARCHAR(254),
-            "is_superuser" BOOLEAN NOT NULL,
-            "active" BOOLEAN NOT NULL,
-            "data" JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-            "created_at" TIMESTAMPTZ NOT NULL,
-            "password_changed_at" TIMESTAMPTZ
-        )"#
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    create_users_in_schema(&pool, &slug).await;
 
     let pools = TenantPools::new(pool.clone());
     run(
