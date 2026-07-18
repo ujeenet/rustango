@@ -279,9 +279,13 @@ pub fn discover_migration_dirs(project_root: &Path) -> Vec<PathBuf> {
                 // Skip the flat top-level migrations dir (already added)
                 // + obvious not-an-app folders.
                 let name = path.file_name()?.to_str()?;
+                // `system` is the framework's own app; its migrations are
+                // scope-partitioned (registry vs tenant) and applied by the
+                // tenancy provisioning path under a dedicated ledger, not as
+                // a plain unscoped user-app dir here.
                 if matches!(
                     name,
-                    "migrations" | "target" | "src" | ".git" | "node_modules"
+                    "migrations" | "target" | "src" | ".git" | "node_modules" | "system"
                 ) || name.starts_with('.')
                 {
                     return None;

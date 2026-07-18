@@ -52,6 +52,7 @@ pub use make::{
 };
 #[cfg(feature = "postgres")]
 pub use manage::{append_data_op, make_data_migration};
+pub use runner::migrate_pool_with_ledger;
 // Always-on: tri-dialect entry points (work on PG / MySQL / SQLite via
 // the `Pool` enum), plus the inventory + builder surface.
 pub use runner::{

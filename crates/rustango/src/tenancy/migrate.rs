@@ -98,6 +98,59 @@ pub struct TenantMigrationOutcome {
     pub error: Option<TenancyError>,
 }
 
+/// Ledger table tracking the framework's own ("system app") migrations,
+/// kept separate from the project's `__rustango_migrations__` so the two
+/// chains never collide.
+const SYSTEM_LEDGER: &str = "__rustango_system_migrations__";
+
+/// Generate (from the current models, if not already on disk) and apply
+/// the framework's system-app migrations for `scope` against `pool`.
+///
+/// This replaces the old hand-written `ensure_*` / bootstrap / ALTER-fixup
+/// DDL: the framework's own tables come from makemigrations-generated
+/// files (drift-free and feature-`#[cfg]`-aware) in
+/// `<project_root>/system/migrations/`, applied under [`SYSTEM_LEDGER`].
+/// Generation is a no-op once the files exist (committed, or generated on
+/// a previous run); a read-only tree simply means they were committed.
+async fn apply_system_migrations(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    scope: crate::core::ModelScope,
+) -> Result<Vec<Migration>, TenancyError> {
+    // `system/migrations/` is a sibling of the project's `migrations/`
+    // dir. When `dir` is literally `<root>/migrations`, the project root
+    // is its parent; otherwise (e.g. a bare test dir) keep `system/`
+    // contained inside `dir` rather than polluting its parent.
+    let project_root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
+        dir.parent().unwrap_or(dir)
+    } else {
+        dir
+    };
+    // Best-effort generate from the compiled models (Ok(None) when the
+    // on-disk system migrations already match the models).
+    let _ = crate::migrate::make_migrations_system(project_root, scope, None);
+    let system_dir = project_root.join("system").join("migrations");
+    if !system_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let migration_scope = match scope {
+        crate::core::ModelScope::Registry => MigrationScope::Registry,
+        crate::core::ModelScope::Tenant => MigrationScope::Tenant,
+    };
+    let applied = match scoped_subset(&system_dir, migration_scope).await? {
+        ScopedDir::Owned(temp) => {
+            let r =
+                crate::migrate::migrate_pool_with_ledger(pool, temp.path(), SYSTEM_LEDGER).await?;
+            drop(temp);
+            r
+        }
+        ScopedDir::Original => {
+            crate::migrate::migrate_pool_with_ledger(pool, &system_dir, SYSTEM_LEDGER).await?
+        }
+    };
+    Ok(applied)
+}
+
 /// Apply registry-scoped pending migrations to the registry DB.
 ///
 /// Only migrations whose `scope == Registry` run. Tenant-scoped
@@ -137,7 +190,7 @@ pub async fn migrate_registry_pool(
 ) -> Result<Vec<Migration>, TenancyError> {
     info!(target: "crate::tenancy", "applying registry-scoped migrations");
     let scoped_dir = scoped_subset(dir, MigrationScope::Registry).await?;
-    let applied = match scoped_dir {
+    let mut applied = match scoped_dir {
         ScopedDir::Owned(temp) => {
             let result = crate::migrate::migrate_pool(registry, temp.path()).await?;
             drop(temp);
@@ -145,141 +198,11 @@ pub async fn migrate_registry_pool(
         }
         ScopedDir::Original => crate::migrate::migrate_pool(registry, dir).await?,
     };
-    // v0.28.4 (#77) — runtime ALTER for the password_changed_at
-    // column on Postgres registries. The column landed mid-v0.28; PG
-    // registries from earlier versions need it back-filled without a
-    // migration JSON the user would have to apply manually. Sqlite +
-    // MySQL registries are post-v0.34 and ship the column from the
-    // start, so the ALTER is PG-only.
-    //
-    // v0.37 (#7) — extended to the v0.26+v0.33 `Org` columns the
-    // scaffolder's bootstrap JSON predates: `backend_kind` (v0.33
-    // multi-backend tenancy), `brand_*` / `logo_path` / `favicon_path`
-    // / `primary_color` / `theme_mode` (v0.26 branding). Until the
-    // scaffolder templates get regenerated, fresh scaffolded projects
-    // need this fixup or `Org` row reads error with `column "..." does
-    // not exist`. Each ALTER is idempotent via `ADD COLUMN IF NOT
-    // EXISTS`; running on an up-to-date schema is a no-op.
-    #[cfg(feature = "postgres")]
-    if let Some(pg) = registry.as_postgres() {
-        // List every (table, column, type) the current framework
-        // expects but a stale bootstrap might be missing. Adding to
-        // this list is the contract for "ship a column that older
-        // deployments need" — pair every new column with an entry
-        // here so users don't have to hand-write ALTERs to upgrade.
-        let fixups: &[(&str, &str, &str)] = &[
-            (
-                "rustango_operators",
-                "password_changed_at",
-                "TIMESTAMPTZ NULL",
-            ),
-            (
-                "rustango_orgs",
-                "backend_kind",
-                "VARCHAR(16) NOT NULL DEFAULT 'postgres'",
-            ),
-            ("rustango_orgs", "brand_name", "VARCHAR(80)"),
-            ("rustango_orgs", "brand_tagline", "VARCHAR(200)"),
-            ("rustango_orgs", "logo_path", "VARCHAR(120)"),
-            ("rustango_orgs", "favicon_path", "VARCHAR(120)"),
-            ("rustango_orgs", "primary_color", "VARCHAR(7)"),
-            ("rustango_orgs", "theme_mode", "VARCHAR(8)"),
-        ];
-        for (table, column, col_type) in fixups {
-            let sql =
-                format!(r#"ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS "{column}" {col_type}"#);
-            if let Err(e) = rustango::sql::sqlx::query(&sql).execute(pg).await {
-                // Missing tables (rustango_operators / rustango_orgs)
-                // mean the registry bootstrap hasn't run yet — that's
-                // a separate error path, not a fixup failure. Warn and
-                // continue; the next on-disk migration will create
-                // the table and a subsequent boot will re-run this
-                // fixup against the populated schema.
-                tracing::warn!(
-                    target: "crate::tenancy",
-                    table = %table,
-                    column = %column,
-                    error = %e,
-                    "registry column fixup failed (non-fatal — re-run after the bootstrap migrate)",
-                );
-            }
-        }
-    }
-    // Same fixup for SQLite registries. SQLite's `ALTER TABLE ADD
-    // COLUMN` has no `IF NOT EXISTS` clause, so we probe `PRAGMA
-    // table_info(<table>)` first and only ALTER when the column is
-    // absent. v0.34 introduced sqlite tenancy AFTER the v0.26 brand
-    // columns shipped, but `Org::SCHEMA` evolved further (v0.33
-    // `backend_kind`) and the scaffolder's bootstrap JSON can be
-    // older than the running rustango — same shape as the PG path.
-    #[cfg(feature = "sqlite")]
-    if let Some(sq) = registry.as_sqlite() {
-        // SQLite is dynamically typed and stores VARCHAR / TIMESTAMP
-        // as TEXT via type affinity. Spell columns with their idiomatic
-        // sqlite types so a follow-up `PRAGMA table_info` reads cleanly.
-        let fixups: &[(&str, &str, &str)] = &[
-            (
-                "rustango_orgs",
-                "backend_kind",
-                "TEXT NOT NULL DEFAULT 'postgres'",
-            ),
-            ("rustango_orgs", "brand_name", "TEXT"),
-            ("rustango_orgs", "brand_tagline", "TEXT"),
-            ("rustango_orgs", "logo_path", "TEXT"),
-            ("rustango_orgs", "favicon_path", "TEXT"),
-            ("rustango_orgs", "primary_color", "TEXT"),
-            ("rustango_orgs", "theme_mode", "TEXT"),
-        ];
-        for (table, column, col_type) in fixups {
-            let pragma = format!(r#"PRAGMA table_info("{table}")"#);
-            let rows = match rustango::sql::sqlx::query(&pragma).fetch_all(sq).await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    // Table missing → bootstrap hasn't run yet. Same
-                    // logic as the PG arm: warn + continue, the next
-                    // boot picks it up after migrate writes the table.
-                    tracing::warn!(
-                        target: "crate::tenancy",
-                        table = %table,
-                        error = %e,
-                        "sqlite PRAGMA table_info failed (non-fatal — re-run after the bootstrap migrate)",
-                    );
-                    continue;
-                }
-            };
-            let has_col = rows.iter().any(|r| {
-                use rustango::sql::sqlx::Row as _;
-                r.try_get::<String, _>("name")
-                    .map(|n| n == *column)
-                    .unwrap_or(false)
-            });
-            if has_col {
-                continue;
-            }
-            let sql = format!(r#"ALTER TABLE "{table}" ADD COLUMN "{column}" {col_type}"#);
-            if let Err(e) = rustango::sql::sqlx::query(&sql).execute(sq).await {
-                tracing::warn!(
-                    target: "crate::tenancy",
-                    table = %table,
-                    column = %column,
-                    error = %e,
-                    "registry column fixup failed (non-fatal — re-run after the bootstrap migrate)",
-                );
-            }
-        }
-    }
-    // Registry-scope audit-log table for operator-side actions
-    // (impersonation start / end, org config edits via the
-    // operator console, etc.). Bi-dialect via
-    // `audit::ensure_table_pool` (Postgres / MySQL / SQLite all
-    // supported).
-    if let Err(e) = crate::audit::ensure_table_pool(registry).await {
-        tracing::warn!(
-            target: "crate::tenancy",
-            error = %e,
-            "audit::ensure_table_pool failed for registry pool",
-        );
-    }
+    // The framework's own registry tables (rustango_orgs, rustango_operators,
+    // rustango_admin_users) come from makemigrations-generated system-app
+    // migrations — no hand-written bootstrap/ensure/ALTER DDL.
+    applied
+        .extend(apply_system_migrations(registry, dir, crate::core::ModelScope::Registry).await?);
     // (#89) Auto-seed the `rustango_content_types` registry-side
     // catalog — the operator console's audit log + permissions UI
     // consult it to resolve `entity_table` strings back to a stable
@@ -500,21 +423,19 @@ where
             unreachable!("database_pool_for_org rejects schema-mode")
         }
     };
-    let applied = migrate::migrate_pool(&inner_pool, dir).await?;
-    if let Err(e) = crate::audit::ensure_table_pool(&inner_pool).await {
-        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "audit::ensure_table_pool failed for database-mode tenant");
-    }
-    if let Err(e) = super::permissions::ensure_tables_pool(&inner_pool).await {
-        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables_pool failed for database-mode tenant");
-    }
+    let mut applied = migrate::migrate_pool(&inner_pool, dir).await?;
+    // Framework tenant tables (users, roles, permissions, api_keys,
+    // audit_log, content_types) come from the makemigrations-generated
+    // system-app migrations — no hand-written ensure/bootstrap DDL.
+    applied
+        .extend(apply_system_migrations(&inner_pool, dir, crate::core::ModelScope::Tenant).await?);
+    // Data seeders (rows, not DDL — kept): the CRUD permission codenames
+    // for every registered model (#61) + the content-type catalog (#89).
     if let Err(e) = super::permissions::auto_create_permissions_pool(&inner_pool).await {
         tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions_pool failed for database-mode tenant");
     }
     if let Err(e) = crate::contenttypes::ensure_seeded(&inner_pool).await {
         tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
-    }
-    if let Err(e) = super::auth_backends::ensure_api_keys_table_pool(&inner_pool).await {
-        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table_pool failed for database-mode tenant");
     }
     Ok(applied)
 }
@@ -562,65 +483,38 @@ async fn run_for_one_tenant(
         StorageMode::Schema => {
             let schema = org.schema_name.clone().unwrap_or_else(|| org.slug.clone());
             let pool = build_schema_scoped_pool(registry_url, &schema).await?;
-            let applied = migrate::migrate(&pool, dir).await?;
-            // v0.13.0: ensure the per-tenant audit log table exists so
-            // projects don't have to call `audit::ensure_table` from
-            // their seed manually. Best-effort — failures here log a
-            // warning but don't fail the migration.
-            if let Err(e) = crate::audit::ensure_table(&pool).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "audit::ensure_table failed for schema-mode tenant");
-            }
-            if let Err(e) = super::permissions::ensure_tables_pool(&pool.clone().into()).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables_pool failed for schema-mode tenant");
-            }
-            // v0.27.2 — seed the `rustango_permissions` catalog with
-            // the four CRUD codenames for every registered Model
-            // whose `permissions` flag is on. Idempotent. Without
-            // this, non-superuser tenant admins could never view
-            // scaffolded models because `is_visible(table)` checks
-            // `{table}.view ∈ user_perms` and the catalog row is
-            // the prerequisite for any role to grant it. (#61)
+            let mut applied = migrate::migrate(&pool, dir).await?;
+            // Framework tenant tables come from the system-app migrations
+            // (applied under the tenant's search_path), not hand DDL.
+            let dbpool: crate::sql::Pool = pool.clone().into();
+            applied.extend(
+                apply_system_migrations(&dbpool, dir, crate::core::ModelScope::Tenant).await?,
+            );
+            // Data seeders (rows, not DDL — kept): CRUD permission
+            // codenames for every registered model (#61) + the
+            // content-type catalog (#89). Idempotent.
             if let Err(e) = super::permissions::auto_create_permissions(&pool).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for schema-mode tenant");
             }
-            // (#89) Auto-seed `rustango_content_types` from the
-            // inventory registry — the operator-facing CT catalog
-            // every framework feature reaching for "any model"
-            // (audit log, generic FKs, permissions UI) consults.
-            // Idempotent; pre-existing rows are unchanged thanks
-            // to the UNIQUE(app_label, model_name) constraint.
-            if let Err(e) = crate::contenttypes::ensure_seeded(&pool.clone().into()).await {
+            if let Err(e) = crate::contenttypes::ensure_seeded(&dbpool).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for schema-mode tenant");
-            }
-            if let Err(e) = super::auth_backends::ensure_api_keys_table(&pool).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table failed for schema-mode tenant");
             }
             pool.close().await;
             Ok(applied)
         }
         StorageMode::Database => {
             let tenant_pool = pools.pool_for_org(org).await?;
-            let applied = migrate::migrate(tenant_pool.pool(), dir).await?;
-            if let Err(e) = crate::audit::ensure_table(tenant_pool.pool()).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "audit::ensure_table failed for database-mode tenant");
-            }
-            if let Err(e) =
-                super::permissions::ensure_tables_pool(&tenant_pool.pool().clone().into()).await
-            {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "permissions::ensure_tables_pool failed for database-mode tenant");
-            }
-            // See schema-mode comment above (#61).
+            let mut applied = migrate::migrate(tenant_pool.pool(), dir).await?;
+            let dbpool: crate::sql::Pool = tenant_pool.pool().clone().into();
+            applied.extend(
+                apply_system_migrations(&dbpool, dir, crate::core::ModelScope::Tenant).await?,
+            );
+            // Data seeders (rows, not DDL — kept): #61 + #89.
             if let Err(e) = super::permissions::auto_create_permissions(tenant_pool.pool()).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for database-mode tenant");
             }
-            // (#89) See schema-mode comment above.
-            if let Err(e) =
-                crate::contenttypes::ensure_seeded(&tenant_pool.pool().clone().into()).await
-            {
+            if let Err(e) = crate::contenttypes::ensure_seeded(&dbpool).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
-            }
-            if let Err(e) = super::auth_backends::ensure_api_keys_table(tenant_pool.pool()).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "ensure_api_keys_table failed for database-mode tenant");
             }
             Ok(applied)
         }

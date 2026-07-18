@@ -274,10 +274,16 @@ impl SchemaSnapshot {
     /// own migrations never mix.
     #[must_use]
     pub fn from_registry_system_for_scope(scope: crate::core::ModelScope) -> Self {
+        // A few framework tables are "shared" — they exist in EVERY
+        // rustango database (the registry AND each tenant), because both
+        // do audits / carry a content-type catalog. The single-scope
+        // migration model can't say "both", so they're included in every
+        // scope's system migrations (each DB creates its own copy).
+        const SHARED: &[&str] = &["rustango_audit_log", "rustango_content_types"];
         let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
             .into_iter()
             .filter(|e| {
-                e.schema.scope == scope
+                (e.schema.scope == scope || SHARED.contains(&e.schema.table))
                     && e.schema.table.starts_with("rustango_")
                     && !e.schema.is_view
                     && e.schema.managed
