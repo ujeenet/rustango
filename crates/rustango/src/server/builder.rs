@@ -627,6 +627,29 @@ fn build_admin_routes(tenant_admin: &Router, routes: &crate::tenancy::RouteConfi
         // `handle_request` for direct API callers.
         .route("/__end-impersonation", any(make()));
 
+    // admin-sso: the OAuth begin + callback live at `{login}/sso` and
+    // `{login}/sso/callback`. They're only handled inside `tenant_admin`'s
+    // fallback dispatch, so without explicit mounts here an app that ships a
+    // page catch-all (e.g. rustango-cms's `PublicRouter`) shadows the GET and
+    // the button 404s. Claim them explicitly — like `login_url` above — so they
+    // take precedence over the app router's fallback and reach the dispatch.
+    #[cfg(feature = "admin-sso")]
+    {
+        let sso_begin = format!(
+            "{}{}",
+            routes.login_url,
+            crate::tenancy::sso::SSO_BEGIN_SUFFIX
+        );
+        let sso_callback = format!(
+            "{}{}",
+            routes.login_url,
+            crate::tenancy::sso::SSO_CALLBACK_SUFFIX
+        );
+        r = r
+            .route(&sso_begin, any(make()))
+            .route(&sso_callback, any(make()));
+    }
+
     // Legacy `/__admin*` mounts kept for back-compat with apps still
     // on `RouteConfig::legacy()` or hard-coded URLs. Skip when the
     // configured admin_url IS `/__admin` (would collide with the
