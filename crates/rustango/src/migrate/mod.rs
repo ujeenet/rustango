@@ -47,7 +47,9 @@ pub use file::{
     discover_migration_dirs, list_dirs, CallbackOp, DataOp, Migration, MigrationScope, Operation,
 };
 pub use invert::invert;
-pub use make::{make_migrations, make_migrations_for_app, make_migrations_from};
+pub use make::{
+    make_migrations, make_migrations_for_app, make_migrations_from, make_migrations_system,
+};
 #[cfg(feature = "postgres")]
 pub use manage::{append_data_op, make_data_migration};
 // Always-on: tri-dialect entry points (work on PG / MySQL / SQLite via

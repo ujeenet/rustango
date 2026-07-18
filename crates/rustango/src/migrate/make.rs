@@ -203,6 +203,88 @@ pub fn make_migrations_scoped(
     Ok(Some(mig))
 }
 
+/// Generate the framework's own **system-app** migrations into
+/// `<project_root>/system/migrations/`.
+///
+/// Diffs the framework (`rustango_*`) models of `scope` against the
+/// prior system migrations of that scope and writes a scope-tagged
+/// migration. Unlike the user path ([`make_migrations_scoped`]) this
+/// does NOT fold framework tables into the baseline — here they ARE the
+/// subject, so a fresh project emits `CreateTable` for every framework
+/// table and later runs emit `AddColumn`/`DropColumn` as the models (and
+/// their `#[cfg]` features) evolve. This is what replaces the
+/// hand-written bootstrap/ensure DDL.
+///
+/// Returns `Ok(None)` when nothing in the framework's schema changed for
+/// this scope.
+///
+/// # Errors
+/// As [`make_migrations_from`], plus [`MigrateError::Io`] if the
+/// `system/migrations/` dir can't be created.
+pub fn make_migrations_system(
+    project_root: &Path,
+    scope: crate::core::ModelScope,
+    name_override: Option<&str>,
+) -> Result<Option<Migration>, MigrateError> {
+    let dir = project_root.join("system").join("migrations");
+    let migration_scope = match scope {
+        crate::core::ModelScope::Registry => super::MigrationScope::Registry,
+        crate::core::ModelScope::Tenant => super::MigrationScope::Tenant,
+    };
+    let current = SchemaSnapshot::from_registry_system_for_scope(scope);
+    let prior = if dir.exists() {
+        file::list_dir(&dir)?
+    } else {
+        Vec::new()
+    };
+    let prior_scoped: Vec<&Migration> = prior
+        .iter()
+        .filter(|m| m.scope == migration_scope)
+        .collect();
+    let prev_snapshot = prior_scoped
+        .last()
+        .map_or_else(empty_snapshot, |m| m.snapshot.clone());
+    let prev_name = prior_scoped.last().map(|m| m.name.clone());
+    let next_index = prior
+        .last()
+        .and_then(|m| extract_index(&m.name))
+        .map_or(1, |n| n + 1);
+
+    let unsupported = detect_unsupported_field_changes(&prev_snapshot, &current);
+    if !unsupported.is_empty() {
+        return Err(MigrateError::Validation(format!(
+            "framework schema change needs an operation the engine can't yet emit \
+             (author manually or wait for the AlterField op):\n  - {}",
+            unsupported.join("\n  - "),
+        )));
+    }
+    let changes = detect_changes(&prev_snapshot, &current);
+    if changes.is_empty() {
+        return Ok(None);
+    }
+    let suffix = name_override.map_or_else(
+        || auto_name(&changes, prior_scoped.is_empty()),
+        str::to_owned,
+    );
+    let name = format!("{next_index:04}_{suffix}");
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let mig = Migration {
+        name: name.clone(),
+        created_at,
+        prev: prev_name,
+        atomic: true,
+        scope: migration_scope,
+        snapshot: current.clone(),
+        forward: changes.into_iter().map(Operation::Schema).collect(),
+    };
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
+    }
+    let path = dir.join(format!("{name}.json"));
+    file::write(&path, &mig)?;
+    Ok(Some(mig))
+}
+
 /// Testable form of [`make_migrations`] that takes the current snapshot
 /// as input rather than building it from the registry.
 ///

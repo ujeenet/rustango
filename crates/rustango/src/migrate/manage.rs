@@ -612,6 +612,31 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
         .any(|e| e.schema.scope == crate::core::ModelScope::Registry);
     if has_registry_scoped {
         let mut wrote_any = false;
+        // Framework ("system app") migrations first — the framework's own
+        // `rustango_*` tables are generated into `<project_root>/system/
+        // migrations/` (registry + tenant scope), replacing the
+        // hand-written bootstrap/ensure DDL. Silent when the framework
+        // schema is unchanged (the common case for app developers).
+        let project_root = dir.parent().unwrap_or(dir);
+        for scope in [
+            crate::core::ModelScope::Registry,
+            crate::core::ModelScope::Tenant,
+        ] {
+            if let Some(m) =
+                crate::migrate::make::make_migrations_system(project_root, scope, name.as_deref())?
+            {
+                writeln!(
+                    w,
+                    "wrote {} (system/{} scope)",
+                    file_path(&project_root.join("system").join("migrations"), &m.name).display(),
+                    scope.as_str(),
+                )?;
+                for op in &m.forward {
+                    writeln!(w, "    + {}", describe_op(op))?;
+                }
+                wrote_any = true;
+            }
+        }
         for scope in [
             crate::core::ModelScope::Registry,
             crate::core::ModelScope::Tenant,

@@ -265,6 +265,42 @@ impl SchemaSnapshot {
         }
     }
 
+    /// Capture only the **framework** models (reserved `rustango_`
+    /// table-name namespace) whose scope matches `scope`. This is the
+    /// "system app" — the framework's own tables, which `makemigrations`
+    /// generates into the project's `system/migrations/` folder instead
+    /// of hand-written bootstrap/ensure DDL. User (non-`rustango_`)
+    /// models are excluded so the framework's migrations and the app's
+    /// own migrations never mix.
+    #[must_use]
+    pub fn from_registry_system_for_scope(scope: crate::core::ModelScope) -> Self {
+        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
+            .into_iter()
+            .filter(|e| {
+                e.schema.scope == scope
+                    && e.schema.table.starts_with("rustango_")
+                    && !e.schema.is_view
+                    && e.schema.managed
+            })
+            .collect();
+        let mut tables: Vec<TableSnapshot> = entries
+            .iter()
+            .map(|e| TableSnapshot::from_schema(e.schema))
+            .collect();
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+        let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
+        let indexes = collect_indexes(entries.iter().map(|e| e.schema));
+        let checks = collect_checks(entries.iter().map(|e| e.schema));
+        let excludes = collect_excludes(entries.iter().map(|e| e.schema));
+        Self {
+            tables,
+            m2m_tables,
+            indexes,
+            checks,
+            excludes,
+        }
+    }
+
     /// Filter `self` to only the tables / indexes / checks whose owning
     /// model has [`crate::core::ModelSchema::scope`] matching `scope`.
     /// Used to filter a *prior* on-disk snapshot down to one scope before
