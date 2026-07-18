@@ -18,8 +18,8 @@
 
 use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::permissions::{
-    auto_create_permissions_pool, ensure_tables_pool, has_perm_pool, seed_reserved_codename_pool,
-    set_user_perm_pool, ACCESS_ADMIN_CODENAME,
+    auto_create_permissions_pool, has_perm_pool, seed_reserved_codename_pool, set_user_perm_pool,
+    ACCESS_ADMIN_CODENAME,
 };
 
 async fn fresh_pool() -> Pool {
@@ -32,7 +32,9 @@ async fn fresh_pool() -> Pool {
     rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
         .await
         .expect("create rustango_users");
-    ensure_tables_pool(&pool).await.expect("ensure_tables_pool");
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("ensure_tables_pool");
     pool
 }
 

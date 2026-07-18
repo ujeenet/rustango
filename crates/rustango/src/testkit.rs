@@ -130,6 +130,51 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
     Ok(())
 }
 
+/// Generate the framework's system-app migrations from the current
+/// models and apply the **whole** set (registry + tenant scope) to
+/// `pool` — the complete framework schema (tables, FK constraints AND
+/// the composite-unique indexes that `create_framework_tables` /
+/// `apply_all_pool` don't emit), built exactly the way provisioning
+/// builds it.
+///
+/// Use this in tests that need the full framework schema — e.g. the
+/// permission engine, which relies on the `(role_id, codename)` /
+/// `(user_id, codename)` unique indexes.
+///
+/// # Errors
+/// Any generation or apply failure ([`MigrateError`]).
+#[cfg(feature = "tenancy")]
+pub async fn migrate_framework(pool: &Pool) -> Result<(), MigrateError> {
+    // Deduped snapshot of every framework (`rustango_*`) table — the
+    // shared audit/content_types tables appear once — materialized in one
+    // pass (tables → indexes → FK ALTERs), exactly what the migration
+    // engine emits. Fresh-DB use only (tests).
+    let mut seen = std::collections::HashSet::new();
+    let models: Vec<&'static ModelSchema> = crate::migrate::registered_models()
+        .into_iter()
+        .filter(|m| m.managed && m.table.starts_with("rustango_") && seen.insert(m.table))
+        .collect();
+    let snapshot = crate::migrate::SchemaSnapshot::from_models(&models);
+    let empty = crate::migrate::SchemaSnapshot::default();
+    let changes = crate::migrate::detect_changes(&empty, &snapshot);
+    let batch =
+        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
+            .map_err(MigrateError::Validation)?;
+    for sql in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
+        // Idempotent: `render` emits plain CREATE (not IF NOT EXISTS), so
+        // swallow "already exists" / duplicate errors — a test may have
+        // pre-created some framework tables (e.g. via apply_all_pool).
+        if let Err(e) = crate::sql::raw_execute_pool(pool, sql, ::std::vec::Vec::new()).await {
+            let msg = format!("{e}").to_lowercase();
+            if msg.contains("already exists") || msg.contains("duplicate") {
+                continue;
+            }
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
 // ======================================================= factories
 
 /// A fully-populated [`Org`](crate::tenancy::Org) with valid defaults,

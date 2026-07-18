@@ -15,10 +15,9 @@
 
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::tenancy::permissions::{
-    assign_role_pool, clear_user_perm_pool, create_role_pool, ensure_tables_pool,
-    get_or_create_role_pool, grant_role_perm_pool, has_all_perms_pool, has_any_perm_pool,
-    has_perm_pool, remove_role_pool, revoke_role_perm_pool, set_user_perm_pool,
-    user_permissions_pool, user_roles_pool,
+    assign_role_pool, clear_user_perm_pool, create_role_pool, get_or_create_role_pool,
+    grant_role_perm_pool, has_all_perms_pool, has_any_perm_pool, has_perm_pool, remove_role_pool,
+    revoke_role_perm_pool, set_user_perm_pool, user_permissions_pool, user_roles_pool,
 };
 use rustango::Model;
 use tokio::sync::Mutex;
@@ -85,7 +84,9 @@ async fn mysql_pool_or_skip() -> Option<Pool> {
     rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
         .await
         .expect("create rustango_users");
-    ensure_tables_pool(&pool).await.expect("ensure_tables_pool");
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("ensure_tables_pool");
     Some(pool)
 }
 

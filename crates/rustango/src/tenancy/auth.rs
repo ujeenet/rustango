@@ -238,6 +238,7 @@ pub async fn authenticate_user(
         password_hash: row.try_get::<String, _>("password_hash")?,
         // Defensive get — tolerates rows from tenants not yet migrated
         // to the SSO `email` column (mirrors `data` / `password_changed_at`).
+        #[cfg(feature = "admin-sso")]
         email: row.try_get::<Option<String>, _>("email").ok().flatten(),
         is_superuser: row.try_get::<bool, _>("is_superuser")?,
         active: row.try_get::<bool, _>("active")?,

@@ -9,7 +9,7 @@
 
 use rustango::core::Model as _;
 use rustango::sql::{sqlx, Pool};
-use rustango::tenancy::permissions::{auto_create_permissions_pool, ensure_tables_pool};
+use rustango::tenancy::permissions::auto_create_permissions_pool;
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
@@ -57,7 +57,7 @@ fn schema_carries_extra_permission_tuples() {
 #[tokio::test]
 async fn auto_create_permissions_seeds_extra_codenames() {
     let pool = fresh_pool().await;
-    ensure_tables_pool(&pool).await.unwrap();
+    rustango::testkit::migrate_framework(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
 
     // Verify the extra codenames landed under the model's table.
@@ -87,7 +87,7 @@ async fn auto_create_permissions_seeds_extra_codenames() {
 #[tokio::test]
 async fn idempotent_re_seed_doesnt_duplicate_extras() {
     let pool = fresh_pool().await;
-    ensure_tables_pool(&pool).await.unwrap();
+    rustango::testkit::migrate_framework(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
     // Second call should be a no-op via the existing ON CONFLICT DO NOTHING
     // tail in the INSERT — both extras + CRUD codenames stay at one row each.
@@ -107,7 +107,7 @@ async fn idempotent_re_seed_doesnt_duplicate_extras() {
 #[tokio::test]
 async fn plain_model_seeds_only_crud_codenames() {
     let pool = fresh_pool().await;
-    ensure_tables_pool(&pool).await.unwrap();
+    rustango::testkit::migrate_framework(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
     let Pool::Sqlite(sq) = &pool else {
         unreachable!()

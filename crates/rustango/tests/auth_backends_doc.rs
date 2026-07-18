@@ -19,7 +19,7 @@ use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::auth_backends::{
     create_api_key, ensure_api_keys_table_pool, ApiKeyBackend, AuthBackend, ModelBackend,
 };
-use rustango::tenancy::permissions::{ensure_tables_pool, set_user_perm_pool};
+use rustango::tenancy::permissions::set_user_perm_pool;
 use rustango::tenancy::{CurrentUser, RouterAuthExt};
 use tower::ServiceExt;
 
@@ -62,7 +62,9 @@ async fn setup() -> (Pool, i64) {
     rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
         .await
         .expect("create users");
-    ensure_tables_pool(&pool).await.expect("ensure perm tables");
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("ensure perm tables");
     ensure_api_keys_table_pool(&pool)
         .await
         .expect("ensure api keys table");

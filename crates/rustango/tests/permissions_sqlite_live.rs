@@ -14,10 +14,10 @@
 
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::tenancy::permissions::{
-    assign_role_pool, clear_user_perm_pool, create_role_pool, ensure_tables_pool,
-    get_or_create_role_pool, grant_role_perm_pool, has_all_perms_pool, has_any_perm_pool,
-    has_perm_pool, remove_role_pool, revoke_role_perm_pool, set_user_perm_pool,
-    user_permissions_pool, user_roles_pool, user_roles_qs_pool,
+    assign_role_pool, clear_user_perm_pool, create_role_pool, get_or_create_role_pool,
+    grant_role_perm_pool, has_all_perms_pool, has_any_perm_pool, has_perm_pool, remove_role_pool,
+    revoke_role_perm_pool, set_user_perm_pool, user_permissions_pool, user_roles_pool,
+    user_roles_qs_pool,
 };
 use rustango::Model;
 
@@ -37,13 +37,12 @@ async fn sqlite_pool() -> Pool {
         .await
         .expect("sqlite memory pool");
     let pool = Pool::Sqlite(p);
-    // rustango_users from `User::SCHEMA` (the permissions engine joins
-    // against it); roles + permissions + join tables come from
-    // `ensure_tables_pool`.
-    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
+    // The full framework schema (rustango_users + roles/permissions/join
+    // tables with their composite-unique indexes) via the real migration
+    // path — same as provisioning builds it.
+    rustango::testkit::migrate_framework(&pool)
         .await
-        .expect("create rustango_users");
-    ensure_tables_pool(&pool).await.expect("ensure_tables_pool");
+        .expect("migrate framework schema");
     pool
 }
 
