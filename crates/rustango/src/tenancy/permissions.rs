@@ -82,6 +82,44 @@ const AUTH_NAMESPACE: &str = "auth";
 
 // ------------------------------------------------------------------ Models
 
+/// A permission codename bound to a logical table — Django's
+/// `Permission` equivalent. Composite-unique on `(table_name, codename)`.
+///
+/// Historically this table was created by hand-written DDL
+/// (`ENSURE_SQL`) and had no model, so it was invisible to
+/// `makemigrations`. It now carries a real `#[derive(Model)]` so the
+/// migration engine owns it like every other framework table.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "rustango_permissions",
+    display = "codename",
+    // `unique_together` values are emitted verbatim as index columns
+    // (no field→column resolution in the macro), so use the DB column
+    // name `table_name` here even though the Rust field is `perm_table`.
+    unique_together = "table_name, codename",
+    admin(
+        list_display = "perm_table, codename, name",
+        search_fields = "perm_table, codename, name",
+        ordering = "perm_table, codename",
+    )
+)]
+pub struct Permission {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    /// Logical table the codename applies to (e.g. `post`, or `auth`
+    /// for framework-level codenames like `access_admin`). Mapped to the
+    /// existing `table_name` column (the Rust field avoids colliding
+    /// with the derived `table_name()` accessor).
+    #[rustango(column = "table_name", max_length = 150)]
+    pub perm_table: String,
+    /// Permission codename — `{table}.{action}` or a reserved name.
+    #[rustango(max_length = 100)]
+    pub codename: String,
+    /// Human-readable label.
+    #[rustango(max_length = 255, default = "''")]
+    pub name: String,
+}
+
 /// A named group of permissions (Django `Group` equivalent).
 ///
 /// Assign a user to a role via [`UserRole`]; grant codenames to a role
@@ -116,6 +154,7 @@ pub struct Role {
 #[rustango(
     table = "rustango_role_permissions",
     display = "codename",
+    unique_together = "role_id, codename",
     admin(
         list_display = "role_id, codename",
         search_fields = "codename",
@@ -138,6 +177,7 @@ pub struct RolePermission {
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "rustango_user_roles",
+    unique_together = "user_id, role_id",
     admin(list_display = "user_id, role_id", ordering = "user_id, role_id",)
 )]
 pub struct UserRole {
@@ -157,6 +197,7 @@ pub struct UserRole {
 #[rustango(
     table = "rustango_user_permissions",
     display = "codename",
+    unique_together = "user_id, codename",
     admin(
         list_display = "user_id, codename, granted",
         search_fields = "codename",
@@ -173,6 +214,7 @@ pub struct UserPermission {
     #[rustango(max_length = 100)]
     pub codename: String,
     /// `true` = explicit grant; `false` = explicit denial.
+    #[rustango(default = "true")]
     pub granted: bool,
     /// Extra context on this override — reason, granted-by, expiry
     /// hints. Never read by `has_perm`.
