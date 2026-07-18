@@ -43,10 +43,6 @@ async fn pool() -> Option<sqlx::PgPool> {
     Some(sqlx::PgPool::connect(&url).await.unwrap())
 }
 
-fn now() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
-}
-
 fn fresh_dir(label: &str) -> PathBuf {
     let n = UNIQ.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
@@ -218,19 +214,7 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         host_pattern: None,
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     acme.insert(&pool).await.unwrap();
 
@@ -245,19 +229,7 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         host_pattern: None,
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     globex.insert(&pool).await.unwrap();
 
@@ -340,19 +312,7 @@ async fn tenant_migrate_skips_inactive_orgs() {
         host_pattern: None,
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     active.insert(&pool).await.unwrap();
 
@@ -368,18 +328,7 @@ async fn tenant_migrate_skips_inactive_orgs() {
         port: None,
         path_prefix: None,
         active: false,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     inactive.insert(&pool).await.unwrap();
 

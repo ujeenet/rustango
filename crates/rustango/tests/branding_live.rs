@@ -126,19 +126,7 @@ async fn upload_then_serve_round_trip() {
         host_pattern: Some(format!("{slug}.app.test")),
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
 
@@ -272,29 +260,17 @@ async fn tenant_admin_renders_brand_overrides() {
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     );
     let mut org = Org {
-        id: Auto::default(),
         slug: slug.clone(),
         display_name: "Acme Inc".into(),
         storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
         database_url: Some(url.clone()),
-        schema_name: None,
         host_pattern: Some(format!("{slug}.app.test")),
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: now(),
         brand_name: Some("Acme Branded".into()),
         brand_tagline: Some("Where work happens".into()),
         logo_path: Some("logo.png".into()),
-        favicon_path: None,
         primary_color: Some("#2c5fb0".into()),
         theme_mode: Some("dark".into()),
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
 

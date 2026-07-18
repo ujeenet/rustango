@@ -59,10 +59,6 @@ async fn pool() -> Option<sqlx::PgPool> {
     Some(sqlx::PgPool::connect(&url).await.unwrap())
 }
 
-fn now() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
-}
-
 /// The test model — single string field so list/retrieve/create/update/
 /// delete + filter/search are all exercisable. `ten_vs_widget` table
 /// name avoids any collision with other live-test fixtures.
@@ -119,29 +115,12 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
     // path is exercised the same way for either mode.
     let slug = unique("vstest");
     let mut org = Org {
-        id: Auto::default(),
         slug: slug.clone(),
         display_name: "VS Test".into(),
         storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
         database_url: Some(url.clone()),
-        schema_name: None,
         host_pattern: Some(format!("{slug}.app.test")),
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
 

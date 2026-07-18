@@ -136,19 +136,7 @@ async fn seed_org(pool: &sqlx::PgPool, slug: &str, mode: StorageMode, db_url: Op
         host_pattern: Some(format!("{slug}.example.com")),
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     org.insert(pool).await.unwrap();
 }
