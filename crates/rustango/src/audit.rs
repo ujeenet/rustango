@@ -354,6 +354,34 @@ pub async fn fetch_for_entity(
     .await
 }
 
+/// Schema-registration model for `rustango_audit_log`.
+///
+/// Reads still go through [`AuditEntry`] (which keeps its per-dialect
+/// `changes`-column decoders); this struct exists so `makemigrations`
+/// owns the audit-log schema instead of the hand-written `ensure_table`
+/// DDL. It carries the two indexes the ensure DDL created — the
+/// `(entity_table, entity_pk)` composite and one on `occurred_at`
+/// (a plain index; the ensure's `DESC` was a scan optimization the
+/// planner uses either way). Consolidated with `AuditEntry` when the
+/// ensure DDL is removed.
+#[derive(crate::Model, Debug, Clone)]
+#[rustango(
+    table = "rustango_audit_log",
+    index_together = "entity_table, entity_pk"
+)]
+#[allow(dead_code)]
+pub struct AuditLog {
+    #[rustango(primary_key)]
+    pub id: crate::sql::Auto<i64>,
+    pub entity_table: String,
+    pub entity_pk: String,
+    pub operation: String,
+    pub source: String,
+    pub changes: serde_json::Value,
+    #[rustango(index, default = "now()")]
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Decoded audit-log row.
 #[derive(Debug, Clone)]
 pub struct AuditEntry {
