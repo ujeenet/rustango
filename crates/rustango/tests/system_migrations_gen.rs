@@ -59,3 +59,62 @@ fn system_migrations_generate_framework_tables_by_scope() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn system_migrations_apply_cleanly_on_sqlite() {
+    use rustango::sql::{sqlx, Pool};
+    let root = std::env::temp_dir().join(format!("rustango_sysapply_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    rustango::migrate::make_migrations_system(&root, ModelScope::Registry, None).unwrap();
+    rustango::migrate::make_migrations_system(&root, ModelScope::Tenant, None).unwrap();
+    let sysdir = root.join("system").join("migrations");
+
+    let dbpath = root.join("t.db");
+    let url = format!("sqlite:{}?mode=rwc", dbpath.display());
+    let pool = Pool::connect(&url).await.unwrap();
+    let applied = rustango::migrate::migrate_pool(&pool, &sysdir)
+        .await
+        .unwrap();
+    assert_eq!(applied.len(), 2, "two system migrations applied");
+
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    for t in [
+        "rustango_orgs",
+        "rustango_operators",
+        "rustango_users",
+        "rustango_roles",
+        "rustango_permissions",
+        "rustango_role_permissions",
+        "rustango_user_roles",
+        "rustango_user_permissions",
+        "rustango_api_keys",
+        "rustango_audit_log",
+        "rustango_content_types",
+        "rustango_admin_users",
+    ] {
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+                .bind(t)
+                .fetch_one(sq)
+                .await
+                .unwrap();
+        assert_eq!(
+            n, 1,
+            "table {t} must exist after applying system migrations"
+        );
+    }
+    let idx: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='rustango_permissions_table_name_codename_idx'",
+    ).fetch_one(sq).await.unwrap();
+    assert_eq!(idx, 1, "composite unique index must exist");
+
+    // Re-run is idempotent (ledger tracks applied).
+    assert!(rustango::migrate::migrate_pool(&pool, &sysdir)
+        .await
+        .unwrap()
+        .is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
