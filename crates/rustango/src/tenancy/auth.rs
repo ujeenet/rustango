@@ -104,6 +104,10 @@ pub struct User {
     /// IdP's verified email against this column; `None` means the
     /// account can't sign in via SSO. Unique within the tenant, but
     /// multiple `NULL`s are allowed.
+    ///
+    /// `#[cfg(feature = "admin-sso")]`-gated — enabling/disabling SSO
+    /// generates an Add/DropColumn migration for this column.
+    #[cfg(feature = "admin-sso")]
     #[rustango(max_length = 254, unique)]
     pub email: Option<String>,
     /// Org-admin within this tenant. Renders write-buttons, allows

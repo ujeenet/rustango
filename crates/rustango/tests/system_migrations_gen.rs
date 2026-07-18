@@ -118,3 +118,39 @@ async fn system_migrations_apply_cleanly_on_sqlite() {
         .is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[cfg(feature = "admin-sso")]
+#[test]
+fn admin_sso_feature_toggles_add_and_drop_columns() {
+    use rustango::migrate::{detect_changes, SchemaSnapshot};
+    // Feature ON → the framework Org snapshot carries the sso_* columns.
+    let with_sso = SchemaSnapshot::from_registry_system_for_scope(ModelScope::Registry);
+    // Simulate feature OFF by stripping the sso_* columns.
+    let mut without_sso = with_sso.clone();
+    for t in without_sso
+        .tables
+        .iter_mut()
+        .filter(|t| t.name == "rustango_orgs")
+    {
+        t.fields.retain(|f| !f.column.starts_with("sso_"));
+    }
+    assert_ne!(
+        with_sso, without_sso,
+        "sso_* columns must exist when admin-sso is on"
+    );
+
+    // Enabling the feature (off → on) generates AddColumn migrations;
+    // disabling (on → off) generates DropColumn migrations.
+    let enable = format!("{:?}", detect_changes(&without_sso, &with_sso));
+    let disable = format!("{:?}", detect_changes(&with_sso, &without_sso));
+    eprintln!("ENABLE ops: {enable}");
+    eprintln!("DISABLE ops: {disable}");
+    assert!(
+        enable.contains("AddColumn") && enable.contains("sso_enabled"),
+        "enabling admin-sso must AddColumn sso_*: {enable}"
+    );
+    assert!(
+        disable.contains("DropColumn") && disable.contains("sso_enabled"),
+        "disabling admin-sso must DropColumn sso_*: {disable}"
+    );
+}

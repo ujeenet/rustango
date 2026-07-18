@@ -44,6 +44,11 @@ pub struct AdminUser {
     /// OAuth) to this account. The `admin-sso` login matches the IdP's
     /// verified email against this column; `None` means the account
     /// can't sign in via SSO. Unique, but multiple `NULL`s are allowed.
+    ///
+    /// `#[cfg(feature = "admin-sso")]`-gated — the column exists only
+    /// when SSO is compiled in, so enabling/disabling the feature
+    /// generates an Add/DropColumn migration.
+    #[cfg(feature = "admin-sso")]
     #[rustango(max_length = 254, unique)]
     pub email: Option<String>,
     /// `true` = full admin access. `false` = future-slice's
@@ -73,6 +78,7 @@ impl AdminUser {
             id: Auto::Unset,
             username: username.into(),
             password_hash: crate::passwords::hash(password)?,
+            #[cfg(feature = "admin-sso")]
             email: None,
             is_superuser,
             active: true,
