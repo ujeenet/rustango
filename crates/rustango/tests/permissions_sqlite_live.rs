@@ -36,25 +36,13 @@ async fn sqlite_pool() -> Pool {
     let p = sqlx::SqlitePool::connect("sqlite::memory:")
         .await
         .expect("sqlite memory pool");
-    // Bootstrap the rustango_users table the permissions engine
-    // joins against. The `_pool` family doesn't auto-create it; in
-    // production it's created by the tenant bootstrap migration.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS rustango_users (\
-            id INTEGER PRIMARY KEY AUTOINCREMENT, \
-            username TEXT NOT NULL UNIQUE, \
-            password_hash TEXT NOT NULL DEFAULT '', email TEXT, \
-            is_superuser INTEGER NOT NULL DEFAULT 0, \
-            active INTEGER NOT NULL DEFAULT 1, \
-            data TEXT NOT NULL DEFAULT '{}', \
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), \
-            password_changed_at TEXT)",
-    )
-    .execute(&p)
-    .await
-    .expect("create rustango_users");
     let pool = Pool::Sqlite(p);
-    // Bootstrap roles + permissions + the join tables.
+    // rustango_users from `User::SCHEMA` (the permissions engine joins
+    // against it); roles + permissions + join tables come from
+    // `ensure_tables_pool`.
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
+        .await
+        .expect("create rustango_users");
     ensure_tables_pool(&pool).await.expect("ensure_tables_pool");
     pool
 }
@@ -63,11 +51,14 @@ async fn make_user(pool: &Pool, name: &str) -> i64 {
     let Pool::Sqlite(sq) = pool else {
         unreachable!()
     };
-    sqlx::query("INSERT INTO rustango_users (username) VALUES (?)")
-        .bind(name)
-        .execute(sq)
-        .await
-        .expect("insert user");
+    sqlx::query(
+        "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
+         VALUES (?, '', 0, 1, datetime('now'))",
+    )
+    .bind(name)
+    .execute(sq)
+    .await
+    .expect("insert user");
     let (id,): (i64,) = sqlx::query_as("SELECT id FROM rustango_users WHERE username = ?")
         .bind(name)
         .fetch_one(sq)

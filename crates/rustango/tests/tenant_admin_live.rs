@@ -45,10 +45,6 @@ async fn pool() -> Option<sqlx::PgPool> {
     Some(sqlx::PgPool::connect(&url).await.unwrap())
 }
 
-fn now() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
-}
-
 async fn drop_schema(pool: &sqlx::PgPool, name: &str) {
     let sql = format!(r#"DROP SCHEMA IF EXISTS "{name}" CASCADE"#);
     sqlx::query(&sql).execute(pool).await.unwrap();
@@ -91,29 +87,12 @@ async fn database_mode_admin_serves_tenant_data() {
     // Seed an org and a widget.
     let org_slug = unique("acme");
     let mut org = Org {
-        id: Auto::default(),
         slug: org_slug.clone(),
         display_name: "ACME".into(),
         storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
         database_url: Some(url.clone()),
-        schema_name: None,
         host_pattern: Some(format!("{org_slug}.app.test")),
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
 
@@ -248,56 +227,20 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
     let acme_slug = unique("acme");
     let globex_slug = unique("globex");
     let mut acme_org = Org {
-        id: Auto::default(),
         slug: acme_slug.clone(),
         display_name: "ACME".into(),
         storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
         schema_name: Some(acme_schema.clone()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     acme_org.insert(&pool).await.unwrap();
 
     let mut globex_org = Org {
-        id: Auto::default(),
         slug: globex_slug.clone(),
         display_name: "Globex".into(),
         storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
         schema_name: Some(globex_schema.clone()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     globex_org.insert(&pool).await.unwrap();
 
@@ -360,29 +303,12 @@ async fn subdomain_chain_resolves_via_host_header() {
     let slug = unique("subdomain_acme");
     let host = format!("{slug}.app.test");
     let mut org = Org {
-        id: Auto::default(),
         slug: slug.clone(),
         display_name: "ACME".into(),
         storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
         database_url: Some(url.clone()),
-        schema_name: None,
         host_pattern: Some(host.clone()),
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-        sso_enabled: false,
-        sso_provider: None,
-        sso_issuer_url: None,
-        sso_client_id: None,
-        sso_secret_ref: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
 

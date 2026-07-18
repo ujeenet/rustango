@@ -79,24 +79,12 @@ async fn mysql_pool_or_skip() -> Option<Pool> {
         .execute(&p)
         .await
         .expect("re-enable FK checks");
-    // Bootstrap rustango_users — the `_pool` family doesn't auto-create
-    // it; the production tenant bootstrap migration does.
-    sqlx::query(
-        "CREATE TABLE `rustango_users` (\
-            `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, \
-            `username` VARCHAR(150) NOT NULL UNIQUE, \
-            `password_hash` VARCHAR(255) NOT NULL DEFAULT '', \
-            `email` VARCHAR(254), \
-            `is_superuser` BOOLEAN NOT NULL DEFAULT FALSE, \
-            `active` BOOLEAN NOT NULL DEFAULT TRUE, \
-            `data` JSON NOT NULL, \
-            `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), \
-            `password_changed_at` DATETIME(6))",
-    )
-    .execute(&p)
-    .await
-    .expect("create rustango_users");
     let pool = Pool::Mysql(p);
+    // rustango_users from `User::SCHEMA` (no hand-written DDL to drift);
+    // roles + permissions + join tables come from `ensure_tables_pool`.
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
+        .await
+        .expect("create rustango_users");
     ensure_tables_pool(&pool).await.expect("ensure_tables_pool");
     Some(pool)
 }
@@ -105,11 +93,15 @@ async fn make_user(pool: &Pool, name: &str) -> i64 {
     let Pool::Mysql(my) = pool else {
         unreachable!()
     };
-    sqlx::query("INSERT INTO `rustango_users` (`username`, `data`) VALUES (?, '{}')")
-        .bind(name)
-        .execute(my)
-        .await
-        .expect("insert user");
+    sqlx::query(
+        "INSERT INTO `rustango_users` \
+         (`username`, `password_hash`, `is_superuser`, `active`, `data`, `created_at`) \
+         VALUES (?, '', FALSE, TRUE, '{}', NOW(6))",
+    )
+    .bind(name)
+    .execute(my)
+    .await
+    .expect("insert user");
     let (id,): (i64,) = sqlx::query_as("SELECT id FROM `rustango_users` WHERE username = ?")
         .bind(name)
         .fetch_one(my)
