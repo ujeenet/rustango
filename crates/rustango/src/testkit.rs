@@ -159,10 +159,15 @@ pub fn org() -> crate::tenancy::Org {
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        #[cfg(feature = "admin-sso")]
         sso_enabled: false,
+        #[cfg(feature = "admin-sso")]
         sso_provider: None,
+        #[cfg(feature = "admin-sso")]
         sso_issuer_url: None,
+        #[cfg(feature = "admin-sso")]
         sso_client_id: None,
+        #[cfg(feature = "admin-sso")]
         sso_secret_ref: None,
     }
 }
@@ -178,6 +183,7 @@ pub fn user() -> crate::tenancy::User {
         id: crate::sql::Auto::Unset,
         username: "alice".into(),
         password_hash: String::new(),
+        #[cfg(feature = "admin-sso")]
         email: None,
         is_superuser: false,
         active: true,
@@ -198,6 +204,7 @@ pub fn admin_user() -> crate::admin::AdminUser {
         id: crate::sql::Auto::Unset,
         username: "admin".into(),
         password_hash: String::new(),
+        #[cfg(feature = "admin-sso")]
         email: None,
         is_superuser: true,
         active: true,
@@ -218,7 +225,19 @@ mod tests {
         let pool = crate::sql::Pool::connect(&url).await.expect("connect");
 
         // Tables come straight from Model::SCHEMA — no hand-written DDL.
-        create_framework_tables(&pool).await.expect("create tables");
+        // Build the specific models this test inserts (not
+        // create_framework_tables) because the lib-test build also
+        // registers `#[cfg(test)]` fixture models that alias
+        // `rustango_users`, which would race the real schema.
+        create_tables_for::<crate::tenancy::Org>(&pool)
+            .await
+            .expect("orgs");
+        create_tables_for::<crate::tenancy::User>(&pool)
+            .await
+            .expect("users");
+        create_tables_for::<crate::admin::AdminUser>(&pool)
+            .await
+            .expect("admin_users");
 
         // Factories build fully-populated instances; struct-update only
         // overrides what the test cares about.
