@@ -164,36 +164,38 @@ async fn system_migrations_apply_cleanly_on_sqlite() {
 
 #[cfg(feature = "admin-sso")]
 #[test]
-fn admin_sso_feature_toggles_add_and_drop_columns() {
+fn admin_sso_feature_toggles_provider_table() {
     use rustango::migrate::{detect_changes, SchemaSnapshot};
-    // Feature ON → the framework Org snapshot carries the sso_* columns.
+    // v0.47 — SSO config moved off the `Org` row into dedicated models.
+    // Enabling `admin-sso` now adds the registry-scoped
+    // `rustango_shared_sso_providers` table (its per-tenant twin
+    // `rustango_sso_providers` toggles in the tenant scope the same way).
     let with_sso = SchemaSnapshot::from_registry_system_for_scope(ModelScope::Registry);
-    // Simulate feature OFF by stripping the sso_* columns.
-    let mut without_sso = with_sso.clone();
-    for t in without_sso
-        .tables
-        .iter_mut()
-        .filter(|t| t.name == "rustango_orgs")
-    {
-        t.fields.retain(|f| !f.column.starts_with("sso_"));
-    }
-    assert_ne!(
-        with_sso, without_sso,
-        "sso_* columns must exist when admin-sso is on"
+    assert!(
+        with_sso
+            .tables
+            .iter()
+            .any(|t| t.name == "rustango_shared_sso_providers"),
+        "admin-sso registry snapshot must include rustango_shared_sso_providers"
     );
+    // Simulate the feature OFF by dropping that table from the snapshot.
+    let mut without_sso = with_sso.clone();
+    without_sso
+        .tables
+        .retain(|t| t.name != "rustango_shared_sso_providers");
+    assert_ne!(with_sso, without_sso);
 
-    // Enabling the feature (off → on) generates AddColumn migrations;
-    // disabling (on → off) generates DropColumn migrations.
+    // Enabling (off → on) generates a CreateTable; disabling a DropTable.
     let enable = format!("{:?}", detect_changes(&without_sso, &with_sso));
     let disable = format!("{:?}", detect_changes(&with_sso, &without_sso));
     eprintln!("ENABLE ops: {enable}");
     eprintln!("DISABLE ops: {disable}");
     assert!(
-        enable.contains("AddColumn") && enable.contains("sso_enabled"),
-        "enabling admin-sso must AddColumn sso_*: {enable}"
+        enable.contains("CreateTable(\"rustango_shared_sso_providers\")"),
+        "enabling admin-sso must CreateTable the shared providers: {enable}"
     );
     assert!(
-        disable.contains("DropColumn") && disable.contains("sso_enabled"),
-        "disabling admin-sso must DropColumn sso_*: {disable}"
+        disable.contains("DropTable(\"rustango_shared_sso_providers\")"),
+        "disabling admin-sso must DropTable the shared providers: {disable}"
     );
 }
