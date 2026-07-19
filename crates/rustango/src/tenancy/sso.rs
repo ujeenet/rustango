@@ -39,7 +39,6 @@ struct CallbackParams {
 use super::auth::User;
 use super::org::Org;
 use super::routes::RouteConfig;
-use super::secrets::{ChainSecretsResolver, SecretsResolver};
 use super::tenant_console::{self, SessionSecret, TenantSessionPayload};
 
 /// A registry-wide SSO provider offered to **every** tenant — the shared
@@ -75,8 +74,10 @@ pub struct SharedSsoProvider {
     pub issuer_url: Option<String>,
     #[rustango(max_length = 255)]
     pub client_id: String,
-    #[rustango(max_length = 255)]
-    pub secret_ref: String,
+    /// The OAuth2 client secret, **encrypted at rest** (see
+    /// [`crate::admin::sso_provider::SsoProvider::client_secret`]).
+    #[rustango(max_length = 1024)]
+    pub client_secret: crate::casts::Cast<crate::casts::EncryptedString>,
     #[rustango(default = "true")]
     pub enabled: bool,
     #[rustango(default = "0")]
@@ -165,8 +166,17 @@ async fn resolve_by_slug(
         .map_err(|e| SsoError::Config(format!("db: {e}")))?
         .into_iter()
         .find(|r| r.enabled);
-    let (kind, issuer_url, client_id, secret_ref, scopes) = if let Some(r) = tenant_row {
-        (r.kind, r.issuer_url, r.client_id, r.secret_ref, r.scopes)
+    // The secret is stored encrypted at rest and decrypted transparently on
+    // load; `into_inner()` yields the plaintext to send to the IdP's token
+    // endpoint (over TLS).
+    let (kind, issuer_url, client_id, client_secret, scopes) = if let Some(r) = tenant_row {
+        (
+            r.kind,
+            r.issuer_url,
+            r.client_id,
+            r.client_secret.into_inner(),
+            r.scopes,
+        )
     } else {
         let shared = SharedSsoProvider::objects()
             .filter("slug", slug.to_owned())
@@ -178,12 +188,14 @@ async fn resolve_by_slug(
         let Some(r) = shared else {
             return Ok(None);
         };
-        (r.kind, r.issuer_url, r.client_id, r.secret_ref, r.scopes)
+        (
+            r.kind,
+            r.issuer_url,
+            r.client_id,
+            r.client_secret.into_inner(),
+            r.scopes,
+        )
     };
-    let client_secret = ChainSecretsResolver::standard()
-        .resolve(&secret_ref)
-        .await
-        .map_err(|e| SsoError::Secret(format!("{e}")))?;
     Ok(Some(ResolvedSso {
         provider: kind,
         issuer_url,

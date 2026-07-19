@@ -62,7 +62,7 @@ as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login
   </label>
   <label>Issuer URL (oidc only) <input name="issuer_url" placeholder="https://idp.example.com"></label>
   <label>Client ID <input name="client_id" required></label>
-  <label>Secret ref <input name="secret_ref" required placeholder="env://ACME_GOOGLE_SECRET"></label>
+  <label>Client secret <input name="client_secret" type="password" required placeholder="the OAuth client secret — stored encrypted at rest"></label>
   <label>Scopes (optional, space-separated) <input name="scopes" placeholder="openid email profile groups"></label>
   <label>Sort order <input name="sort_order" type="number" value="0"></label>
   <label class="inline"><input type="checkbox" name="enabled" checked> Enabled</label>

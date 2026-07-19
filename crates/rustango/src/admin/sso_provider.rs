@@ -14,10 +14,12 @@
 //! bare/standalone admin uses it as a plain global table. The registry-wide
 //! shared set is the sibling [`crate::tenancy::sso::SharedSsoProvider`].
 //!
-//! The client secret is never stored: `secret_ref` is a handle
-//! (`env://VAR`, `vault://…`, or a literal) resolved by the `SecretsResolver`
-//! at login time — same posture as `Org.database_url`.
+//! The client secret is stored in `client_secret`, **encrypted at rest**
+//! (XChaCha20-Poly1305, key from `RUSTANGO_SECRET_KEY`) and decrypted in-memory
+//! only at login time — so a leaked DB dump never exposes it, and each tenant
+//! keeps its own secret without any per-tenant env var.
 
+use crate::casts::{Cast, EncryptedString};
 use crate::sql::Auto;
 
 /// A single SSO/OpenID provider offered on the login page.
@@ -64,11 +66,13 @@ pub struct SsoProvider {
     #[rustango(max_length = 255)]
     pub client_id: String,
 
-    /// **Reference** to the OAuth2 client secret — an `env://VAR` /
-    /// `vault://…` handle resolved by the `SecretsResolver` at login time.
-    /// Never the raw secret.
-    #[rustango(max_length = 255)]
-    pub secret_ref: String,
+    /// The OAuth2 client secret, **encrypted at rest** (XChaCha20-Poly1305,
+    /// key from `RUSTANGO_SECRET_KEY`). Each tenant stores its own here via the
+    /// admin UI; decrypted in-memory only at login time to authenticate to the
+    /// IdP's token endpoint. The single home for a provider's secret — no env
+    /// var, no plaintext-in-DB.
+    #[rustango(max_length = 1024)]
+    pub client_secret: Cast<EncryptedString>,
 
     /// Offer this provider on the login page when `true`.
     #[rustango(default = "true")]
@@ -92,7 +96,7 @@ pub struct SsoProvider {
     pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 
-use super::sso::{parse_scopes, resolve_secret_ref_env, ProviderButton, ResolvedSso, SsoError};
+use super::sso::{parse_scopes, ProviderButton, ResolvedSso, SsoError};
 use crate::sql::Pool;
 
 /// Enabled providers for the bare admin login page, sorted by `sort_order`.
@@ -136,7 +140,7 @@ pub async fn resolve_by_slug(
     let Some(r) = row else {
         return Ok(None);
     };
-    let client_secret = resolve_secret_ref_env(&r.secret_ref)?;
+    let client_secret = r.client_secret.clone().into_inner();
     Ok(Some(ResolvedSso {
         provider: r.kind,
         issuer_url: r.issuer_url,
