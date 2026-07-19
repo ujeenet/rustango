@@ -1,11 +1,105 @@
 {
-  "name": "0003_auto",
-  "created_at": "2026-07-17T16:11:25.948852+00:00",
-  "prev": "0001_rustango_registry_initial",
+  "name": "0001_create_rustango_audit_log_and_rustango_content_types_and_rustango_operators_etc",
+  "created_at": "2026-07-18T23:30:16.981738+00:00",
   "atomic": true,
   "scope": "registry",
   "snapshot": {
     "tables": [
+      {
+        "name": "rustango_audit_log",
+        "model": "AuditLog",
+        "fields": [
+          {
+            "name": "changes",
+            "column": "changes",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "entity_pk",
+            "column": "entity_pk",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "entity_table",
+            "column": "entity_table",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "occurred_at",
+            "column": "occurred_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()"
+          },
+          {
+            "name": "operation",
+            "column": "operation",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "source",
+            "column": "source",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false
+          }
+        ]
+      },
+      {
+        "name": "rustango_content_types",
+        "model": "ContentType",
+        "fields": [
+          {
+            "name": "app_label",
+            "column": "app_label",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "model_name",
+            "column": "model_name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "table",
+            "column": "table",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          }
+        ]
+      },
       {
         "name": "rustango_operators",
         "model": "Operator",
@@ -189,46 +283,6 @@
             "unique": true
           },
           {
-            "name": "sso_client_id",
-            "column": "sso_client_id",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 300
-          },
-          {
-            "name": "sso_enabled",
-            "column": "sso_enabled",
-            "ty": "bool",
-            "nullable": false,
-            "primary_key": false,
-            "default": "false"
-          },
-          {
-            "name": "sso_issuer_url",
-            "column": "sso_issuer_url",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 300
-          },
-          {
-            "name": "sso_provider",
-            "column": "sso_provider",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 40
-          },
-          {
-            "name": "sso_secret_ref",
-            "column": "sso_secret_ref",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 300
-          },
-          {
             "name": "storage_mode",
             "column": "storage_mode",
             "ty": "string",
@@ -246,110 +300,74 @@
           }
         ]
       }
+    ],
+    "indexes": [
+      {
+        "name": "rustango_audit_log_entity_table_entity_pk_idx",
+        "table": "rustango_audit_log",
+        "columns": [
+          "entity_table",
+          "entity_pk"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_audit_log_occurred_at_idx",
+        "table": "rustango_audit_log",
+        "columns": [
+          "occurred_at"
+        ],
+        "unique": false,
+        "method": "btree"
+      }
     ]
   },
   "forward": [
     {
       "schema": {
-        "AddColumn": {
-          "table": "rustango_operators",
-          "column": "password_changed_at"
+        "CreateTable": "rustango_audit_log"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_content_types"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_operators"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_orgs"
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_audit_log_entity_table_entity_pk_idx",
+          "table": "rustango_audit_log",
+          "columns": [
+            "entity_table",
+            "entity_pk"
+          ],
+          "unique": false,
+          "method": "btree"
         }
       }
     },
     {
       "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "backend_kind"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "brand_name"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "brand_tagline"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "favicon_path"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "logo_path"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "primary_color"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "sso_client_id"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "sso_enabled"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "sso_issuer_url"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "sso_provider"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "sso_secret_ref"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_orgs",
-          "column": "theme_mode"
+        "CreateIndex": {
+          "name": "rustango_audit_log_occurred_at_idx",
+          "table": "rustango_audit_log",
+          "columns": [
+            "occurred_at"
+          ],
+          "unique": false,
+          "method": "btree"
         }
       }
     }

@@ -85,31 +85,32 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
 
     // The cookbook example registers a sprawling set of models via
     // inventory; `rmig::apply_all` would try to wire FKs across all
-    // of them and hits ordering issues. Instead, init just the
-    // tenancy bootstrap migrations into a tempdir + run them
+    // of them and hits ordering issues. Instead, generate + run just
+    // the framework's registry-scope system migrations into a tempdir
     // through `migrate_registry` — same shape Chapter 5 uses to set
     // up the registry tables without dragging in cookbook models.
     //
-    // Drop the registry tables AND the migration ledger before
-    // each fixture build so: (a) state left from sibling tests
-    // doesn't conflict with bootstrap CREATE TABLE statements, and
-    // (b) the ledger and the actual schema stay in sync —
-    // `migrate_registry` is idempotent against the ledger, so a
-    // dropped table + populated ledger would silently skip the
-    // re-create.
+    // Drop the registry tables AND BOTH migration ledgers before each
+    // fixture build so: (a) state left from sibling tests doesn't
+    // conflict with the CREATE TABLE statements, and (b) the ledgers
+    // and the actual schema stay in sync — `migrate_registry` is
+    // idempotent against the ledger, so a dropped table + populated
+    // ledger would silently skip the re-create. The framework's own
+    // tables now migrate under a dedicated `__rustango_system_migrations__`
+    // ledger (separate from the user-app `__rustango_migrations__`), so
+    // both must be dropped.
     let _ = rmig::drop_all(&pool).await;
-    let _ = sqlx::query(&format!(
-        r#"DROP TABLE IF EXISTS "{}" CASCADE"#,
-        rmig::LEDGER_TABLE
-    )).execute(&pool)
-    .await;
+    for ledger in [rmig::LEDGER_TABLE, "__rustango_system_migrations__"] {
+        let _ = sqlx::query(&format!(r#"DROP TABLE IF EXISTS "{ledger}" CASCADE"#))
+            .execute(&pool)
+            .await;
+    }
     let pools_for_init = TenantPools::new(pool.clone());
-    let dir = std::env::temp_dir().join(format!(
-        "cookbook_ch9d_{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let dir = std::env::temp_dir().join(format!("cookbook_ch9d_{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
-    tenancy::init_tenancy(&dir).expect("init bootstrap");
+    // `migrate_registry` generates + applies the framework's
+    // registry-scope `system/migrations/` (into `dir`) — no separate
+    // bootstrap step.
     tenancy::migrate_registry(&pools_for_init, &dir)
         .await
         .expect("migrate registry");
@@ -163,9 +164,7 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
         .page_size(2)
         .tenant_router("/api/authors");
 
-    let app = axum::Router::new()
-        .merge(vs_router)
-        .layer(Extension(ctx));
+    let app = axum::Router::new().merge(vs_router).layer(Extension(ctx));
     Some((slug, pool, app))
 }
 
@@ -187,11 +186,13 @@ async fn json_response(
         }
         None => Body::empty(),
     };
-    let resp = app.oneshot(req.body(body).unwrap()).await.expect("response");
+    let resp = app
+        .oneshot(req.body(body).unwrap())
+        .await
+        .expect("response");
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
 }
 
@@ -212,7 +213,8 @@ async fn tenant_router_lists_paginated_payload() {
     ] {
         sqlx::query("INSERT INTO cookbook_author (name, email) VALUES ($1, $2)")
             .bind(n)
-            .bind(e).execute(&pool)
+            .bind(e)
+            .execute(&pool)
             .await
             .unwrap();
     }
@@ -244,7 +246,8 @@ async fn tenant_router_search_param_narrows_count_and_results() {
     ] {
         sqlx::query("INSERT INTO cookbook_author (name, email) VALUES ($1, $2)")
             .bind(n)
-            .bind(e).execute(&pool)
+            .bind(e)
+            .execute(&pool)
             .await
             .unwrap();
     }
@@ -269,7 +272,8 @@ async fn tenant_router_filter_param_exact_match() {
     for (n, e) in [("Alice", "alice@x.com"), ("Bob", "bob@x.com")] {
         sqlx::query("INSERT INTO cookbook_author (name, email) VALUES ($1, $2)")
             .bind(n)
-            .bind(e).execute(&pool)
+            .bind(e)
+            .execute(&pool)
             .await
             .unwrap();
     }
