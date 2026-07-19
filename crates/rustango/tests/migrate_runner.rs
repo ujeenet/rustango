@@ -153,6 +153,7 @@ async fn applies_one_schema_migration_and_records_in_ledger() {
     let dir = fresh_dir("apply_one");
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: mig_name.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -210,6 +211,7 @@ async fn rerun_skips_already_applied_migrations() {
     let dir = fresh_dir("rerun");
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: mig_name.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -256,6 +258,7 @@ async fn atomic_failure_rolls_back_offender_keeps_priors() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: mig_a.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -272,6 +275,7 @@ async fn atomic_failure_rolls_back_offender_keeps_priors() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: mig_b.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: Some(mig_a.clone()),
@@ -345,6 +349,7 @@ async fn mixed_schema_and_data_ops_apply_in_order() {
 
     // CreateTable then Data op that inserts a row.
     let mig = Migration {
+        replaces: Vec::new(),
         name: mig_name.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -393,6 +398,7 @@ async fn non_atomic_migration_runs_outside_a_tx() {
     let dir = fresh_dir("loose");
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: mig_name.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -440,6 +446,7 @@ async fn unapply_round_trips_a_schema_only_migration() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: mig_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -510,6 +517,7 @@ async fn unapply_data_op_uses_reverse_sql() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: create_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -524,6 +532,7 @@ async fn unapply_data_op_uses_reverse_sql() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: data_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: Some(create_name.clone()),
@@ -596,6 +605,7 @@ async fn unapply_irreversible_migration_fails_fast_no_db_writes() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: create_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -610,6 +620,7 @@ async fn unapply_irreversible_migration_fails_fast_no_db_writes() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: bad_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: Some(create_name.clone()),
@@ -682,6 +693,7 @@ async fn unapply_then_reapply_round_trip() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: mig_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -769,6 +781,7 @@ async fn migration_with_two_create_tables_one_having_fk_to_other_applies() {
     };
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: mig_name.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -839,6 +852,7 @@ fn three_migrations() -> (PathBuf, [String; 3], [String; 3]) {
         write_migration(
             &dir,
             &Migration {
+                replaces: Vec::new(),
                 name: name.clone(),
                 created_at: "2026-04-28T00:00:00Z".into(),
                 prev: prev.clone(),
@@ -1097,6 +1111,7 @@ async fn alter_column_type_applies_and_unapplies_round_trip() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: create_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -1118,6 +1133,7 @@ async fn alter_column_type_applies_and_unapplies_round_trip() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: alter_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: Some(create_name.clone()),
@@ -1193,6 +1209,7 @@ async fn rename_column_applies_and_unapplies() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: create_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -1213,6 +1230,7 @@ async fn rename_column_applies_and_unapplies() {
     write_migration(
         &dir,
         &Migration {
+            replaces: Vec::new(),
             name: rename_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: Some(create_name.clone()),
@@ -1277,6 +1295,7 @@ async fn dry_run_returns_pending_sql_without_executing() {
     let dir = fresh_dir("dry_run");
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: mig_name.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,

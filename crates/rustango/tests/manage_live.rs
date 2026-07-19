@@ -375,6 +375,7 @@ async fn migrate_tenants_runs_against_active_only() {
     // Ship a tenant migration in dir.
     let mig_name = unique("0001_thing");
     let mig = rmig::Migration {
+        replaces: Vec::new(),
         name: mig_name.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,

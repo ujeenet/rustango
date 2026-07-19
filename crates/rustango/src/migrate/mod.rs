@@ -57,9 +57,22 @@ pub use runner::migrate_pool_with_ledger;
 // the `Pool` enum), plus the inventory + builder surface.
 pub use runner::{
     applied_set_pool, apply_all_pool, downgrade_pool, drop_all_pool, ensure_ledger_pool,
-    migrate_dry_run_pool, migrate_embedded_pool, migrate_pool, migrate_to_pool, registered_models,
+    fake_apply_by_name_pool, migrate_dry_run_pool, migrate_embedded_pool,
+    migrate_embedded_pool_with_ledger, migrate_pool, migrate_to_pool, registered_models,
     sqlmigrate_one, unapply_force_pool, unapply_pool, Builder, MigrationPreview, LEDGER_TABLE,
 };
+
+/// The framework's own "system app" migrations — the `rustango_*` tables
+/// (orgs, operators, users, roles, permissions, api_keys, audit_log,
+/// content_types, admin_users, …). Authored in-repo and embedded here;
+/// regenerate with `examples/gen_system_migrations.rs` whenever a framework
+/// schema change lands, then commit the new migration.
+///
+/// Downstream projects **apply** these (scope-filtered, under the system
+/// ledger) — they never generate them. This is the Django model: the
+/// framework owns and ships its migrations. See
+/// [`crate::tenancy::migrate::apply_system_migrations`].
+pub const SYSTEM_MIGRATIONS: &[(&str, &str)] = crate::embed_migrations!("system/migrations");
 // PG-typed back-compat: only re-exported when the `postgres` feature
 // is on. Sqlite/MySQL apps use the `_pool` variants above.
 #[cfg(feature = "postgres")]

@@ -103,51 +103,41 @@ pub struct TenantMigrationOutcome {
 /// chains never collide.
 const SYSTEM_LEDGER: &str = "__rustango_system_migrations__";
 
-/// Generate (from the current models, if not already on disk) and apply
-/// the framework's system-app migrations for `scope` against `pool`.
+/// Apply the framework's own ("system app") migrations for `scope` against
+/// `pool`, under [`SYSTEM_LEDGER`].
 ///
-/// This replaces the old hand-written `ensure_*` / bootstrap / ALTER-fixup
-/// DDL: the framework's own tables come from makemigrations-generated
-/// files (drift-free and feature-`#[cfg]`-aware) in
-/// `<project_root>/system/migrations/`, applied under [`SYSTEM_LEDGER`].
-/// Generation is a no-op once the files exist (committed, or generated on
-/// a previous run); a read-only tree simply means they were committed.
+/// The `rustango_*` tables come from the framework's **shipped, embedded**
+/// migrations ([`crate::migrate::SYSTEM_MIGRATIONS`], authored in-repo via
+/// `examples/gen_system_migrations.rs`) — projects **apply** them, they never
+/// generate them. Per-project generation drifts (each project would emit its
+/// own `NNNN_auto` for every framework schema change, non-deterministically);
+/// shipping one authored chain is the Django model and the single source of
+/// truth.
+///
+/// Reconcile-aware: on a DB upgraded from the pre-overhaul hand-built
+/// bootstrap the `rustango_*` tables already exist, so the initial system
+/// migration (which carries `replaces`) fake-applies instead of colliding.
 async fn apply_system_migrations(
     pool: &crate::sql::Pool,
-    dir: &Path,
     scope: crate::core::ModelScope,
 ) -> Result<Vec<Migration>, TenancyError> {
-    // `system/migrations/` is a sibling of the project's `migrations/`
-    // dir. When `dir` is literally `<root>/migrations`, the project root
-    // is its parent; otherwise (e.g. a bare test dir) keep `system/`
-    // contained inside `dir` rather than polluting its parent.
-    let project_root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
-        dir.parent().unwrap_or(dir)
-    } else {
-        dir
-    };
-    // Best-effort generate from the compiled models (Ok(None) when the
-    // on-disk system migrations already match the models).
-    let _ = crate::migrate::make_migrations_system(project_root, scope, None);
-    let system_dir = project_root.join("system").join("migrations");
-    if !system_dir.is_dir() {
-        return Ok(Vec::new());
-    }
     let migration_scope = match scope {
         crate::core::ModelScope::Registry => MigrationScope::Registry,
         crate::core::ModelScope::Tenant => MigrationScope::Tenant,
     };
-    let applied = match scoped_subset(&system_dir, migration_scope).await? {
-        ScopedDir::Owned(temp) => {
-            let r =
-                crate::migrate::migrate_pool_with_ledger(pool, temp.path(), SYSTEM_LEDGER).await?;
-            drop(temp);
-            r
-        }
-        ScopedDir::Original => {
-            crate::migrate::migrate_pool_with_ledger(pool, &system_dir, SYSTEM_LEDGER).await?
-        }
-    };
+    // Scope-filter the embedded framework chain to this DB's scope (registry
+    // tables run against the registry DB, tenant tables against each org's).
+    let scoped: Vec<(&str, &str)> = crate::migrate::SYSTEM_MIGRATIONS
+        .iter()
+        .filter(|(_, json)| {
+            serde_json::from_str::<Migration>(json)
+                .map(|m| m.scope == migration_scope)
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect();
+    let applied =
+        crate::migrate::migrate_embedded_pool_with_ledger(pool, &scoped, SYSTEM_LEDGER).await?;
     Ok(applied)
 }
 
@@ -201,8 +191,7 @@ pub async fn migrate_registry_pool(
     // The framework's own registry tables (rustango_orgs, rustango_operators,
     // rustango_admin_users) come from makemigrations-generated system-app
     // migrations — no hand-written bootstrap/ensure/ALTER DDL.
-    applied
-        .extend(apply_system_migrations(registry, dir, crate::core::ModelScope::Registry).await?);
+    applied.extend(apply_system_migrations(registry, crate::core::ModelScope::Registry).await?);
     // (#89) Auto-seed the `rustango_content_types` registry-side
     // catalog — the operator console's audit log + permissions UI
     // consult it to resolve `entity_table` strings back to a stable
@@ -427,8 +416,7 @@ where
     // Framework tenant tables (users, roles, permissions, api_keys,
     // audit_log, content_types) come from the makemigrations-generated
     // system-app migrations — no hand-written ensure/bootstrap DDL.
-    applied
-        .extend(apply_system_migrations(&inner_pool, dir, crate::core::ModelScope::Tenant).await?);
+    applied.extend(apply_system_migrations(&inner_pool, crate::core::ModelScope::Tenant).await?);
     // Data seeders (rows, not DDL — kept): the CRUD permission codenames
     // for every registered model (#61) + the content-type catalog (#89).
     if let Err(e) = super::permissions::auto_create_permissions_pool(&inner_pool).await {
@@ -487,9 +475,8 @@ async fn run_for_one_tenant(
             // Framework tenant tables come from the system-app migrations
             // (applied under the tenant's search_path), not hand DDL.
             let dbpool: crate::sql::Pool = pool.clone().into();
-            applied.extend(
-                apply_system_migrations(&dbpool, dir, crate::core::ModelScope::Tenant).await?,
-            );
+            applied
+                .extend(apply_system_migrations(&dbpool, crate::core::ModelScope::Tenant).await?);
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.
@@ -506,9 +493,8 @@ async fn run_for_one_tenant(
             let tenant_pool = pools.pool_for_org(org).await?;
             let mut applied = migrate::migrate(tenant_pool.pool(), dir).await?;
             let dbpool: crate::sql::Pool = tenant_pool.pool().clone().into();
-            applied.extend(
-                apply_system_migrations(&dbpool, dir, crate::core::ModelScope::Tenant).await?,
-            );
+            applied
+                .extend(apply_system_migrations(&dbpool, crate::core::ModelScope::Tenant).await?);
             // Data seeders (rows, not DDL — kept): #61 + #89.
             if let Err(e) = super::permissions::auto_create_permissions(tenant_pool.pool()).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for database-mode tenant");

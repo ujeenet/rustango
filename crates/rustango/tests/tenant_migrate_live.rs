@@ -158,6 +158,7 @@ async fn registry_migrate_applies_only_registry_scoped() {
     write_migration(
         &dir,
         &rmig::Migration {
+            replaces: Vec::new(),
             name: reg_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -172,6 +173,7 @@ async fn registry_migrate_applies_only_registry_scoped() {
     write_migration(
         &dir,
         &rmig::Migration {
+            replaces: Vec::new(),
             name: tenant_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: Some(reg_name.clone()),
@@ -276,6 +278,7 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
     write_migration(
         &dir,
         &rmig::Migration {
+            replaces: Vec::new(),
             name: mig_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -391,6 +394,7 @@ async fn tenant_migrate_skips_inactive_orgs() {
     write_migration(
         &dir,
         &rmig::Migration {
+            replaces: Vec::new(),
             name: mig_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,

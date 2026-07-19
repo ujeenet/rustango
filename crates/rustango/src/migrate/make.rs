@@ -186,6 +186,7 @@ pub fn make_migrations_scoped(
     let created_at = chrono::Utc::now().to_rfc3339();
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: name.clone(),
         created_at,
         prev: prev_name,
@@ -268,7 +269,24 @@ pub fn make_migrations_system(
     );
     let name = format!("{next_index:04}_{suffix}");
     let created_at = chrono::Utc::now().to_rfc3339();
+    // The *initial* system migration supersedes the pre-overhaul hand-built
+    // bootstrap (`0001_rustango_*_initial`), which ran under the app ledger,
+    // not the system ledger. Marking it as a squash lets the runner
+    // fake-initial when the `rustango_*` tables already exist (Django
+    // `--fake-initial`) instead of colliding on CREATE TABLE. Cross-ledger,
+    // so the check is table-existence, not ledger membership.
+    let replaces = if prior_scoped.is_empty() {
+        match scope {
+            crate::core::ModelScope::Registry => {
+                vec!["0001_rustango_registry_initial".to_owned()]
+            }
+            crate::core::ModelScope::Tenant => vec!["0001_rustango_tenant_initial".to_owned()],
+        }
+    } else {
+        Vec::new()
+    };
     let mig = Migration {
+        replaces,
         name: name.clone(),
         created_at,
         prev: prev_name,
@@ -333,6 +351,7 @@ pub fn make_migrations_from(
     let created_at = chrono::Utc::now().to_rfc3339();
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: name.clone(),
         created_at,
         prev: prev_name,
@@ -628,6 +647,7 @@ pub fn make_merge_migration_from(
     let created_at = chrono::Utc::now().to_rfc3339();
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: name.clone(),
         created_at,
         prev: Some(merge_prev),
@@ -763,6 +783,7 @@ mod tests {
         let dir = tempdir();
         let snap = snap_with(vec![t("rustango_users")]);
         let prior = Migration {
+            replaces: Vec::new(),
             name: "0001_initial".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: None,
@@ -830,6 +851,7 @@ mod tests {
         // this test we trust the lookup path's default behavior.
         let dir = tempdir();
         let prev = Migration {
+            replaces: Vec::new(),
             name: "0001_initial".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: None,
@@ -866,6 +888,7 @@ mod tests {
         // A new tenant migration must land at 0003, not 0002.
         let dir = tempdir();
         let r = Migration {
+            replaces: Vec::new(),
             name: "0001_registry_initial".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: None,
@@ -875,6 +898,7 @@ mod tests {
             forward: vec![],
         };
         let t1 = Migration {
+            replaces: Vec::new(),
             name: "0002_initial".into(),
             created_at: "2026-01-02T00:00:00Z".into(),
             prev: None,
@@ -940,6 +964,7 @@ mod tests {
 
     fn mig_at(name: &str, prev: Option<&str>, snapshot: SchemaSnapshot) -> Migration {
         Migration {
+            replaces: Vec::new(),
             name: name.into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: prev.map(str::to_owned),

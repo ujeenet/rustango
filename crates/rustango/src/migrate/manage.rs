@@ -612,31 +612,13 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
         .any(|e| e.schema.scope == crate::core::ModelScope::Registry);
     if has_registry_scoped {
         let mut wrote_any = false;
-        // Framework ("system app") migrations first — the framework's own
-        // `rustango_*` tables are generated into `<project_root>/system/
-        // migrations/` (registry + tenant scope), replacing the
-        // hand-written bootstrap/ensure DDL. Silent when the framework
-        // schema is unchanged (the common case for app developers).
-        let project_root = dir.parent().unwrap_or(dir);
-        for scope in [
-            crate::core::ModelScope::Registry,
-            crate::core::ModelScope::Tenant,
-        ] {
-            if let Some(m) =
-                crate::migrate::make::make_migrations_system(project_root, scope, name.as_deref())?
-            {
-                writeln!(
-                    w,
-                    "wrote {} (system/{} scope)",
-                    file_path(&project_root.join("system").join("migrations"), &m.name).display(),
-                    scope.as_str(),
-                )?;
-                for op in &m.forward {
-                    writeln!(w, "    + {}", describe_op(op))?;
-                }
-                wrote_any = true;
-            }
-        }
+        // NOTE: the framework's own `rustango_*` ("system app") migrations are
+        // NOT generated here. They're authored + shipped by the framework
+        // (`rustango::migrate::SYSTEM_MIGRATIONS`, regen via the framework's
+        // `examples/gen_system_migrations.rs`) and applied to every project.
+        // Generating them per-project drifts — each project would emit its own
+        // `NNNN_auto` for every framework schema change. `makemigrations` here
+        // only writes the PROJECT's own app migrations.
         for scope in [
             crate::core::ModelScope::Registry,
             crate::core::ModelScope::Tenant,
@@ -732,17 +714,22 @@ async fn migrate<W: Write>(
 ) -> Result<(), MigrateError> {
     let mut dry_run = false;
     let mut squash = false;
+    let mut fake = false;
     let mut positional: Option<&str> = None;
     for arg in args {
         match arg.as_str() {
             "--dry-run" => dry_run = true,
             "--squash" => squash = true,
+            "--fake" => fake = true,
             "--help" | "-h" => {
                 writeln!(
                     w,
                     "migrate                    apply pending migrations\n\
                      migrate <target>           forward or back to <target> (`zero` wipes)\n\
                      migrate --dry-run          preview the SQL without writing\n\
+                     migrate --fake <name>      record <name> as applied WITHOUT running it\n\
+                                                (tombstones anything it `replaces`) — reconcile\n\
+                                                a squash the runner can't auto-detect\n\
                      migrate --squash           delete every pending (un-applied) migration JSON\n\
                                                 and regenerate a single fresh diff. Dev-iteration\n\
                                                 escape hatch — refuses to touch applied rows."
@@ -761,6 +748,23 @@ async fn migrate<W: Write>(
                 positional = Some(other);
             }
         }
+    }
+
+    if fake {
+        if dry_run || squash {
+            return Err(MigrateError::Validation(
+                "`migrate --fake <name>` does not combine with `--dry-run` or `--squash`".into(),
+            ));
+        }
+        let name = positional.ok_or_else(|| {
+            MigrateError::Validation("`migrate --fake` requires a migration name".into())
+        })?;
+        if runner::fake_apply_by_name_pool(pool, dir, name).await? {
+            writeln!(w, "faked (recorded as applied without running): {name}")?;
+        } else {
+            writeln!(w, "{name} is already applied — nothing to fake")?;
+        }
+        return Ok(());
     }
 
     if squash {
@@ -887,6 +891,17 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
         "squashing {} pending migration(s) into a fresh diff:",
         pending.len()
     )?;
+    // Record the names being superseded so the regenerated diff can claim
+    // them via `replaces` — that's what lets the squash reconcile against a
+    // DB that already applied the old chain (fake-apply instead of re-CREATE).
+    let replaced: Vec<String> = pending.iter().map(|m| m.name.clone()).collect();
+    // Files that survive the squash (the applied ones) — anything appearing
+    // after regeneration that isn't one of these is a freshly-written diff.
+    let survivors: std::collections::HashSet<String> = all
+        .iter()
+        .filter(|m| applied.contains(&m.name))
+        .map(|m| m.name.clone())
+        .collect();
     for m in &pending {
         let path = file_path(dir, &m.name);
         std::fs::remove_file(&path).map_err(|e| {
@@ -900,7 +915,23 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
     // registry vs tenant in tenancy projects, single file otherwise.
     // Pass through to the existing entry point so any future flags
     // gain consistent behavior automatically.
-    makemigrations(dir, &[], w)
+    makemigrations(dir, &[], w)?;
+
+    // Stamp `replaces` onto the freshly-regenerated migration(s).
+    for m in file::list_dir(dir)? {
+        if !survivors.contains(&m.name) && m.replaces.is_empty() {
+            let mut regenerated = m;
+            regenerated.replaces = replaced.clone();
+            file::write(&file_path(dir, &regenerated.name), &regenerated)?;
+            writeln!(
+                w,
+                "  {} replaces: {}",
+                regenerated.name,
+                replaced.join(", ")
+            )?;
+        }
+    }
+    Ok(())
 }
 
 async fn downgrade<W: Write>(
@@ -1141,6 +1172,7 @@ pub fn make_empty(dir: &Path, name: &str) -> Result<Migration, MigrateError> {
 
     let full_name = format!("{next_index:04}_{name}");
     let mig = Migration {
+        replaces: Vec::new(),
         name: full_name.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
         prev: prev_name,
@@ -1196,6 +1228,7 @@ pub fn make_data_migration(
         reversible: reverse_sql.is_some(),
     });
     let mig = Migration {
+        replaces: Vec::new(),
         name: full_name.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
         prev: prev_name,
