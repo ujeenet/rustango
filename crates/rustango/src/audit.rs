@@ -373,9 +373,17 @@ pub async fn fetch_for_entity(
 pub struct AuditLog {
     #[rustango(primary_key)]
     pub id: crate::sql::Auto<i64>,
+    // `entity_table` + `entity_pk` are the `index_together` key; they MUST
+    // be bounded so MySQL can index them (an unbounded `TEXT` column can't
+    // be a key without a prefix length — MySQL error 1170). Lengths match
+    // the pre-v0.47 hand-written MySQL DDL to avoid schema drift.
+    #[rustango(max_length = 255)]
     pub entity_table: String,
+    #[rustango(max_length = 255)]
     pub entity_pk: String,
+    #[rustango(max_length = 32)]
     pub operation: String,
+    #[rustango(max_length = 255)]
     pub source: String,
     pub changes: serde_json::Value,
     #[rustango(index, default = "now()")]
