@@ -265,6 +265,48 @@ impl SchemaSnapshot {
         }
     }
 
+    /// Capture only the **framework** models (reserved `rustango_`
+    /// table-name namespace) whose scope matches `scope`. This is the
+    /// "system app" — the framework's own tables, which `makemigrations`
+    /// generates into the project's `system/migrations/` folder instead
+    /// of hand-written bootstrap/ensure DDL. User (non-`rustango_`)
+    /// models are excluded so the framework's migrations and the app's
+    /// own migrations never mix.
+    #[must_use]
+    pub fn from_registry_system_for_scope(scope: crate::core::ModelScope) -> Self {
+        // A few framework tables are "shared" — they exist in EVERY
+        // rustango database (the registry AND each tenant), because both
+        // do audits / carry a content-type catalog. The single-scope
+        // migration model can't say "both", so they're included in every
+        // scope's system migrations (each DB creates its own copy).
+        const SHARED: &[&str] = &["rustango_audit_log", "rustango_content_types"];
+        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
+            .into_iter()
+            .filter(|e| {
+                (e.schema.scope == scope || SHARED.contains(&e.schema.table))
+                    && e.schema.table.starts_with("rustango_")
+                    && !e.schema.is_view
+                    && e.schema.managed
+            })
+            .collect();
+        let mut tables: Vec<TableSnapshot> = entries
+            .iter()
+            .map(|e| TableSnapshot::from_schema(e.schema))
+            .collect();
+        tables.sort_by(|a, b| a.name.cmp(&b.name));
+        let m2m_tables = collect_m2m_tables(entries.iter().map(|e| e.schema));
+        let indexes = collect_indexes(entries.iter().map(|e| e.schema));
+        let checks = collect_checks(entries.iter().map(|e| e.schema));
+        let excludes = collect_excludes(entries.iter().map(|e| e.schema));
+        Self {
+            tables,
+            m2m_tables,
+            indexes,
+            checks,
+            excludes,
+        }
+    }
+
     /// Filter `self` to only the tables / indexes / checks whose owning
     /// model has [`crate::core::ModelSchema::scope`] matching `scope`.
     /// Used to filter a *prior* on-disk snapshot down to one scope before
@@ -371,11 +413,25 @@ impl SchemaSnapshot {
     /// rule as [`from_registry`].
     #[must_use]
     pub fn from_models(models: &[&ModelSchema]) -> Self {
-        let models: Vec<&ModelSchema> = models
-            .iter()
-            .copied()
-            .filter(|s| !s.is_view && s.managed)
-            .collect();
+        Self::build_from(models.iter().copied().filter(|s| !s.is_view && s.managed))
+    }
+
+    /// Like [`Self::from_models`] but does **not** skip `managed = false`
+    /// models. The drift-free `ensure_*` table helpers use this: their
+    /// models are intentionally `managed = false` (outside the migration
+    /// set — the framework creates them lazily on first use), yet the
+    /// helper still needs to render the table's `CREATE TABLE` from
+    /// [`ModelSchema`] rather than hand-written per-dialect DDL. Views are
+    /// still skipped.
+    #[must_use]
+    pub fn from_models_forced(models: &[&ModelSchema]) -> Self {
+        Self::build_from(models.iter().copied().filter(|s| !s.is_view))
+    }
+
+    /// Shared body of [`Self::from_models`] / [`Self::from_models_forced`]:
+    /// builds the snapshot from an already-filtered model iterator.
+    fn build_from<'a>(models: impl Iterator<Item = &'a ModelSchema>) -> Self {
+        let models: Vec<&ModelSchema> = models.collect();
         let mut tables: Vec<TableSnapshot> = models
             .iter()
             .map(|s| TableSnapshot::from_schema(s))

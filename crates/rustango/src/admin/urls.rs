@@ -208,6 +208,12 @@ pub(crate) struct Config {
     /// `security.secure_cookies`, secure-by-default). Toggle directly
     /// via [`Builder::secure_cookies`].
     pub(crate) secure_cookies: bool,
+    /// SSO (`admin-sso`) global provider config. `Some` enables the
+    /// `/login/sso` + `/login/sso/callback` routes and the "Sign in
+    /// with <provider>" button. Set via [`Builder::with_sso`]. Requires
+    /// `session_secret` (SSO mints the same signed-cookie session).
+    #[cfg(feature = "admin-sso")]
+    pub(crate) sso: Option<super::sso::BareSsoConfig>,
 }
 
 impl Builder {
@@ -308,6 +314,37 @@ impl Builder {
         //    local plain-HTTP dev (set in dev_settings.toml).
         builder = builder.secure_cookies(settings.security.secure_cookies.unwrap_or(true));
 
+        // 6. SSO (`[sso]` section, admin-sso feature). Enabled only when
+        //    provider + client_id + redirect_uri are all present; the
+        //    secret comes from the `RUSTANGO__SSO__CLIENT_SECRET` env
+        //    overlay. Incomplete config is skipped (logged) rather than
+        //    half-wiring a broken login button.
+        #[cfg(feature = "admin-sso")]
+        if settings.sso.enabled() {
+            match (
+                settings.sso.provider.clone(),
+                settings.sso.client_id.clone(),
+                settings.sso.client_secret.clone(),
+                settings.sso.redirect_uri.clone(),
+            ) {
+                (Some(provider), Some(client_id), Some(client_secret), Some(redirect_uri)) => {
+                    builder = builder.with_sso(super::sso::BareSsoConfig {
+                        provider,
+                        issuer_url: settings.sso.issuer_url.clone(),
+                        client_id,
+                        client_secret,
+                        redirect_uri,
+                    });
+                }
+                _ => {
+                    tracing::warn!(
+                        target: "rustango::admin::sso",
+                        "[sso] enabled but provider/client_id/client_secret/redirect_uri incomplete — SSO not wired"
+                    );
+                }
+            }
+        }
+
         builder
     }
 
@@ -376,6 +413,31 @@ impl Builder {
         if self.config.change_password_url.is_none() {
             self.config.change_password_url = Some("/account/password".to_owned());
         }
+        self
+    }
+
+    /// Enable SSO (OpenID Connect / social OAuth) login for the admin
+    /// (`admin-sso` feature). Requires [`Builder::with_session_auth`] —
+    /// SSO mints the same signed-cookie session. The verified IdP email
+    /// must match an existing [`AdminUser`](super::user::AdminUser)
+    /// `email`; SSO never auto-provisions.
+    ///
+    /// ```ignore
+    /// let admin = rustango::admin::Builder::new(pool)
+    ///     .with_session_auth(secret)
+    ///     .with_sso(rustango::admin::sso::BareSsoConfig {
+    ///         provider: "google".into(),
+    ///         issuer_url: None,
+    ///         client_id: std::env::var("SSO_CLIENT_ID")?,
+    ///         client_secret: std::env::var("SSO_CLIENT_SECRET")?,
+    ///         redirect_uri: "https://admin.example.com/login/sso/callback".into(),
+    ///     })
+    ///     .build();
+    /// ```
+    #[cfg(feature = "admin-sso")]
+    #[must_use]
+    pub fn with_sso(mut self, sso: super::sso::BareSsoConfig) -> Self {
+        self.config.sso = Some(sso);
         self
     }
 
@@ -704,9 +766,16 @@ impl Builder {
                     gate,
                     super::login_view::require_session,
                 ));
-            return Router::new()
-                .merge(super::login_view::public_router(state))
-                .merge(protected);
+            // Public login routes (form + logout), plus the SSO routes
+            // when `with_sso` was set (admin-sso).
+            let public = super::login_view::public_router(state.clone());
+            #[cfg(feature = "admin-sso")]
+            let public = if state.config.sso.is_some() {
+                public.merge(super::sso::sso_router(state.clone()))
+            } else {
+                public
+            };
+            return Router::new().merge(public).merge(protected);
         }
 
         protected

@@ -36,10 +36,6 @@ async fn pool() -> Option<sqlx::PgPool> {
     )
 }
 
-fn now() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
-}
-
 /// Insert three orgs in different routing modes.
 async fn seed_orgs(pool: &sqlx::PgPool) {
     let mut acme = Org {
@@ -53,14 +49,7 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         host_pattern: Some("acme.app.test".into()),
         port: None,
         path_prefix: Some("/acme".into()),
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     acme.insert(pool).await.unwrap();
 
@@ -76,14 +65,7 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         host_pattern: None,
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     globex.insert(pool).await.unwrap();
 
@@ -99,14 +81,7 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         host_pattern: None,
         port: Some(9001),
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     initech.insert(pool).await.unwrap();
 
@@ -123,13 +98,7 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         port: None,
         path_prefix: None,
         active: false,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     frozen.insert(pool).await.unwrap();
 }

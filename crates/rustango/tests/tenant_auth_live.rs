@@ -43,10 +43,6 @@ async fn pool() -> Option<sqlx::PgPool> {
     Some(sqlx::PgPool::connect(&url).await.unwrap())
 }
 
-fn now() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
-}
-
 fn secret() -> SessionSecret {
     SessionSecret::from_bytes(b"tenant-auth-test-secret-32-bytes".to_vec())
 }
@@ -72,24 +68,12 @@ async fn body_text(resp: axum::response::Response) -> String {
 /// the simplest setup for tests — same Postgres backs both layers).
 async fn seed_db_mode_tenant(pool: &sqlx::PgPool, slug: &str, url: &str) -> Org {
     let mut org = Org {
-        id: Auto::default(),
         slug: slug.to_owned(),
         display_name: slug.to_owned(),
         storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
         database_url: Some(url.to_owned()),
-        schema_name: None,
         host_pattern: Some(format!("{slug}.app.test")),
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     org.insert(pool).await.unwrap();
     org
@@ -103,24 +87,11 @@ async fn reset_users_table(pool: &sqlx::PgPool) {
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query(
-        // Mirrors the current canonical `rustango_users` schema —
-        // `data JSONB` + `password_changed_at` were added after this
-        // test's original write, so the framework's auth flow now
-        // INSERT/UPDATEs columns the hand-rolled CREATE TABLE used to
-        // omit and 500s out on the missing column.
-        r#"CREATE TABLE "rustango_users" (
-            "id" BIGSERIAL NOT NULL PRIMARY KEY,
-            "username" VARCHAR(150) NOT NULL UNIQUE,
-            "password_hash" VARCHAR(255) NOT NULL DEFAULT '',
-            "is_superuser" BOOLEAN NOT NULL,
-            "active" BOOLEAN NOT NULL,
-            "data" JSONB NOT NULL DEFAULT '{}'::jsonb,
-            "created_at" TIMESTAMPTZ NOT NULL,
-            "password_changed_at" TIMESTAMPTZ
-        )"#,
+    // Recreate from `User::SCHEMA` via the shared DDL emitter — no
+    // hand-written CREATE TABLE to drift when the model gains a column.
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(
+        &rustango::sql::Pool::Postgres(pool.clone()),
     )
-    .execute(pool)
     .await
     .unwrap();
 }

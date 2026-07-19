@@ -75,6 +75,7 @@ async fn delete_ledger_entry(pool: &PgPool, name: &str) {
 
 fn make_migration_json(table: &str, name: &str) -> String {
     let mig = Migration {
+        replaces: Vec::new(),
         name: name.to_owned(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -230,6 +231,7 @@ async fn migrate_embedded_rejects_broken_prev_chain() {
     let orphan = format!("0002_orphan_{pid}_{suffix}");
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: orphan.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: Some("0001_missing_predecessor".into()),

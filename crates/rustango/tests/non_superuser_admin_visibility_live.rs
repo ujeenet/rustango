@@ -22,8 +22,7 @@ use axum::http::{Request, StatusCode};
 use rustango::sql::sqlx;
 use rustango::sql::{Auto, Pool};
 use rustango::tenancy::permissions::{
-    assign_role, auto_create_permissions, ensure_tables_pool, get_or_create_role, grant_role_perm,
-    user_permissions,
+    assign_role, auto_create_permissions, get_or_create_role, grant_role_perm, user_permissions,
 };
 use rustango::tenancy::User;
 use tower::ServiceExt;
@@ -61,7 +60,7 @@ async fn fresh(pool: &sqlx::PgPool) {
             .await
             .unwrap();
     }
-    ensure_tables_pool(&Pool::Postgres(pool.clone()))
+    rustango::testkit::migrate_framework(&Pool::Postgres(pool.clone()))
         .await
         .unwrap();
 }
@@ -137,6 +136,8 @@ async fn non_superuser_with_view_perm_sees_model_in_admin() {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ),
         password_hash: "x".into(),
+        #[cfg(feature = "admin-sso")]
+        email: None,
         is_superuser: false,
         active: true,
         created_at: chrono::Utc::now(),

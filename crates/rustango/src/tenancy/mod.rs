@@ -93,6 +93,10 @@ mod resolver;
 pub mod routes;
 mod secrets;
 pub mod session;
+/// Per-`Org` SSO (OpenID Connect / social OAuth) login for the tenant
+/// admin — the `admin-sso` feature. Reuses `crate::admin::sso`.
+#[cfg(feature = "admin-sso")]
+pub(crate) mod sso;
 // v0.38 slice 24 — `tenancy::server::run<DB>` is tri-dialect; the
 // operator console runs on whichever backend `TenantPools<DB>` was
 // built with, schema-mode dispatch only fires on PG (by language),
@@ -120,11 +124,7 @@ pub use auth_backends::{
     create_api_key, ensure_api_keys_table_pool, ApiKeyBackend, AuthBackend, AuthError, AuthUser,
     BoxedBackend, JwtBackend, ModelBackend,
 };
-pub use bootstrap::{
-    init_tenancy, init_tenancy_with, registry_bootstrap_migration,
-    registry_bootstrap_migration_for, tenant_bootstrap_migration, tenant_bootstrap_migration_for,
-    InitTenancyReport, REGISTRY_BOOTSTRAP_NAME, TENANT_BOOTSTRAP_NAME,
-};
+pub use bootstrap::{init_tenancy, init_tenancy_with, InitTenancyReport};
 pub use middleware::{AuthenticatedUser, CurrentUser, RouterAuthExt};
 // v0.38 — the PG-typed permission helpers stay PG-only re-exports;
 // the tri-dialect `_pool` variants are the cross-dialect entry points.

@@ -486,12 +486,37 @@ fn migrate_embedded_pool_is_callable() {
 fn audit_mysql_ddl_uses_backticks_and_json() {
     // batch 16 — confirm the MySQL-shape DDL uses backticks +
     // JSON + DATETIME(6) (no JSONB / TIMESTAMPTZ / double quotes).
-    let ddl = rustango::audit::CREATE_TABLE_SQL_MYSQL;
-    assert!(ddl.contains("`rustango_audit_log`"));
-    assert!(ddl.contains("`changes`      JSON NOT NULL"));
-    assert!(ddl.contains("DATETIME(6)"));
-    assert!(ddl.contains("BIGINT AUTO_INCREMENT"));
-    assert!(!ddl.contains("JSONB"));
-    assert!(!ddl.contains("TIMESTAMPTZ"));
-    assert!(!ddl.contains("BIGSERIAL"));
+    //
+    // v0.47 — the audit table is now a `#[derive(Model)]` (`AuditLog`)
+    // and its DDL is rendered through the migration engine's dialect
+    // emitter (the same path `makemigrations`/`migrate` use), not a
+    // hand-written `CREATE_TABLE_SQL_MYSQL` const. Render it here via
+    // the MySQL dialect and assert the same MySQL-flavored shape.
+    use rustango::core::Model as _;
+    use rustango::migrate::{detect_changes, render_changes_split_with_dialect, SchemaSnapshot};
+    use rustango::sql::{Dialect, MySql};
+
+    let snapshot = SchemaSnapshot::from_models(&[rustango::audit::AuditLog::SCHEMA]);
+    let changes = detect_changes(&SchemaSnapshot::default(), &snapshot);
+    let batch = render_changes_split_with_dialect(&changes, &snapshot, &MySql as &dyn Dialect)
+        .expect("render audit DDL for MySQL");
+    let ddl = batch
+        .immediate
+        .iter()
+        .chain(batch.deferred_fks.iter())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(ddl.contains("`rustango_audit_log`"), "got: {ddl}");
+    assert!(ddl.contains("`changes`"), "got: {ddl}");
+    assert!(ddl.contains("JSON"), "got: {ddl}");
+    assert!(ddl.contains("DATETIME(6)"), "got: {ddl}");
+    assert!(
+        ddl.contains("BIGINT") && ddl.contains("AUTO_INCREMENT"),
+        "got: {ddl}"
+    );
+    assert!(!ddl.contains("JSONB"), "got: {ddl}");
+    assert!(!ddl.contains("TIMESTAMPTZ"), "got: {ddl}");
+    assert!(!ddl.contains("BIGSERIAL"), "got: {ddl}");
 }

@@ -17,24 +17,11 @@ use rustango::tenancy::{BackendKind, DatabasePools, Org};
 
 fn fake_mysql_org(slug: &str, url: &str) -> Org {
     Org {
-        id: rustango::sql::Auto::default(),
         slug: slug.to_owned(),
         display_name: slug.to_owned(),
-        storage_mode: "database".into(),
         backend_kind: "mysql".into(),
         database_url: Some(url.to_owned()),
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     }
 }
 

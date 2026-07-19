@@ -32,10 +32,6 @@ async fn pool() -> Option<sqlx::PgPool> {
     )
 }
 
-fn now() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
-}
-
 async fn seed_org(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -54,14 +50,7 @@ async fn seed_org(
         host_pattern: Some(format!("{slug}.app.test")),
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     org.insert(pool).await.unwrap();
     org

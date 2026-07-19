@@ -242,6 +242,8 @@ where
         id: Auto::default(),
         username: username.clone(),
         password_hash: hash,
+        #[cfg(feature = "admin-sso")]
+        email: None,
         is_superuser,
         active: true,
         created_at: chrono::Utc::now(),

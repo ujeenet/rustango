@@ -30,48 +30,43 @@ pub struct AdminTotp {
     /// `true` once the user has verified a code against the secret.
     #[rustango(default = "false")]
     pub confirmed: bool,
+    #[rustango(default = "now()")]
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
-
-const CREATE_TABLE_PG: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_admin_totp" (
-    "user_id"       BIGINT PRIMARY KEY,
-    "secret_base32" VARCHAR(64) NOT NULL,
-    "confirmed"     BOOLEAN NOT NULL DEFAULT false,
-    "created_at"    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"#;
-
-const CREATE_TABLE_MYSQL: &str = r#"
-CREATE TABLE IF NOT EXISTS `rustango_admin_totp` (
-    `user_id`       BIGINT PRIMARY KEY,
-    `secret_base32` VARCHAR(64) NOT NULL,
-    `confirmed`     TINYINT(1) NOT NULL DEFAULT 0,
-    `created_at`    DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-);
-"#;
-
-const CREATE_TABLE_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_admin_totp" (
-    "user_id"       INTEGER PRIMARY KEY,
-    "secret_base32" TEXT NOT NULL,
-    "confirmed"     INTEGER NOT NULL DEFAULT 0,
-    "created_at"    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"#;
 
 /// Idempotently create the `rustango_admin_totp` table for the active
 /// backend.
 ///
+/// Drift-free: rendered from [`AdminTotp::SCHEMA`] through the migration
+/// engine's dialect emitter — the same path `makemigrations`/`migrate`
+/// use — instead of hand-written per-dialect DDL. The model is
+/// `managed = false` (ensure-based, outside the migration set), so this
+/// helper is its only DDL path.
+///
 /// # Errors
-/// Driver / SQL failures from `CREATE TABLE IF NOT EXISTS`.
+/// Driver / SQL failures (other than the duplicate-object errors this
+/// swallows to stay idempotent).
 pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
-    let ddl = match pool.dialect().name() {
-        "mysql" => CREATE_TABLE_MYSQL,
-        "sqlite" => CREATE_TABLE_SQLITE,
-        _ => CREATE_TABLE_PG,
-    };
-    crate::sql::run_ddl_idempotent(pool, ddl).await
+    use crate::core::Model as _;
+    let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(&[AdminTotp::SCHEMA]);
+    let changes =
+        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
+    let batch =
+        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
+            .map_err(sqlx::Error::Protocol)?;
+    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
+        if let Err(e) = crate::sql::raw_execute_pool(pool, stmt, Vec::new()).await {
+            let msg = format!("{e}").to_lowercase();
+            if msg.contains("already exists") || msg.contains("duplicate") {
+                continue;
+            }
+            return Err(match e {
+                crate::sql::ExecError::Driver(err) => err,
+                other => sqlx::Error::Protocol(format!("{other}")),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Fetch the device row for `user_id`, if any.

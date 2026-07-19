@@ -51,6 +51,7 @@ fn empty_snapshot() -> SchemaSnapshot {
 
 fn callback_migration(name: &str, callback_name: &str) -> Migration {
     Migration {
+        replaces: Vec::new(),
         name: name.to_owned(),
         created_at: "2026-05-22T00:00:00Z".into(),
         prev: None,

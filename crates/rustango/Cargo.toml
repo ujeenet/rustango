@@ -39,6 +39,13 @@ manage = ["dep:axum", "dep:tokio", "runtime"]
 # axum server with TenantContext. v0.30.26+.
 test_utils = []
 
+# Dev-only test-support helpers (`crate::testkit`): build framework
+# tables from `Model::SCHEMA` (no hand-written DDL) + model factories
+# for struct-update construction. Integration tests are external
+# crates, so the module must be public API behind this feature; it
+# pulls in nothing and costs a normal build nothing.
+testkit = []
+
 # MySQL 8.0+ backend. Fully tri-dialect since v0.38: every framework
 # surface (ORM, migrations, admin, tenancy database-mode, jobs queue,
 # audit, media, contenttypes, permissions, inspectdb, ViewSet,
@@ -316,6 +323,15 @@ admin = [
     "dep:tokio",
 ]
 
+# SSO for the admin login (`rustango::admin::sso`) — sign in with an
+# external IdP (OpenID Connect, Google, Microsoft/Azure AD, GitHub, …)
+# instead of a local password. Composes the existing `oauth2` client
+# (the OIDC/OAuth2 handshake) with `admin` (the session + user model).
+# Access is *link-to-existing* — the verified IdP email must match an
+# admin user; SSO never auto-provisions. Works for the bare admin
+# (global `[sso]` config) and, with `tenancy`, per-Org.
+admin-sso = ["admin", "oauth2"]
+
 # Multi-tenancy module (`rustango::tenancy`). Implies `admin` (the
 # tenant admin builder wraps `rustango::admin`). Pulls in Argon2 +
 # HMAC-SHA256 + cookie + tower for the per-tenant + operator
@@ -376,7 +392,7 @@ runserver = ["dep:axum", "dep:tokio"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.46.0", path = "../rustango-macros" }
+rustango-macros = { version = "0.48.0", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

@@ -516,25 +516,11 @@ pub fn api() -> Router<()> {
         }
     }
 }
-// ---------------- Bootstrap migrations (tenant template) ----------------
-
-/// Registry-scoped bootstrap migration shipped by `rustango::tenancy`.
-/// Embedded as a static string so `cargo rustango new --template tenant`
-/// drops a working `migrations/` dir into the new project — the very
-/// first `cargo run -- migrate` creates `rustango_orgs` /
-/// `rustango_operators` without a separate `manage init-tenancy` step.
-///
-/// Regenerate by running `cargo test -p rustango --test dump_bootstrap
-/// --features tenancy` and copying the output into
-/// `crates/cargo-rustango/templates/`.
-pub const BOOTSTRAP_REGISTRY_MIGRATION: &str =
-    include_str!("../templates/0001_rustango_registry_initial.json");
-
-/// Tenant-scoped bootstrap migration — same provenance as
-/// [`BOOTSTRAP_REGISTRY_MIGRATION`]. Creates `rustango_users` inside
-/// each tenant's schema/database when `manage migrate-tenants` runs.
-pub const BOOTSTRAP_TENANT_MIGRATION: &str =
-    include_str!("../templates/0001_rustango_tenant_initial.json");
+// The framework no longer ships hardcoded bootstrap migration JSON.
+// `cargo rustango new --template tenant` seeds an empty `system/
+// migrations/` folder; `cargo run -- makemigrations` generates the
+// framework's own tables from the compiled models (Django-style), and
+// `cargo run -- migrate` applies them.
 
 // ---------------- Tiered settings files (#87) ----------------
 //

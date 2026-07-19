@@ -354,6 +354,42 @@ pub async fn fetch_for_entity(
     .await
 }
 
+/// Schema-registration model for `rustango_audit_log`.
+///
+/// Reads still go through [`AuditEntry`] (which keeps its per-dialect
+/// `changes`-column decoders); this struct exists so `makemigrations`
+/// owns the audit-log schema instead of the hand-written `ensure_table`
+/// DDL. It carries the two indexes the ensure DDL created — the
+/// `(entity_table, entity_pk)` composite and one on `occurred_at`
+/// (a plain index; the ensure's `DESC` was a scan optimization the
+/// planner uses either way). Consolidated with `AuditEntry` when the
+/// ensure DDL is removed.
+#[derive(crate::Model, Debug, Clone)]
+#[rustango(
+    table = "rustango_audit_log",
+    index_together = "entity_table, entity_pk"
+)]
+#[allow(dead_code)]
+pub struct AuditLog {
+    #[rustango(primary_key)]
+    pub id: crate::sql::Auto<i64>,
+    // `entity_table` + `entity_pk` are the `index_together` key; they MUST
+    // be bounded so MySQL can index them (an unbounded `TEXT` column can't
+    // be a key without a prefix length — MySQL error 1170). Lengths match
+    // the pre-v0.47 hand-written MySQL DDL to avoid schema drift.
+    #[rustango(max_length = 255)]
+    pub entity_table: String,
+    #[rustango(max_length = 255)]
+    pub entity_pk: String,
+    #[rustango(max_length = 32)]
+    pub operation: String,
+    #[rustango(max_length = 255)]
+    pub source: String,
+    pub changes: serde_json::Value,
+    #[rustango(index, default = "now()")]
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Decoded audit-log row.
 #[derive(Debug, Clone)]
 pub struct AuditEntry {
@@ -427,27 +463,6 @@ impl AuditEntry {
         })
     }
 }
-
-/// SQL that creates the `rustango_audit_log` table and its composite
-/// `(entity_table, entity_pk)` index. Idempotent (`IF NOT EXISTS`).
-/// Mounted by the per-tenant audit bootstrap migration; users with
-/// pre-existing rustango deployments can run it directly via
-/// `sqlx::query(audit::CREATE_TABLE_SQL).execute(pool)` to retrofit.
-pub const CREATE_TABLE_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_audit_log" (
-    "id"           BIGSERIAL PRIMARY KEY,
-    "entity_table" TEXT NOT NULL,
-    "entity_pk"    TEXT NOT NULL,
-    "operation"    TEXT NOT NULL,
-    "source"       TEXT NOT NULL,
-    "changes"      JSONB NOT NULL,
-    "occurred_at"  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS "rustango_audit_log_entity_idx"
-    ON "rustango_audit_log" ("entity_table", "entity_pk");
-CREATE INDEX IF NOT EXISTS "rustango_audit_log_occurred_idx"
-    ON "rustango_audit_log" ("occurred_at" DESC);
-"#;
 
 /// Delete audit entries older than `cutoff_days` from `pool`'s
 /// audit table. Returns the number of rows removed.
@@ -533,68 +548,14 @@ pub async fn cleanup_keep_last_n(pool: &PgPool, keep: i64) -> Result<u64, sqlx::
 ///
 /// PG-typed back-compat; for non-PG use [`ensure_table_pool`].
 ///
-/// Splits [`CREATE_TABLE_SQL`] on `;` because Postgres' simple-prepare
-/// path rejects multiple commands in one prepared statement; each
-/// `CREATE TABLE` / `CREATE INDEX` runs as its own round-trip.
-///
 /// # Errors
-/// Driver / SQL failures from `CREATE TABLE IF NOT EXISTS`.
+/// Driver / SQL failures from the emitted DDL.
 #[cfg(feature = "postgres")]
 pub async fn ensure_table(pool: &PgPool) -> Result<(), sqlx::Error> {
-    for stmt in CREATE_TABLE_SQL.split(';') {
-        let trimmed = stmt.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        sqlx::query(trimmed).execute(pool).await?;
-    }
-    Ok(())
+    ensure_table_pool(&crate::sql::Pool::Postgres(pool.clone())).await
 }
 
 // ============================================================ bi-dialect audit (v0.23.0-batch16)
-
-/// `MySQL`-shape audit-log DDL. Mirror of [`CREATE_TABLE_SQL`] with
-/// MySQL types: `BIGINT AUTO_INCREMENT`, `JSON` (no `JSONB`),
-/// `DATETIME(6)` (no `TIMESTAMPTZ`), and backtick identifier quoting
-/// since `MySQL`'s parser rejects double-quoted identifiers in
-/// default `ANSI_QUOTES=off` mode.
-pub const CREATE_TABLE_SQL_MYSQL: &str = r#"
-CREATE TABLE IF NOT EXISTS `rustango_audit_log` (
-    `id`           BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `entity_table` VARCHAR(255) NOT NULL,
-    `entity_pk`    VARCHAR(255) NOT NULL,
-    `operation`    VARCHAR(32) NOT NULL,
-    `source`       VARCHAR(255) NOT NULL,
-    `changes`      JSON NOT NULL,
-    `occurred_at`  DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-);
-CREATE INDEX `rustango_audit_log_entity_idx`
-    ON `rustango_audit_log` (`entity_table`, `entity_pk`);
-CREATE INDEX `rustango_audit_log_occurred_idx`
-    ON `rustango_audit_log` (`occurred_at` DESC);
-"#;
-
-/// SQLite-shape audit-log DDL. Same column shape as the Postgres
-/// version, but: `INTEGER PRIMARY KEY AUTOINCREMENT` (the SQLite
-/// auto-PK token), `TEXT` for VARCHAR / JSON / TIMESTAMP (SQLite
-/// affinities), `CURRENT_TIMESTAMP` for the default. `CREATE INDEX
-/// IF NOT EXISTS` is supported, so the bootstrap stays idempotent
-/// without per-error fallback.
-pub const CREATE_TABLE_SQL_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_audit_log" (
-    "id"           INTEGER PRIMARY KEY AUTOINCREMENT,
-    "entity_table" TEXT NOT NULL,
-    "entity_pk"    TEXT NOT NULL,
-    "operation"    TEXT NOT NULL,
-    "source"       TEXT NOT NULL,
-    "changes"      TEXT NOT NULL,
-    "occurred_at"  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS "rustango_audit_log_entity_idx"
-    ON "rustango_audit_log" ("entity_table", "entity_pk");
-CREATE INDEX IF NOT EXISTS "rustango_audit_log_occurred_idx"
-    ON "rustango_audit_log" ("occurred_at" DESC);
-"#;
 
 /// Bootstrap the audit-log table against either backend. Routes the
 /// per-dialect DDL through the right driver via [`crate::sql::Pool`].
@@ -607,20 +568,31 @@ CREATE INDEX IF NOT EXISTS "rustango_audit_log_occurred_idx"
 /// Driver / SQL failures other than the swallowed duplicate-index
 /// errors on MySQL.
 pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Error> {
-    let ddl = match pool.dialect().name() {
-        "postgres" => CREATE_TABLE_SQL,
-        "mysql" => CREATE_TABLE_SQL_MYSQL,
-        "sqlite" => CREATE_TABLE_SQL_SQLITE,
-        // Future dialects fall through to a portable best-effort
-        // using `Dialect::column_type` for the timestamp + JSON
-        // columns; for the backends rustango ships against, hand-
-        // rolled DDL is simpler and produces tighter SQL.
-        _ => CREATE_TABLE_SQL,
-    };
-    // #561 — the split-by-`;` + dispatch + swallow-dup-index loop
-    // was duplicated ~6× across audit / media / jobs / contenttypes.
-    // Single owner now lives in `crate::sql::run_ddl_idempotent`.
-    crate::sql::run_ddl_idempotent(pool, ddl).await
+    // Drift-free (v0.47): emit `rustango_audit_log` (+ its two indexes)
+    // from `AuditLog::SCHEMA` via the migration render path instead of
+    // hand-written per-dialect DDL. Idempotent (swallows "already
+    // exists"). `audit_log` is a per-DB shared table, so this ensure
+    // remains as a defensive helper alongside the system migrations.
+    use crate::core::Model as _;
+    let snapshot = crate::migrate::SchemaSnapshot::from_models(&[AuditLog::SCHEMA]);
+    let changes =
+        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
+    let batch =
+        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
+            .map_err(sqlx::Error::Protocol)?;
+    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
+        if let Err(e) = crate::sql::raw_execute_pool(pool, stmt, Vec::new()).await {
+            let msg = format!("{e}").to_lowercase();
+            if msg.contains("already exists") || msg.contains("duplicate") {
+                continue;
+            }
+            return Err(match e {
+                crate::sql::ExecError::Driver(err) => err,
+                other => sqlx::Error::Protocol(format!("{other}")),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Per-row audit emit on a `MySqlConnection`-shape executor —

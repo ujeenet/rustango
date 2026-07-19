@@ -10,7 +10,7 @@
 
 use cookbook_blog::apps::blog::models::*;
 use rustango::core::Op;
-use rustango::sql::{sqlx, Auto, };
+use rustango::sql::{sqlx, Auto};
 
 fn url() -> Option<String> {
     std::env::var("DATABASE_URL").ok()
@@ -18,7 +18,11 @@ fn url() -> Option<String> {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = url()?;
-    Some(sqlx::PgPool::connect(&url).await.expect("connect to docker pg"))
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to docker pg"),
+    )
 }
 
 async fn fresh_schema(pool: &sqlx::PgPool) {
@@ -49,14 +53,20 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             bio VARCHAR(500) NULL,
             joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )"#,
-    ).execute(pool).await.expect("create author");
+    )
+    .execute(pool)
+    .await
+    .expect("create author");
 
     sqlx::query(
         r#"CREATE TABLE cookbook_rating (
             id BIGSERIAL PRIMARY KEY,
             score BIGINT NOT NULL CHECK (score >= 1 AND score <= 5)
         )"#,
-    ).execute(pool).await.expect("create rating");
+    )
+    .execute(pool)
+    .await
+    .expect("create rating");
 
     sqlx::query(
         r#"CREATE TABLE cookbook_post (
@@ -70,20 +80,30 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             metadata JSONB NOT NULL,
             published_at TIMESTAMPTZ NULL
         )"#,
-    ).execute(pool).await.expect("create post");
+    )
+    .execute(pool)
+    .await
+    .expect("create post");
 
     sqlx::query("CREATE INDEX cookbook_post_author_idx ON cookbook_post(author_id)")
-        .execute(pool).await.expect("create index");
+        .execute(pool)
+        .await
+        .expect("create index");
 
     // §2.27 Auto<Uuid>
     sqlx::query(r#"CREATE EXTENSION IF NOT EXISTS pgcrypto"#)
-        .execute(pool).await.expect("pgcrypto");
+        .execute(pool)
+        .await
+        .expect("pgcrypto");
     sqlx::query(
         r#"CREATE TABLE cookbook_session (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             user_token VARCHAR(80) NOT NULL
         )"#,
-    ).execute(pool).await.expect("create session");
+    )
+    .execute(pool)
+    .await
+    .expect("create session");
 
     // §2.21 O2O — UNIQUE on author_id makes it 1:1
     sqlx::query(
@@ -92,7 +112,10 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             author_id BIGINT NOT NULL UNIQUE REFERENCES cookbook_author(id),
             avatar_url TEXT NOT NULL
         )"#,
-    ).execute(pool).await.expect("create profile");
+    )
+    .execute(pool)
+    .await
+    .expect("create profile");
 
     // §2.22 M2M
     sqlx::query(
@@ -100,14 +123,20 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             id BIGSERIAL PRIMARY KEY,
             name VARCHAR(40) NOT NULL UNIQUE
         )"#,
-    ).execute(pool).await.expect("create tag");
+    )
+    .execute(pool)
+    .await
+    .expect("create tag");
     sqlx::query(
         r#"CREATE TABLE cookbook_post_tag (
             post_id BIGINT NOT NULL REFERENCES cookbook_post(id),
             tag_id  BIGINT NOT NULL REFERENCES cookbook_tag(id),
             PRIMARY KEY (post_id, tag_id)
         )"#,
-    ).execute(pool).await.expect("create post_tag");
+    )
+    .execute(pool)
+    .await
+    .expect("create post_tag");
 
     // §2.30 soft_delete
     sqlx::query(
@@ -116,7 +145,10 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             note VARCHAR(200) NOT NULL,
             deleted_at TIMESTAMPTZ NULL
         )"#,
-    ).execute(pool).await.expect("create archive_note");
+    )
+    .execute(pool)
+    .await
+    .expect("create archive_note");
 
     // §2.19 — table-level CHECK constraint on InventoryItem.
     sqlx::query(
@@ -127,7 +159,10 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             price_cents BIGINT NOT NULL,
             CONSTRAINT cookbook_inventory_item_qty_chk CHECK (qty >= 0 AND price_cents > 0)
         )"#,
-    ).execute(pool).await.expect("create inventory_item");
+    )
+    .execute(pool)
+    .await
+    .expect("create inventory_item");
 
     // §2.23 fk_composite target + source.
     sqlx::query(
@@ -138,7 +173,10 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             label VARCHAR(40) NOT NULL,
             UNIQUE (a_id, b_id)
         )"#,
-    ).execute(pool).await.expect("create pair_target");
+    )
+    .execute(pool)
+    .await
+    .expect("create pair_target");
     sqlx::query(
         r#"CREATE TABLE cookbook_pair_link (
             id BIGSERIAL PRIMARY KEY,
@@ -147,7 +185,10 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             CONSTRAINT pair_target_fk FOREIGN KEY (left_ref, right_ref)
                 REFERENCES cookbook_pair_target (a_id, b_id)
         )"#,
-    ).execute(pool).await.expect("create pair_link");
+    )
+    .execute(pool)
+    .await
+    .expect("create pair_link");
 
     // §2.24 generic_fk — Activity carries (CT, object_pk).
     sqlx::query(
@@ -157,12 +198,17 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             target_object_pk BIGINT NOT NULL,
             action VARCHAR(40) NOT NULL
         )"#,
-    ).execute(pool).await.expect("create activity");
+    )
+    .execute(pool)
+    .await
+    .expect("create activity");
 
     // §2.25 ContentType registry table — required for ensure_seeded().
-    // Mirrors what the framework's bootstrap migration produces.
+    // Mirrors what the framework's generated system migration produces.
     sqlx::query("DROP TABLE IF EXISTS rustango_content_types CASCADE")
-        .execute(pool).await.expect("drop ct");
+        .execute(pool)
+        .await
+        .expect("drop ct");
     sqlx::query(
         r#"CREATE TABLE rustango_content_types (
             id BIGSERIAL PRIMARY KEY,
@@ -171,7 +217,10 @@ async fn fresh_schema(pool: &sqlx::PgPool) {
             "table" VARCHAR(100) NOT NULL,
             UNIQUE (app_label, model_name)
         )"#,
-    ).execute(pool).await.expect("create rustango_content_types");
+    )
+    .execute(pool)
+    .await
+    .expect("create rustango_content_types");
 }
 
 // §2.11 / §2.12 — derive Model + Auto<i64> assigns id on save.
@@ -188,7 +237,10 @@ async fn save_assigns_auto_pk() {
         joined_at: Auto::Unset,
     };
     a.save(&pool).await.expect("save author");
-    let id = match a.id { Auto::Set(v) => v, Auto::Unset => panic!("Auto<i64> never assigned") };
+    let id = match a.id {
+        Auto::Set(v) => v,
+        Auto::Unset => panic!("Auto<i64> never assigned"),
+    };
     assert!(id > 0, "Auto::Set value must be a real serial id, got {id}");
 }
 
@@ -207,11 +259,20 @@ async fn option_field_round_trips_null() {
     };
     a.save(&pool).await.unwrap();
 
-    let id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+    let id = match a.id {
+        Auto::Set(v) => v,
+        Auto::Unset => unreachable!(),
+    };
     let row: Vec<Author> = Author::objects()
-        .filter_op("id", Op::Eq, id).fetch_on(&pool).await.unwrap();
+        .filter_op("id", Op::Eq, id)
+        .fetch_on(&pool)
+        .await
+        .unwrap();
     assert_eq!(row.len(), 1);
-    assert_eq!(row[0].bio, None, "Option<String>::None should round-trip as NULL");
+    assert_eq!(
+        row[0].bio, None,
+        "Option<String>::None should round-trip as NULL"
+    );
 }
 
 // §2.14 / §2.29 — auto_now_add fills joined_at via DB DEFAULT NOW().
@@ -228,10 +289,16 @@ async fn auto_now_add_assigns_at_insert() {
         joined_at: Auto::Unset,
     };
     a.save(&pool).await.unwrap();
-    let id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+    let id = match a.id {
+        Auto::Set(v) => v,
+        Auto::Unset => unreachable!(),
+    };
 
     let row: Vec<Author> = Author::objects()
-        .filter_op("id", Op::Eq, id).fetch_on(&pool).await.unwrap();
+        .filter_op("id", Op::Eq, id)
+        .fetch_on(&pool)
+        .await
+        .unwrap();
     let joined = match row[0].joined_at {
         Auto::Set(t) => t,
         Auto::Unset => panic!("auto_now_add did not populate joined_at"),
@@ -264,8 +331,8 @@ async fn unique_constraint_rejects_duplicates() {
     };
     let err = b.save(&pool).await.expect_err("duplicate email must fail");
     assert!(
-        format!("{err:?}").to_lowercase().contains("unique") ||
-        format!("{err:?}").to_lowercase().contains("duplicate"),
+        format!("{err:?}").to_lowercase().contains("unique")
+            || format!("{err:?}").to_lowercase().contains("duplicate"),
         "expected a unique-violation, got: {err:?}",
     );
 }
@@ -276,10 +343,16 @@ async fn min_max_check_rejects_out_of_range() {
     let Some(pool) = pool().await else { return };
     fresh_schema(&pool).await;
 
-    let mut ok = Rating { id: Auto::Unset, score: 3 };
+    let mut ok = Rating {
+        id: Auto::Unset,
+        score: 3,
+    };
     ok.save(&pool).await.expect("score 3 is valid");
 
-    let mut bad = Rating { id: Auto::Unset, score: 99 };
+    let mut bad = Rating {
+        id: Auto::Unset,
+        score: 99,
+    };
     let err = bad.save(&pool).await.expect_err("score 99 violates max=5");
     let msg = format!("{err:?}").to_lowercase();
     assert!(
@@ -305,7 +378,10 @@ async fn fk_column_round_trips() {
         joined_at: Auto::Unset,
     };
     a.save(&pool).await.unwrap();
-    let author_id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+    let author_id = match a.id {
+        Auto::Set(v) => v,
+        Auto::Unset => unreachable!(),
+    };
 
     let mut p = Post {
         id: Auto::Unset,
@@ -321,7 +397,10 @@ async fn fk_column_round_trips() {
     p.save(&pool).await.unwrap();
 
     let posts: Vec<Post> = Post::objects()
-        .filter_op("author_id", Op::Eq, author_id).fetch_on(&pool).await.unwrap();
+        .filter_op("author_id", Op::Eq, author_id)
+        .fetch_on(&pool)
+        .await
+        .unwrap();
     assert_eq!(posts.len(), 1);
     assert_eq!(posts[0].title, "first");
     assert_eq!(posts[0].metadata["tags"][0], "intro");
@@ -341,7 +420,10 @@ async fn jsonb_field_round_trips_structured_data() {
         joined_at: Auto::Unset,
     };
     a.save(&pool).await.unwrap();
-    let author_id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+    let author_id = match a.id {
+        Auto::Set(v) => v,
+        Auto::Unset => unreachable!(),
+    };
 
     let payload = serde_json::json!({
         "tags": ["rust", "framework"],
@@ -361,7 +443,10 @@ async fn jsonb_field_round_trips_structured_data() {
     p.save(&pool).await.unwrap();
 
     let posts: Vec<Post> = Post::objects()
-        .filter_op("slug", Op::Eq, "j").fetch_on(&pool).await.unwrap();
+        .filter_op("slug", Op::Eq, "j")
+        .fetch_on(&pool)
+        .await
+        .unwrap();
     assert_eq!(posts[0].metadata, payload);
 }
 
@@ -379,12 +464,16 @@ async fn datetime_option_round_trips() {
         joined_at: Auto::Unset,
     };
     a.save(&pool).await.unwrap();
-    let author_id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+    let author_id = match a.id {
+        Auto::Set(v) => v,
+        Auto::Unset => unreachable!(),
+    };
 
     let when = chrono::Utc::now();
     let mut p1 = Post {
         id: Auto::Unset,
-        title: "now".into(), slug: "now".into(),
+        title: "now".into(),
+        slug: "now".into(),
         body: "b".into(),
         author_id,
         published: true,
@@ -396,7 +485,8 @@ async fn datetime_option_round_trips() {
 
     let mut p2 = Post {
         id: Auto::Unset,
-        title: "never".into(), slug: "never".into(),
+        title: "never".into(),
+        slug: "never".into(),
         body: "b".into(),
         author_id,
         published: false,
@@ -406,9 +496,20 @@ async fn datetime_option_round_trips() {
     };
     p2.save(&pool).await.unwrap();
 
-    let now_back: Vec<Post> = Post::objects().filter_op("slug", Op::Eq, "now").fetch_on(&pool).await.unwrap();
-    assert!(now_back[0].published_at.is_some(), "Some(when) lost on round-trip");
-    let never_back: Vec<Post> = Post::objects().filter_op("slug", Op::Eq, "never").fetch_on(&pool).await.unwrap();
+    let now_back: Vec<Post> = Post::objects()
+        .filter_op("slug", Op::Eq, "now")
+        .fetch_on(&pool)
+        .await
+        .unwrap();
+    assert!(
+        now_back[0].published_at.is_some(),
+        "Some(when) lost on round-trip"
+    );
+    let never_back: Vec<Post> = Post::objects()
+        .filter_op("slug", Op::Eq, "never")
+        .fetch_on(&pool)
+        .await
+        .unwrap();
     assert_eq!(never_back[0].published_at, None);
 }
 
@@ -418,10 +519,20 @@ async fn auto_uuid_assigns_server_side_uuid() {
     let Some(pool) = pool().await else { return };
     fresh_schema(&pool).await;
 
-    let mut s = Session { id: Auto::Unset, user_token: "tok".into() };
+    let mut s = Session {
+        id: Auto::Unset,
+        user_token: "tok".into(),
+    };
     s.save(&pool).await.expect("save session");
-    let id = match s.id { Auto::Set(v) => v, Auto::Unset => panic!("Auto<Uuid> not assigned") };
-    assert_ne!(id, uuid::Uuid::nil(), "DB DEFAULT gen_random_uuid() should fill a real v4");
+    let id = match s.id {
+        Auto::Set(v) => v,
+        Auto::Unset => panic!("Auto<Uuid> not assigned"),
+    };
+    assert_ne!(
+        id,
+        uuid::Uuid::nil(),
+        "DB DEFAULT gen_random_uuid() should fill a real v4"
+    );
 }
 
 // §2.21 — O2O UNIQUE FK rejects a second row with the same author_id.
@@ -432,19 +543,34 @@ async fn o2o_unique_fk_rejects_duplicate() {
 
     let mut a = Author {
         id: Auto::Unset,
-        name: "p".into(), email: "p@example.com".into(),
-        bio: None, joined_at: Auto::Unset,
+        name: "p".into(),
+        email: "p@example.com".into(),
+        bio: None,
+        joined_at: Auto::Unset,
     };
     a.save(&pool).await.unwrap();
-    let author_id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+    let author_id = match a.id {
+        Auto::Set(v) => v,
+        Auto::Unset => unreachable!(),
+    };
 
-    let mut p1 = AuthorProfile { id: Auto::Unset, author_id, avatar_url: "/a.png".into() };
+    let mut p1 = AuthorProfile {
+        id: Auto::Unset,
+        author_id,
+        avatar_url: "/a.png".into(),
+    };
     p1.save(&pool).await.expect("first profile");
-    let mut p2 = AuthorProfile { id: Auto::Unset, author_id, avatar_url: "/b.png".into() };
+    let mut p2 = AuthorProfile {
+        id: Auto::Unset,
+        author_id,
+        avatar_url: "/b.png".into(),
+    };
     let err = p2.save(&pool).await.expect_err("o2o duplicate must fail");
     let msg = format!("{err:?}").to_lowercase();
-    assert!(msg.contains("unique") || msg.contains("duplicate"),
-        "expected unique violation, got {err:?}");
+    assert!(
+        msg.contains("unique") || msg.contains("duplicate"),
+        "expected unique violation, got {err:?}"
+    );
 }
 
 // §2.22 — M2M through writes/reads the junction table.
@@ -455,36 +581,67 @@ async fn m2m_through_junction_table_round_trips() {
 
     let mut a = Author {
         id: Auto::Unset,
-        name: "m2m".into(), email: "m@example.com".into(),
-        bio: None, joined_at: Auto::Unset,
+        name: "m2m".into(),
+        email: "m@example.com".into(),
+        bio: None,
+        joined_at: Auto::Unset,
     };
     a.save(&pool).await.unwrap();
-    let author_id = match a.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+    let author_id = match a.id {
+        Auto::Set(v) => v,
+        Auto::Unset => unreachable!(),
+    };
 
     let mut p = Post {
         id: Auto::Unset,
-        title: "tagged".into(), slug: "tagged".into(),
-        body: "b".into(), author_id,
-        published: false, view_count: 0,
+        title: "tagged".into(),
+        slug: "tagged".into(),
+        body: "b".into(),
+        author_id,
+        published: false,
+        view_count: 0,
         metadata: serde_json::json!({}),
         published_at: None,
     };
     p.save(&pool).await.unwrap();
-    let post_id = match p.id { Auto::Set(v) => v, Auto::Unset => unreachable!() };
+    let post_id = match p.id {
+        Auto::Set(v) => v,
+        Auto::Unset => unreachable!(),
+    };
 
-    let mut t1 = Tag { id: Auto::Unset, name: "rust".into() };
+    let mut t1 = Tag {
+        id: Auto::Unset,
+        name: "rust".into(),
+    };
     t1.save(&pool).await.unwrap();
-    let mut t2 = Tag { id: Auto::Unset, name: "framework".into() };
+    let mut t2 = Tag {
+        id: Auto::Unset,
+        name: "framework".into(),
+    };
     t2.save(&pool).await.unwrap();
-    let t1_id = match t1.id { Auto::Set(v) => v, _ => unreachable!() };
-    let t2_id = match t2.id { Auto::Set(v) => v, _ => unreachable!() };
+    let t1_id = match t1.id {
+        Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
+    let t2_id = match t2.id {
+        Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     sqlx::query("INSERT INTO cookbook_post_tag (post_id, tag_id) VALUES ($1, $2), ($1, $3)")
-        .bind(post_id).bind(t1_id).bind(t2_id).execute(&pool).await.expect("link tags");
+        .bind(post_id)
+        .bind(t1_id)
+        .bind(t2_id)
+        .execute(&pool)
+        .await
+        .expect("link tags");
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM cookbook_post_tag WHERE post_id = $1"
-    ).bind(post_id).fetch_one(&pool).await.unwrap();
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cookbook_post_tag WHERE post_id = $1")
+            .bind(post_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(count, 2, "junction should hold 2 rows for one post");
 }
 
@@ -523,20 +680,35 @@ async fn fk_composite_rejects_unmatched_pair() {
     fresh_schema(&pool).await;
 
     // Insert a valid pair on target.
-    let mut t = PairTarget { id: Auto::Unset, a_id: 10, b_id: 20, label: "ten-twenty".into() };
+    let mut t = PairTarget {
+        id: Auto::Unset,
+        a_id: 10,
+        b_id: 20,
+        label: "ten-twenty".into(),
+    };
     t.save(&pool).await.unwrap();
 
     // Source pointing at the matching pair → ok.
-    let mut ok = PairLink { id: Auto::Unset, left_ref: 10, right_ref: 20 };
+    let mut ok = PairLink {
+        id: Auto::Unset,
+        left_ref: 10,
+        right_ref: 20,
+    };
     ok.save(&pool).await.expect("matching pair link");
 
     // Source pointing at a pair that doesn't exist → FK violation.
-    let mut bad = PairLink { id: Auto::Unset, left_ref: 99, right_ref: 99 };
+    let mut bad = PairLink {
+        id: Auto::Unset,
+        left_ref: 99,
+        right_ref: 99,
+    };
     let err = bad.save(&pool).await.expect_err("composite FK violation");
     let msg = format!("{err:?}").to_lowercase();
     assert!(
-        msg.contains("foreign key") || msg.contains("foreign_key") ||
-        msg.contains("violates") || msg.contains("constraint"),
+        msg.contains("foreign key")
+            || msg.contains("foreign_key")
+            || msg.contains("violates")
+            || msg.contains("constraint"),
         "expected FK violation, got {err:?}"
     );
 }
@@ -551,7 +723,11 @@ async fn generic_fk_schema_and_content_type_lookup() {
 
     // Schema-level: Activity must declare exactly one generic_fk pointing
     // at the (target_content_type_id, target_object_pk) column pair.
-    assert_eq!(Activity::SCHEMA.generic_relations.len(), 1, "one generic_fk on Activity");
+    assert_eq!(
+        Activity::SCHEMA.generic_relations.len(),
+        1,
+        "one generic_fk on Activity"
+    );
     let g = &Activity::SCHEMA.generic_relations[0];
     assert_eq!(g.name, "target");
     assert_eq!(g.ct_column, "target_content_type_id");
@@ -559,7 +735,9 @@ async fn generic_fk_schema_and_content_type_lookup() {
 
     // ContentType lookup against an arbitrary registered model — Author
     // is registered by this binary's inventory.
-    rustango::contenttypes::ensure_seeded(&pool.clone().into()).await.expect("seed contenttypes");
+    rustango::contenttypes::ensure_seeded(&pool.clone().into())
+        .await
+        .expect("seed contenttypes");
     let ct = rustango::contenttypes::ContentType::for_model::<Author>(&pool.clone().into())
         .await
         .expect("ContentType lookup")
@@ -569,12 +747,20 @@ async fn generic_fk_schema_and_content_type_lookup() {
     // Round-trip an Activity row pointing at an Author via the (CT, pk) pair.
     let mut a = Author {
         id: Auto::Unset,
-        name: "ct".into(), email: "ct@example.com".into(),
-        bio: None, joined_at: Auto::Unset,
+        name: "ct".into(),
+        email: "ct@example.com".into(),
+        bio: None,
+        joined_at: Auto::Unset,
     };
     a.save(&pool).await.unwrap();
-    let author_id = match a.id { Auto::Set(v) => v, _ => unreachable!() };
-    let ct_id = match ct.id { Auto::Set(v) => v, _ => unreachable!() };
+    let author_id = match a.id {
+        Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
+    let ct_id = match ct.id {
+        Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     let mut act = Activity {
         id: Auto::Unset,
@@ -585,7 +771,10 @@ async fn generic_fk_schema_and_content_type_lookup() {
     act.save(&pool).await.expect("activity insert");
 
     let rows: Vec<Activity> = Activity::objects()
-        .filter_op("target_object_pk", Op::Eq, author_id).fetch_on(&pool).await.unwrap();
+        .filter_op("target_object_pk", Op::Eq, author_id)
+        .fetch_on(&pool)
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].action, "viewed");
 }
@@ -602,10 +791,19 @@ async fn soft_delete_column_round_trips_and_deleted_at_defaults_null() {
         deleted_at: None,
     };
     n.save(&pool).await.unwrap();
-    let id = match n.id { Auto::Set(v) => v, _ => unreachable!() };
+    let id = match n.id {
+        Auto::Set(v) => v,
+        _ => unreachable!(),
+    };
 
     let rows: Vec<ArchiveNote> = ArchiveNote::objects()
-        .filter_op("id", Op::Eq, id).fetch_on(&pool).await.unwrap();
+        .filter_op("id", Op::Eq, id)
+        .fetch_on(&pool)
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].deleted_at, None, "fresh row deleted_at should be NULL");
+    assert_eq!(
+        rows[0].deleted_at, None,
+        "fresh row deleted_at should be NULL"
+    );
 }

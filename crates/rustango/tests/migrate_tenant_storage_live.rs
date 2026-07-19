@@ -41,10 +41,6 @@ async fn fresh(pool: &PgPool) {
     rustango::migrate::apply_all(pool).await.unwrap();
 }
 
-fn now() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
-}
-
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|v| (*v).to_owned()).collect()
 }
@@ -70,14 +66,7 @@ async fn migrate_tenant_storage_dry_run_prints_plan() {
         host_pattern: None,
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
 
@@ -141,14 +130,7 @@ async fn migrate_tenant_storage_rejects_same_mode_no_op() {
         host_pattern: None,
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
 
@@ -199,14 +181,7 @@ async fn migrate_tenant_storage_rejects_database_target_without_url() {
         host_pattern: None,
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
 

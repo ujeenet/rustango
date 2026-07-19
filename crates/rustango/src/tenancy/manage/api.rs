@@ -172,6 +172,16 @@ where
         favicon_path: None,
         primary_color: None,
         theme_mode: None,
+        #[cfg(feature = "admin-sso")]
+        sso_enabled: false,
+        #[cfg(feature = "admin-sso")]
+        sso_provider: None,
+        #[cfg(feature = "admin-sso")]
+        sso_issuer_url: None,
+        #[cfg(feature = "admin-sso")]
+        sso_client_id: None,
+        #[cfg(feature = "admin-sso")]
+        sso_secret_ref: None,
     };
     org.insert_pool(&pools.registry_pool()).await?;
 
@@ -300,6 +310,8 @@ where
         id: Auto::default(),
         username: username.to_owned(),
         password_hash: crate::tenancy::password::hash(password)?,
+        #[cfg(feature = "admin-sso")]
+        email: None,
         is_superuser: superuser,
         active: true,
         created_at: chrono::Utc::now(),

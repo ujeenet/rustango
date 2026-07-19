@@ -375,6 +375,7 @@ async fn migrate_tenants_runs_against_active_only() {
     // Ship a tenant migration in dir.
     let mig_name = unique("0001_thing");
     let mig = rmig::Migration {
+        replaces: Vec::new(),
         name: mig_name.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -692,11 +693,15 @@ async fn purge_tenant_works_on_soft_deleted_org() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// End-to-end lifecycle: `init-tenancy` writes packaged bootstrap
-/// migrations, `migrate` applies the registry-scoped one,
-/// `create-operator` lands in `rustango_operators`, `create-tenant`
-/// runs the tenant-scoped bootstrap so `rustango_users` exists in the
-/// new schema automatically, and `create-user` writes into it.
+/// End-to-end lifecycle: `migrate` generates the framework's
+/// `system/migrations/` on demand from the compiled models and applies
+/// the registry-scoped ones, `create-operator` lands in
+/// `rustango_operators`, `create-tenant` applies the tenant-scoped
+/// system migrations so `rustango_users` exists in the new schema
+/// automatically, and `create-user` writes into it. There is no
+/// `init-tenancy` file-writing step: the framework ships no hardcoded
+/// bootstrap JSON — its schema flows through the same makemigrations/
+/// migrate engine as user models.
 #[tokio::test]
 async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     let _g = live_lock().lock().await;
@@ -705,47 +710,24 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     };
     let url = std::env::var("DATABASE_URL").unwrap();
 
-    // Clean slate: drop registry tables AND the migration ledger so
-    // bootstrap migrations re-apply on this run.
+    // Clean slate: drop registry tables AND both migration ledgers so the
+    // system migrations re-apply on this run.
     rmig::drop_all(&pool).await.unwrap();
-    sqlx::query(r#"DROP TABLE IF EXISTS "__rustango_migrations__" CASCADE"#)
-        .execute(&pool)
-        .await
-        .unwrap();
+    for ledger in ["__rustango_migrations__", "__rustango_system_migrations__"] {
+        sqlx::query(&format!(r#"DROP TABLE IF EXISTS "{ledger}" CASCADE"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 
     let dir = fresh_dir("lifecycle");
     let pools = TenantPools::new(pool.clone());
 
-    // 1. init-tenancy writes the two packaged bootstraps.
-    let (out, res) = run(&pools, &url, &dir, &["init-tenancy"]).await;
+    // 1. Scope-aware `migrate` generates the registry-scope system
+    //    migrations from the compiled models and applies them (the tenant
+    //    phase is a no-op pre-tenants).
+    let (_out, res) = run(&pools, &url, &dir, &["migrate"]).await;
     res.unwrap();
-    assert!(
-        out.contains("0001_rustango_registry_initial"),
-        "init-tenancy should mention registry bootstrap, got: {out}"
-    );
-    assert!(
-        out.contains("0001_rustango_tenant_initial"),
-        "init-tenancy should mention tenant bootstrap, got: {out}"
-    );
-    assert!(dir.join("0001_rustango_registry_initial.json").exists());
-    assert!(dir.join("0001_rustango_tenant_initial.json").exists());
-
-    // Re-running is idempotent — both files are reported as skipped.
-    let (out2, res2) = run(&pools, &url, &dir, &["init-tenancy"]).await;
-    res2.unwrap();
-    assert!(
-        out2.contains("already exists"),
-        "second run should skip: {out2}"
-    );
-
-    // 2. Scope-aware `migrate` applies registry bootstrap (and runs
-    //    the tenant phase, which is a no-op pre-tenants).
-    let (out3, res3) = run(&pools, &url, &dir, &["migrate"]).await;
-    res3.unwrap();
-    assert!(
-        out3.contains("0001_rustango_registry_initial"),
-        "migrate should report the registry bootstrap, got: {out3}"
-    );
 
     // rustango_orgs and rustango_operators now exist in public schema.
     for table in ["rustango_orgs", "rustango_operators"] {
@@ -877,9 +859,11 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
     // Cleanup.
     drop_schema(&pool, &slug).await;
     rmig::drop_all(&pool).await.unwrap();
-    sqlx::query(r#"DROP TABLE IF EXISTS "__rustango_migrations__" CASCADE"#)
-        .execute(&pool)
-        .await
-        .unwrap();
+    for ledger in ["__rustango_migrations__", "__rustango_system_migrations__"] {
+        sqlx::query(&format!(r#"DROP TABLE IF EXISTS "{ledger}" CASCADE"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

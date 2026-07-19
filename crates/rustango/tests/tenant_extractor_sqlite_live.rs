@@ -51,18 +51,7 @@ fn fake_sqlite_org() -> Org {
         database_url: Some(
             "sqlite:file:tenant_extractor_sqlite_test?mode=memory&cache=shared".into(),
         ),
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     }
 }
 

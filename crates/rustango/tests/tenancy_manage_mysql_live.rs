@@ -1,9 +1,9 @@
 //! MySQL counterpart of `tenancy_manage_sqlite_live.rs`. Exercises
-//! the full tenancy CLI cycle (`init-tenancy` → `migrate-registry`
-//! → `create-tenant` → `list-tenants`) against MySQL 8+.
+//! the full tenancy CLI cycle (`migrate-registry` → `create-tenant`
+//! → `list-tenants`) against MySQL 8+.
 //!
 //! Pins the dialect-aware migration DDL emission contract on MySQL —
-//! the bootstrap migration must emit `BIGINT NOT NULL AUTO_INCREMENT`
+//! the generated system migration must emit `BIGINT NOT NULL AUTO_INCREMENT`
 //! for `Auto<i64>` PKs (the MySQL equivalent of the SQLite
 //! `INTEGER PRIMARY KEY AUTOINCREMENT` fix in slice 30).
 //!
@@ -16,7 +16,7 @@ use rustango::tenancy::TenantPools;
 use tokio::sync::Mutex;
 
 /// Suite-wide lock. Both tests in this file `DROP TABLE` the shared
-/// registry tables and then re-run the bootstrap migration; without
+/// registry tables and then re-run `migrate-registry`; without
 /// serialization the parallel harness races and trips MySQL error 1050
 /// or partial-drop FK errors.
 fn live_lock() -> &'static Mutex<()> {
@@ -40,10 +40,12 @@ async fn pools_or_skip() -> Option<(TenantPools<sqlx::MySql>, String)> {
     // so the SET statements must `expect` — otherwise the bypass
     // silently no-ops and the failure surfaces only later as a 42S01.
     //
-    // The migration ledger table is `__rustango_migrations__` (double
-    // underscores per `migrate::runner::LEDGER_TABLE`); if a stale entry
-    // survives, `migrate-registry` thinks bootstrap is already applied
-    // and skips creating the tables we just dropped.
+    // The system-migration ledger is `__rustango_system_migrations__`
+    // (the framework's own tables migrate under a dedicated ledger,
+    // separate from the user-app `__rustango_migrations__`); if a stale
+    // entry survives, `migrate-registry` thinks the system migrations are
+    // already applied and skips creating the tables we just dropped. Both
+    // ledgers are dropped below.
     sqlx::query("SET FOREIGN_KEY_CHECKS = 0")
         .execute(&pool)
         .await
@@ -60,6 +62,7 @@ async fn pools_or_skip() -> Option<(TenantPools<sqlx::MySql>, String)> {
         "rustango_operators",
         "rustango_orgs",
         "__rustango_migrations__",
+        "__rustango_system_migrations__",
     ] {
         let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{tbl}`"))
             .execute(&pool)
@@ -81,24 +84,9 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
     };
     let migrations_dir = tempfile::tempdir().expect("migrations tempdir");
 
-    // Step 1: init-tenancy writes the bootstrap migration JSONs.
-    let mut buf: Vec<u8> = Vec::new();
-    rustango::tenancy::manage::run_with_writer(
-        &pools,
-        &url,
-        migrations_dir.path(),
-        vec!["init-tenancy".to_owned()],
-        &mut buf,
-    )
-    .await
-    .expect("init-tenancy");
-    let registry_json = migrations_dir
-        .path()
-        .join("0001_rustango_registry_initial.json");
-    assert!(registry_json.exists());
-
-    // Step 2: migrate-registry — applies bootstrap migrations against
-    // MySQL. The runner must emit MySQL-flavored DDL
+    // Step 1: migrate-registry generates the framework's registry-scope
+    // `system/migrations/` on demand from the compiled models and applies
+    // them against MySQL. The runner must emit MySQL-flavored DDL
     // (`BIGINT AUTO_INCREMENT PRIMARY KEY`, `DATETIME(6)`, `JSON`,
     // backtick identifiers) — not PG-flavored `BIGSERIAL` / `TIMESTAMPTZ`.
     let mut buf: Vec<u8> = Vec::new();
@@ -183,16 +171,6 @@ async fn tenancy_manage_run_rejects_schema_mode_on_mysql_with_friendly_error() {
     };
     let migrations_dir = tempfile::tempdir().expect("migrations tempdir");
 
-    let mut buf: Vec<u8> = Vec::new();
-    rustango::tenancy::manage::run_with_writer(
-        &pools,
-        &url,
-        migrations_dir.path(),
-        vec!["init-tenancy".to_owned()],
-        &mut buf,
-    )
-    .await
-    .expect("init-tenancy");
     let mut buf: Vec<u8> = Vec::new();
     rustango::tenancy::manage::run_with_writer(
         &pools,

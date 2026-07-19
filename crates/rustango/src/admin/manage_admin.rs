@@ -147,6 +147,8 @@ pub async fn create_admin_cmd<W: Write + Send>(
         id: Auto::Unset,
         username: username.clone(),
         password_hash: hash,
+        #[cfg(feature = "admin-sso")]
+        email: None,
         is_superuser,
         active: true,
         created_at: chrono::Utc::now(),

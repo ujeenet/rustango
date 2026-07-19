@@ -13,7 +13,7 @@ use axum::http::{Request, StatusCode};
 use rustango::sql::sqlx;
 use rustango::sql::{Auto, Pool};
 use rustango::tenancy::permissions::{
-    assign_role, ensure_tables_pool, get_or_create_role, grant_role_perm, set_user_perm,
+    assign_role, get_or_create_role, grant_role_perm, set_user_perm,
 };
 use rustango::tenancy::User;
 use tower::ServiceExt;
@@ -50,7 +50,7 @@ async fn fresh(pool: &sqlx::PgPool) {
             .await
             .unwrap();
     }
-    ensure_tables_pool(&Pool::Postgres(pool.clone()))
+    rustango::testkit::migrate_framework(&Pool::Postgres(pool.clone()))
         .await
         .unwrap();
 }
@@ -71,6 +71,8 @@ async fn user_detail_page_renders_roles_and_effective_perms() {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ),
         password_hash: "x".into(),
+        #[cfg(feature = "admin-sso")]
+        email: None,
         is_superuser: false,
         active: true,
         created_at: chrono::Utc::now(),

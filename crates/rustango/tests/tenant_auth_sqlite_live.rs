@@ -11,43 +11,35 @@
 
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "passwords"))]
 
+use rustango::core::Model as _;
 use rustango::sql::{sqlx, Pool};
 
 async fn sqlite_pool() -> Pool {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:")
         .await
         .expect("sqlite memory pool");
-    // Bootstrap rustango_users — the `_pool` family doesn't auto-create
-    // it; the production tenant bootstrap migration does.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS rustango_users (\
-            id INTEGER PRIMARY KEY AUTOINCREMENT, \
-            username TEXT NOT NULL UNIQUE, \
-            password_hash TEXT NOT NULL DEFAULT '', \
-            is_superuser INTEGER NOT NULL DEFAULT 0, \
-            active INTEGER NOT NULL DEFAULT 1, \
-            data TEXT NOT NULL DEFAULT '{}', \
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), \
-            password_changed_at TEXT)",
-    )
-    .execute(&pool)
-    .await
-    .expect("create users table");
-    Pool::Sqlite(pool)
+    let pool = Pool::Sqlite(pool);
+    // Bootstrap rustango_users from `User::SCHEMA` via the same DDL
+    // emitter the migration runner uses — no hand-written CREATE TABLE
+    // to drift when the model gains a column.
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
+        .await
+        .expect("create users table");
+    pool
 }
 
 async fn seed_user(pool: &Pool, username: &str, plaintext_password: &str, active: bool) {
     let hash = rustango::tenancy::password::hash(plaintext_password).expect("hash");
-    let Pool::Sqlite(sq) = pool else {
-        unreachable!()
+    // Insert through the model (sets created_at etc. from the struct)
+    // rather than a raw INSERT that leaned on hand-written column
+    // defaults.
+    let mut u = rustango::tenancy::User {
+        username: username.into(),
+        password_hash: hash,
+        active,
+        ..rustango::testkit::user()
     };
-    sqlx::query("INSERT INTO rustango_users (username, password_hash, active) VALUES (?, ?, ?)")
-        .bind(username)
-        .bind(&hash)
-        .bind(if active { 1 } else { 0 })
-        .execute(sq)
-        .await
-        .expect("seed user");
+    u.insert_pool(pool).await.expect("seed user");
 }
 
 #[tokio::test]

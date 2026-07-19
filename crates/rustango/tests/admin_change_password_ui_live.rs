@@ -47,10 +47,6 @@ async fn pool() -> Option<sqlx::PgPool> {
     Some(sqlx::PgPool::connect(&url).await.unwrap())
 }
 
-fn now() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
-}
-
 fn test_secret() -> rustango::tenancy::tenant_console::SessionSecret {
     rustango::tenancy::tenant_console::SessionSecret::from_bytes(b"a".repeat(32))
 }
@@ -82,14 +78,7 @@ async fn change_password_anonymous_redirects_to_login() {
         host_pattern: Some(host_pattern.clone()),
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
 
@@ -147,14 +136,7 @@ async fn change_password_authenticated_get_renders_form() {
         host_pattern: Some(host_pattern.clone()),
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
     // Seed a user so validate_session can look it up.
@@ -232,14 +214,7 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
         host_pattern: Some(host_pattern.clone()),
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
     let hash = rustango::tenancy::password::hash("old-pw-secret").unwrap();
@@ -323,14 +298,7 @@ async fn change_password_post_rejects_wrong_current() {
         host_pattern: Some(host_pattern.clone()),
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
     let hash = rustango::tenancy::password::hash("real-current").unwrap();
@@ -426,14 +394,7 @@ async fn session_minted_before_password_rotation_is_rejected() {
         host_pattern: Some(host_pattern.clone()),
         port: None,
         path_prefix: None,
-        active: true,
-        created_at: now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
+        ..rustango::testkit::org()
     };
     org.insert(&pool).await.unwrap();
     let hash = rustango::tenancy::password::hash("starting-pw").unwrap();

@@ -186,6 +186,7 @@ pub fn make_migrations_scoped(
     let created_at = chrono::Utc::now().to_rfc3339();
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: name.clone(),
         created_at,
         prev: prev_name,
@@ -197,6 +198,105 @@ pub fn make_migrations_scoped(
 
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
+    }
+    let path = dir.join(format!("{name}.json"));
+    file::write(&path, &mig)?;
+    Ok(Some(mig))
+}
+
+/// Generate the framework's own **system-app** migrations into
+/// `<project_root>/system/migrations/`.
+///
+/// Diffs the framework (`rustango_*`) models of `scope` against the
+/// prior system migrations of that scope and writes a scope-tagged
+/// migration. Unlike the user path ([`make_migrations_scoped`]) this
+/// does NOT fold framework tables into the baseline — here they ARE the
+/// subject, so a fresh project emits `CreateTable` for every framework
+/// table and later runs emit `AddColumn`/`DropColumn` as the models (and
+/// their `#[cfg]` features) evolve. This is what replaces the
+/// hand-written bootstrap/ensure DDL.
+///
+/// Returns `Ok(None)` when nothing in the framework's schema changed for
+/// this scope.
+///
+/// # Errors
+/// As [`make_migrations_from`], plus [`MigrateError::Io`] if the
+/// `system/migrations/` dir can't be created.
+pub fn make_migrations_system(
+    project_root: &Path,
+    scope: crate::core::ModelScope,
+    name_override: Option<&str>,
+) -> Result<Option<Migration>, MigrateError> {
+    let dir = project_root.join("system").join("migrations");
+    let migration_scope = match scope {
+        crate::core::ModelScope::Registry => super::MigrationScope::Registry,
+        crate::core::ModelScope::Tenant => super::MigrationScope::Tenant,
+    };
+    let current = SchemaSnapshot::from_registry_system_for_scope(scope);
+    let prior = if dir.exists() {
+        file::list_dir(&dir)?
+    } else {
+        Vec::new()
+    };
+    let prior_scoped: Vec<&Migration> = prior
+        .iter()
+        .filter(|m| m.scope == migration_scope)
+        .collect();
+    let prev_snapshot = prior_scoped
+        .last()
+        .map_or_else(empty_snapshot, |m| m.snapshot.clone());
+    let prev_name = prior_scoped.last().map(|m| m.name.clone());
+    let next_index = prior
+        .last()
+        .and_then(|m| extract_index(&m.name))
+        .map_or(1, |n| n + 1);
+
+    let unsupported = detect_unsupported_field_changes(&prev_snapshot, &current);
+    if !unsupported.is_empty() {
+        return Err(MigrateError::Validation(format!(
+            "framework schema change needs an operation the engine can't yet emit \
+             (author manually or wait for the AlterField op):\n  - {}",
+            unsupported.join("\n  - "),
+        )));
+    }
+    let changes = detect_changes(&prev_snapshot, &current);
+    if changes.is_empty() {
+        return Ok(None);
+    }
+    let suffix = name_override.map_or_else(
+        || auto_name(&changes, prior_scoped.is_empty()),
+        str::to_owned,
+    );
+    let name = format!("{next_index:04}_{suffix}");
+    let created_at = chrono::Utc::now().to_rfc3339();
+    // The *initial* system migration supersedes the pre-overhaul hand-built
+    // bootstrap (`0001_rustango_*_initial`), which ran under the app ledger,
+    // not the system ledger. Marking it as a squash lets the runner
+    // fake-initial when the `rustango_*` tables already exist (Django
+    // `--fake-initial`) instead of colliding on CREATE TABLE. Cross-ledger,
+    // so the check is table-existence, not ledger membership.
+    let replaces = if prior_scoped.is_empty() {
+        match scope {
+            crate::core::ModelScope::Registry => {
+                vec!["0001_rustango_registry_initial".to_owned()]
+            }
+            crate::core::ModelScope::Tenant => vec!["0001_rustango_tenant_initial".to_owned()],
+        }
+    } else {
+        Vec::new()
+    };
+    let mig = Migration {
+        replaces,
+        name: name.clone(),
+        created_at,
+        prev: prev_name,
+        atomic: true,
+        scope: migration_scope,
+        snapshot: current.clone(),
+        forward: changes.into_iter().map(Operation::Schema).collect(),
+    };
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
     }
     let path = dir.join(format!("{name}.json"));
     file::write(&path, &mig)?;
@@ -251,6 +351,7 @@ pub fn make_migrations_from(
     let created_at = chrono::Utc::now().to_rfc3339();
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: name.clone(),
         created_at,
         prev: prev_name,
@@ -546,6 +647,7 @@ pub fn make_merge_migration_from(
     let created_at = chrono::Utc::now().to_rfc3339();
 
     let mig = Migration {
+        replaces: Vec::new(),
         name: name.clone(),
         created_at,
         prev: Some(merge_prev),
@@ -681,6 +783,7 @@ mod tests {
         let dir = tempdir();
         let snap = snap_with(vec![t("rustango_users")]);
         let prior = Migration {
+            replaces: Vec::new(),
             name: "0001_initial".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: None,
@@ -748,6 +851,7 @@ mod tests {
         // this test we trust the lookup path's default behavior.
         let dir = tempdir();
         let prev = Migration {
+            replaces: Vec::new(),
             name: "0001_initial".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: None,
@@ -784,6 +888,7 @@ mod tests {
         // A new tenant migration must land at 0003, not 0002.
         let dir = tempdir();
         let r = Migration {
+            replaces: Vec::new(),
             name: "0001_registry_initial".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: None,
@@ -793,6 +898,7 @@ mod tests {
             forward: vec![],
         };
         let t1 = Migration {
+            replaces: Vec::new(),
             name: "0002_initial".into(),
             created_at: "2026-01-02T00:00:00Z".into(),
             prev: None,
@@ -858,6 +964,7 @@ mod tests {
 
     fn mig_at(name: &str, prev: Option<&str>, snapshot: SchemaSnapshot) -> Migration {
         Migration {
+            replaces: Vec::new(),
             name: name.into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: prev.map(str::to_owned),
