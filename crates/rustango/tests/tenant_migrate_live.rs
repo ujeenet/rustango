@@ -3,10 +3,17 @@
 //!
 //! Bootstraps a registry with two schema-mode tenants, writes a
 //! mixed-scope migration set, and proves:
-//! * registry-scoped migrations apply to the registry's `public.__rustango_migrations__`,
+//! * registry-scoped migrations apply to the registry's `public`,
 //! * tenant-scoped migrations apply per-tenant under
 //!   `<schema>.__rustango_migrations__` with isolated tables,
 //! * one tenant's broken migration doesn't sink the rest of the batch.
+//!
+//! Provisioning also fans out the framework's own tables: `migrate_registry`
+//! / `migrate_tenants` generate + apply the scope's *system* migration
+//! (`system/migrations/`, tracked under `__rustango_system_migrations__`)
+//! alongside the user migrations, so a tenant schema gets `rustango_users`
+//! etc. without a separate bootstrap step. Each `applied` list therefore
+//! includes both the user migration(s) and the system migration.
 //!
 //! Reads `DATABASE_URL`. Skips silently when unset.
 
@@ -84,11 +91,14 @@ async fn drop_table_in_public(pool: &sqlx::PgPool, table: &str) {
 }
 
 async fn delete_ledger_entry_in_public(pool: &sqlx::PgPool, name: &str) {
-    sqlx::query("DELETE FROM public.__rustango_migrations__ WHERE name = $1")
+    // Best-effort: the user-migration ledger (`public.__rustango_migrations__`)
+    // may not exist yet when this test runs in isolation (no sibling binary
+    // has created it). A missing ledger simply means there's nothing to
+    // delete, so swallow the undefined-table error.
+    let _ = sqlx::query("DELETE FROM public.__rustango_migrations__ WHERE name = $1")
         .bind(name)
         .execute(pool)
-        .await
-        .unwrap();
+        .await;
 }
 
 async fn table_exists_in_schema(pool: &sqlx::PgPool, schema: &str, table: &str) -> bool {
@@ -123,8 +133,21 @@ async fn registry_migrate_applies_only_registry_scoped() {
         return;
     };
 
+    // Clean slate: drop the framework tables AND both migration ledgers so
+    // `migrate_registry` freshly (re)generates + applies the registry-scope
+    // system migration. We must NOT leave the framework tables present with
+    // an empty system ledger (as an `apply_all` would): the system
+    // migration would then try to CREATE them again and collide. Tables
+    // absent + ledger absent is the one consistent starting state.
     rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    for ledger in ["__rustango_migrations__", "__rustango_system_migrations__"] {
+        sqlx::query(&format!(
+            r#"DROP TABLE IF EXISTS public."{ledger}" CASCADE"#
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
 
     let dir = fresh_dir("registry_only");
     let reg_table = unique("reg_audit");
@@ -168,8 +191,23 @@ async fn registry_migrate_applies_only_registry_scoped() {
 
     let pools = TenantPools::new(pool.clone());
     let applied = migrate_registry(&pools, &dir).await.unwrap();
-    assert_eq!(applied.len(), 1);
-    assert_eq!(applied[0].name, reg_name);
+    // `migrate_registry` applies the registry-scoped USER migration AND,
+    // now, the framework's registry-scope *system* migration (which
+    // creates `rustango_orgs`/`operators`/… — generated on demand from
+    // the compiled models under `__rustango_system_migrations__`). Whether
+    // the system migration is *newly* applied here depends on prior state
+    // (a sibling test may have applied it already), so assert on presence
+    // rather than an exact count: the registry user migration ran, the
+    // tenant-scoped one did NOT.
+    let names: Vec<&str> = applied.iter().map(|m| m.name.as_str()).collect();
+    assert!(
+        names.contains(&reg_name.as_str()),
+        "registry migrate should apply the registry-scoped migration; got {names:?}"
+    );
+    assert!(
+        !names.contains(&tenant_name.as_str()),
+        "registry migrate must NOT apply the tenant-scoped migration; got {names:?}"
+    );
 
     // Registry-scoped table exists; tenant-scoped does not.
     assert!(table_exists_in_schema(&pool, "public", &reg_table).await);
@@ -260,9 +298,25 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
     );
     assert_eq!(report.tenants.len(), 2);
     for outcome in &report.tenants {
-        assert_eq!(outcome.applied.len(), 1, "exactly one migration per tenant");
-        assert_eq!(outcome.applied[0].name, mig_name);
+        // Each tenant's `applied` now carries the tenant-scope USER
+        // migration (`items`) AND the framework's tenant-scope *system*
+        // migration (which provisions `rustango_users`/roles/permissions/…
+        // into the tenant's own schema, under `__rustango_system_migrations__`).
+        // Assert the user migration is present rather than pinning an exact
+        // count — the framework's table set (hence the system migration's
+        // op list) evolves independently of this test.
+        let names: Vec<&str> = outcome.applied.iter().map(|m| m.name.as_str()).collect();
+        assert!(
+            names.contains(&mig_name.as_str()),
+            "each tenant should apply the `items` migration; got {names:?}"
+        );
     }
+
+    // The framework's tenant tables were provisioned into each tenant
+    // schema by the fanned-out system migration (the new plug-and-play
+    // provisioning path — no separate bootstrap step).
+    assert!(table_exists_in_schema(&pool, &acme_schema, "rustango_users").await);
+    assert!(table_exists_in_schema(&pool, &globex_schema, "rustango_users").await);
 
     // `items` table exists in both tenant schemas, NOT in public.
     assert!(table_exists_in_schema(&pool, &acme_schema, "items").await);

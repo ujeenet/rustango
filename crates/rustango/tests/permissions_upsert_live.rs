@@ -41,15 +41,14 @@ async fn pool() -> Option<sqlx::PgPool> {
 async fn fresh(pool: &sqlx::PgPool) {
     rustango::migrate::drop_all(pool).await.unwrap();
     rustango::migrate::apply_all(pool).await.unwrap();
-    // The Model-derived auto-DDL in apply_all creates the four
-    // permission tables WITHOUT the composite UNIQUE constraints
-    // declared in `permissions::ENSURE_SQL` (the constraints aren't
-    // currently on the Model defs as `unique_together`). For these
-    // tests to exercise ON CONFLICT we need those constraints, so
-    // drop the tables and let `ensure_tables_pool` re-create them
-    // with the constraints. Production deployments hit this same
-    // code path because `ensure_tables_pool` runs before any
-    // inventory-driven CREATE TABLE for these model types.
+    // The permission models now declare their composite UNIQUE
+    // constraints as `unique_together` (v0.47), so the framework's
+    // schema — whether emitted by the inventory-driven auto-DDL or the
+    // migration engine — carries them. To exercise ON CONFLICT against a
+    // clean, constraint-carrying baseline we drop the four permission
+    // tables and re-create them via `testkit::migrate_framework`, which
+    // renders every `rustango_*` model through the same dialect emitter
+    // the real `migrate` uses.
     for t in [
         "rustango_user_permissions",
         "rustango_user_roles",
