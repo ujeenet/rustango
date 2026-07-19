@@ -413,11 +413,25 @@ impl SchemaSnapshot {
     /// rule as [`from_registry`].
     #[must_use]
     pub fn from_models(models: &[&ModelSchema]) -> Self {
-        let models: Vec<&ModelSchema> = models
-            .iter()
-            .copied()
-            .filter(|s| !s.is_view && s.managed)
-            .collect();
+        Self::build_from(models.iter().copied().filter(|s| !s.is_view && s.managed))
+    }
+
+    /// Like [`Self::from_models`] but does **not** skip `managed = false`
+    /// models. The drift-free `ensure_*` table helpers use this: their
+    /// models are intentionally `managed = false` (outside the migration
+    /// set — the framework creates them lazily on first use), yet the
+    /// helper still needs to render the table's `CREATE TABLE` from
+    /// [`ModelSchema`] rather than hand-written per-dialect DDL. Views are
+    /// still skipped.
+    #[must_use]
+    pub fn from_models_forced(models: &[&ModelSchema]) -> Self {
+        Self::build_from(models.iter().copied().filter(|s| !s.is_view))
+    }
+
+    /// Shared body of [`Self::from_models`] / [`Self::from_models_forced`]:
+    /// builds the snapshot from an already-filtered model iterator.
+    fn build_from<'a>(models: impl Iterator<Item = &'a ModelSchema>) -> Self {
+        let models: Vec<&ModelSchema> = models.collect();
         let mut tables: Vec<TableSnapshot> = models
             .iter()
             .map(|s| TableSnapshot::from_schema(s))

@@ -48,80 +48,61 @@ pub struct WebauthnCredential {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     /// The owning user's id.
+    #[rustango(index)]
     pub user_id: i64,
     /// Base64url (no padding) of the raw credential id the authenticator
     /// returns — the unique handle used to look the credential up at
     /// assertion time.
-    #[rustango(max_length = 255)]
+    #[rustango(max_length = 255, unique)]
     pub credential_id: String,
     /// COSE-encoded public key bytes captured at registration.
     pub public_key: Vec<u8>,
     /// Authenticator signature counter (replay / clone detection).
+    #[rustango(default = "0")]
     pub sign_count: i64,
     /// Optional user-facing label ("MacBook Touch ID", "YubiKey 5").
-    #[rustango(max_length = 64, default = "")]
+    #[rustango(max_length = 64, default = "''")]
     pub label: String,
     /// When the credential was registered.
+    #[rustango(default = "now()")]
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
-
-const CREATE_TABLE_PG: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_webauthn_credentials" (
-    "id"            BIGSERIAL PRIMARY KEY,
-    "user_id"       BIGINT NOT NULL,
-    "credential_id" VARCHAR(255) NOT NULL,
-    "public_key"    BYTEA NOT NULL,
-    "sign_count"    BIGINT NOT NULL DEFAULT 0,
-    "label"         VARCHAR(64) NOT NULL DEFAULT '',
-    "created_at"    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT "rustango_webauthn_credentials_cred_uq" UNIQUE ("credential_id")
-);
-CREATE INDEX IF NOT EXISTS "rustango_webauthn_credentials_user_idx"
-    ON "rustango_webauthn_credentials" ("user_id");
-"#;
-
-const CREATE_TABLE_MYSQL: &str = r"
-CREATE TABLE IF NOT EXISTS `rustango_webauthn_credentials` (
-    `id`            BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `user_id`       BIGINT NOT NULL,
-    `credential_id` VARCHAR(255) NOT NULL,
-    `public_key`    LONGBLOB NOT NULL,
-    `sign_count`    BIGINT NOT NULL DEFAULT 0,
-    `label`         VARCHAR(64) NOT NULL DEFAULT '',
-    `created_at`    DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    CONSTRAINT `rustango_webauthn_credentials_cred_uq` UNIQUE (`credential_id`),
-    INDEX `rustango_webauthn_credentials_user_idx` (`user_id`)
-);
-";
-
-const CREATE_TABLE_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_webauthn_credentials" (
-    "id"            INTEGER PRIMARY KEY AUTOINCREMENT,
-    "user_id"       INTEGER NOT NULL,
-    "credential_id" TEXT NOT NULL,
-    "public_key"    BLOB NOT NULL,
-    "sign_count"    INTEGER NOT NULL DEFAULT 0,
-    "label"         TEXT NOT NULL DEFAULT '',
-    "created_at"    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT "rustango_webauthn_credentials_cred_uq" UNIQUE ("credential_id")
-);
-CREATE INDEX IF NOT EXISTS "rustango_webauthn_credentials_user_idx"
-    ON "rustango_webauthn_credentials" ("user_id");
-"#;
 
 /// Idempotently create the `rustango_webauthn_credentials` table for the
 /// active backend.
 ///
+/// Drift-free: the DDL (+ the `credential_id` UNIQUE and the `user_id`
+/// index) is rendered from [`WebauthnCredential::SCHEMA`] through the
+/// migration engine's dialect emitter — the same path
+/// `makemigrations`/`migrate` use — instead of hand-written per-dialect
+/// strings. The model is `managed = false` (deliberately ensure-based,
+/// outside the migration set), so this helper is its only DDL path.
+///
 /// # Errors
-/// Driver / SQL failures from `CREATE TABLE IF NOT EXISTS` (other than
-/// the duplicate-object errors `run_ddl_idempotent` swallows).
+/// Driver / SQL failures (other than the duplicate-object errors this
+/// swallows to stay idempotent).
 pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
-    let ddl = match pool.dialect().name() {
-        "mysql" => CREATE_TABLE_MYSQL,
-        "sqlite" => CREATE_TABLE_SQLITE,
-        _ => CREATE_TABLE_PG,
-    };
-    crate::sql::run_ddl_idempotent(pool, ddl).await
+    use crate::core::Model as _;
+    let snapshot =
+        crate::migrate::SchemaSnapshot::from_models_forced(&[WebauthnCredential::SCHEMA]);
+    let changes =
+        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
+    let batch =
+        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
+            .map_err(sqlx::Error::Protocol)?;
+    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
+        if let Err(e) = crate::sql::raw_execute_pool(pool, stmt, Vec::new()).await {
+            let msg = format!("{e}").to_lowercase();
+            if msg.contains("already exists") || msg.contains("duplicate") {
+                continue;
+            }
+            return Err(match e {
+                crate::sql::ExecError::Driver(err) => err,
+                other => sqlx::Error::Protocol(format!("{other}")),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Every credential registered to `user_id` — the allow-list the
