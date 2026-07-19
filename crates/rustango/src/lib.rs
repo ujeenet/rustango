@@ -454,6 +454,12 @@ pub mod migrate;
 pub mod query;
 pub mod sql;
 
+/// Test-support helpers (schema builders from `Model::SCHEMA` + model
+/// factories). Dev-only: `#[cfg(test)]` for this crate's own tests,
+/// `feature = "testkit"` for external integration tests.
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
+
 /// Soft-delete query helpers — `active_filter` / `trashed_filter` /
 /// `compose_with_active` / `soft_delete` / `restore` / `purge` for any
 /// model carrying `#[rustango(soft_delete)]`. See [`soft_delete`].

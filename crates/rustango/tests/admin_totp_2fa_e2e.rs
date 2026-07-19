@@ -34,22 +34,11 @@ async fn seed() -> (Pool, TotpSecret) {
         .connect("sqlite::memory:")
         .await
         .expect("sqlite");
-    // AdminUser table (matches `rustango_admin_users` / AdminUser::SCHEMA).
-    sqlx::query(
-        r#"CREATE TABLE rustango_admin_users (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            username      TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            email         TEXT,
-            is_superuser  INTEGER NOT NULL DEFAULT 0,
-            active        INTEGER NOT NULL DEFAULT 1,
-            created_at    TEXT NOT NULL
-        )"#,
-    )
-    .execute(&p)
-    .await
-    .unwrap();
     let pool: Pool = p.into();
+    // rustango_admin_users from `AdminUser::SCHEMA` (no hand-written DDL).
+    rustango::testkit::create_tables_for::<AdminUser>(&pool)
+        .await
+        .unwrap();
     totp_store::ensure_table(&pool).await.unwrap();
 
     // Two users: "alice" (2FA-enrolled, confirmed) and "bob" (no 2FA).

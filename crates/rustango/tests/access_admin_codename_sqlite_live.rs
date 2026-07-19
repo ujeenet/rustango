@@ -18,30 +18,23 @@
 
 use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::permissions::{
-    auto_create_permissions_pool, ensure_tables_pool, has_perm_pool, seed_reserved_codename_pool,
-    set_user_perm_pool, ACCESS_ADMIN_CODENAME,
+    auto_create_permissions_pool, has_perm_pool, seed_reserved_codename_pool, set_user_perm_pool,
+    ACCESS_ADMIN_CODENAME,
 };
 
 async fn fresh_pool() -> Pool {
     let p = sqlx::SqlitePool::connect("sqlite::memory:")
         .await
         .expect("sqlite memory pool");
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS rustango_users (\
-            id INTEGER PRIMARY KEY AUTOINCREMENT, \
-            username TEXT NOT NULL UNIQUE, \
-            password_hash TEXT NOT NULL DEFAULT '', email TEXT, \
-            is_superuser INTEGER NOT NULL DEFAULT 0, \
-            active INTEGER NOT NULL DEFAULT 1, \
-            data TEXT NOT NULL DEFAULT '{}', \
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), \
-            password_changed_at TEXT)",
-    )
-    .execute(&p)
-    .await
-    .expect("create rustango_users");
     let pool = Pool::Sqlite(p);
-    ensure_tables_pool(&pool).await.expect("ensure_tables_pool");
+    // rustango_users from `User::SCHEMA` (no hand-written DDL to drift);
+    // the permission tables come from `ensure_tables_pool` (under test).
+    rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
+        .await
+        .expect("create rustango_users");
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("ensure_tables_pool");
     pool
 }
 
@@ -49,12 +42,15 @@ async fn make_user(pool: &Pool, name: &str, is_superuser: bool) -> i64 {
     let Pool::Sqlite(sq) = pool else {
         unreachable!("test uses sqlite only")
     };
-    sqlx::query("INSERT INTO rustango_users (username, is_superuser) VALUES (?, ?)")
-        .bind(name)
-        .bind(i64::from(is_superuser))
-        .execute(sq)
-        .await
-        .expect("insert user");
+    sqlx::query(
+        "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
+         VALUES (?, '', ?, 1, datetime('now'))",
+    )
+    .bind(name)
+    .bind(i64::from(is_superuser))
+    .execute(sq)
+    .await
+    .expect("insert user");
     let (id,): (i64,) = sqlx::query_as("SELECT id FROM rustango_users WHERE username = ?")
         .bind(name)
         .fetch_one(sq)

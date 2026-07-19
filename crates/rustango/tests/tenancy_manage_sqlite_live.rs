@@ -4,9 +4,10 @@
 //! and the generic-over-`DB` lift of the CLI runner. This proves that
 //! a binary built with `features = ["postgres", "sqlite", "tenancy"]`
 //! can dispatch a sqlite registry through the full tenancy CLI flow:
-//! `init-tenancy` (writes bootstrap migrations), `migrate-registry`
-//! (applies them), `create-tenant` (inserts an Org row),
-//! `list-tenants` (verifies the row appears).
+//! `migrate-registry` (generates the framework's `system/migrations/`
+//! from the compiled models on demand and applies them),
+//! `create-tenant` (inserts an Org row), `list-tenants` (verifies the
+//! row appears).
 //!
 //! The same code path is what `Cli::tenancy().run()` uses when the
 //! user runs `cargo run -- create-tenant acme` against a sqlite
@@ -39,34 +40,13 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_sqlite() {
     let (pools, url, _tmpdir) = sqlite_pools_in_tempfile().await;
     let migrations_dir = tempfile::tempdir().expect("migrations tempdir");
 
-    // Step 1: init-tenancy writes the bootstrap migration JSONs.
-    let mut buf: Vec<u8> = Vec::new();
-    rustango::tenancy::manage::run_with_writer(
-        &pools,
-        &url,
-        migrations_dir.path(),
-        vec!["init-tenancy".to_owned()],
-        &mut buf,
-    )
-    .await
-    .expect("init-tenancy");
-    let out = String::from_utf8_lossy(&buf);
-    assert!(
-        out.contains("bootstrap") || out.contains("rustango"),
-        "init-tenancy should mention the bootstrap migrations, got: {out}"
-    );
-    // The bootstrap JSONs should now live in the migrations dir.
-    let registry_json = migrations_dir
-        .path()
-        .join("0001_rustango_registry_initial.json");
-    assert!(
-        registry_json.exists(),
-        "expected the registry bootstrap migration file"
-    );
-
-    // Step 2: migrate-registry applies the bootstrap migrations against
-    // the SQLite database — creates `rustango_orgs`, `rustango_operators`,
-    // `rustango_migrations`, etc.
+    // Step 1: migrate-registry generates the framework's registry-scope
+    // `system/migrations/` on demand from the compiled models and applies
+    // them against the SQLite database — creates `rustango_orgs`,
+    // `rustango_operators`, etc. There is no `init-tenancy` file-writing
+    // step any more: the framework ships no hardcoded bootstrap JSON; its
+    // schema flows through the same makemigrations/migrate engine as user
+    // models.
     let mut buf: Vec<u8> = Vec::new();
     rustango::tenancy::manage::run_with_writer(
         &pools,
@@ -167,16 +147,6 @@ async fn tenancy_manage_run_rejects_schema_mode_on_sqlite_with_friendly_error() 
     let (pools, url, _tmpdir) = sqlite_pools_in_tempfile().await;
     let migrations_dir = tempfile::tempdir().expect("migrations tempdir");
 
-    let mut buf: Vec<u8> = Vec::new();
-    rustango::tenancy::manage::run_with_writer(
-        &pools,
-        &url,
-        migrations_dir.path(),
-        vec!["init-tenancy".to_owned()],
-        &mut buf,
-    )
-    .await
-    .expect("init-tenancy");
     let mut buf: Vec<u8> = Vec::new();
     rustango::tenancy::manage::run_with_writer(
         &pools,

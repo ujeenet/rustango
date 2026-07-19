@@ -47,9 +47,12 @@ pub use file::{
     discover_migration_dirs, list_dirs, CallbackOp, DataOp, Migration, MigrationScope, Operation,
 };
 pub use invert::invert;
-pub use make::{make_migrations, make_migrations_for_app, make_migrations_from};
+pub use make::{
+    make_migrations, make_migrations_for_app, make_migrations_from, make_migrations_system,
+};
 #[cfg(feature = "postgres")]
 pub use manage::{append_data_op, make_data_migration};
+pub use runner::migrate_pool_with_ledger;
 // Always-on: tri-dialect entry points (work on PG / MySQL / SQLite via
 // the `Pool` enum), plus the inventory + builder surface.
 pub use runner::{

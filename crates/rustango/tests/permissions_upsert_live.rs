@@ -15,8 +15,8 @@ use rustango::core::Column as _;
 use rustango::sql::sqlx;
 use rustango::sql::{Auto, Pool};
 use rustango::tenancy::permissions::{
-    assign_role, ensure_tables_pool, get_or_create_role, grant_role_perm, set_user_perm,
-    RolePermission, UserPermission, UserRole,
+    assign_role, get_or_create_role, grant_role_perm, set_user_perm, RolePermission,
+    UserPermission, UserRole,
 };
 use rustango::tenancy::User;
 
@@ -41,15 +41,14 @@ async fn pool() -> Option<sqlx::PgPool> {
 async fn fresh(pool: &sqlx::PgPool) {
     rustango::migrate::drop_all(pool).await.unwrap();
     rustango::migrate::apply_all(pool).await.unwrap();
-    // The Model-derived auto-DDL in apply_all creates the four
-    // permission tables WITHOUT the composite UNIQUE constraints
-    // declared in `permissions::ENSURE_SQL` (the constraints aren't
-    // currently on the Model defs as `unique_together`). For these
-    // tests to exercise ON CONFLICT we need those constraints, so
-    // drop the tables and let `ensure_tables_pool` re-create them
-    // with the constraints. Production deployments hit this same
-    // code path because `ensure_tables_pool` runs before any
-    // inventory-driven CREATE TABLE for these model types.
+    // The permission models now declare their composite UNIQUE
+    // constraints as `unique_together` (v0.47), so the framework's
+    // schema — whether emitted by the inventory-driven auto-DDL or the
+    // migration engine — carries them. To exercise ON CONFLICT against a
+    // clean, constraint-carrying baseline we drop the four permission
+    // tables and re-create them via `testkit::migrate_framework`, which
+    // renders every `rustango_*` model through the same dialect emitter
+    // the real `migrate` uses.
     for t in [
         "rustango_user_permissions",
         "rustango_user_roles",
@@ -61,7 +60,7 @@ async fn fresh(pool: &sqlx::PgPool) {
             .await
             .unwrap();
     }
-    ensure_tables_pool(&Pool::Postgres(pool.clone()))
+    rustango::testkit::migrate_framework(&Pool::Postgres(pool.clone()))
         .await
         .unwrap();
 }
@@ -75,6 +74,7 @@ async fn make_user(pool: &sqlx::PgPool, username_prefix: &str) -> i64 {
         id: Auto::default(),
         username,
         password_hash: "test-hash".to_owned(),
+        #[cfg(feature = "admin-sso")]
         email: None,
         is_superuser: false,
         active: true,

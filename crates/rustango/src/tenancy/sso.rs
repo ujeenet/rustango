@@ -37,8 +37,8 @@ use super::secrets::{ChainSecretsResolver, SecretsResolver};
 use super::tenant_console::{self, SessionSecret, TenantSessionPayload};
 
 /// Path suffixes (relative to `routes.login_url`) for the two SSO routes.
-pub(super) const SSO_BEGIN_SUFFIX: &str = "/sso";
-pub(super) const SSO_CALLBACK_SUFFIX: &str = "/sso/callback";
+pub(crate) const SSO_BEGIN_SUFFIX: &str = "/sso";
+pub(crate) const SSO_CALLBACK_SUFFIX: &str = "/sso/callback";
 
 /// Read the per-`Org` SSO config when enabled + complete.
 /// Returns `(provider, issuer_url, client_id, secret_ref)`.

@@ -104,6 +104,10 @@ pub struct User {
     /// IdP's verified email against this column; `None` means the
     /// account can't sign in via SSO. Unique within the tenant, but
     /// multiple `NULL`s are allowed.
+    ///
+    /// `#[cfg(feature = "admin-sso")]`-gated — enabling/disabling SSO
+    /// generates an Add/DropColumn migration for this column.
+    #[cfg(feature = "admin-sso")]
     #[rustango(max_length = 254, unique)]
     pub email: Option<String>,
     /// Org-admin within this tenant. Renders write-buttons, allows
@@ -234,6 +238,7 @@ pub async fn authenticate_user(
         password_hash: row.try_get::<String, _>("password_hash")?,
         // Defensive get — tolerates rows from tenants not yet migrated
         // to the SSO `email` column (mirrors `data` / `password_changed_at`).
+        #[cfg(feature = "admin-sso")]
         email: row.try_get::<Option<String>, _>("email").ok().flatten(),
         is_superuser: row.try_get::<bool, _>("is_superuser")?,
         active: row.try_get::<bool, _>("active")?,

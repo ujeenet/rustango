@@ -17,8 +17,13 @@ fn layout_matches_django_shape() {
         "src/settings.rs",
         "src/apps/mod.rs",
         "config/default.toml",
-        "migrations/0001_rustango_registry_initial.json",
-        "migrations/0001_rustango_tenant_initial.json",
+        // The framework's own tables are no longer shipped as hardcoded
+        // bootstrap JSON: they flow through `makemigrations` into a
+        // `system/migrations/` folder (generated from the compiled
+        // models). The app's own migrations dir carries only user
+        // migrations.
+        "migrations/0002_cookbook_tables.json",
+        "system/migrations",
         "COOKBOOK.md",
         "README.md",
     ] {
@@ -26,8 +31,14 @@ fn layout_matches_django_shape() {
         assert!(p.exists(), "missing required file: {required}");
     }
     for app in [
-        "tenants", "auth", "blog", "media",
-        "notify", "jobs_demo", "search", "admin_ui",
+        "tenants",
+        "auth",
+        "blog",
+        "media",
+        "notify",
+        "jobs_demo",
+        "search",
+        "admin_ui",
     ] {
         let mod_rs = root.join("src/apps").join(app).join("mod.rs");
         assert!(mod_rs.exists(), "missing sub-app mod.rs: {app}");
@@ -111,10 +122,8 @@ fn settings_layer_resolves_env_overrides() {
 
     let root = project_root().join("config");
 
-    let baseline = Settings::load_from(&root, "default")
-        .expect("default settings should load");
-    let test_overlay = Settings::load_from(&root, "test")
-        .expect("test settings should load");
+    let baseline = Settings::load_from(&root, "default").expect("default settings should load");
+    let test_overlay = Settings::load_from(&root, "test").expect("test settings should load");
 
     // config/test.toml overrides pool_max_size = 2 (default is 10).
     assert_eq!(baseline.database.pool_max_size, Some(10));
@@ -125,8 +134,12 @@ fn settings_layer_resolves_env_overrides() {
     // and we restore at the end. cargo test runs each integration test
     // binary in its own process so cross-test interference is bounded.
     // SAFETY: tests run single-threaded inside one process; we restore.
-    unsafe { std::env::set_var("RUSTANGO__DATABASE__POOL_MAX_SIZE", "42"); }
+    unsafe {
+        std::env::set_var("RUSTANGO__DATABASE__POOL_MAX_SIZE", "42");
+    }
     let envwins = Settings::load_from(&root, "default").expect("env-override load");
     assert_eq!(envwins.database.pool_max_size, Some(42));
-    unsafe { std::env::remove_var("RUSTANGO__DATABASE__POOL_MAX_SIZE"); }
+    unsafe {
+        std::env::remove_var("RUSTANGO__DATABASE__POOL_MAX_SIZE");
+    }
 }

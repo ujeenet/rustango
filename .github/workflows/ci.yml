@@ -255,7 +255,7 @@ jobs:
       - run: |
           cargo test -p rustango \
             --no-default-features \
-            --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer,totp \
+            --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer,totp,testkit \
             --test access_admin_codename_sqlite_live \
             --test admin_sqlite_live \
             --test admin_list_display_links_sqlite_live \
@@ -354,8 +354,8 @@ jobs:
       - run: cargo test -p rustango --features mysql --test explain_pool_mysql_live
       - run: cargo test -p rustango --features mysql --test bulk_upsert_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
-      - run: cargo test -p rustango --features mysql,tenancy --test permissions_mysql_live
-      - run: cargo test -p rustango --features mysql,tenancy --test database_pools_mysql_live
+      - run: cargo test -p rustango --features mysql,tenancy,testkit --test permissions_mysql_live
+      - run: cargo test -p rustango --features mysql,tenancy,testkit --test database_pools_mysql_live
       - run: cargo test -p rustango --features mysql --test audit_mysql_live
       - run: cargo test -p rustango --features mysql --test fixtures_mysql_live
       - run: cargo test -p rustango --features mysql --test inspectdb_mysql_live

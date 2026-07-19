@@ -175,8 +175,11 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     println!("  cd {}", parsed.name);
     println!("  cp .env.example .env");
     println!("  docker compose up -d");
-    println!("  cargo run -- migrate    # apply pending migrations");
-    println!("  cargo run               # boot the HTTP server");
+    println!(
+        "  cargo run -- makemigrations  # generate schema migrations (incl. system/ framework tables)"
+    );
+    println!("  cargo run -- migrate         # apply them");
+    println!("  cargo run                    # boot the HTTP server");
     println!("  cargo run -- --help     # full verb list");
     Ok(())
 }
@@ -274,23 +277,16 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     write(root, "src/views.rs", templates::VIEWS_RS)?;
     write(root, "src/urls.rs", &templates::urls_rs(template))?;
 
-    // Tenant projects need the framework's registry+tenant bootstrap
-    // migrations from day one — without them the very first
-    // `cargo run -- migrate` reports "nothing to migrate" and then
-    // errors when the tenant pass queries the (non-existent)
-    // `rustango_orgs` table. Drop the same JSON `init-tenancy` would
-    // produce so the project is `migrate`-ready out of the box.
+    // Tenant projects get an empty `system/migrations/` folder — the
+    // framework's own tables (`rustango_orgs`, `rustango_users`, roles/
+    // permissions, …) are NOT shipped as hardcoded bootstrap JSON.
+    // Instead the first `cargo run -- makemigrations` generates them
+    // into `system/migrations/` from the compiled models (reflecting the
+    // enabled feature flags), and `cargo run -- migrate` applies them —
+    // the normal Django flow. `.gitkeep` keeps the dir under version
+    // control until the migrations land.
     if matches!(template, Template::Tenant) {
-        write(
-            root,
-            "migrations/0001_rustango_registry_initial.json",
-            templates::BOOTSTRAP_REGISTRY_MIGRATION,
-        )?;
-        write(
-            root,
-            "migrations/0001_rustango_tenant_initial.json",
-            templates::BOOTSTRAP_TENANT_MIGRATION,
-        )?;
+        write(root, "system/migrations/.gitkeep", "")?;
     }
 
     Ok(())

@@ -82,6 +82,44 @@ const AUTH_NAMESPACE: &str = "auth";
 
 // ------------------------------------------------------------------ Models
 
+/// A permission codename bound to a logical table — Django's
+/// `Permission` equivalent. Composite-unique on `(table_name, codename)`.
+///
+/// Historically this table was created by hand-written DDL
+/// (`ENSURE_SQL`) and had no model, so it was invisible to
+/// `makemigrations`. It now carries a real `#[derive(Model)]` so the
+/// migration engine owns it like every other framework table.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "rustango_permissions",
+    display = "codename",
+    // `unique_together` values are emitted verbatim as index columns
+    // (no field→column resolution in the macro), so use the DB column
+    // name `table_name` here even though the Rust field is `perm_table`.
+    unique_together = "table_name, codename",
+    admin(
+        list_display = "perm_table, codename, name",
+        search_fields = "perm_table, codename, name",
+        ordering = "perm_table, codename",
+    )
+)]
+pub struct Permission {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    /// Logical table the codename applies to (e.g. `post`, or `auth`
+    /// for framework-level codenames like `access_admin`). Mapped to the
+    /// existing `table_name` column (the Rust field avoids colliding
+    /// with the derived `table_name()` accessor).
+    #[rustango(column = "table_name", max_length = 150)]
+    pub perm_table: String,
+    /// Permission codename — `{table}.{action}` or a reserved name.
+    #[rustango(max_length = 100)]
+    pub codename: String,
+    /// Human-readable label.
+    #[rustango(max_length = 255, default = "''")]
+    pub name: String,
+}
+
 /// A named group of permissions (Django `Group` equivalent).
 ///
 /// Assign a user to a role via [`UserRole`]; grant codenames to a role
@@ -116,6 +154,7 @@ pub struct Role {
 #[rustango(
     table = "rustango_role_permissions",
     display = "codename",
+    unique_together = "role_id, codename",
     admin(
         list_display = "role_id, codename",
         search_fields = "codename",
@@ -138,6 +177,7 @@ pub struct RolePermission {
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "rustango_user_roles",
+    unique_together = "user_id, role_id",
     admin(list_display = "user_id, role_id", ordering = "user_id, role_id",)
 )]
 pub struct UserRole {
@@ -157,6 +197,7 @@ pub struct UserRole {
 #[rustango(
     table = "rustango_user_permissions",
     display = "codename",
+    unique_together = "user_id, codename",
     admin(
         list_display = "user_id, codename, granted",
         search_fields = "codename",
@@ -173,6 +214,7 @@ pub struct UserPermission {
     #[rustango(max_length = 100)]
     pub codename: String,
     /// `true` = explicit grant; `false` = explicit denial.
+    #[rustango(default = "true")]
     pub granted: bool,
     /// Extra context on this override — reason, granted-by, expiry
     /// hints. Never read by `has_perm`.
@@ -182,203 +224,35 @@ pub struct UserPermission {
 
 // ------------------------------------------------------------------ ensure_tables_pool (DDL)
 
-const ENSURE_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_permissions" (
-    "id"          BIGSERIAL    PRIMARY KEY,
-    "table_name"  VARCHAR(150) NOT NULL,
-    "codename"    VARCHAR(100) NOT NULL,
-    "name"        VARCHAR(255) NOT NULL DEFAULT '',
-    CONSTRAINT "rustango_permissions_uq" UNIQUE ("table_name", "codename")
-);
-CREATE TABLE IF NOT EXISTS "rustango_roles" (
-    "id"          BIGSERIAL    PRIMARY KEY,
-    "name"        VARCHAR(150) NOT NULL,
-    "description" VARCHAR(500) NOT NULL DEFAULT '',
-    "data"        JSONB        NOT NULL DEFAULT '{}',
-    CONSTRAINT "rustango_roles_name_uq" UNIQUE ("name")
-);
-ALTER TABLE "rustango_roles"
-    ADD COLUMN IF NOT EXISTS "data" JSONB NOT NULL DEFAULT '{}';
-CREATE TABLE IF NOT EXISTS "rustango_role_permissions" (
-    "id"       BIGSERIAL    PRIMARY KEY,
-    "role_id"  BIGINT       NOT NULL
-                             REFERENCES "rustango_roles"("id")
-                             ON DELETE CASCADE,
-    "codename" VARCHAR(100) NOT NULL,
-    CONSTRAINT "rustango_role_permissions_uq" UNIQUE ("role_id", "codename")
-);
-CREATE TABLE IF NOT EXISTS "rustango_user_roles" (
-    "id"      BIGSERIAL PRIMARY KEY,
-    "user_id" BIGINT    NOT NULL
-                         REFERENCES "rustango_users"("id")
-                         ON DELETE CASCADE,
-    "role_id" BIGINT    NOT NULL
-                         REFERENCES "rustango_roles"("id")
-                         ON DELETE CASCADE,
-    CONSTRAINT "rustango_user_roles_uq" UNIQUE ("user_id", "role_id")
-);
-CREATE TABLE IF NOT EXISTS "rustango_user_permissions" (
-    "id"       BIGSERIAL    PRIMARY KEY,
-    "user_id"  BIGINT       NOT NULL
-                             REFERENCES "rustango_users"("id")
-                             ON DELETE CASCADE,
-    "codename" VARCHAR(100) NOT NULL,
-    "granted"  BOOLEAN      NOT NULL DEFAULT TRUE,
-    "data"     JSONB        NOT NULL DEFAULT '{}',
-    CONSTRAINT "rustango_user_permissions_uq" UNIQUE ("user_id", "codename")
-);
-ALTER TABLE "rustango_user_permissions"
-    ADD COLUMN IF NOT EXISTS "data" JSONB NOT NULL DEFAULT '{}';
-ALTER TABLE "rustango_users"
-    ADD COLUMN IF NOT EXISTS "data" JSONB NOT NULL DEFAULT '{}';
-ALTER TABLE "rustango_users"
-    ADD COLUMN IF NOT EXISTS "password_changed_at" TIMESTAMPTZ NULL;
-ALTER TABLE "rustango_users"
-    ADD COLUMN IF NOT EXISTS "email" VARCHAR(254) NULL;
-"#;
-
-/// v0.38 — SQLite counterpart of [`ENSURE_SQL`].
-///
-/// Differences from the PG version:
-/// - `BIGSERIAL` → `INTEGER PRIMARY KEY AUTOINCREMENT` (SQLite's
-///   auto-rowid spelling — `INTEGER PRIMARY KEY` aliases to the
-///   internal `ROWID`, AUTOINCREMENT enforces monotonic non-reuse).
-/// - `BIGINT` / `VARCHAR(N)` / `JSONB` / `BOOLEAN` / `TIMESTAMPTZ`
-///   collapse to SQLite's loose affinities (`INTEGER` / `TEXT`).
-/// - `DEFAULT TRUE` → `DEFAULT 1` (SQLite has no bool literal —
-///   1/0 are the canonical encoding the sqlx-sqlite driver reads
-///   back via `<bool as Decode<Sqlite>>`).
-/// - No `ALTER TABLE ADD COLUMN IF NOT EXISTS`. The PG ALTER block
-///   is a legacy backfill for ≤0.27 installs; fresh SQLite tenants
-///   never need it because the columns ship in the CREATE TABLE.
-const ENSURE_SQL_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_permissions" (
-    "id"          INTEGER     PRIMARY KEY AUTOINCREMENT,
-    "table_name"  TEXT        NOT NULL,
-    "codename"    TEXT        NOT NULL,
-    "name"        TEXT        NOT NULL DEFAULT '',
-    CONSTRAINT "rustango_permissions_uq" UNIQUE ("table_name", "codename")
-);
-CREATE TABLE IF NOT EXISTS "rustango_roles" (
-    "id"          INTEGER     PRIMARY KEY AUTOINCREMENT,
-    "name"        TEXT        NOT NULL,
-    "description" TEXT        NOT NULL DEFAULT '',
-    "data"        TEXT        NOT NULL DEFAULT '{}',
-    CONSTRAINT "rustango_roles_name_uq" UNIQUE ("name")
-);
-CREATE TABLE IF NOT EXISTS "rustango_role_permissions" (
-    "id"       INTEGER  PRIMARY KEY AUTOINCREMENT,
-    "role_id"  INTEGER  NOT NULL
-                         REFERENCES "rustango_roles"("id")
-                         ON DELETE CASCADE,
-    "codename" TEXT     NOT NULL,
-    CONSTRAINT "rustango_role_permissions_uq" UNIQUE ("role_id", "codename")
-);
-CREATE TABLE IF NOT EXISTS "rustango_user_roles" (
-    "id"      INTEGER PRIMARY KEY AUTOINCREMENT,
-    "user_id" INTEGER NOT NULL
-                       REFERENCES "rustango_users"("id")
-                       ON DELETE CASCADE,
-    "role_id" INTEGER NOT NULL
-                       REFERENCES "rustango_roles"("id")
-                       ON DELETE CASCADE,
-    CONSTRAINT "rustango_user_roles_uq" UNIQUE ("user_id", "role_id")
-);
-CREATE TABLE IF NOT EXISTS "rustango_user_permissions" (
-    "id"       INTEGER  PRIMARY KEY AUTOINCREMENT,
-    "user_id"  INTEGER  NOT NULL
-                         REFERENCES "rustango_users"("id")
-                         ON DELETE CASCADE,
-    "codename" TEXT     NOT NULL,
-    "granted"  INTEGER  NOT NULL DEFAULT 1,
-    "data"     TEXT     NOT NULL DEFAULT '{}',
-    CONSTRAINT "rustango_user_permissions_uq" UNIQUE ("user_id", "codename")
-);
-"#;
-
-/// v0.38 — MySQL counterpart of [`ENSURE_SQL`]. Identifier quoting
-/// is backticks (MySQL rejects double-quoted identifiers in default
-/// `ANSI_QUOTES=off` mode). `BIGSERIAL` → `BIGINT AUTO_INCREMENT
-/// PRIMARY KEY`. `JSONB` → `JSON`. `TIMESTAMPTZ` → `DATETIME(6)`.
-/// `BOOLEAN` is a `TINYINT(1)` alias. Same legacy-ALTER posture as
-/// SQLite: omit the back-compat columns — fresh MySQL tenants ship
-/// the `data` / `password_changed_at` columns from the CREATE.
-const ENSURE_SQL_MYSQL: &str = r#"
-CREATE TABLE IF NOT EXISTS `rustango_permissions` (
-    `id`          BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `table_name`  VARCHAR(150) NOT NULL,
-    `codename`    VARCHAR(100) NOT NULL,
-    `name`        VARCHAR(255) NOT NULL DEFAULT '',
-    CONSTRAINT `rustango_permissions_uq` UNIQUE (`table_name`, `codename`)
-);
-CREATE TABLE IF NOT EXISTS `rustango_roles` (
-    `id`          BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `name`        VARCHAR(150) NOT NULL,
-    `description` VARCHAR(500) NOT NULL DEFAULT '',
-    `data`        JSON         NOT NULL,
-    CONSTRAINT `rustango_roles_name_uq` UNIQUE (`name`)
-);
-CREATE TABLE IF NOT EXISTS `rustango_role_permissions` (
-    `id`       BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `role_id`  BIGINT       NOT NULL,
-    `codename` VARCHAR(100) NOT NULL,
-    CONSTRAINT `rustango_role_permissions_uq` UNIQUE (`role_id`, `codename`),
-    CONSTRAINT `rustango_role_permissions_fk_role`
-        FOREIGN KEY (`role_id`) REFERENCES `rustango_roles`(`id`) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS `rustango_user_roles` (
-    `id`      BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `user_id` BIGINT NOT NULL,
-    `role_id` BIGINT NOT NULL,
-    CONSTRAINT `rustango_user_roles_uq` UNIQUE (`user_id`, `role_id`),
-    CONSTRAINT `rustango_user_roles_fk_user`
-        FOREIGN KEY (`user_id`) REFERENCES `rustango_users`(`id`) ON DELETE CASCADE,
-    CONSTRAINT `rustango_user_roles_fk_role`
-        FOREIGN KEY (`role_id`) REFERENCES `rustango_roles`(`id`) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS `rustango_user_permissions` (
-    `id`       BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `user_id`  BIGINT       NOT NULL,
-    `codename` VARCHAR(100) NOT NULL,
-    `granted`  BOOLEAN      NOT NULL DEFAULT TRUE,
-    `data`     JSON         NOT NULL,
-    CONSTRAINT `rustango_user_permissions_uq` UNIQUE (`user_id`, `codename`),
-    CONSTRAINT `rustango_user_permissions_fk_user`
-        FOREIGN KEY (`user_id`) REFERENCES `rustango_users`(`id`) ON DELETE CASCADE
-);
-"#;
-
-/// Ensure all four permission tables exist in `pool`'s schema.
-/// Idempotent — safe to call on every boot. Picks the per-dialect
-/// DDL constant ([`ENSURE_SQL`] / [`ENSURE_SQL_SQLITE`] /
-/// [`ENSURE_SQL_MYSQL`]) and runs each statement as its own round-trip
-/// because sqlx's simple-prepare path rejects multi-statement strings.
-///
-/// Long-term, the bootstrap tenant migration should create every
-/// table the engine needs and this runtime helper goes away; today
-/// the bootstrap only emits `CreateTable rustango_users` (the seven
-/// auth/perm tables live in its snapshot but never get DDL'd by the
-/// migration runner). This helper plugs that gap on all three
-/// dialects.
-///
-/// # Errors
-/// Driver / SQL failures from any `CREATE TABLE IF NOT EXISTS`.
 pub async fn ensure_tables_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Error> {
-    let dialect = pool.dialect();
-    let ddl = match dialect.name() {
-        "sqlite" => ENSURE_SQL_SQLITE,
-        "mysql" => ENSURE_SQL_MYSQL,
-        // PG and any future dialect fall through to the original
-        // BIGSERIAL/JSONB/TIMESTAMPTZ DDL.
-        _ => ENSURE_SQL,
-    };
-    for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        crate::sql::raw_execute_pool(pool, stmt, Vec::new())
-            .await
-            .map_err(|e| match e {
+    // Drift-free (v0.47): emit the permission tables straight from their
+    // `Model::SCHEMA` via the migration engine's render path — tables +
+    // FK constraints + the composite-unique indexes — instead of the old
+    // hand-written per-dialect `ENSURE_SQL` strings. Idempotent: `render`
+    // emits plain CREATE, so "already exists" is swallowed.
+    let snapshot = crate::migrate::SchemaSnapshot::from_models(&[
+        Permission::SCHEMA,
+        Role::SCHEMA,
+        RolePermission::SCHEMA,
+        UserRole::SCHEMA,
+        UserPermission::SCHEMA,
+    ]);
+    let changes =
+        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
+    let batch =
+        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
+            .map_err(sqlx::Error::Protocol)?;
+    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
+        if let Err(e) = crate::sql::raw_execute_pool(pool, stmt, Vec::new()).await {
+            let msg = format!("{e}").to_lowercase();
+            if msg.contains("already exists") || msg.contains("duplicate") {
+                continue;
+            }
+            return Err(match e {
                 crate::sql::ExecError::Driver(err) => err,
                 other => sqlx::Error::Protocol(format!("{other}")),
-            })?;
+            });
+        }
     }
     Ok(())
 }

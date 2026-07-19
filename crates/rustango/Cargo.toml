@@ -39,6 +39,13 @@ manage = ["dep:axum", "dep:tokio", "runtime"]
 # axum server with TenantContext. v0.30.26+.
 test_utils = []
 
+# Dev-only test-support helpers (`crate::testkit`): build framework
+# tables from `Model::SCHEMA` (no hand-written DDL) + model factories
+# for struct-update construction. Integration tests are external
+# crates, so the module must be public API behind this feature; it
+# pulls in nothing and costs a normal build nothing.
+testkit = []
+
 # MySQL 8.0+ backend. Fully tri-dialect since v0.38: every framework
 # surface (ORM, migrations, admin, tenancy database-mode, jobs queue,
 # audit, media, contenttypes, permissions, inspectdb, ViewSet,

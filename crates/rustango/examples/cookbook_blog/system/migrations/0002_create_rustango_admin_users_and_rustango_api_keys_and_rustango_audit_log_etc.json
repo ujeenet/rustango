@@ -1,10 +1,63 @@
 {
-  "name": "0001_rustango_registry_initial",
-  "created_at": "2026-04-29T00:00:00Z",
+  "name": "0002_create_rustango_admin_users_and_rustango_api_keys_and_rustango_audit_log_etc",
+  "created_at": "2026-07-18T23:31:00.910898+00:00",
   "atomic": true,
-  "scope": "registry",
   "snapshot": {
     "tables": [
+      {
+        "name": "rustango_admin_users",
+        "model": "AdminUser",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "true"
+          },
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "is_superuser",
+            "column": "is_superuser",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "false"
+          },
+          {
+            "name": "password_hash",
+            "column": "password_hash",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 200
+          },
+          {
+            "name": "username",
+            "column": "username",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 150,
+            "unique": true
+          }
+        ]
+      },
       {
         "name": "rustango_api_keys",
         "model": "ApiKey",
@@ -72,20 +125,27 @@
         ]
       },
       {
-        "name": "rustango_operators",
-        "model": "Operator",
+        "name": "rustango_audit_log",
+        "model": "AuditLog",
         "fields": [
           {
-            "name": "active",
-            "column": "active",
-            "ty": "bool",
+            "name": "changes",
+            "column": "changes",
+            "ty": "json",
             "nullable": false,
             "primary_key": false
           },
           {
-            "name": "created_at",
-            "column": "created_at",
-            "ty": "datetime",
+            "name": "entity_pk",
+            "column": "entity_pk",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "entity_table",
+            "column": "entity_table",
+            "ty": "string",
             "nullable": false,
             "primary_key": false
           },
@@ -98,104 +158,40 @@
             "auto": true
           },
           {
-            "name": "password_changed_at",
-            "column": "password_changed_at",
+            "name": "occurred_at",
+            "column": "occurred_at",
             "ty": "datetime",
-            "nullable": true,
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()"
+          },
+          {
+            "name": "operation",
+            "column": "operation",
+            "ty": "string",
+            "nullable": false,
             "primary_key": false
           },
           {
-            "name": "password_hash",
-            "column": "password_hash",
+            "name": "source",
+            "column": "source",
             "ty": "string",
             "nullable": false,
-            "primary_key": false,
-            "max_length": 255
-          },
-          {
-            "name": "username",
-            "column": "username",
-            "ty": "string",
-            "nullable": false,
-            "primary_key": false,
-            "max_length": 64,
-            "unique": true
+            "primary_key": false
           }
         ]
       },
       {
-        "name": "rustango_orgs",
-        "model": "Org",
+        "name": "rustango_content_types",
+        "model": "ContentType",
         "fields": [
           {
-            "name": "active",
-            "column": "active",
-            "ty": "bool",
-            "nullable": false,
-            "primary_key": false
-          },
-          {
-            "name": "backend_kind",
-            "column": "backend_kind",
+            "name": "app_label",
+            "column": "app_label",
             "ty": "string",
             "nullable": false,
             "primary_key": false,
-            "max_length": 16,
-            "default": "'postgres'"
-          },
-          {
-            "name": "brand_name",
-            "column": "brand_name",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 80
-          },
-          {
-            "name": "brand_tagline",
-            "column": "brand_tagline",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 200
-          },
-          {
-            "name": "created_at",
-            "column": "created_at",
-            "ty": "datetime",
-            "nullable": false,
-            "primary_key": false
-          },
-          {
-            "name": "database_url",
-            "column": "database_url",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false
-          },
-          {
-            "name": "display_name",
-            "column": "display_name",
-            "ty": "string",
-            "nullable": false,
-            "primary_key": false,
-            "max_length": 255
-          },
-          {
-            "name": "favicon_path",
-            "column": "favicon_path",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 120
-          },
-          {
-            "name": "host_pattern",
-            "column": "host_pattern",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 255
+            "max_length": 100
           },
           {
             "name": "id",
@@ -206,108 +202,59 @@
             "auto": true
           },
           {
-            "name": "logo_path",
-            "column": "logo_path",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 120
-          },
-          {
-            "name": "path_prefix",
-            "column": "path_prefix",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 255
-          },
-          {
-            "name": "port",
-            "column": "port",
-            "ty": "i32",
-            "nullable": true,
-            "primary_key": false
-          },
-          {
-            "name": "primary_color",
-            "column": "primary_color",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 7
-          },
-          {
-            "name": "schema_name",
-            "column": "schema_name",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 64
-          },
-          {
-            "name": "slug",
-            "column": "slug",
+            "name": "model_name",
+            "column": "model_name",
             "ty": "string",
             "nullable": false,
             "primary_key": false,
-            "max_length": 64,
-            "unique": true
+            "max_length": 100
           },
           {
-            "name": "sso_client_id",
-            "column": "sso_client_id",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 300
-          },
-          {
-            "name": "sso_enabled",
-            "column": "sso_enabled",
-            "ty": "bool",
-            "nullable": false,
-            "primary_key": false,
-            "default": "false"
-          },
-          {
-            "name": "sso_issuer_url",
-            "column": "sso_issuer_url",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 300
-          },
-          {
-            "name": "sso_provider",
-            "column": "sso_provider",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 40
-          },
-          {
-            "name": "sso_secret_ref",
-            "column": "sso_secret_ref",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 300
-          },
-          {
-            "name": "storage_mode",
-            "column": "storage_mode",
+            "name": "table",
+            "column": "table",
             "ty": "string",
             "nullable": false,
             "primary_key": false,
-            "max_length": 16
+            "max_length": 100
+          }
+        ]
+      },
+      {
+        "name": "rustango_permissions",
+        "model": "Permission",
+        "fields": [
+          {
+            "name": "codename",
+            "column": "codename",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
           },
           {
-            "name": "theme_mode",
-            "column": "theme_mode",
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "name",
+            "column": "name",
             "ty": "string",
-            "nullable": true,
+            "nullable": false,
             "primary_key": false,
-            "max_length": 8
+            "max_length": 255,
+            "default": "''"
+          },
+          {
+            "name": "perm_table",
+            "column": "table_name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 150
           }
         ]
       },
@@ -409,7 +356,8 @@
             "column": "granted",
             "ty": "bool",
             "nullable": false,
-            "primary_key": false
+            "primary_key": false,
+            "default": "true"
           },
           {
             "name": "id",
@@ -498,15 +446,6 @@
             "default": "'{}'"
           },
           {
-            "name": "email",
-            "column": "email",
-            "ty": "string",
-            "nullable": true,
-            "primary_key": false,
-            "max_length": 254,
-            "unique": true
-          },
-          {
             "name": "id",
             "column": "id",
             "ty": "i64",
@@ -547,17 +486,201 @@
           }
         ]
       }
+    ],
+    "indexes": [
+      {
+        "name": "rustango_audit_log_entity_table_entity_pk_idx",
+        "table": "rustango_audit_log",
+        "columns": [
+          "entity_table",
+          "entity_pk"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_audit_log_occurred_at_idx",
+        "table": "rustango_audit_log",
+        "columns": [
+          "occurred_at"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_permissions_table_name_codename_idx",
+        "table": "rustango_permissions",
+        "columns": [
+          "table_name",
+          "codename"
+        ],
+        "unique": true,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_role_permissions_role_id_codename_idx",
+        "table": "rustango_role_permissions",
+        "columns": [
+          "role_id",
+          "codename"
+        ],
+        "unique": true,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_user_permissions_user_id_codename_idx",
+        "table": "rustango_user_permissions",
+        "columns": [
+          "user_id",
+          "codename"
+        ],
+        "unique": true,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_user_roles_user_id_role_id_idx",
+        "table": "rustango_user_roles",
+        "columns": [
+          "user_id",
+          "role_id"
+        ],
+        "unique": true,
+        "method": "btree"
+      }
     ]
   },
   "forward": [
     {
       "schema": {
-        "CreateTable": "rustango_orgs"
+        "CreateTable": "rustango_admin_users"
       }
     },
     {
       "schema": {
-        "CreateTable": "rustango_operators"
+        "CreateTable": "rustango_api_keys"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_audit_log"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_content_types"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_permissions"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_role_permissions"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_roles"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_user_permissions"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_user_roles"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_users"
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_audit_log_entity_table_entity_pk_idx",
+          "table": "rustango_audit_log",
+          "columns": [
+            "entity_table",
+            "entity_pk"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_audit_log_occurred_at_idx",
+          "table": "rustango_audit_log",
+          "columns": [
+            "occurred_at"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_permissions_table_name_codename_idx",
+          "table": "rustango_permissions",
+          "columns": [
+            "table_name",
+            "codename"
+          ],
+          "unique": true,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_role_permissions_role_id_codename_idx",
+          "table": "rustango_role_permissions",
+          "columns": [
+            "role_id",
+            "codename"
+          ],
+          "unique": true,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_user_permissions_user_id_codename_idx",
+          "table": "rustango_user_permissions",
+          "columns": [
+            "user_id",
+            "codename"
+          ],
+          "unique": true,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_user_roles_user_id_role_id_idx",
+          "table": "rustango_user_roles",
+          "columns": [
+            "user_id",
+            "role_id"
+          ],
+          "unique": true,
+          "method": "btree"
+        }
       }
     }
   ]

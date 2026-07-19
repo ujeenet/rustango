@@ -1,16 +1,23 @@
-//! Sanity check: the bootstrap migration emitted via
-//! `init_tenancy_with::<AppUser>` carries the extra columns.
+//! Sanity check: the tenant-user schema for a custom `AppUser` carries
+//! the extra columns, so the generated tenant-scope system migration
+//! (makemigrations → `system/migrations/`) creates them.
+//!
+//! v0.47 — the framework no longer emits a hand-built bootstrap
+//! migration; its schema flows through `SchemaSnapshot::from_models`
+//! (the same path `makemigrations` uses). This test builds that
+//! snapshot directly from `AppUser::SCHEMA`.
 //!
 //! No DB needed — pure schema math.
 
+use rustango::core::Model as _;
+use rustango::migrate::SchemaSnapshot;
 use rustango::tenancy;
 use tenant_user_extension::models::AppUser;
 
 #[test]
 fn tenant_bootstrap_includes_extras() {
-    let mig = tenancy::tenant_bootstrap_migration_for::<AppUser>();
-    let users = mig
-        .snapshot
+    let snapshot = SchemaSnapshot::from_models(&[AppUser::SCHEMA]);
+    let users = snapshot
         .table("rustango_users")
         .expect("rustango_users table in snapshot");
 

@@ -200,56 +200,6 @@ pub struct ApiKey {
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 
-const API_KEY_ENSURE_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_api_keys" (
-    "id"         BIGSERIAL    PRIMARY KEY,
-    "user_id"    BIGINT       NOT NULL
-                               REFERENCES "rustango_users"("id")
-                               ON DELETE CASCADE,
-    "key_prefix" VARCHAR(8)   NOT NULL,
-    "key_hash"   VARCHAR(255) NOT NULL,
-    "label"      VARCHAR(100) NOT NULL DEFAULT '',
-    "expires_at" TIMESTAMPTZ,
-    "created_at" TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    CONSTRAINT "rustango_api_keys_prefix_uq" UNIQUE ("key_prefix")
-);
-"#;
-
-/// v0.38 — SQLite counterpart of [`API_KEY_ENSURE_SQL`]. Same column
-/// shape, SQLite affinities. `NOW()` → `CURRENT_TIMESTAMP`.
-const API_KEY_ENSURE_SQL_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_api_keys" (
-    "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
-    "user_id"    INTEGER NOT NULL
-                          REFERENCES "rustango_users"("id")
-                          ON DELETE CASCADE,
-    "key_prefix" TEXT    NOT NULL,
-    "key_hash"   TEXT    NOT NULL,
-    "label"      TEXT    NOT NULL DEFAULT '',
-    "expires_at" TEXT,
-    "created_at" TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT "rustango_api_keys_prefix_uq" UNIQUE ("key_prefix")
-);
-"#;
-
-/// v0.38 — MySQL counterpart of [`API_KEY_ENSURE_SQL`]. Backticks +
-/// `BIGINT AUTO_INCREMENT PRIMARY KEY` + `DATETIME(6)` for the
-/// timestamp columns + `CURRENT_TIMESTAMP(6)` default.
-const API_KEY_ENSURE_SQL_MYSQL: &str = r#"
-CREATE TABLE IF NOT EXISTS `rustango_api_keys` (
-    `id`         BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `user_id`    BIGINT       NOT NULL,
-    `key_prefix` VARCHAR(8)   NOT NULL,
-    `key_hash`   VARCHAR(255) NOT NULL,
-    `label`      VARCHAR(100) NOT NULL DEFAULT '',
-    `expires_at` DATETIME(6),
-    `created_at` DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    CONSTRAINT `rustango_api_keys_prefix_uq` UNIQUE (`key_prefix`),
-    CONSTRAINT `rustango_api_keys_fk_user`
-        FOREIGN KEY (`user_id`) REFERENCES `rustango_users`(`id`) ON DELETE CASCADE
-);
-"#;
-
 /// Create the `rustango_api_keys` table if it doesn't exist.
 ///
 /// PG-typed back-compat for legacy callers; new code should use
@@ -274,18 +224,27 @@ pub async fn ensure_api_keys_table(pool: &crate::sql::sqlx::PgPool) -> Result<()
 /// # Errors
 /// Driver / SQL failures from `CREATE TABLE IF NOT EXISTS`.
 pub async fn ensure_api_keys_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
-    let ddl = match pool.dialect().name() {
-        "sqlite" => API_KEY_ENSURE_SQL_SQLITE,
-        "mysql" => API_KEY_ENSURE_SQL_MYSQL,
-        _ => API_KEY_ENSURE_SQL,
-    };
-    for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        crate::sql::raw_execute_pool(pool, stmt, Vec::new())
-            .await
-            .map_err(|e| match e {
+    // Drift-free (v0.47): emit `rustango_api_keys` from `ApiKey::SCHEMA`
+    // via the migration render path instead of hand-written per-dialect
+    // DDL. Idempotent (swallows "already exists").
+    use crate::core::Model as _;
+    let snapshot = crate::migrate::SchemaSnapshot::from_models(&[ApiKey::SCHEMA]);
+    let changes =
+        crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot);
+    let batch =
+        crate::migrate::render_changes_split_with_dialect(&changes, &snapshot, pool.dialect())
+            .map_err(sqlx::Error::Protocol)?;
+    for stmt in batch.immediate.iter().chain(batch.deferred_fks.iter()) {
+        if let Err(e) = crate::sql::raw_execute_pool(pool, stmt, Vec::new()).await {
+            let msg = format!("{e}").to_lowercase();
+            if msg.contains("already exists") || msg.contains("duplicate") {
+                continue;
+            }
+            return Err(match e {
                 crate::sql::ExecError::Driver(err) => err,
                 other => sqlx::Error::Protocol(format!("{other}")),
-            })?;
+            });
+        }
     }
     Ok(())
 }

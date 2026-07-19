@@ -1,15 +1,11 @@
 #![allow(irrefutable_let_patterns)] // Pool enum is single-variant in sqlite-only builds; pattern is refutable on multi-backend builds.
-//! Live regression for v0.34 slice 2 — `migrate_registry_pool`
-//! against a SQLite registry. Proves the backend-agnostic registry
-//! bootstrap (migration runner + audit table + contenttype seed)
-//! works end-to-end without Postgres.
+//! Live regression — `migrate_registry_pool` against a SQLite registry.
 //!
-//! The migration dir is intentionally empty — this test isn't about
-//! the runner's row processing, it's about verifying the auxiliary
-//! bootstrap (audit::ensure_table_pool, contenttypes::ensure_seeded)
-//! that runs unconditionally after the migration loop. Combined with
-//! the existing contenttypes_pool_live + audit live tests this gives
-//! coverage of the whole `migrate_registry_pool` happy path.
+//! Post-`system-app` migrations: `migrate_registry_pool` no longer runs
+//! hand-written `ensure_*` DDL. Instead it generates the framework's
+//! registry-scope system migrations from the compiled models (into a
+//! sibling `system/migrations/`) and applies them, creating the core
+//! framework tables. This test proves that end-to-end on SQLite.
 
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]
 
@@ -17,47 +13,47 @@ use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::migrate_registry_pool;
 
 #[tokio::test]
-async fn migrate_registry_pool_bootstraps_audit_and_contenttypes_on_sqlite() {
-    let pool = Pool::Sqlite(
-        sqlx::SqlitePool::connect("sqlite::memory:")
-            .await
-            .expect("sqlite memory pool"),
-    );
-
-    // Empty migration dir — exercises the bootstrap-only path
-    // (audit::ensure_table_pool + contenttypes::ensure_seeded).
+async fn migrate_registry_pool_creates_framework_tables_on_sqlite() {
     let tmp = tempfile::tempdir().expect("temp dir");
-    let applied = migrate_registry_pool(&pool, tmp.path())
+    let dir = tmp.path().join("migrations");
+    std::fs::create_dir_all(&dir).expect("create migrations dir");
+    let dbpath = tmp.path().join("reg.db");
+    let url = format!("sqlite:{}?mode=rwc", dbpath.display());
+    let pool = Pool::connect(&url).await.expect("sqlite pool");
+
+    // First run generates + applies the framework's system-app migrations.
+    let applied = migrate_registry_pool(&pool, &dir)
         .await
         .expect("migrate_registry_pool");
-    assert_eq!(applied.len(), 0, "no migrations in empty dir");
+    assert!(
+        !applied.is_empty(),
+        "framework system migrations should be generated + applied on first run"
+    );
 
-    // Verify both auxiliary tables exist on the sqlite registry.
-    if let Pool::Sqlite(sq) = &pool {
-        let audit_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master \
-             WHERE type='table' AND name='rustango_audit_log'",
-        )
-        .fetch_one(sq)
-        .await
-        .expect("audit probe");
-        assert_eq!(audit_exists, 1, "audit table should exist");
-
-        let ct_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master \
-             WHERE type='table' AND name='rustango_content_types'",
-        )
-        .fetch_one(sq)
-        .await
-        .expect("contenttype probe");
-        assert_eq!(ct_exists, 1, "contenttype table should exist");
-
-        // Re-run for idempotency.
-        let applied2 = migrate_registry_pool(&pool, tmp.path())
-            .await
-            .expect("migrate_registry_pool idempotent");
-        assert_eq!(applied2.len(), 0);
-    } else {
+    let Pool::Sqlite(sq) = &pool else {
         panic!("expected sqlite pool");
+    };
+    // Registry-scope + shared framework tables now come from migrations,
+    // not ensure_* DDL.
+    for t in [
+        "rustango_orgs",
+        "rustango_operators",
+        "rustango_audit_log",
+        "rustango_content_types",
+    ] {
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+                .bind(t)
+                .fetch_one(sq)
+                .await
+                .expect("probe");
+        assert_eq!(n, 1, "{t} must exist after migrate_registry_pool");
     }
+
+    // Idempotent re-run — nothing new to apply (ledger-tracked).
+    let applied2 = migrate_registry_pool(&pool, &dir)
+        .await
+        .expect("migrate_registry_pool idempotent");
+    assert!(applied2.is_empty(), "re-run applies nothing");
+    drop(tmp);
 }

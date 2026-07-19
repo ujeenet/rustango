@@ -8,7 +8,7 @@
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]
 
 use rustango::sql::{sqlx, Pool};
-use rustango::tenancy::permissions::{auto_create_permissions_pool, ensure_tables_pool};
+use rustango::tenancy::permissions::auto_create_permissions_pool;
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
@@ -64,7 +64,7 @@ fn schema_carries_default_permissions_when_set() {
 #[tokio::test]
 async fn seeder_emits_only_declared_subset() {
     let pool = fresh_pool().await;
-    ensure_tables_pool(&pool).await.unwrap();
+    rustango::testkit::migrate_framework(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
 
     let Pool::Sqlite(sq) = &pool else {
@@ -125,7 +125,7 @@ async fn seeder_emits_only_declared_subset() {
 #[tokio::test]
 async fn re_seed_stays_idempotent_with_filtered_set() {
     let pool = fresh_pool().await;
-    ensure_tables_pool(&pool).await.unwrap();
+    rustango::testkit::migrate_framework(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
 
