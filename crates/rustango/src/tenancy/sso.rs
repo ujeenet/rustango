@@ -99,38 +99,46 @@ pub(crate) async fn list_enabled(
     routes: &RouteConfig,
 ) -> Vec<ProviderButton> {
     use crate::sql::FetcherPool as _;
-    let base = &routes.login_url;
-    let mut seen = std::collections::HashSet::new();
-    let mut out: Vec<(i32, ProviderButton)> = Vec::new();
-
     let tenant_rows: Vec<SsoProvider> = SsoProvider::objects()
         .fetch(tenant_pool)
         .await
         .unwrap_or_default();
-    for r in tenant_rows.into_iter().filter(|r| r.enabled) {
-        if seen.insert(r.slug.clone()) {
-            out.push((
-                r.sort_order,
-                ProviderButton {
-                    login_url: format!("{base}/sso/{}", r.slug),
-                    slug: r.slug,
-                    label: r.label,
-                },
-            ));
-        }
-    }
     let shared_rows: Vec<SharedSsoProvider> = SharedSsoProvider::objects()
         .fetch(registry_pool)
         .await
         .unwrap_or_default();
-    for r in shared_rows.into_iter().filter(|r| r.enabled) {
-        if seen.insert(r.slug.clone()) {
+    merge_provider_buttons(
+        &routes.login_url,
+        tenant_rows
+            .into_iter()
+            .map(|r| (r.slug, r.label, r.sort_order, r.enabled)),
+        shared_rows
+            .into_iter()
+            .map(|r| (r.slug, r.label, r.sort_order, r.enabled)),
+    )
+}
+
+/// Pure merge: tenant providers first (they **win** on a slug clash), then
+/// the registry-wide shared set; disabled rows dropped; result sorted by
+/// `sort_order`. Each `(slug, label, sort_order, enabled)`.
+fn merge_provider_buttons(
+    login_base: &str,
+    tenant: impl IntoIterator<Item = (String, String, i32, bool)>,
+    shared: impl IntoIterator<Item = (String, String, i32, bool)>,
+) -> Vec<ProviderButton> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(i32, ProviderButton)> = Vec::new();
+    for (slug, label, sort_order, enabled) in tenant.into_iter().chain(shared) {
+        if !enabled {
+            continue;
+        }
+        if seen.insert(slug.clone()) {
             out.push((
-                r.sort_order,
+                sort_order,
                 ProviderButton {
-                    login_url: format!("{base}/sso/{}", r.slug),
-                    slug: r.slug,
-                    label: r.label,
+                    login_url: format!("{login_base}/sso/{slug}"),
+                    slug,
+                    label,
                 },
             ));
         }
@@ -373,4 +381,52 @@ async fn find_tenant_user_by_email(pool: &crate::sql::Pool, email: &str) -> Opti
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     Some((id, active))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_provider_buttons;
+
+    fn row(slug: &str, label: &str, sort: i32, enabled: bool) -> (String, String, i32, bool) {
+        (slug.into(), label.into(), sort, enabled)
+    }
+
+    #[test]
+    fn tenant_wins_on_slug_clash_and_result_is_sorted() {
+        let buttons = merge_provider_buttons(
+            "/login",
+            // tenant: a clashing "corp" (wins), a disabled one (dropped)
+            vec![
+                row("corp", "Tenant Corp", 1, true),
+                row("off", "Off", 0, false),
+            ],
+            // shared: same "corp" (loses), a shared-only "global"
+            vec![
+                row("corp", "Shared Corp", 0, true),
+                row("global", "Global", 5, true),
+            ],
+        );
+        let view: Vec<_> = buttons
+            .iter()
+            .map(|b| (b.slug.as_str(), b.label.as_str(), b.login_url.as_str()))
+            .collect();
+        assert_eq!(
+            view,
+            vec![
+                ("corp", "Tenant Corp", "/login/sso/corp"), // tenant label wins, sort=1
+                ("global", "Global", "/login/sso/global"),  // shared-only, sort=5
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_only_when_no_tenant_providers() {
+        let buttons = merge_provider_buttons(
+            "/admin/login",
+            std::iter::empty(),
+            vec![row("okta", "Okta", 0, true)],
+        );
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].login_url, "/admin/login/sso/okta");
+    }
 }
