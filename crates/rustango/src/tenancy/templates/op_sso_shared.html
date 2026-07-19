@@ -1,0 +1,71 @@
+{% extends "op_layout.html" %}
+{% block title %}Shared SSO providers — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
+{% block content %}
+<h1>Shared SSO providers</h1>
+<p>Registry-wide OpenID Connect / social login providers. Each one is offered
+on <strong>every</strong> tenant's login page. A tenant can add its own providers
+from its admin; on a slug clash the tenant's own provider wins. Secrets are stored
+as references (e.g. <code>env://ACME_GOOGLE_SECRET</code>) and resolved at login.</p>
+
+{% if providers | length == 0 %}
+  <div class="empty">No shared providers yet — add one below.</div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Slug</th>
+      <th>Label</th>
+      <th>Kind</th>
+      <th>Issuer / client</th>
+      <th>Enabled</th>
+      <th>Order</th>
+      <th class="actions-col">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in providers %}
+    <tr>
+      <td><strong>{{ p.slug }}</strong></td>
+      <td>{{ p.label }}</td>
+      <td>{{ p.kind }}</td>
+      <td>
+        {% if p.issuer_url %}<div style="color:#888;font-size:.85em">{{ p.issuer_url }}</div>{% endif %}
+        <code>{{ p.client_id }}</code>
+      </td>
+      <td>{% if p.enabled %}✓{% else %}—{% endif %}</td>
+      <td>{{ p.sort_order }}</td>
+      <td class="actions-col">
+        <form method="post" action="/sso-shared/{{ p.id }}/delete"
+              onsubmit="return confirm('Delete shared provider {{ p.slug }}?');">
+          <button type="submit" class="btn-row-action">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Add a shared provider</h2>
+<form method="post" action="/sso-shared" class="op-form">
+  <label>Slug <input name="slug" required pattern="[a-z0-9-]+" placeholder="acme-google"></label>
+  <label>Button label <input name="label" required placeholder="Sign in with Google"></label>
+  <label>Kind
+    <select name="kind">
+      <option value="oidc">oidc (generic — needs issuer URL)</option>
+      <option value="google">google</option>
+      <option value="microsoft">microsoft</option>
+      <option value="github">github</option>
+      <option value="gitlab">gitlab</option>
+      <option value="discord">discord</option>
+    </select>
+  </label>
+  <label>Issuer URL (oidc only) <input name="issuer_url" placeholder="https://idp.example.com"></label>
+  <label>Client ID <input name="client_id" required></label>
+  <label>Secret ref <input name="secret_ref" required placeholder="env://ACME_GOOGLE_SECRET"></label>
+  <label>Scopes (optional, space-separated) <input name="scopes" placeholder="openid email profile groups"></label>
+  <label>Sort order <input name="sort_order" type="number" value="0"></label>
+  <label class="inline"><input type="checkbox" name="enabled" checked> Enabled</label>
+  <button type="submit">Add provider</button>
+</form>
+{% endblock %}
