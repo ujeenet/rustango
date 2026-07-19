@@ -790,11 +790,18 @@ async fn table_exists_pool(pool: &crate::sql::Pool, table: &str) -> Result<bool,
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
-            let reg: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
-                .bind(table)
-                .fetch_one(pg)
-                .await?;
-            Ok(reg.is_some())
+            // Scope to the CURRENT schema, not the search_path — otherwise a
+            // schema-mode tenant would falsely see the shared registry tables
+            // (audit_log, content_types) that live in `public` and misfire the
+            // fake-initial check. `to_regclass` follows search_path; this does not.
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+                 WHERE table_schema = current_schema() AND table_name = $1)",
+            )
+            .bind(table)
+            .fetch_one(pg)
+            .await?;
+            Ok(exists)
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(my) => {
@@ -847,11 +854,15 @@ async fn decide_pool(
 /// Does `table` exist on the legacy `PgPool`?
 #[cfg(feature = "postgres")]
 async fn table_exists_pg(pool: &PgPool, table: &str) -> Result<bool, MigrateError> {
-    let reg: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
-        .bind(table)
-        .fetch_one(pool)
-        .await?;
-    Ok(reg.is_some())
+    // Current schema only — see the note in `table_exists_pool`.
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
+         WHERE table_schema = current_schema() AND table_name = $1)",
+    )
+    .bind(table)
+    .fetch_one(pool)
+    .await?;
+    Ok(exists)
 }
 
 /// Full reconcile decision on the legacy `PgPool` path (see [`decide_pool`]).
