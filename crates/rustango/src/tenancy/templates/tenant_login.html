@@ -142,7 +142,9 @@
   </form>
   {% if sso_enabled %}
   <div class="sso-divider"><span>or</span></div>
-  <a class="sso-button" href="{{ sso_login_url }}">Sign in with {{ sso_provider | capitalize }}</a>
+  {% for p in sso_providers %}
+  <a class="sso-button" href="{{ p.login_url }}">{{ p.label }}</a>
+  {% endfor %}
   {% endif %}
 </body>
 </html>

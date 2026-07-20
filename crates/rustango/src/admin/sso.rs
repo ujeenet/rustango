@@ -1,10 +1,10 @@
 //! SSO (OpenID Connect / social OAuth) login for the admin — the
 //! `admin-sso` feature.
 //!
-//! This module is the **shared core** used by both admin surfaces:
-//!
-//! - the bare admin (`crate::admin`, global `[sso]` config), and
-//! - the tenant admin (`crate::tenancy`, per-`Org` config).
+//! This module is the **shared core** used by all admin surfaces. Providers
+//! are DB rows managed from the admin UI (the `SsoProvider` /
+//! `SharedSsoProvider` models), not config — the bare admin and each tenant
+//! load their enabled providers and build one [`OAuth2Provider`] per login.
 //!
 //! It reuses the existing [`crate::oauth2`] handshake
 //! ([`OAuth2Provider::begin`]/[`complete`](OAuth2Provider::complete) +
@@ -41,6 +41,9 @@ pub struct ResolvedSso {
     pub client_secret: String,
     /// Must match the route mounted at `<login>/sso/{provider}/callback`.
     pub redirect_uri: String,
+    /// Optional OAuth scope override. `None` keeps the provider defaults
+    /// (`openid email profile`); `Some(list)` replaces them.
+    pub scopes: Option<Vec<String>>,
 }
 
 /// Errors surfaced by the SSO login flow. Rendered as a generic
@@ -120,7 +123,49 @@ pub async fn build_provider(cfg: &ResolvedSso) -> Result<OAuth2Provider, SsoErro
         }
         other => return Err(SsoError::UnknownProvider(other.to_owned())),
     };
+    // Per-provider scope override (e.g. adding `groups` for an OIDC IdP).
+    let provider = match &cfg.scopes {
+        Some(s) if !s.is_empty() => provider.with_scopes(s.iter().cloned()),
+        _ => provider,
+    };
     Ok(provider)
+}
+
+/// One SSO button for a login page — the template loops over these.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderButton {
+    /// Route key (`{login}/sso/{slug}`).
+    pub slug: String,
+    /// Button text (e.g. "Sign in with Google").
+    pub label: String,
+    /// Absolute-or-relative href the button links to.
+    pub login_url: String,
+}
+
+/// Parse a stored space-separated scope string into the `ResolvedSso`
+/// override form. Empty/blank → `None` (keep provider defaults).
+#[must_use]
+pub fn parse_scopes(scopes: Option<&str>) -> Option<Vec<String>> {
+    let s = scopes?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    Some(s.split_whitespace().map(str::to_owned).collect())
+}
+
+/// Resolve a `secret_ref` for the **bare admin** (no tenancy in the
+/// dependency set): `env://VAR` reads the environment; anything else is a
+/// literal. The tenant surfaces use the richer
+/// [`crate::tenancy::secrets::ChainSecretsResolver`] instead.
+///
+/// # Errors
+/// [`SsoError::Secret`] when an `env://` variable is unset.
+pub fn resolve_secret_ref_env(reference: &str) -> Result<String, SsoError> {
+    if let Some(var) = reference.strip_prefix("env://") {
+        std::env::var(var).map_err(|_| SsoError::Secret(format!("env var `{var}` is unset")))
+    } else {
+        Ok(reference.to_owned())
+    }
 }
 
 /// The verified email from a completed handshake, or an error when the
@@ -144,7 +189,7 @@ pub fn verified_email(user: &NormalizedUser) -> Result<&str, SsoError> {
 // ===================================================================
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue},
     response::{IntoResponse, Redirect, Response},
     routing::get,
@@ -156,34 +201,6 @@ use super::urls::AppState;
 use super::user::AdminUser;
 use crate::core::Model as _; // brings `AdminUser::SCHEMA` into scope
 
-/// Global SSO config stored on the admin [`Config`](super::urls::Config)
-/// via [`Builder::with_sso`](super::urls::Builder::with_sso). The client
-/// secret is already the resolved value (the global `[sso]` section
-/// sources it from the `RUSTANGO__SSO__CLIENT_SECRET` env overlay).
-#[derive(Debug, Clone)]
-pub struct BareSsoConfig {
-    pub provider: String,
-    pub issuer_url: Option<String>,
-    pub client_id: String,
-    pub client_secret: String,
-    /// Absolute callback URL registered with the IdP. Must match the
-    /// mounted `<login>/sso/callback` route. Required (not derived) so
-    /// it stays stable behind proxies.
-    pub redirect_uri: String,
-}
-
-impl BareSsoConfig {
-    fn resolved(&self) -> ResolvedSso {
-        ResolvedSso {
-            provider: self.provider.clone(),
-            issuer_url: self.issuer_url.clone(),
-            client_id: self.client_id.clone(),
-            client_secret: self.client_secret.clone(),
-            redirect_uri: self.redirect_uri.clone(),
-        }
-    }
-}
-
 /// Query params on the IdP callback (`?code=…&state=…` or `?error=…`).
 #[derive(serde::Deserialize)]
 struct CallbackParams {
@@ -192,13 +209,14 @@ struct CallbackParams {
     error: Option<String>,
 }
 
-/// Routes for the bare-admin SSO flow, mounted alongside `/login` when
-/// `Builder::with_sso` was set. `GET /login/sso` starts the handshake;
-/// `GET /login/sso/callback` completes it.
+/// Routes for the bare-admin SSO flow, mounted alongside `/login`.
+/// `GET /login/sso/{slug}` starts the handshake for one configured
+/// [`SsoProvider`](super::sso_provider::SsoProvider); `.../callback`
+/// completes it.
 pub(crate) fn sso_router(state: AppState) -> Router {
     Router::new()
-        .route("/login/sso", get(sso_begin))
-        .route("/login/sso/callback", get(sso_callback))
+        .route("/login/sso/{slug}", get(sso_begin))
+        .route("/login/sso/{slug}/callback", get(sso_callback))
         .with_state(state)
 }
 
@@ -209,6 +227,23 @@ fn login_path(state: &AppState) -> String {
     } else {
         format!("{p}/login")
     }
+}
+
+/// Absolute per-provider callback URL derived from the request host —
+/// `{scheme}://{host}{login_path}/sso/{slug}/callback`. Scheme honors
+/// `X-Forwarded-Proto`, else `https`.
+fn derive_bare_redirect(headers: &HeaderMap, state: &AppState, slug: &str) -> Option<String> {
+    let host = headers.get(header::HOST)?.to_str().ok()?;
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https");
+    Some(format!(
+        "{scheme}://{host}{}/sso/{slug}/callback",
+        login_path(state)
+    ))
 }
 
 /// Redirect back to the login page with a generic `?sso_error=` marker.
@@ -233,15 +268,27 @@ fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|(_, v)| v.to_owned())
 }
 
-// GET /login/sso — start the handshake.
-async fn sso_begin(State(state): State<AppState>) -> Response {
-    let Some(cfg) = state.config.sso.as_ref() else {
-        return login_error(&state, "disabled");
-    };
+// GET /login/sso/{slug} — start the handshake for one provider.
+async fn sso_begin(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     let Some(secret) = state.config.session_secret.as_ref() else {
         return login_error(&state, "disabled");
     };
-    let provider = match build_provider(&cfg.resolved()).await {
+    let Some(redirect_uri) = derive_bare_redirect(&headers, &state, &slug) else {
+        return login_error(&state, "config");
+    };
+    let cfg = match super::sso_provider::resolve_by_slug(&state.pool, &slug, redirect_uri).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return login_error(&state, "disabled"),
+        Err(e) => {
+            tracing::error!(target: "rustango::admin::sso", "begin resolve: {e}");
+            return login_error(&state, "config");
+        }
+    };
+    let provider = match build_provider(&cfg).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::admin::sso", "begin: {e}");
@@ -261,15 +308,13 @@ async fn sso_begin(State(state): State<AppState>) -> Response {
     resp
 }
 
-// GET /login/sso/callback — finish the handshake, link, mint.
+// GET /login/sso/{slug}/callback — finish the handshake, link, mint.
 async fn sso_callback(
     State(state): State<AppState>,
+    Path(slug): Path<String>,
     headers: HeaderMap,
     Query(params): Query<CallbackParams>,
 ) -> Response {
-    let Some(cfg) = state.config.sso.as_ref() else {
-        return login_error(&state, "disabled");
-    };
     let Some(secret) = state.config.session_secret.as_ref() else {
         return login_error(&state, "disabled");
     };
@@ -287,7 +332,18 @@ async fn sso_callback(
         Ok(f) => f,
         Err(_) => return login_error(&state, "expired"),
     };
-    let provider = match build_provider(&cfg.resolved()).await {
+    let Some(redirect_uri) = derive_bare_redirect(&headers, &state, &slug) else {
+        return login_error(&state, "config");
+    };
+    let cfg = match super::sso_provider::resolve_by_slug(&state.pool, &slug, redirect_uri).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return login_error(&state, "disabled"),
+        Err(e) => {
+            tracing::error!(target: "rustango::admin::sso", "callback resolve: {e}");
+            return login_error(&state, "config");
+        }
+    };
+    let provider = match build_provider(&cfg).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(target: "rustango::admin::sso", "callback build: {e}");
@@ -400,6 +456,7 @@ mod tests {
             client_id: "cid".into(),
             client_secret: "csecret".into(),
             redirect_uri: "https://app.example.com/login/sso/x/callback".into(),
+            scopes: None,
         }
     }
 
@@ -413,6 +470,41 @@ mod tests {
                 "https://app.example.com/login/sso/x/callback"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn scopes_override_is_applied() {
+        // Default scopes stay when no override.
+        let p = build_provider(&cfg("google")).await.expect("builds");
+        assert_eq!(p.scopes, vec!["openid", "email", "profile"]);
+        // An override replaces them (e.g. adding `groups` for an IdP).
+        let mut c = cfg("google");
+        c.scopes = Some(vec!["openid".into(), "email".into(), "groups".into()]);
+        let p = build_provider(&c).await.expect("builds");
+        assert_eq!(p.scopes, vec!["openid", "email", "groups"]);
+    }
+
+    #[test]
+    fn parse_scopes_splits_and_trims() {
+        assert_eq!(parse_scopes(None), None);
+        assert_eq!(parse_scopes(Some("  ")), None);
+        assert_eq!(
+            parse_scopes(Some("openid  email profile")),
+            Some(vec!["openid".into(), "email".into(), "profile".into()])
+        );
+    }
+
+    #[test]
+    fn resolve_secret_ref_env_reads_env_or_literal() {
+        // A bare value is a literal.
+        assert_eq!(
+            resolve_secret_ref_env("plain-literal").unwrap(),
+            "plain-literal"
+        );
+        // `env://VAR` reads the environment — `PATH` is reliably set.
+        assert!(resolve_secret_ref_env("env://PATH").is_ok());
+        // An unset var errors.
+        assert!(resolve_secret_ref_env("env://RUSTANGO_TEST_UNSET_VAR_QQQ").is_err());
     }
 
     #[tokio::test]

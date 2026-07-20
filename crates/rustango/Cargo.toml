@@ -330,7 +330,7 @@ admin = [
 # Access is *link-to-existing* — the verified IdP email must match an
 # admin user; SSO never auto-provisions. Works for the bare admin
 # (global `[sso]` config) and, with `tenancy`, per-Org.
-admin-sso = ["admin", "oauth2"]
+admin-sso = ["admin", "oauth2", "casts"]
 
 # Multi-tenancy module (`rustango::tenancy`). Implies `admin` (the
 # tenant admin builder wraps `rustango::admin`). Pulls in Argon2 +

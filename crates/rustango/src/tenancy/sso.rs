@@ -1,4 +1,4 @@
-//! Tenant-admin SSO — per-`Org` OpenID Connect / social OAuth login
+//! Tenant-admin SSO — multi-provider OpenID Connect / social OAuth login
 //! (`admin-sso` feature).
 //!
 //! Reuses the shared handshake core in [`crate::admin::sso`]
@@ -7,10 +7,13 @@
 //! `rustango_users.email` in the tenant's own storage. Access is
 //! link-to-existing — SSO never auto-provisions a tenant user.
 //!
-//! Each tenant brings its own IdP: the provider, client id, issuer, and
-//! a **secret reference** live on the `Org` row; the reference is
-//! resolved via [`SecretsResolver`] at login time (mirrors
-//! `Org.database_url`), so the raw secret never sits in a column.
+//! Providers are rows, managed from the admin UI: each tenant's own
+//! [`crate::admin::sso_provider::SsoProvider`] table (per-tenant, granular)
+//! merged with the registry-wide [`SharedSsoProvider`] set (operator-defined,
+//! offered to all tenants). On a slug clash the tenant's row wins. Each
+//! provider stores a **secret reference** (e.g. `env://…`) resolved via
+//! [`SecretsResolver`] at login time, so the raw secret never sits in a
+//! column. `{login}/sso/{slug}` starts the handshake for one provider.
 
 use axum::{
     http::{header, request::Parts, HeaderValue},
@@ -18,9 +21,12 @@ use axum::{
 };
 
 use crate::admin::sso::{
-    build_provider, open_flow, seal_flow, verified_email, ResolvedSso, SSO_FLOW_COOKIE,
+    build_provider, open_flow, parse_scopes, seal_flow, verified_email, ProviderButton,
+    ResolvedSso, SsoError, SSO_FLOW_COOKIE,
 };
+use crate::admin::sso_provider::SsoProvider;
 use crate::core::Model as _; // brings `User::SCHEMA` into scope
+use crate::sql::Pool;
 
 /// IdP callback params (`?code=…&state=…` or `?error=…`).
 #[derive(serde::Deserialize, Default)]
@@ -33,32 +39,178 @@ struct CallbackParams {
 use super::auth::User;
 use super::org::Org;
 use super::routes::RouteConfig;
-use super::secrets::{ChainSecretsResolver, SecretsResolver};
 use super::tenant_console::{self, SessionSecret, TenantSessionPayload};
 
-/// Path suffixes (relative to `routes.login_url`) for the two SSO routes.
-pub(crate) const SSO_BEGIN_SUFFIX: &str = "/sso";
-pub(crate) const SSO_CALLBACK_SUFFIX: &str = "/sso/callback";
-
-/// Read the per-`Org` SSO config when enabled + complete.
-/// Returns `(provider, issuer_url, client_id, secret_ref)`.
-fn org_sso(org: &Org) -> Option<(String, Option<String>, String, String)> {
-    if !org.sso_enabled {
-        return None;
-    }
-    Some((
-        org.sso_provider.clone()?,
-        org.sso_issuer_url.clone(),
-        org.sso_client_id.clone()?,
-        org.sso_secret_ref.clone()?,
-    ))
+/// A registry-wide SSO provider offered to **every** tenant — the shared
+/// counterpart of the per-tenant [`crate::admin::sso_provider::SsoProvider`].
+///
+/// An operator defines a provider once (in the operator console) and it
+/// appears on every tenant's login page. Same fields as the per-tenant
+/// model; `scope = "registry"` puts the table in the registry database and
+/// hides it from tenant admins (only operators manage the shared set). When
+/// a tenant configures a provider with the same `slug`, the tenant's row
+/// takes precedence on that tenant's login page.
+#[derive(crate::Model, Debug, Clone)]
+#[rustango(
+    table = "rustango_shared_sso_providers",
+    scope = "registry",
+    admin(
+        list_display = "slug, label, kind, enabled, sort_order",
+        ordering = "sort_order",
+        readonly_fields = "created_at, updated_at",
+    )
+)]
+#[allow(dead_code)]
+pub struct SharedSsoProvider {
+    #[rustango(primary_key)]
+    pub id: crate::sql::Auto<i64>,
+    #[rustango(max_length = 64, unique)]
+    pub slug: String,
+    #[rustango(max_length = 150)]
+    pub label: String,
+    #[rustango(max_length = 32)]
+    pub kind: String,
+    #[rustango(max_length = 255)]
+    pub issuer_url: Option<String>,
+    #[rustango(max_length = 255)]
+    pub client_id: String,
+    /// The OAuth2 client secret, **encrypted at rest** (see
+    /// [`crate::admin::sso_provider::SsoProvider::client_secret`]).
+    #[rustango(max_length = 1024)]
+    pub client_secret: crate::casts::Cast<crate::casts::EncryptedString>,
+    #[rustango(default = "true")]
+    pub enabled: bool,
+    #[rustango(default = "0")]
+    pub sort_order: i32,
+    #[rustango(max_length = 255)]
+    pub scopes: Option<String>,
+    #[rustango(auto_now_add)]
+    pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
+    #[rustango(auto_now)]
+    pub updated_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Derive the absolute callback URL for this tenant from the request —
-/// tenants are host-based, so the redirect_uri is per-host:
-/// `{scheme}://{host}{login_url}/sso/callback`. Scheme honors
-/// `X-Forwarded-Proto` (proxy), else defaults to `https`.
-fn derive_redirect(parts: &Parts, routes: &RouteConfig) -> Option<String> {
+/// Enabled providers for this tenant's login page: the tenant's own
+/// [`SsoProvider`] rows merged with the registry-wide [`SharedSsoProvider`]
+/// set, **tenant-wins** on a slug clash, sorted by `sort_order`. Each button
+/// links to `{login_url}/sso/{slug}`. DB errors degrade to an empty list.
+pub(crate) async fn list_enabled(
+    tenant_pool: &Pool,
+    registry_pool: &Pool,
+    routes: &RouteConfig,
+) -> Vec<ProviderButton> {
+    use crate::sql::FetcherPool as _;
+    let tenant_rows: Vec<SsoProvider> = SsoProvider::objects()
+        .fetch(tenant_pool)
+        .await
+        .unwrap_or_default();
+    let shared_rows: Vec<SharedSsoProvider> = SharedSsoProvider::objects()
+        .fetch(registry_pool)
+        .await
+        .unwrap_or_default();
+    merge_provider_buttons(
+        &routes.login_url,
+        tenant_rows
+            .into_iter()
+            .map(|r| (r.slug, r.label, r.sort_order, r.enabled)),
+        shared_rows
+            .into_iter()
+            .map(|r| (r.slug, r.label, r.sort_order, r.enabled)),
+    )
+}
+
+/// Pure merge: tenant providers first (they **win** on a slug clash), then
+/// the registry-wide shared set; disabled rows dropped; result sorted by
+/// `sort_order`. Each `(slug, label, sort_order, enabled)`.
+fn merge_provider_buttons(
+    login_base: &str,
+    tenant: impl IntoIterator<Item = (String, String, i32, bool)>,
+    shared: impl IntoIterator<Item = (String, String, i32, bool)>,
+) -> Vec<ProviderButton> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(i32, ProviderButton)> = Vec::new();
+    for (slug, label, sort_order, enabled) in tenant.into_iter().chain(shared) {
+        if !enabled {
+            continue;
+        }
+        if seen.insert(slug.clone()) {
+            out.push((
+                sort_order,
+                ProviderButton {
+                    login_url: format!("{login_base}/sso/{slug}"),
+                    slug,
+                    label,
+                },
+            ));
+        }
+    }
+    out.sort_by_key(|(o, _)| *o);
+    out.into_iter().map(|(_, b)| b).collect()
+}
+
+/// Resolve one provider by `slug` — the tenant's own table first, then the
+/// registry-wide shared set — into a ready-to-build [`ResolvedSso`], with
+/// the secret dereferenced by the tenancy [`SecretsResolver`]. `Ok(None)`
+/// when no enabled row matches.
+async fn resolve_by_slug(
+    tenant_pool: &Pool,
+    registry_pool: &Pool,
+    slug: &str,
+    redirect_uri: String,
+) -> Result<Option<ResolvedSso>, SsoError> {
+    use crate::sql::FetcherPool as _;
+    let tenant_row = SsoProvider::objects()
+        .filter("slug", slug.to_owned())
+        .fetch(tenant_pool)
+        .await
+        .map_err(|e| SsoError::Config(format!("db: {e}")))?
+        .into_iter()
+        .find(|r| r.enabled);
+    // The secret is stored encrypted at rest and decrypted transparently on
+    // load; `into_inner()` yields the plaintext to send to the IdP's token
+    // endpoint (over TLS).
+    let (kind, issuer_url, client_id, client_secret, scopes) = if let Some(r) = tenant_row {
+        (
+            r.kind,
+            r.issuer_url,
+            r.client_id,
+            r.client_secret.into_inner(),
+            r.scopes,
+        )
+    } else {
+        let shared = SharedSsoProvider::objects()
+            .filter("slug", slug.to_owned())
+            .fetch(registry_pool)
+            .await
+            .map_err(|e| SsoError::Config(format!("db: {e}")))?
+            .into_iter()
+            .find(|r| r.enabled);
+        let Some(r) = shared else {
+            return Ok(None);
+        };
+        (
+            r.kind,
+            r.issuer_url,
+            r.client_id,
+            r.client_secret.into_inner(),
+            r.scopes,
+        )
+    };
+    Ok(Some(ResolvedSso {
+        provider: kind,
+        issuer_url,
+        client_id,
+        client_secret,
+        redirect_uri,
+        scopes: parse_scopes(scopes.as_deref()),
+    }))
+}
+
+/// Derive the absolute per-provider callback URL for this tenant from the
+/// request — tenants are host-based, so the redirect_uri is per-host +
+/// per-slug: `{scheme}://{host}{login_url}/sso/{slug}/callback`. Scheme
+/// honors `X-Forwarded-Proto` (proxy), else defaults to `https`.
+fn derive_redirect(parts: &Parts, routes: &RouteConfig, slug: &str) -> Option<String> {
     let host = parts.headers.get(header::HOST)?.to_str().ok()?;
     let scheme = parts
         .headers
@@ -68,34 +220,9 @@ fn derive_redirect(parts: &Parts, routes: &RouteConfig) -> Option<String> {
         .filter(|s| !s.is_empty())
         .unwrap_or("https");
     Some(format!(
-        "{scheme}://{host}{}{SSO_CALLBACK_SUFFIX}",
+        "{scheme}://{host}{}/sso/{slug}/callback",
         routes.login_url
     ))
-}
-
-/// Build the resolved provider config for this tenant, dereferencing the
-/// stored secret reference.
-async fn resolve(org: &Org, parts: &Parts, routes: &RouteConfig) -> Result<ResolvedSso, Response> {
-    let Some((provider, issuer_url, client_id, secret_ref)) = org_sso(org) else {
-        return Err(login_error(routes, "disabled"));
-    };
-    let Some(redirect_uri) = derive_redirect(parts, routes) else {
-        return Err(login_error(routes, "config"));
-    };
-    let client_secret = match ChainSecretsResolver::standard().resolve(&secret_ref).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(target: "rustango::tenancy::sso", "secret resolve: {e}");
-            return Err(login_error(routes, "config"));
-        }
-    };
-    Ok(ResolvedSso {
-        provider,
-        issuer_url,
-        client_id,
-        client_secret,
-        redirect_uri,
-    })
 }
 
 fn login_error(routes: &RouteConfig, code: &str) -> Response {
@@ -119,16 +246,26 @@ fn set_cookie(resp: &mut Response, value: &str) {
     }
 }
 
-/// `GET {login_url}/sso` — start the tenant handshake.
+/// `GET {login_url}/sso/{slug}` — start the tenant handshake for one
+/// provider (tenant-owned or shared).
 pub(super) async fn tenant_sso_begin(
-    org: &Org,
+    slug: &str,
     secret: &SessionSecret,
+    tenant_pool: &Pool,
+    registry_pool: &Pool,
     routes: &RouteConfig,
     parts: &Parts,
 ) -> Response {
-    let cfg = match resolve(org, parts, routes).await {
-        Ok(c) => c,
-        Err(resp) => return resp,
+    let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
+        return login_error(routes, "config");
+    };
+    let cfg = match resolve_by_slug(tenant_pool, registry_pool, slug, redirect_uri).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return login_error(routes, "disabled"),
+        Err(e) => {
+            tracing::error!(target: "rustango::tenancy::sso", "begin resolve: {e}");
+            return login_error(routes, "config");
+        }
     };
     let provider = match build_provider(&cfg).await {
         Ok(p) => p,
@@ -148,12 +285,14 @@ pub(super) async fn tenant_sso_begin(
     resp
 }
 
-/// `GET {login_url}/sso/callback` — finish the handshake, link by email,
-/// mint the tenant session.
+/// `GET {login_url}/sso/{slug}/callback` — finish the handshake, link by
+/// email, mint the tenant session.
 pub(super) async fn tenant_sso_callback(
     org: &Org,
+    slug: &str,
     secret: &SessionSecret,
-    tenant_pool: &crate::sql::Pool,
+    tenant_pool: &Pool,
+    registry_pool: &Pool,
     routes: &RouteConfig,
     parts: &Parts,
 ) -> Response {
@@ -172,9 +311,16 @@ pub(super) async fn tenant_sso_callback(
         Ok(f) => f,
         Err(_) => return login_error(routes, "expired"),
     };
-    let cfg = match resolve(org, parts, routes).await {
-        Ok(c) => c,
-        Err(resp) => return resp,
+    let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
+        return login_error(routes, "config");
+    };
+    let cfg = match resolve_by_slug(tenant_pool, registry_pool, slug, redirect_uri).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return login_error(routes, "disabled"),
+        Err(e) => {
+            tracing::error!(target: "rustango::tenancy::sso", "callback resolve: {e}");
+            return login_error(routes, "config");
+        }
     };
     let provider = match build_provider(&cfg).await {
         Ok(p) => p,
@@ -247,4 +393,52 @@ async fn find_tenant_user_by_email(pool: &crate::sql::Pool, email: &str) -> Opti
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     Some((id, active))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_provider_buttons;
+
+    fn row(slug: &str, label: &str, sort: i32, enabled: bool) -> (String, String, i32, bool) {
+        (slug.into(), label.into(), sort, enabled)
+    }
+
+    #[test]
+    fn tenant_wins_on_slug_clash_and_result_is_sorted() {
+        let buttons = merge_provider_buttons(
+            "/login",
+            // tenant: a clashing "corp" (wins), a disabled one (dropped)
+            vec![
+                row("corp", "Tenant Corp", 1, true),
+                row("off", "Off", 0, false),
+            ],
+            // shared: same "corp" (loses), a shared-only "global"
+            vec![
+                row("corp", "Shared Corp", 0, true),
+                row("global", "Global", 5, true),
+            ],
+        );
+        let view: Vec<_> = buttons
+            .iter()
+            .map(|b| (b.slug.as_str(), b.label.as_str(), b.login_url.as_str()))
+            .collect();
+        assert_eq!(
+            view,
+            vec![
+                ("corp", "Tenant Corp", "/login/sso/corp"), // tenant label wins, sort=1
+                ("global", "Global", "/login/sso/global"),  // shared-only, sort=5
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_only_when_no_tenant_providers() {
+        let buttons = merge_provider_buttons(
+            "/admin/login",
+            std::iter::empty(),
+            vec![row("okta", "Okta", 0, true)],
+        );
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].login_url, "/admin/login/sso/okta");
+    }
 }

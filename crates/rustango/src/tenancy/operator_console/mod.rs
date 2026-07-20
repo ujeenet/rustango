@@ -389,6 +389,10 @@ fn router_inner(
             "op_change_password.html",
             include_str!("../templates/op_change_password.html"),
         ),
+        (
+            "op_sso_shared.html",
+            include_str!("../templates/op_sso_shared.html"),
+        ),
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
@@ -422,6 +426,15 @@ fn router_inner(
             "/change-password",
             get(change_password_form).post(change_password_submit),
         );
+    // Registry-wide shared SSO providers (admin-sso) — always available to
+    // authenticated operators; writes go to the registry pool the console
+    // already holds.
+    #[cfg(feature = "admin-sso")]
+    {
+        private = private
+            .route("/sso-shared", get(sso_shared_list).post(sso_shared_create))
+            .route("/sso-shared/{id}/delete", post(sso_shared_delete));
+    }
     if edit_enabled {
         private = private
             .route(
@@ -461,6 +474,9 @@ fn router_inner(
 /// context. Centralizing the keys keeps op_layout.html and op_login.html
 /// in sync without each handler remembering the four template names.
 fn inject_op_brand(ctx: &mut Context, brand: &OpBrand) {
+    // Show the "Shared SSO" nav entry only when the admin-sso feature is
+    // compiled in (its routes exist only then).
+    ctx.insert("sso_console", &cfg!(feature = "admin-sso"));
     ctx.insert("brand_name", &brand.name);
     ctx.insert("brand_tagline", &brand.tagline);
     ctx.insert("brand_logo_url", &brand.logo_url);
@@ -964,6 +980,117 @@ async fn orgs_list(
     ctx.insert("orgs", &view);
     ctx.insert("edit_enabled", &state.pools.is_some());
     Html(state.tera.render("op_orgs.html", &ctx).unwrap_or_default()).into_response()
+}
+
+// ---- Shared SSO providers (registry-wide, `admin-sso`) --------------
+// An operator defines a provider once here and it is offered on EVERY
+// tenant's login page (`SharedSsoProvider`, registry scope). Per-tenant
+// providers are managed by each tenant from its own admin (`SsoProvider`),
+// which the type-erased console can't reach — a clean split: shared here,
+// per-tenant there. Both merge at login (tenant wins on slug clash).
+#[cfg(feature = "admin-sso")]
+#[derive(serde::Deserialize)]
+struct SharedSsoForm {
+    slug: String,
+    label: String,
+    kind: String,
+    issuer_url: Option<String>,
+    client_id: String,
+    client_secret: String,
+    scopes: Option<String>,
+    sort_order: Option<i32>,
+    enabled: Option<String>,
+}
+
+#[cfg(feature = "admin-sso")]
+async fn sso_shared_list(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+) -> Response<Body> {
+    let mut rows: Vec<super::sso::SharedSsoProvider> =
+        match super::sso::SharedSsoProvider::objects()
+            .fetch(&state.registry)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+        };
+    rows.sort_by_key(|p| p.sort_order);
+    let view: Vec<_> = rows
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id.get().copied().unwrap_or_default(),
+                "slug": p.slug,
+                "label": p.label,
+                "kind": p.kind,
+                "issuer_url": p.issuer_url,
+                "client_id": p.client_id,
+                "enabled": p.enabled,
+                "sort_order": p.sort_order,
+            })
+        })
+        .collect();
+    let mut ctx = Context::new();
+    inject_op_brand(&mut ctx, &state.op_brand);
+    ctx.insert("section", "sso");
+    ctx.insert("operator_username", &op.username);
+    ctx.insert("providers", &view);
+    Html(
+        state
+            .tera
+            .render("op_sso_shared.html", &ctx)
+            .unwrap_or_default(),
+    )
+    .into_response()
+}
+
+#[cfg(feature = "admin-sso")]
+async fn sso_shared_create(
+    State(state): State<ConsoleState>,
+    Extension(_op): Extension<auth::Operator>,
+    Form(form): Form<SharedSsoForm>,
+) -> Response<Body> {
+    let mut row = super::sso::SharedSsoProvider {
+        id: crate::sql::Auto::Unset,
+        slug: form.slug.trim().to_owned(),
+        label: form.label,
+        kind: form.kind.trim().to_owned(),
+        issuer_url: form.issuer_url.filter(|s| !s.trim().is_empty()),
+        client_id: form.client_id,
+        client_secret: crate::casts::Cast::new(form.client_secret),
+        enabled: form.enabled.as_deref() == Some("on"),
+        sort_order: form.sort_order.unwrap_or(0),
+        scopes: form.scopes.filter(|s| !s.trim().is_empty()),
+        created_at: crate::sql::Auto::Unset,
+        updated_at: crate::sql::Auto::Unset,
+    };
+    if let Err(e) = row.insert_pool(&state.registry).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("create failed: {e}"),
+        )
+            .into_response();
+    }
+    Redirect::to("/sso-shared").into_response()
+}
+
+#[cfg(feature = "admin-sso")]
+async fn sso_shared_delete(
+    State(state): State<ConsoleState>,
+    Extension(_op): Extension<auth::Operator>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Response<Body> {
+    let row = super::sso::SharedSsoProvider::objects()
+        .filter("id", id)
+        .fetch(&state.registry)
+        .await
+        .ok()
+        .and_then(|v| v.into_iter().next());
+    if let Some(r) = row {
+        let _ = r.delete_pool(&state.registry).await;
+    }
+    Redirect::to("/sso-shared").into_response()
 }
 
 // ----------------------------- /orgs/{slug}/edit

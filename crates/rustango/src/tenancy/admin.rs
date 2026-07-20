@@ -444,24 +444,64 @@ where
             return redeem_impersonation_handoff(&org, cfg, routes, parts.uri.query())
                 .into_response();
         }
-        // SSO (admin-sso) — per-Org OpenID Connect / social OAuth login.
-        // `{login}/sso` starts the handshake; `{login}/sso/callback`
-        // completes it. Both GET; exact-match so they don't collide with
-        // the bare `{login}` route below.
+        // SSO (admin-sso) — multi-provider OpenID Connect / social OAuth.
+        // `{login}/sso/{slug}` starts the handshake for one provider;
+        // `{login}/sso/{slug}/callback` completes it. Both GET. The slug
+        // resolves against the tenant's own `SsoProvider` rows first, then
+        // the registry-wide `SharedSsoProvider` set.
         #[cfg(feature = "admin-sso")]
         if method == axum::http::Method::GET {
-            if path == format!("{}{}", routes.login_url, super::sso::SSO_CALLBACK_SUFFIX) {
-                return super::sso::tenant_sso_callback(&org, &cfg.secret, &pool, routes, &parts)
+            let sso_prefix = format!("{}/sso/", routes.login_url);
+            if let Some(rest) = path.strip_prefix(&sso_prefix) {
+                let registry_pool = pools.registry_pool();
+                if let Some(slug) = rest.strip_suffix("/callback") {
+                    return super::sso::tenant_sso_callback(
+                        &org,
+                        slug,
+                        &cfg.secret,
+                        &pool,
+                        &registry_pool,
+                        routes,
+                        &parts,
+                    )
                     .await;
-            }
-            if path == format!("{}{}", routes.login_url, super::sso::SSO_BEGIN_SUFFIX) {
-                return super::sso::tenant_sso_begin(&org, &cfg.secret, routes, &parts).await;
+                }
+                if !rest.is_empty() && !rest.contains('/') {
+                    return super::sso::tenant_sso_begin(
+                        rest,
+                        &cfg.secret,
+                        &pool,
+                        &registry_pool,
+                        routes,
+                        &parts,
+                    )
+                    .await;
+                }
             }
         }
         if path == routes.login_url {
             return match method {
                 axum::http::Method::GET => {
-                    login_form(&org, cfg, brand_storage, routes, parts.uri.query()).into_response()
+                    #[cfg(feature = "admin-sso")]
+                    let resp = {
+                        let registry_pool = pools.registry_pool();
+                        login_form(
+                            &org,
+                            cfg,
+                            brand_storage,
+                            routes,
+                            parts.uri.query(),
+                            &pool,
+                            &registry_pool,
+                        )
+                        .await
+                        .into_response()
+                    };
+                    #[cfg(not(feature = "admin-sso"))]
+                    let resp = login_form(&org, cfg, brand_storage, routes, parts.uri.query())
+                        .await
+                        .into_response();
+                    resp
                 }
                 axum::http::Method::POST => {
                     login_submit(&org, cfg, &pool, routes, parts.headers, body).await
@@ -773,12 +813,15 @@ fn redirect_to_tenant_login(next_path: &str, routes: &super::routes::RouteConfig
     Redirect::to(&location)
 }
 
-fn login_form(
+#[allow(clippy::too_many_arguments)]
+async fn login_form(
     org: &Org,
     cfg: &TenantSessionConfig,
     brand_storage: &BoxedStorage,
     routes: &super::routes::RouteConfig,
     query: Option<&str>,
+    #[cfg(feature = "admin-sso")] tenant_pool: &crate::sql::Pool,
+    #[cfg(feature = "admin-sso")] registry_pool: &crate::sql::Pool,
 ) -> axum::response::Html<String> {
     let mut next: Option<String> = None;
     let mut error: Option<String> = None;
@@ -831,20 +874,13 @@ fn login_form(
     // come from RouteConfig so apps can flip to /login etc.
     ctx.insert("login_url", &routes.login_url);
     ctx.insert("static_url", &routes.static_url);
-    // SSO (admin-sso) — show a "Sign in with <provider>" button when the
-    // Org has SSO enabled + a provider set.
+    // SSO (admin-sso) — one button per enabled provider (the tenant's own
+    // `SsoProvider` rows merged with the registry-wide shared set).
     #[cfg(feature = "admin-sso")]
     {
-        let sso_enabled = org.sso_enabled && org.sso_provider.is_some();
-        ctx.insert("sso_enabled", &sso_enabled);
-        ctx.insert(
-            "sso_provider",
-            &org.sso_provider.clone().unwrap_or_default(),
-        );
-        ctx.insert(
-            "sso_login_url",
-            &format!("{}{}", routes.login_url, super::sso::SSO_BEGIN_SUFFIX),
-        );
+        let providers = super::sso::list_enabled(tenant_pool, registry_pool, routes).await;
+        ctx.insert("sso_enabled", &!providers.is_empty());
+        ctx.insert("sso_providers", &providers);
     }
     // v0.27.5 — log render errors instead of silently rendering an
     // empty body. The previous `unwrap_or_default()` hid a real
