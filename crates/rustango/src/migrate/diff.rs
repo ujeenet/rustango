@@ -829,9 +829,14 @@ fn render_changes_split_inner(
             } => {
                 guard_alter_column_dialect(dialect, "AlterColumnDefault", table, column)?;
                 match to {
-                    Some(expr) => out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {expr}"#,
-                    )),
+                    Some(expr) => {
+                        // Empty-string default → the literal `''`, not nothing
+                        // (#1161), so we don't emit `SET DEFAULT ` (invalid).
+                        let rendered: &str = if expr.is_empty() { "''" } else { expr };
+                        out.immediate.push(format!(
+                            r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {rendered}"#,
+                        ));
+                    }
                     None => out.immediate.push(format!(
                         r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
                     )),
@@ -1249,11 +1254,13 @@ fn create_table_sql_from_snapshot_with_dialect(
             continue;
         }
         if let Some(expr) = &f.default {
-            let _ = write!(
-                sql,
-                " DEFAULT {}",
+            // Empty-string default → literal `''`, not a blank (#1161).
+            let rendered = if expr.is_empty() {
+                "''".to_owned()
+            } else {
                 dialect.translate_default_expr(expr, &f.ty, f.max_length)
-            );
+            };
+            let _ = write!(sql, " DEFAULT {rendered}");
         }
         if !f.nullable {
             sql.push_str(" NOT NULL");
@@ -1375,11 +1382,13 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
         sql_type_with_dialect(f, dialect)
     );
     if let Some(expr) = &f.default {
-        let _ = write!(
-            sql,
-            " DEFAULT {}",
+        // Empty-string default → literal `''`, not a blank (#1161).
+        let rendered = if expr.is_empty() {
+            "''".to_owned()
+        } else {
             dialect.translate_default_expr(expr, &f.ty, f.max_length)
-        );
+        };
+        let _ = write!(sql, " DEFAULT {rendered}");
     }
     if !f.nullable {
         sql.push_str(" NOT NULL");
