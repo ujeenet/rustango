@@ -109,7 +109,7 @@ cargo rustango new shop --template tenant    # multi-tenancy + operator console
 cd myblog
 cp .env.example .env                         # edit DATABASE_URL
 docker compose up -d                         # starts Postgres
-cargo run -- migrate                         # apply bootstrap migrations
+cargo run -- migrate                         # generate + apply migrations
 cargo run                                    # http://localhost:8080
 ```
 
