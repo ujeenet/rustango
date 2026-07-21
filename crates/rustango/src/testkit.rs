@@ -218,7 +218,7 @@ pub fn user() -> crate::tenancy::User {
         id: crate::sql::Auto::Unset,
         username: "alice".into(),
         password_hash: String::new(),
-        #[cfg(feature = "admin-sso")]
+        #[cfg(feature = "sso")]
         email: None,
         is_superuser: false,
         active: true,

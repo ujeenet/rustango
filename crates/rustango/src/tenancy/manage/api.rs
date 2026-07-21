@@ -300,7 +300,7 @@ where
         id: Auto::default(),
         username: username.to_owned(),
         password_hash: crate::tenancy::password::hash(password)?,
-        #[cfg(feature = "admin-sso")]
+        #[cfg(feature = "sso")]
         email: None,
         is_superuser: superuser,
         active: true,
