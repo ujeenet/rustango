@@ -324,11 +324,17 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
     }
     if let Some(expr) = field.default {
         let ty_name = crate::migrate::snapshot::field_type_name(field.ty);
-        let _ = write!(
-            s,
-            " DEFAULT {}",
+        // An empty-string default (`#[rustango(default = "")]`) means the
+        // literal empty string, not an empty raw expression — render it as
+        // `''` rather than nothing, or we emit `DEFAULT  NOT NULL` which the
+        // driver rejects with `near "NOT": syntax error` (#1161). `''` is a
+        // valid empty-string literal in Postgres, MySQL, and SQLite.
+        let rendered = if expr.is_empty() {
+            "''".to_owned()
+        } else {
             dialect.translate_default_expr(expr, ty_name, field.max_length)
-        );
+        };
+        let _ = write!(s, " DEFAULT {rendered}");
     }
     if !field.nullable {
         s.push_str(" NOT NULL");
@@ -513,6 +519,46 @@ mod tests {
     fn auto_uuid_emits_uuid_not_bigserial() {
         let f = fld("id", FieldType::Uuid, true, Some("gen_random_uuid()"));
         assert_eq!(sql_type(&pg(), &f), "UUID");
+    }
+
+    #[test]
+    fn empty_string_default_renders_as_quoted_empty_literal() {
+        // #1161 — `#[rustango(default = "")]` must emit `DEFAULT ''`, not
+        // `DEFAULT ` (nothing), which collapses to `DEFAULT  NOT NULL` and the
+        // driver rejects with `near "NOT": syntax error`. `''` is a valid
+        // empty-string literal on Postgres, MySQL, and SQLite.
+        let mut f = fld("name", FieldType::String, false, Some(""));
+        f.max_length = Some(64);
+        // Postgres is always available in this build; MySQL/SQLite are
+        // feature-gated, so add them only when compiled in.
+        let mut dialects: Vec<&dyn Dialect> = vec![&crate::sql::Postgres];
+        #[cfg(feature = "mysql")]
+        dialects.push(&crate::sql::MySql);
+        #[cfg(feature = "sqlite")]
+        dialects.push(&crate::sql::Sqlite);
+        for dialect in dialects {
+            let mut s = String::new();
+            write_column_def(&mut s, dialect, &f);
+            assert!(
+                s.contains("DEFAULT ''"),
+                "[{}] expected DEFAULT '': {s}",
+                dialect.name()
+            );
+            assert!(
+                !s.contains("DEFAULT  "),
+                "[{}] empty default leaked a blank: {s}",
+                dialect.name()
+            );
+        }
+    }
+
+    #[test]
+    fn nonempty_string_default_is_unchanged() {
+        // A non-empty default is still a raw expression, untouched.
+        let f = fld("status", FieldType::String, false, Some("'active'"));
+        let mut s = String::new();
+        write_column_def(&mut s, &crate::sql::Postgres, &f);
+        assert!(s.contains("DEFAULT 'active'"), "got: {s}");
     }
 
     #[test]

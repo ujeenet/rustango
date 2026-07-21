@@ -61,21 +61,6 @@ pub struct Migration {
     /// until v0.5 Slice 3 wires it in.
     #[serde(default, skip_serializing_if = "MigrationScope::is_default")]
     pub scope: MigrationScope,
-    /// Django-style squash bookkeeping: the names of the migrations this
-    /// one supersedes. Empty for ordinary migrations.
-    ///
-    /// When non-empty, the apply runner *reconciles* instead of blindly
-    /// running `forward`:
-    /// * every replaced name already in the ledger → the squash is
-    ///   recorded as applied **without running its DDL**, and the replaced
-    ///   rows are tombstoned (the tables already exist — re-running
-    ///   `CREATE TABLE` would collide);
-    /// * none of them applied (a fresh DB) → run `forward` normally (the
-    ///   squash *is* the initial migration);
-    /// * a partial overlap → refuse (inconsistent history), so the
-    ///   operator resolves it deliberately.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub replaces: Vec<String>,
     /// Full schema snapshot **after** applying `forward`.
     pub snapshot: SchemaSnapshot,
     /// Ordered list of operations — schema and data interleaved.

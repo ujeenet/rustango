@@ -137,7 +137,6 @@ fn make_empty_picks_next_index_after_existing_migrations() {
     write_migration(
         &dir,
         &Migration {
-            replaces: Vec::new(),
             name: "0003_existing".into(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -209,7 +208,6 @@ fn make_data_migration_indexes_after_existing_chain() {
     write_migration(
         &dir,
         &Migration {
-            replaces: Vec::new(),
             name: "0001_initial".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: None,
@@ -222,7 +220,6 @@ fn make_data_migration_indexes_after_existing_chain() {
     write_migration(
         &dir,
         &Migration {
-            replaces: Vec::new(),
             name: "0002_add_col".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: Some("0001_initial".into()),
@@ -247,7 +244,6 @@ fn append_data_op_adds_op_to_existing_migration() {
     write_migration(
         &dir,
         &Migration {
-            replaces: Vec::new(),
             name: "0001_initial".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             prev: None,
@@ -436,7 +432,6 @@ async fn migrate_subcommand_applies_pending() {
     write_migration(
         &dir,
         &Migration {
-            replaces: Vec::new(),
             name: mig_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -495,7 +490,6 @@ async fn migrate_to_target_subcommand_routes_correctly() {
         write_migration(
             &dir,
             &Migration {
-                replaces: Vec::new(),
                 name: name.clone(),
                 created_at: "2026-04-28T00:00:00Z".into(),
                 prev,
@@ -560,7 +554,6 @@ async fn downgrade_subcommand_steps_back_one_by_default() {
         write_migration(
             &dir,
             &Migration {
-                replaces: Vec::new(),
                 name: name.clone(),
                 created_at: "2026-04-28T00:00:00Z".into(),
                 prev,
@@ -649,7 +642,6 @@ async fn migrate_dry_run_subcommand_prints_sql_no_writes() {
     write_migration(
         &dir,
         &Migration {
-            replaces: Vec::new(),
             name: mig_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,
@@ -727,7 +719,6 @@ async fn run_with_writer_captures_migrate_output() {
     write_migration(
         &dir,
         &Migration {
-            replaces: Vec::new(),
             name: mig_name.clone(),
             created_at: "2026-04-28T00:00:00Z".into(),
             prev: None,

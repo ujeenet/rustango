@@ -99,7 +99,6 @@ fn data_op_reversible_defaults_to_true() {
 #[test]
 fn round_trip_schema_only_migration() {
     let mig = Migration {
-        replaces: Vec::new(),
         name: "0001_initial".into(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -121,7 +120,6 @@ fn round_trip_schema_only_migration() {
 #[test]
 fn round_trip_mixed_schema_and_data_ops() {
     let mig = Migration {
-        replaces: Vec::new(),
         name: "0002_backfill_slugs".into(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: Some("0001_initial".into()),
@@ -151,7 +149,6 @@ fn round_trip_mixed_schema_and_data_ops() {
 #[test]
 fn round_trip_irreversible_data_op() {
     let mig = Migration {
-        replaces: Vec::new(),
         name: "0003_purge_pii".into(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: Some("0002_backfill_slugs".into()),
@@ -181,7 +178,6 @@ fn round_trip_irreversible_data_op() {
 #[test]
 fn write_then_load_round_trip_via_filesystem() {
     let mig = Migration {
-        replaces: Vec::new(),
         name: "0001_initial".into(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -261,7 +257,6 @@ fn names_lex_sort_correctly_for_apply_order() {
 #[test]
 fn migration_with_empty_forward_round_trips() {
     let mig = Migration {
-        replaces: Vec::new(),
         name: "0001_marker".into(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -359,7 +354,6 @@ fn list_dir_rejects_broken_prev_chain() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let mig = Migration {
-        replaces: Vec::new(),
         name: "0002_orphan".into(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: Some("0001_initial".into()),
@@ -388,7 +382,6 @@ fn list_dir_accepts_well_formed_chain() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let m1 = Migration {
-        replaces: Vec::new(),
         name: "0001_initial".into(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: None,
@@ -398,7 +391,6 @@ fn list_dir_accepts_well_formed_chain() {
         forward: vec![],
     };
     let m2 = Migration {
-        replaces: Vec::new(),
         name: "0002_next".into(),
         created_at: "2026-04-28T00:00:00Z".into(),
         prev: Some("0001_initial".into()),
@@ -421,7 +413,6 @@ fn list_dir_skips_subdirectories() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("nested")).unwrap();
     let mig = Migration {
-        replaces: Vec::new(),
         name: "0001_x".into(),
         created_at: "now".into(),
         prev: None,

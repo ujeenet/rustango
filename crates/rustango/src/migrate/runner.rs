@@ -437,11 +437,7 @@ async fn migrate_with_ledger(
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            match decide_pg(pool, &mig, &applied).await? {
-                ReconcileAction::Run => apply_one(pool, &mig, ledger).await?,
-                ReconcileAction::Fake => fake_apply(pool, &mig, ledger).await?,
-                ReconcileAction::Conflict(msg) => return Err(MigrateError::Validation(msg)),
-            }
+            apply_one(pool, &mig, ledger).await?;
             newly.push(mig);
         }
         Ok(newly)
@@ -701,252 +697,6 @@ fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, 
     })
 }
 
-/// What the runner should do with a pending migration once it has been
-/// reconciled against the database. See [`Migration::replaces`].
-enum ReconcileAction {
-    /// Ordinary migration, or a squash on a genuinely fresh DB — run `forward`.
-    Run,
-    /// Squash whose predecessors already ran (their rows exist, or its tables
-    /// already exist) — record it applied and tombstone any replaced rows, but
-    /// run no DDL.
-    Fake,
-    /// Inconsistent state (some predecessors / tables present, some not) — refuse.
-    Conflict(String),
-}
-
-/// First-stage decision from the ledger alone.
-enum LedgerVerdict {
-    Run,
-    Fake,
-    Conflict(String),
-    /// None of the replaced names are in *this* ledger. That means either a
-    /// fresh DB, or a cross-ledger reconcile (e.g. the framework's old
-    /// hand-built bootstrap ran under a different ledger than the generated
-    /// system migrations). Fall through to a table-existence check
-    /// (Django's `--fake-initial`).
-    CheckTables,
-}
-
-/// Compare a squash migration's `replaces` list against the ledger.
-fn ledger_verdict(mig: &Migration, applied: &HashSet<String>) -> LedgerVerdict {
-    if mig.replaces.is_empty() {
-        return LedgerVerdict::Run;
-    }
-    let present = mig.replaces.iter().filter(|n| applied.contains(*n)).count();
-    if present == 0 {
-        LedgerVerdict::CheckTables
-    } else if present == mig.replaces.len() {
-        LedgerVerdict::Fake
-    } else {
-        let missing: Vec<&str> = mig
-            .replaces
-            .iter()
-            .filter(|n| !applied.contains(*n))
-            .map(String::as_str)
-            .collect();
-        LedgerVerdict::Conflict(format!(
-            "cannot reconcile squash `{}`: it replaces {} migration(s) but only some are \
-             recorded on this database (not in the ledger: {}). Apply or `migrate --fake` the \
-             remaining replaced migrations first, then re-run.",
-            mig.name,
-            mig.replaces.len(),
-            missing.join(", "),
-        ))
-    }
-}
-
-/// The tables a migration's `forward` list would `CREATE`.
-fn create_table_targets(mig: &Migration) -> Vec<&str> {
-    mig.forward
-        .iter()
-        .filter_map(|op| match op {
-            Operation::Schema(super::diff::SchemaChange::CreateTable(t)) => Some(t.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Second-stage decision: given how many of the squash's `CREATE TABLE`
-/// targets already exist, decide fake vs run vs conflict. Django `--fake-initial`.
-fn table_verdict(mig: &Migration, targets: &[&str], existing: usize) -> ReconcileAction {
-    if targets.is_empty() || existing == 0 {
-        ReconcileAction::Run
-    } else if existing == targets.len() {
-        ReconcileAction::Fake
-    } else {
-        ReconcileAction::Conflict(format!(
-            "cannot reconcile squash `{}`: {} of its {} tables already exist but the rest do not, \
-             so the schema is in an in-between state. Bring the schema to a consistent point \
-             (all or none of the squash's tables) before re-running.",
-            mig.name,
-            existing,
-            targets.len(),
-        ))
-    }
-}
-
-/// Does `table` exist on the tri-dialect pool?
-async fn table_exists_pool(pool: &crate::sql::Pool, table: &str) -> Result<bool, MigrateError> {
-    match pool {
-        #[cfg(feature = "postgres")]
-        crate::sql::Pool::Postgres(pg) => {
-            // Scope to the CURRENT schema, not the search_path — otherwise a
-            // schema-mode tenant would falsely see the shared registry tables
-            // (audit_log, content_types) that live in `public` and misfire the
-            // fake-initial check. `to_regclass` follows search_path; this does not.
-            let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
-                 WHERE table_schema = current_schema() AND table_name = $1)",
-            )
-            .bind(table)
-            .fetch_one(pg)
-            .await?;
-            Ok(exists)
-        }
-        #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(my) => {
-            let c: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM information_schema.tables \
-                 WHERE table_schema = DATABASE() AND table_name = ?",
-            )
-            .bind(table)
-            .fetch_one(my)
-            .await?;
-            Ok(c > 0)
-        }
-        #[cfg(feature = "sqlite")]
-        crate::sql::Pool::Sqlite(sq) => {
-            let c: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
-            )
-            .bind(table)
-            .fetch_one(sq)
-            .await?;
-            Ok(c > 0)
-        }
-    }
-}
-
-/// Full reconcile decision on the tri-dialect pool: ledger first, then a
-/// table-existence check when the ledger can't see the predecessors.
-async fn decide_pool(
-    pool: &crate::sql::Pool,
-    mig: &Migration,
-    applied: &HashSet<String>,
-) -> Result<ReconcileAction, MigrateError> {
-    match ledger_verdict(mig, applied) {
-        LedgerVerdict::Run => Ok(ReconcileAction::Run),
-        LedgerVerdict::Fake => Ok(ReconcileAction::Fake),
-        LedgerVerdict::Conflict(m) => Ok(ReconcileAction::Conflict(m)),
-        LedgerVerdict::CheckTables => {
-            let targets = create_table_targets(mig);
-            let mut existing = 0;
-            for t in &targets {
-                if table_exists_pool(pool, t).await? {
-                    existing += 1;
-                }
-            }
-            Ok(table_verdict(mig, &targets, existing))
-        }
-    }
-}
-
-/// Does `table` exist on the legacy `PgPool`?
-#[cfg(feature = "postgres")]
-async fn table_exists_pg(pool: &PgPool, table: &str) -> Result<bool, MigrateError> {
-    // Current schema only — see the note in `table_exists_pool`.
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM information_schema.tables \
-         WHERE table_schema = current_schema() AND table_name = $1)",
-    )
-    .bind(table)
-    .fetch_one(pool)
-    .await?;
-    Ok(exists)
-}
-
-/// Full reconcile decision on the legacy `PgPool` path (see [`decide_pool`]).
-#[cfg(feature = "postgres")]
-async fn decide_pg(
-    pool: &PgPool,
-    mig: &Migration,
-    applied: &HashSet<String>,
-) -> Result<ReconcileAction, MigrateError> {
-    match ledger_verdict(mig, applied) {
-        LedgerVerdict::Run => Ok(ReconcileAction::Run),
-        LedgerVerdict::Fake => Ok(ReconcileAction::Fake),
-        LedgerVerdict::Conflict(m) => Ok(ReconcileAction::Conflict(m)),
-        LedgerVerdict::CheckTables => {
-            let targets = create_table_targets(mig);
-            let mut existing = 0;
-            for t in &targets {
-                if table_exists_pg(pool, t).await? {
-                    existing += 1;
-                }
-            }
-            Ok(table_verdict(mig, &targets, existing))
-        }
-    }
-}
-
-/// Fake-apply a squash on the tri-dialect pool: record the squash in the
-/// ledger and delete the rows it replaces — no schema DDL. The squash name
-/// is inserted **first** so that a crash mid-tombstone still leaves the
-/// squash recorded (a re-run then skips it; leftover replaced rows are
-/// harmless orphans). Callers hold the migrate advisory lock.
-async fn fake_apply_pool(
-    pool: &crate::sql::Pool,
-    mig: &Migration,
-    ledger: &str,
-) -> Result<(), MigrateError> {
-    tracing::info!(
-        migration = %mig.name,
-        replaces = ?mig.replaces,
-        "reconciling squash — recording applied without running DDL (replaced set already present)"
-    );
-    let ph = pool.dialect().placeholder(1);
-    crate::sql::raw_execute_pool(
-        pool,
-        &format!("INSERT INTO {ledger} (name) VALUES ({ph})"),
-        vec![crate::core::SqlValue::String(mig.name.clone())],
-    )
-    .await
-    .map_err(|e| MigrateError::Validation(e.to_string()))?;
-    for replaced in &mig.replaces {
-        crate::sql::raw_execute_pool(
-            pool,
-            &format!("DELETE FROM {ledger} WHERE name = {ph}"),
-            vec![crate::core::SqlValue::String(replaced.clone())],
-        )
-        .await
-        .map_err(|e| MigrateError::Validation(e.to_string()))?;
-    }
-    Ok(())
-}
-
-/// Fake-apply a squash on the legacy `PgPool` path (see [`fake_apply_pool`]).
-#[cfg(feature = "postgres")]
-async fn fake_apply(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
-    tracing::info!(
-        migration = %mig.name,
-        replaces = ?mig.replaces,
-        "reconciling squash — recording applied without running DDL (replaced set already present)"
-    );
-    let mut tx = pool.begin().await?;
-    sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES ($1)"))
-        .bind(&mig.name)
-        .execute(&mut *tx)
-        .await?;
-    for replaced in &mig.replaces {
-        sqlx::query(&format!("DELETE FROM {ledger} WHERE name = $1"))
-            .bind(replaced)
-            .execute(&mut *tx)
-            .await?;
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
 #[cfg(feature = "postgres")]
 async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic)");
@@ -1150,11 +900,7 @@ async fn migrate_embedded_with_ledger(
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            match decide_pg(pool, &mig, &applied).await? {
-                ReconcileAction::Run => apply_one(pool, &mig, ledger).await?,
-                ReconcileAction::Fake => fake_apply(pool, &mig, ledger).await?,
-                ReconcileAction::Conflict(msg) => return Err(MigrateError::Validation(msg)),
-            }
+            apply_one(pool, &mig, ledger).await?;
             newly.push(mig);
         }
         Ok(newly)
@@ -1671,49 +1417,16 @@ pub async fn migrate_pool_with_ledger(
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            match decide_pool(pool, &mig, &applied).await? {
-                ReconcileAction::Run => {
-                    if mig.atomic {
-                        apply_atomic_pool(pool, &mig, ledger).await?;
-                    } else {
-                        apply_nonatomic_pool(pool, &mig, ledger).await?;
-                    }
-                }
-                ReconcileAction::Fake => fake_apply_pool(pool, &mig, ledger).await?,
-                ReconcileAction::Conflict(msg) => return Err(MigrateError::Validation(msg)),
+            if mig.atomic {
+                apply_atomic_pool(pool, &mig, ledger).await?;
+            } else {
+                apply_nonatomic_pool(pool, &mig, ledger).await?;
             }
             newly.push(mig);
         }
         Ok(newly)
     })
     .await
-}
-
-/// `migrate --fake <name>` — record a migration as applied **without running
-/// its `forward` ops**, and tombstone anything it `replaces`. The operator
-/// escape hatch for reconciling a history the runner can't auto-detect (e.g.
-/// a squash whose predecessors are only partially recorded). Returns `false`
-/// when the migration was already applied (a no-op).
-///
-/// # Errors
-/// [`MigrateError::Validation`] if `name` isn't a migration file in `dir`;
-/// plus any ledger I/O error.
-pub async fn fake_apply_by_name_pool(
-    pool: &crate::sql::Pool,
-    dir: &Path,
-    name: &str,
-) -> Result<bool, MigrateError> {
-    ensure_ledger_pool(pool).await?;
-    let all = file::list_dir(dir)?;
-    let mig = all.iter().find(|m| m.name == name).ok_or_else(|| {
-        MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
-    })?;
-    let applied = applied_set_pool(pool).await?;
-    if applied.contains(name) {
-        return Ok(false);
-    }
-    fake_apply_pool(pool, mig, LEDGER_TABLE).await?;
-    Ok(true)
 }
 
 /// Hold the migrate session-scoped advisory lock while `body` runs,
@@ -2504,15 +2217,7 @@ pub async fn migrate_embedded_pool(
     migrate_embedded_pool_with_ledger(pool, embedded, LEDGER_TABLE).await
 }
 
-/// Apply an embedded migration slice against a custom ledger (see
-/// [`migrate_embedded_pool`]). Reconcile-aware: entries carrying `replaces`
-/// fake-apply when their predecessors/tables are already present. Used for the
-/// framework's shipped [`SYSTEM_MIGRATIONS`](crate::migrate::SYSTEM_MIGRATIONS)
-/// under the system ledger.
-///
-/// # Errors
-/// As [`migrate_embedded_pool`].
-pub async fn migrate_embedded_pool_with_ledger(
+async fn migrate_embedded_pool_with_ledger(
     pool: &crate::sql::Pool,
     embedded: &[(&str, &str)],
     ledger: &str,
@@ -2541,11 +2246,7 @@ pub async fn migrate_embedded_pool_with_ledger(
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            match decide_pool(pool, &mig, &applied).await? {
-                ReconcileAction::Run => apply_one_pool(pool, &mig, ledger).await?,
-                ReconcileAction::Fake => fake_apply_pool(pool, &mig, ledger).await?,
-                ReconcileAction::Conflict(msg) => return Err(MigrateError::Validation(msg)),
-            }
+            apply_one_pool(pool, &mig, ledger).await?;
             newly.push(mig);
         }
         Ok(newly)

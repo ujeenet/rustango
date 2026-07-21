@@ -43,7 +43,6 @@ fn embedded_migrations_const_is_loaded() {
 #[test]
 fn migration_serde_round_trips_schema_and_data_ops() {
     let mig = Migration {
-        replaces: Vec::new(),
         name: "9999_demo".into(),
         created_at: "2026-05-04T00:00:00Z".into(),
         prev: None,

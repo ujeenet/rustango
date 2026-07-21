@@ -72,7 +72,6 @@ fn snapshot_with_table(table_name: &str) -> SchemaSnapshot {
 
 fn make_create_migration(name: &str, table: &str) -> Migration {
     Migration {
-        replaces: Vec::new(),
         name: name.into(),
         created_at: "2026-04-29T00:00:00Z".into(),
         prev: None,

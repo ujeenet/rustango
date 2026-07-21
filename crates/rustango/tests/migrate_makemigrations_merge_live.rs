@@ -28,7 +28,6 @@ fn empty_snap() -> SchemaSnapshot {
 
 fn mig_at(name: &str, prev: Option<&str>) -> Migration {
     Migration {
-        replaces: Vec::new(),
         name: name.into(),
         created_at: "2026-01-01T00:00:00Z".into(),
         prev: prev.map(str::to_owned),

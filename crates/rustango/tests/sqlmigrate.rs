@@ -45,7 +45,6 @@ fn snapshot_with_post_table() -> SchemaSnapshot {
 fn create_table_migration(name: &str) -> Migration {
     let snap = snapshot_with_post_table();
     Migration {
-        replaces: Vec::new(),
         name: name.to_owned(),
         created_at: "2026-05-22T00:00:00Z".into(),
         prev: None,

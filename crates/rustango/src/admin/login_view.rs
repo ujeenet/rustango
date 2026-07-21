@@ -63,7 +63,7 @@ pub(crate) fn protected_router(state: AppState) -> Router {
 // ============================================================ Login form (GET)
 
 async fn login_form(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    login_response(&state, &headers, None)
+    login_response(&state, &headers, None).await
 }
 
 /// Build the login-page response, seeding a double-submit CSRF token
@@ -71,14 +71,14 @@ async fn login_form(State(state): State<AppState>, headers: axum::http::HeaderMa
 /// the matching token is embedded as a hidden form field, so the POST
 /// can be validated in [`login_submit`] without relying on outer
 /// middleware placement.
-fn login_response(
+async fn login_response(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
 ) -> Response {
     use crate::forms::csrf;
     let (token, set_cookie) = csrf::ensure_token(headers, csrf::CSRF_COOKIE);
-    let html = render_login_form(state, error, &csrf::csrf_input_html(&token));
+    let html = render_login_form(state, error, &csrf::csrf_input_html(&token)).await;
     let mut resp = Html(html).into_response();
     if let Some(cookie) = set_cookie {
         if let Ok(v) = HeaderValue::from_str(&cookie) {
@@ -88,25 +88,27 @@ fn login_response(
     resp
 }
 
-fn render_login_form(state: &AppState, error: Option<&str>, csrf_input: &str) -> String {
+async fn render_login_form(state: &AppState, error: Option<&str>, csrf_input: &str) -> String {
     let admin_prefix = &state.config.admin_prefix;
-    // SSO button — shown when `with_sso` configured a provider (admin-sso).
+    // SSO buttons — one per enabled `SsoProvider` row (admin-sso).
     #[cfg(feature = "admin-sso")]
-    let (sso_enabled, sso_provider) = state
-        .config
-        .sso
-        .as_ref()
-        .map_or((false, String::new()), |c| (true, c.provider.clone()));
+    let sso_providers =
+        super::sso_provider::list_enabled(&state.pool, &format!("{admin_prefix}/login")).await;
+    #[cfg(feature = "admin-sso")]
+    let sso_enabled = !sso_providers.is_empty();
+    #[cfg(feature = "admin-sso")]
+    let sso_providers_json = serde_json::to_value(&sso_providers).unwrap_or_default();
     #[cfg(not(feature = "admin-sso"))]
-    let (sso_enabled, sso_provider) = (false, String::new());
+    let sso_enabled = false;
+    #[cfg(not(feature = "admin-sso"))]
+    let sso_providers_json = serde_json::Value::Array(Vec::new());
     let ctx = serde_json::json!({
         "title": "Sign in",
         "action": format!("{admin_prefix}/login"),
         "error": error,
         "csrf_input": csrf_input,
         "sso_enabled": sso_enabled,
-        "sso_provider": sso_provider,
-        "sso_login_url": format!("{admin_prefix}/login/sso"),
+        "sso_providers": sso_providers_json,
         "admin_title": state
             .config
             .title
@@ -175,7 +177,8 @@ async fn login_submit(
             &state,
             &headers,
             Some("Your session expired or the form was invalid. Please try again."),
-        );
+        )
+        .await;
     }
 
     // Schema-driven lookup so we don't depend on tenancy's
@@ -203,7 +206,7 @@ async fn login_submit(
             request: meta.clone(),
         })
         .await;
-        return login_response(&state, &headers, Some("Invalid credentials."));
+        return login_response(&state, &headers, Some("Invalid credentials.")).await;
     };
     let id = row.get("id").and_then(|v| v.as_i64()).unwrap_or_default();
     let stored_hash = row
@@ -237,7 +240,8 @@ async fn login_submit(
             &state,
             &headers,
             Some("Too many failed attempts. Please try again later."),
-        );
+        )
+        .await;
     }
 
     // Verify before the active check so active vs inactive accounts take
@@ -256,7 +260,7 @@ async fn login_submit(
         // Return the same generic message as unknown-user / wrong-password
         // so the login form can't be used to enumerate accounts. The
         // Inactive signal above still records the real reason for audit.
-        return login_response(&state, &headers, Some("Invalid credentials."));
+        return login_response(&state, &headers, Some("Invalid credentials.")).await;
     }
     if !password_ok {
         // Audit M1 — count this failure toward the per-account lockout.
@@ -273,7 +277,7 @@ async fn login_submit(
             request: meta.clone(),
         })
         .await;
-        return login_response(&state, &headers, Some("Invalid credentials."));
+        return login_response(&state, &headers, Some("Invalid credentials.")).await;
     }
 
     // Issue #367 — two-factor challenge. If the user has a confirmed
@@ -300,7 +304,8 @@ async fn login_submit(
                     &state,
                     &headers,
                     Some("Enter the 6-digit code from your authenticator app."),
-                );
+                )
+                .await;
             }
         }
     }

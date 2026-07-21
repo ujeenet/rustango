@@ -635,19 +635,11 @@ fn build_admin_routes(tenant_admin: &Router, routes: &crate::tenancy::RouteConfi
     // take precedence over the app router's fallback and reach the dispatch.
     #[cfg(feature = "admin-sso")]
     {
-        let sso_begin = format!(
-            "{}{}",
-            routes.login_url,
-            crate::tenancy::sso::SSO_BEGIN_SUFFIX
-        );
-        let sso_callback = format!(
-            "{}{}",
-            routes.login_url,
-            crate::tenancy::sso::SSO_CALLBACK_SUFFIX
-        );
-        r = r
-            .route(&sso_begin, any(make()))
-            .route(&sso_callback, any(make()));
+        // Multi-provider: `{login}/sso/{slug}` + `{login}/sso/{slug}/callback`.
+        // A single wildcard mount claims the whole subtree so an app's page
+        // catch-all can't shadow any per-provider route.
+        let sso_glob = format!("{}/sso/{{*rest}}", routes.login_url);
+        r = r.route(&sso_glob, any(make()));
     }
 
     // Legacy `/__admin*` mounts kept for back-compat with apps still

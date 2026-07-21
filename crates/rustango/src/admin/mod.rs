@@ -60,6 +60,10 @@ pub mod session;
 /// the tenant admin; access is link-to-existing (no auto-provisioning).
 #[cfg(feature = "admin-sso")]
 pub mod sso;
+/// `SsoProvider` model — one configurable OIDC/social provider per row,
+/// managed from the admin UI. Replaces the flat `Org.sso_*` columns.
+#[cfg(feature = "admin-sso")]
+pub mod sso_provider;
 /// Admin TOTP (two-factor) device persistence — issue #367. Gated on
 /// the `totp` feature; admin builds without it have no 2FA challenge.
 #[cfg(feature = "totp")]
@@ -85,5 +89,7 @@ pub use manage_admin::create_admin_cmd;
 pub use object_permissions::{AdminObjectPermission, ObjectPermissionFn};
 pub use queryset_hooks::{AdminQuerySetHook, QuerySetHookFn};
 pub use session::{AdminSession, AdminSessionSecret};
+#[cfg(feature = "admin-sso")]
+pub use sso_provider::SsoProvider;
 pub use urls::{router, AdminActionFn, AdminActionFuture, Builder};
 pub use user::AdminUser;

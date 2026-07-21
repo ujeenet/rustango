@@ -233,7 +233,6 @@ fn list_dir_sorts_lexicographically() {
         let snap = snapshot_with(vec![user_table()]);
         let path = dir.join(format!("{s}_x.json"));
         let mig = rustango::migrate::Migration {
-            replaces: Vec::new(),
             name: format!("{s}_x"),
             created_at: "now".into(),
             prev: None,
@@ -257,7 +256,6 @@ fn list_dir_ignores_non_json_files() {
     let _ = std::fs::create_dir_all(&dir);
     std::fs::write(dir.join("README.md"), "not a migration").unwrap();
     let mig = rustango::migrate::Migration {
-        replaces: Vec::new(),
         name: "0001_real".into(),
         created_at: "now".into(),
         prev: None,
