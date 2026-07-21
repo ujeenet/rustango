@@ -6,6 +6,63 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 _Nothing yet — next development cycle._
 
+## [0.47.0] — 2026-07-21
+
+Headline: **the framework migrates its own schema** — Django-style
+system migrations with no hardcoded DDL and plug-and-play features — plus
+**multi-provider admin SSO**, configured from the admin UI with secrets
+encrypted at rest.
+
+### Added
+
+- **Django-style framework migrations** (#1158) — the framework's own
+  `rustango_*` tables now flow through the same `makemigrations` /
+  `migrate` engine as your models. They're generated into a scaffolded
+  **`system/migrations/`** folder from the compiled models (registry +
+  tenant scope), applied under a dedicated `__rustango_system_migrations__`
+  ledger, and generated on demand at provisioning time. No hand-shipped
+  bootstrap JSON, no per-dialect DDL strings. **Features are
+  plug-and-play**: a `#[cfg(feature = …)]`-gated column or table is
+  compiler-stripped when off, so enabling a feature makes `makemigrations`
+  emit `AddColumn`/`CreateTable` and disabling emits `DropColumn`/`DropTable`.
+- **Admin SSO** (#1157) — sign in to the admin with an external IdP
+  (Google, Microsoft/Azure AD, GitHub, GitLab, Discord, or any OpenID
+  Connect provider) instead of a password. Link-to-existing (verified IdP
+  email must match an admin user; no auto-provisioning), single-tenant and
+  per-tenant, reusing the normal signed-cookie session. Gated behind the
+  `admin-sso` feature.
+- **Multi-provider, admin-managed SSO** (#1160) — SSO providers are now
+  DB rows managed from the admin UI: **many providers per surface**, a
+  per-tenant `SsoProvider` (tenant admin, granular self-service) plus a
+  registry-wide `SharedSsoProvider` (operator-defined, offered to every
+  tenant), merged on the login page with tenant-wins on a slug clash.
+  Endpoints are auto-discovered from an OIDC issuer URL; the client secret
+  is **encrypted at rest** (XChaCha20-Poly1305, `RUSTANGO_SECRET_KEY`).
+  The operator console gains a *Shared SSO* panel; routes are
+  `{login}/sso/{slug}[/callback]`.
+
+### Changed
+
+- **SSO config moved off the `Org` row** — replaced the flat
+  `Org.sso_*` columns and the `BareSsoConfig` / `Builder::with_sso` /
+  `[sso]` config path with the `SsoProvider` / `SharedSsoProvider` models
+  (breaking for the single-provider config added earlier in this cycle).
+- **`init-tenancy` is now a no-op** — the framework ships no hardcoded
+  bootstrap migrations; the tenant scaffold ships an empty
+  `system/migrations/` and `cargo run -- migrate` generates + applies the
+  framework tables. Docs updated (`sso.md`, `manage.md`, `scaffolding.md`,
+  `security.md`, README, cookbook).
+
+### Fixed
+
+- **Empty-string default renders invalid DDL** (#1161) —
+  `#[rustango(default = "")]` emitted `DEFAULT ` (nothing), collapsing to
+  `… DEFAULT  NOT NULL` which drivers reject (`near "NOT": syntax error`),
+  so any `String` / `Cast<C>` field with an empty-string default produced
+  an un-appliable `CREATE TABLE`. It now renders the quoted empty-string
+  literal `''` across all four DDL render paths (create-table + add-column,
+  both the inventory and migration paths, plus `SET DEFAULT`).
+
 ## [0.46.0] — 2026-07-12
 
 Headline: **HTTP QUERY method (RFC 10008)** — first-class support for the "safe GET with a body" across routing, extraction, safe-method policy, per-view caching, ViewSets, the client/test surfaces, and OpenAPI 3.2. Plus an ORM derived-table source and a documentation overhaul (feature-focused README, cleaned runnable cookbook, new WebSockets/SSE guide).
