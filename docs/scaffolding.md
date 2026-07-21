@@ -111,7 +111,7 @@ How the templates differ inside `main.rs` / `urls.rs`:
 
 - **api** — no admin; `urls::api()` simply aggregates your own routes.
 - **fullstack** — `urls.rs` also exposes `admin_router(pool)` (built from `admin::Builder::new(pool).build()`) so the auto-admin mounts at `/admin`.
-- **tenant** — `main.rs` adds `.tenancy()`, serving the operator console at the apex domain and each tenant under its own subdomain. It also ships the registry + tenant **bootstrap migrations**, so the very first `cargo run -- migrate` works with no extra setup.
+- **tenant** — `main.rs` adds `.tenancy()`, serving the operator console at the apex domain and each tenant under its own subdomain. The framework's own tables are generated into a **`system/migrations/`** folder from the compiled models (Django-style) on the first `cargo run -- migrate` — no hand-shipped bootstrap JSON, so the very first migrate works with no extra setup.
 
 ### Layered configuration
 
@@ -144,7 +144,6 @@ Options:
 
 - **`--into <dir>`** — scaffold under a base directory other than `src/` (e.g. a workspace member).
 - **`--with-manage-bin`** — also emit a `bin/manage.rs` (for layouts that prefer a separate manage binary).
-- **`--with-bootstrap-migration`** — drop a starter migration alongside the new app.
 
 ---
 

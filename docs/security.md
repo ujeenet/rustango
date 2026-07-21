@@ -284,7 +284,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 Authentication is how you confirm who is making a request. **Rustango** ships three ready-made backends (Basic auth, API keys, and JWTs) and lets you write your own — much like Django's authentication backends. You attach them to routes, and requests without a recognized credential get a `401`.
 
-> **Admin SSO.** To let operators sign in to the admin with an external IdP (Google, Microsoft/Azure AD, GitHub, or any OpenID Connect provider) instead of a password, enable the `admin-sso` feature — see the [SSO guide](sso.md). It's link-to-existing (the verified IdP email must match an admin user; no auto-provisioning), works for the single-tenant admin (global `[sso]`) and per-tenant, and reuses the existing session.
+> **Admin SSO.** To let operators sign in to the admin with an external IdP (Google, Microsoft/Azure AD, GitHub, or any OpenID Connect provider) instead of a password, enable the `admin-sso` feature — see the [SSO guide](sso.md). Providers are **managed from the admin UI as rows** (multiple per surface; per-tenant, or a shared set across tenants), with the client secret **encrypted at rest**. It's link-to-existing (the verified IdP email must match an admin user; no auto-provisioning) and reuses the existing session.
 
 ### Three ready-made backends
 

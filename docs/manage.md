@@ -294,15 +294,16 @@ Writes:
   rust-toolchain.toml
   docker-compose.yml
   README.md
-  migrations/                               (tenant template only — bootstrap JSONs)
+  migrations/                               (your app's migrations)
+  system/migrations/                        (tenant template — framework tables, generated)
   src/{main,models,views,urls}.rs
 ```
 
-The tenant template writes
-`migrations/0001_rustango_registry_initial.json` and
-`0001_rustango_tenant_initial.json` for you — see
-[`init-tenancy`](#init-tenancy) for what they contain and when to
-regenerate them.
+The tenant template ships an **empty** `system/migrations/` folder. The
+framework's own tables (`rustango_orgs`, `rustango_users`,
+roles/permissions, …) are generated into it from the compiled models on
+the first `cargo run -- migrate` — there's no hand-shipped bootstrap
+JSON. See [`migrate`](#migrate) / [`migrate-registry`](#migrate-registry).
 
 ### `startapp <name> [flags]`
 
@@ -313,7 +314,6 @@ of your project grouped together.
 ```bash
 cargo run -- startapp blog
 cargo run -- startapp shop --with-manage-bin             # also writes src/bin/manage.rs
-cargo run -- startapp shop --with-bootstrap-migration    # tenancy: also seed bootstrap migrations
 cargo run -- startapp shop --into apps                   # write under src/apps/shop/ instead
 ```
 
@@ -325,17 +325,10 @@ src/<name>/
   models.rs
   views.rs
   urls.rs
-  migrations/                               (when --with-bootstrap-migration on tenancy)
 ```
 
 Safe to re-run — existing files are left alone. One manual step: add
 `pub mod <name>;` to `src/lib.rs` so Rust compiles the new module.
-
-`--with-bootstrap-migration` is tenancy-only. It runs
-[`init-tenancy`](#init-tenancy) inside the new app's `migrations/`
-directory, writing the framework's registry and tenant bootstrap files
-there. Skip it if you already have those bootstrap files at the project
-root.
 
 ---
 
@@ -559,32 +552,23 @@ with `features = ["tenancy"]` AND `Cli::new()` is chained with
 
 ### `init-tenancy`
 
-Writes the framework's starter migrations for multi-tenancy into your
-migrations directory. It creates `0001_rustango_registry_initial.json`
-(which builds the shared `rustango_orgs` and `rustango_operators`
-tables) and `0001_rustango_tenant_initial.json` (which builds the
-per-tenant `rustango_users` table).
+**No-op — retained for compatibility.** The framework no longer ships
+hand-built bootstrap migrations. Its own tables (`rustango_orgs`,
+`rustango_operators`, `rustango_users`, roles/permissions, …) are
+generated into `system/migrations/` from the compiled models — the
+normal Django flow (models → `makemigrations` → `migrate`) — and applied
+by [`migrate`](#migrate) / [`migrate-registry`](#migrate-registry), which
+generate them on demand if the files are missing.
 
 ```bash
-cargo run -- init-tenancy
+cargo run -- init-tenancy   # does nothing now; kept so old scripts don't break
 ```
 
-**Safe to re-run**: if those files already exist, they're left alone.
-Most of the time this command runs for you indirectly:
-
-- `cargo rustango new --template tenant` writes the same JSONs from a
-  static template, so a freshly scaffolded project never needs
-  `init-tenancy`.
-- `startapp --with-bootstrap-migration` runs it against a per-app
-  migrations directory.
-- `Builder::migrate(project_root)` runs it implicitly before applying
-  pending migrations.
-
-If you've chained `.user_model::<AppUser>()` on `Cli`, this command
-builds the starter migration from your `AppUser` schema instead of the
-framework's `User`, so your extra columns end up in the `CREATE TABLE`.
-See [Custom user model](#custom-user-model-extra-columns-on-rustango_users)
-below.
+Older versions wrote `0001_rustango_*_initial.json` here; that hardcoded
+flow is gone. **To provision, just run `cargo run -- migrate`.** A custom
+user model (`.user_model::<AppUser>()`) flows through the same generated
+`system/migrations/` — see
+[Custom user model](#custom-user-model-extra-columns-on-rustango_users).
 
 ### `migrate-registry`
 
@@ -824,9 +808,11 @@ breaking framework auth.
 ### Option 2 — `Cli::user_model::<AppUser>()` *(greenfield only)*
 
 Use this only on a fresh project where you want the extra fields right
-on the `rustango_users` table itself. The `init-tenancy` command then
-generates a starter migration whose `CREATE TABLE rustango_users`
-includes your columns.
+on the `rustango_users` table itself. Because `AppUser` *is* the
+`rustango_users` model, its columns flow through the ordinary
+`makemigrations` → `migrate` engine: the framework's tables are generated
+into `system/migrations/`, so `AppUser`'s columns land in the generated
+`CREATE TABLE rustango_users`.
 
 **Step 1.** Define your model. It has to declare every framework-required
 column exactly (`id`, `username`, `password_hash`, `is_superuser`,
@@ -866,31 +852,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-**Step 3.** Make sure no starter migration exists yet. If you ran
-`cargo rustango new --template tenant`, the scaffolder already wrote
-`migrations/0001_rustango_{registry,tenant}_initial.json` from a static
-template — those use the framework's `User`, and `init-tenancy` won't
-overwrite them. So either:
-
-- delete both `0001_rustango_*_initial.json` files before continuing, or
-- start from a non-template `cargo new` and skip the scaffolder.
+**Step 3.** Register `AppUser` **instead of** the framework `User` — only
+one model may claim `table = "rustango_users"`. The scaffolder ships no
+static bootstrap JSON (just an empty `system/migrations/`), so there's
+nothing to delete; just don't also register the framework `User`.
 
 **Step 4.** Generate + apply:
 
 ```bash
-cargo run -- init-tenancy        # writes 0001_*.json using AppUser's schema
-cargo run -- migrate             # creates rustango_users with your extras
+cargo run -- makemigrations       # generates system/migrations/ with AppUser's columns
+cargo run -- migrate              # creates rustango_users with your extras
 ```
 
 **Caveats:**
 
-- `init-tenancy` won't rewrite the migration once it's on disk, so
-  changing `AppUser` later has no effect on it. To add columns after
-  the fact, write a normal `AddColumn` migration via `makemigrations`.
-- Both the framework's `User` and your `AppUser` register as models
-  (they share `table = "rustango_users"`). `makemigrations` may then
-  produce redundant operations on that table — review the generated
-  JSON before applying. This is the main reason Option 2 is for fresh
+- Changing `AppUser` later is a normal schema change: re-run
+  `makemigrations` to emit the `AddColumn` migration, then `migrate`.
+- Only one model may map to `rustango_users`. Registering **both** the
+  framework `User` and your `AppUser` makes `makemigrations` ambiguous —
+  register `AppUser` alone. This is the main reason Option 2 is for fresh
   projects only; on an existing project, Option 1 avoids the problem.
 - Framework auth and admin code reads the seven core columns by name;
   your extra columns are reachable only through
