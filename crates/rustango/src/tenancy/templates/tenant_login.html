@@ -105,6 +105,7 @@
       color: var(--color-text, #222); font: inherit; text-decoration: none; cursor: pointer;
     }
     .sso-button:hover { background: var(--color-surface-hover, #f3f3f3); }
+    .sso-button + .sso-button { margin-top: var(--space-2, 0.5rem); }
     .error {
       color: var(--color-error-fg);
       background: var(--color-error-bg);
@@ -139,12 +140,12 @@
     <input type="password" id="password" name="password" autocomplete="current-password" required>
     <input type="hidden" name="next" value="{{ next }}">
     <button type="submit">Sign in</button>
+    {% if sso_enabled %}
+    <div class="sso-divider"><span>or</span></div>
+    {% for p in sso_providers %}
+    <a class="sso-button" href="{{ p.login_url }}">{{ p.label }}</a>
+    {% endfor %}
+    {% endif %}
   </form>
-  {% if sso_enabled %}
-  <div class="sso-divider"><span>or</span></div>
-  {% for p in sso_providers %}
-  <a class="sso-button" href="{{ p.login_url }}">{{ p.label }}</a>
-  {% endfor %}
-  {% endif %}
 </body>
 </html>
