@@ -100,14 +100,15 @@ pub struct User {
     #[rustango(max_length = 255)]
     pub password_hash: String,
     /// Email used to link an external SSO identity (OIDC / social
-    /// OAuth) to this tenant user. The `admin-sso` login matches the
-    /// IdP's verified email against this column; `None` means the
-    /// account can't sign in via SSO. Unique within the tenant, but
-    /// multiple `NULL`s are allowed.
+    /// OAuth) to this tenant user. Both the admin/tenant-console login
+    /// and the member login match the IdP's verified email against this
+    /// column; `None` means the account can't sign in via SSO. Unique
+    /// within the tenant, but multiple `NULL`s are allowed.
     ///
-    /// `#[cfg(feature = "admin-sso")]`-gated — enabling/disabling SSO
-    /// generates an Add/DropColumn migration for this column.
-    #[cfg(feature = "admin-sso")]
+    /// `#[cfg(feature = "sso")]`-gated (the admin-independent SSO core,
+    /// which `admin-sso` also enables) — enabling/disabling SSO generates
+    /// an Add/DropColumn migration for this column.
+    #[cfg(feature = "sso")]
     #[rustango(max_length = 254, unique)]
     pub email: Option<String>,
     /// Org-admin within this tenant. Renders write-buttons, allows
@@ -238,7 +239,7 @@ pub async fn authenticate_user(
         password_hash: row.try_get::<String, _>("password_hash")?,
         // Defensive get — tolerates rows from tenants not yet migrated
         // to the SSO `email` column (mirrors `data` / `password_changed_at`).
-        #[cfg(feature = "admin-sso")]
+        #[cfg(feature = "sso")]
         email: row.try_get::<Option<String>, _>("email").ok().flatten(),
         is_superuser: row.try_get::<bool, _>("is_superuser")?,
         active: row.try_get::<bool, _>("active")?,
