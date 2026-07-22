@@ -410,6 +410,10 @@ where
     // still applies — every request goes straight to the inner admin.
     let mut user_perms: Option<std::collections::HashSet<String>> = None;
     let mut session_user_id: Option<i64> = None;
+    // Chrome session info threaded into the inner admin so the sidebar
+    // renders "Signed in as <username>" + the Logout button.
+    let mut session_username: Option<String> = None;
+    let mut session_is_superuser = false;
     // v0.27.8 (#78) — populated when the session was minted by
     // the operator console's impersonation flow. Threaded into
     // the chrome context for the impersonation banner + into
@@ -543,9 +547,12 @@ where
             SessionCheck::Authenticated {
                 is_superuser,
                 user_id,
+                username,
                 impersonated_by: imp_by,
             } => {
                 session_user_id = Some(user_id);
+                session_username = Some(username);
+                session_is_superuser = is_superuser;
                 impersonated_by = imp_by;
                 if !is_superuser {
                     // Fetch the user's effective codenames once per request
@@ -615,6 +622,7 @@ where
         impersonated_by,
         routes.admin_url.as_str(),
         routes.change_password_url.as_str(),
+        routes.logout_url.as_str(),
         routes.audit_url.as_str(),
         routes.static_url.as_str(),
     );
@@ -649,16 +657,36 @@ where
             Err(_infallible) => unreachable!("axum::Router service is Infallible"),
         }
     };
-    let response = if let Some(uid) = session_user_id {
-        crate::audit::with_source(
-            crate::audit::AuditSource::User {
-                id: uid.to_string(),
-            },
-            dispatch,
-        )
-        .await
-    } else {
-        dispatch.await
+    let audited = async {
+        if let Some(uid) = session_user_id {
+            crate::audit::with_source(
+                crate::audit::AuditSource::User {
+                    id: uid.to_string(),
+                },
+                dispatch,
+            )
+            .await
+        } else {
+            dispatch.await
+        }
+    };
+    // Install the request's session into the admin task-local the inner
+    // chrome reads (`admin::session::current()`), so the tenant admin
+    // sidebar renders "Signed in as <username>" + the Logout button —
+    // the bare admin gets this from its own `require_session` middleware,
+    // which the tenant admin path bypasses.
+    let response = match session_user_id {
+        Some(uid) => {
+            let sess = crate::admin::session::AdminSession {
+                user_id: uid,
+                username: session_username.clone().unwrap_or_default(),
+                is_superuser: session_is_superuser,
+            };
+            crate::admin::session::CURRENT_SESSION
+                .scope(sess, audited)
+                .await
+        }
+        None => audited.await,
     };
 
     // Schema-mode pool is dropped here when `pool` falls out of
@@ -678,6 +706,11 @@ enum SessionCheck {
         /// duration of the inner-router dispatch so any audited
         /// write picks up the user-attribution automatically.
         user_id: i64,
+        /// Username of the authenticated user (empty for an
+        /// operator-impersonation session, which has no tenant user).
+        /// Threaded into the inner admin's chrome session so the
+        /// sidebar renders "Signed in as <username>" + Logout.
+        username: String,
         /// `Some(operator_id)` when this session was minted by
         /// the operator console's "Open admin as superuser →"
         /// flow (#78). Drives the impersonation banner +
@@ -757,6 +790,7 @@ async fn validate_session(
             Some(op) if op.active => SessionCheck::Authenticated {
                 is_superuser: true,
                 user_id: 0,
+                username: String::new(),
                 impersonated_by: Some(operator_id),
             },
             // Operator gone or deactivated → drop the impersonation.
@@ -799,6 +833,7 @@ async fn validate_session(
     SessionCheck::Authenticated {
         is_superuser: user.is_superuser,
         user_id: payload.uid,
+        username: user.username.clone(),
         impersonated_by: None,
     }
 }
@@ -1444,6 +1479,7 @@ fn build_inner_admin_router(
     impersonated_by: Option<i64>,
     admin_url_prefix: &str,
     change_password_url: &str,
+    logout_url: &str,
     audit_url: &str,
     static_url: &str,
 ) -> Router {
@@ -1468,7 +1504,10 @@ fn build_inner_admin_router(
         .static_url(static_url)
         // v0.28.2 (#77) — surface the self-serve change-password
         // page in the sidebar.
-        .change_password_url(change_password_url);
+        .change_password_url(change_password_url)
+        // Sidebar Logout posts here (the tenancy-layer logout route),
+        // not the bare admin's `{prefix}/logout` which isn't mounted.
+        .logout_url(logout_url);
     // v0.27.8 (#78) — propagate the impersonation flag so chrome
     // renders the banner + audit-log emit picks it up.
     if let Some(operator_id) = impersonated_by {
