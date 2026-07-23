@@ -330,7 +330,20 @@ admin = [
 # Access is *link-to-existing* — the verified IdP email must match an
 # admin user; SSO never auto-provisions. Works for the bare admin
 # (global `[sso]` config) and, with `tenancy`, per-Org.
-admin-sso = ["admin", "oauth2", "casts"]
+#
+# Composes the admin-independent `sso` core (below) with `admin` (the
+# session + user model). `admin-sso` = `admin` + `sso`; `sso` transitively
+# brings `oauth2` + `casts`.
+admin-sso = ["admin", "sso"]
+
+# SSO core (`rustango::sso`) — the admin-INDEPENDENT OpenID Connect /
+# social-OAuth handshake plumbing (`ResolvedSso`, `build_provider`,
+# `verified_email`, …) plus the DB-backed `SsoProvider` model
+# (`rustango_sso_providers`). No `admin` dependency, so member / end-user
+# SSO (`tenancy::member_auth`) can build without pulling in the auto-admin.
+# Composes the existing `oauth2` client with `casts` (encrypted-at-rest
+# client secret). `admin-sso` layers the admin login wiring on top.
+sso = ["oauth2", "casts"]
 
 # Multi-tenancy module (`rustango::tenancy`). Implies `admin` (the
 # tenant admin builder wraps `rustango::admin`). Pulls in Argon2 +
@@ -392,7 +405,7 @@ runserver = ["dep:axum", "dep:tokio"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.48.0", path = "../rustango-macros" }
+rustango-macros = { version = "0.49.1", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

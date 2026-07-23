@@ -962,6 +962,15 @@ pub mod ws;
 #[cfg(feature = "oauth2")]
 pub mod oauth2;
 
+/// SSO (OpenID Connect / social OAuth) login core — admin-INDEPENDENT.
+/// The shared handshake plumbing (`ResolvedSso`, `build_provider`,
+/// `verified_email`, …) plus the DB-backed [`sso::SsoProvider`] model,
+/// reused by the bare admin ([`crate::admin::sso`]), the tenant console
+/// ([`crate::tenancy::sso`]), and members ([`crate::tenancy::member_auth`]).
+/// The `admin-sso` feature layers the admin login wiring on top.
+#[cfg(feature = "sso")]
+pub mod sso;
+
 /// Model Context Protocol (MCP) server — expose tools / prompts /
 /// resources to external ML agents over JSON-RPC 2.0 + Streamable HTTP.
 /// Mount via [`mcp::router`] (single-tenant) or [`mcp::tenant_router`]

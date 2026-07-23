@@ -77,6 +77,12 @@ mod error;
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
 pub mod manage;
+/// Member (end-user) social SSO — OpenID Connect / social OAuth login
+/// for a tenant's own user pool, with optional auto-provisioning.
+/// Reuses the admin-independent `crate::sso` core + the DB-backed
+/// `SsoProvider` rows — builds with `tenancy + sso`, no admin required.
+#[cfg(all(feature = "tenancy", feature = "sso"))]
+pub mod member_auth;
 // v0.45 (#253) — `manage_interactive` was promoted to the crate
 // root so the bare admin's `create-admin` verb (slice B) can reuse
 // the same TTY-gated prompt helpers. Re-export keeps existing
@@ -143,6 +149,8 @@ pub use permissions::{
 
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
 pub use error::TenancyError;
+#[cfg(all(feature = "tenancy", feature = "sso"))]
+pub use member_auth::{member_sso_router, CurrentMember, MemberAuthConfig, MEMBER_COOKIE};
 #[cfg(feature = "postgres")]
 pub use migrate::migrate_tenants;
 pub use migrate::{

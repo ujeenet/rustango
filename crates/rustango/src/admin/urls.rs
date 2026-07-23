@@ -164,6 +164,13 @@ pub(crate) struct Config {
     /// `RouteConfig::change_password_url`. Standalone admins
     /// leave it `None` (no auth surface to wire it to).
     pub(crate) change_password_url: Option<String>,
+    /// Logout POST target for the sidebar button. Standalone admins
+    /// leave this `None` and the chrome falls back to
+    /// `{admin_prefix}/logout` (the bare admin's own logout route).
+    /// The tenant admin sets it to its `RouteConfig::logout_url`
+    /// (e.g. `/staff-logout`), which is handled at the tenancy layer
+    /// rather than under the admin prefix.
+    pub(crate) logout_url: Option<String>,
     /// URL suffix the audit-log view is mounted under (sibling
     /// to `admin_prefix`). The cross-row activity feed renders
     /// at `<admin_prefix><audit_url>` and the cleanup form at
@@ -429,6 +436,17 @@ impl Builder {
     #[must_use]
     pub fn change_password_url(mut self, url: impl Into<String>) -> Self {
         self.config.change_password_url = Some(url.into());
+        self
+    }
+
+    /// Set the sidebar Logout button's POST target. Standalone admins
+    /// omit this and the chrome defaults to `{admin_prefix}/logout`.
+    /// The tenant admin sets it to its `RouteConfig::logout_url` so the
+    /// button hits the tenancy-layer logout route (e.g. `/staff-logout`),
+    /// not a non-existent `{admin_prefix}/logout`.
+    #[must_use]
+    pub fn logout_url(mut self, url: impl Into<String>) -> Self {
+        self.config.logout_url = Some(url.into());
         self
     }
 

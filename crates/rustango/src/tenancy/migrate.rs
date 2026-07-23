@@ -423,12 +423,14 @@ where
             unreachable!("database_pool_for_org rejects schema-mode")
         }
     };
-    let mut applied = migrate::migrate_pool(&inner_pool, dir).await?;
     // Framework tenant tables (users, roles, permissions, api_keys,
     // audit_log, content_types) come from the makemigrations-generated
-    // system-app migrations — no hand-written ensure/bootstrap DDL.
-    applied
-        .extend(apply_system_migrations(&inner_pool, dir, crate::core::ModelScope::Tenant).await?);
+    // system-app migrations and MUST be applied BEFORE the tenant's user
+    // migrations, which may FK into them (issue #1171).
+    let mut applied =
+        apply_system_migrations(&inner_pool, dir, crate::core::ModelScope::Tenant).await?;
+    ensure_media_tables(&inner_pool).await?;
+    applied.extend(migrate::migrate_pool(&inner_pool, dir).await?);
     // Data seeders (rows, not DDL — kept): the CRUD permission codenames
     // for every registered model (#61) + the content-type catalog (#89).
     if let Err(e) = super::permissions::auto_create_permissions_pool(&inner_pool).await {
@@ -466,6 +468,24 @@ where
     migrate_tenants_db(pools, dir, registry_url).await
 }
 
+/// Ensure the framework `media` subsystem tables (`rustango_media`,
+/// `rustango_media_collections`, `rustango_media_tags`) exist in a
+/// tenant's storage. Media is not yet part of the migration engine
+/// (#1174) — it ships idempotent `CREATE TABLE IF NOT EXISTS` DDL via
+/// [`crate::media::ensure_all_tables_pool`]. We run it here, AFTER the
+/// system migrations and BEFORE the tenant's user migrations, so a tenant
+/// model that FKs `rustango_media` applies cleanly on a fresh tenant.
+/// No-op unless the `media` feature is enabled.
+async fn ensure_media_tables(pool: &crate::sql::Pool) -> Result<(), TenancyError> {
+    #[cfg(feature = "media")]
+    crate::media::ensure_all_tables_pool(pool)
+        .await
+        .map_err(|e| TenancyError::Validation(format!("media table ensure failed: {e}")))?;
+    #[cfg(not(feature = "media"))]
+    let _ = pool;
+    Ok(())
+}
+
 #[cfg(feature = "postgres")]
 async fn run_for_one_tenant(
     pools: &TenantPools,
@@ -483,13 +503,16 @@ async fn run_for_one_tenant(
         StorageMode::Schema => {
             let schema = org.schema_name.clone().unwrap_or_else(|| org.slug.clone());
             let pool = build_schema_scoped_pool(registry_url, &schema).await?;
-            let mut applied = migrate::migrate(&pool, dir).await?;
-            // Framework tenant tables come from the system-app migrations
-            // (applied under the tenant's search_path), not hand DDL.
+            // Framework tenant tables (rustango_users/roles/permissions/…)
+            // come from the system-app migrations and MUST be applied
+            // BEFORE the tenant's user migrations, which may FK into them
+            // (issue #1171). Applying user migrations first breaks a fresh
+            // tenant whose model references e.g. rustango_users.
             let dbpool: crate::sql::Pool = pool.clone().into();
-            applied.extend(
-                apply_system_migrations(&dbpool, dir, crate::core::ModelScope::Tenant).await?,
-            );
+            let mut applied =
+                apply_system_migrations(&dbpool, dir, crate::core::ModelScope::Tenant).await?;
+            ensure_media_tables(&dbpool).await?;
+            applied.extend(migrate::migrate(&pool, dir).await?);
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.
@@ -504,11 +527,12 @@ async fn run_for_one_tenant(
         }
         StorageMode::Database => {
             let tenant_pool = pools.pool_for_org(org).await?;
-            let mut applied = migrate::migrate(tenant_pool.pool(), dir).await?;
+            // System-app migrations before user migrations (issue #1171).
             let dbpool: crate::sql::Pool = tenant_pool.pool().clone().into();
-            applied.extend(
-                apply_system_migrations(&dbpool, dir, crate::core::ModelScope::Tenant).await?,
-            );
+            let mut applied =
+                apply_system_migrations(&dbpool, dir, crate::core::ModelScope::Tenant).await?;
+            ensure_media_tables(&dbpool).await?;
+            applied.extend(migrate::migrate(tenant_pool.pool(), dir).await?);
             // Data seeders (rows, not DDL — kept): #61 + #89.
             if let Err(e) = super::permissions::auto_create_permissions(tenant_pool.pool()).await {
                 tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for database-mode tenant");
