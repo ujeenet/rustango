@@ -1,5 +1,5 @@
 //! MCP follow-up #1091 — logging/setLevel + completion/complete.
-#![cfg(all(feature = "sqlite", feature = "mcp"))]
+#![cfg(all(feature = "sqlite", feature = "mcp", feature = "testkit"))]
 #![allow(irrefutable_let_patterns)]
 
 use rustango::mcp::utilities::{complete, set_log_level};
@@ -14,6 +14,10 @@ async fn ctx(skills: &[&str]) -> McpContext {
             .await
             .expect("sqlite"),
     );
+    // Skill/resource tables now come from system migrations, not a lazy ensure layer.
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate framework");
     McpContext {
         pool,
         agent: McpAgent {

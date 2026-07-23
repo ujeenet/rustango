@@ -23,8 +23,9 @@ use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::jwt_lifecycle::JwtLifecycle;
 use rustango::tenancy::permissions::set_user_perm_pool;
 use rustango::tenancy::{
-    authenticate_agent_pool, create_skill_pool, create_user_key_pool, list_user_keys_pool,
-    map_skill_to_permission_pool, resolve_user_agent_grants_pool, revoke_user_key_pool,
+    agent_token_still_valid_pool, authenticate_agent_pool, create_skill_pool, create_user_key_pool,
+    delete_user_keys_pool, list_user_keys_pool, map_skill_to_permission_pool,
+    resolve_user_agent_grants_pool, revoke_user_key_pool,
 };
 use serde_json::json;
 
@@ -81,6 +82,37 @@ async fn make_user(pool: &Pool, name: &str) -> i64 {
         .await
         .expect("fetch id");
     id
+}
+
+async fn make_superuser(pool: &Pool, name: &str) -> i64 {
+    let Pool::Sqlite(sq) = pool else {
+        unreachable!()
+    };
+    sqlx::query(
+        "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
+         VALUES (?, '', 1, 1, datetime('now'))",
+    )
+    .bind(name)
+    .execute(sq)
+    .await
+    .expect("insert superuser");
+    let (id,): (i64,) = sqlx::query_as("SELECT id FROM rustango_users WHERE username = ?")
+        .bind(name)
+        .fetch_one(sq)
+        .await
+        .expect("fetch id");
+    id
+}
+
+async fn deactivate_user(pool: &Pool, user_id: i64) {
+    let Pool::Sqlite(sq) = pool else {
+        unreachable!()
+    };
+    sqlx::query("UPDATE rustango_users SET active = 0 WHERE id = ?")
+        .bind(user_id)
+        .execute(sq)
+        .await
+        .expect("deactivate user");
 }
 
 fn ctx(pool: &Pool, agent: &rustango::mcp::McpAgent) -> McpContext {
@@ -226,4 +258,109 @@ async fn keys_list_and_revoke_by_owner() {
         .expect("revoke");
     let after = list_user_keys_pool(&pool, alice).await.expect("list");
     assert_eq!(after.len(), 1);
+}
+
+/// A superuser owner's key resolves to EVERY skill + tool in the tenant, even
+/// with no explicit grants and no direct permissions — `user_permissions_pool`
+/// does not expand superusers, so `resolve_user_agent_grants_pool` does (#1).
+#[tokio::test]
+async fn superuser_user_key_resolves_to_all_skills_and_tools() {
+    let pool = world().await;
+    let root = make_superuser(&pool, "root").await;
+
+    // Two skills; neither mapped to any permission the user holds.
+    create_skill_pool(&pool, "coach", "Coach", "", "", &["coach_log".into()])
+        .await
+        .expect("skill a");
+    create_skill_pool(
+        &pool,
+        "billing",
+        "Billing",
+        "",
+        "",
+        &["invoice.create".into(), "invoice.void".into()],
+    )
+    .await
+    .expect("skill b");
+
+    let issued = create_user_key_pool(&pool, root, "root's key")
+        .await
+        .expect("key");
+    let agent_id = issued.agent.id.get().copied().unwrap();
+
+    let (mut skills, mut tools) = resolve_user_agent_grants_pool(&pool, agent_id, root)
+        .await
+        .expect("resolve");
+    skills.sort();
+    tools.sort();
+    assert_eq!(skills, vec!["billing", "coach"]);
+    assert_eq!(tools, vec!["coach_log", "invoice.create", "invoice.void"]);
+}
+
+/// Request-time re-check (#2): a token stays valid while the key + owner are
+/// live, and is refused as soon as the key is revoked or the owner is
+/// deactivated — the effect `post_authed` / `sse_handler` rely on for immediate
+/// revocation of stateless JWTs.
+#[tokio::test]
+async fn revoked_or_deactivated_key_is_refused_at_request_time() {
+    let pool = world().await;
+    let uid = make_user(&pool, "carol").await;
+
+    let issued = create_user_key_pool(&pool, uid, "carol's key")
+        .await
+        .expect("key");
+    let agent_id = issued.agent.id.get().copied().unwrap();
+
+    // Live key + live owner → accepted.
+    assert!(
+        agent_token_still_valid_pool(&pool, agent_id, Some(uid))
+            .await
+            .expect("check"),
+        "live key accepted"
+    );
+
+    // Deactivating the owner refuses the key even though the agent row remains.
+    deactivate_user(&pool, uid).await;
+    assert!(
+        !agent_token_still_valid_pool(&pool, agent_id, Some(uid))
+            .await
+            .expect("check"),
+        "inactive owner refused"
+    );
+
+    // Revoking (deleting) the key refuses the token — a missing agent row.
+    revoke_user_key_pool(&pool, uid, agent_id)
+        .await
+        .expect("revoke");
+    assert!(
+        !agent_token_still_valid_pool(&pool, agent_id, Some(uid))
+            .await
+            .expect("check"),
+        "deleted key refused"
+    );
+}
+
+/// Deleting a tenant user must remove their user-owned keys (#4). No framework
+/// user-deletion path exists yet, so the helper is exercised directly.
+#[tokio::test]
+async fn delete_user_keys_removes_only_that_users_keys() {
+    let pool = world().await;
+    let dave = make_user(&pool, "dave").await;
+    let erin = make_user(&pool, "erin").await;
+
+    create_user_key_pool(&pool, dave, "k1").await.expect("k1");
+    create_user_key_pool(&pool, dave, "k2").await.expect("k2");
+    create_user_key_pool(&pool, erin, "k3").await.expect("k3");
+
+    delete_user_keys_pool(&pool, dave).await.expect("delete");
+
+    assert!(
+        list_user_keys_pool(&pool, dave).await.unwrap().is_empty(),
+        "dave's keys removed"
+    );
+    assert_eq!(
+        list_user_keys_pool(&pool, erin).await.unwrap().len(),
+        1,
+        "erin's key untouched"
+    );
 }

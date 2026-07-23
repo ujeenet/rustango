@@ -236,6 +236,20 @@ pub(crate) async fn post_authed(
     let Some(agent) = verify_agent_token(jwt, token, &t.org.slug) else {
         return unauthorized(&headers, &uri);
     };
+    // Revocation immediacy: the JWT is stateless, so re-check at request time
+    // that the agent (and, for a user-owned key, its owner) still exists and is
+    // active. A revoked / deactivated key is refused straight away rather than
+    // lingering until the token expires.
+    match crate::tenancy::agent_token_still_valid_pool(t.pool(), agent.agent_id, agent.user_id)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return unauthorized(&headers, &uri),
+        Err(e) => {
+            tracing::warn!(error = %e, "mcp agent liveness re-check failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed").into_response();
+        }
+    }
     // Agent verified + tenant-pinned: hand the tools layer the resolved
     // tenant pool + principal so `tools/call` runs against the right tenant.
     let ctx = super::tools::McpContext {

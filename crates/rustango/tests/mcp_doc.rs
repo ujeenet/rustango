@@ -5,7 +5,7 @@
 //!
 //! Run: `cargo test -p rustango --features sqlite,mcp --test mcp_doc`
 
-#![cfg(all(feature = "sqlite", feature = "mcp"))]
+#![cfg(all(feature = "sqlite", feature = "mcp", feature = "testkit"))]
 #![allow(irrefutable_let_patterns)]
 
 use std::sync::Arc;
@@ -99,6 +99,9 @@ async fn initialize_handshake_over_http() {
 #[tokio::test]
 async fn agent_lists_and_calls_only_its_granted_tools() {
     let pool = Pool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate framework");
 
     // Provision an agent (returns a one-time credential), define a skill that
     // bundles the `add` tool, and grant it to the agent in tenant "acme".
@@ -168,6 +171,9 @@ async fn agent_lists_and_calls_only_its_granted_tools() {
 #[tokio::test]
 async fn ungranted_agent_sees_nothing_and_is_refused() {
     let pool = Pool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate framework");
 
     // An agent with NO grants — fail-closed: empty tool list, calls refused.
     let agent = McpAgent {

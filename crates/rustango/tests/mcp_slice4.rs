@@ -6,7 +6,7 @@
 //!   * revoking removes them;
 //!   * an agent with no grants resolves to an empty tool set (fail-closed) →
 //!     `list_tools` returns nothing.
-#![cfg(all(feature = "sqlite", feature = "mcp"))]
+#![cfg(all(feature = "sqlite", feature = "mcp", feature = "testkit"))]
 #![allow(irrefutable_let_patterns)]
 
 use rustango::mcp::{list_tools, McpAgent};
@@ -17,11 +17,16 @@ use rustango::tenancy::{
 };
 
 async fn pool() -> Pool {
-    Pool::Sqlite(
+    let pool = Pool::Sqlite(
         sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("sqlite"),
-    )
+    );
+    // Agent/skill tables now come from system migrations, not a lazy ensure layer.
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate framework");
+    pool
 }
 
 async fn agent_id(pool: &Pool, name: &str) -> i64 {

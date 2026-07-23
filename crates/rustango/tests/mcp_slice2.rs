@@ -9,7 +9,7 @@
 //! plus the `rustango_agents` data layer (create / authenticate / rotate).
 //!
 //! Run: `cargo test -p rustango --no-default-features --features sqlite,mcp --test mcp_slice2`.
-#![cfg(all(feature = "sqlite", feature = "mcp"))]
+#![cfg(all(feature = "sqlite", feature = "mcp", feature = "testkit"))]
 #![allow(irrefutable_let_patterns)] // Pool is single-variant in sqlite-only builds
 
 use std::sync::Arc;
@@ -22,10 +22,16 @@ use rustango::tenancy::{
 };
 
 async fn sqlite_pool() -> Pool {
-    let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+    let pool = Pool::Sqlite(
+        sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool"),
+    );
+    // Agent tables now come from system migrations, not a lazy ensure layer.
+    rustango::testkit::migrate_framework(&pool)
         .await
-        .expect("sqlite memory pool");
-    Pool::Sqlite(pool)
+        .expect("migrate framework");
+    pool
 }
 
 // ----------------------------------------------------------- data layer

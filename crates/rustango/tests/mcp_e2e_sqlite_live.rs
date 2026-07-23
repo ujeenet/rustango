@@ -8,7 +8,7 @@
 //! This is the "full agent loop is green" acceptance. (The JSON-RPC
 //! transport itself — initialize/ping over HTTP — is covered in
 //! `mcp_slice1`.)
-#![cfg(all(feature = "sqlite", feature = "mcp"))]
+#![cfg(all(feature = "sqlite", feature = "mcp", feature = "testkit"))]
 #![allow(irrefutable_let_patterns)]
 
 use std::sync::Arc;
@@ -64,6 +64,10 @@ async fn full_agent_loop() {
             .await
             .expect("sqlite"),
     );
+    // Agent/skill/resource tables now come from system migrations.
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate framework");
 
     // 1. Provision an agent (one-time secret).
     let issued = create_agent_pool(&pool, "e2e-bot").await.expect("agent");

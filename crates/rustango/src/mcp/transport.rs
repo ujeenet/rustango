@@ -106,6 +106,18 @@ pub(crate) async fn sse_handler(
     let Some(agent) = super::auth::verify_agent_token(jwt, token, &t.org.slug) else {
         return super::auth::unauthorized(&headers, &uri);
     };
+    // Revocation immediacy: re-check the agent (and, for a user-owned key, its
+    // owner) still exists + is active before opening the notification stream.
+    match crate::tenancy::agent_token_still_valid_pool(t.pool(), agent.agent_id, agent.user_id)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return super::auth::unauthorized(&headers, &uri),
+        Err(e) => {
+            tracing::warn!(error = %e, "mcp agent liveness re-check failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed").into_response();
+        }
+    }
     let tenant = agent.tenant.clone();
     let agent_id = agent.agent_id;
 
