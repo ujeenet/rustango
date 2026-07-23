@@ -230,8 +230,11 @@ create_skill_pool(&pool, "coach", "Coach", "logs workouts",
 map_skill_to_permission_pool(&pool, "coach", "mcp.coach").await?;
 
 // 2. The member generates a key — a one-time `name`.`secret`, shown once.
-//    Nothing is pinned onto it; capabilities come from the owner's permissions.
-let issued = create_user_key_pool(&pool, user_id, "Alice's phone").await?;
+//    `&[]` = a FULL key: everything the owner is entitled to. Pass skill
+//    codenames to SCOPE the key to a single skill or a skillset instead —
+//    always bounded by the owner's entitlement (you can't exceed your perms):
+let issued = create_user_key_pool(&pool, user_id, "Alice's phone", &[]).await?;
+// scoped: create_user_key_pool(&pool, user_id, "coach bot", &["coach".into()]).await?;
 println!("copy once: {}", issued.token);
 ```
 
@@ -247,6 +250,15 @@ member. Revoke fresh capabilities by changing the user's permissions (they
 re-resolve on the next token); revoke the key itself with
 `revoke_user_key_pool(&pool, user_id, agent_id)`. List a member's keys with
 `list_user_keys_pool(&pool, user_id)`.
+
+**Per-key scope vs per-user entitlement.** Skills reach a key along two axes:
+the owner's **entitlement** (superuser → every skill; otherwise the skills
+mapped to a permission they hold) and the key's **scope** (skills pinned at
+creation). An unscoped key (`skills = &[]`) gets the owner's full entitlement;
+a scoped key (`skills = &["coach", …]`) is limited to those. Resolution always
+re-intersects scope with the *current* entitlement — so a key can never exceed
+the owner's permissions, and losing a permission narrows every key on the next
+mint. Scoping to a skill the owner isn't entitled to is refused at creation.
 
 Standalone agents are unaffected — a machine agent (`user_id = None`) still
 uses only its explicit `grant_skill_pool` grants.
@@ -266,7 +278,7 @@ tenant-scoped and takes a `<slug>`:
 | `grant-skill <slug> <agent> <skill>` | Grant a skill to an agent. |
 | `revoke-skill <slug> <agent> <skill>` | Revoke a skill from an agent. |
 | `list-skills <slug>` | List a tenant's skills. |
-| `create-user-key <slug> <username> [label]` | Issue a **user-owned key** for a tenant user; prints its token **once** (default label = username). |
+| `create-user-key <slug> <username> [--label <l>] [--skill <codename>]…` | Issue a **user-owned key**; prints its token **once**. Repeat `--skill` to scope the key to a single skill or a skillset; omit for a full key (default label = username). |
 | `list-user-keys <slug> <username>` | List a user's personal keys (id, label, created-at). |
 | `revoke-user-key <slug> <username> <key_id>` | Revoke one of a user's personal keys by id (ownership-verified). |
 | `map-skill-permission <slug> <skill> <permission>` | Map a skill to a permission codename. Idempotent — any user key whose owner holds `<permission>` gains the skill. |
@@ -282,10 +294,13 @@ $ cargo run -- map-skill-permission acme coach mcp.coach
 # 2. Grant the permission to the member (roles or direct — see grant-perm),
 #    then issue their personal key.
 $ cargo run -- grant-perm acme alice mcp.coach
-$ cargo run -- create-user-key acme alice "Alice's phone"
-created key #7 for user `alice` in tenant `acme` (label `Alice's phone`)
+$ cargo run -- create-user-key acme alice --label "Alice's phone"
+created key #7 for user `alice` in tenant `acme` (label `Alice's phone`, scope full (owner's permissions))
   token: 3f9c1a2b.7d…            # copy once — never shown again
   store this safely — it won't be shown again
+
+# …or scope the key to a single skill / skillset (repeat --skill):
+$ cargo run -- create-user-key acme alice --label "coach bot" --skill coach
 ```
 
 Alice's key now resolves the `coach` skill's tools at every token-issue because

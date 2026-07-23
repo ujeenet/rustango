@@ -152,7 +152,7 @@ async fn permission_grants_flow_into_a_user_key() {
         .expect("map");
 
     // Member generates a personal key (shown-once secret).
-    let issued = create_user_key_pool(&pool, uid, "Alice's phone")
+    let issued = create_user_key_pool(&pool, uid, "Alice's phone", &[])
         .await
         .expect("key");
     assert_eq!(issued.agent.user_id, Some(uid));
@@ -214,7 +214,7 @@ async fn without_the_permission_a_key_gets_nothing() {
         .await
         .expect("map");
 
-    let issued = create_user_key_pool(&pool, uid, "Bob's key")
+    let issued = create_user_key_pool(&pool, uid, "Bob's key", &[])
         .await
         .expect("key");
     let agent_id = issued.agent.id.get().copied().unwrap();
@@ -235,10 +235,10 @@ async fn keys_list_and_revoke_by_owner() {
     let alice = make_user(&pool, "alice").await;
     let mallory = make_user(&pool, "mallory").await;
 
-    let k1 = create_user_key_pool(&pool, alice, "laptop")
+    let k1 = create_user_key_pool(&pool, alice, "laptop", &[])
         .await
         .expect("k1");
-    let _k2 = create_user_key_pool(&pool, alice, "phone")
+    let _k2 = create_user_key_pool(&pool, alice, "phone", &[])
         .await
         .expect("k2");
 
@@ -283,7 +283,7 @@ async fn superuser_user_key_resolves_to_all_skills_and_tools() {
     .await
     .expect("skill b");
 
-    let issued = create_user_key_pool(&pool, root, "root's key")
+    let issued = create_user_key_pool(&pool, root, "root's key", &[])
         .await
         .expect("key");
     let agent_id = issued.agent.id.get().copied().unwrap();
@@ -306,7 +306,7 @@ async fn revoked_or_deactivated_key_is_refused_at_request_time() {
     let pool = world().await;
     let uid = make_user(&pool, "carol").await;
 
-    let issued = create_user_key_pool(&pool, uid, "carol's key")
+    let issued = create_user_key_pool(&pool, uid, "carol's key", &[])
         .await
         .expect("key");
     let agent_id = issued.agent.id.get().copied().unwrap();
@@ -348,9 +348,15 @@ async fn delete_user_keys_removes_only_that_users_keys() {
     let dave = make_user(&pool, "dave").await;
     let erin = make_user(&pool, "erin").await;
 
-    create_user_key_pool(&pool, dave, "k1").await.expect("k1");
-    create_user_key_pool(&pool, dave, "k2").await.expect("k2");
-    create_user_key_pool(&pool, erin, "k3").await.expect("k3");
+    create_user_key_pool(&pool, dave, "k1", &[])
+        .await
+        .expect("k1");
+    create_user_key_pool(&pool, dave, "k2", &[])
+        .await
+        .expect("k2");
+    create_user_key_pool(&pool, erin, "k3", &[])
+        .await
+        .expect("k3");
 
     delete_user_keys_pool(&pool, dave).await.expect("delete");
 
@@ -362,5 +368,83 @@ async fn delete_user_keys_removes_only_that_users_keys() {
         list_user_keys_pool(&pool, erin).await.unwrap().len(),
         1,
         "erin's key untouched"
+    );
+}
+
+/// Per-key scope: a non-superuser entitled to two skills can mint a key scoped
+/// to ONE of them (or a skillset) — the key resolves to only those skills'
+/// tools, not the owner's full set — while an unscoped key gets everything the
+/// owner may use. Scoping to a skill the owner isn't entitled to is refused.
+#[tokio::test]
+async fn user_key_can_be_scoped_to_a_skillset() {
+    let pool = world().await;
+    let uid = make_user(&pool, "dana").await;
+
+    // Two entitled skills (each gated on a permission dana holds).
+    create_skill_pool(
+        &pool,
+        "coach",
+        "Coach",
+        "",
+        "",
+        &["log_set".into(), "view_progress".into()],
+    )
+    .await
+    .expect("coach");
+    create_skill_pool(
+        &pool,
+        "billing",
+        "Billing",
+        "",
+        "",
+        &["invoice.create".into()],
+    )
+    .await
+    .expect("billing");
+    map_skill_to_permission_pool(&pool, "coach", "mcp.coach")
+        .await
+        .expect("map coach");
+    map_skill_to_permission_pool(&pool, "billing", "mcp.billing")
+        .await
+        .expect("map billing");
+    set_user_perm_pool(uid, "mcp.coach", true, &pool)
+        .await
+        .expect("perm coach");
+    set_user_perm_pool(uid, "mcp.billing", true, &pool)
+        .await
+        .expect("perm billing");
+
+    // Unscoped key → both skills.
+    let full = create_user_key_pool(&pool, uid, "full", &[])
+        .await
+        .expect("full");
+    let (mut fs, _) =
+        resolve_user_agent_grants_pool(&pool, full.agent.id.get().copied().unwrap(), uid)
+            .await
+            .expect("resolve full");
+    fs.sort();
+    assert_eq!(fs, vec!["billing", "coach"]);
+
+    // Scoped to just `coach` → only coach's tools.
+    let scoped = create_user_key_pool(&pool, uid, "coach-only", &["coach".into()])
+        .await
+        .expect("scoped");
+    let (ss, mut st) =
+        resolve_user_agent_grants_pool(&pool, scoped.agent.id.get().copied().unwrap(), uid)
+            .await
+            .expect("resolve scoped");
+    st.sort();
+    assert_eq!(ss, vec!["coach"]);
+    assert_eq!(st, vec!["log_set", "view_progress"]);
+
+    // Scoping to a skill the owner isn't entitled to is refused (no key left).
+    create_skill_pool(&pool, "admin_ops", "Admin", "", "", &["nuke".into()])
+        .await
+        .expect("admin skill");
+    assert!(
+        create_user_key_pool(&pool, uid, "bad", &["admin_ops".into()])
+            .await
+            .is_err(),
+        "scoping to an un-entitled skill must be refused"
     );
 }

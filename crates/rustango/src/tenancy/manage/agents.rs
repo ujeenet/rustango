@@ -22,7 +22,9 @@ const CREATE_SKILL_HELP: &str =
 const GRANT_HELP: &str = "grant-skill <slug> <agent> <skill>";
 const REVOKE_HELP: &str = "revoke-skill <slug> <agent> <skill>";
 const LIST_SKILLS_HELP: &str = "list-skills <slug>";
-const CREATE_USER_KEY_HELP: &str = "create-user-key <slug> <username> [label]";
+const CREATE_USER_KEY_HELP: &str =
+    "create-user-key <slug> <username> [--label <l>] [--skill <codename>]…  \
+     (repeat --skill to scope the key to a skillset; omit for a full key)";
 const LIST_USER_KEYS_HELP: &str = "list-user-keys <slug> <username>";
 const REVOKE_USER_KEY_HELP: &str = "revoke-user-key <slug> <username> <key_id>";
 const MAP_SKILL_PERM_HELP: &str = "map-skill-permission <slug> <skill> <permission>";
@@ -286,31 +288,58 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     reject_leading_flag(args, "create-user-key", "slug", CREATE_USER_KEY_HELP)?;
-    let mut iter = args.iter();
-    let slug = iter
-        .next()
+    let slug = args
+        .first()
         .cloned()
         .ok_or_else(|| TenancyError::Validation(CREATE_USER_KEY_HELP.into()))?;
-    let username = iter
-        .next()
+    let username = args
+        .get(1)
         .cloned()
         .ok_or_else(|| TenancyError::Validation(CREATE_USER_KEY_HELP.into()))?;
-    let label = iter.next().cloned().unwrap_or_else(|| username.clone());
-    if let Some(extra) = iter.next() {
-        return Err(TenancyError::Validation(format!(
-            "create-user-key: unexpected argument `{extra}`"
-        )));
+
+    // Flags after the two positionals: --label <l>, --skill <codename> (repeat
+    // --skill for a skillset; none = a full-permission key).
+    let mut label: Option<String> = None;
+    let mut skills: Vec<String> = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--label" => {
+                i += 1;
+                label = Some(args.get(i).cloned().ok_or_else(|| {
+                    TenancyError::Validation("create-user-key: --label needs a value".into())
+                })?);
+            }
+            "--skill" => {
+                i += 1;
+                skills.push(args.get(i).cloned().ok_or_else(|| {
+                    TenancyError::Validation("create-user-key: --skill needs a codename".into())
+                })?);
+            }
+            other => {
+                return Err(TenancyError::Validation(format!(
+                    "create-user-key: unexpected argument `{other}` ({CREATE_USER_KEY_HELP})"
+                )));
+            }
+        }
+        i += 1;
     }
+    let label = label.unwrap_or_else(|| username.clone());
 
     let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
     let uid = resolve_user_id(&scoped, &username).await?;
-    let issued = crate::tenancy::create_user_key_pool(&scoped, uid, &label)
+    let issued = crate::tenancy::create_user_key_pool(&scoped, uid, &label, &skills)
         .await
         .map_err(|e| TenancyError::Validation(e.to_string()))?;
     let id = issued.agent.id.get().copied().unwrap_or_default();
+    let scope = if skills.is_empty() {
+        "full (owner's permissions)".to_owned()
+    } else {
+        format!("skills: {}", skills.join(", "))
+    };
     writeln!(
         w,
-        "created key #{id} for user `{username}` in tenant `{slug}` (label `{label}`)"
+        "created key #{id} for user `{username}` in tenant `{slug}` (label `{label}`, scope {scope})"
     )?;
     writeln!(w, "  token: {}", issued.token)?;
     writeln!(w, "  store this safely — it won't be shown again")?;

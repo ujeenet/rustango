@@ -609,11 +609,61 @@ pub async fn unmap_skill_from_permission_pool(
     Ok(())
 }
 
-/// Resolve a **user-owned** agent's effective `(skill codenames, tools)`:
-/// its explicit [`AgentGrant`]s (if any) unioned with every skill mapped to a
-/// permission the owning `user_id` currently holds. This is what
-/// [`crate::mcp`] bakes into the scoped JWT so `tools`, `prompts`, and
-/// `resources` are all gated by the tenant's RBAC.
+/// The skill ids the owning user is **entitled** to. `Ok(None)` means a
+/// superuser (entitled to every skill); `Ok(Some(ids))` is the set of skills
+/// mapped to a permission the user currently holds (may be empty).
+///
+/// # Errors
+/// Propagates DB / permission-lookup errors.
+async fn user_entitled_skill_ids(
+    pool: &Pool,
+    user_id: i64,
+) -> Result<Option<Vec<i64>>, AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
+    let is_superuser = crate::tenancy::User::objects()
+        .filter("id", user_id)
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+        .is_some_and(|u| u.is_superuser);
+    if is_superuser {
+        return Ok(None);
+    }
+    let perms = super::user_permissions_pool(user_id, pool).await?;
+    if perms.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let mapped: Vec<AgentSkillPermission> = AgentSkillPermission::objects()
+        .where_(AgentSkillPermission::permission_codename.is_in(perms))
+        .fetch(pool)
+        .await?;
+    let mut ids: Vec<i64> = Vec::new();
+    for m in mapped {
+        if !ids.contains(&m.skill_id) {
+            ids.push(m.skill_id);
+        }
+    }
+    Ok(Some(ids))
+}
+
+/// Resolve a **user-owned** agent's effective `(skill codenames, tools)`,
+/// along two axes and always bounded by the owner's entitlement:
+///
+/// * **Entitlement** — which skills the owner may use: *every* skill for a
+///   superuser, otherwise the skills mapped (via [`AgentSkillPermission`]) to a
+///   permission the owner currently holds.
+/// * **Scope** — if the key was created with pinned skills ([`AgentGrant`]s via
+///   [`create_user_key_pool`]) it is limited to those; an unscoped key gets the
+///   owner's full entitlement.
+///
+/// Effective skills = `pinned ∩ entitled` for a scoped key, or the full
+/// entitlement for an unscoped one. A key can therefore never exceed the
+/// owner's permissions, and revoking a permission narrows every key at the next
+/// mint. [`crate::mcp`] bakes the resulting `tools` into the scoped JWT.
 ///
 /// # Errors
 /// Propagates DB / permission-lookup errors.
@@ -625,71 +675,52 @@ pub async fn resolve_user_agent_grants_pool(
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
-    // Start from any explicit grants (an app may still pin a skill directly).
-    let (mut skills, mut tools) = resolve_agent_grants_pool(pool, agent_id).await?;
+    let entitled = user_entitled_skill_ids(pool, user_id).await?;
 
-    // A superuser owner is entitled to everything. `user_permissions_pool`
-    // returns only explicit/role perms and does NOT expand superusers, so
-    // resolve them here: union every skill codename + every tool in the tenant
-    // on top of the explicit grants, then return.
-    let owner_is_superuser = crate::tenancy::User::objects()
-        .filter("id", user_id)
-        .limit(1)
+    // Skills pinned onto THIS key at creation (the per-key scope).
+    let pinned: Vec<i64> = {
+        let grants: Vec<AgentGrant> = AgentGrant::objects()
+            .filter("agent_id", agent_id)
+            .fetch(pool)
+            .await?;
+        let mut ids = Vec::new();
+        for g in grants {
+            if !ids.contains(&g.skill_id) {
+                ids.push(g.skill_id);
+            }
+        }
+        ids
+    };
+
+    // Effective skill ids: pinned∩entitled (scoped) or the full entitlement.
+    let effective: Vec<i64> = match (&entitled, pinned.is_empty()) {
+        (None, true) => AgentSkill::objects()
+            .fetch(pool)
+            .await?
+            .into_iter()
+            .filter_map(|s| s.id.get().copied())
+            .collect(), // superuser, unscoped → every skill
+        (None, false) => pinned, // superuser, scoped → the pinned skills
+        (Some(ent), true) => ent.clone(), // non-superuser, unscoped → entitled
+        (Some(ent), false) => pinned.into_iter().filter(|id| ent.contains(id)).collect(),
+    };
+    if effective.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let skills: Vec<String> = AgentSkill::objects()
+        .where_(AgentSkill::id.is_in(effective.clone()))
         .fetch(pool)
         .await?
         .into_iter()
-        .next()
-        .is_some_and(|u| u.is_superuser);
-    if owner_is_superuser {
-        let all_skills: Vec<AgentSkill> = AgentSkill::objects().fetch(pool).await?;
-        for s in all_skills {
-            if !skills.contains(&s.codename) {
-                skills.push(s.codename);
-            }
-        }
-        let all_tools: Vec<AgentSkillTool> = AgentSkillTool::objects().fetch(pool).await?;
-        for st in all_tools {
-            if !tools.contains(&st.tool_name) {
-                tools.push(st.tool_name);
-            }
-        }
-        return Ok((skills, tools));
-    }
-
-    // Skills the owning user is entitled to via their permissions.
-    let perms = super::user_permissions_pool(user_id, pool).await?;
-    if perms.is_empty() {
-        return Ok((skills, tools));
-    }
-
-    let mapped: Vec<AgentSkillPermission> = AgentSkillPermission::objects()
-        .where_(AgentSkillPermission::permission_codename.is_in(perms))
+        .map(|s| s.codename)
+        .collect();
+    let mut tools: Vec<String> = Vec::new();
+    for st in AgentSkillTool::objects()
+        .where_(AgentSkillTool::skill_id.is_in(effective))
         .fetch(pool)
-        .await?;
-    let mut skill_ids: Vec<i64> = Vec::new();
-    for m in mapped {
-        if !skill_ids.contains(&m.skill_id) {
-            skill_ids.push(m.skill_id);
-        }
-    }
-    if skill_ids.is_empty() {
-        return Ok((skills, tools));
-    }
-
-    let entitled: Vec<AgentSkill> = AgentSkill::objects()
-        .where_(AgentSkill::id.is_in(skill_ids.clone()))
-        .fetch(pool)
-        .await?;
-    for s in entitled {
-        if !skills.contains(&s.codename) {
-            skills.push(s.codename);
-        }
-    }
-    let entitled_tools: Vec<AgentSkillTool> = AgentSkillTool::objects()
-        .where_(AgentSkillTool::skill_id.is_in(skill_ids))
-        .fetch(pool)
-        .await?;
-    for st in entitled_tools {
+        .await?
+    {
         if !tools.contains(&st.tool_name) {
             tools.push(st.tool_name);
         }
@@ -728,16 +759,62 @@ async fn unique_key_name(pool: &Pool, user_id: i64) -> Result<String, AgentError
 }
 
 /// Create a personal, user-owned MCP key. The returned [`AgentSecret::token`]
-/// (`prefix.secret`) is shown once and never recoverable. Capabilities are
-/// resolved from the owner's permissions at token-issue — nothing to pin here.
+/// (`prefix.secret`) is shown once and never recoverable.
+///
+/// `skills` sets the key's scope:
+/// * **empty** → an *unscoped* key that can use everything the owner is
+///   entitled to (their full permission-derived skill set, or all skills for a
+///   superuser).
+/// * **non-empty** → a *scoped* key limited to exactly those skill codenames
+///   (a single skill or a skillset). Each must be a real skill the owner is
+///   entitled to; otherwise this fails — you can't mint a key more capable than
+///   yourself. Scoping pins [`AgentGrant`]s, and resolution always re-intersects
+///   with the owner's current entitlement at mint
+///   ([`resolve_user_agent_grants_pool`]).
 ///
 /// # Errors
-/// A DB / secret-generation error.
+/// [`AgentError::NotFound`] for an unknown skill codename;
+/// [`AgentError::Tenancy`] if the owner isn't entitled to a requested skill;
+/// a DB / secret-generation error otherwise.
 pub async fn create_user_key_pool(
     pool: &Pool,
     user_id: i64,
     label: &str,
+    skills: &[String],
 ) -> Result<AgentSecret, AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
+    // Resolve + entitlement-check every requested skill up front, so an invalid
+    // request fails before any key row is written.
+    let mut skill_ids: Vec<i64> = Vec::new();
+    if !skills.is_empty() {
+        let entitled = user_entitled_skill_ids(pool, user_id).await?;
+        for codename in skills {
+            let skill = AgentSkill::objects()
+                .where_(AgentSkill::codename.eq(codename.clone()))
+                .limit(1)
+                .fetch(pool)
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| AgentError::NotFound(codename.clone()))?;
+            let sid = skill.id.get().copied().unwrap_or_default();
+            let entitled_to_it = match &entitled {
+                None => true, // superuser
+                Some(ids) => ids.contains(&sid),
+            };
+            if !entitled_to_it {
+                return Err(AgentError::Tenancy(super::error::TenancyError::Validation(
+                    format!("owner is not entitled to skill `{codename}`"),
+                )));
+            }
+            if !skill_ids.contains(&sid) {
+                skill_ids.push(sid);
+            }
+        }
+    }
+
     let name = unique_key_name(pool, user_id).await?;
     let (token, prefix, hash) = generate_credential()?;
     let mut agent = Agent {
@@ -752,6 +829,18 @@ pub async fn create_user_key_pool(
         data: serde_json::json!({ "kind": "user_key", "label": label }),
     };
     agent.insert_pool(pool).await?;
+    let agent_id = agent.id.get().copied().unwrap_or_default();
+
+    // Pin the scoped skills as grants (the per-key scope).
+    for sid in skill_ids {
+        let mut grant = AgentGrant {
+            id: Auto::default(),
+            agent_id,
+            skill_id: sid,
+            data: serde_json::json!({}),
+        };
+        grant.insert_pool(pool).await?;
+    }
     Ok(AgentSecret { agent, token })
 }
 

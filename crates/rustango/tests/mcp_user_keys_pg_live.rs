@@ -86,7 +86,7 @@ async fn user_key_capabilities_follow_permissions_on_pg() {
         .expect("map");
 
     // A personal key resolves its capabilities from the owner's permissions.
-    let issued = create_user_key_pool(&pool, uid, "laptop")
+    let issued = create_user_key_pool(&pool, uid, "laptop", &[])
         .await
         .expect("key");
     assert_eq!(issued.agent.user_id, Some(uid));
@@ -112,7 +112,7 @@ async fn user_key_capabilities_follow_permissions_on_pg() {
 
     // Negative: no permission → no capabilities (fail-closed).
     let bob = make_user(&pool, "ukpg_bob").await;
-    let issued2 = create_user_key_pool(&pool, bob, "phone")
+    let issued2 = create_user_key_pool(&pool, bob, "phone", &[])
         .await
         .expect("key2");
     let aid2 = issued2.agent.id.get().copied().unwrap();

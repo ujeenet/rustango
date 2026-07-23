@@ -109,7 +109,7 @@ async fn user_key_and_skill_permission_verbs_round_trip_on_sqlite() {
         &pools,
         &url,
         dir,
-        &["create-user-key", "acme", "alice", "mylabel"],
+        &["create-user-key", "acme", "alice", "--label", "mylabel"],
     )
     .await;
     assert!(out.contains("token:"), "expected a token line, got:\n{out}");
