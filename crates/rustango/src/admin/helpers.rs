@@ -111,6 +111,13 @@ pub(crate) fn chrome_context_with_session(
         // v0.28.2 (#77) — sidebar "Change password" link target.
         // Threaded from the tenant admin's RouteConfig.
         "change_password_url": &state.config.change_password_url,
+        // Sidebar Logout POST target. Defaults to `{admin_prefix}/logout`
+        // (the bare admin's own route); the tenant admin overrides it to
+        // its RouteConfig logout_url (handled at the tenancy layer), so
+        // the button doesn't POST to a non-existent `{prefix}/logout`.
+        "logout_url": state.config.logout_url.clone().unwrap_or_else(
+            || format!("{}/logout", state.config.admin_prefix)
+        ),
         // #253 — Logout button visibility. The bare admin's
         // session middleware redirects unauthenticated requests to
         // `/login`, so by the time chrome renders we know any
