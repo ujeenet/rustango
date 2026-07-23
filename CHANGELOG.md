@@ -4,7 +4,25 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-_Nothing yet — next development cycle._
+### Added
+
+- **User-owned MCP keys + permission-driven capabilities** — a member can
+  generate a personal MCP key (a user-owned `Agent`, via a new nullable
+  `user_id` owner on `rustango_agents`) so an LLM acts on their behalf. Its
+  tools/prompts/resources are resolved from the tenant's existing **RBAC**
+  rather than pinned onto the key: map a skill to a permission codename with
+  `map_skill_to_permission_pool` (new `rustango_agent_skill_permissions`
+  table), and any key whose owner holds that permission is granted the skill
+  at token-issue (`resolve_user_agent_grants_pool` — the user's effective
+  permissions select the mapped skills, flattened into the JWT `skills`/`tools`
+  claims, so `tools/list`, `tools/call`, `prompts/get` and `resources/read`
+  are all RBAC-gated). The owner rides in the token's `uid` claim, surfaced as
+  `McpAgent.user_id` for tool handlers to scope work to the member. New
+  helpers `create_user_key_pool` / `list_user_keys_pool` /
+  `revoke_user_key_pool`. Backward compatible: standalone machine agents
+  (`user_id = None`) use their explicit grants only, and older `rustango_agents`
+  tables gain `user_id` transparently via an additive `ADD COLUMN`.
+  `issue_agent_token` gains a trailing `user_id: Option<i64>` argument.
 
 ## [0.48.0] — 2026-07-21
 

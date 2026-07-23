@@ -139,7 +139,7 @@ async fn agent_lists_and_calls_only_its_granted_tools() {
     let jwt = Arc::new(JwtLifecycle::new(
         b"doc-secret-at-least-32-bytes-long!!".to_vec(),
     ));
-    let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools).unwrap();
+    let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools, None).unwrap();
 
     // The guarded endpoint verifies the token on every request (tenant-pinned).
     let agent = verify_agent_token(&jwt, &token, "acme").expect("valid agent token");
@@ -175,6 +175,7 @@ async fn ungranted_agent_sees_nothing_and_is_refused() {
         tenant: "acme".into(),
         skills: vec![],
         tools: vec![],
+        user_id: None,
         jti: "doc-jti".into(),
     };
 

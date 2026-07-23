@@ -112,7 +112,7 @@ fn jwt() -> Arc<JwtLifecycle> {
 #[tokio::test]
 async fn token_issue_and_verify_within_tenant() {
     let jwt = jwt();
-    let token = rustango::mcp::issue_agent_token(&jwt, 42, "acme", &[], &[]).expect("issue");
+    let token = rustango::mcp::issue_agent_token(&jwt, 42, "acme", &[], &[], None).expect("issue");
     let agent = rustango::mcp::verify_agent_token(&jwt, &token, "acme").expect("verify");
     assert_eq!(agent.agent_id, 42);
     assert_eq!(agent.tenant, "acme");
@@ -122,7 +122,7 @@ async fn token_issue_and_verify_within_tenant() {
 #[tokio::test]
 async fn token_for_other_tenant_is_rejected() {
     let jwt = jwt();
-    let token = rustango::mcp::issue_agent_token(&jwt, 42, "acme", &[], &[]).expect("issue");
+    let token = rustango::mcp::issue_agent_token(&jwt, 42, "acme", &[], &[], None).expect("issue");
     // Same valid signature, wrong tenant → refused (cross-tenant replay).
     assert!(rustango::mcp::verify_agent_token(&jwt, &token, "evilcorp").is_none());
 }
@@ -130,7 +130,7 @@ async fn token_for_other_tenant_is_rejected() {
 #[tokio::test]
 async fn revoked_token_is_refused() {
     let jwt = jwt();
-    let token = rustango::mcp::issue_agent_token(&jwt, 7, "acme", &[], &[]).expect("issue");
+    let token = rustango::mcp::issue_agent_token(&jwt, 7, "acme", &[], &[], None).expect("issue");
     assert!(rustango::mcp::verify_agent_token(&jwt, &token, "acme").is_some());
     assert!(jwt.revoke(&token), "revoke decodes + blacklists the jti");
     assert!(rustango::mcp::verify_agent_token(&jwt, &token, "acme").is_none());

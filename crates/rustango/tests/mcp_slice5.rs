@@ -34,6 +34,7 @@ fn ctx(pool: Pool, skills: &[&str]) -> McpContext {
             tenant: "acme".into(),
             skills: skills.iter().map(|s| s.to_string()).collect(),
             tools: vec![],
+            user_id: None,
             jti: "t".into(),
         },
         progress: rustango::mcp::ProgressReporter::disabled(),

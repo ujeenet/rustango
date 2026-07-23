@@ -113,10 +113,12 @@ pub mod tenant_console;
 #[cfg(feature = "mcp")]
 pub use agents::{
     add_skill_resource_pool, authenticate_agent_pool, create_agent_pool, create_skill_pool,
-    ensure_agents_table_pool, ensure_skill_tables_pool, grant_skill_pool, list_agents_pool,
-    list_skills_pool, resolve_agent_grants_pool, resources_for_skills_pool, revoke_skill_pool,
-    rotate_agent_secret_pool, skills_by_codenames_pool, Agent, AgentError, AgentGrant, AgentSecret,
-    AgentSkill, AgentSkillResource, AgentSkillTool,
+    create_user_key_pool, ensure_agents_table_pool, ensure_skill_tables_pool, grant_skill_pool,
+    list_agents_pool, list_skills_pool, list_user_keys_pool, map_skill_to_permission_pool,
+    resolve_agent_grants_pool, resolve_user_agent_grants_pool, resources_for_skills_pool,
+    revoke_skill_pool, revoke_user_key_pool, rotate_agent_secret_pool, skills_by_codenames_pool,
+    unmap_skill_from_permission_pool, Agent, AgentError, AgentGrant, AgentSecret, AgentSkill,
+    AgentSkillPermission, AgentSkillResource, AgentSkillTool,
 };
 #[cfg(feature = "postgres")]
 pub use auth::{authenticate_operator, authenticate_user};

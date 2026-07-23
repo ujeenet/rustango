@@ -43,6 +43,7 @@ async fn ctx() -> McpContext {
             tenant: "acme".into(),
             skills: vec![],
             tools: vec!["work".into()],
+            user_id: None,
             jti: "t".into(),
         },
         progress: rustango::mcp::ProgressReporter::disabled(),

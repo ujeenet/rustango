@@ -47,6 +47,7 @@ fn agent_with(tools: Vec<String>) -> McpAgent {
         tenant: "acme".into(),
         skills: vec![],
         tools,
+        user_id: None,
         jti: "t".into(),
     }
 }

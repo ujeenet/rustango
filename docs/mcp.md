@@ -211,6 +211,46 @@ assert_eq!(out["structuredContent"]["sum"], 5);
 Tokens are tenant-pinned: a token minted for `acme` is rejected against any other
 tenant (cross-tenant replay → 401). Revoke an agent and its JTI is blacklisted.
 
+### User-owned keys (permission-driven capabilities)
+
+The agents above are standalone machine identities. A member can instead
+generate a **personal key** — a user-owned agent — so an LLM acts *on their
+behalf*, with capabilities that follow the tenant's existing **RBAC** instead
+of a list pinned onto the key.
+
+Two pieces wire it up:
+
+```rust
+use rustango::tenancy::{create_user_key_pool, create_skill_pool, map_skill_to_permission_pool};
+
+// 1. Map a skill to a permission codename. Any user-owned key whose owner
+//    holds `mcp.coach` is then granted this skill's tools + prompt + resources.
+create_skill_pool(&pool, "coach", "Coach", "logs workouts",
+                  "You are the member's coach.", &["log_set".into()]).await?;
+map_skill_to_permission_pool(&pool, "coach", "mcp.coach").await?;
+
+// 2. The member generates a key — a one-time `name`.`secret`, shown once.
+//    Nothing is pinned onto it; capabilities come from the owner's permissions.
+let issued = create_user_key_pool(&pool, user_id, "Alice's phone").await?;
+println!("copy once: {}", issued.token);
+```
+
+At token-issue the server calls
+[`resolve_user_agent_grants_pool`](../crates/rustango/src/tenancy/agents.rs) —
+the owner's effective permissions (`user_permissions_pool`, i.e. roles + direct
+grants − denials) select the mapped skills, whose tools/prompts/resources are
+flattened into the JWT's `skills`/`tools` claims. So `tools/list`,
+`tools/call`, `prompts/get`, and `resources/read` are **all** gated by RBAC,
+with no change to those handlers. The owning user rides in the token's `uid`
+claim; a tool handler reads it as `ctx.agent.user_id` to scope work to that
+member. Revoke fresh capabilities by changing the user's permissions (they
+re-resolve on the next token); revoke the key itself with
+`revoke_user_key_pool(&pool, user_id, agent_id)`. List a member's keys with
+`list_user_keys_pool(&pool, user_id)`.
+
+Standalone agents are unaffected — a machine agent (`user_id = None`) still
+uses only its explicit `grant_skill_pool` grants.
+
 ---
 
 ## The protocol

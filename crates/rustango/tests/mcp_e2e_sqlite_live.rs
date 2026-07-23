@@ -120,7 +120,7 @@ async fn full_agent_loop() {
     let jwt = Arc::new(JwtLifecycle::new(
         b"e2e-secret-at-least-32-bytes-long!!".to_vec(),
     ));
-    let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools).expect("issue");
+    let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools, None).expect("issue");
 
     // 6. Verify the token (what the guarded endpoint does each request).
     let agent = verify_agent_token(&jwt, &token, "acme").expect("verify");
