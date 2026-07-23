@@ -356,6 +356,7 @@ jobs:
       - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test permissions_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test database_pools_mysql_live
+      - run: cargo test -p rustango --features mysql,tenancy,mcp,testkit --test mcp_user_keys_mysql_live
       - run: cargo test -p rustango --features mysql --test audit_mysql_live
       - run: cargo test -p rustango --features mysql --test fixtures_mysql_live
       - run: cargo test -p rustango --features mysql --test inspectdb_mysql_live
