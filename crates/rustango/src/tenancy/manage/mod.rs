@@ -276,6 +276,26 @@ where
         "revoke-skill" => agents::revoke_skill_cmd(pools, registry_url, &args[1..], writer).await,
         #[cfg(feature = "mcp")]
         "list-skills" => agents::list_skills_cmd(pools, registry_url, &args[1..], writer).await,
+        #[cfg(feature = "mcp")]
+        "create-user-key" => {
+            agents::create_user_key_cmd(pools, registry_url, &args[1..], writer).await
+        }
+        #[cfg(feature = "mcp")]
+        "list-user-keys" => {
+            agents::list_user_keys_cmd(pools, registry_url, &args[1..], writer).await
+        }
+        #[cfg(feature = "mcp")]
+        "revoke-user-key" => {
+            agents::revoke_user_key_cmd(pools, registry_url, &args[1..], writer).await
+        }
+        #[cfg(feature = "mcp")]
+        "map-skill-permission" => {
+            agents::map_skill_permission_cmd(pools, registry_url, &args[1..], writer).await
+        }
+        #[cfg(feature = "mcp")]
+        "unmap-skill-permission" => {
+            agents::unmap_skill_permission_cmd(pools, registry_url, &args[1..], writer).await
+        }
         "seed-permissions" => roles::seed_permissions_cmd(pools, &args[1..], writer).await,
         "startapp" => scaffold::startapp_cmd(&args[1..], writer),
         // Plain `migrate` is scope-aware here — registry-scoped
@@ -543,6 +563,28 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         writeln!(w, "  revoke-skill <slug> <agent> <skill>")?;
         writeln!(w, "                       Revoke a skill from an agent.")?;
         writeln!(w, "  list-skills <slug>   List a tenant's MCP skills.")?;
+        writeln!(w, "  create-user-key <slug> <username> [label]")?;
+        writeln!(
+            w,
+            "                       Issue a personal, user-owned MCP key (prints its token once)."
+        )?;
+        writeln!(w, "  list-user-keys <slug> <username>")?;
+        writeln!(w, "                       List a user's personal MCP keys.")?;
+        writeln!(w, "  revoke-user-key <slug> <username> <key_id>")?;
+        writeln!(
+            w,
+            "                       Revoke one of a user's personal keys by id."
+        )?;
+        writeln!(w, "  map-skill-permission <slug> <skill> <permission>")?;
+        writeln!(
+            w,
+            "                       Grant a skill to any user holding <permission> (user keys)."
+        )?;
+        writeln!(w, "  unmap-skill-permission <slug> <skill> <permission>")?;
+        writeln!(
+            w,
+            "                       Remove a skill↔permission mapping."
+        )?;
     }
     writeln!(w, "  seed-permissions [--slug <s>]")?;
     writeln!(

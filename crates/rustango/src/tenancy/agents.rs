@@ -23,7 +23,7 @@ use crate::sql::{Auto, ExecError, Pool};
     table = "rustango_agents",
     display = "name",
     admin(
-        list_display = "name, active, secret_prefix, created_at",
+        list_display = "name, user_id, active, secret_prefix, created_at",
         search_fields = "name",
         ordering = "name",
         readonly_fields = "secret_prefix, secret_hash, created_at, secret_rotated_at",

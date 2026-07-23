@@ -251,6 +251,53 @@ re-resolve on the next token); revoke the key itself with
 Standalone agents are unaffected — a machine agent (`user_id = None`) still
 uses only its explicit `grant_skill_pool` grants.
 
+### From the CLI (`manage` verbs)
+
+Everything above is also available out of the box through the tenancy-aware
+`manage` dispatcher (these verbs compile in with the `mcp` feature). Each is
+tenant-scoped and takes a `<slug>`:
+
+| Verb | What it does |
+|---|---|
+| `create-agent <slug> <name>` | Provision a machine agent; prints its `prefix.secret` **once**. |
+| `rotate-agent-secret <slug> <name>` | Issue a fresh secret, invalidating the old one. |
+| `list-agents <slug>` | List a tenant's agents (id, name, status, prefix). |
+| `create-skill <slug> <codename> [--name ..] [--description ..] [--tools a,b] [--instructions ..]` | Define a skill (a bundle of tools + prompt). |
+| `grant-skill <slug> <agent> <skill>` | Grant a skill to an agent. |
+| `revoke-skill <slug> <agent> <skill>` | Revoke a skill from an agent. |
+| `list-skills <slug>` | List a tenant's skills. |
+| `create-user-key <slug> <username> [label]` | Issue a **user-owned key** for a tenant user; prints its token **once** (default label = username). |
+| `list-user-keys <slug> <username>` | List a user's personal keys (id, label, created-at). |
+| `revoke-user-key <slug> <username> <key_id>` | Revoke one of a user's personal keys by id (ownership-verified). |
+| `map-skill-permission <slug> <skill> <permission>` | Map a skill to a permission codename. Idempotent — any user key whose owner holds `<permission>` gains the skill. |
+| `unmap-skill-permission <slug> <skill> <permission>` | Remove a skill↔permission mapping. |
+
+The **permission → skill → tools** flow end to end:
+
+```console
+# 1. Define the skill and map it to a permission codename.
+$ cargo run -- create-skill acme coach --tools log_set --instructions "You are the member's coach."
+$ cargo run -- map-skill-permission acme coach mcp.coach
+
+# 2. Grant the permission to the member (roles or direct — see grant-perm),
+#    then issue their personal key.
+$ cargo run -- grant-perm acme alice mcp.coach
+$ cargo run -- create-user-key acme alice "Alice's phone"
+created key #7 for user `alice` in tenant `acme` (label `Alice's phone`)
+  token: 3f9c1a2b.7d…            # copy once — never shown again
+  store this safely — it won't be shown again
+```
+
+Alice's key now resolves the `coach` skill's tools at every token-issue because
+she holds `mcp.coach`. Change her permissions and the capabilities re-resolve on
+her next token; revoke the key itself with `revoke-user-key`. The same key id is
+distinguishable from machine agents in the tenant admin (the `Agent` list shows
+`user_id`).
+
+The auto-admin surfaces these too: `Agent`, `AgentSkill`, `AgentSkillPermission`
+(and `AgentGrant`) each render an auto-CRUD table in the tenant admin, so the
+skill↔permission mappings can be reviewed and edited without the CLI.
+
 ---
 
 ## The protocol
