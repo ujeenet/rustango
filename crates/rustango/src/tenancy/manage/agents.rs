@@ -7,6 +7,7 @@ use std::io::Write;
 
 use sqlx::Database;
 
+use crate::sql::Pool;
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::manage::args::{next_value, reject_leading_flag};
 use crate::tenancy::pools::TenantPools;
@@ -21,6 +22,13 @@ const CREATE_SKILL_HELP: &str =
 const GRANT_HELP: &str = "grant-skill <slug> <agent> <skill>";
 const REVOKE_HELP: &str = "revoke-skill <slug> <agent> <skill>";
 const LIST_SKILLS_HELP: &str = "list-skills <slug>";
+const CREATE_USER_KEY_HELP: &str =
+    "create-user-key <slug> <username> [--label <l>] [--skill <codename>]…  \
+     (repeat --skill to scope the key to a skillset; omit for a full key)";
+const LIST_USER_KEYS_HELP: &str = "list-user-keys <slug> <username>";
+const REVOKE_USER_KEY_HELP: &str = "revoke-user-key <slug> <username> <key_id>";
+const MAP_SKILL_PERM_HELP: &str = "map-skill-permission <slug> <skill> <permission>";
+const UNMAP_SKILL_PERM_HELP: &str = "unmap-skill-permission <slug> <skill> <permission>";
 
 /// `create-agent <slug> <name>` — provision a new MCP agent in the tenant
 /// and print its one-time `prefix.secret` credential.
@@ -265,6 +273,226 @@ where
         writeln!(w, "  {}  {}", s.codename, s.name)?;
     }
     Ok(())
+}
+
+/// `create-user-key <slug> <username> [label]` — provision a personal,
+/// user-owned MCP key for `<username>` and print its one-time credential.
+/// The default label is the username.
+pub(super) async fn create_user_key_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    reject_leading_flag(args, "create-user-key", "slug", CREATE_USER_KEY_HELP)?;
+    let slug = args
+        .first()
+        .cloned()
+        .ok_or_else(|| TenancyError::Validation(CREATE_USER_KEY_HELP.into()))?;
+    let username = args
+        .get(1)
+        .cloned()
+        .ok_or_else(|| TenancyError::Validation(CREATE_USER_KEY_HELP.into()))?;
+
+    // Flags after the two positionals: --label <l>, --skill <codename> (repeat
+    // --skill for a skillset; none = a full-permission key).
+    let mut label: Option<String> = None;
+    let mut skills: Vec<String> = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--label" => {
+                i += 1;
+                label = Some(args.get(i).cloned().ok_or_else(|| {
+                    TenancyError::Validation("create-user-key: --label needs a value".into())
+                })?);
+            }
+            "--skill" => {
+                i += 1;
+                skills.push(args.get(i).cloned().ok_or_else(|| {
+                    TenancyError::Validation("create-user-key: --skill needs a codename".into())
+                })?);
+            }
+            other => {
+                return Err(TenancyError::Validation(format!(
+                    "create-user-key: unexpected argument `{other}` ({CREATE_USER_KEY_HELP})"
+                )));
+            }
+        }
+        i += 1;
+    }
+    let label = label.unwrap_or_else(|| username.clone());
+
+    let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
+    let uid = resolve_user_id(&scoped, &username).await?;
+    let issued = crate::tenancy::create_user_key_pool(&scoped, uid, &label, &skills)
+        .await
+        .map_err(|e| TenancyError::Validation(e.to_string()))?;
+    let id = issued.agent.id.get().copied().unwrap_or_default();
+    let scope = if skills.is_empty() {
+        "full (owner's permissions)".to_owned()
+    } else {
+        format!("skills: {}", skills.join(", "))
+    };
+    writeln!(
+        w,
+        "created key #{id} for user `{username}` in tenant `{slug}` (label `{label}`, scope {scope})"
+    )?;
+    writeln!(w, "  token: {}", issued.token)?;
+    writeln!(w, "  store this safely — it won't be shown again")?;
+    Ok(())
+}
+
+/// `list-user-keys <slug> <username>` — print every personal key owned by
+/// `<username>`, newest first.
+pub(super) async fn list_user_keys_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    reject_leading_flag(args, "list-user-keys", "slug", LIST_USER_KEYS_HELP)?;
+    let mut iter = args.iter();
+    let slug = iter
+        .next()
+        .cloned()
+        .ok_or_else(|| TenancyError::Validation(LIST_USER_KEYS_HELP.into()))?;
+    let username = iter
+        .next()
+        .cloned()
+        .ok_or_else(|| TenancyError::Validation(LIST_USER_KEYS_HELP.into()))?;
+
+    let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
+    let uid = resolve_user_id(&scoped, &username).await?;
+    let keys = crate::tenancy::list_user_keys_pool(&scoped, uid)
+        .await
+        .map_err(|e| TenancyError::Validation(e.to_string()))?;
+    if keys.is_empty() {
+        writeln!(w, "no keys for user `{username}`")?;
+        return Ok(());
+    }
+    writeln!(w, "keys for user `{username}` in tenant `{slug}`:")?;
+    for k in &keys {
+        let id = k.id.get().copied().unwrap_or_default();
+        let label = k
+            .data
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let created = k
+            .created_at
+            .get()
+            .map(chrono::DateTime::to_rfc3339)
+            .unwrap_or_default();
+        writeln!(w, "  #{id}  {label}  {created}")?;
+    }
+    Ok(())
+}
+
+/// `revoke-user-key <slug> <username> <key_id>` — delete one of
+/// `<username>`'s personal keys by its id (ownership-verified).
+pub(super) async fn revoke_user_key_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    reject_leading_flag(args, "revoke-user-key", "slug", REVOKE_USER_KEY_HELP)?;
+    let mut iter = args.iter();
+    let slug = iter
+        .next()
+        .cloned()
+        .ok_or_else(|| TenancyError::Validation(REVOKE_USER_KEY_HELP.into()))?;
+    let username = iter
+        .next()
+        .cloned()
+        .ok_or_else(|| TenancyError::Validation(REVOKE_USER_KEY_HELP.into()))?;
+    let key_id: i64 = iter
+        .next()
+        .ok_or_else(|| TenancyError::Validation(REVOKE_USER_KEY_HELP.into()))?
+        .parse()
+        .map_err(|_| {
+            TenancyError::Validation("revoke-user-key: <key_id> must be an integer".into())
+        })?;
+
+    let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
+    let uid = resolve_user_id(&scoped, &username).await?;
+    crate::tenancy::revoke_user_key_pool(&scoped, uid, key_id)
+        .await
+        .map_err(|e| TenancyError::Validation(e.to_string()))?;
+    writeln!(w, "revoked key #{key_id} for user `{username}`")?;
+    Ok(())
+}
+
+/// `map-skill-permission <slug> <skill> <permission>` — grant everyone
+/// holding `<permission>` the `<skill>`'s tools on their user-owned keys.
+/// Idempotent.
+pub(super) async fn map_skill_permission_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let (slug, skill, permission) =
+        three_positionals(args, "map-skill-permission", MAP_SKILL_PERM_HELP)?;
+    let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
+    crate::tenancy::map_skill_to_permission_pool(&scoped, &skill, &permission)
+        .await
+        .map_err(|e| TenancyError::Validation(e.to_string()))?;
+    writeln!(
+        w,
+        "mapped skill `{skill}` → permission `{permission}` in tenant `{slug}`"
+    )?;
+    Ok(())
+}
+
+/// `unmap-skill-permission <slug> <skill> <permission>` — remove a
+/// skill↔permission mapping. No-op if absent.
+pub(super) async fn unmap_skill_permission_cmd<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let (slug, skill, permission) =
+        three_positionals(args, "unmap-skill-permission", UNMAP_SKILL_PERM_HELP)?;
+    let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
+    crate::tenancy::unmap_skill_from_permission_pool(&scoped, &skill, &permission)
+        .await
+        .map_err(|e| TenancyError::Validation(e.to_string()))?;
+    writeln!(w, "unmapped skill `{skill}` ✗ permission `{permission}`")?;
+    Ok(())
+}
+
+/// Resolve `username` to a `rustango_users.id` on the scoped tenant pool.
+/// Returns a `Validation` error naming the unknown user.
+async fn resolve_user_id(pool: &Pool, username: &str) -> Result<i64, TenancyError> {
+    use crate::sql::FetcherPool as _;
+    let user = crate::tenancy::User::objects()
+        .filter("username", username.to_owned())
+        .limit(1)
+        .fetch(pool)
+        .await
+        .map_err(|e| TenancyError::Validation(e.to_string()))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| TenancyError::Validation(format!("unknown user `{username}`")))?;
+    Ok(user.id.get().copied().unwrap_or_default())
 }
 
 /// Parse exactly three positional args (`<slug> <a> <b>`) for the grant verbs.

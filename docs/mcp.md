@@ -211,6 +211,108 @@ assert_eq!(out["structuredContent"]["sum"], 5);
 Tokens are tenant-pinned: a token minted for `acme` is rejected against any other
 tenant (cross-tenant replay → 401). Revoke an agent and its JTI is blacklisted.
 
+### User-owned keys (permission-driven capabilities)
+
+The agents above are standalone machine identities. A member can instead
+generate a **personal key** — a user-owned agent — so an LLM acts *on their
+behalf*, with capabilities that follow the tenant's existing **RBAC** instead
+of a list pinned onto the key.
+
+Two pieces wire it up:
+
+```rust
+use rustango::tenancy::{create_user_key_pool, create_skill_pool, map_skill_to_permission_pool};
+
+// 1. Map a skill to a permission codename. Any user-owned key whose owner
+//    holds `mcp.coach` is then granted this skill's tools + prompt + resources.
+create_skill_pool(&pool, "coach", "Coach", "logs workouts",
+                  "You are the member's coach.", &["log_set".into()]).await?;
+map_skill_to_permission_pool(&pool, "coach", "mcp.coach").await?;
+
+// 2. The member generates a key — a one-time `name`.`secret`, shown once.
+//    `&[]` = a FULL key: everything the owner is entitled to. Pass skill
+//    codenames to SCOPE the key to a single skill or a skillset instead —
+//    always bounded by the owner's entitlement (you can't exceed your perms):
+let issued = create_user_key_pool(&pool, user_id, "Alice's phone", &[]).await?;
+// scoped: create_user_key_pool(&pool, user_id, "coach bot", &["coach".into()]).await?;
+println!("copy once: {}", issued.token);
+```
+
+At token-issue the server calls
+[`resolve_user_agent_grants_pool`](../crates/rustango/src/tenancy/agents.rs) —
+the owner's effective permissions (`user_permissions_pool`, i.e. roles + direct
+grants − denials) select the mapped skills, whose tools/prompts/resources are
+flattened into the JWT's `skills`/`tools` claims. So `tools/list`,
+`tools/call`, `prompts/get`, and `resources/read` are **all** gated by RBAC,
+with no change to those handlers. The owning user rides in the token's `uid`
+claim; a tool handler reads it as `ctx.agent.user_id` to scope work to that
+member. Revoke fresh capabilities by changing the user's permissions (they
+re-resolve on the next token); revoke the key itself with
+`revoke_user_key_pool(&pool, user_id, agent_id)`. List a member's keys with
+`list_user_keys_pool(&pool, user_id)`.
+
+**Per-key scope vs per-user entitlement.** Skills reach a key along two axes:
+the owner's **entitlement** (superuser → every skill; otherwise the skills
+mapped to a permission they hold) and the key's **scope** (skills pinned at
+creation). An unscoped key (`skills = &[]`) gets the owner's full entitlement;
+a scoped key (`skills = &["coach", …]`) is limited to those. Resolution always
+re-intersects scope with the *current* entitlement — so a key can never exceed
+the owner's permissions, and losing a permission narrows every key on the next
+mint. Scoping to a skill the owner isn't entitled to is refused at creation.
+
+Standalone agents are unaffected — a machine agent (`user_id = None`) still
+uses only its explicit `grant_skill_pool` grants.
+
+### From the CLI (`manage` verbs)
+
+Everything above is also available out of the box through the tenancy-aware
+`manage` dispatcher (these verbs compile in with the `mcp` feature). Each is
+tenant-scoped and takes a `<slug>`:
+
+| Verb | What it does |
+|---|---|
+| `create-agent <slug> <name>` | Provision a machine agent; prints its `prefix.secret` **once**. |
+| `rotate-agent-secret <slug> <name>` | Issue a fresh secret, invalidating the old one. |
+| `list-agents <slug>` | List a tenant's agents (id, name, status, prefix). |
+| `create-skill <slug> <codename> [--name ..] [--description ..] [--tools a,b] [--instructions ..]` | Define a skill (a bundle of tools + prompt). |
+| `grant-skill <slug> <agent> <skill>` | Grant a skill to an agent. |
+| `revoke-skill <slug> <agent> <skill>` | Revoke a skill from an agent. |
+| `list-skills <slug>` | List a tenant's skills. |
+| `create-user-key <slug> <username> [--label <l>] [--skill <codename>]…` | Issue a **user-owned key**; prints its token **once**. Repeat `--skill` to scope the key to a single skill or a skillset; omit for a full key (default label = username). |
+| `list-user-keys <slug> <username>` | List a user's personal keys (id, label, created-at). |
+| `revoke-user-key <slug> <username> <key_id>` | Revoke one of a user's personal keys by id (ownership-verified). |
+| `map-skill-permission <slug> <skill> <permission>` | Map a skill to a permission codename. Idempotent — any user key whose owner holds `<permission>` gains the skill. |
+| `unmap-skill-permission <slug> <skill> <permission>` | Remove a skill↔permission mapping. |
+
+The **permission → skill → tools** flow end to end:
+
+```console
+# 1. Define the skill and map it to a permission codename.
+$ cargo run -- create-skill acme coach --tools log_set --instructions "You are the member's coach."
+$ cargo run -- map-skill-permission acme coach mcp.coach
+
+# 2. Grant the permission to the member (roles or direct — see grant-perm),
+#    then issue their personal key.
+$ cargo run -- grant-perm acme alice mcp.coach
+$ cargo run -- create-user-key acme alice --label "Alice's phone"
+created key #7 for user `alice` in tenant `acme` (label `Alice's phone`, scope full (owner's permissions))
+  token: 3f9c1a2b.7d…            # copy once — never shown again
+  store this safely — it won't be shown again
+
+# …or scope the key to a single skill / skillset (repeat --skill):
+$ cargo run -- create-user-key acme alice --label "coach bot" --skill coach
+```
+
+Alice's key now resolves the `coach` skill's tools at every token-issue because
+she holds `mcp.coach`. Change her permissions and the capabilities re-resolve on
+her next token; revoke the key itself with `revoke-user-key`. The same key id is
+distinguishable from machine agents in the tenant admin (the `Agent` list shows
+`user_id`).
+
+The auto-admin surfaces these too: `Agent`, `AgentSkill`, `AgentSkillPermission`
+(and `AgentGrant`) each render an auto-CRUD table in the tenant admin, so the
+skill↔permission mappings can be reviewed and edited without the CLI.
+
 ---
 
 ## The protocol

@@ -8,7 +8,7 @@
 //! This is the "full agent loop is green" acceptance. (The JSON-RPC
 //! transport itself — initialize/ping over HTTP — is covered in
 //! `mcp_slice1`.)
-#![cfg(all(feature = "sqlite", feature = "mcp"))]
+#![cfg(all(feature = "sqlite", feature = "mcp", feature = "testkit"))]
 #![allow(irrefutable_let_patterns)]
 
 use std::sync::Arc;
@@ -64,6 +64,10 @@ async fn full_agent_loop() {
             .await
             .expect("sqlite"),
     );
+    // Agent/skill/resource tables now come from system migrations.
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate framework");
 
     // 1. Provision an agent (one-time secret).
     let issued = create_agent_pool(&pool, "e2e-bot").await.expect("agent");
@@ -120,7 +124,7 @@ async fn full_agent_loop() {
     let jwt = Arc::new(JwtLifecycle::new(
         b"e2e-secret-at-least-32-bytes-long!!".to_vec(),
     ));
-    let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools).expect("issue");
+    let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools, None).expect("issue");
 
     // 6. Verify the token (what the guarded endpoint does each request).
     let agent = verify_agent_token(&jwt, &token, "acme").expect("verify");

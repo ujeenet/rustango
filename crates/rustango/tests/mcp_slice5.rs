@@ -4,7 +4,7 @@
 //! `prompts/get` and its resources by `resources/read`; an ungranted
 //! skill's prompt/resources are neither listed nor readable (fail-closed);
 //! a `register_mcp_resource!` static resource is always available.
-#![cfg(all(feature = "sqlite", feature = "mcp"))]
+#![cfg(all(feature = "sqlite", feature = "mcp", feature = "testkit"))]
 #![allow(irrefutable_let_patterns)]
 
 use rustango::mcp::{
@@ -19,11 +19,16 @@ rustango::register_mcp_resource!("rustango://about", "About", "text/plain", || {
 },);
 
 async fn pool() -> Pool {
-    Pool::Sqlite(
+    let pool = Pool::Sqlite(
         sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("sqlite"),
-    )
+    );
+    // Skill/resource tables now come from system migrations, not a lazy ensure layer.
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate framework");
+    pool
 }
 
 fn ctx(pool: Pool, skills: &[&str]) -> McpContext {
@@ -34,6 +39,7 @@ fn ctx(pool: Pool, skills: &[&str]) -> McpContext {
             tenant: "acme".into(),
             skills: skills.iter().map(|s| s.to_string()).collect(),
             tools: vec![],
+            user_id: None,
             jti: "t".into(),
         },
         progress: rustango::mcp::ProgressReporter::disabled(),
