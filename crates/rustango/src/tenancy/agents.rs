@@ -6,12 +6,12 @@
 //! verified by [`crate::api_keys`] — and exchanges it for a short-lived
 //! scoped JWT (see [`crate::mcp::auth`]).
 //!
-//! The table is created on demand by [`ensure_agents_table_pool`], exactly
-//! like `rustango_api_keys` (`tenancy::auth_backends::ensure_api_keys_table_pool`)
-//! — the bootstrap `forward` ops only create `rustango_users`; everything
-//! else is ensured per-dialect. `Agent::SCHEMA` is still listed in the
-//! tenant bootstrap snapshot so a downstream `make_migrations` sees a
-//! complete world.
+//! Every model here is `#[derive(Model)]`, `managed`, and lives on a
+//! `rustango_*` table, so all its tables are emitted as ordinary **system
+//! migrations** (and, in tests, materialized by
+//! [`crate::testkit::migrate_framework`]). There is no lazy `ensure_*`
+//! creation layer — the tables exist because migrations ran, exactly like
+//! the rest of the framework's own tables.
 
 use crate::sql::{Auto, ExecError, Pool};
 
@@ -23,7 +23,7 @@ use crate::sql::{Auto, ExecError, Pool};
     table = "rustango_agents",
     display = "name",
     admin(
-        list_display = "name, active, secret_prefix, created_at",
+        list_display = "name, user_id, active, secret_prefix, created_at",
         search_fields = "name",
         ordering = "name",
         readonly_fields = "secret_prefix, secret_hash, created_at, secret_rotated_at",
@@ -49,78 +49,18 @@ pub struct Agent {
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
     /// Timestamp of the last secret rotation. `None` until first rotated.
     pub secret_rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Optional owning `rustango_users.id`. `None` for a standalone machine
+    /// agent; `Some(uid)` for a **user-owned key** — a personal credential a
+    /// member generates so an LLM can act on their behalf. The owner rides
+    /// into the agent's scoped JWT (`uid` claim) so tool handlers can scope
+    /// work to the member (`ctx.agent.user_id`). Logically references
+    /// `rustango_users`, but no hard FK is declared — that would couple the
+    /// `mcp` feature to `tenancy` and break mcp-without-tenancy builds. Orphan
+    /// cleanup on user deletion is explicit via [`delete_user_keys_pool`].
+    pub user_id: Option<i64>,
     /// Flexible per-agent metadata. Never read by the framework.
     #[rustango(default = "'{}'")]
     pub data: serde_json::Value,
-}
-
-// --------------------------------------------------------------- ensure DDL
-// Per-dialect `CREATE TABLE IF NOT EXISTS`, mirroring
-// `tenancy::auth_backends`'s api-keys constants. No FK — an agent is its
-// own identity (not owned by a `rustango_users` row).
-
-const AGENT_ENSURE_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_agents" (
-    "id"                BIGSERIAL    PRIMARY KEY,
-    "name"              VARCHAR(150) NOT NULL,
-    "secret_prefix"     VARCHAR(16)  NOT NULL,
-    "secret_hash"       VARCHAR(255) NOT NULL,
-    "active"            BOOLEAN      NOT NULL DEFAULT TRUE,
-    "created_at"        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    "secret_rotated_at" TIMESTAMPTZ,
-    "data"              JSONB        NOT NULL DEFAULT '{}',
-    CONSTRAINT "rustango_agents_name_uq"   UNIQUE ("name"),
-    CONSTRAINT "rustango_agents_prefix_uq" UNIQUE ("secret_prefix")
-);"#;
-
-const AGENT_ENSURE_SQL_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_agents" (
-    "id"                INTEGER PRIMARY KEY AUTOINCREMENT,
-    "name"              TEXT    NOT NULL,
-    "secret_prefix"     TEXT    NOT NULL,
-    "secret_hash"       TEXT    NOT NULL,
-    "active"            INTEGER NOT NULL DEFAULT 1,
-    "created_at"        TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "secret_rotated_at" TEXT,
-    "data"              TEXT    NOT NULL DEFAULT '{}',
-    CONSTRAINT "rustango_agents_name_uq"   UNIQUE ("name"),
-    CONSTRAINT "rustango_agents_prefix_uq" UNIQUE ("secret_prefix")
-);"#;
-
-const AGENT_ENSURE_SQL_MYSQL: &str = r#"
-CREATE TABLE IF NOT EXISTS `rustango_agents` (
-    `id`                BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `name`              VARCHAR(150) NOT NULL,
-    `secret_prefix`     VARCHAR(16)  NOT NULL,
-    `secret_hash`       VARCHAR(255) NOT NULL,
-    `active`            TINYINT(1)   NOT NULL DEFAULT 1,
-    `created_at`        DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    `secret_rotated_at` DATETIME(6),
-    `data`              JSON,
-    CONSTRAINT `rustango_agents_name_uq`   UNIQUE (`name`),
-    CONSTRAINT `rustango_agents_prefix_uq` UNIQUE (`secret_prefix`)
-);"#;
-
-/// Create the `rustango_agents` table if absent (idempotent, per-dialect).
-/// Mirrors `tenancy::auth_backends::ensure_api_keys_table_pool`.
-///
-/// # Errors
-/// Propagates the driver error if the `CREATE TABLE` fails.
-pub async fn ensure_agents_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
-    let ddl = match pool.dialect().name() {
-        "sqlite" => AGENT_ENSURE_SQL_SQLITE,
-        "mysql" => AGENT_ENSURE_SQL_MYSQL,
-        _ => AGENT_ENSURE_SQL,
-    };
-    for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        crate::sql::raw_execute_pool(pool, stmt, Vec::new())
-            .await
-            .map_err(|e| match e {
-                ExecError::Driver(err) => err,
-                other => sqlx::Error::Protocol(format!("{other}")),
-            })?;
-    }
-    Ok(())
 }
 
 // ------------------------------------------------------------- operations
@@ -147,6 +87,8 @@ pub enum AgentError {
     Db(#[from] ExecError),
     #[error(transparent)]
     Driver(#[from] sqlx::Error),
+    #[error(transparent)]
+    Tenancy(#[from] super::error::TenancyError),
 }
 
 /// Generate a fresh `prefix.secret` credential: returns
@@ -183,8 +125,6 @@ pub async fn create_agent_pool(pool: &Pool, name: &str) -> Result<AgentSecret, A
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
-    ensure_agents_table_pool(pool).await?;
-
     let existing: Vec<Agent> = Agent::objects()
         .where_(Agent::name.eq(name))
         .limit(1)
@@ -204,6 +144,7 @@ pub async fn create_agent_pool(pool: &Pool, name: &str) -> Result<AgentSecret, A
         active: true,
         created_at: Auto::default(),
         secret_rotated_at: None,
+        user_id: None,
         data: serde_json::json!({}),
     };
     agent.insert_pool(pool).await?;
@@ -218,8 +159,6 @@ pub async fn create_agent_pool(pool: &Pool, name: &str) -> Result<AgentSecret, A
 pub async fn rotate_agent_secret_pool(pool: &Pool, name: &str) -> Result<AgentSecret, AgentError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-
-    ensure_agents_table_pool(pool).await?;
 
     let mut agent: Agent = Agent::objects()
         .where_(Agent::name.eq(name))
@@ -244,7 +183,6 @@ pub async fn rotate_agent_secret_pool(pool: &Pool, name: &str) -> Result<AgentSe
 /// Propagates DB errors.
 pub async fn list_agents_pool(pool: &Pool) -> Result<Vec<Agent>, AgentError> {
     use crate::sql::FetcherPool as _;
-    ensure_agents_table_pool(pool).await?;
     let agents = Agent::objects()
         .order_by(&[("name", false)])
         .fetch(pool)
@@ -267,8 +205,6 @@ pub async fn authenticate_agent_pool(
 ) -> Result<Option<Agent>, AgentError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-
-    ensure_agents_table_pool(pool).await?;
 
     // Accept either `prefix.secret` or the bare secret half (secrets are
     // hex, so the part after the last `.` is the secret).
@@ -358,101 +294,24 @@ pub struct AgentGrant {
     pub data: serde_json::Value,
 }
 
-const SKILLS_ENSURE_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_agent_skills" (
-    "id"           BIGSERIAL    PRIMARY KEY,
-    "codename"     VARCHAR(100) NOT NULL,
-    "name"         VARCHAR(150) NOT NULL DEFAULT '',
-    "description"  VARCHAR(500) NOT NULL DEFAULT '',
-    "instructions" TEXT         NOT NULL DEFAULT '',
-    "data"         JSONB        NOT NULL DEFAULT '{}',
-    CONSTRAINT "rustango_agent_skills_codename_uq" UNIQUE ("codename")
-);
-CREATE TABLE IF NOT EXISTS "rustango_agent_skill_tools" (
-    "id"        BIGSERIAL    PRIMARY KEY,
-    "skill_id"  BIGINT       NOT NULL REFERENCES "rustango_agent_skills"("id") ON DELETE CASCADE,
-    "tool_name" VARCHAR(150) NOT NULL
-);
-CREATE TABLE IF NOT EXISTS "rustango_agent_grants" (
-    "id"       BIGSERIAL PRIMARY KEY,
-    "agent_id" BIGINT    NOT NULL REFERENCES "rustango_agents"("id")       ON DELETE CASCADE,
-    "skill_id" BIGINT    NOT NULL REFERENCES "rustango_agent_skills"("id") ON DELETE CASCADE,
-    "data"     JSONB     NOT NULL DEFAULT '{}',
-    CONSTRAINT "rustango_agent_grants_uq" UNIQUE ("agent_id", "skill_id")
-);"#;
-
-const SKILLS_ENSURE_SQL_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_agent_skills" (
-    "id"           INTEGER PRIMARY KEY AUTOINCREMENT,
-    "codename"     TEXT NOT NULL,
-    "name"         TEXT NOT NULL DEFAULT '',
-    "description"  TEXT NOT NULL DEFAULT '',
-    "instructions" TEXT NOT NULL DEFAULT '',
-    "data"         TEXT NOT NULL DEFAULT '{}',
-    CONSTRAINT "rustango_agent_skills_codename_uq" UNIQUE ("codename")
-);
-CREATE TABLE IF NOT EXISTS "rustango_agent_skill_tools" (
-    "id"        INTEGER PRIMARY KEY AUTOINCREMENT,
-    "skill_id"  INTEGER NOT NULL REFERENCES "rustango_agent_skills"("id") ON DELETE CASCADE,
-    "tool_name" TEXT    NOT NULL
-);
-CREATE TABLE IF NOT EXISTS "rustango_agent_grants" (
-    "id"       INTEGER PRIMARY KEY AUTOINCREMENT,
-    "agent_id" INTEGER NOT NULL REFERENCES "rustango_agents"("id")       ON DELETE CASCADE,
-    "skill_id" INTEGER NOT NULL REFERENCES "rustango_agent_skills"("id") ON DELETE CASCADE,
-    "data"     TEXT    NOT NULL DEFAULT '{}',
-    CONSTRAINT "rustango_agent_grants_uq" UNIQUE ("agent_id", "skill_id")
-);"#;
-
-const SKILLS_ENSURE_SQL_MYSQL: &str = r#"
-CREATE TABLE IF NOT EXISTS `rustango_agent_skills` (
-    `id`           BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `codename`     VARCHAR(100) NOT NULL,
-    `name`         VARCHAR(150) NOT NULL DEFAULT '',
-    `description`  VARCHAR(500) NOT NULL DEFAULT '',
-    `instructions` TEXT         NOT NULL,
-    `data`         JSON,
-    CONSTRAINT `rustango_agent_skills_codename_uq` UNIQUE (`codename`)
-);
-CREATE TABLE IF NOT EXISTS `rustango_agent_skill_tools` (
-    `id`        BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `skill_id`  BIGINT       NOT NULL,
-    `tool_name` VARCHAR(150) NOT NULL,
-    CONSTRAINT `rustango_agent_skill_tools_fk` FOREIGN KEY (`skill_id`)
-        REFERENCES `rustango_agent_skills`(`id`) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS `rustango_agent_grants` (
-    `id`       BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `agent_id` BIGINT NOT NULL,
-    `skill_id` BIGINT NOT NULL,
-    `data`     JSON,
-    CONSTRAINT `rustango_agent_grants_uq` UNIQUE (`agent_id`, `skill_id`),
-    CONSTRAINT `rustango_agent_grants_fk_agent` FOREIGN KEY (`agent_id`)
-        REFERENCES `rustango_agents`(`id`) ON DELETE CASCADE,
-    CONSTRAINT `rustango_agent_grants_fk_skill` FOREIGN KEY (`skill_id`)
-        REFERENCES `rustango_agent_skills`(`id`) ON DELETE CASCADE
-);"#;
-
-/// Create the skill / skill-tool / grant tables if absent (idempotent,
-/// per-dialect). Mirrors [`ensure_agents_table_pool`].
-///
-/// # Errors
-/// Propagates the driver error if a `CREATE TABLE` fails.
-pub async fn ensure_skill_tables_pool(pool: &Pool) -> Result<(), sqlx::Error> {
-    let ddl = match pool.dialect().name() {
-        "sqlite" => SKILLS_ENSURE_SQL_SQLITE,
-        "mysql" => SKILLS_ENSURE_SQL_MYSQL,
-        _ => SKILLS_ENSURE_SQL,
-    };
-    for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        crate::sql::raw_execute_pool(pool, stmt, Vec::new())
-            .await
-            .map_err(|e| match e {
-                ExecError::Driver(err) => err,
-                other => sqlx::Error::Protocol(format!("{other}")),
-            })?;
-    }
-    Ok(())
+/// Maps a skill to a user **permission codename**. A user-owned key is
+/// granted the skill (its tools + prompt + resources) when the owning user
+/// holds any mapped permission — so MCP capabilities follow the tenant's
+/// existing RBAC. Standalone (machine) agents ignore this; they use explicit
+/// [`AgentGrant`]s only.
+#[derive(crate::Model, Debug, Clone)]
+#[rustango(
+    table = "rustango_agent_skill_permissions",
+    admin(list_display = "skill_id, permission_codename", ordering = "skill_id")
+)]
+pub struct AgentSkillPermission {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "rustango_agent_skills", on = "id", on_delete = "cascade")]
+    pub skill_id: i64,
+    /// A `rustango_permissions` codename (e.g. `ib_member_profile.change`).
+    #[rustango(max_length = 150)]
+    pub permission_codename: String,
 }
 
 /// Create a skill bundling `tools` (by name). `name`/`description`/
@@ -471,7 +330,6 @@ pub async fn create_skill_pool(
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
-    ensure_skill_tables_pool(pool).await?;
     let existing: Vec<AgentSkill> = AgentSkill::objects()
         .where_(AgentSkill::codename.eq(codename))
         .limit(1)
@@ -509,7 +367,6 @@ pub async fn create_skill_pool(
 /// Propagates DB errors.
 pub async fn list_skills_pool(pool: &Pool) -> Result<Vec<AgentSkill>, AgentError> {
     use crate::sql::FetcherPool as _;
-    ensure_skill_tables_pool(pool).await?;
     Ok(AgentSkill::objects()
         .order_by(&[("codename", false)])
         .fetch(pool)
@@ -529,9 +386,6 @@ pub async fn grant_skill_pool(
 ) -> Result<(), AgentError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-
-    ensure_agents_table_pool(pool).await?;
-    ensure_skill_tables_pool(pool).await?;
 
     let (agent_id, skill_id) = resolve_ids(pool, agent_name, skill_codename).await?;
 
@@ -566,9 +420,6 @@ pub async fn revoke_skill_pool(
 ) -> Result<(), AgentError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-
-    ensure_agents_table_pool(pool).await?;
-    ensure_skill_tables_pool(pool).await?;
 
     let (agent_id, skill_id) = resolve_ids(pool, agent_name, skill_codename).await?;
     let grants: Vec<AgentGrant> = AgentGrant::objects()
@@ -645,8 +496,6 @@ pub async fn resolve_agent_grants_pool(
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
-    ensure_skill_tables_pool(pool).await?;
-
     let grants: Vec<AgentGrant> = AgentGrant::objects()
         .where_(AgentGrant::agent_id.eq(agent_id))
         .fetch(pool)
@@ -675,6 +524,456 @@ pub async fn resolve_agent_grants_pool(
     Ok((skill_codenames, tools))
 }
 
+// =========================================== permission-driven capabilities
+// User-owned keys derive their MCP capabilities from the tenant's RBAC: a
+// skill is mapped to one or more permission codenames, and the key's owning
+// user is granted that skill (its tools + prompt + resources) when they hold
+// any mapped permission. Resolved fresh at token-mint so the JWT reflects the
+// user's current entitlements.
+
+/// Map `skill_codename` to a `permission_codename`. Idempotent — a duplicate
+/// mapping is a no-op. A user-owned key whose owner holds this permission is
+/// then granted the skill at token-issue.
+///
+/// # Errors
+/// [`AgentError::NotFound`] if the skill codename doesn't exist.
+pub async fn map_skill_to_permission_pool(
+    pool: &Pool,
+    skill_codename: &str,
+    permission_codename: &str,
+) -> Result<(), AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
+    let skill_id = AgentSkill::objects()
+        .where_(AgentSkill::codename.eq(skill_codename))
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| AgentError::NotFound(skill_codename.to_owned()))?
+        .id
+        .get()
+        .copied()
+        .unwrap_or_default();
+
+    let existing: Vec<AgentSkillPermission> = AgentSkillPermission::objects()
+        .where_(AgentSkillPermission::skill_id.eq(skill_id))
+        .where_(AgentSkillPermission::permission_codename.eq(permission_codename))
+        .limit(1)
+        .fetch(pool)
+        .await?;
+    if existing.is_empty() {
+        let mut row = AgentSkillPermission {
+            id: Auto::default(),
+            skill_id,
+            permission_codename: permission_codename.to_owned(),
+        };
+        row.insert_pool(pool).await?;
+    }
+    Ok(())
+}
+
+/// Remove a skill↔permission mapping. No-op if absent.
+///
+/// # Errors
+/// [`AgentError::NotFound`] if the skill codename doesn't exist.
+pub async fn unmap_skill_from_permission_pool(
+    pool: &Pool,
+    skill_codename: &str,
+    permission_codename: &str,
+) -> Result<(), AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
+    let Some(skill_id) = AgentSkill::objects()
+        .where_(AgentSkill::codename.eq(skill_codename))
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+        .and_then(|s| s.id.get().copied())
+    else {
+        return Err(AgentError::NotFound(skill_codename.to_owned()));
+    };
+    let rows: Vec<AgentSkillPermission> = AgentSkillPermission::objects()
+        .where_(AgentSkillPermission::skill_id.eq(skill_id))
+        .where_(AgentSkillPermission::permission_codename.eq(permission_codename))
+        .fetch(pool)
+        .await?;
+    for row in rows {
+        row.delete_pool(pool).await?;
+    }
+    Ok(())
+}
+
+/// The skill ids the owning user is **entitled** to. `Ok(None)` means a
+/// superuser (entitled to every skill); `Ok(Some(ids))` is the set of skills
+/// mapped to a permission the user currently holds (may be empty).
+///
+/// # Errors
+/// Propagates DB / permission-lookup errors.
+async fn user_entitled_skill_ids(
+    pool: &Pool,
+    user_id: i64,
+) -> Result<Option<Vec<i64>>, AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
+    let is_superuser = crate::tenancy::User::objects()
+        .filter("id", user_id)
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+        .is_some_and(|u| u.is_superuser);
+    if is_superuser {
+        return Ok(None);
+    }
+    let perms = super::user_permissions_pool(user_id, pool).await?;
+    if perms.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let mapped: Vec<AgentSkillPermission> = AgentSkillPermission::objects()
+        .where_(AgentSkillPermission::permission_codename.is_in(perms))
+        .fetch(pool)
+        .await?;
+    let mut ids: Vec<i64> = Vec::new();
+    for m in mapped {
+        if !ids.contains(&m.skill_id) {
+            ids.push(m.skill_id);
+        }
+    }
+    Ok(Some(ids))
+}
+
+/// Resolve a **user-owned** agent's effective `(skill codenames, tools)`,
+/// along two axes and always bounded by the owner's entitlement:
+///
+/// * **Entitlement** — which skills the owner may use: *every* skill for a
+///   superuser, otherwise the skills mapped (via [`AgentSkillPermission`]) to a
+///   permission the owner currently holds.
+/// * **Scope** — if the key was created with pinned skills ([`AgentGrant`]s via
+///   [`create_user_key_pool`]) it is limited to those; an unscoped key gets the
+///   owner's full entitlement.
+///
+/// Effective skills = `pinned ∩ entitled` for a scoped key, or the full
+/// entitlement for an unscoped one. A key can therefore never exceed the
+/// owner's permissions, and revoking a permission narrows every key at the next
+/// mint. [`crate::mcp`] bakes the resulting `tools` into the scoped JWT.
+///
+/// # Errors
+/// Propagates DB / permission-lookup errors.
+pub async fn resolve_user_agent_grants_pool(
+    pool: &Pool,
+    agent_id: i64,
+    user_id: i64,
+) -> Result<(Vec<String>, Vec<String>), AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
+    let entitled = user_entitled_skill_ids(pool, user_id).await?;
+
+    // Skills pinned onto THIS key at creation (the per-key scope).
+    let pinned: Vec<i64> = {
+        let grants: Vec<AgentGrant> = AgentGrant::objects()
+            .filter("agent_id", agent_id)
+            .fetch(pool)
+            .await?;
+        let mut ids = Vec::new();
+        for g in grants {
+            if !ids.contains(&g.skill_id) {
+                ids.push(g.skill_id);
+            }
+        }
+        ids
+    };
+
+    // Effective skill ids: pinned∩entitled (scoped) or the full entitlement.
+    let effective: Vec<i64> = match (&entitled, pinned.is_empty()) {
+        (None, true) => AgentSkill::objects()
+            .fetch(pool)
+            .await?
+            .into_iter()
+            .filter_map(|s| s.id.get().copied())
+            .collect(), // superuser, unscoped → every skill
+        (None, false) => pinned, // superuser, scoped → the pinned skills
+        (Some(ent), true) => ent.clone(), // non-superuser, unscoped → entitled
+        (Some(ent), false) => pinned.into_iter().filter(|id| ent.contains(id)).collect(),
+    };
+    if effective.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let skills: Vec<String> = AgentSkill::objects()
+        .where_(AgentSkill::id.is_in(effective.clone()))
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .map(|s| s.codename)
+        .collect();
+    let mut tools: Vec<String> = Vec::new();
+    for st in AgentSkillTool::objects()
+        .where_(AgentSkillTool::skill_id.is_in(effective))
+        .fetch(pool)
+        .await?
+    {
+        if !tools.contains(&st.tool_name) {
+            tools.push(st.tool_name);
+        }
+    }
+    Ok((skills, tools))
+}
+
+// ================================================================ user keys
+// A "user key" is a personal, user-owned [`Agent`]: a member generates one so
+// an LLM/MCP client can act on their behalf. Its capabilities are entirely
+// permission-driven (see [`resolve_user_agent_grants_pool`]); the app never
+// pins tools onto it.
+
+/// Allocate a per-tenant-unique agent name for `user_id`'s new key.
+async fn unique_key_name(pool: &Pool, user_id: i64) -> Result<String, AgentError> {
+    use crate::sql::FetcherPool as _;
+    use rand::rngs::OsRng;
+    use rand::RngCore;
+
+    for _ in 0..6 {
+        let mut b = [0u8; 5];
+        OsRng.fill_bytes(&mut b);
+        let name = format!("uk_{user_id}_{}", to_hex(&b));
+        let taken: Vec<Agent> = Agent::objects()
+            .filter("name", name.clone())
+            .limit(1)
+            .fetch(pool)
+            .await?;
+        if taken.is_empty() {
+            return Ok(name);
+        }
+    }
+    Err(AgentError::Secret(
+        "could not allocate a unique key name".to_owned(),
+    ))
+}
+
+/// Create a personal, user-owned MCP key. The returned [`AgentSecret::token`]
+/// (`prefix.secret`) is shown once and never recoverable.
+///
+/// `skills` sets the key's scope:
+/// * **empty** → an *unscoped* key that can use everything the owner is
+///   entitled to (their full permission-derived skill set, or all skills for a
+///   superuser).
+/// * **non-empty** → a *scoped* key limited to exactly those skill codenames
+///   (a single skill or a skillset). Each must be a real skill the owner is
+///   entitled to; otherwise this fails — you can't mint a key more capable than
+///   yourself. Scoping pins [`AgentGrant`]s, and resolution always re-intersects
+///   with the owner's current entitlement at mint
+///   ([`resolve_user_agent_grants_pool`]).
+///
+/// # Errors
+/// [`AgentError::NotFound`] for an unknown skill codename;
+/// [`AgentError::Tenancy`] if the owner isn't entitled to a requested skill;
+/// a DB / secret-generation error otherwise.
+pub async fn create_user_key_pool(
+    pool: &Pool,
+    user_id: i64,
+    label: &str,
+    skills: &[String],
+) -> Result<AgentSecret, AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
+    // Resolve + entitlement-check every requested skill up front, so an invalid
+    // request fails before any key row is written.
+    let mut skill_ids: Vec<i64> = Vec::new();
+    if !skills.is_empty() {
+        let entitled = user_entitled_skill_ids(pool, user_id).await?;
+        for codename in skills {
+            let skill = AgentSkill::objects()
+                .where_(AgentSkill::codename.eq(codename.clone()))
+                .limit(1)
+                .fetch(pool)
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| AgentError::NotFound(codename.clone()))?;
+            let sid = skill.id.get().copied().unwrap_or_default();
+            let entitled_to_it = match &entitled {
+                None => true, // superuser
+                Some(ids) => ids.contains(&sid),
+            };
+            if !entitled_to_it {
+                return Err(AgentError::Tenancy(super::error::TenancyError::Validation(
+                    format!("owner is not entitled to skill `{codename}`"),
+                )));
+            }
+            if !skill_ids.contains(&sid) {
+                skill_ids.push(sid);
+            }
+        }
+    }
+
+    let name = unique_key_name(pool, user_id).await?;
+    let (token, prefix, hash) = generate_credential()?;
+    let mut agent = Agent {
+        id: Auto::default(),
+        name,
+        secret_prefix: prefix,
+        secret_hash: hash,
+        active: true,
+        created_at: Auto::default(),
+        secret_rotated_at: None,
+        user_id: Some(user_id),
+        data: serde_json::json!({ "kind": "user_key", "label": label }),
+    };
+    agent.insert_pool(pool).await?;
+    let agent_id = agent.id.get().copied().unwrap_or_default();
+
+    // Pin the scoped skills as grants (the per-key scope).
+    for sid in skill_ids {
+        let mut grant = AgentGrant {
+            id: Auto::default(),
+            agent_id,
+            skill_id: sid,
+            data: serde_json::json!({}),
+        };
+        grant.insert_pool(pool).await?;
+    }
+    Ok(AgentSecret { agent, token })
+}
+
+/// List a user's personal keys, newest first.
+///
+/// # Errors
+/// Propagates DB errors.
+pub async fn list_user_keys_pool(pool: &Pool, user_id: i64) -> Result<Vec<Agent>, AgentError> {
+    use crate::sql::FetcherPool as _;
+    Ok(Agent::objects()
+        .filter("user_id", user_id)
+        .order_by(&[("created_at", true)])
+        .fetch(pool)
+        .await?)
+}
+
+/// Revoke (delete) one of `user_id`'s keys by agent id. Verifies ownership —
+/// a key that isn't the user's is reported as [`AgentError::NotFound`], not
+/// deleted. Explicit grants are removed first (not relying on FK cascade,
+/// which some SQLite connections don't enforce).
+///
+/// # Errors
+/// [`AgentError::NotFound`] if the key doesn't exist or isn't owned by
+/// `user_id`.
+pub async fn revoke_user_key_pool(
+    pool: &Pool,
+    user_id: i64,
+    agent_id: i64,
+) -> Result<(), AgentError> {
+    use crate::sql::FetcherPool as _;
+
+    let agent = Agent::objects()
+        .filter("id", agent_id)
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+        .filter(|a| a.user_id == Some(user_id))
+        .ok_or_else(|| AgentError::NotFound(format!("key #{agent_id}")))?;
+
+    let grants: Vec<AgentGrant> = AgentGrant::objects()
+        .filter("agent_id", agent_id)
+        .fetch(pool)
+        .await?;
+    for g in grants {
+        g.delete_pool(pool).await?;
+    }
+    agent.delete_pool(pool).await?;
+    Ok(())
+}
+
+/// Delete **every** user-owned key belonging to `user_id` — all [`Agent`]
+/// rows with `user_id == Some(user_id)` — removing each agent's
+/// [`AgentGrant`]s first (not relying on FK cascade, which some SQLite
+/// connections don't enforce). Call this from a tenant user-deletion path so a
+/// departed member's personal MCP keys can't outlive them. There is no hard FK
+/// from `rustango_agents.user_id` to `rustango_users` (it would couple `mcp` →
+/// `tenancy`), so orphan cleanup is explicit.
+///
+/// # Errors
+/// Propagates DB errors.
+pub async fn delete_user_keys_pool(pool: &Pool, user_id: i64) -> Result<(), AgentError> {
+    use crate::sql::FetcherPool as _;
+
+    let agents: Vec<Agent> = Agent::objects()
+        .filter("user_id", user_id)
+        .fetch(pool)
+        .await?;
+    for agent in agents {
+        let agent_id = agent.id.get().copied().unwrap_or_default();
+        let grants: Vec<AgentGrant> = AgentGrant::objects()
+            .filter("agent_id", agent_id)
+            .fetch(pool)
+            .await?;
+        for g in grants {
+            g.delete_pool(pool).await?;
+        }
+        agent.delete_pool(pool).await?;
+    }
+    Ok(())
+}
+
+/// Request-time liveness re-check for a verified agent token. MCP agent JWTs
+/// are stateless — [`crate::mcp::verify_agent_token`] proves the token is
+/// well-formed and tenant-pinned but not that the agent still exists. Call
+/// this right after verification (where the tenant [`Pool`] is available) so
+/// that revoking / deactivating a key takes effect immediately instead of
+/// lingering until the token expires.
+///
+/// Returns `false` (reject) when the agent row is absent or `active == false`,
+/// and — for a user-owned key (`user_id.is_some()`) — when the owning user is
+/// missing or `active == false`. One cheap lookup per request.
+///
+/// # Errors
+/// Propagates DB errors.
+pub async fn agent_token_still_valid_pool(
+    pool: &Pool,
+    agent_id: i64,
+    user_id: Option<i64>,
+) -> Result<bool, AgentError> {
+    use crate::sql::FetcherPool as _;
+
+    let Some(agent) = Agent::objects()
+        .filter("id", agent_id)
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(false);
+    };
+    if !agent.active {
+        return Ok(false);
+    }
+
+    if let Some(uid) = user_id {
+        let owner_active = crate::tenancy::User::objects()
+            .filter("id", uid)
+            .limit(1)
+            .fetch(pool)
+            .await?
+            .into_iter()
+            .next()
+            .is_some_and(|u| u.active);
+        if !owner_active {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 // ====================================================== resources (Slice 5)
 
 /// A resource attached to a skill (epic #1013, Slice 5 / #1018). The body is
@@ -694,52 +993,6 @@ pub struct AgentSkillResource {
     pub data: serde_json::Value,
 }
 
-const RESOURCES_ENSURE_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_agent_skill_resources" (
-    "id"           BIGSERIAL    PRIMARY KEY,
-    "skill_id"     BIGINT       NOT NULL REFERENCES "rustango_agent_skills"("id") ON DELETE CASCADE,
-    "resource_uri" VARCHAR(500) NOT NULL,
-    "mime"         VARCHAR(100) NOT NULL DEFAULT 'text/plain',
-    "data"         JSONB        NOT NULL DEFAULT '{}'
-);"#;
-
-const RESOURCES_ENSURE_SQL_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_agent_skill_resources" (
-    "id"           INTEGER PRIMARY KEY AUTOINCREMENT,
-    "skill_id"     INTEGER NOT NULL REFERENCES "rustango_agent_skills"("id") ON DELETE CASCADE,
-    "resource_uri" TEXT    NOT NULL,
-    "mime"         TEXT    NOT NULL DEFAULT 'text/plain',
-    "data"         TEXT    NOT NULL DEFAULT '{}'
-);"#;
-
-const RESOURCES_ENSURE_SQL_MYSQL: &str = r#"
-CREATE TABLE IF NOT EXISTS `rustango_agent_skill_resources` (
-    `id`           BIGINT AUTO_INCREMENT PRIMARY KEY,
-    `skill_id`     BIGINT       NOT NULL,
-    `resource_uri` VARCHAR(500) NOT NULL,
-    `mime`         VARCHAR(100) NOT NULL DEFAULT 'text/plain',
-    `data`         JSON,
-    CONSTRAINT `rustango_agent_skill_resources_fk` FOREIGN KEY (`skill_id`)
-        REFERENCES `rustango_agent_skills`(`id`) ON DELETE CASCADE
-);"#;
-
-async fn ensure_resources_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
-    let ddl = match pool.dialect().name() {
-        "sqlite" => RESOURCES_ENSURE_SQL_SQLITE,
-        "mysql" => RESOURCES_ENSURE_SQL_MYSQL,
-        _ => RESOURCES_ENSURE_SQL,
-    };
-    for stmt in ddl.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        crate::sql::raw_execute_pool(pool, stmt, Vec::new())
-            .await
-            .map_err(|e| match e {
-                ExecError::Driver(err) => err,
-                other => sqlx::Error::Protocol(format!("{other}")),
-            })?;
-    }
-    Ok(())
-}
-
 /// Attach a resource (uri + mime + text body) to a skill.
 ///
 /// # Errors
@@ -753,9 +1006,6 @@ pub async fn add_skill_resource_pool(
 ) -> Result<AgentSkillResource, AgentError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-
-    ensure_skill_tables_pool(pool).await?;
-    ensure_resources_table_pool(pool).await?;
 
     let skill_id = AgentSkill::objects()
         .where_(AgentSkill::codename.eq(skill_codename))
@@ -792,7 +1042,6 @@ pub async fn skills_by_codenames_pool(
 ) -> Result<Vec<AgentSkill>, AgentError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-    ensure_skill_tables_pool(pool).await?;
     if codenames.is_empty() {
         return Ok(vec![]);
     }
@@ -813,8 +1062,6 @@ pub async fn resources_for_skills_pool(
 ) -> Result<Vec<AgentSkillResource>, AgentError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
-    ensure_skill_tables_pool(pool).await?;
-    ensure_resources_table_pool(pool).await?;
     if codenames.is_empty() {
         return Ok(vec![]);
     }

@@ -5,7 +5,7 @@
 //!
 //! Run: `cargo test -p rustango --features sqlite,mcp --test mcp_doc`
 
-#![cfg(all(feature = "sqlite", feature = "mcp"))]
+#![cfg(all(feature = "sqlite", feature = "mcp", feature = "testkit"))]
 #![allow(irrefutable_let_patterns)]
 
 use std::sync::Arc;
@@ -99,6 +99,9 @@ async fn initialize_handshake_over_http() {
 #[tokio::test]
 async fn agent_lists_and_calls_only_its_granted_tools() {
     let pool = Pool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate framework");
 
     // Provision an agent (returns a one-time credential), define a skill that
     // bundles the `add` tool, and grant it to the agent in tenant "acme".
@@ -139,7 +142,7 @@ async fn agent_lists_and_calls_only_its_granted_tools() {
     let jwt = Arc::new(JwtLifecycle::new(
         b"doc-secret-at-least-32-bytes-long!!".to_vec(),
     ));
-    let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools).unwrap();
+    let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools, None).unwrap();
 
     // The guarded endpoint verifies the token on every request (tenant-pinned).
     let agent = verify_agent_token(&jwt, &token, "acme").expect("valid agent token");
@@ -168,6 +171,9 @@ async fn agent_lists_and_calls_only_its_granted_tools() {
 #[tokio::test]
 async fn ungranted_agent_sees_nothing_and_is_refused() {
     let pool = Pool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate framework");
 
     // An agent with NO grants — fail-closed: empty tool list, calls refused.
     let agent = McpAgent {
@@ -175,6 +181,7 @@ async fn ungranted_agent_sees_nothing_and_is_refused() {
         tenant: "acme".into(),
         skills: vec![],
         tools: vec![],
+        user_id: None,
         jti: "doc-jti".into(),
     };
 

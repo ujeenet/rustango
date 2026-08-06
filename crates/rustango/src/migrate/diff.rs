@@ -1254,12 +1254,7 @@ fn create_table_sql_from_snapshot_with_dialect(
             continue;
         }
         if let Some(expr) = &f.default {
-            // Empty-string default → literal `''`, not a blank (#1161).
-            let rendered = if expr.is_empty() {
-                "''".to_owned()
-            } else {
-                dialect.translate_default_expr(expr, &f.ty, f.max_length)
-            };
+            let rendered = render_column_default(expr, &f.ty, f.max_length, dialect);
             let _ = write!(sql, " DEFAULT {rendered}");
         }
         if !f.nullable {
@@ -1373,6 +1368,26 @@ fn constraints_sql_from_snapshot(
     out
 }
 
+/// Render a column `DEFAULT` expression for CREATE TABLE / ADD COLUMN.
+///
+/// An empty-string default (`#[rustango(default = "")]`) means the literal
+/// empty string — render it as `''` rather than a blank, or we emit
+/// `DEFAULT  NOT NULL` which the driver rejects (#1161). The `''` literal is
+/// then routed through [`Dialect::translate_default_expr`] like any other
+/// expression so a MySQL LOB column (TEXT/JSON/BLOB) gets the parenthesized
+/// expression form `DEFAULT ('')` it requires — MySQL rejects a *literal*
+/// default on those types (error 1101), only the 8.0.13+ expression form is
+/// legal. PG/SQLite leave `''` untouched (#1174).
+fn render_column_default(
+    expr: &str,
+    ty: &str,
+    max_length: Option<u32>,
+    dialect: &dyn crate::sql::Dialect,
+) -> String {
+    let expr_to_render = if expr.is_empty() { "''" } else { expr };
+    dialect.translate_default_expr(expr_to_render, ty, max_length)
+}
+
 fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
     let col_q = dialect.quote_ident(&f.column);
     let mut sql = format!(
@@ -1382,12 +1397,7 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
         sql_type_with_dialect(f, dialect)
     );
     if let Some(expr) = &f.default {
-        // Empty-string default → literal `''`, not a blank (#1161).
-        let rendered = if expr.is_empty() {
-            "''".to_owned()
-        } else {
-            dialect.translate_default_expr(expr, &f.ty, f.max_length)
-        };
+        let rendered = render_column_default(expr, &f.ty, f.max_length, dialect);
         let _ = write!(sql, " DEFAULT {rendered}");
     }
     if !f.nullable {

@@ -40,6 +40,9 @@ pub const CLAIM_TENANT: &str = "tenant";
 pub const CLAIM_SKILLS: &str = "skills";
 /// Custom-claim key carrying the agent's flattened tool set (Slice 4).
 pub const CLAIM_TOOLS: &str = "tools";
+/// Custom-claim key carrying the owning `rustango_users.id` for a user-owned
+/// key. Absent for a standalone machine agent.
+pub const CLAIM_UID: &str = "uid";
 
 /// A verified agent principal, resolved from a tenant-pinned access token.
 #[derive(Debug, Clone)]
@@ -52,6 +55,10 @@ pub struct McpAgent {
     pub skills: Vec<String>,
     /// Flattened allowed tool set (empty until Slice 4).
     pub tools: Vec<String>,
+    /// Owning `rustango_users.id` for a user-owned key; `None` for a
+    /// standalone machine agent. Tool handlers scope work to this user via
+    /// `ctx.agent.user_id`.
+    pub user_id: Option<i64>,
     /// Unique token id — the revocation handle.
     pub jti: String,
 }
@@ -68,12 +75,16 @@ pub fn issue_agent_token(
     tenant: &str,
     skills: &[String],
     tools: &[String],
+    user_id: Option<i64>,
 ) -> Result<String, JwtIssueError> {
     let mut custom = serde_json::Map::new();
     custom.insert(CLAIM_KIND.into(), json!(KIND_AGENT));
     custom.insert(CLAIM_TENANT.into(), json!(tenant));
     custom.insert(CLAIM_SKILLS.into(), json!(skills));
     custom.insert(CLAIM_TOOLS.into(), json!(tools));
+    if let Some(uid) = user_id {
+        custom.insert(CLAIM_UID.into(), json!(uid));
+    }
     jwt.issue_access_with(agent_id, custom)
 }
 
@@ -103,6 +114,7 @@ pub fn verify_agent_token(
         tools: claims
             .get_custom::<Vec<String>>(CLAIM_TOOLS)
             .unwrap_or_default(),
+        user_id: claims.get_custom::<i64>(CLAIM_UID),
         jti: claims.jti,
     })
 }
@@ -157,16 +169,21 @@ pub(crate) async fn mint_agent_jwt(
         }
     };
     let agent_id = agent.id.get().copied().unwrap_or_default();
-    let (skills, tools) = crate::tenancy::resolve_agent_grants_pool(pool, agent_id)
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "mcp grant resolution failed");
-            MintError::Internal
-        })?;
-    let token = issue_agent_token(jwt, agent_id, slug, &skills, &tools).map_err(|e| {
-        tracing::error!(error = %e, "mcp token issuance failed");
+    // A user-owned key resolves its capabilities from the owner's permissions
+    // (RBAC); a standalone machine agent uses its explicit grants only.
+    let grants = match agent.user_id {
+        Some(uid) => crate::tenancy::resolve_user_agent_grants_pool(pool, agent_id, uid).await,
+        None => crate::tenancy::resolve_agent_grants_pool(pool, agent_id).await,
+    };
+    let (skills, tools) = grants.map_err(|e| {
+        tracing::warn!(error = %e, "mcp grant resolution failed");
         MintError::Internal
     })?;
+    let token =
+        issue_agent_token(jwt, agent_id, slug, &skills, &tools, agent.user_id).map_err(|e| {
+            tracing::error!(error = %e, "mcp token issuance failed");
+            MintError::Internal
+        })?;
     Ok(MintedToken {
         token,
         expires_in: jwt.access_ttl_secs,
@@ -219,6 +236,20 @@ pub(crate) async fn post_authed(
     let Some(agent) = verify_agent_token(jwt, token, &t.org.slug) else {
         return unauthorized(&headers, &uri);
     };
+    // Revocation immediacy: the JWT is stateless, so re-check at request time
+    // that the agent (and, for a user-owned key, its owner) still exists and is
+    // active. A revoked / deactivated key is refused straight away rather than
+    // lingering until the token expires.
+    match crate::tenancy::agent_token_still_valid_pool(t.pool(), agent.agent_id, agent.user_id)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return unauthorized(&headers, &uri),
+        Err(e) => {
+            tracing::warn!(error = %e, "mcp agent liveness re-check failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed").into_response();
+        }
+    }
     // Agent verified + tenant-pinned: hand the tools layer the resolved
     // tenant pool + principal so `tools/call` runs against the right tenant.
     let ctx = super::tools::McpContext {
@@ -333,6 +364,36 @@ pub(crate) fn jwt_secret() -> Vec<u8> {
 mod tests {
     use super::*;
     use axum::http::Uri;
+
+    #[test]
+    fn token_round_trips_the_owning_user_id() {
+        use crate::tenancy::jwt_lifecycle::JwtLifecycle;
+        let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
+
+        // A user-owned key carries `uid`.
+        let token = issue_agent_token(
+            &jwt,
+            5,
+            "acme",
+            &["coach".into()],
+            &["log".into()],
+            Some(99),
+        )
+        .expect("issue");
+        let agent = verify_agent_token(&jwt, &token, "acme").expect("verify");
+        assert_eq!(agent.agent_id, 5);
+        assert_eq!(agent.user_id, Some(99));
+        assert_eq!(agent.tools, vec!["log"]);
+
+        // A standalone machine agent has no `uid`.
+        let token = issue_agent_token(&jwt, 5, "acme", &[], &[], None).expect("issue");
+        assert_eq!(
+            verify_agent_token(&jwt, &token, "acme")
+                .expect("verify")
+                .user_id,
+            None
+        );
+    }
 
     fn headers(host: &str) -> HeaderMap {
         let mut h = HeaderMap::new();

@@ -1,4 +1,4 @@
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "media", feature = "testkit"))]
 //! `#[ignore]`-d helper that creates visible Media rows + S3
 //! objects via `MediaManager`, leaves everything behind for
 //! inspection.
@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustango::media::{Media, MediaManager, SaveOpts, UploadIntent};
+use rustango::media::{MediaManager, SaveOpts, UploadIntent};
 use rustango::storage::s3::{S3Config, S3Storage};
 use rustango::storage::{BoxedStorage, StorageRegistry};
 use sqlx::PgPool;
@@ -31,7 +31,9 @@ async fn seed_media_rows_for_inspection() {
     let region = std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
 
     let pool = PgPool::connect(&url).await.expect("connect");
-    Media::ensure_table(&pool).await.expect("ensure_table");
+    rustango::testkit::migrate_framework(&rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .expect("migrate framework media tables");
 
     let storage: BoxedStorage = Arc::new(S3Storage::new(S3Config {
         bucket,

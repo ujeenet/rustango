@@ -6,6 +6,69 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 _Nothing yet — next development cycle._
 
+## [0.51.0] — 2026-08-06
+
+Headline: **the media subsystem is now managed by system migrations** — the
+last framework subsystem still relying on lazy `ensure_table` raw DDL now
+ships its schema like the rest of the framework's own tables.
+
+### Changed
+
+- **Media tables via system migrations** (#1174) — `Media`, `MediaCollection`,
+  and `MediaTag` are now managed `#[derive(Model)]`s on their `rustango_*`
+  tables, and a new `MediaTagLink` model backs the `rustango_media_tag_links`
+  junction. Their schema is emitted through the `#[cfg]`-aware system-migration
+  engine (present per-tenant when the `media` feature is on, absent when it is
+  off) instead of the lazy `ensure_table` layer. The hand-written per-dialect
+  DDL constants, the `ensure_*` functions, the manual per-backend row decoders,
+  and the `0.49.2` `ensure_media_tables` provisioning hook are all removed; the
+  derived `FromRow` decodes on every backend.
+
+### Fixed
+
+- **Empty-string defaults on MySQL LOB columns** (#1174) — a
+  `#[rustango(default = "")]` on a MySQL `TEXT`/`JSON`/`BLOB` column was emitted
+  as a literal `DEFAULT ''`, which MySQL rejects (error 1101). Empty-string
+  defaults are now routed through `translate_default_expr` in every CREATE /
+  ADD render path, so LOB columns get the parenthesized 8.0.13+ expression form
+  `DEFAULT ('')`; Postgres and SQLite keep the plain literal.
+
+### Upgrade note
+
+- Existing tenant databases provisioned before `0.51` created the media tables
+  via the retired `ensure_*` DDL, so those tables exist but are absent from the
+  system-migration ledger; the fresh `CREATE TABLE` will collide there. Fresh
+  provisioning is clean. A ledger backfill (fake-initial) for pre-existing
+  deployments is tracked separately (#1167).
+
+## [0.50.0] — 2026-07-24
+
+Headline: **user-owned MCP keys** — a member mints a personal key and an LLM
+acts on their behalf, with capabilities governed by the tenant's existing RBAC.
+
+### Added
+
+- **User-owned MCP keys + permission-driven capabilities** (#1178) — a member can
+  generate a personal MCP key (a user-owned `Agent`, via a new nullable
+  `user_id` owner on `rustango_agents`) so an LLM acts on their behalf. Its
+  tools/prompts/resources are resolved from the tenant's existing **RBAC**
+  rather than pinned onto the key: map a skill to a permission codename with
+  `map_skill_to_permission_pool` (new `rustango_agent_skill_permissions`
+  table), and any key whose owner holds that permission is granted the skill
+  at token-issue (`resolve_user_agent_grants_pool` — the user's effective
+  permissions select the mapped skills, flattened into the JWT `skills`/`tools`
+  claims, so `tools/list`, `tools/call`, `prompts/get` and `resources/read`
+  are all RBAC-gated). The owner rides in the token's `uid` claim, surfaced as
+  `McpAgent.user_id` for tool handlers to scope work to the member. New
+  helpers `create_user_key_pool` / `list_user_keys_pool` /
+  `revoke_user_key_pool`, plus per-key skill scoping (a key may be pinned to a
+  subset of the owner's skills, re-intersected with entitlement at mint),
+  `manage` CLI verbs, and admin surfacing for keys + skill↔permission mappings.
+  Backward compatible: standalone machine agents (`user_id = None`) use their
+  explicit grants only, and older `rustango_agents` tables gain `user_id`
+  transparently via an additive `ADD COLUMN`. `issue_agent_token` gains a
+  trailing `user_id: Option<i64>` argument.
+
 ## [0.48.0] — 2026-07-21
 
 Headline: **the framework migrates its own schema** — Django-style

@@ -329,11 +329,14 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
         // `''` rather than nothing, or we emit `DEFAULT  NOT NULL` which the
         // driver rejects with `near "NOT": syntax error` (#1161). `''` is a
         // valid empty-string literal in Postgres, MySQL, and SQLite.
-        let rendered = if expr.is_empty() {
-            "''".to_owned()
-        } else {
-            dialect.translate_default_expr(expr, ty_name, field.max_length)
-        };
+        //
+        // Still route the `''` literal through `translate_default_expr` so a
+        // LOB column (MySQL TEXT/JSON/BLOB) gets the parenthesized
+        // expression form `DEFAULT ('')` it requires — MySQL rejects a
+        // *literal* default on those types (error 1101), only the 8.0.13+
+        // expression form is legal. PG/SQLite leave `''` untouched (#1174).
+        let expr_to_render = if expr.is_empty() { "''" } else { expr };
+        let rendered = dialect.translate_default_expr(expr_to_render, ty_name, field.max_length);
         let _ = write!(s, " DEFAULT {rendered}");
     }
     if !field.nullable {
@@ -550,6 +553,31 @@ mod tests {
                 dialect.name()
             );
         }
+    }
+
+    #[test]
+    fn empty_string_default_on_lob_uses_mysql_expression_form() {
+        // #1174 — an empty-string default on a MySQL LOB column (TEXT/JSON/
+        // BLOB, i.e. `String` with no `max_length`) must emit the
+        // parenthesized expression form `DEFAULT ('')`; MySQL rejects a
+        // *literal* default on those types (error 1101). PG/SQLite still emit
+        // the plain `DEFAULT ''` (they accept literal defaults on TEXT).
+        let f = fld("body", FieldType::String, false, Some("")); // no max_length → TEXT
+        #[cfg(feature = "mysql")]
+        {
+            let mut s = String::new();
+            write_column_def(&mut s, &crate::sql::MySql, &f);
+            assert!(
+                s.contains("DEFAULT ('')"),
+                "[mysql] LOB empty default must be paren-wrapped: {s}"
+            );
+        }
+        let mut s = String::new();
+        write_column_def(&mut s, &crate::sql::Postgres, &f);
+        assert!(
+            s.contains("DEFAULT ''") && !s.contains("DEFAULT ('')"),
+            "[postgres] LOB empty default stays a literal: {s}"
+        );
     }
 
     #[test]
