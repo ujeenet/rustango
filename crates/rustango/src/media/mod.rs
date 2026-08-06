@@ -14,8 +14,8 @@
 //! use rustango::storage::StorageRegistry;
 //! use std::sync::Arc;
 //!
-//! // Once at startup:
-//! Media::ensure_table(&pool).await?;
+//! // Tables come from the framework's system migrations (run during
+//! // provisioning / `migrate_framework`) — no per-boot table bootstrap.
 //!
 //! let registry = StorageRegistry::new()
 //!     .set("avatars", Arc::new(s3_storage))
@@ -44,25 +44,10 @@
 //!
 //! ## Schema
 //!
-//! ```sql
-//! CREATE TABLE rustango_media (
-//!     id                BIGSERIAL PRIMARY KEY,
-//!     disk              TEXT        NOT NULL,
-//!     storage_key       TEXT        NOT NULL,
-//!     mime              TEXT        NOT NULL,
-//!     size_bytes        BIGINT      NOT NULL,
-//!     original_filename TEXT        NOT NULL,
-//!     status            TEXT        NOT NULL,            -- pending/ready/failed
-//!     uploaded_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-//!     uploaded_by_id    BIGINT,                          -- soft FK to your User table
-//!     derived_from_id   BIGINT,                          -- self-FK for variants/thumbnails
-//!     metadata          JSONB       NOT NULL DEFAULT '{}'::JSONB,
-//!     deleted_at        TIMESTAMPTZ                      -- soft delete
-//! );
-//! CREATE INDEX rustango_media_disk_key_idx ON rustango_media (disk, storage_key);
-//! CREATE INDEX rustango_media_status_idx   ON rustango_media (status)
-//!     WHERE deleted_at IS NULL;
-//! ```
+//! The `rustango_media` table (and the collection / tag / tag-link
+//! tables) are managed `#[derive(Model)]`s, so their schema is emitted
+//! as ordinary **system migrations** rather than a per-boot `ensure_*`
+//! DDL bootstrap. See the [`Media`] struct for the column definitions.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -75,117 +60,15 @@ use sqlx::PgPool;
 use crate::sql::Auto;
 use crate::storage::{StorageError, StorageRegistry};
 
-const CREATE_MEDIA_TABLE_SQL_PG: &str = "\
-CREATE TABLE IF NOT EXISTS rustango_media (
-    id                BIGSERIAL PRIMARY KEY,
-    disk              TEXT        NOT NULL,
-    storage_key       TEXT        NOT NULL,
-    mime              TEXT        NOT NULL,
-    size_bytes        BIGINT      NOT NULL,
-    original_filename TEXT        NOT NULL,
-    status            TEXT        NOT NULL,
-    uploaded_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    uploaded_by_id    BIGINT,
-    derived_from_id   BIGINT,
-    collection_id     BIGINT,
-    metadata          JSONB       NOT NULL DEFAULT '{}'::JSONB,
-    deleted_at        TIMESTAMPTZ
-);
-ALTER TABLE rustango_media ADD COLUMN IF NOT EXISTS collection_id BIGINT;
-CREATE INDEX IF NOT EXISTS rustango_media_disk_key_idx
-    ON rustango_media (disk, storage_key);
-CREATE INDEX IF NOT EXISTS rustango_media_status_idx
-    ON rustango_media (status)
-    WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS rustango_media_collection_idx
-    ON rustango_media (collection_id)
-    WHERE deleted_at IS NULL";
-
-const CREATE_MEDIA_TABLE_SQL_MYSQL: &str = "\
-CREATE TABLE IF NOT EXISTS `rustango_media` (
-    `id`                BIGINT      NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    `disk`              VARCHAR(255) NOT NULL,
-    `storage_key`       VARCHAR(512) NOT NULL,
-    `mime`              VARCHAR(255) NOT NULL,
-    `size_bytes`        BIGINT      NOT NULL,
-    `original_filename` VARCHAR(512) NOT NULL,
-    `status`            VARCHAR(32)  NOT NULL,
-    `uploaded_at`       DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    `uploaded_by_id`    BIGINT,
-    `derived_from_id`   BIGINT,
-    `collection_id`     BIGINT,
-    `metadata`          JSON         NOT NULL,
-    `deleted_at`        DATETIME(6)
-);
-CREATE INDEX `rustango_media_disk_key_idx`
-    ON `rustango_media` (`disk`, `storage_key`);
-CREATE INDEX `rustango_media_status_idx`
-    ON `rustango_media` (`status`);
-CREATE INDEX `rustango_media_collection_idx`
-    ON `rustango_media` (`collection_id`)";
-
-const CREATE_MEDIA_TABLE_SQL_SQLITE: &str = "\
-CREATE TABLE IF NOT EXISTS rustango_media (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    disk              TEXT     NOT NULL,
-    storage_key       TEXT     NOT NULL,
-    mime              TEXT     NOT NULL,
-    size_bytes        INTEGER  NOT NULL,
-    original_filename TEXT     NOT NULL,
-    status            TEXT     NOT NULL,
-    uploaded_at       TEXT     NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    uploaded_by_id    INTEGER,
-    derived_from_id   INTEGER,
-    collection_id     INTEGER,
-    metadata          TEXT     NOT NULL DEFAULT '{}',
-    deleted_at        TEXT
-);
-CREATE INDEX IF NOT EXISTS rustango_media_disk_key_idx
-    ON rustango_media (disk, storage_key);
-CREATE INDEX IF NOT EXISTS rustango_media_status_idx
-    ON rustango_media (status) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS rustango_media_collection_idx
-    ON rustango_media (collection_id) WHERE deleted_at IS NULL";
-
 pub mod collection;
 pub mod tag;
 pub use collection::MediaCollection;
-pub use tag::MediaTag;
+pub use tag::{MediaTag, MediaTagLink};
 
 #[cfg(feature = "admin")]
 pub mod router;
 
 const DEFAULT_DISK_NAME: &str = "default";
-
-/// One-call bootstrap for every table the `media` module needs:
-/// `rustango_media`, `rustango_media_collections`,
-/// `rustango_media_tags`, and the `rustango_media_tag_links`
-/// junction. Also runs the idempotent ALTER that adds
-/// `collection_id` to `rustango_media` for deployments that ran
-/// the v0.21.51 ensure_table before this column existed.
-///
-/// Safe to call on every boot. v0.38 — PG back-compat shim around
-/// [`ensure_all_tables_pool`].
-///
-/// # Errors
-/// Surfaces the underlying sqlx error if any DDL fails.
-#[cfg(feature = "postgres")]
-pub async fn ensure_all_tables(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    ensure_all_tables_pool(&crate::sql::Pool::Postgres(pool.clone())).await
-}
-
-/// Tri-dialect counterpart of [`ensure_all_tables`] (v0.38). Routes
-/// each `ensure_table_pool` through the unified [`crate::sql::Pool`]
-/// enum so the media bootstrap works on PG / SQLite / MySQL.
-///
-/// # Errors
-/// Surfaces the underlying sqlx error if any DDL fails.
-pub async fn ensure_all_tables_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Error> {
-    Media::ensure_table_pool(pool).await?;
-    MediaCollection::ensure_table_pool(pool).await?;
-    MediaTag::ensure_table_pool(pool).await?;
-    Ok(())
-}
 
 /// Lifecycle state of a Media row.
 ///
@@ -228,63 +111,49 @@ impl MediaStatus {
 
 /// First-class media row. Always referenced from user models via
 /// `Option<ForeignKey<Media>>` rather than embedded directly.
-#[derive(Debug, Clone)]
+///
+/// Managed `#[derive(Model)]` on the `rustango_media` table — its schema
+/// (and the `(disk, storage_key)` / `status` / `collection_id` indexes)
+/// is emitted via the framework's system migrations. The `status` and
+/// `collection_id` indexes are plain (non-partial) here; the retired
+/// hand-DDL made them partial `WHERE deleted_at IS NULL`, which the
+/// `#[rustango(index)]` attr can't express — behavior-equivalent for
+/// correctness.
+#[derive(crate::Model, Debug, Clone)]
+#[rustango(table = "rustango_media", index("disk, storage_key"))]
 pub struct Media {
+    #[rustango(primary_key)]
     pub id: Auto<i64>,
+    #[rustango(max_length = 255)]
     pub disk: String,
+    #[rustango(max_length = 512)]
     pub storage_key: String,
+    #[rustango(max_length = 255)]
     pub mime: String,
     pub size_bytes: i64,
+    #[rustango(max_length = 512)]
     pub original_filename: String,
-    pub status: String, // MediaStatus serialized as &str
-    pub uploaded_at: DateTime<Utc>,
+    /// MediaStatus serialized as &str (pending/ready/failed).
+    #[rustango(max_length = 32, index)]
+    pub status: String,
+    /// Set on INSERT via the per-dialect `DEFAULT NOW()`.
+    #[rustango(auto_now_add)]
+    pub uploaded_at: Auto<DateTime<Utc>>,
+    /// Soft FK to your User table.
     pub uploaded_by_id: Option<i64>,
+    /// Self-FK for variants / thumbnails.
     pub derived_from_id: Option<i64>,
     /// Optional FK to `rustango_media_collections.id` — the
     /// "where it lives" folder. NULL means "loose" (in the root).
+    #[rustango(index)]
     pub collection_id: Option<i64>,
+    #[rustango(default = "'{}'")]
     pub metadata: Value,
+    /// Soft delete.
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
 impl Media {
-    /// Create the `rustango_media` table + supporting indexes if
-    /// they don't exist. Idempotent. Safe to call on every boot.
-    ///
-    /// We use raw DDL (matching the `PgJobQueue::ensure_table`
-    /// pattern shipped in v0.21.14) rather than threading through
-    /// the migration system, because Media is a framework-shipped
-    /// table rather than user-authored.
-    ///
-    /// # Errors
-    /// Underlying sqlx error if the DDL fails (insufficient
-    /// privileges, connection issue, etc.).
-    #[cfg(feature = "postgres")]
-    pub async fn ensure_table(pool: &PgPool) -> Result<(), sqlx::Error> {
-        Self::ensure_table_pool(&crate::sql::Pool::Postgres(pool.clone())).await
-    }
-
-    /// v0.38 — tri-dialect `rustango_media` table bootstrap. Dispatches
-    /// per-dialect DDL (BIGSERIAL/SERIAL/AUTOINCREMENT, TIMESTAMPTZ/
-    /// DATETIME(6)/TEXT-ISO-8601, JSONB/JSON/TEXT-as-JSON). PG + SQLite
-    /// keep the partial indexes (`WHERE deleted_at IS NULL`); MySQL
-    /// uses full-column indexes since it doesn't support partial
-    /// indexes.
-    ///
-    /// # Errors
-    /// Underlying sqlx DDL error.
-    pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Error> {
-        let ddl = match pool.dialect().name() {
-            "postgres" => CREATE_MEDIA_TABLE_SQL_PG,
-            "mysql" => CREATE_MEDIA_TABLE_SQL_MYSQL,
-            "sqlite" => CREATE_MEDIA_TABLE_SQL_SQLITE,
-            _ => CREATE_MEDIA_TABLE_SQL_PG,
-        };
-        // #561 — shared split-+-dispatch-+-swallow-dup-index loop
-        // lives in `crate::sql::run_ddl_idempotent`.
-        crate::sql::run_ddl_idempotent(pool, ddl).await
-    }
-
     /// Typed status accessor.
     #[must_use]
     pub fn status_enum(&self) -> Option<MediaStatus> {
@@ -295,100 +164,6 @@ impl Media {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.status_enum() == Some(MediaStatus::Ready)
-    }
-
-    #[cfg(feature = "postgres")]
-    fn decode_pg(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
-        let id: i64 = row.try_get("id")?;
-        Ok(Self {
-            id: Auto::Set(id),
-            disk: row.try_get("disk")?,
-            storage_key: row.try_get("storage_key")?,
-            mime: row.try_get("mime")?,
-            size_bytes: row.try_get("size_bytes")?,
-            original_filename: row.try_get("original_filename")?,
-            status: row.try_get("status")?,
-            uploaded_at: row.try_get("uploaded_at")?,
-            uploaded_by_id: row.try_get("uploaded_by_id")?,
-            derived_from_id: row.try_get("derived_from_id")?,
-            collection_id: row.try_get("collection_id")?,
-            metadata: row.try_get("metadata")?,
-            deleted_at: row.try_get("deleted_at")?,
-        })
-    }
-
-    /// MySQL row decoder (v0.38).
-    #[cfg(feature = "mysql")]
-    fn decode_my(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
-        let id: i64 = row.try_get("id")?;
-        let uploaded_at = crate::media::tag::decode_my_datetime(row, "uploaded_at")?;
-        let deleted_at = crate::media::tag::decode_my_datetime_opt(row, "deleted_at")?;
-        let metadata: sqlx::types::Json<Value> = row.try_get("metadata")?;
-        Ok(Self {
-            id: Auto::Set(id),
-            disk: row.try_get("disk")?,
-            storage_key: row.try_get("storage_key")?,
-            mime: row.try_get("mime")?,
-            size_bytes: row.try_get("size_bytes")?,
-            original_filename: row.try_get("original_filename")?,
-            status: row.try_get("status")?,
-            uploaded_at,
-            uploaded_by_id: row.try_get("uploaded_by_id")?,
-            derived_from_id: row.try_get("derived_from_id")?,
-            collection_id: row.try_get("collection_id")?,
-            metadata: metadata.0,
-            deleted_at,
-        })
-    }
-
-    /// SQLite row decoder (v0.38). `metadata` is stored as TEXT-as-JSON.
-    #[cfg(feature = "sqlite")]
-    fn decode_sq(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        use sqlx::Row;
-        let id: i64 = row.try_get("id")?;
-        let uploaded_at = crate::media::tag::decode_sqlite_datetime(row, "uploaded_at")?;
-        let deleted_at = crate::media::tag::decode_sqlite_datetime_opt(row, "deleted_at")?;
-        let meta_text: String = row.try_get("metadata")?;
-        let metadata: Value = serde_json::from_str(&meta_text).unwrap_or(Value::Null);
-        Ok(Self {
-            id: Auto::Set(id),
-            disk: row.try_get("disk")?,
-            storage_key: row.try_get("storage_key")?,
-            mime: row.try_get("mime")?,
-            size_bytes: row.try_get("size_bytes")?,
-            original_filename: row.try_get("original_filename")?,
-            status: row.try_get("status")?,
-            uploaded_at,
-            uploaded_by_id: row.try_get("uploaded_by_id")?,
-            derived_from_id: row.try_get("derived_from_id")?,
-            collection_id: row.try_get("collection_id")?,
-            metadata,
-            deleted_at,
-        })
-    }
-}
-
-// v0.38 — FromRow impls so `raw_query_pool::<Media>` dispatches via
-// the unified `crate::sql::Pool` enum. Each backend's FromRow forwards
-// to the corresponding inherent `decode_*` above.
-#[cfg(feature = "postgres")]
-impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for Media {
-    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
-        Self::decode_pg(row)
-    }
-}
-#[cfg(feature = "mysql")]
-impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for Media {
-    fn from_row(row: &'r sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
-        Self::decode_my(row)
-    }
-}
-#[cfg(feature = "sqlite")]
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Media {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        Self::decode_sq(row)
     }
 }
 
@@ -902,13 +677,12 @@ impl MediaManager {
                     .bind(&description)
                     .execute(&mut *tx)
                     .await?;
-                let row = sqlx::query(&format!(
+                let out: MediaCollection = sqlx::query_as(&format!(
                     "SELECT {select_cols} FROM `rustango_media_collections` \
                      WHERE id = LAST_INSERT_ID()"
                 ))
                 .fetch_one(&mut *tx)
                 .await?;
-                let out = MediaCollection::decode_my(&row)?;
                 tx.commit().await?;
                 return Ok(out);
             }
@@ -1157,13 +931,12 @@ impl MediaManager {
                 .bind(slug)
                 .execute(&mut *tx)
                 .await?;
-                let row = sqlx::query(
+                let out: MediaTag = sqlx::query_as(
                     "SELECT id, name, slug, created_at FROM `rustango_media_tags` WHERE slug = ?",
                 )
                 .bind(slug)
                 .fetch_one(&mut *tx)
                 .await?;
-                let out = MediaTag::decode_my(&row)?;
                 tx.commit().await?;
                 return Ok(out);
             }
@@ -1344,9 +1117,9 @@ impl MediaManager {
               LIMIT {p}"
         );
         // #561 — was three byte-similar `bind+fetch+decode` arms. The
-        // `use_count` aggregate column isn't part of MediaTag's schema,
-        // so the existing `MediaTag::decode_pg/my/sq` helpers can't be
-        // re-used directly. Factor per-backend pair decoders below.
+        // `use_count` aggregate column isn't part of MediaTag's schema, so
+        // per-backend pair decoders (below) pull `use_count` themselves and
+        // delegate the tag columns to the derived `sqlx::FromRow`.
         let lim = limit.max(1).min(1000);
         match &self.pool {
             #[cfg(feature = "postgres")]
@@ -1419,12 +1192,11 @@ impl MediaManager {
                     .bind(sqlx::types::Json(&r.metadata))
                     .execute(&mut *tx)
                     .await?;
-                let row = sqlx::query(&format!(
+                let out: Media = sqlx::query_as(&format!(
                     "SELECT {select_cols} FROM `rustango_media` WHERE id = LAST_INSERT_ID()"
                 ))
                 .fetch_one(&mut *tx)
                 .await?;
-                let out = Media::decode_my(&row)?;
                 tx.commit().await?;
                 return Ok(out);
             }
@@ -1476,31 +1248,31 @@ fn media_err_from_exec(e: crate::sql::ExecError) -> MediaError {
 
 /// #561 — per-backend MediaTag-with-`use_count` row decoder helpers.
 /// `popular_tags` does a single LEFT JOIN GROUP BY query whose row
-/// shape is `MediaTag::SCHEMA + use_count: i64`; the existing
-/// `MediaTag::decode_<backend>` family expects only the model's
-/// scalar columns. Three sibling free fns keep the per-backend
-/// arms tight without forcing a new schema column.
+/// shape is `MediaTag::SCHEMA + use_count: i64`. The derived
+/// `sqlx::FromRow` for `MediaTag` reads only the model's columns by
+/// name (ignoring the extra `use_count`), so we pull `use_count`
+/// ourselves and let `FromRow` decode the tag.
 #[cfg(feature = "postgres")]
 fn decode_tag_with_count_pg(row: &sqlx::postgres::PgRow) -> Result<(MediaTag, i64), MediaError> {
-    use sqlx::Row as _;
+    use sqlx::{FromRow as _, Row as _};
     let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
-    let tag = MediaTag::decode_pg(row).map_err(MediaError::Db)?;
+    let tag = MediaTag::from_row(row).map_err(MediaError::Db)?;
     Ok((tag, count))
 }
 
 #[cfg(feature = "mysql")]
 fn decode_tag_with_count_my(row: &sqlx::mysql::MySqlRow) -> Result<(MediaTag, i64), MediaError> {
-    use sqlx::Row as _;
+    use sqlx::{FromRow as _, Row as _};
     let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
-    let tag = MediaTag::decode_my(row).map_err(MediaError::Db)?;
+    let tag = MediaTag::from_row(row).map_err(MediaError::Db)?;
     Ok((tag, count))
 }
 
 #[cfg(feature = "sqlite")]
 fn decode_tag_with_count_sq(row: &sqlx::sqlite::SqliteRow) -> Result<(MediaTag, i64), MediaError> {
-    use sqlx::Row as _;
+    use sqlx::{FromRow as _, Row as _};
     let count: i64 = row.try_get("use_count").map_err(MediaError::Db)?;
-    let tag = MediaTag::decode_sq(row).map_err(MediaError::Db)?;
+    let tag = MediaTag::from_row(row).map_err(MediaError::Db)?;
     Ok((tag, count))
 }
 
@@ -1626,7 +1398,7 @@ mod tests {
             size_bytes: 0,
             original_filename: "x".into(),
             status: "ready".into(),
-            uploaded_at: Utc::now(),
+            uploaded_at: Auto::Set(Utc::now()),
             uploaded_by_id: None,
             derived_from_id: None,
             collection_id: None,

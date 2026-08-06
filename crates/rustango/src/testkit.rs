@@ -143,7 +143,10 @@ async fn emit_tables(pool: &Pool, models: &[&'static ModelSchema]) -> Result<(),
 ///
 /// # Errors
 /// Any generation or apply failure ([`MigrateError`]).
-#[cfg(feature = "tenancy")]
+///
+/// Available in any build (not just `tenancy`) — the `media` subsystem's
+/// tests use it to materialize the media tables from the migration render
+/// path with no `tenancy` feature.
 pub async fn migrate_framework(pool: &Pool) -> Result<(), MigrateError> {
     // Deduped snapshot of every framework (`rustango_*`) table — the
     // shared audit/content_types tables appear once — materialized in one

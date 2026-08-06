@@ -804,14 +804,6 @@ async fn migrate<W: Write>(
         return Ok(());
     }
 
-    // Framework media tables (`rustango_media` + collections/tags/links):
-    // created BEFORE any user migrations are applied, so a user model that
-    // FKs `rustango_media` applies cleanly — the same behavior the tenant
-    // provisioning path gives per-tenant. Idempotent (`CREATE TABLE IF NOT
-    // EXISTS`); only when the `media` feature is enabled.
-    #[cfg(feature = "media")]
-    crate::media::ensure_all_tables_pool(pool).await?;
-
     if let Some(target) = positional {
         let touched = runner::migrate_to_pool(pool, dir, target).await?;
         if touched.is_empty() {
