@@ -1367,8 +1367,8 @@ pub async fn raw_execute_tx(
 ///
 /// This is the canonical "ensure-this-DDL-applied" primitive for
 /// modules that ship hand-written per-dialect schema constants
-/// (`audit::ensure_table_pool`, `media::*::ensure_table`, the
-/// JSON-side `jobs::pg::ensure_jobs_table`, etc.). The non-MySQL
+/// (`audit::ensure_table_pool`, the JSON-side
+/// `jobs::pg::ensure_jobs_table`, etc.). The non-MySQL
 /// errors surface as [`sqlx::Error`] verbatim (driver-level); only
 /// the dup-index case is swallowed.
 ///

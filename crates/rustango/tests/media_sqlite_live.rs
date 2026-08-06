@@ -1,4 +1,4 @@
-#![cfg(all(feature = "sqlite", feature = "media"))]
+#![cfg(all(feature = "sqlite", feature = "media", feature = "testkit"))]
 //! Live integration test for the tri-dialect MediaManager on SQLite.
 //!
 //! v0.38 slice 29 — every MediaManager query is dispatched per
@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use rustango::media::{ensure_all_tables_pool, MediaManager, SaveOpts};
+use rustango::media::{MediaManager, SaveOpts};
 use rustango::sql::Pool;
 use rustango::storage::{InMemoryStorage, StorageRegistry};
 
@@ -24,9 +24,9 @@ async fn manager() -> MediaManager {
         .await
         .expect("sqlite connect");
     let pool_enum = Pool::Sqlite(pool);
-    ensure_all_tables_pool(&pool_enum)
+    rustango::testkit::migrate_framework(&pool_enum)
         .await
-        .expect("ensure media tables");
+        .expect("migrate framework media tables");
     let registry = StorageRegistry::new()
         .set("default", Arc::new(InMemoryStorage::new()))
         .with_default("default");

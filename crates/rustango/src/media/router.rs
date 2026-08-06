@@ -31,8 +31,8 @@
 //! use rustango::media::{Media, MediaManager, router::media_router};
 //! use rustango::storage::StorageRegistry;
 //!
-//! Media::ensure_table(&pool).await?;
-//! rustango::media::ensure_all_tables(&pool).await?;
+//! // Tables come from the framework's system migrations (run during
+//! // provisioning / `migrate_framework`) — no per-boot bootstrap needed.
 //!
 //! let manager = MediaManager::new(pool.clone(), registry);
 //! let app = axum::Router::new()
@@ -166,7 +166,7 @@ impl MediaResponse {
             size_bytes: m.size_bytes,
             original_filename: m.original_filename,
             status: m.status,
-            uploaded_at: m.uploaded_at,
+            uploaded_at: m.uploaded_at.into_inner().unwrap_or_else(chrono::Utc::now),
             uploaded_by_id: m.uploaded_by_id,
             derived_from_id: m.derived_from_id,
             collection_id: m.collection_id,
@@ -220,7 +220,7 @@ impl From<MediaCollection> for CollectionResponse {
             slug: c.slug,
             parent_id: c.parent_id,
             description: c.description,
-            created_at: c.created_at,
+            created_at: c.created_at.into_inner().unwrap_or_else(chrono::Utc::now),
         }
     }
 }

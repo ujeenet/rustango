@@ -1,4 +1,4 @@
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "media", feature = "testkit"))]
 //! Live integration tests for `MediaManager` against Postgres + an
 //! S3-compatible bucket.
 //!
@@ -20,7 +20,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustango::media::{Media, MediaManager, MediaStatus, SaveOpts, UploadIntent};
+use rustango::media::{MediaManager, MediaStatus, SaveOpts, UploadIntent};
 use rustango::storage::s3::{S3Config, S3Storage};
 use rustango::storage::{BoxedStorage, StorageRegistry};
 use sqlx::PgPool;
@@ -36,7 +36,9 @@ async fn maybe_setup() -> Option<MediaManager> {
     let region = std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
 
     let pool = PgPool::connect(&url).await.expect("connect Postgres");
-    Media::ensure_table(&pool).await.expect("ensure_table");
+    rustango::testkit::migrate_framework(&rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .expect("migrate framework media tables");
     // Wipe between runs so each test sees a clean slate.
     sqlx::query("DELETE FROM rustango_media")
         .execute(&pool)

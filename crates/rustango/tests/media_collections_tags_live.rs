@@ -1,4 +1,4 @@
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "media", feature = "testkit"))]
 //! Live integration tests for `MediaCollection` + `MediaTag` + the
 //! axum router. Same env-var contract as `media_live.rs` — skips
 //! silently when DATABASE_URL or RUSTANGO_S3_TEST_* are unset.
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use rustango::media::router::media_router;
-use rustango::media::{ensure_all_tables, MediaManager, SaveOpts};
+use rustango::media::{MediaManager, SaveOpts};
 use rustango::storage::s3::{S3Config, S3Storage};
 use rustango::storage::{BoxedStorage, StorageRegistry};
 use sqlx::PgPool;
@@ -25,7 +25,9 @@ async fn maybe_setup() -> Option<MediaManager> {
     let region = std::env::var("RUSTANGO_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
 
     let pool = PgPool::connect(&url).await.expect("connect Postgres");
-    ensure_all_tables(&pool).await.expect("ensure_all_tables");
+    rustango::testkit::migrate_framework(&rustango::sql::Pool::Postgres(pool.clone()))
+        .await
+        .expect("migrate framework media tables");
     // Wipe between runs — every test gets a clean slate.
     sqlx::query("DELETE FROM rustango_media_tag_links")
         .execute(&pool)
@@ -751,19 +753,21 @@ async fn router_collection_contents_with_recursive_query() {
 }
 
 #[tokio::test]
-async fn ensure_all_tables_works_against_running_db() {
+async fn migrate_framework_is_idempotent_against_running_db() {
     let Some(_manager) = maybe_setup().await else {
         return;
     };
-    // The setup helper already calls ensure_all_tables; a second
-    // call must be a no-op (idempotent DDL).
+    // The setup helper already ran migrate_framework; a second call must be
+    // a no-op (it swallows "already exists" errors on a fresh-then-reapplied
+    // schema).
     let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
-    rustango::media::ensure_all_tables(&pool)
+    let pool_enum = rustango::sql::Pool::Postgres(pool);
+    rustango::testkit::migrate_framework(&pool_enum)
         .await
-        .expect("ensure_all_tables idempotent");
-    rustango::media::ensure_all_tables(&pool)
+        .expect("migrate_framework idempotent");
+    rustango::testkit::migrate_framework(&pool_enum)
         .await
-        .expect("ensure_all_tables called twice");
+        .expect("migrate_framework called twice");
 }
