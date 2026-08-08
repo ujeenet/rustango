@@ -205,11 +205,15 @@ async fn fake_initial_creates_normally_when_table_absent() {
     cleanup(pool, &path, &dir);
 }
 
-/// Guard: a migration whose tables only PARTIALLY exist is NOT faked — it
-/// falls through to the runner and surfaces the collision loudly rather than
-/// silently skipping a table that still needs creating.
+/// **Partial state → create only what's missing.** The `ensure_table` era
+/// created framework tables piecemeal — whichever subsystems an app actually
+/// touched — so a real upgrade routinely finds *some* of a system migration's
+/// tables present and others absent. The runner creates the missing ones and
+/// leaves the existing ones (and their data) alone: exactly the
+/// `CREATE TABLE IF NOT EXISTS` semantics the retired `ensure_*` calls had.
+/// Refusing here instead would simply break the upgrade.
 #[tokio::test]
-async fn fake_initial_does_not_fake_partial_existence() {
+async fn fake_initial_creates_only_missing_tables_on_partial_state() {
     let (pool, path) = sqlite_pool().await;
     let (t1, t2) = ("recon_a", "recon_b");
     let name = "0002_create_recon_a_and_recon_b";
@@ -223,24 +227,40 @@ async fn fake_initial_does_not_fake_partial_existence() {
     );
     let dir = write_dir(&m);
 
-    // Only t1 pre-exists → not all tables exist → must not fake.
+    // Only t1 pre-exists, and it holds data that must survive.
     let Pool::Sqlite(sq) = &pool else {
         unreachable!()
     };
-    sqlx::query(&format!("CREATE TABLE {t1} (id INTEGER PRIMARY KEY)"))
+    sqlx::query(&format!(
+        "CREATE TABLE {t1} (id INTEGER PRIMARY KEY, note TEXT)"
+    ))
+    .execute(sq)
+    .await
+    .unwrap();
+    sqlx::query(&format!("INSERT INTO {t1} (id, note) VALUES (1, 'kept')"))
         .execute(sq)
         .await
         .unwrap();
 
-    let res = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER).await;
-    assert!(
-        res.is_err(),
-        "partial existence must fall through to the runner and collide, not fake"
-    );
-    assert!(
-        !ledger_has(&pool, name).await,
-        "a non-faked, failed migration must not be recorded"
-    );
+    let applied = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER)
+        .await
+        .expect("partial state must reconcile, not collide");
+    assert_eq!(applied.len(), 1);
+    assert!(ledger_has(&pool, name).await);
+
+    // t2 was actually created...
+    sqlx::query(&format!("INSERT INTO {t2} (id) VALUES (1)"))
+        .execute(sq)
+        .await
+        .expect("the missing table must have been created");
+    // ...and t1's data was left untouched.
+    let note: String = sqlx::query(&format!("SELECT note FROM {t1} WHERE id = 1"))
+        .fetch_one(sq)
+        .await
+        .unwrap()
+        .try_get("note")
+        .unwrap();
+    assert_eq!(note, "kept");
 
     cleanup(pool, &path, &dir);
 }

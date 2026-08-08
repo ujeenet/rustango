@@ -34,6 +34,12 @@ use super::{ddl, MigrateError};
 /// tables. Override per-app via `Builder::ledger`.
 pub const LEDGER_TABLE: &str = "__rustango_migrations__";
 
+/// Ledger for the framework's own ("system app") migrations — the
+/// generated `system/migrations/` chain that stands up the `rustango_*`
+/// tables. Kept separate from [`LEDGER_TABLE`] so the framework's chain and
+/// the project's never collide or renumber each other.
+pub const SYSTEM_LEDGER_TABLE: &str = "__rustango_system_migrations__";
+
 /// Per-app migration runner config. Lets two rustango apps live in
 /// the same Postgres database without colliding on the default
 /// `__rustango_migrations__` ledger table — each app picks its own
@@ -442,7 +448,11 @@ async fn migrate_with_ledger(
         for mig in pending {
             match reconcile(&enum_pool, &mig, &applied, false).await? {
                 ReconcileAction::Fake => fake_apply_pool(&enum_pool, &mig, ledger).await?,
-                ReconcileAction::Run => apply_one(pool, &mig, ledger).await?,
+                // `fake_initial` is off on this path, so `RunPartial` is
+                // unreachable here; treat it as a plain run for totality.
+                ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
+                    apply_one(pool, &mig, ledger).await?
+                }
             }
             newly.push(mig);
         }
@@ -1463,11 +1473,17 @@ async fn migrate_pool_with_ledger_opts(
         for mig in pending {
             match reconcile(pool, &mig, &applied, fake_initial).await? {
                 ReconcileAction::Fake => fake_apply_pool(pool, &mig, ledger).await?,
-                ReconcileAction::Run => {
-                    if mig.atomic {
-                        apply_atomic_pool(pool, &mig, ledger).await?;
+                other => {
+                    let effective = match other {
+                        ReconcileAction::RunPartial(existing) => {
+                            std::borrow::Cow::Owned(without_existing_tables(&mig, &existing))
+                        }
+                        _ => std::borrow::Cow::Borrowed(&mig),
+                    };
+                    if effective.atomic {
+                        apply_atomic_pool(pool, &effective, ledger).await?;
                     } else {
-                        apply_nonatomic_pool(pool, &mig, ledger).await?;
+                        apply_nonatomic_pool(pool, &effective, ledger).await?;
                     }
                 }
             }
@@ -1482,13 +1498,17 @@ async fn migrate_pool_with_ledger_opts(
 
 /// What to do with a pending migration once it has been reconciled
 /// against the database's actual state. See [`reconcile`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ReconcileAction {
     /// Apply normally — run its `forward` ops, then record it.
     Run,
     /// Record it as applied (and tombstone anything it `replaces`)
     /// **without** running any DDL: the end state is already present.
     Fake,
+    /// Apply it, but skip the operations for the listed tables — they
+    /// already exist (created by the retired `ensure_*` DDL of an older
+    /// build). Only the framework's own system chain uses this.
+    RunPartial(Vec<String>),
 }
 
 /// Decide whether a pending migration should run or be reconciled.
@@ -1581,10 +1601,19 @@ async fn reconcile(
     }
 
     // Plain migration: only the framework's own system-migration path opts
-    // into table-existence faking, and only for pure-`CreateTable` files.
+    // into table-existence reconciliation.
     if fake_initial {
         if let Some(tables) = create_only_tables(mig) {
-            if count_existing_tables(pool, &tables).await == tables.len() {
+            let existing: Vec<String> = {
+                let mut present = Vec::new();
+                for t in &tables {
+                    if count_existing_tables(pool, std::slice::from_ref(t)).await == 1 {
+                        present.push(t.clone());
+                    }
+                }
+                present
+            };
+            if existing.len() == tables.len() {
                 tracing::warn!(
                     migration = %mig.name,
                     tables = %tables.join(", "),
@@ -1594,9 +1623,52 @@ async fn reconcile(
                 );
                 return Ok(ReconcileAction::Fake);
             }
+            if !existing.is_empty() {
+                // Partial: some of the framework's tables predate this chain
+                // (the `ensure_table` era created them piecemeal — whichever
+                // subsystems the app actually touched). Create only what's
+                // missing and leave the rest alone. That is exactly the
+                // `CREATE TABLE IF NOT EXISTS` semantics the retired `ensure_*`
+                // calls had, so upgrading is never worse than before; refusing
+                // here instead would simply break the upgrade.
+                tracing::warn!(
+                    migration = %mig.name,
+                    existing = %existing.join(", "),
+                    "fake-initial: some framework tables already exist — creating \
+                     only the missing ones and leaving the existing untouched"
+                );
+                return Ok(ReconcileAction::RunPartial(existing));
+            }
         }
     }
     Ok(ReconcileAction::Run)
+}
+
+/// A copy of `mig` with every operation that targets an already-present
+/// table removed — the `RunPartial` payload.
+///
+/// Both the `CreateTable` and any `CreateIndex` for a skipped table are
+/// dropped: the table was created by an older framework build, which created
+/// its indexes too, so re-running them would collide the same way. Operations
+/// for tables we *are* creating pass through untouched.
+fn without_existing_tables(mig: &Migration, existing: &[String]) -> Migration {
+    use super::diff::SchemaChange as SC;
+    let skip = |t: &String| existing.iter().any(|e| e == t);
+    let forward = mig
+        .forward
+        .iter()
+        .filter(|op| match op {
+            Operation::Schema(SC::CreateTable(t)) => !skip(t),
+            Operation::Schema(SC::CreateIndex { table, .. }) => !skip(table),
+            Operation::Schema(SC::CreateM2MTable { through, .. }) => !skip(through),
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    Migration {
+        forward,
+        ..mig.clone()
+    }
 }
 
 /// The migrations in `all` that still need to be considered, given the
