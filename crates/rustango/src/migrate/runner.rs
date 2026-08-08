@@ -1712,7 +1712,10 @@ async fn fake_apply_pool(
     )
     .await
     .map_err(|e| {
-        MigrateError::Validation(format!("fake-apply: ledger insert for `{}` failed: {e}", mig.name))
+        MigrateError::Validation(format!(
+            "fake-apply: ledger insert for `{}` failed: {e}",
+            mig.name
+        ))
     })?;
 
     if mig.replaces.is_empty() {

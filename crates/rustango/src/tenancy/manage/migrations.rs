@@ -117,10 +117,18 @@ where
     // so operators can repair a stretch of drifted rows in one
     // command.
     let mut fakes: Vec<String> = Vec::new();
+    // Which chain the fake stamps into, and where it runs. `--fake` alone
+    // means "the project's migrations, in the registry DB" (the historical
+    // behavior); `--system` switches to the framework's own chain and
+    // `--all-tenants` fans the stamp out across every active tenant.
+    let mut fake_scope = FakeScope::Project;
+    let mut fake_all_tenants = false;
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--help" | "-h" => help = true,
             "--dry-run" => dry_run = true,
+            "--system" => fake_scope = FakeScope::System,
+            "--all-tenants" => fake_all_tenants = true,
             "--fake" => {
                 let name = iter.next().ok_or_else(|| {
                     TenancyError::Migrate(rustango::migrate::MigrateError::Validation(
@@ -157,12 +165,31 @@ where
              migrate --fake <name>           insert <name> into the registry ledger WITHOUT running its SQL\n\
                                              (recovery path when tables exist but the ledger row is missing — fixes\n\
                                              \"relation X already exists\" 42P07 errors after a manual setup)\n\
+             migrate --fake <name> --system  stamp the framework's system-migration chain instead of the project's\n\
+             migrate --fake <name> --all-tenants\n\
+                                             stamp every active tenant's ledger rather than the registry\n\
+                                             (combine with --system for the framework's own tables)\n\
              migrate-registry                apply registry-scoped pending migrations only\n\
              migrate-tenants                 apply tenant-scoped pending migrations across active orgs"
         )?;
         return Ok(());
     }
     if !fakes.is_empty() {
+        let (fake_dir, ledger) = fake_scope.resolve(dir);
+        if fake_all_tenants {
+            return fake_apply_across_tenants(pools, &fake_dir, ledger, &fakes, w).await;
+        }
+        if fake_scope == FakeScope::System {
+            return fake_apply_to_pool(
+                &pools.registry_pool(),
+                &fake_dir,
+                ledger,
+                &fakes,
+                "registry (system chain)",
+                w,
+            )
+            .await;
+        }
         return fake_apply_to_registry(pools, dir, &fakes, w).await;
     }
     if target.is_some() || dry_run {
@@ -263,6 +290,132 @@ async fn fake_apply_to_registry<W: Write, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    let registry = pools.registry_pool();
+    fake_apply_to_pool(
+        &registry,
+        dir,
+        rustango::migrate::LEDGER_TABLE,
+        names,
+        "registry",
+        w,
+    )
+    .await
+}
+
+/// Stamp `names` into `ledger` for **every active tenant**.
+///
+/// The framework's own tables live per tenant, so repairing a drifted
+/// system-migration ledger (or squash bookkeeping) is a per-tenant job. Each
+/// tenant is processed independently and a failure is reported without
+/// aborting the rest — the same failure-isolation policy
+/// [`crate::tenancy::migrate::migrate_tenants`] uses, so one broken tenant
+/// can't leave the others unrepaired.
+async fn fake_apply_across_tenants<W: Write, DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    ledger: &str,
+    names: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    use crate::tenancy::org::Org;
+
+    let registry = pools.registry_pool();
+    let orgs: Vec<Org> = Org::objects()
+        .where_(Org::active.eq(true))
+        .fetch(&registry)
+        .await
+        .map_err(|e| {
+            TenancyError::Validation(format!("--fake --all-tenants: listing orgs failed: {e}"))
+        })?;
+    if orgs.is_empty() {
+        writeln!(w, "no active tenants — nothing to stamp.")?;
+        return Ok(());
+    }
+    let mut failures = 0;
+    for org in &orgs {
+        writeln!(w, "tenant `{}`:", org.slug)?;
+        let pool = match pools.scoped_pool_dyn(org).await {
+            Ok(p) => p,
+            Err(e) => {
+                failures += 1;
+                writeln!(w, "  ! could not open a pool: {e}")?;
+                continue;
+            }
+        };
+        if let Err(e) = fake_apply_to_pool(&pool, dir, ledger, names, &org.slug, w).await {
+            failures += 1;
+            writeln!(w, "  ! {e}")?;
+        }
+    }
+    writeln!(
+        w,
+        "stamped {} tenant(s); {failures} failure(s).",
+        orgs.len()
+    )?;
+    Ok(())
+}
+
+/// Which migration chain a `--fake` targets.
+///
+/// The framework keeps its own tables in a **separate** chain (generated
+/// `system/migrations/`, recorded in `__rustango_system_migrations__`) from
+/// the project's (`migrations/`, `__rustango_migrations__`), so stamping a
+/// row needs to know which pair to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FakeScope {
+    /// The project's own migrations.
+    Project,
+    /// The framework's system-app migrations.
+    System,
+}
+
+impl FakeScope {
+    /// The `(directory, ledger)` pair this scope stamps into, given the
+    /// project's migrations dir.
+    fn resolve(self, dir: &Path) -> (std::path::PathBuf, &'static str) {
+        match self {
+            Self::Project => (dir.to_path_buf(), rustango::migrate::LEDGER_TABLE),
+            Self::System => {
+                // `system/migrations/` sits beside the project's
+                // `migrations/` — mirror `apply_system_migrations`.
+                let root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
+                    dir.parent().unwrap_or(dir)
+                } else {
+                    dir
+                };
+                (
+                    root.join("system").join("migrations"),
+                    crate::tenancy::migrate::SYSTEM_LEDGER,
+                )
+            }
+        }
+    }
+}
+
+/// Backfill `ledger` in `pool` with `names` without running any SQL.
+///
+/// Recovery path for the "tables exist but the ledger row is missing" drift
+/// that surfaces as `relation "X" already exists` (Postgres 42P07) /
+/// `table already exists` (MySQL 1050) on the next `migrate` — a DB set up
+/// out-of-band, a dropped ledger, a partially-succeeded migration, or a
+/// subsystem whose tables predate its migration.
+///
+/// Each name is validated against `dir` before the row lands, so operators
+/// can't backfill a typo. The ledger is created if missing. `label` names
+/// the target in the output (`registry`, a tenant slug, …).
+async fn fake_apply_to_pool<W: Write>(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    ledger: &str,
+    names: &[String],
+    label: &str,
+    w: &mut W,
+) -> Result<(), TenancyError> {
     // Discover what's on disk to validate the names.
     let migrations = rustango::migrate::file::list_dir(dir).map_err(TenancyError::Migrate)?;
     let on_disk: std::collections::HashSet<&str> =
@@ -283,19 +436,20 @@ where
     // v0.38 — route through the tri-dialect `_pool` helpers + the
     // dialect's `placeholder(n)` emitter so the same code works on
     // PG (`$1`) and sqlite/mysql (`?`).
-    let registry = pools.registry_pool();
-    rustango::migrate::ensure_ledger_pool(&registry)
+    rustango::migrate::ensure_ledger_pool_with_ledger(pool, ledger)
         .await
         .map_err(TenancyError::Migrate)?;
-    let dialect = registry.dialect();
-    let placeholder = dialect.placeholder(1);
-    let table = dialect.quote_ident(rustango::migrate::LEDGER_TABLE);
-    let name_col = dialect.quote_ident("name");
-    let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);
-    let sql = format!("INSERT INTO {table} ({name_col}) VALUES ({placeholder}) {conflict_tail}");
+    let sql = {
+        let dialect = pool.dialect();
+        let placeholder = dialect.placeholder(1);
+        let table = dialect.quote_ident(ledger);
+        let name_col = dialect.quote_ident("name");
+        let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);
+        format!("INSERT INTO {table} ({name_col}) VALUES ({placeholder}) {conflict_tail}")
+    };
     for name in names {
         let affected = rustango::sql::raw_execute_pool(
-            &registry,
+            pool,
             &sql,
             vec![rustango::core::SqlValue::String(name.clone())],
         )
@@ -313,7 +467,7 @@ where
     }
     writeln!(
         w,
-        "registry: {} fake row(s) processed. Run `migrate` to apply any actually-pending migrations.",
+        "{label}: {} fake row(s) processed. Run `migrate` to apply any actually-pending migrations.",
         names.len()
     )?;
     Ok(())

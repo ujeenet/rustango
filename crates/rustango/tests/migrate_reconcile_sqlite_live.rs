@@ -87,7 +87,9 @@ fn write(dir: &Path, m: &Migration) {
 }
 
 async fn ledger_names(pool: &Pool) -> Vec<String> {
-    let Pool::Sqlite(sq) = pool else { unreachable!() };
+    let Pool::Sqlite(sq) = pool else {
+        unreachable!()
+    };
     sqlx::query(&format!("SELECT name FROM {LEDGER} ORDER BY name"))
         .fetch_all(sq)
         .await
@@ -98,7 +100,9 @@ async fn ledger_names(pool: &Pool) -> Vec<String> {
 }
 
 async fn table_exists(pool: &Pool, table: &str) -> bool {
-    let Pool::Sqlite(sq) = pool else { unreachable!() };
+    let Pool::Sqlite(sq) = pool else {
+        unreachable!()
+    };
     sqlx::query("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?")
         .bind(table)
         .fetch_optional(sq)
@@ -145,7 +149,9 @@ async fn squash_fakes_and_tombstones_when_predecessors_applied() {
     let first = migrate::migrate_pool(&pool, &dir).await.unwrap();
     assert_eq!(first.len(), 2);
     // Prove the history is real data we must not lose.
-    let Pool::Sqlite(sq) = &pool else { unreachable!() };
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
     sqlx::query("INSERT INTO sq2_a (id) VALUES (7)")
         .execute(sq)
         .await
@@ -187,7 +193,9 @@ async fn squash_fakes_when_tables_exist_but_ledger_is_empty() {
     let dir = fresh_dir();
 
     // Tables exist with data, but nothing is recorded in the ledger.
-    let Pool::Sqlite(sq) = &pool else { unreachable!() };
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
     for t in ["sq3_a", "sq3_b"] {
         sqlx::query(&format!("CREATE TABLE {t} (id INTEGER PRIMARY KEY)"))
             .execute(sq)
@@ -255,7 +263,9 @@ async fn squash_refuses_partial_table_state() {
     let (pool, path) = sqlite_pool().await;
     let dir = fresh_dir();
 
-    let Pool::Sqlite(sq) = &pool else { unreachable!() };
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
     sqlx::query("CREATE TABLE sq5_a (id INTEGER PRIMARY KEY)")
         .execute(sq)
         .await
@@ -282,7 +292,9 @@ async fn plain_migration_is_not_faked_when_table_exists() {
     let (pool, path) = sqlite_pool().await;
     let dir = fresh_dir();
 
-    let Pool::Sqlite(sq) = &pool else { unreachable!() };
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
     sqlx::query("CREATE TABLE sq6_a (id INTEGER PRIMARY KEY)")
         .execute(sq)
         .await

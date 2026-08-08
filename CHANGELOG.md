@@ -4,7 +4,31 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-_Nothing yet — next development cycle._
+### Added
+
+- **Squash reconciliation — `Migration.replaces`** (#1167) — a squash collapses
+  a run of historical migrations into one file that recreates the same end
+  state. The runner now reconciles it against the database instead of
+  colliding: when every replaced migration is already in the ledger it is
+  recorded and its predecessors tombstoned with **no DDL**; when the ledger has
+  no history but the tables already exist it is recorded anyway (Django's
+  cross-ledger `--fake-initial`); on a fresh database it runs for real; and a
+  *partial* state — only some replaced rows or tables present — is **refused**
+  with a message naming what's missing rather than guessed at. Migrations
+  superseded by an applied squash count as applied, so the collapsed files can
+  stay on disk for deployments that never ran them. Applies to both the
+  tri-dialect and legacy Postgres runners through one shared decision path;
+  plain user migrations are unaffected (table-existence faking remains opt-in
+  to the framework's own system-migration path, #1174).
+- **`migrate --squash` stamps `replaces`** (#1167) — the regenerated file now
+  records the migrations it collapsed, so a database that already applied some
+  of them (a colleague's checkout, staging, CI) reconciles instead of failing
+  on a duplicate `CREATE TABLE`.
+- **`migrate --fake <name> [--system] [--all-tenants]`** (#1167) — the operator
+  escape hatch now reaches beyond the registry chain. `--system` stamps the
+  framework's own chain (`system/migrations/` →
+  `__rustango_system_migrations__`) and `--all-tenants` fans the stamp out
+  across every active tenant, reporting each and continuing past failures.
 
 ## [0.51.1] — 2026-08-06
 

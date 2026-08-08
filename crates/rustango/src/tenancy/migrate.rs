@@ -101,7 +101,7 @@ pub struct TenantMigrationOutcome {
 /// Ledger table tracking the framework's own ("system app") migrations,
 /// kept separate from the project's `__rustango_migrations__` so the two
 /// chains never collide.
-const SYSTEM_LEDGER: &str = "__rustango_system_migrations__";
+pub(crate) const SYSTEM_LEDGER: &str = "__rustango_system_migrations__";
 
 /// Generate (from the current models, if not already on disk) and apply
 /// the framework's system-app migrations for `scope` against `pool`.
