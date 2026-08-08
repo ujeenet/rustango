@@ -380,6 +380,7 @@ async fn migrate_tenants_runs_against_active_only() {
         prev: None,
         atomic: true,
         scope: rmig::MigrationScope::Tenant,
+        replaces: Vec::new(),
         snapshot: serde_json::from_value(serde_json::json!({
             "tables": [{
                 "name": "thing", "model": "T",

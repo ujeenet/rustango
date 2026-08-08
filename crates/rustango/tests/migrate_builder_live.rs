@@ -77,6 +77,7 @@ fn make_create_migration(name: &str, table: &str) -> Migration {
         prev: None,
         atomic: true,
         scope: MigrationScope::default(),
+        replaces: Vec::new(),
         snapshot: snapshot_with_table(table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(table.into()))],
     }
