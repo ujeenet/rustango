@@ -1759,26 +1759,59 @@ fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
 /// `CREATE TABLE` would use (unqualified — correct for schema-mode
 /// tenants and single-DB alike).
 async fn count_existing_tables(pool: &crate::sql::Pool, tables: &[String]) -> usize {
-    // Render every probe up front so the `&dyn Dialect` borrow is dropped
-    // before the first `.await` — holding it across a suspend point would
-    // make this future non-`Send` (it is spawned via `tokio::spawn`).
-    let probes: Vec<String> = {
-        let dialect = pool.dialect();
-        tables
-            .iter()
-            .map(|t| format!("SELECT 1 FROM {} LIMIT 1", dialect.quote_ident(t)))
-            .collect()
-    };
     let mut n = 0;
-    for sql in &probes {
-        if crate::sql::raw_execute_pool(pool, sql, Vec::new())
-            .await
-            .is_ok()
-        {
+    for t in tables {
+        if table_exists_here(pool, t).await {
             n += 1;
         }
     }
     n
+}
+
+/// Does `table` exist **in the schema this connection writes to**?
+///
+/// Deliberately *not* `SELECT 1 FROM <table>`: an unqualified name resolves
+/// through the search path, so in schema-mode multi-tenancy (`search_path =
+/// <tenant>, public`) a probe would happily find a same-named table in
+/// `public` and conclude the tenant already had one. Reconciliation would then
+/// skip creating it and the tenant would silently come up without its tables.
+///
+/// Each backend is asked about its *current* namespace only:
+/// * Postgres — `information_schema.tables` filtered to `current_schema()`
+/// * MySQL — filtered to `DATABASE()` (a schema is a database here)
+/// * SQLite — `sqlite_master`, which is inherently per-connection
+async fn table_exists_here(pool: &crate::sql::Pool, table: &str) -> bool {
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_name = $1",
+        )
+        .bind(table)
+        .fetch_one(pg)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false),
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = DATABASE() AND table_name = ?",
+        )
+        .bind(table)
+        .fetch_one(my)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false),
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_one(sq)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false),
+    }
 }
 
 /// Record `mig` as applied **without running its `forward` ops**, and
