@@ -887,6 +887,10 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
         "squashing {} pending migration(s) into a fresh diff:",
         pending.len()
     )?;
+    // Remember what we collapse, per scope, so the regenerated file can
+    // declare it `replaces` them (see below).
+    let removed: Vec<(String, super::MigrationScope)> =
+        pending.iter().map(|m| (m.name.clone(), m.scope)).collect();
     for m in &pending {
         let path = file_path(dir, &m.name);
         std::fs::remove_file(&path).map_err(|e| {
@@ -896,11 +900,52 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
     }
 
     writeln!(w, "regenerating diff against current model registry...")?;
+    // Which files existed before regeneration, so we can tell which are new.
+    let before: std::collections::HashSet<String> =
+        file::list_dir(dir)?.into_iter().map(|m| m.name).collect();
     // Empty args means "default makemigrations behavior" — splits
     // registry vs tenant in tenancy projects, single file otherwise.
     // Pass through to the existing entry point so any future flags
     // gain consistent behavior automatically.
-    makemigrations(dir, &[], w)
+    makemigrations(dir, &[], w)?;
+
+    stamp_replaces(dir, &before, &removed, w)
+}
+
+/// Record, on each freshly-generated migration, the names it collapsed.
+///
+/// The squashed files were only *pending here* — another deployment (a
+/// colleague's database, staging, CI) may well have applied some of them
+/// already. Declaring `replaces` means the regenerated file **reconciles**
+/// there (recorded + predecessors tombstoned, no DDL) instead of colliding
+/// with tables those migrations created.
+///
+/// Names are matched to the new file by [`super::MigrationScope`], so in a
+/// tenancy project the registry squash claims only registry-scoped
+/// predecessors and the tenant squash only tenant-scoped ones.
+fn stamp_replaces<W: Write>(
+    dir: &Path,
+    before: &std::collections::HashSet<String>,
+    removed: &[(String, super::MigrationScope)],
+    w: &mut W,
+) -> Result<(), MigrateError> {
+    for mut mig in file::list_dir(dir)? {
+        if before.contains(&mig.name) {
+            continue; // pre-existing file, not one we just generated
+        }
+        let claims: Vec<String> = removed
+            .iter()
+            .filter(|(_, scope)| *scope == mig.scope)
+            .map(|(name, _)| name.clone())
+            .collect();
+        if claims.is_empty() {
+            continue;
+        }
+        writeln!(w, "  {} now replaces: {}", mig.name, claims.join(", "))?;
+        mig.replaces = claims;
+        file::write(&file_path(dir, &mig.name), &mig)?;
+    }
+    Ok(())
 }
 
 async fn downgrade<W: Write>(

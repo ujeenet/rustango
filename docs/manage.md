@@ -198,6 +198,73 @@ cargo run -- migrate 0001_initial       # roll back to 0001 (unapply 0002+)
 cargo run -- migrate zero               # unapply EVERY migration
 ```
 
+### `migrate --squash`
+
+Collapses every **pending** (un-applied) migration into one freshly
+generated diff — the dev-iteration escape hatch for when a stack of
+half-finished migrations is easier to regenerate than to fix. It refuses
+to touch anything already applied.
+
+```bash
+cargo run -- migrate --squash
+```
+
+The regenerated file records the names it collapsed in its `replaces`
+list. That matters the moment another database is involved: your
+colleague's checkout, staging, or CI may already have applied some of the
+files you just deleted. Without `replaces` the new file's `CREATE TABLE`
+would collide there; with it, the runner **reconciles** instead (see
+below).
+
+### Squash reconciliation
+
+A squash recreates the end state of the migrations it replaces, so what
+the runner should do depends entirely on what the target database already
+contains. It decides automatically:
+
+| database state | what happens |
+|---|---|
+| fresh — no history, no tables | the squash runs for real |
+| every replaced migration is in the ledger | recorded, predecessors tombstoned, **no DDL** |
+| tables exist but the ledger has no history | recorded, **no DDL** (Django's `--fake-initial`) |
+| only *some* replaced rows / tables present | **refused**, naming what's missing |
+
+The partial case is deliberately a hard error: no automatic choice is
+safe there, so the runner stops and tells you what it found instead of
+guessing. Resolve it with `migrate --fake` (below).
+
+Migrations superseded by an applied squash are treated as applied, so you
+can leave the old files on disk for a release or two — deployments that
+never ran them still migrate forward correctly.
+
+Ordinary (non-squash) migrations are unaffected: a plain migration whose
+table already exists still fails loudly, because that is a real conflict
+rather than a known-equivalent history.
+
+### `migrate --fake <name>`
+
+Stamps a migration as applied **without running its SQL** — the operator
+escape hatch when the database is already in the target state but the
+ledger doesn't know it (a DB set up out-of-band, a dropped ledger table, a
+partially-succeeded migration, a refused partial squash). Repeat the flag
+to repair several rows at once.
+
+```bash
+cargo run -- migrate --fake 0004_add_indexes
+cargo run -- migrate --fake 0004_add_indexes --system        # framework's own chain
+cargo run -- migrate --fake 0004_add_indexes --all-tenants   # every active tenant
+```
+
+The name is validated against the migration directory first, so a typo
+can't land a bogus row. Stamping is idempotent.
+
+`--system` targets the framework's own migration chain
+(`system/migrations/`, recorded in `__rustango_system_migrations__`)
+rather than your project's. `--all-tenants` fans the stamp out across
+every active tenant, reporting each one and continuing past failures —
+the framework's tables live per tenant, so repairing them is a per-tenant
+job.
+
 ### `downgrade [N]`
 
 Rolls back the last N applied migrations (default 1) — Laravel's
