@@ -188,6 +188,24 @@ It also handles soft-delete and orphan purging. The full flow is dogfooded in
 `media_sqlite_live.rs`; the manager's presigned/direct-upload methods are
 PostgreSQL-oriented.
 
+### How the media tables are created
+
+The media tables (`rustango_media`, `rustango_media_collections`,
+`rustango_media_tags`, `rustango_media_tag_links`) are managed models. Their
+schema ships as a **system migration** and is created — per tenant, when the
+`media` feature is enabled — the same way as the rest of the framework's own
+tables, whenever you run `migrate` / provision a tenant. There is no lazy
+"create on first use" step; if the feature is off, the tables are never created.
+
+> **Upgrading from before 0.51.** Earlier versions created the media tables
+> lazily via an `ensure_table` DDL call rather than a migration. On the first
+> `migrate` (or tenant provision) after upgrading, the framework **auto-reconciles**:
+> because the tables already exist, the generated media migration is recorded in
+> the system-migration ledger *without* re-running its `CREATE TABLE`, and your
+> existing rows are left untouched. **No manual step is required** — the upgrade
+> that would otherwise fail with `relation already exists` / `table already exists`
+> now just works. (Introduced in 0.51.1; see the CHANGELOG.)
+
 ---
 
 ## Reference
