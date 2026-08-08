@@ -1406,6 +1406,47 @@ pub async fn migrate_pool_with_ledger(
     dir: &Path,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
+    migrate_pool_with_ledger_opts(pool, dir, ledger, false).await
+}
+
+/// Like [`migrate_pool_with_ledger`], but with **guarded fake-initial**
+/// reconciliation (#1167): before applying, any pending migration that
+/// is *purely* table-creation (`CreateTable` ops only) whose tables
+/// **all already exist** is recorded in the ledger *without running its
+/// SQL*. This is the upgrade path for a subsystem that used to build
+/// its tables via the lazy `ensure_table` DDL and is now managed by a
+/// system migration: on the first `migrate` after the upgrade, the
+/// freshly-generated `CREATE TABLE` would otherwise collide with the
+/// already-present table. Faking it records the migration as applied so
+/// the chain moves on; existing data is untouched.
+///
+/// Scoped to the framework's own system-migration apply path (see
+/// [`crate::tenancy`] provisioning) — user migrations go through the
+/// plain [`migrate_pool_with_ledger`] and never auto-fake. The guard is
+/// deliberately narrow: a migration with *any* non-`CreateTable`
+/// operation (a column add, a data backfill, a callback) is never
+/// faked, and a create-migration is faked only when **every** table it
+/// creates is already present (a partial state falls through to the
+/// runner, which surfaces the collision loudly rather than papering
+/// over it).
+///
+/// # Errors
+/// As [`migrate_pool_with_ledger`], plus a ledger-insert failure while
+/// recording a faked migration.
+pub async fn migrate_pool_with_ledger_fake_initial(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
+    migrate_pool_with_ledger_opts(pool, dir, ledger, true).await
+}
+
+async fn migrate_pool_with_ledger_opts(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    ledger: &str,
+    fake_initial: bool,
+) -> Result<Vec<Migration>, MigrateError> {
     ensure_ledger_pool_with_ledger(pool, ledger).await?;
     with_migrate_lock_pool(pool, async {
         let all = file::list_dir(dir)?;
@@ -1417,6 +1458,25 @@ pub async fn migrate_pool_with_ledger(
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
+            // Fake-initial reconcile (#1167): a pure-`CreateTable`
+            // migration whose tables all already exist is recorded
+            // without running — the ensure→system-migration upgrade path.
+            if fake_initial {
+                if let Some(tables) = create_only_tables(&mig) {
+                    if all_tables_exist(pool, &tables).await {
+                        record_fake_applied(pool, &mig, ledger).await?;
+                        tracing::warn!(
+                            migration = %mig.name,
+                            tables = %tables.join(", "),
+                            "fake-initial: tables already exist (pre-migration \
+                             `ensure_table` era) — recorded as applied without \
+                             running its CREATE TABLE; existing data left intact"
+                        );
+                        newly.push(mig);
+                        continue;
+                    }
+                }
+            }
             if mig.atomic {
                 apply_atomic_pool(pool, &mig, ledger).await?;
             } else {
@@ -1427,6 +1487,70 @@ pub async fn migrate_pool_with_ledger(
         Ok(newly)
     })
     .await
+}
+
+/// If every operation in `mig` is a `CreateTable` schema change, return
+/// the tables it creates; otherwise `None`. Only such "initial"
+/// pure-table-creation migrations are eligible for fake-initial
+/// reconciliation — anything with a column add / data op / callback is
+/// excluded so we never skip a real side effect.
+fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
+    let mut tables = Vec::new();
+    for op in &mig.forward {
+        match op {
+            Operation::Schema(super::diff::SchemaChange::CreateTable(t)) => tables.push(t.clone()),
+            _ => return None,
+        }
+    }
+    (!tables.is_empty()).then_some(tables)
+}
+
+/// `true` when every table in `tables` already exists in `pool`. Uses
+/// `SELECT 1 FROM <t> LIMIT 1` so the name resolves through exactly the
+/// same search_path / current-database rules the migration's own
+/// `CREATE TABLE` would use (unqualified — correct for schema-mode
+/// tenants and single-DB alike).
+async fn all_tables_exist(pool: &crate::sql::Pool, tables: &[String]) -> bool {
+    let dialect = pool.dialect();
+    for t in tables {
+        let sql = format!("SELECT 1 FROM {} LIMIT 1", dialect.quote_ident(t));
+        if crate::sql::raw_execute_pool(pool, &sql, Vec::new())
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Insert a migration's name into `ledger` without running its SQL
+/// (idempotent — an existing row is left untouched). Mirrors the
+/// bookkeeping the normal apply path performs on success.
+async fn record_fake_applied(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+    ledger: &str,
+) -> Result<(), MigrateError> {
+    let dialect = pool.dialect();
+    let placeholder = dialect.placeholder(1);
+    let table = dialect.quote_ident(ledger);
+    let name_col = dialect.quote_ident("name");
+    let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);
+    let sql = format!("INSERT INTO {table} ({name_col}) VALUES ({placeholder}) {conflict_tail}");
+    crate::sql::raw_execute_pool(
+        pool,
+        &sql,
+        vec![crate::core::SqlValue::String(mig.name.clone())],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| {
+        MigrateError::Validation(format!(
+            "fake-initial: ledger insert for `{}` failed: {e}",
+            mig.name
+        ))
+    })
 }
 
 /// Hold the migrate session-scoped advisory lock while `body` runs,
