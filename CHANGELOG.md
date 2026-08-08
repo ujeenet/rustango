@@ -4,7 +4,56 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+_Nothing yet — next development cycle._
+
+## [0.51.2] — 2026-08-08
+
+Headline: **the ensure→migrations upgrade actually works now.** 0.51.0 moved the
+media tables onto system migrations and 0.51.1 claimed to reconcile existing
+databases — cross-version testing against real 0.46–0.50 databases showed
+neither did. Those releases are yanked; upgrade to this one.
+
+### Fixed
+
+- **Fake-initial never fired** (#1167) — the reconcile guard demanded a migration
+  be *purely* `CreateTable`, but a generated initial migration is table +
+  indexes (the media one is 4 `CreateTable` + 6 `CreateIndex`). It therefore
+  bailed on every real migration, so 0.51.1's reconcile did nothing and
+  upgrading still died with `relation "rustango_media" already exists`. The
+  accepted set is now "operations that are part of creating these tables":
+  `CreateTable`, plus `CreateIndex` / `CreateM2MTable` targeting a table the
+  same migration creates. An index on a pre-existing table, or any alter /
+  drop / data op / callback, still disqualifies it.
+- **Table existence was probed through the search path** (#1167) — the probe was
+  `SELECT 1 FROM <table>`, whose unqualified name resolves via `search_path`. In
+  schema-mode multi-tenancy a same-named table in `public` made it report the
+  tenant already had the table, so reconciliation skipped creating it and the
+  tenant came up **silently missing its tables**. Existence is now asked of the
+  current namespace only (Postgres `current_schema()`, MySQL `DATABASE()`,
+  SQLite `sqlite_master`).
+- **Partial table sets aborted the upgrade** (#1167) — the `ensure_*` era created
+  framework tables piecemeal, whichever subsystems an app actually touched, so
+  real databases routinely hold *some* of a system migration's tables.
+  All-or-nothing faking refused those outright. The system chain now creates
+  only the missing tables and leaves existing ones (and their data) alone —
+  the same `CREATE TABLE IF NOT EXISTS` semantics `ensure_*` had, so upgrading
+  is never worse than before. Scoped to the framework's own chain; user
+  migrations and squashes are untouched, and a squash's partial state is still
+  refused.
+- **Non-tenancy projects got no framework tables at all** (#1167) — system
+  migrations were only ever applied by tenancy code, and 0.51.0 removed the
+  `ensure_*` calls that covered the single-database case, so a non-tenancy app
+  using `media` ended up with **zero** media tables. `migrate` now applies the
+  generated system chain itself, before the project's migrations (#1171 order).
+  Only the tenant-scope chain runs — the two scopes deliberately overlap on the
+  shared framework tables, and the registry-only ones (`rustango_orgs`,
+  `rustango_operators`) mean nothing without tenancy. Tables the project's own
+  migrations declare are left to the project's chain, so apps scaffolded before
+  the system chain existed (whose `0001_initial` carries the framework tables)
+  keep working.
+
 ### Added
+
 
 - **Squash reconciliation — `Migration.replaces`** (#1167) — a squash collapses
   a run of historical migrations into one file that recreates the same end
@@ -30,7 +79,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   `__rustango_system_migrations__`) and `--all-tenants` fans the stamp out
   across every active tenant, reporting each and continuing past failures.
 
-## [0.51.1] — 2026-08-06
+## [0.51.1] — 2026-08-06 — YANKED
+
+> **Yanked.** The reconcile described below never actually fired (the guard
+> required a migration to be purely `CreateTable`, which no generated migration
+> is), so the upgrade it promised still failed. It also carries 0.51.0's
+> non-tenancy regression. Use **0.51.2**.
 
 Headline: **the media upgrade is now automatic** — the collision that 0.51.0's
 upgrade note warned about (existing `ensure_table`-era media tables vs the new
@@ -54,7 +108,12 @@ system migration) is reconciled during provisioning, with no operator action.
   so a genuine inconsistency still surfaces loudly rather than being papered
   over. Closes the reconcile follow-up from #1174 / #1178.
 
-## [0.51.0] — 2026-08-06
+## [0.51.0] — 2026-08-06 — YANKED
+
+> **Yanked.** Moving the media tables onto system migrations broke two upgrade
+> paths: existing databases collided (`relation "rustango_media" already
+> exists`) and non-tenancy projects stopped getting framework tables entirely.
+> Use **0.51.2**.
 
 Headline: **the media subsystem is now managed by system migrations** — the
 last framework subsystem still relying on lazy `ensure_table` raw DDL now
