@@ -56,6 +56,7 @@ fn callback_migration(name: &str, callback_name: &str) -> Migration {
         prev: None,
         atomic: true,
         scope: Default::default(),
+        replaces: Vec::new(),
         snapshot: empty_snapshot(),
         forward: vec![Operation::Callback(CallbackOp {
             name: callback_name.to_owned(),

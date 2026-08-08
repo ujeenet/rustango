@@ -63,6 +63,7 @@ async fn fake_initial_reconciles_existing_table_on_mysql() {
         prev: None,
         atomic: true,
         scope: migrate::MigrationScope::default(),
+        replaces: Vec::new(),
         snapshot: snapshot_with_table(&table),
         forward: vec![Operation::Schema(SchemaChange::CreateTable(table.clone()))],
     };

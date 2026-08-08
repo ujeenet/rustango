@@ -50,6 +50,7 @@ fn create_table_migration(name: &str) -> Migration {
         prev: None,
         atomic: true,
         scope: Default::default(),
+        replaces: Vec::new(),
         snapshot: snap,
         forward: vec![Operation::Schema(SchemaChange::CreateTable(
             "sqlmig_post".into(),

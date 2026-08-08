@@ -61,6 +61,20 @@ pub struct Migration {
     /// until v0.5 Slice 3 wires it in.
     #[serde(default, skip_serializing_if = "MigrationScope::is_default")]
     pub scope: MigrationScope,
+    /// Django-style squash bookkeeping: the migrations this one **replaces**.
+    ///
+    /// A squash collapses a run of historical migrations into a single file
+    /// that recreates the same end state. On a **fresh** database it simply
+    /// runs (plain `CREATE TABLE`). On an **existing** database whose history
+    /// already contains the replaced migrations, running it would collide —
+    /// so the runner *reconciles* instead: it records the squash as applied
+    /// and tombstones the replaced ledger rows, without executing any DDL.
+    /// See [`crate::migrate::migrate_pool`] and the `--fake` escape hatch.
+    ///
+    /// Empty for ordinary (non-squash) migrations, and omitted from the JSON
+    /// when empty so pre-squash migration files round-trip unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaces: Vec<String>,
     /// Full schema snapshot **after** applying `forward`.
     pub snapshot: SchemaSnapshot,
     /// Ordered list of operations — schema and data interleaved.

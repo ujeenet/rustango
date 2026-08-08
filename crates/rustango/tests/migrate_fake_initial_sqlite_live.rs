@@ -66,6 +66,7 @@ fn mig(name: &str, snapshot: SchemaSnapshot, forward: Vec<Operation>) -> Migrati
         prev: None,
         atomic: true,
         scope: migrate::MigrationScope::default(),
+        replaces: Vec::new(),
         snapshot,
         forward,
     }
