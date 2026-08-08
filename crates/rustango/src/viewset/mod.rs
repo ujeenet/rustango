@@ -398,14 +398,36 @@ where
 ///     .router_pool("/posts", pool);
 /// ```
 ///
-/// Backends run on the **list** action.
+/// Backends run on **every** action: they narrow the list query, and they
+/// scope `retrieve` / `update` / `destroy` so a row the backend excludes is a
+/// 404 rather than someone else's data. That is DRF's `get_queryset()`
+/// contract, and without it an ownership backend would guard the collection
+/// while leaving every row reachable by id.
 pub trait ViewSetFilter: Send + Sync + 'static {
-    /// Return `WHERE` predicates to AND into the list query for this request.
+    /// Return `WHERE` predicates to AND into the query for this request.
     fn filter(
         &self,
         params: &HashMap<String, String>,
         schema: &'static ModelSchema,
     ) -> Vec<WhereExpr>;
+
+    /// As [`Self::filter`], with the request's [`Parts`] in hand.
+    ///
+    /// The authenticated principal lives in the request extensions, not in the
+    /// query string, so "only this user's rows" cannot be written against
+    /// `filter` alone. Defaults to [`Self::filter`], so every existing backend
+    /// — including the plain closure form — keeps compiling and behaving
+    /// exactly as before.
+    ///
+    /// [`Parts`]: axum::http::request::Parts
+    fn filter_with(
+        &self,
+        _parts: &axum::http::request::Parts,
+        params: &HashMap<String, String>,
+        schema: &'static ModelSchema,
+    ) -> Vec<WhereExpr> {
+        self.filter(params, schema)
+    }
 }
 
 impl<F> ViewSetFilter for F
@@ -1169,6 +1191,32 @@ macro_rules! or_400 {
 /// it; the helper still returns the body so write paths
 /// (`handle_create`, `update_inner`) can consume it after the
 /// permission gate.
+/// Predicates every backend contributes for this request, ANDed into
+/// whatever query the action is about to run.
+fn scope_filters(
+    state: &ViewSetState,
+    parts: &axum::http::request::Parts,
+    params: &HashMap<String, String>,
+) -> Vec<WhereExpr> {
+    state
+        .vs
+        .filter_backends
+        .iter()
+        .flat_map(|b| b.filter_with(parts, params, state.vs.schema))
+        .collect()
+}
+
+/// `expr` narrowed by `extra`. An empty `extra` returns `expr` untouched, so
+/// a ViewSet with no backends builds the same SQL it always did.
+fn narrow(expr: WhereExpr, extra: Vec<WhereExpr>) -> WhereExpr {
+    if extra.is_empty() {
+        return expr;
+    }
+    let mut all = vec![expr];
+    all.extend(extra);
+    WhereExpr::And(all)
+}
+
 async fn enter(
     state: &Arc<ViewSetState>,
     req: axum::extract::Request,
@@ -1371,11 +1419,11 @@ async fn handle_list(
     Query(params): Query<HashMap<String, String>>,
     req: axum::extract::Request,
 ) -> Response {
-    let (_parts, _body, acq) = match enter(&state, req, &state.vs.perms.list, "list").await {
+    let (parts, _body, acq) = match enter(&state, req, &state.vs.perms.list, "list").await {
         Ok(x) => x,
         Err(resp) => return resp,
     };
-    run_list(state, params, acq).await
+    run_list(state, params, acq, &parts).await
 }
 
 /// Core `list` logic shared by the GET `list` action and the RFC 10008
@@ -1387,6 +1435,7 @@ async fn run_list(
     state: Arc<ViewSetState>,
     params: HashMap<String, String>,
     mut acq: AcquiredConn,
+    parts: &axum::http::request::Parts,
 ) -> Response {
     let page_size: i64 = params
         .get("page_size")
@@ -1428,9 +1477,7 @@ async fn run_list(
 
     // #1010 — pluggable filter backends contribute extra predicates,
     // ANDed with the built-in filter_fields parsed above.
-    for backend in &state.vs.filter_backends {
-        filters.extend(backend.filter(&params, state.vs.schema));
-    }
+    filters.extend(scope_filters(&state, parts, &params));
 
     let where_clause = if filters.len() == 1 {
         filters.remove(0)
@@ -1608,7 +1655,7 @@ async fn handle_query(
         Ok(p) => p,
         Err(resp) => return resp,
     };
-    run_list(state, params, acq).await
+    run_list(state, params, acq, &parts).await
 }
 
 /// Parse a QUERY request body into the same `HashMap<String, String>`
@@ -1808,7 +1855,7 @@ async fn handle_retrieve(
     Path(pk_raw): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (_parts, _body, mut acq) =
+    let (parts, _body, mut acq) =
         match enter(&state, req, &state.vs.perms.retrieve, "retrieve").await {
             Ok(x) => x,
             Err(resp) => return resp,
@@ -1825,7 +1872,11 @@ async fn handle_retrieve(
 
     // #562 — was 11-field struct literal; SelectQuery::by_pk constructs
     // the single-PK-lookup shape directly.
-    let select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
+    let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
+    // …narrowed by the filter backends, so a row this principal may not see
+    // reads as absent rather than forbidden — a 403 would confirm the id.
+    let scope = scope_filters(&state, &parts, &HashMap::new());
+    select_q.where_clause = narrow(select_q.where_clause, scope);
 
     let fields = state.effective_fields();
     match render_single(&state, &mut acq, &select_q, &fields).await {
@@ -2040,6 +2091,8 @@ async fn update_inner(
         Ok(x) => x,
         Err(resp) => return resp,
     };
+    // Scope first: an update must not reach a row this principal cannot see.
+    let scope = scope_filters(&state, &parts, &HashMap::new());
 
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
@@ -2093,19 +2146,26 @@ async fn update_inner(
     let query = UpdateQuery {
         model: state.vs.schema,
         set: assignments,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: pk_val.clone(),
-        }),
+        where_clause: narrow(
+            WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::Eq,
+                value: pk_val.clone(),
+            }),
+            scope.clone(),
+        ),
     };
 
-    if let Err(e) = acq.update(&query).await {
-        return json_error(StatusCode::BAD_REQUEST, &e.to_string());
+    match acq.update(&query).await {
+        // Nothing matched: either no such row, or one this principal is
+        // scoped out of. Both are a 404 — see `handle_retrieve`.
+        Ok(0) => return json_error(StatusCode::NOT_FOUND, "not found"),
+        Ok(_) => {}
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
     }
 
     let fields = state.effective_fields();
-    match fetch_by_pk(&state, &mut acq, pk_field, pk_val, &fields).await {
+    match fetch_by_pk_scoped(&state, &mut acq, pk_field, pk_val, &fields, scope).await {
         Some(obj) => json_response(obj),
         None => json_error(StatusCode::NOT_FOUND, "not found after update"),
     }
@@ -2116,11 +2176,12 @@ async fn handle_destroy(
     Path(pk_raw): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (_parts, _body, mut acq) =
-        match enter(&state, req, &state.vs.perms.destroy, "destroy").await {
-            Ok(x) => x,
-            Err(resp) => return resp,
-        };
+    let (parts, _body, mut acq) = match enter(&state, req, &state.vs.perms.destroy, "destroy").await
+    {
+        Ok(x) => x,
+        Err(resp) => return resp,
+    };
+    let scope = scope_filters(&state, &parts, &HashMap::new());
 
     let pk_field = match pk_field_or_500(&state) {
         Ok(f) => f,
@@ -2133,11 +2194,14 @@ async fn handle_destroy(
 
     let query = DeleteQuery {
         model: state.vs.schema,
-        where_clause: WhereExpr::Predicate(Filter {
-            column: pk_field.column,
-            op: Op::Eq,
-            value: pk_val,
-        }),
+        where_clause: narrow(
+            WhereExpr::Predicate(Filter {
+                column: pk_field.column,
+                op: Op::Eq,
+                value: pk_val,
+            }),
+            scope,
+        ),
     };
 
     match acq.delete(&query).await {
@@ -2148,6 +2212,24 @@ async fn handle_destroy(
 }
 
 // ------------------------------------------------------------------ helpers
+
+/// [`fetch_by_pk`] narrowed by the filter backends — the read-back after an
+/// update, which must not return a row the principal is scoped out of.
+async fn fetch_by_pk_scoped(
+    state: &ViewSetState,
+    acq: &mut AcquiredConn,
+    pk_field: &'static crate::core::FieldSchema,
+    pk_val: SqlValue,
+    fields: &[&'static crate::core::FieldSchema],
+    scope: Vec<WhereExpr>,
+) -> Option<Value> {
+    let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
+    select_q.where_clause = narrow(select_q.where_clause, scope);
+    render_single(state, acq, &select_q, fields)
+        .await
+        .ok()
+        .flatten()
+}
 
 async fn fetch_by_pk(
     state: &ViewSetState,

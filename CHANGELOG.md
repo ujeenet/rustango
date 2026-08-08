@@ -6,6 +6,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 _Nothing yet — next development cycle._
 
+## [0.52.0] — 2026-08-08
+
+Headline: **filter backends are principal-aware, and they scope every action**
+— the two things standing between a `ViewSet` and a safe per-user API.
+
+### Added
+
+- **`ViewSetFilter::filter_with(&Parts, params, schema)`** — a default-provided
+  companion to `filter` that receives the request `Parts`, so a backend can read
+  the authenticated principal out of the extensions. `filter` alone sees only
+  the query string, which means "only this user's rows" could not be written at
+  all. The default delegates to `filter`, so every existing backend — including
+  the plain closure form — compiles and behaves exactly as before.
+
+### Fixed
+
+- **Filter backends now scope `retrieve` / `update` / `destroy`, not just
+  `list`** — DRF's `get_queryset()` contract. Scoping the collection alone is
+  worse than not scoping: it reads as safe while every row stays reachable by
+  id. A row excluded by a backend is now a **404** on those actions (not a 403,
+  which would confirm the id exists), an `UPDATE` that matches nothing returns
+  404 rather than reporting success, and the read-back after an update is
+  scoped too.
+
 ## [0.51.1] — 2026-08-06
 
 Headline: **the media upgrade is now automatic** — the collision that 0.51.0's

@@ -715,8 +715,56 @@ let api = Router::new()
     .route("/api/posts/bulk_archive", post(bulk_archive));
 ```
 
-For per-list extra `WHERE` logic, `.filter_backend(…)` contributes predicates to
-the built-in list query without a separate route.
+For extra `WHERE` logic, `.filter_backend(…)` contributes predicates without a
+separate route.
+
+### Scoping rows to the authenticated principal
+
+A backend runs on **every** action — `list`, `retrieve`, `update`, `destroy` —
+so it behaves like DRF's `get_queryset()`. A row the backend excludes is a
+**404** on the item routes, not a 403: a 403 would confirm the id exists.
+
+The principal lives in the request extensions, not the query string, so
+implement the trait and override `filter_with`, which receives the request
+`Parts`:
+
+```rust
+use axum::http::request::Parts;
+use rustango::viewset::ViewSetFilter;
+
+struct OwnerFilter;
+
+impl ViewSetFilter for OwnerFilter {
+    // No principal in hand — fail closed. Returning no predicates here would
+    // widen the query to every row in the table.
+    fn filter(&self, _p: &HashMap<String, String>, schema: &'static ModelSchema) -> Vec<WhereExpr> {
+        deny_all(schema)
+    }
+
+    fn filter_with(
+        &self,
+        parts: &Parts,
+        _p: &HashMap<String, String>,
+        schema: &'static ModelSchema,
+    ) -> Vec<WhereExpr> {
+        let Some(user) = parts.extensions.get::<AuthenticatedUser>() else {
+            return deny_all(schema);
+        };
+        vec![WhereExpr::Predicate(Filter {
+            column: schema.field("owner_id").expect("owner_id").column,
+            op: Op::Eq,
+            value: SqlValue::from(user.id),
+        })]
+    }
+}
+
+ViewSet::for_model(Note::SCHEMA)
+    .filter_backend(OwnerFilter)
+    .tenant_router("/api/notes")
+```
+
+`filter_with` defaults to `filter`, so a backend that does not need the request
+— including the plain closure form — implements only `filter` as before.
 
 ---
 
