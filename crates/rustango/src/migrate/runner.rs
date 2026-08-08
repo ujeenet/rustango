@@ -1476,7 +1476,7 @@ async fn migrate_pool_with_ledger_opts(
                 other => {
                     let effective = match other {
                         ReconcileAction::RunPartial(existing) => {
-                            std::borrow::Cow::Owned(without_existing_tables(&mig, &existing))
+                            std::borrow::Cow::Owned(without_tables(&mig, &existing))
                         }
                         _ => std::borrow::Cow::Borrowed(&mig),
                     };
@@ -1651,7 +1651,7 @@ async fn reconcile(
 /// dropped: the table was created by an older framework build, which created
 /// its indexes too, so re-running them would collide the same way. Operations
 /// for tables we *are* creating pass through untouched.
-fn without_existing_tables(mig: &Migration, existing: &[String]) -> Migration {
+pub(crate) fn without_tables(mig: &Migration, existing: &[String]) -> Migration {
     use super::diff::SchemaChange as SC;
     let skip = |t: &String| existing.iter().any(|e| e == t);
     let forward = mig
