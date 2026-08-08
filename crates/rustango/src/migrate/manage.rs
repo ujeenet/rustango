@@ -816,8 +816,19 @@ async fn migrate<W: Write>(
         return Ok(());
     }
 
+    // The framework's own `rustango_*` tables come from the generated
+    // `system/migrations/` chain. In tenancy mode that chain is applied per
+    // tenant by `tenancy::migrate`; a single-database project has no such
+    // hook, so apply it here — otherwise a non-tenancy project using e.g.
+    // `media` would never get its tables at all (the pre-0.51 `ensure_*`
+    // calls that used to cover this are gone). System migrations run BEFORE
+    // the project's, so user models may FK framework tables (#1171), and go
+    // through the fake-initial runner so a database whose framework tables
+    // predate the chain reconciles instead of colliding (#1167).
+    let system_applied = apply_system_chain(pool, dir, w).await?;
+
     let applied = runner::migrate_pool(pool, dir).await?;
-    if applied.is_empty() {
+    if applied.is_empty() && system_applied == 0 {
         writeln!(w, "nothing to migrate (already up to date)")?;
     } else {
         for m in &applied {
@@ -910,6 +921,91 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
     makemigrations(dir, &[], w)?;
 
     stamp_replaces(dir, &before, &removed, w)
+}
+
+/// Apply the framework's generated `system/migrations/` chain to a
+/// single-database (non-tenancy) project, returning how many were applied.
+///
+/// Tenancy projects get this per tenant via
+/// `tenancy::migrate::apply_system_migrations`; this is the single-DB
+/// counterpart, so both shapes materialize the framework's own tables the
+/// same way instead of a non-tenancy project silently ending up with none.
+///
+/// Only the **tenant**-scope chain runs. The two scopes exist because a
+/// tenancy deployment splits them across different databases, and they
+/// deliberately overlap on the shared framework tables (`rustango_audit_log`,
+/// `rustango_content_types`) — applying both into one database would have the
+/// second chain collide with the first. Tenant scope is also the right set on
+/// its own: the registry-only tables (`rustango_orgs`, `rustango_operators`)
+/// describe a tenant fleet and mean nothing to a single-database app, while
+/// everything an app actually uses (users, roles, permissions, api keys,
+/// audit log, content types, media, …) is tenant-scoped.
+///
+/// Generation is best-effort and a no-op once the files exist (they are
+/// normally written by `makemigrations` and committed). A missing
+/// `system/migrations/` directory simply means there is nothing to do.
+async fn apply_system_chain<W: Write>(
+    pool: &Pool,
+    dir: &Path,
+    w: &mut W,
+) -> Result<usize, MigrateError> {
+    // `system/migrations/` is a sibling of the project's `migrations/`.
+    let project_root = if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
+        dir.parent().unwrap_or(dir)
+    } else {
+        dir
+    };
+    for scope in [
+        crate::core::ModelScope::Registry,
+        crate::core::ModelScope::Tenant,
+    ] {
+        let _ = crate::migrate::make::make_migrations_system(project_root, scope, None);
+    }
+    let system_dir = project_root.join("system").join("migrations");
+    if !system_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let all = file::list_dir(&system_dir)?;
+    let wanted: Vec<&Migration> = all
+        .iter()
+        .filter(|m| m.scope == super::MigrationScope::Tenant)
+        .collect();
+    if wanted.is_empty() {
+        return Ok(0);
+    }
+    // Apply from a scratch directory holding just the tenant-scope files, so
+    // the runner's ledger bookkeeping stays a plain whole-directory operation.
+    let scratch: Option<std::path::PathBuf> = if wanted.len() == all.len() {
+        None
+    } else {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "rustango_system_scoped_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&p)?;
+        for mig in &wanted {
+            file::write(&p.join(format!("{}.json", mig.name)), mig)?;
+        }
+        Some(p)
+    };
+    let run_dir = scratch.clone().unwrap_or_else(|| system_dir.clone());
+
+    let applied =
+        runner::migrate_pool_with_ledger_fake_initial(pool, &run_dir, runner::SYSTEM_LEDGER_TABLE)
+            .await;
+    if let Some(p) = &scratch {
+        let _ = std::fs::remove_dir_all(p);
+    }
+    let applied = applied?;
+    for m in &applied {
+        writeln!(w, "  applied {} (system)", m.name)?;
+    }
+    Ok(applied.len())
 }
 
 /// Record, on each freshly-generated migration, the names it collapsed.
