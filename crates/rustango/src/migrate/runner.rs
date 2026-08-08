@@ -1635,20 +1635,50 @@ fn create_table_targets(mig: &Migration) -> Vec<String> {
         .collect()
 }
 
-/// If every operation in `mig` is a `CreateTable` schema change, return
-/// the tables it creates; otherwise `None`. Only such "initial"
-/// pure-table-creation migrations are eligible for fake-initial
-/// reconciliation — anything with a column add / data op / callback is
-/// excluded so we never skip a real side effect.
+/// The tables `mig` creates, when the migration does **nothing but** stand
+/// those tables up; otherwise `None`.
+///
+/// "Nothing but" is judged against the real shape a generated initial
+/// migration has, which is *not* only `CreateTable`: `makemigrations` emits
+/// the table, then its indexes (and any M2M join table) as sibling
+/// operations. A media-subsystem initial, for instance, is 4 `CreateTable` +
+/// 6 `CreateIndex`. Requiring literal `CreateTable`-purity would reject every
+/// real migration and silently disable fake-initial reconciliation — which is
+/// exactly what it did before this was fixed.
+///
+/// So the accepted set is "operations that are part of creating these
+/// tables":
+/// * `CreateTable`
+/// * `CreateIndex` / `CreateM2MTable`, but **only** when they target a table
+///   this same migration creates — an index added to a *pre-existing* table
+///   is real work that must not be skipped.
+///
+/// Everything else (a column add, an alter, a drop, a data backfill, a
+/// callback) disqualifies the migration, so a genuine side effect is never
+/// faked away.
 fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
-    let mut tables = Vec::new();
+    use super::diff::SchemaChange as SC;
+    let mut tables: Vec<String> = Vec::new();
+    let mut targeted: Vec<&str> = Vec::new();
     for op in &mig.forward {
         match op {
-            Operation::Schema(super::diff::SchemaChange::CreateTable(t)) => tables.push(t.clone()),
+            Operation::Schema(SC::CreateTable(t)) => tables.push(t.clone()),
+            Operation::Schema(SC::CreateIndex { table, .. }) => targeted.push(table.as_str()),
+            Operation::Schema(SC::CreateM2MTable { through, .. }) => tables.push(through.clone()),
             _ => return None,
         }
     }
-    (!tables.is_empty()).then_some(tables)
+    if tables.is_empty() {
+        return None;
+    }
+    // Every index must belong to a table this migration itself creates.
+    if targeted
+        .iter()
+        .any(|t| !tables.iter().any(|created| created == t))
+    {
+        return None;
+    }
+    Some(tables)
 }
 
 /// How many of `tables` already exist in `pool`. Probes with

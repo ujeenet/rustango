@@ -244,3 +244,114 @@ async fn fake_initial_does_not_fake_partial_existence() {
 
     cleanup(pool, &path, &dir);
 }
+
+/// **Regression (cross-version proof, #1167):** a *real* generated initial
+/// migration is not purely `CreateTable` — `makemigrations` emits the table
+/// and then its indexes as sibling ops (the media subsystem's is 4
+/// `CreateTable` + 6 `CreateIndex`). An earlier guard demanded literal
+/// `CreateTable`-purity, so it bailed on every real migration and
+/// fake-initial silently never fired: upgrading a pre-0.51 database still
+/// died with `relation "rustango_media" already exists`. This pins the
+/// realistic shape.
+#[tokio::test]
+async fn fake_initial_handles_create_table_plus_indexes() {
+    let (pool, path) = sqlite_pool().await;
+    let table = "recon_idx";
+    let name = "0003_create_recon_idx";
+    let m = mig(
+        name,
+        snapshot_with_table(table),
+        vec![
+            Operation::Schema(SchemaChange::CreateTable(table.into())),
+            Operation::Schema(SchemaChange::CreateIndex {
+                name: format!("{table}_id_idx"),
+                table: table.into(),
+                columns: vec!["id".into()],
+                unique: false,
+                method: "btree".into(),
+                where_clause: None,
+                include: Vec::new(),
+            }),
+        ],
+    );
+    let dir = write_dir(&m);
+
+    // Pre-existing (ensure_table-era) table with data.
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    sqlx::query(&format!(
+        "CREATE TABLE {table} (id INTEGER PRIMARY KEY, note TEXT)"
+    ))
+    .execute(sq)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "INSERT INTO {table} (id, note) VALUES (1, 'pre-existing')"
+    ))
+    .execute(sq)
+    .await
+    .unwrap();
+
+    let applied = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER)
+        .await
+        .expect("CreateTable+CreateIndex must still reconcile, not collide");
+    assert_eq!(applied.len(), 1);
+    assert!(ledger_has(&pool, name).await);
+
+    let note: String = sqlx::query(&format!("SELECT note FROM {table} WHERE id = 1"))
+        .fetch_one(sq)
+        .await
+        .unwrap()
+        .try_get("note")
+        .unwrap();
+    assert_eq!(note, "pre-existing");
+
+    cleanup(pool, &path, &dir);
+}
+
+/// The index guard has teeth: an index targeting a table this migration does
+/// **not** create is real work on a pre-existing table, so the migration must
+/// not be faked away.
+#[tokio::test]
+async fn fake_initial_refuses_index_on_foreign_table() {
+    let (pool, path) = sqlite_pool().await;
+    let (created, other) = ("recon_new", "recon_other");
+    let name = "0004_create_recon_new_and_index_other";
+    let m = mig(
+        name,
+        snapshot_with_table(created),
+        vec![
+            Operation::Schema(SchemaChange::CreateTable(created.into())),
+            // index on a table NOT created here → disqualifies faking
+            Operation::Schema(SchemaChange::CreateIndex {
+                name: format!("{other}_id_idx"),
+                table: other.into(),
+                columns: vec!["id".into()],
+                unique: false,
+                method: "btree".into(),
+                where_clause: None,
+                include: Vec::new(),
+            }),
+        ],
+    );
+    let dir = write_dir(&m);
+
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    for t in [created, other] {
+        sqlx::query(&format!("CREATE TABLE {t} (id INTEGER PRIMARY KEY)"))
+            .execute(sq)
+            .await
+            .unwrap();
+    }
+
+    let res = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER).await;
+    assert!(
+        res.is_err(),
+        "an index on a pre-existing foreign table is real work — must not be faked"
+    );
+
+    cleanup(pool, &path, &dir);
+}
