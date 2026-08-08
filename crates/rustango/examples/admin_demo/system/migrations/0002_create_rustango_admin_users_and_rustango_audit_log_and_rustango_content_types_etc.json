@@ -1,0 +1,624 @@
+{
+  "name": "0002_create_rustango_admin_users_and_rustango_audit_log_and_rustango_content_types_etc",
+  "created_at": "2026-08-08T21:01:21.112259+00:00",
+  "atomic": true,
+  "snapshot": {
+    "tables": [
+      {
+        "name": "rustango_admin_users",
+        "model": "AdminUser",
+        "fields": [
+          {
+            "name": "active",
+            "column": "active",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "true"
+          },
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "is_superuser",
+            "column": "is_superuser",
+            "ty": "bool",
+            "nullable": false,
+            "primary_key": false,
+            "default": "false"
+          },
+          {
+            "name": "password_hash",
+            "column": "password_hash",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 200
+          },
+          {
+            "name": "username",
+            "column": "username",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 150,
+            "unique": true
+          }
+        ]
+      },
+      {
+        "name": "rustango_audit_log",
+        "model": "AuditLog",
+        "fields": [
+          {
+            "name": "changes",
+            "column": "changes",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "entity_pk",
+            "column": "entity_pk",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "entity_table",
+            "column": "entity_table",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "occurred_at",
+            "column": "occurred_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()"
+          },
+          {
+            "name": "operation",
+            "column": "operation",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 32
+          },
+          {
+            "name": "source",
+            "column": "source",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          }
+        ]
+      },
+      {
+        "name": "rustango_content_types",
+        "model": "ContentType",
+        "fields": [
+          {
+            "name": "app_label",
+            "column": "app_label",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "model_name",
+            "column": "model_name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "table",
+            "column": "table",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          }
+        ]
+      },
+      {
+        "name": "rustango_media",
+        "model": "Media",
+        "fields": [
+          {
+            "name": "collection_id",
+            "column": "collection_id",
+            "ty": "i64",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "deleted_at",
+            "column": "deleted_at",
+            "ty": "datetime",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "derived_from_id",
+            "column": "derived_from_id",
+            "ty": "i64",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "disk",
+            "column": "disk",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "metadata",
+            "column": "metadata",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false,
+            "default": "'{}'"
+          },
+          {
+            "name": "mime",
+            "column": "mime",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "original_filename",
+            "column": "original_filename",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 512
+          },
+          {
+            "name": "size_bytes",
+            "column": "size_bytes",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "status",
+            "column": "status",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 32
+          },
+          {
+            "name": "storage_key",
+            "column": "storage_key",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 512
+          },
+          {
+            "name": "uploaded_at",
+            "column": "uploaded_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "uploaded_by_id",
+            "column": "uploaded_by_id",
+            "ty": "i64",
+            "nullable": true,
+            "primary_key": false
+          }
+        ]
+      },
+      {
+        "name": "rustango_media_collections",
+        "model": "MediaCollection",
+        "fields": [
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "deleted_at",
+            "column": "deleted_at",
+            "ty": "datetime",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "description",
+            "column": "description",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "default": ""
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "name",
+            "column": "name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "parent_id",
+            "column": "parent_id",
+            "ty": "i64",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "slug",
+            "column": "slug",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255,
+            "unique": true
+          }
+        ]
+      },
+      {
+        "name": "rustango_media_tag_links",
+        "model": "MediaTagLink",
+        "fields": [
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "media_id",
+            "column": "media_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "tag_id",
+            "column": "tag_id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": false,
+            "fk": {
+              "kind": "fk",
+              "to": "rustango_media_tags",
+              "on": "id"
+            }
+          }
+        ]
+      },
+      {
+        "name": "rustango_media_tags",
+        "model": "MediaTag",
+        "fields": [
+          {
+            "name": "created_at",
+            "column": "created_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()",
+            "auto": true
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "name",
+            "column": "name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "slug",
+            "column": "slug",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255,
+            "unique": true
+          }
+        ]
+      }
+    ],
+    "indexes": [
+      {
+        "name": "rustango_audit_log_entity_table_entity_pk_idx",
+        "table": "rustango_audit_log",
+        "columns": [
+          "entity_table",
+          "entity_pk"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_audit_log_occurred_at_idx",
+        "table": "rustango_audit_log",
+        "columns": [
+          "occurred_at"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_collection_id_idx",
+        "table": "rustango_media",
+        "columns": [
+          "collection_id"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_collections_parent_id_idx",
+        "table": "rustango_media_collections",
+        "columns": [
+          "parent_id"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_disk_storage_key_idx",
+        "table": "rustango_media",
+        "columns": [
+          "disk",
+          "storage_key"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_status_idx",
+        "table": "rustango_media",
+        "columns": [
+          "status"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_tag_links_media_id_tag_id_idx",
+        "table": "rustango_media_tag_links",
+        "columns": [
+          "media_id",
+          "tag_id"
+        ],
+        "unique": true,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_media_tag_links_tag_id_idx",
+        "table": "rustango_media_tag_links",
+        "columns": [
+          "tag_id"
+        ],
+        "unique": false,
+        "method": "btree"
+      }
+    ]
+  },
+  "forward": [
+    {
+      "schema": {
+        "CreateTable": "rustango_admin_users"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_audit_log"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_content_types"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_media"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_media_collections"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_media_tag_links"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_media_tags"
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_audit_log_entity_table_entity_pk_idx",
+          "table": "rustango_audit_log",
+          "columns": [
+            "entity_table",
+            "entity_pk"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_audit_log_occurred_at_idx",
+          "table": "rustango_audit_log",
+          "columns": [
+            "occurred_at"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_media_collection_id_idx",
+          "table": "rustango_media",
+          "columns": [
+            "collection_id"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_media_collections_parent_id_idx",
+          "table": "rustango_media_collections",
+          "columns": [
+            "parent_id"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_media_disk_storage_key_idx",
+          "table": "rustango_media",
+          "columns": [
+            "disk",
+            "storage_key"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_media_status_idx",
+          "table": "rustango_media",
+          "columns": [
+            "status"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_media_tag_links_media_id_tag_id_idx",
+          "table": "rustango_media_tag_links",
+          "columns": [
+            "media_id",
+            "tag_id"
+          ],
+          "unique": true,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_media_tag_links_tag_id_idx",
+          "table": "rustango_media_tag_links",
+          "columns": [
+            "tag_id"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    }
+  ]
+}

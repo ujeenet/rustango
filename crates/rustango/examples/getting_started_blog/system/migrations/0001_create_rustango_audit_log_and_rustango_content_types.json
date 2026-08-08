@@ -1,0 +1,169 @@
+{
+  "name": "0001_create_rustango_audit_log_and_rustango_content_types",
+  "created_at": "2026-08-08T21:00:22.809850+00:00",
+  "atomic": true,
+  "scope": "registry",
+  "snapshot": {
+    "tables": [
+      {
+        "name": "rustango_audit_log",
+        "model": "AuditLog",
+        "fields": [
+          {
+            "name": "changes",
+            "column": "changes",
+            "ty": "json",
+            "nullable": false,
+            "primary_key": false
+          },
+          {
+            "name": "entity_pk",
+            "column": "entity_pk",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "entity_table",
+            "column": "entity_table",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "occurred_at",
+            "column": "occurred_at",
+            "ty": "datetime",
+            "nullable": false,
+            "primary_key": false,
+            "default": "now()"
+          },
+          {
+            "name": "operation",
+            "column": "operation",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 32
+          },
+          {
+            "name": "source",
+            "column": "source",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 255
+          }
+        ]
+      },
+      {
+        "name": "rustango_content_types",
+        "model": "ContentType",
+        "fields": [
+          {
+            "name": "app_label",
+            "column": "app_label",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "id",
+            "column": "id",
+            "ty": "i64",
+            "nullable": false,
+            "primary_key": true,
+            "auto": true
+          },
+          {
+            "name": "model_name",
+            "column": "model_name",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          },
+          {
+            "name": "table",
+            "column": "table",
+            "ty": "string",
+            "nullable": false,
+            "primary_key": false,
+            "max_length": 100
+          }
+        ]
+      }
+    ],
+    "indexes": [
+      {
+        "name": "rustango_audit_log_entity_table_entity_pk_idx",
+        "table": "rustango_audit_log",
+        "columns": [
+          "entity_table",
+          "entity_pk"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_audit_log_occurred_at_idx",
+        "table": "rustango_audit_log",
+        "columns": [
+          "occurred_at"
+        ],
+        "unique": false,
+        "method": "btree"
+      }
+    ]
+  },
+  "forward": [
+    {
+      "schema": {
+        "CreateTable": "rustango_audit_log"
+      }
+    },
+    {
+      "schema": {
+        "CreateTable": "rustango_content_types"
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_audit_log_entity_table_entity_pk_idx",
+          "table": "rustango_audit_log",
+          "columns": [
+            "entity_table",
+            "entity_pk"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_audit_log_occurred_at_idx",
+          "table": "rustango_audit_log",
+          "columns": [
+            "occurred_at"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    }
+  ]
+}

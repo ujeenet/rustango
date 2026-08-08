@@ -974,9 +974,34 @@ async fn apply_system_chain<W: Write>(
     if wanted.is_empty() {
         return Ok(0);
     }
-    // Apply from a scratch directory holding just the tenant-scope files, so
-    // the runner's ledger bookkeeping stays a plain whole-directory operation.
-    let scratch: Option<std::path::PathBuf> = if wanted.len() == all.len() {
+
+    // Tables the project's OWN pending migrations will create. A project
+    // scaffolded before the system chain existed carries the framework tables
+    // in its `0001_initial` (that is where `makemigrations` used to put them),
+    // so creating them here too would collide the moment that migration runs.
+    // The project's chain wins for anything it declares; the system chain
+    // fills in only what the project does not own (e.g. `media`, added to the
+    // framework later). Modern projects declare none of them, so the system
+    // chain creates the full set as usual.
+    let claimed: Vec<String> = {
+        let project_applied = runner::applied_set_pool(pool).await.unwrap_or_default();
+        file::list_dir(dir)
+            .unwrap_or_default()
+            .iter()
+            .filter(|m| !project_applied.contains(&m.name))
+            .flat_map(|m| {
+                m.forward.iter().filter_map(|op| match op {
+                    Operation::Schema(super::diff::SchemaChange::CreateTable(t)) => Some(t.clone()),
+                    _ => None,
+                })
+            })
+            .collect()
+    };
+
+    // Apply from a scratch directory holding just the tenant-scope files (with
+    // project-claimed tables filtered out), so the runner's ledger bookkeeping
+    // stays a plain whole-directory operation.
+    let scratch: Option<std::path::PathBuf> = if wanted.len() == all.len() && claimed.is_empty() {
         None
     } else {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -989,7 +1014,12 @@ async fn apply_system_chain<W: Write>(
         ));
         std::fs::create_dir_all(&p)?;
         for mig in &wanted {
-            file::write(&p.join(format!("{}.json", mig.name)), mig)?;
+            let effective = if claimed.is_empty() {
+                (*mig).clone()
+            } else {
+                runner::without_tables(mig, &claimed)
+            };
+            file::write(&p.join(format!("{}.json", effective.name)), &effective)?;
         }
         Some(p)
     };

@@ -48,6 +48,9 @@ fn migration_serde_round_trips_schema_and_data_ops() {
         prev: None,
         scope: rustango::migrate::MigrationScope::Tenant,
         atomic: true,
+        // Squash bookkeeping — empty for an ordinary migration, and omitted
+        // from the JSON when empty (so pre-squash files round-trip unchanged).
+        replaces: Vec::new(),
         snapshot: SchemaSnapshot::default(),
         forward: vec![
             Operation::Schema(SchemaChange::CreateTable("cookbook_demo".into())),
