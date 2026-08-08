@@ -6,6 +6,30 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 _Nothing yet — next development cycle._
 
+## [0.51.1] — 2026-08-06
+
+Headline: **the media upgrade is now automatic** — the collision that 0.51.0's
+upgrade note warned about (existing `ensure_table`-era media tables vs the new
+system migration) is reconciled during provisioning, with no operator action.
+
+### Fixed
+
+- **Auto-reconcile pre-existing framework tables on provision** (#1167) — the
+  system-migration runner now performs a guarded **fake-initial**: a pending
+  migration that is _purely_ `CreateTable` operations whose tables **all
+  already exist** is recorded in the `__rustango_system_migrations__` ledger
+  _without_ running its `CREATE TABLE`, then the chain continues. This is the
+  upgrade path for a deployment whose media tables were built by the retired
+  `ensure_table` DDL (pre-0.51): the first `migrate` / tenant provision after
+  upgrading no longer fails with `relation already exists` (Postgres 42P07) /
+  `table already exists` (MySQL 1050) / `table … already exists` (SQLite), and
+  **existing data is left untouched**. The guard is narrow — it is scoped to
+  the framework's own system migrations (user migrations use the plain runner
+  and never auto-fake), a migration with any non-`CreateTable` operation is
+  never faked, and a _partial_ pre-existing state falls through to the runner
+  so a genuine inconsistency still surfaces loudly rather than being papered
+  over. Closes the reconcile follow-up from #1174 / #1178.
+
 ## [0.51.0] — 2026-08-06
 
 Headline: **the media subsystem is now managed by system migrations** — the

@@ -137,15 +137,28 @@ async fn apply_system_migrations(
         crate::core::ModelScope::Registry => MigrationScope::Registry,
         crate::core::ModelScope::Tenant => MigrationScope::Tenant,
     };
+    // Fake-initial reconcile (#1167): a subsystem that used to build its
+    // tables via lazy `ensure_table` DDL (e.g. media before 0.51) now ships
+    // them as a system migration. On the first `migrate` after the upgrade
+    // the freshly-generated `CREATE TABLE` would collide with the
+    // already-present table — so the system-migration runner records such a
+    // pure-`CreateTable`-of-existing-tables migration as applied without
+    // running it. Scoped to the framework's own tables; user migrations use
+    // the plain runner.
     let applied = match scoped_subset(&system_dir, migration_scope).await? {
         ScopedDir::Owned(temp) => {
-            let r =
-                crate::migrate::migrate_pool_with_ledger(pool, temp.path(), SYSTEM_LEDGER).await?;
+            let r = crate::migrate::migrate_pool_with_ledger_fake_initial(
+                pool,
+                temp.path(),
+                SYSTEM_LEDGER,
+            )
+            .await?;
             drop(temp);
             r
         }
         ScopedDir::Original => {
-            crate::migrate::migrate_pool_with_ledger(pool, &system_dir, SYSTEM_LEDGER).await?
+            crate::migrate::migrate_pool_with_ledger_fake_initial(pool, &system_dir, SYSTEM_LEDGER)
+                .await?
         }
     };
     Ok(applied)
