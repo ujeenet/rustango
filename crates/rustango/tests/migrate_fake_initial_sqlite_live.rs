@@ -13,7 +13,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use rustango::migrate::{self, file, Migration, Operation, SchemaChange, SchemaSnapshot, TableSnapshot};
+use rustango::migrate::{
+    self, file, Migration, Operation, SchemaChange, SchemaSnapshot, TableSnapshot,
+};
 use rustango::sql::sqlx::{self, Row};
 use rustango::sql::Pool;
 
@@ -26,7 +28,9 @@ async fn sqlite_pool() -> (Pool, PathBuf) {
     path.push(format!("rustango_fakeinit_{}_{n}.db", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let url = format!("sqlite:{}?mode=rwc", path.display());
-    let sq = sqlx::SqlitePool::connect(&url).await.expect("connect sqlite");
+    let sq = sqlx::SqlitePool::connect(&url)
+        .await
+        .expect("connect sqlite");
     (Pool::Sqlite(sq), path)
 }
 
@@ -39,7 +43,10 @@ fn snapshot_with_table(table: &str) -> SchemaSnapshot {
         ]
     }))
     .unwrap();
-    SchemaSnapshot { tables: vec![t], ..Default::default() }
+    SchemaSnapshot {
+        tables: vec![t],
+        ..Default::default()
+    }
 }
 
 fn snapshot_with_tables(tables: &[&str]) -> SchemaSnapshot {
@@ -56,7 +63,10 @@ fn snapshot_with_tables(tables: &[&str]) -> SchemaSnapshot {
             .unwrap()
         })
         .collect();
-    SchemaSnapshot { tables: ts, ..Default::default() }
+    SchemaSnapshot {
+        tables: ts,
+        ..Default::default()
+    }
 }
 
 fn mig(name: &str, snapshot: SchemaSnapshot, forward: Vec<Operation>) -> Migration {
@@ -82,14 +92,18 @@ fn write_dir(mig: &Migration) -> PathBuf {
 }
 
 async fn ledger_has(pool: &Pool, name: &str) -> bool {
-    let Pool::Sqlite(sq) = pool else { unreachable!() };
-    let count: i64 = sqlx::query(&format!("SELECT COUNT(*) AS c FROM {LEDGER} WHERE name = ?"))
-        .bind(name)
-        .fetch_one(sq)
-        .await
-        .unwrap()
-        .try_get("c")
-        .unwrap();
+    let Pool::Sqlite(sq) = pool else {
+        unreachable!()
+    };
+    let count: i64 = sqlx::query(&format!(
+        "SELECT COUNT(*) AS c FROM {LEDGER} WHERE name = ?"
+    ))
+    .bind(name)
+    .fetch_one(sq)
+    .await
+    .unwrap()
+    .try_get("c")
+    .unwrap();
     count > 0
 }
 
@@ -107,29 +121,52 @@ async fn fake_initial_records_without_running_when_table_exists() {
     let (pool, path) = sqlite_pool().await;
     let table = "recon_media";
     let name = "0004_create_recon_media";
-    let m = mig(name, snapshot_with_table(table), vec![Operation::Schema(SchemaChange::CreateTable(table.into()))]);
+    let m = mig(
+        name,
+        snapshot_with_table(table),
+        vec![Operation::Schema(SchemaChange::CreateTable(table.into()))],
+    );
     let dir = write_dir(&m);
 
     // Simulate the old `ensure_table` era: the table already exists, with data.
-    let Pool::Sqlite(sq) = &pool else { unreachable!() };
-    sqlx::query(&format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY, note TEXT)"))
-        .execute(sq).await.unwrap();
-    sqlx::query(&format!("INSERT INTO {table} (id, note) VALUES (1, 'pre-existing')"))
-        .execute(sq).await.unwrap();
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    sqlx::query(&format!(
+        "CREATE TABLE {table} (id INTEGER PRIMARY KEY, note TEXT)"
+    ))
+    .execute(sq)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "INSERT INTO {table} (id, note) VALUES (1, 'pre-existing')"
+    ))
+    .execute(sq)
+    .await
+    .unwrap();
 
     let applied = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER)
         .await
         .expect("fake-initial should succeed, not collide");
     assert_eq!(applied.len(), 1, "migration should be resolved (faked)");
-    assert!(ledger_has(&pool, name).await, "faked migration must be recorded in the ledger");
+    assert!(
+        ledger_has(&pool, name).await,
+        "faked migration must be recorded in the ledger"
+    );
 
     // The pre-existing row survived — the CREATE never ran and no data was lost.
     let note: String = sqlx::query(&format!("SELECT note FROM {table} WHERE id = 1"))
-        .fetch_one(sq).await.unwrap().try_get("note").unwrap();
+        .fetch_one(sq)
+        .await
+        .unwrap()
+        .try_get("note")
+        .unwrap();
     assert_eq!(note, "pre-existing");
 
     // Idempotent: a second run is a no-op (already in ledger).
-    let again = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER).await.unwrap();
+    let again = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER)
+        .await
+        .unwrap();
     assert!(again.is_empty(), "second run has nothing pending");
 
     cleanup(pool, &path, &dir);
@@ -142,16 +179,26 @@ async fn fake_initial_creates_normally_when_table_absent() {
     let (pool, path) = sqlite_pool().await;
     let table = "recon_fresh";
     let name = "0001_create_recon_fresh";
-    let m = mig(name, snapshot_with_table(table), vec![Operation::Schema(SchemaChange::CreateTable(table.into()))]);
+    let m = mig(
+        name,
+        snapshot_with_table(table),
+        vec![Operation::Schema(SchemaChange::CreateTable(table.into()))],
+    );
     let dir = write_dir(&m);
 
-    let applied = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER).await.unwrap();
+    let applied = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER)
+        .await
+        .unwrap();
     assert_eq!(applied.len(), 1);
     assert!(ledger_has(&pool, name).await);
 
     // The table was actually created (a real INSERT works).
-    let Pool::Sqlite(sq) = &pool else { unreachable!() };
-    sqlx::query(&format!("INSERT INTO {table} (id) VALUES (1)")).execute(sq).await
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    sqlx::query(&format!("INSERT INTO {table} (id) VALUES (1)"))
+        .execute(sq)
+        .await
         .expect("table should have been created by the runner");
 
     cleanup(pool, &path, &dir);
@@ -176,12 +223,23 @@ async fn fake_initial_does_not_fake_partial_existence() {
     let dir = write_dir(&m);
 
     // Only t1 pre-exists → not all tables exist → must not fake.
-    let Pool::Sqlite(sq) = &pool else { unreachable!() };
-    sqlx::query(&format!("CREATE TABLE {t1} (id INTEGER PRIMARY KEY)")).execute(sq).await.unwrap();
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!()
+    };
+    sqlx::query(&format!("CREATE TABLE {t1} (id INTEGER PRIMARY KEY)"))
+        .execute(sq)
+        .await
+        .unwrap();
 
     let res = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER).await;
-    assert!(res.is_err(), "partial existence must fall through to the runner and collide, not fake");
-    assert!(!ledger_has(&pool, name).await, "a non-faked, failed migration must not be recorded");
+    assert!(
+        res.is_err(),
+        "partial existence must fall through to the runner and collide, not fake"
+    );
+    assert!(
+        !ledger_has(&pool, name).await,
+        "a non-faked, failed migration must not be recorded"
+    );
 
     cleanup(pool, &path, &dir);
 }

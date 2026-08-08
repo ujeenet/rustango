@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use rustango::migrate::{self, file, Migration, Operation, SchemaChange, SchemaSnapshot, TableSnapshot};
+use rustango::migrate::{
+    self, file, Migration, Operation, SchemaChange, SchemaSnapshot, TableSnapshot,
+};
 use rustango::sql::sqlx::{self, Row};
 use rustango::sql::Pool;
 
@@ -26,7 +28,10 @@ fn snapshot_with_table(table: &str) -> SchemaSnapshot {
         ]
     }))
     .unwrap();
-    SchemaSnapshot { tables: vec![t], ..Default::default() }
+    SchemaSnapshot {
+        tables: vec![t],
+        ..Default::default()
+    }
 }
 
 fn write_dir(m: &Migration) -> PathBuf {
@@ -54,8 +59,14 @@ async fn fake_initial_reconciles_existing_table_on_mysql() {
     let name = format!("9{n:03}_create_{table}");
 
     // Clean slate.
-    sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`")).execute(&my).await.unwrap();
-    let _ = sqlx::query(&format!("DELETE FROM {LEDGER} WHERE name = ?")).bind(&name).execute(&my).await;
+    sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
+        .execute(&my)
+        .await
+        .unwrap();
+    let _ = sqlx::query(&format!("DELETE FROM {LEDGER} WHERE name = ?"))
+        .bind(&name)
+        .execute(&my)
+        .await;
 
     let m = Migration {
         name: name.clone(),
@@ -69,10 +80,18 @@ async fn fake_initial_reconciles_existing_table_on_mysql() {
     let dir = write_dir(&m);
 
     // Simulate the old ensure_table era: table already present, with data.
-    sqlx::query(&format!("CREATE TABLE `{table}` (id BIGINT PRIMARY KEY, note VARCHAR(64))"))
-        .execute(&my).await.unwrap();
-    sqlx::query(&format!("INSERT INTO `{table}` (id, note) VALUES (1, 'pre-existing')"))
-        .execute(&my).await.unwrap();
+    sqlx::query(&format!(
+        "CREATE TABLE `{table}` (id BIGINT PRIMARY KEY, note VARCHAR(64))"
+    ))
+    .execute(&my)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "INSERT INTO `{table}` (id, note) VALUES (1, 'pre-existing')"
+    ))
+    .execute(&my)
+    .await
+    .unwrap();
 
     // The reconcile: no "table already exists" (MySQL 1050); faked instead.
     let applied = migrate::migrate_pool_with_ledger_fake_initial(&pool, &dir, LEDGER)
@@ -81,18 +100,34 @@ async fn fake_initial_reconciles_existing_table_on_mysql() {
     assert_eq!(applied.len(), 1);
 
     // Recorded in the ledger.
-    let recorded: i64 = sqlx::query(&format!("SELECT COUNT(*) AS c FROM {LEDGER} WHERE name = ?"))
-        .bind(&name).fetch_one(&my).await.unwrap().try_get("c").unwrap();
+    let recorded: i64 = sqlx::query(&format!(
+        "SELECT COUNT(*) AS c FROM {LEDGER} WHERE name = ?"
+    ))
+    .bind(&name)
+    .fetch_one(&my)
+    .await
+    .unwrap()
+    .try_get("c")
+    .unwrap();
     assert_eq!(recorded, 1, "faked migration must be in the ledger");
 
     // Data intact — the CREATE never ran.
     let note: String = sqlx::query(&format!("SELECT note FROM `{table}` WHERE id = 1"))
-        .fetch_one(&my).await.unwrap().try_get("note").unwrap();
+        .fetch_one(&my)
+        .await
+        .unwrap()
+        .try_get("note")
+        .unwrap();
     assert_eq!(note, "pre-existing");
 
     // Cleanup.
-    let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`")).execute(&my).await;
-    let _ = sqlx::query(&format!("DELETE FROM {LEDGER} WHERE name = ?")).bind(&name).execute(&my).await;
+    let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
+        .execute(&my)
+        .await;
+    let _ = sqlx::query(&format!("DELETE FROM {LEDGER} WHERE name = ?"))
+        .bind(&name)
+        .execute(&my)
+        .await;
     let _ = std::fs::remove_dir_all(&dir);
     println!("MySQL fake-initial reconcile OK");
 }
