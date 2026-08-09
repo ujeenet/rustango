@@ -95,6 +95,9 @@ mod org;
 pub mod password;
 pub mod permissions;
 mod pools;
+/// Who a request is acting as, whatever authenticated it (session cookie,
+/// Bearer access token, MCP agent token).
+pub mod principal;
 mod resolver;
 pub mod routes;
 mod secrets;
@@ -134,6 +137,7 @@ pub use auth_backends::{
 };
 pub use bootstrap::{init_tenancy, init_tenancy_with, InitTenancyReport};
 pub use middleware::{AuthenticatedUser, CurrentUser, RouterAuthExt};
+pub use principal::{OptionalPrincipal, Principal, PrincipalKind, TenantSlug};
 // v0.38 — the PG-typed permission helpers stay PG-only re-exports;
 // the tri-dialect `_pool` variants are the cross-dialect entry points.
 #[cfg(feature = "postgres")]

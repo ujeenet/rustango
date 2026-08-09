@@ -46,6 +46,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::extractors::Tenant;
+use crate::sql::FetcherPool as _;
 use crate::tenancy::jwt_lifecycle::JwtLifecycle;
 
 // ---------------------------------------------------------------- Config
@@ -488,6 +489,99 @@ async fn me(t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
     }))
 }
 
+// ------------------------------------------------- Bearer → Principal layer
+
+/// Require a valid, tenant-pinned access token, and publish who sent it.
+///
+/// This is the API counterpart of the session-cookie middleware: it turns
+/// `Authorization: Bearer …` into an [`AuthenticatedUser`] and a [`Principal`]
+/// in the request extensions, which is what every downstream consumer reads —
+/// `ViewSet` permission gates, [`OwnedBy`] scoping, handlers taking the
+/// `Principal` extractor.
+///
+/// What it checks, in order:
+/// 1. signature, expiry, `typ = access`, and the JTI revocation list, via
+///    [`verify_for_tenant`];
+/// 2. the token's `tenant` claim against the resolved tenant — all tenants
+///    share one signing key, so this is the only thing standing between a
+///    token minted on `acme.` and a request to `globex.`;
+/// 3. the user row, **read per request**, so deactivating an account takes
+///    effect immediately rather than whenever the access token happens to
+///    expire.
+///
+/// ```no_run
+/// use axum::{middleware, Router};
+/// use rustango::tenancy::auth_routes::require_bearer;
+///
+/// # fn api() -> Router { Router::new() }
+/// let protected = api().layer(middleware::from_fn(require_bearer));
+/// ```
+///
+/// Mount it on the routes that need a user, not on `/auth/login` or
+/// `/auth/refresh` — those are how a client gets a token in the first place.
+///
+/// [`AuthenticatedUser`]: crate::tenancy::AuthenticatedUser
+/// [`Principal`]: crate::tenancy::Principal
+/// [`OwnedBy`]: crate::viewset::OwnedBy
+pub async fn require_bearer(
+    t: Tenant,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(token) = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
+        return unauthorized("missing Bearer token");
+    };
+
+    let user_id = match verify_for_tenant(token, &t.org.slug) {
+        Ok(id) => id,
+        // The reason is deliberately not echoed: "expired" vs "wrong tenant"
+        // vs "revoked" tells a prober which of those they achieved.
+        Err(_) => return unauthorized("invalid or expired token"),
+    };
+
+    let user = match crate::tenancy::auth::User::objects()
+        .filter("id", user_id)
+        .fetch(t.pool())
+        .await
+    {
+        Ok(rows) => rows.into_iter().next(),
+        Err(e) => {
+            tracing::error!(error = %e, "bearer auth could not read the user row");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "authentication failed").into_response();
+        }
+    };
+    let Some(user) = user.filter(|u| u.active) else {
+        // Deleted or deactivated between mint and use. Same body as a bad
+        // token: whether an account exists is not a fact this endpoint owes.
+        return unauthorized("invalid or expired token");
+    };
+
+    let id = user.id.get().copied().unwrap_or(user_id);
+    req.extensions_mut()
+        .insert(crate::tenancy::AuthenticatedUser {
+            id,
+            username: user.username.clone(),
+            is_superuser: user.is_superuser,
+        });
+    req.extensions_mut().insert(crate::tenancy::Principal::user(
+        id,
+        user.is_superuser,
+        Some(t.org.slug.clone()),
+    ));
+    next.run(req).await
+}
+
+fn unauthorized(msg: &'static str) -> Response {
+    (StatusCode::UNAUTHORIZED, msg).into_response()
+}
+
 // ---------------------------------------------------------------- Bearer
 
 /// Extracts the raw bearer token from the `Authorization` header.
@@ -496,7 +590,7 @@ async fn me(t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
 /// looks the user row up against a `PgPool` (single-tenant); this
 /// extractor just pulls the token string and lets handlers do the
 /// per-tenant lookup themselves via [`Tenant`].
-struct Bearer(String);
+pub struct Bearer(pub String);
 
 impl<S: Send + Sync> FromRequestParts<S> for Bearer {
     type Rejection = Response;

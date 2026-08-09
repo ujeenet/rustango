@@ -4,7 +4,51 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-_Nothing yet — next development cycle._
+Headline: **a `ViewSet` can finally be scoped to the caller** (#1183) — the
+authenticated identity is available to filter backends, backends apply to every
+action, and `OwnedBy` does the common case in one line.
+
+### Added
+
+- **`ViewSetFilter::filter_with(&Parts, params, schema)`** — a default-provided
+  companion to `filter` that receives the request `Parts`, so a backend can read
+  the authenticated principal out of the extensions. `filter` alone sees only
+  the query string, which means "only this user's rows" could not be written at
+  all — apps were pushing the owner column into `filter_fields` and trusting the
+  client to send `?owner_id=`, which is not authorization. The default delegates
+  to `filter`, so every existing backend — including the plain closure form —
+  compiles and behaves exactly as before.
+
+- **`tenancy::Principal`** — one identity type, resolved from whichever
+  middleware verified the request: an explicit `Principal`, an
+  `AuthenticatedUser` (session or Bearer), or an MCP agent token, which acts as
+  the user who minted it. Available as an extractor (401 when absent) and as
+  `OptionalPrincipal` where anonymous is a valid answer. It authenticates
+  nothing itself — it reads only what a verifying layer already proved.
+
+- **`viewset::OwnedBy`** — the shipped ownership backend:
+  `.filter_backend(OwnedBy::column("member_id"))`. Any column name works, since
+  it takes the name rather than assuming a convention, and it fails closed on
+  both ways it can be wrong — an unauthenticated request and a column the model
+  does not have each match **nothing**, so a typo at mount time cannot become
+  "no predicates, return the table". `.superuser_sees_all()` opts superusers in;
+  they are not special by default, because "admins see everything" is a product
+  decision.
+
+- **`auth_routes::require_bearer`** — middleware that turns a Bearer access
+  token into a `Principal`: verifies against the resolved tenant, then re-reads
+  the user row, so a deactivated account stops working on the next request
+  rather than when the token expires. `Bearer` is now public alongside it.
+
+### Fixed
+
+- **Filter backends now scope `retrieve` / `update` / `destroy`, not just
+  `list`** — DRF's `get_queryset()` contract. Scoping the collection alone is
+  worse than not scoping: it reads as safe while every row stays reachable by
+  id. A row excluded by a backend is now a **404** on those actions (not a 403,
+  which would confirm the id exists), an `UPDATE` that matches nothing returns
+  404 rather than reporting success, and the read-back after an update is
+  scoped too.
 
 ## [0.51.2] — 2026-08-08
 
