@@ -33,6 +33,7 @@ fn mig_at(name: &str, prev: Option<&str>) -> Migration {
         prev: prev.map(str::to_owned),
         atomic: true,
         scope: MigrationScope::Tenant,
+        replaces: Vec::new(),
         snapshot: empty_snap(),
         forward: vec![],
     }

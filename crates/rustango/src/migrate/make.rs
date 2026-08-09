@@ -191,6 +191,7 @@ pub fn make_migrations_scoped(
         prev: prev_name,
         atomic: true,
         scope: migration_scope,
+        replaces: Vec::new(),
         snapshot: current.clone(),
         forward: changes.into_iter().map(Operation::Schema).collect(),
     };
@@ -274,6 +275,7 @@ pub fn make_migrations_system(
         prev: prev_name,
         atomic: true,
         scope: migration_scope,
+        replaces: Vec::new(),
         snapshot: current.clone(),
         forward: changes.into_iter().map(Operation::Schema).collect(),
     };
@@ -338,6 +340,7 @@ pub fn make_migrations_from(
         prev: prev_name,
         atomic: true,
         scope: super::MigrationScope::default(),
+        replaces: Vec::new(),
         snapshot: current.clone(),
         forward: changes.into_iter().map(Operation::Schema).collect(),
     };
@@ -633,6 +636,9 @@ pub fn make_merge_migration_from(
         prev: Some(merge_prev),
         atomic: true,
         scope: super::MigrationScope::default(),
+        // A merge migration reconciles two branches; it doesn't collapse
+        // history, so it replaces nothing.
+        replaces: Vec::new(),
         // Snapshot reflects the post-merge cumulative schema. The
         // registry's current state IS that snapshot — by the time
         // the operator runs `--merge`, the checkout has both
@@ -768,6 +774,7 @@ mod tests {
             prev: None,
             atomic: true,
             scope: MigrationScope::Tenant,
+            replaces: Vec::new(),
             snapshot: snap.clone(),
             forward: vec![],
         };
@@ -835,6 +842,7 @@ mod tests {
             prev: None,
             atomic: true,
             scope: MigrationScope::Tenant,
+            replaces: Vec::new(),
             snapshot: snap_with(vec![t("rustango_users")]),
             forward: vec![],
         };
@@ -871,6 +879,7 @@ mod tests {
             prev: None,
             atomic: true,
             scope: MigrationScope::Registry,
+            replaces: Vec::new(),
             snapshot: snap_with(vec![t("rustango_orgs")]),
             forward: vec![],
         };
@@ -880,6 +889,7 @@ mod tests {
             prev: None,
             atomic: true,
             scope: MigrationScope::Tenant,
+            replaces: Vec::new(),
             snapshot: snap_with(vec![t("rustango_users")]),
             forward: vec![],
         };
@@ -945,6 +955,7 @@ mod tests {
             prev: prev.map(str::to_owned),
             atomic: true,
             scope: MigrationScope::Tenant,
+            replaces: Vec::new(),
             snapshot,
             forward: vec![],
         }

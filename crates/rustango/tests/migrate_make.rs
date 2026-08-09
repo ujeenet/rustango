@@ -238,6 +238,7 @@ fn list_dir_sorts_lexicographically() {
             prev: None,
             atomic: true,
             scope: rustango::migrate::MigrationScope::default(),
+            replaces: Vec::new(),
             snapshot: snap,
             forward: vec![],
         };
@@ -261,6 +262,7 @@ fn list_dir_ignores_non_json_files() {
         prev: None,
         atomic: true,
         scope: rustango::migrate::MigrationScope::default(),
+        replaces: Vec::new(),
         snapshot: snapshot_with(vec![]),
         forward: vec![],
     };

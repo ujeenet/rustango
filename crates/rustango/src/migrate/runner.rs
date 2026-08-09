@@ -34,6 +34,12 @@ use super::{ddl, MigrateError};
 /// tables. Override per-app via `Builder::ledger`.
 pub const LEDGER_TABLE: &str = "__rustango_migrations__";
 
+/// Ledger for the framework's own ("system app") migrations — the
+/// generated `system/migrations/` chain that stands up the `rustango_*`
+/// tables. Kept separate from [`LEDGER_TABLE`] so the framework's chain and
+/// the project's never collide or renumber each other.
+pub const SYSTEM_LEDGER_TABLE: &str = "__rustango_system_migrations__";
+
 /// Per-app migration runner config. Lets two rustango apps live in
 /// the same Postgres database without colliding on the default
 /// `__rustango_migrations__` ledger table — each app picks its own
@@ -430,14 +436,24 @@ async fn migrate_with_ledger(
     let newly = with_migrate_lock(pool, async {
         let all = file::list_dir(dir)?;
         let applied = applied_set_for(pool, ledger).await?;
-        let pending: Vec<Migration> = all
-            .into_iter()
-            .filter(|m| !applied.contains(&m.name))
-            .collect();
+        let pending = pending_migrations(all, &applied);
 
         let mut newly = Vec::with_capacity(pending.len());
+        // Squash reconciliation applies on this legacy PgPool entry point
+        // too — route through the same dialect-agnostic decision used by
+        // `migrate_pool` so both runners agree. `fake_initial` stays off
+        // here: table-existence faking is opted into only by the
+        // framework's system-migration path.
+        let enum_pool = crate::sql::Pool::Postgres(pool.clone());
         for mig in pending {
-            apply_one(pool, &mig, ledger).await?;
+            match reconcile(&enum_pool, &mig, &applied, false).await? {
+                ReconcileAction::Fake => fake_apply_pool(&enum_pool, &mig, ledger).await?,
+                // `fake_initial` is off on this path, so `RunPartial` is
+                // unreachable here; treat it as a plain run for totality.
+                ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
+                    apply_one(pool, &mig, ledger).await?
+                }
+            }
             newly.push(mig);
         }
         Ok(newly)
@@ -1451,36 +1467,25 @@ async fn migrate_pool_with_ledger_opts(
     with_migrate_lock_pool(pool, async {
         let all = file::list_dir(dir)?;
         let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-        let pending: Vec<Migration> = all
-            .into_iter()
-            .filter(|m| !applied.contains(&m.name))
-            .collect();
+        let pending = pending_migrations(all, &applied);
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            // Fake-initial reconcile (#1167): a pure-`CreateTable`
-            // migration whose tables all already exist is recorded
-            // without running — the ensure→system-migration upgrade path.
-            if fake_initial {
-                if let Some(tables) = create_only_tables(&mig) {
-                    if all_tables_exist(pool, &tables).await {
-                        record_fake_applied(pool, &mig, ledger).await?;
-                        tracing::warn!(
-                            migration = %mig.name,
-                            tables = %tables.join(", "),
-                            "fake-initial: tables already exist (pre-migration \
-                             `ensure_table` era) — recorded as applied without \
-                             running its CREATE TABLE; existing data left intact"
-                        );
-                        newly.push(mig);
-                        continue;
+            match reconcile(pool, &mig, &applied, fake_initial).await? {
+                ReconcileAction::Fake => fake_apply_pool(pool, &mig, ledger).await?,
+                other => {
+                    let effective = match other {
+                        ReconcileAction::RunPartial(existing) => {
+                            std::borrow::Cow::Owned(without_tables(&mig, &existing))
+                        }
+                        _ => std::borrow::Cow::Borrowed(&mig),
+                    };
+                    if effective.atomic {
+                        apply_atomic_pool(pool, &effective, ledger).await?;
+                    } else {
+                        apply_nonatomic_pool(pool, &effective, ledger).await?;
                     }
                 }
-            }
-            if mig.atomic {
-                apply_atomic_pool(pool, &mig, ledger).await?;
-            } else {
-                apply_nonatomic_pool(pool, &mig, ledger).await?;
             }
             newly.push(mig);
         }
@@ -1489,68 +1494,383 @@ async fn migrate_pool_with_ledger_opts(
     .await
 }
 
-/// If every operation in `mig` is a `CreateTable` schema change, return
-/// the tables it creates; otherwise `None`. Only such "initial"
-/// pure-table-creation migrations are eligible for fake-initial
-/// reconciliation — anything with a column add / data op / callback is
-/// excluded so we never skip a real side effect.
+// ------------------------------------------------------- reconciliation
+
+/// What to do with a pending migration once it has been reconciled
+/// against the database's actual state. See [`reconcile`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReconcileAction {
+    /// Apply normally — run its `forward` ops, then record it.
+    Run,
+    /// Record it as applied (and tombstone anything it `replaces`)
+    /// **without** running any DDL: the end state is already present.
+    Fake,
+    /// Apply it, but skip the operations for the listed tables — they
+    /// already exist (created by the retired `ensure_*` DDL of an older
+    /// build). Only the framework's own system chain uses this.
+    RunPartial(Vec<String>),
+}
+
+/// Decide whether a pending migration should run or be reconciled.
+///
+/// Two independent reconciliation paths:
+///
+/// * **Squash** (`replaces` non-empty) — always considered, on every
+///   runner. A squash collapses historical migrations into one file that
+///   recreates the same end state, so on a database that already has that
+///   history it must not re-run:
+///   - every replaced migration present in the ledger → [`Fake`] (same-ledger)
+///   - none present, but all the tables it creates already exist → [`Fake`]
+///     (cross-ledger, Django's `--fake-initial`)
+///   - a *partial* match either way → **error**, because the database is in
+///     a state no automatic choice can safely resolve
+///   - otherwise (fresh database) → [`Run`]
+///
+/// * **Plain migration** (`replaces` empty) — only when `fake_initial` is
+///   set (the framework's own system-migration path, #1174): a *purely*
+///   table-creating migration whose tables all already exist is faked, so a
+///   subsystem that used to build its tables via the retired `ensure_table`
+///   DDL upgrades cleanly. Deliberately conservative: any non-`CreateTable`
+///   operation, or a partially-present table set, falls through to [`Run`]
+///   so real work is never skipped and genuine collisions still surface.
+///
+/// [`Fake`]: ReconcileAction::Fake
+/// [`Run`]: ReconcileAction::Run
+async fn reconcile(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+    applied: &HashSet<String>,
+    fake_initial: bool,
+) -> Result<ReconcileAction, MigrateError> {
+    if !mig.replaces.is_empty() {
+        let present = mig.replaces.iter().filter(|n| applied.contains(*n)).count();
+        if present == mig.replaces.len() {
+            tracing::info!(
+                migration = %mig.name,
+                replaces = ?mig.replaces,
+                "reconciling squash — every replaced migration is already applied; \
+                 recording it and tombstoning them without running DDL"
+            );
+            return Ok(ReconcileAction::Fake);
+        }
+        if present > 0 {
+            let missing: Vec<&str> = mig
+                .replaces
+                .iter()
+                .filter(|n| !applied.contains(*n))
+                .map(String::as_str)
+                .collect();
+            return Err(MigrateError::Validation(format!(
+                "cannot reconcile squash `{}`: it replaces {} migration(s) but only {} are \
+                 recorded as applied (missing: {}). The database is in a partial state — \
+                 resolve it by hand (see `migrate --fake <name>`) rather than guessing.",
+                mig.name,
+                mig.replaces.len(),
+                present,
+                missing.join(", "),
+            )));
+        }
+        // None of the replaced set is in THIS ledger. The history may still
+        // be present (a different ledger, or tables built out-of-band), so
+        // fall back to comparing against the tables themselves.
+        let targets = create_table_targets(mig);
+        if targets.is_empty() {
+            return Ok(ReconcileAction::Run);
+        }
+        let existing = count_existing_tables(pool, &targets).await;
+        if existing == targets.len() {
+            tracing::info!(
+                migration = %mig.name,
+                tables = %targets.join(", "),
+                "reconciling squash — its tables already exist (cross-ledger \
+                 fake-initial); recording it without running DDL"
+            );
+            return Ok(ReconcileAction::Fake);
+        }
+        if existing > 0 {
+            return Err(MigrateError::Validation(format!(
+                "cannot reconcile squash `{}`: {} of its {} tables already exist but the rest \
+                 do not. The database is in a partial state — resolve it by hand (see \
+                 `migrate --fake <name>`) rather than guessing.",
+                mig.name,
+                existing,
+                targets.len(),
+            )));
+        }
+        return Ok(ReconcileAction::Run);
+    }
+
+    // Plain migration: only the framework's own system-migration path opts
+    // into table-existence reconciliation.
+    if fake_initial {
+        if let Some(tables) = create_only_tables(mig) {
+            let existing: Vec<String> = {
+                let mut present = Vec::new();
+                for t in &tables {
+                    if count_existing_tables(pool, std::slice::from_ref(t)).await == 1 {
+                        present.push(t.clone());
+                    }
+                }
+                present
+            };
+            if existing.len() == tables.len() {
+                tracing::warn!(
+                    migration = %mig.name,
+                    tables = %tables.join(", "),
+                    "fake-initial: tables already exist (pre-migration \
+                     `ensure_table` era) — recorded as applied without \
+                     running its CREATE TABLE; existing data left intact"
+                );
+                return Ok(ReconcileAction::Fake);
+            }
+            if !existing.is_empty() {
+                // Partial: some of the framework's tables predate this chain
+                // (the `ensure_table` era created them piecemeal — whichever
+                // subsystems the app actually touched). Create only what's
+                // missing and leave the rest alone. That is exactly the
+                // `CREATE TABLE IF NOT EXISTS` semantics the retired `ensure_*`
+                // calls had, so upgrading is never worse than before; refusing
+                // here instead would simply break the upgrade.
+                tracing::warn!(
+                    migration = %mig.name,
+                    existing = %existing.join(", "),
+                    "fake-initial: some framework tables already exist — creating \
+                     only the missing ones and leaving the existing untouched"
+                );
+                return Ok(ReconcileAction::RunPartial(existing));
+            }
+        }
+    }
+    Ok(ReconcileAction::Run)
+}
+
+/// A copy of `mig` with every operation that targets an already-present
+/// table removed — the `RunPartial` payload.
+///
+/// Both the `CreateTable` and any `CreateIndex` for a skipped table are
+/// dropped: the table was created by an older framework build, which created
+/// its indexes too, so re-running them would collide the same way. Operations
+/// for tables we *are* creating pass through untouched.
+pub(crate) fn without_tables(mig: &Migration, existing: &[String]) -> Migration {
+    use super::diff::SchemaChange as SC;
+    let skip = |t: &String| existing.iter().any(|e| e == t);
+    let forward = mig
+        .forward
+        .iter()
+        .filter(|op| match op {
+            Operation::Schema(SC::CreateTable(t)) => !skip(t),
+            Operation::Schema(SC::CreateIndex { table, .. }) => !skip(table),
+            Operation::Schema(SC::CreateM2MTable { through, .. }) => !skip(through),
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    Migration {
+        forward,
+        ..mig.clone()
+    }
+}
+
+/// The migrations in `all` that still need to be considered, given the
+/// `applied` ledger set.
+///
+/// Beyond the obvious "not in the ledger" filter, this drops anything that an
+/// **applied squash** declares it `replaces`. Once a squash is recorded, its
+/// predecessors' ledger rows are tombstoned, but their *files* usually remain
+/// on disk for a release or two (Django keeps them so older deployments can
+/// still migrate forward). Without this filter those files would look pending
+/// on the very next run and try to recreate tables that already exist.
+fn pending_migrations(all: Vec<Migration>, applied: &HashSet<String>) -> Vec<Migration> {
+    let superseded: HashSet<&str> = all
+        .iter()
+        .filter(|m| applied.contains(&m.name))
+        .flat_map(|m| m.replaces.iter().map(String::as_str))
+        .collect();
+    all.iter()
+        .filter(|m| !applied.contains(&m.name) && !superseded.contains(m.name.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Every table this migration creates, in order. Unlike
+/// [`create_only_tables`] this does **not** require the migration to be
+/// purely table-creating — a squash legitimately carries other operations
+/// alongside its `CreateTable`s, and it is the created tables that tell us
+/// whether the end state is already present.
+fn create_table_targets(mig: &Migration) -> Vec<String> {
+    mig.forward
+        .iter()
+        .filter_map(|op| match op {
+            Operation::Schema(super::diff::SchemaChange::CreateTable(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The tables `mig` creates, when the migration does **nothing but** stand
+/// those tables up; otherwise `None`.
+///
+/// "Nothing but" is judged against the real shape a generated initial
+/// migration has, which is *not* only `CreateTable`: `makemigrations` emits
+/// the table, then its indexes (and any M2M join table) as sibling
+/// operations. A media-subsystem initial, for instance, is 4 `CreateTable` +
+/// 6 `CreateIndex`. Requiring literal `CreateTable`-purity would reject every
+/// real migration and silently disable fake-initial reconciliation — which is
+/// exactly what it did before this was fixed.
+///
+/// So the accepted set is "operations that are part of creating these
+/// tables":
+/// * `CreateTable`
+/// * `CreateIndex` / `CreateM2MTable`, but **only** when they target a table
+///   this same migration creates — an index added to a *pre-existing* table
+///   is real work that must not be skipped.
+///
+/// Everything else (a column add, an alter, a drop, a data backfill, a
+/// callback) disqualifies the migration, so a genuine side effect is never
+/// faked away.
 fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
-    let mut tables = Vec::new();
+    use super::diff::SchemaChange as SC;
+    let mut tables: Vec<String> = Vec::new();
+    let mut targeted: Vec<&str> = Vec::new();
     for op in &mig.forward {
         match op {
-            Operation::Schema(super::diff::SchemaChange::CreateTable(t)) => tables.push(t.clone()),
+            Operation::Schema(SC::CreateTable(t)) => tables.push(t.clone()),
+            Operation::Schema(SC::CreateIndex { table, .. }) => targeted.push(table.as_str()),
+            Operation::Schema(SC::CreateM2MTable { through, .. }) => tables.push(through.clone()),
             _ => return None,
         }
     }
-    (!tables.is_empty()).then_some(tables)
+    if tables.is_empty() {
+        return None;
+    }
+    // Every index must belong to a table this migration itself creates.
+    if targeted
+        .iter()
+        .any(|t| !tables.iter().any(|created| created == t))
+    {
+        return None;
+    }
+    Some(tables)
 }
 
-/// `true` when every table in `tables` already exists in `pool`. Uses
-/// `SELECT 1 FROM <t> LIMIT 1` so the name resolves through exactly the
+/// How many of `tables` already exist in `pool`. Probes with
+/// `SELECT 1 FROM <t> LIMIT 1` so each name resolves through exactly the
 /// same search_path / current-database rules the migration's own
 /// `CREATE TABLE` would use (unqualified — correct for schema-mode
 /// tenants and single-DB alike).
-async fn all_tables_exist(pool: &crate::sql::Pool, tables: &[String]) -> bool {
-    let dialect = pool.dialect();
+async fn count_existing_tables(pool: &crate::sql::Pool, tables: &[String]) -> usize {
+    let mut n = 0;
     for t in tables {
-        let sql = format!("SELECT 1 FROM {} LIMIT 1", dialect.quote_ident(t));
-        if crate::sql::raw_execute_pool(pool, &sql, Vec::new())
-            .await
-            .is_err()
-        {
-            return false;
+        if table_exists_here(pool, t).await {
+            n += 1;
         }
     }
-    true
+    n
 }
 
-/// Insert a migration's name into `ledger` without running its SQL
-/// (idempotent — an existing row is left untouched). Mirrors the
-/// bookkeeping the normal apply path performs on success.
-async fn record_fake_applied(
+/// Does `table` exist **in the schema this connection writes to**?
+///
+/// Deliberately *not* `SELECT 1 FROM <table>`: an unqualified name resolves
+/// through the search path, so in schema-mode multi-tenancy (`search_path =
+/// <tenant>, public`) a probe would happily find a same-named table in
+/// `public` and conclude the tenant already had one. Reconciliation would then
+/// skip creating it and the tenant would silently come up without its tables.
+///
+/// Each backend is asked about its *current* namespace only:
+/// * Postgres — `information_schema.tables` filtered to `current_schema()`
+/// * MySQL — filtered to `DATABASE()` (a schema is a database here)
+/// * SQLite — `sqlite_master`, which is inherently per-connection
+async fn table_exists_here(pool: &crate::sql::Pool, table: &str) -> bool {
+    match pool {
+        #[cfg(feature = "postgres")]
+        crate::sql::Pool::Postgres(pg) => sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_name = $1",
+        )
+        .bind(table)
+        .fetch_one(pg)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false),
+        #[cfg(feature = "mysql")]
+        crate::sql::Pool::Mysql(my) => sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = DATABASE() AND table_name = ?",
+        )
+        .bind(table)
+        .fetch_one(my)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false),
+        #[cfg(feature = "sqlite")]
+        crate::sql::Pool::Sqlite(sq) => sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_one(sq)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false),
+    }
+}
+
+/// Record `mig` as applied **without running its `forward` ops**, and
+/// tombstone every migration it `replaces`.
+///
+/// The squash row is inserted *before* the replaced rows are deleted, so a
+/// crash midway leaves the ledger over-full (squash + some predecessors)
+/// rather than empty — the next run then sees a full/partial state it can
+/// report, instead of silently re-running the squash against live tables.
+async fn fake_apply_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
     ledger: &str,
 ) -> Result<(), MigrateError> {
-    let dialect = pool.dialect();
-    let placeholder = dialect.placeholder(1);
-    let table = dialect.quote_ident(ledger);
-    let name_col = dialect.quote_ident("name");
-    let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);
-    let sql = format!("INSERT INTO {table} ({name_col}) VALUES ({placeholder}) {conflict_tail}");
+    // Render both statements before the first `.await` so the
+    // `&dyn Dialect` borrow never crosses a suspend point (keeps this
+    // future `Send` — see `count_existing_tables`).
+    let (insert, delete) = {
+        let dialect = pool.dialect();
+        let placeholder = dialect.placeholder(1);
+        let table = dialect.quote_ident(ledger);
+        let name_col = dialect.quote_ident("name");
+        let conflict_tail = dialect.insert_on_conflict_skip(&[&name_col]);
+        (
+            format!("INSERT INTO {table} ({name_col}) VALUES ({placeholder}) {conflict_tail}"),
+            format!("DELETE FROM {table} WHERE {name_col} = {placeholder}"),
+        )
+    };
     crate::sql::raw_execute_pool(
         pool,
-        &sql,
+        &insert,
         vec![crate::core::SqlValue::String(mig.name.clone())],
     )
     .await
-    .map(|_| ())
     .map_err(|e| {
         MigrateError::Validation(format!(
-            "fake-initial: ledger insert for `{}` failed: {e}",
+            "fake-apply: ledger insert for `{}` failed: {e}",
             mig.name
         ))
-    })
+    })?;
+
+    if mig.replaces.is_empty() {
+        return Ok(());
+    }
+    for replaced in &mig.replaces {
+        crate::sql::raw_execute_pool(
+            pool,
+            &delete,
+            vec![crate::core::SqlValue::String(replaced.clone())],
+        )
+        .await
+        .map_err(|e| {
+            MigrateError::Validation(format!(
+                "fake-apply: tombstoning `{replaced}` (replaced by `{}`) failed: {e}",
+                mig.name
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 /// Hold the migrate session-scoped advisory lock while `body` runs,
