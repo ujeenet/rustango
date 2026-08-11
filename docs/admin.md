@@ -404,6 +404,21 @@ one of two ways:
 - **Front it with your own auth.** Leave the admin open and put HTTP Basic auth,
   OAuth2, or corporate SSO in front of the nest path with your own middleware.
 
+When session auth is on, the sidebar footer shows a **"Signed in as _username_"**
+line and a **Logout** button (a `POST` form). Standalone admins post to
+`{admin_prefix}/logout` by default; a tenant admin sits behind the tenancy
+layer's own logout route, so point the button there with `Builder::logout_url`:
+
+```rust
+let admin = admin::Builder::new(pool)
+    .with_session_auth(session_secret)
+    .logout_url("/staff-logout")       // POST target for the sidebar Logout button
+    .build();
+```
+
+The tenant-admin builder wires this to its `RouteConfig::logout_url`
+automatically, so the button always hits a route that exists.
+
 ---
 
 ## Theming and branding
@@ -444,6 +459,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `with_user_perms([codenames])` | Gate tables on `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Register a bulk-action handler. |
 | `with_session_auth(secret)` | Require cookie login (`/login` + `/logout`). |
+| `logout_url(u)` | POST target for the sidebar Logout button. Default `{admin_prefix}/logout`; tenant admins set it to their tenancy logout route. |
 | `secure_cookies(bool)` | Set the `Secure` (HTTPS-only) flag on the session cookie. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo above the title. |

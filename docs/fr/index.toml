@@ -1,0 +1,21 @@
+# Table des matières de la documentation.
+#
+# rustangodocs lit ce manifeste pour amorcer le site de documentation : chaque
+# [[section]] devient une section de navigation, et chaque page (un fichier
+# markdown de ce répertoire) devient une page de documentation, rendue dans
+# l'ordre indiqué ici. Les fichiers non listés ci-dessous ne sont pas publiés.
+
+[[section]]
+title = "Premiers pas"
+slug = "premiers-pas"
+pages = ["getting-started.md", "scaffolding.md"]
+
+[[section]]
+title = "Guides"
+slug = "guides"
+pages = ["models.md", "orm.md", "admin.md", "i18n.md", "manage.md"]
+
+[[section]]
+title = "Authentification"
+slug = "authentification"
+pages = ["sso.md"]
