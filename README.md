@@ -8,7 +8,7 @@
 
 Rustango gives you the productivity of Django or Laravel with the speed and type-safety of Rust: a tri-dialect ORM, auto-migrations, an auto-generated admin, multi-tenancy, first-class auth, and every standard middleware — all shipped, all opt-out via cargo features, and all working on **Postgres, MySQL, and SQLite** out of the box.
 
-📚 **Docs:** [rustango.im-fullstack.dev](https://rustango.im-fullstack.dev) · [in-repo guides](docs/) · [API reference](https://docs.rs/rustango)
+📚 **Docs:** [rustango.com](https://rustango.com) · [in-repo guides](docs/) · [API reference](https://docs.rs/rustango)
 🍳 **Cookbook:** [`cookbook_blog/COOKBOOK.md`](crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a runnable, test-backed recipe for every feature below.
 
 ---
@@ -317,7 +317,7 @@ A `TestClient` drives the router as a tower service (no socket), a `RequestFacto
 
 ## Documentation
 
-- **Guides & tutorials**: <https://rustango.im-fullstack.dev>
+- **Guides & tutorials**: <https://rustango.com>
 - **Runnable cookbook**: [`cookbook_blog/COOKBOOK.md`](crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a test-backed recipe for every feature, on all three backends.
 - **In-repo guides** ([`docs/`](docs/)): [getting started](docs/getting-started.md) · [models](docs/models.md) · [ORM](docs/orm.md) · [migrations & CLI](docs/manage.md) · [admin](docs/admin.md) · [viewsets](docs/viewsets.md) · [serializers](docs/serializers.md) · [auth](docs/auth-flows.md) · [security](docs/security.md) · [middleware](docs/middleware.md) · [caching](docs/caching.md) · [email](docs/email.md) · [files](docs/files.md) · [jobs](docs/jobs.md) · [i18n](docs/i18n.md) · [MCP](docs/mcp.md) · [testing](docs/testing.md) · [glossary](docs/glossary.md)
 - **API reference**: <https://docs.rs/rustango>
