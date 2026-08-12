@@ -90,13 +90,19 @@ async fn drop_table(pool: &rustango::sql::Pool, table: &str) {
     sqlx::query(&sql).execute(pg).await.unwrap();
 }
 
+/// Remove a ledger row if it is there.
+///
+/// Tolerates a missing ledger table: this runs during setup, and on a
+/// brand-new database nothing has created `__rustango_migrations__` yet.
+/// Unwrapping here made the suite's result depend on test ordering and on
+/// residue in the target database — five tests failed on a fresh DB and
+/// passed on the second run (#1186).
 async fn delete_ledger_entry(pool: &rustango::sql::Pool, name: &str) {
     let pg = pool.as_postgres().expect("test pool is postgres");
-    sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
+    let _ = sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
         .bind(name)
         .execute(pg)
-        .await
-        .unwrap();
+        .await;
 }
 
 fn args(cmd: &[&str]) -> Vec<String> {
