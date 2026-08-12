@@ -759,10 +759,7 @@ impl Cli {
                 None => api,
             };
             #[cfg(feature = "config")]
-            let api = match self.settings_for_layers.as_ref() {
-                Some(s) => apply_settings_layers(api, s),
-                None => api,
-            };
+            let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
             let app = api.layer(axum::Extension(pool));
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
@@ -815,10 +812,7 @@ impl Cli {
                     None => api,
                 };
                 #[cfg(feature = "config")]
-                let api = match self.settings_for_layers.as_ref() {
-                    Some(s) => apply_settings_layers(api, s),
-                    None => api,
-                };
+                let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
                 let app = api.layer(axum::Extension(pool));
                 let listener = tokio::net::TcpListener::bind(&self.bind).await?;
                 eprintln!("server listening on http://{}", listener.local_addr()?);
@@ -856,10 +850,7 @@ impl Cli {
                 None => api,
             };
             #[cfg(feature = "config")]
-            let api = match self.settings_for_layers.as_ref() {
-                Some(s) => apply_settings_layers(api, s),
-                None => api,
-            };
+            let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
             let app = api.layer(axum::Extension(pool));
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
@@ -897,10 +888,7 @@ impl Cli {
             None => api,
         };
         #[cfg(feature = "config")]
-        let api = match self.settings_for_layers.as_ref() {
-            Some(s) => apply_settings_layers(api, s),
-            None => api,
-        };
+        let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
         let mut builder = crate::server::Builder::from_env().await?.api(api);
         if self.health_endpoints {
             builder = builder.with_health();
@@ -944,10 +932,7 @@ impl Cli {
             None => api,
         };
         #[cfg(feature = "config")]
-        let api = match self.settings_for_layers.as_ref() {
-            Some(s) => apply_settings_layers(api, s),
-            None => api,
-        };
+        let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         let registry_url =
             std::env::var("DATABASE_URL")
@@ -1067,6 +1052,82 @@ fn mount_static_dirs(api: Router, dirs: &[(String, PathBuf)]) -> Router {
 /// has nothing configured, so `with_settings` on a near-empty
 /// `default.toml` doesn't surprise the user with unexpected
 /// middleware.
+/// Apply the settings-driven layers, or — when no settings were installed —
+/// warn if the environment nonetheless *configures* some of them (#1192).
+///
+/// A setting that is absent is a bug you find; a setting that is present,
+/// parsed and ignored is a bug you ship. Without
+/// [`Cli::with_settings_from_env`] in the builder chain, CORS, the body
+/// limit, the request timeout and the security headers are read from the
+/// environment and then silently do nothing — reading the config and
+/// concluding the headers are being sent is entirely reasonable, and wrong.
+/// Naming the missing builder call turns that into a one-line fix.
+#[cfg(feature = "config")]
+fn apply_settings_layers_or_warn(
+    api: Router,
+    settings: Option<&crate::config::Settings>,
+) -> Router {
+    match settings {
+        Some(s) => apply_settings_layers(api, s),
+        None => {
+            warn_if_settings_inert();
+            api
+        }
+    }
+}
+
+/// The layer-driving settings that `s` configures, by dotted name.
+///
+/// Only settings that would actually install a layer count — a configured
+/// `secret_key` is not evidence that anyone expected CORS. Pure, so the
+/// warning's precision is unit-testable.
+#[cfg(feature = "config")]
+fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
+    let mut inert: Vec<&'static str> = Vec::new();
+    if s.server.request_timeout_secs.is_some() {
+        inert.push("server.request_timeout_secs");
+    }
+    if s.server.max_body_bytes.is_some() {
+        inert.push("server.max_body_bytes");
+    }
+    if s.security.headers_preset.is_some() {
+        inert.push("security.headers_preset");
+    }
+    if s.security.csp.is_some() {
+        inert.push("security.csp");
+    }
+    if s.security.hsts_max_age_secs.is_some() {
+        inert.push("security.hsts_max_age_secs");
+    }
+    if !s.security.cors_allowed_origins.is_empty() {
+        inert.push("security.cors_allowed_origins");
+    }
+    inert
+}
+
+/// Emit a `WARN` naming every layer-driving setting that is configured in the
+/// environment while no settings layer is installed. Silent when nothing is
+/// configured (the common case for projects that never used `Settings`).
+#[cfg(feature = "config")]
+fn warn_if_settings_inert() {
+    let Ok(s) = crate::config::Settings::load_from_env() else {
+        return;
+    };
+    let inert = inert_layer_settings(&s);
+    if inert.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        target: "rustango::manage",
+        settings = %inert.join(", "),
+        "these settings are configured but NOT being applied — no settings layer is \
+         installed. Add `.with_settings_from_env()` to the `Cli` builder chain to \
+         activate them (CORS, body limit, request timeout, security headers). \
+         Note that enabling them also turns on a strict CSP, which can break a \
+         server-rendered app that was fine without it."
+    );
+}
+
 #[cfg(feature = "config")]
 fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
     use crate::access_log::{AccessLogLayer, AccessLogRouterExt as _};
@@ -1364,6 +1425,36 @@ mod tests {
     /// settings without panicking on axum layer-stacking
     /// constraints. End-to-end header-presence assertions live in
     /// the per-module smoke tests for each layer.
+    /// #1192 — the detector must name exactly the layer-driving settings that
+    /// are configured, and stay quiet when none are. A false positive would
+    /// train people to ignore the warning; a false negative is the original bug.
+    #[cfg(feature = "config")]
+    #[test]
+    fn inert_settings_detector_names_only_configured_layers() {
+        use crate::config::Settings;
+
+        // Nothing configured → nothing to warn about.
+        assert!(inert_layer_settings(&Settings::default()).is_empty());
+
+        // Each layer-driving field is reported, and only that field.
+        let mut s = Settings::default();
+        s.security.headers_preset = Some("strict".into());
+        assert_eq!(inert_layer_settings(&s), vec!["security.headers_preset"]);
+
+        let mut s = Settings::default();
+        s.server.max_body_bytes = Some(1024);
+        s.security.cors_allowed_origins = vec!["https://example.com".into()];
+        assert_eq!(
+            inert_layer_settings(&s),
+            vec!["server.max_body_bytes", "security.cors_allowed_origins"]
+        );
+
+        // A setting that drives no layer must NOT trigger the warning.
+        let mut s = Settings::default();
+        s.secret_key = Some("irrelevant".into());
+        assert!(inert_layer_settings(&s).is_empty());
+    }
+
     #[cfg(feature = "config")]
     #[test]
     fn apply_settings_layers_smoke() {
