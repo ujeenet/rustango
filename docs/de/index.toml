@@ -1,19 +1,19 @@
-# Table des matières de la documentation (français).
+# Inhaltsverzeichnis der Dokumentation (Deutsch).
 # Mirrors docs/index.toml; filenames match English so the site maps pages 1:1.
 
 [[section]]
-title = "Premiers pas"
-slug = "premiers-pas"
+title = "Erste Schritte"
+slug = "erste-schritte"
 pages = ["getting-started.md", "scaffolding.md", "glossary.md"]
 
 [[section]]
-title = "Guides"
-slug = "guides"
+title = "Anleitungen"
+slug = "anleitungen"
 pages = ["models.md", "orm.md", "admin.md", "serializers.md", "viewsets.md", "html-views.md", "openapi.md", "query-method.md", "mcp.md", "urls.md", "manage.md", "migrations.md", "middleware.md", "jobs.md", "websockets.md", "caching.md", "files.md", "i18n.md", "email.md", "testing.md", "security.md"]
 
 [[section]]
-title = "Authentification"
-slug = "authentification"
+title = "Authentifizierung"
+slug = "authentifizierung"
 pages = ["auth-passwords.md", "auth-sessions.md", "auth-backends.md", "auth-decorators.md", "auth-jwt.md", "auth-jwt-api.md", "auth-api-keys.md", "auth-hmac.md", "auth-flows.md", "sso.md"]
 
 [[section]]
@@ -22,6 +22,6 @@ slug = "benchmarks"
 pages = ["benchmarks.md"]
 
 [[section]]
-title = "Référence"
-slug = "reference"
+title = "Referenz"
+slug = "referenz"
 pages = ["api-conventions.md"]
