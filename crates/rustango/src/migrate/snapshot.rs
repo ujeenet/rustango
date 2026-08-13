@@ -199,6 +199,13 @@ pub struct RelationSnapshot {
     pub on: String,
 }
 
+/// Was this model registered by the framework itself (as opposed to a
+/// downstream crate)? Used to decide which model owns a `rustango_*` table
+/// when a project overrides one — see [`SchemaSnapshot::from_registry_system_for_scope`].
+fn is_framework_model(e: &ModelEntry) -> bool {
+    e.module_path == "rustango" || e.module_path.starts_with("rustango::")
+}
+
 impl SchemaSnapshot {
     /// Capture every model registered in the binary's `inventory`.
     ///
@@ -280,15 +287,35 @@ impl SchemaSnapshot {
         // migration model can't say "both", so they're included in every
         // scope's system migrations (each DB creates its own copy).
         const SHARED: &[&str] = &["rustango_audit_log", "rustango_content_types"];
-        let entries: Vec<&ModelEntry> = inventory::iter::<ModelEntry>
-            .into_iter()
-            .filter(|e| {
-                (e.schema.scope == scope || SHARED.contains(&e.schema.table))
-                    && e.schema.table.starts_with("rustango_")
-                    && !e.schema.is_view
-                    && e.schema.managed
-            })
-            .collect();
+        let matching = inventory::iter::<ModelEntry>.into_iter().filter(|e| {
+            (e.schema.scope == scope || SHARED.contains(&e.schema.table))
+                && e.schema.table.starts_with("rustango_")
+                && !e.schema.is_view
+                && e.schema.managed
+        });
+        // Exactly one model may own a table. The documented custom-user-model
+        // path has a downstream model declare `rustango_users` with extra
+        // columns — but the built-in `User` derive is unconditional, so both
+        // land in the inventory and both used to flow into the migration,
+        // yielding a duplicate/ambiguous `CREATE TABLE` (#1168). Dedup by
+        // table, and let the *downstream* model win: a project that spells out
+        // a framework table is overriding it on purpose.
+        let mut by_table: std::collections::BTreeMap<&'static str, &ModelEntry> =
+            std::collections::BTreeMap::new();
+        for e in matching {
+            match by_table.entry(e.schema.table) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(e);
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let held_is_framework = is_framework_model(slot.get());
+                    if held_is_framework && !is_framework_model(e) {
+                        slot.insert(e);
+                    }
+                }
+            }
+        }
+        let entries: Vec<&ModelEntry> = by_table.into_values().collect();
         let mut tables: Vec<TableSnapshot> = entries
             .iter()
             .map(|e| TableSnapshot::from_schema(e.schema))
