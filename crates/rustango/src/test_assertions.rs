@@ -73,8 +73,15 @@
 //! beyond `axum::Response` plus the existing test_client redirect
 //! follower.
 
+// Every assertion below is over an `axum::Response`, so the HTTP half of this
+// module gates on `_axum` (#1208 follow-up). `query_counter` does not: it is
+// ORM instrumentation that `sql::executor` bumps on every query, so it must
+// stay available in a bare-ORM build with no axum in the graph.
+#[cfg(feature = "_axum")]
 use axum::body::to_bytes;
+#[cfg(feature = "_axum")]
 use axum::http::header;
+#[cfg(feature = "_axum")]
 use axum::response::Response;
 
 pub mod query_counter;
@@ -83,6 +90,7 @@ pub use query_counter::{assert_num_queries, QueryCounter};
 /// Maximum bytes consumed from a response body for inspection.
 /// 1 MiB is far above any reasonable test payload; gives a clean
 /// error if a streamed body would otherwise hang the test.
+#[cfg(feature = "_axum")]
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Assert the response status equals `expected`. Panics on mismatch
@@ -92,6 +100,7 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// assert_status(&res, 200);
 /// assert_status(&res, 404);
 /// ```
+#[cfg(feature = "_axum")]
 pub fn assert_status(res: &Response, expected: u16) {
     let actual = res.status().as_u16();
     assert_eq!(
@@ -109,6 +118,7 @@ pub fn assert_status(res: &Response, expected: u16) {
 /// assert_status_in(&res, &[200, 201]);
 /// assert_status_in(&res, &[301, 302, 307, 308]);
 /// ```
+#[cfg(feature = "_axum")]
 pub fn assert_status_in(res: &Response, allowed: &[u16]) {
     let actual = res.status().as_u16();
     assert!(
@@ -119,6 +129,7 @@ pub fn assert_status_in(res: &Response, allowed: &[u16]) {
 
 /// Assert the response status is in the 2xx range (success).
 /// Sugar for the very common "any success" check.
+#[cfg(feature = "_axum")]
 pub fn assert_status_2xx(res: &Response) {
     let actual = res.status().as_u16();
     assert!(
@@ -128,6 +139,7 @@ pub fn assert_status_2xx(res: &Response) {
 }
 
 /// Assert the response status is in the 4xx range (client error).
+#[cfg(feature = "_axum")]
 pub fn assert_status_4xx(res: &Response) {
     let actual = res.status().as_u16();
     assert!(
@@ -139,6 +151,7 @@ pub fn assert_status_4xx(res: &Response) {
 /// Assert the response status is in the 5xx range (server error).
 /// Useful for negative tests of error pages / handlers that must
 /// surface internal failures rather than degrade silently.
+#[cfg(feature = "_axum")]
 pub fn assert_status_5xx(res: &Response) {
     let actual = res.status().as_u16();
     assert!(
@@ -169,6 +182,7 @@ pub fn assert_status_5xx(res: &Response) {
 /// fragment isn't found. Snippet of the actual body (truncated +
 /// "more chars" indicator) is included in the panic message for fast
 /// debugging.
+#[cfg(feature = "_axum")]
 pub async fn assert_contains(res: Response, fragment: &str) {
     let body = to_bytes(res.into_body(), MAX_BODY_BYTES)
         .await
@@ -185,6 +199,7 @@ pub async fn assert_contains(res: Response, fragment: &str) {
 /// Inverse of [`assert_contains`] — panics when the fragment IS
 /// found. Useful for "the deleted post shouldn't appear in the list"
 /// style assertions.
+#[cfg(feature = "_axum")]
 pub async fn assert_not_contains(res: Response, fragment: &str) {
     let body = to_bytes(res.into_body(), MAX_BODY_BYTES)
         .await
@@ -208,6 +223,7 @@ pub async fn assert_not_contains(res: Response, fragment: &str) {
 ///
 /// Does NOT follow the redirect or check what the target serves —
 /// pair with [`assert_redirect_chain`] for that.
+#[cfg(feature = "_axum")]
 pub fn assert_redirects(res: &Response, target: &str) {
     let status = res.status();
     assert!(
@@ -242,7 +258,7 @@ pub fn assert_redirects(res: &Response, target: &str) {
 /// clear-cookie with `Max-Age=0`).
 // `_signing` as well as `template_views` (#1208): this reads the HMAC-signed
 // messages cookie, and `crate::messages` now gates on the signing capability.
-#[cfg(all(feature = "template_views", feature = "_signing"))]
+#[cfg(all(feature = "template_views", feature = "_signing", feature = "_axum"))]
 pub fn assert_messages(res: &Response, secret: &[u8], expected: &[(&str, &str)]) {
     use crate::messages::{Level, MESSAGES_COOKIE};
     use std::str::FromStr as _;
@@ -320,6 +336,7 @@ pub fn assert_messages(res: &Response, secret: &[u8], expected: &[(&str, &str)])
 /// Panics if the header is missing or carries a different value.
 /// Multiple headers with the same name match the FIRST occurrence
 /// (axum's default header API surfaces them in order).
+#[cfg(feature = "_axum")]
 pub fn assert_header(res: &Response, name: &str, value: &str) {
     let actual = res
         .headers()
@@ -339,6 +356,7 @@ pub fn assert_header(res: &Response, name: &str, value: &str) {
 /// assert_content_type(&res, "application/json");
 /// assert_content_type(&res, "text/html; charset=utf-8");
 /// ```
+#[cfg(feature = "_axum")]
 pub fn assert_content_type(res: &Response, expected: &str) {
     assert_header(res, "content-type", expected);
 }
@@ -355,6 +373,7 @@ pub fn assert_content_type(res: &Response, expected: &str) {
 /// Panics with both bodies in the message when:
 /// - the response body isn't valid JSON;
 /// - the parsed body doesn't structurally equal `expected`.
+#[cfg(feature = "_axum")]
 pub async fn assert_json_eq(res: Response, expected: &serde_json::Value) {
     let bytes = to_bytes(res.into_body(), MAX_BODY_BYTES)
         .await
@@ -385,6 +404,7 @@ pub async fn assert_json_eq(res: Response, expected: &serde_json::Value) {
 /// ```ignore
 /// assert_json_not_eq(res, &serde_json::json!({"password": "leaked"})).await;
 /// ```
+#[cfg(feature = "_axum")]
 pub async fn assert_json_not_eq(res: Response, unexpected: &serde_json::Value) {
     let bytes = to_bytes(res.into_body(), MAX_BODY_BYTES)
         .await
@@ -420,6 +440,7 @@ pub async fn assert_json_not_eq(res: Response, unexpected: &serde_json::Value) {
 /// Panics with the full chain in the message when the final hop's
 /// status or path doesn't match — so a misconfigured chain is easy
 /// to diagnose.
+#[cfg(feature = "_axum")]
 pub fn assert_redirect_chain(chain: &[(u16, String)], final_path: &str, final_status: u16) {
     let last = chain
         .last()
@@ -449,6 +470,7 @@ pub fn assert_redirect_chain(chain: &[(u16, String)], final_path: &str, final_st
 ///
 /// Panics with the actual count and a 500-char body snippet when
 /// the counts don't match.
+#[cfg(feature = "_axum")]
 pub async fn assert_contains_count(res: Response, fragment: &str, count: usize) {
     let bytes = to_bytes(res.into_body(), MAX_BODY_BYTES)
         .await
@@ -479,6 +501,7 @@ pub async fn assert_contains_count(res: Response, fragment: &str, count: usize) 
 ///
 /// Panics with the full Set-Cookie list when no header for that
 /// name is found, or when the value doesn't match.
+#[cfg(feature = "_axum")]
 pub fn assert_cookie_set(res: &Response, name: &str, expected_value: Option<&str>) {
     let mut matches: Vec<String> = Vec::new();
     for v in res.headers().get_all(axum::http::header::SET_COOKIE).iter() {
@@ -515,6 +538,7 @@ pub fn assert_cookie_set(res: &Response, name: &str, expected_value: Option<&str
 /// `name` IS present. Use to verify that a handler did NOT set a
 /// cookie under specific conditions (logged-out request shouldn't
 /// touch the session cookie, etc.).
+#[cfg(feature = "_axum")]
 pub fn assert_cookie_not_set(res: &Response, name: &str) {
     for v in res.headers().get_all(axum::http::header::SET_COOKIE).iter() {
         let Ok(s) = v.to_str() else { continue };
@@ -530,6 +554,9 @@ pub fn assert_cookie_not_set(res: &Response, name: &str) {
 /// Truncate a string at a UTF-8 char boundary at or before `max`,
 /// appending a `...(N more chars)` indicator so the panic message
 /// doesn't confuse a clipped 1000-char body for a 500-char one.
+///
+/// Only the body-inspecting assertions call it, so it follows their gate.
+#[cfg(feature = "_axum")]
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_owned();
@@ -542,7 +569,9 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}...(+{remaining} more chars)", &s[..idx])
 }
 
-#[cfg(test)]
+// Every case here builds an `axum::Response`, so the suite follows the same
+// gate as the assertions it exercises. `query_counter` has its own tests.
+#[cfg(all(test, feature = "_axum"))]
 mod tests {
     use super::*;
     use axum::body::Body;
@@ -671,7 +700,9 @@ mod tests {
 
     // -------- assert_messages --------
 
-    #[cfg(feature = "template_views")]
+    // `_signing` as well: these exercise `assert_messages`, which reads the
+    // HMAC-signed messages cookie and now carries that gate too (#1208).
+    #[cfg(all(feature = "template_views", feature = "_signing"))]
     #[test]
     fn assert_messages_passes_on_staged_match() {
         use crate::messages;
@@ -688,14 +719,18 @@ mod tests {
         assert_messages(&res, SECRET, &[("success", "Item created.")]);
     }
 
-    #[cfg(feature = "template_views")]
+    // `_signing` as well: these exercise `assert_messages`, which reads the
+    // HMAC-signed messages cookie and now carries that gate too (#1208).
+    #[cfg(all(feature = "template_views", feature = "_signing"))]
     #[test]
     fn assert_messages_passes_on_empty_when_no_cookie_set() {
         let res = html_response(StatusCode::OK, "");
         assert_messages(&res, b"any-secret", &[]);
     }
 
-    #[cfg(feature = "template_views")]
+    // `_signing` as well: these exercise `assert_messages`, which reads the
+    // HMAC-signed messages cookie and now carries that gate too (#1208).
+    #[cfg(all(feature = "template_views", feature = "_signing"))]
     #[test]
     #[should_panic(expected = "messages don't match")]
     fn assert_messages_panics_on_mismatch() {

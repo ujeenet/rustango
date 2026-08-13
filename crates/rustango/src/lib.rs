@@ -1226,6 +1226,10 @@ pub mod cookies;
 /// middleware. Rejects unallowed methods with `405 Method Not
 /// Allowed` + RFC 7231-compliant `Allow:` header listing the
 /// accepted set.
+///
+/// Gated on `_axum` — it is tower middleware over `axum::extract::Request`,
+/// and `axum` is an optional dependency absent from a bare-ORM build.
+#[cfg(feature = "_axum")]
 pub mod http_methods;
 
 /// Django messages framework — `messages.success/info/warning/error/debug`
@@ -1238,6 +1242,9 @@ pub mod messages;
 
 /// Django-shape access decorators — `login_required` middleware +
 /// `?next=` round-trip helpers. Issue #11.
+///
+/// Gated on `_axum` — the module is axum middleware end to end.
+#[cfg(feature = "_axum")]
 pub mod auth_decorators;
 
 /// Pluggable `AUTHENTICATION_BACKENDS` chain — register an ordered
@@ -1309,6 +1316,11 @@ pub mod syndication;
 /// mount [`redirects::redirects_middleware`] on your axum router;
 /// matching requests short-circuit with a 301/302 response and the
 /// canonical URL in `Location`, query strings preserved. Issue #57.
+///
+/// The next three gate on `_axum` — each is axum middleware (or assertions
+/// over an `axum::Response`), and `axum` is optional. They were unconditional,
+/// which is most of why `--features sqlite` alone never built.
+#[cfg(feature = "_axum")]
 pub mod redirects;
 
 /// Static "flat pages" — `django.contrib.flatpages`. Build a
@@ -1316,11 +1328,17 @@ pub mod redirects;
 /// mount [`flatpages::flatpages_middleware`] on your axum router;
 /// matching requests serve the page body with `text/html` (or a
 /// custom content-type). Bring your own Tera wrapping. Issue #57.
+#[cfg(feature = "_axum")]
 pub mod flatpages;
 
 /// Django-shape test assertion helpers — `assert_contains` /
 /// `assert_redirects` / `assert_status` / `assert_messages` on axum
 /// Response objects. Issue #40.
+///
+/// Stays unconditional: its `query_counter` submodule is ORM instrumentation
+/// that `sql::executor` bumps on **every** query, so gating the module would
+/// break a bare-ORM build. The `axum::Response` assertions inside it carry
+/// their own `_axum` gate instead.
 pub mod test_assertions;
 
 /// Tag-based test filtering — Django's `@tag('slow')` +

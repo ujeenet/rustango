@@ -611,7 +611,11 @@ mod tests {
     }
 
     // ---- urlsafe_base64 (Django parity) ----
+    //
+    // These follow the `_base64` gate on the functions they exercise; the
+    // rest of the suite is dependency-free and runs in every feature set.
 
+    #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_encode_matches_django_examples() {
         assert_eq!(urlsafe_base64_encode(b"foo"), "Zm9v");
@@ -619,6 +623,7 @@ mod tests {
         assert_eq!(urlsafe_base64_encode(b""), "");
     }
 
+    #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_encode_drops_padding() {
         // 1 byte → standard b64 would emit `==` padding; urlsafe-no-pad
@@ -628,6 +633,7 @@ mod tests {
         assert!(!encoded.contains('='));
     }
 
+    #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_encode_uses_url_safe_alphabet() {
         // 0xfb 0xff in standard b64 is `+/8=`. URL-safe is `-_8`.
@@ -637,11 +643,13 @@ mod tests {
         assert!(!encoded.contains('/'));
     }
 
+    #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_decode_simple() {
         assert_eq!(urlsafe_base64_decode("Zm9v").as_deref(), Some(&b"foo"[..]));
     }
 
+    #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_decode_accepts_padding_for_django_compat() {
         // Django shape — `=` padding silently stripped so legacy senders
@@ -653,6 +661,7 @@ mod tests {
         assert_eq!(urlsafe_base64_decode("Zg==").as_deref(), Some(&b"f"[..]));
     }
 
+    #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_decode_rejects_standard_b64_chars() {
         // Standard b64 reserved chars `+` and `/` must be rejected when
@@ -660,12 +669,14 @@ mod tests {
         assert!(urlsafe_base64_decode("a+b/c").is_none());
     }
 
+    #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_decode_rejects_garbage() {
         assert!(urlsafe_base64_decode("!@#$%").is_none());
         assert!(urlsafe_base64_decode("hello\n").is_none()); // embedded LF
     }
 
+    #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_decode_empty_is_empty_vec() {
         assert_eq!(urlsafe_base64_decode("").as_deref(), Some(&[][..]));
@@ -768,6 +779,7 @@ mod tests {
         assert_eq!(escape_uri_path(""), "");
     }
 
+    #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_round_trip_for_random_bytes() {
         // Every byte value through encode → decode lands back unchanged.

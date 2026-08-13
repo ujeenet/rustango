@@ -33,8 +33,37 @@ action, and `OwnedBy` does the common case in one line.
   `admin`-gated health router unconditionally, and `migrate::runner` /
   `sql::m2m` emitted `signals` without the feature.
 
-  A `feature_combos` CI matrix now builds all seven combinations with
-  `-D warnings`, so a new gate gap fails the build instead of shipping.
+  A `feature_combos` CI matrix now builds every combination with `-D warnings`
+  **and runs its unit tests**, so a new gate gap fails the build instead of
+  shipping. (`cargo check` alone misses `#[cfg(test)]` code, which is exactly
+  where a gate mismatch hides.)
+
+- **The bare ORM build finally works** — `--no-default-features --features
+  sqlite` (or `postgres`, or `mysql`) failed with **50 errors**, despite the
+  manifest advertising exactly that: *"Drop `default-features` for the bare ORM
+  (core + query + sql + migrate)"*. Same root cause as above, two more
+  dependency families:
+
+  **tokio is no longer optional.** `sqlx` is a hard dependency built with
+  `runtime-tokio`, so tokio was already compiled into every build — `optional =
+  true` only controlled whether rustango was allowed to *name* the crate it was
+  already linking. Meanwhile the modules needing it are core, not opt-in: the
+  transaction on-commit registry (`sql::executor::atomic`), the audit-source
+  task-local and the event bus are all built on `tokio::task_local!` /
+  `tokio::sync`. Gating those would have silently removed transaction hooks
+  from a bare-ORM build; making the dependency honest costs no extra crate.
+
+  **axum gets an `_axum` capability.** `http_methods`, `auth_decorators`,
+  `redirects` and `flatpages` are axum middleware end to end and now gate as
+  such. Where a module is mostly dependency-free, only the axum-typed items
+  gate: `cookies::Cookie::header_value` (the builder and `build()` stay),
+  `i18n::timezone`'s two header readers (offset parsing and activation stay),
+  and the `axum::Response` assertions in `test_assertions` — that module stays
+  unconditional because its `query_counter` submodule is ORM instrumentation
+  the executor bumps on every query.
+
+  All ten checked combinations now build clean **and pass their unit tests**
+  (1443 on bare `sqlite`, 1417 on `postgres`, 1449 on `mysql`).
 
 - **ViewSet: 401 for anonymous, 403 for authenticated-but-unauthorised**
   (#1193) — the permission check collapsed both cases to 403. A token client
