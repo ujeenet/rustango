@@ -10,6 +10,32 @@ action, and `OwnedBy` does the common case in one line.
 
 ### Fixed
 
+- **Most minimal feature sets did not build** (#1208) — nine modules were
+  declared `pub mod` with no `cfg` while their bodies used *optional*
+  dependencies (`tera`, `rand`, `tower`, `hmac`, `async-trait`), so they only
+  compiled when some unrelated feature happened to pull the crate in. Measured
+  before: `postgres,manage` **75 errors**, `sqlite,admin` 26, `sqlite,manage`,
+  `postgres,manage,admin`, `sqlite,template_views` all broken — effectively
+  only combinations including `tenancy` worked, because `tenancy` enables all
+  four crates and masked every gap. `--no-default-features --features
+  sqlite,tenancy`, the one combination CI checked, was one of the masking ones.
+
+  `cargo rustango new --template api` emits exactly `postgres,manage`, so a
+  third of the shipped project templates generated a project that could not
+  compile (#1209).
+
+  Fixed by giving each optional dependency an internal capability feature
+  (`_rand`, `_tera`, `_tower`, `_async_trait`, `_base64`, `_signing`) that
+  product features enable in place of the raw `dep:`, and gating each module on
+  the capability it actually needs. `url_codec` and `list_params` became
+  **unconditional** — both are pure `std`, were gated for no reason, and are
+  imported by unconditional modules. Also fixed: `manage` merged the
+  `admin`-gated health router unconditionally, and `migrate::runner` /
+  `sql::m2m` emitted `signals` without the feature.
+
+  A `feature_combos` CI matrix now builds all seven combinations with
+  `-D warnings`, so a new gate gap fails the build instead of shipping.
+
 - **ViewSet: 401 for anonymous, 403 for authenticated-but-unauthorised**
   (#1193) — the permission check collapsed both cases to 403. A token client
   treats 401 as its cue to refresh, so answering 403 to a request that simply

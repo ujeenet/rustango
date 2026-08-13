@@ -602,7 +602,11 @@ pub(crate) mod hex;
 /// directly (otherwise the `uri_to_iri` / `filepath_to_uri` /
 /// `escape_uri_path` / `is_uri_reserved` helpers shipped by the
 /// `django.utils` parity sweep would be unreachable).
-#[cfg(any(feature = "signed_url", feature = "auth_flows", feature = "tenancy",))]
+/// Unconditional since #1208. The module is pure `std` — it has no
+/// dependencies at all — yet it was gated on
+/// `any(signed_url, auth_flows, tenancy)` while unconditional modules
+/// ([`pagination`], [`urls`], [`crypto`], [`default_filters`]) import it.
+/// Any feature set without one of those three failed to build.
 pub mod url_codec;
 
 /// AWS-style canonical request signed with SHA-256, replay-bounded
@@ -1046,7 +1050,10 @@ pub mod viewset;
 /// `?page_size=` clamping. Used by both `viewset::handle_list` and
 /// the `template_views::ListView` CBV. Closes the drift hazard
 /// flagged in issue #809.
-#[cfg(any(feature = "tenancy", feature = "template_views"))]
+///
+/// Unconditional since #1208 — it depends on nothing but `std` and
+/// [`core`], and `viewset` (gated on `any(admin, tenancy)`) uses it, so
+/// the old `any(tenancy, template_views)` gate broke `admin` alone.
 pub mod list_params;
 
 /// Generic class-based views for HTML templates (Django-shape) —
@@ -1068,14 +1075,22 @@ pub mod template_views;
 
 /// Django-shape DEBUG template-error overlay — see [`template_debug`].
 /// Issue #386.
+///
+/// The next three modules are pure Tera integrations, so they gate on
+/// `_tera` (#1208). They were unconditional while `tera` is an optional
+/// dependency, which is why any feature set without `template_views` or
+/// `admin` failed to build.
+#[cfg(feature = "_tera")]
 pub mod template_debug;
 
 /// Django-shape template context processors — see
 /// [`template_context_processors`]. Issue #384.
+#[cfg(feature = "_tera")]
 pub mod template_context_processors;
 
 /// Django-shape custom template filters + functions — see
 /// [`template_extensions`]. Issue #383.
+#[cfg(feature = "_tera")]
 pub mod template_extensions;
 
 /// Django-shape view shortcuts — `get_object_or_404` / `get_list_or_404`
@@ -1137,6 +1152,10 @@ pub mod urls;
 /// Django-shape random-string helpers — `get_random_string`,
 /// `get_random_token_urlsafe`. CSPRNG-backed, suitable for
 /// session IDs, reset tokens, verification codes.
+///
+/// Gated on `_rand` since #1208 — the module *is* `rand`, and `rand` is
+/// an optional dependency.
+#[cfg(feature = "_rand")]
 pub mod random;
 
 /// Django-shape base36 integer encoding — used in password reset
@@ -1152,6 +1171,10 @@ pub mod base62;
 /// Django-shape lorem ipsum generators — placeholder text for
 /// demos, test fixtures, template scaffolds. `lorem::words(n)`,
 /// `lorem::paragraphs(n)`, `lorem::sentence()`.
+///
+/// Gated on `_rand` since #1208 — it shuffles with `rand`, an optional
+/// dependency.
+#[cfg(feature = "_rand")]
 pub mod lorem;
 
 /// Django-shape HTTP date parser + formatter — RFC 1123 / RFC 850 /
@@ -1207,6 +1230,10 @@ pub mod http_methods;
 
 /// Django messages framework — `messages.success/info/warning/error/debug`
 /// flash storage backed by a signed cookie. Issue #9.
+///
+/// Gated on `_signing` since #1208: the cookie is HMAC-signed, so the
+/// module needs `hmac` + `sha2` + `base64`, all optional dependencies.
+#[cfg(feature = "_signing")]
 pub mod messages;
 
 /// Django-shape access decorators — `login_required` middleware +
@@ -1217,6 +1244,10 @@ pub mod auth_decorators;
 /// list of [`auth_backends::AuthBackend`] impls; the chain returns
 /// the first non-`None` result. Ships `RemoteUserBackend` for SSO
 /// proxy deployments. Issue #54 (partial).
+///
+/// Gated on `_async_trait` since #1208 — `AuthBackend` is an async trait
+/// used as `dyn`, which needs `#[async_trait]`, an optional dependency.
+#[cfg(feature = "_async_trait")]
 pub mod auth_backends;
 
 /// Pluggable `AUTH_PASSWORD_VALIDATORS` chain — run an ordered list

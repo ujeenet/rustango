@@ -414,6 +414,11 @@ pub fn filepath_to_uri(path: &str) -> String {
 /// // raw `+` → `-`, raw `/` → `_`.
 /// assert_eq!(urlsafe_base64_encode(&[0xfb, 0xff]), "-_8");
 /// ```
+///
+/// Gated on `_base64` (#1208): the module is otherwise pure `std`, so only
+/// the two base64 helpers depend on an optional crate — gating the pair keeps
+/// the rest of the URL/IRI surface available in every feature set.
+#[cfg(feature = "_base64")]
 #[must_use]
 pub fn urlsafe_base64_encode(bytes: &[u8]) -> String {
     use base64::Engine;
@@ -441,6 +446,7 @@ pub fn urlsafe_base64_encode(bytes: &[u8]) -> String {
 /// // Standard b64 reserved chars rejected.
 /// assert!(urlsafe_base64_decode("a+b/c").is_none());
 /// ```
+#[cfg(feature = "_base64")]
 #[must_use]
 pub fn urlsafe_base64_decode(s: &str) -> Option<Vec<u8>> {
     use base64::Engine;

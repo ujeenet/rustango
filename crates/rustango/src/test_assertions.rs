@@ -240,7 +240,9 @@ pub fn assert_redirects(res: &Response, target: &str) {
 ///
 /// Empty `expected` asserts NO messages cookie was set (or it's a
 /// clear-cookie with `Max-Age=0`).
-#[cfg(feature = "template_views")]
+// `_signing` as well as `template_views` (#1208): this reads the HMAC-signed
+// messages cookie, and `crate::messages` now gates on the signing capability.
+#[cfg(all(feature = "template_views", feature = "_signing"))]
 pub fn assert_messages(res: &Response, secret: &[u8], expected: &[(&str, &str)]) {
     use crate::messages::{Level, MESSAGES_COOKIE};
     use std::str::FromStr as _;

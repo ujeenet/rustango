@@ -97,7 +97,10 @@ pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
 #[cfg(feature = "mysql")]
 pub use mysql::MySql;
-#[cfg(all(feature = "sqlite", feature = "manage"))]
+// Both call sites (`manage::dispatch`) sit inside `tenancy` gates, so the
+// re-export needs `tenancy` too (#1208) — without it, `sqlite,manage` warned
+// about an unused import.
+#[cfg(all(feature = "sqlite", feature = "manage", feature = "tenancy"))]
 pub(crate) use pool::sqlite_connect_options;
 pub use pool::{Pool, PoolError};
 pub use postgres::Postgres;

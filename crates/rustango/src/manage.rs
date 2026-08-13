@@ -837,6 +837,10 @@ impl Cli {
             } else {
                 api
             };
+            // `crate::health` is `#[cfg(feature = "admin")]`, so the merge has
+            // to be too (#1208) — it was unconditional, which broke every
+            // admin-less build.
+            #[cfg(feature = "admin")]
             let api = if self.health_endpoints {
                 api.merge(crate::health::health_router(pool.clone()))
             } else {

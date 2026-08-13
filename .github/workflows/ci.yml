@@ -173,6 +173,40 @@ jobs:
   # Runs `cargo check`, `cargo clippy`, and the SQLite pragma
   # regression test (foreign_keys ON, WAL on file-backed, busy_timeout
   # set, FK violation rejected — see tests/sqlite_pragmas_live.rs).
+  # #1208 — the feature table is a public promise, so check the promise.
+  # `sqlite_litmus` below is a single combination, and it happens to be one
+  # that *masks* gate gaps: `tenancy` pulls in rand / tower / hmac /
+  # async-trait, so modules that use those without gating on them still
+  # compiled. Meanwhile `postgres,manage` (what `cargo rustango new
+  # --template api` generates) failed with 75 errors, and `sqlite,admin`
+  # with 26 — undetected, because nothing built them.
+  #
+  # Warnings are errors here, unlike the rest of CI: these combinations are
+  # exactly where cfg'd-out code leaves unused imports and unconstructed
+  # variants behind, and a warning is the only signal that a gate is wrong.
+  feature_combos:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - postgres,manage              # `cargo rustango new --template api`
+          - sqlite,manage
+          - sqlite,admin
+          - sqlite,manage,admin
+          - postgres,manage,admin
+          - sqlite,template_views
+          - sqlite,tenancy               # the pre-existing litmus
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-combos
+      - run: cargo check -p rustango --no-default-features --features ${{ matrix.features }}
+        env:
+          RUSTFLAGS: "-D warnings"
+
   sqlite_litmus:
     runs-on: ubuntu-latest
     steps:

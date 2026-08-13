@@ -275,9 +275,13 @@ fn bootstrap_models() -> Vec<&'static ModelSchema> {
 /// constraint violation).
 #[cfg(feature = "postgres")]
 pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
+    // `signals` is optional, so the pre/post_migrate emissions are gated
+    // (#1208) — they were unconditional while the module is not.
+    #[cfg(feature = "signals")]
     use crate::signals::migrate::{
         send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
     };
+    #[cfg(feature = "signals")]
     send_pre_migrate(PreMigrateContext {
         source: "apply_all",
     })
@@ -295,6 +299,7 @@ pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
     }
     // #411 — post_migrate fires once after the bootstrap walk
     // completes successfully.
+    #[cfg(feature = "signals")]
     send_post_migrate(PostMigrateContext {
         source: "apply_all",
         applied: Vec::new(),
@@ -333,9 +338,11 @@ pub async fn drop_all(pool: &PgPool) -> Result<(), MigrateError> {
 /// # Errors
 /// As [`apply_all`].
 pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> {
+    #[cfg(feature = "signals")]
     use crate::signals::migrate::{
         send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
     };
+    #[cfg(feature = "signals")]
     send_pre_migrate(PreMigrateContext {
         source: "apply_all_pool",
     })
@@ -370,6 +377,7 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     // #411 — post_migrate fires once after the bootstrap walk
     // completes. `applied` is empty because apply_all_pool doesn't
     // carry per-migration names — it walks the model inventory.
+    #[cfg(feature = "signals")]
     send_post_migrate(PostMigrateContext {
         source: "apply_all_pool",
         applied: Vec::new(),
@@ -428,9 +436,11 @@ async fn migrate_with_ledger(
     dir: &Path,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
+    #[cfg(feature = "signals")]
     use crate::signals::migrate::{
         send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
     };
+    #[cfg(feature = "signals")]
     send_pre_migrate(PreMigrateContext { source: "migrate" }).await;
     ensure_ledger_for(pool, ledger).await?;
     let newly = with_migrate_lock(pool, async {
@@ -462,6 +472,7 @@ async fn migrate_with_ledger(
     // #411 — post_migrate fires once after the file-based migrate
     // session completes. `applied` lists newly-applied migration
     // names (empty when everything was already applied).
+    #[cfg(feature = "signals")]
     send_post_migrate(PostMigrateContext {
         source: "migrate",
         applied: newly.iter().map(|m| m.name.clone()).collect(),
