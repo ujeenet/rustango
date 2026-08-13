@@ -39,7 +39,7 @@ impl ViewSet {
     pub fn openapi_paths(&self, prefix: &str, item_schema_ref: &str) -> Vec<(String, PathItem)> {
         let prefix = prefix.trim_end_matches('/').to_owned();
         let collection_path = prefix.clone();
-        let item_path = format!("{prefix}/{{pk}}");
+        let item_path = format!("{prefix}/{{{}}}", self.pk_param_name());
         let tag = item_schema_ref.to_owned();
 
         let collection = self.collection_path_item(&tag, item_schema_ref);
@@ -139,7 +139,10 @@ impl ViewSet {
         let pk_field = self.schema.primary_key();
         let schema = pk_field.map_or_else(Schema::integer, |f| field_type_to_schema(f.ty));
         let name = pk_field.map_or("pk", |f| f.name);
-        Parameter::path("pk", schema).description(format!("Primary key ({name})"))
+        // The parameter must be spelled the same as the route capture, which
+        // `ViewSet::pk_param` can rename (#1194) — otherwise the generated
+        // spec documents a path variable the server never binds.
+        Parameter::path(self.pk_param_name(), schema).description(format!("Primary key ({name})"))
     }
 
     fn list_query_params(&self) -> Vec<Parameter> {
