@@ -32,6 +32,14 @@ pub struct SetLog {
 
 const TENANT: &str = "agg_on_tenant";
 
+/// Suite-wide lock. Both tests DROP/CREATE the same tables; run in parallel
+/// they race on Postgres' `pg_type_typname_nsp_index` (23505 duplicate key)
+/// rather than on anything this file is testing.
+fn lock() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 async fn pool() -> Option<PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
     PgPool::connect(&url).await.ok()
@@ -73,6 +81,7 @@ async fn setup(pool: &PgPool) {
 /// `public`'s (10+5).
 #[tokio::test]
 async fn aggregate_fetch_on_reads_the_connections_schema() {
+    let _g = lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping — set DATABASE_URL");
         return;
@@ -104,6 +113,7 @@ async fn aggregate_fetch_on_reads_the_connections_schema() {
 /// Same guarantee for the plain values projection.
 #[tokio::test]
 async fn values_fetch_on_reads_the_connections_schema() {
+    let _g = lock().lock().await;
     let Some(pool) = pool().await else {
         eprintln!("skipping — set DATABASE_URL");
         return;
