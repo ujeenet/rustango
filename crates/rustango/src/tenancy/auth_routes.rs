@@ -344,9 +344,12 @@ async fn refresh(
     // /refresh (they share the session secret) and rotated — burning A's
     // refresh token (a cross-tenant DoS / rotation oracle). Verify the
     // token's `tenant` claim matches this subdomain BEFORE rotating.
-    let claims = jwt_handle().verify_refresh(&body.refresh).ok_or_else(|| {
-        (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
-    })?;
+    let claims = jwt_handle()
+        .verify_refresh(&body.refresh)
+        .await
+        .ok_or_else(|| {
+            (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
+        })?;
     let tenant_ok =
         claims.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str());
     if !tenant_ok {
@@ -378,7 +381,7 @@ async fn refresh(
             );
         }
     }
-    let pair = jwt_handle().refresh(&body.refresh).ok_or_else(|| {
+    let pair = jwt_handle().refresh(&body.refresh).await.ok_or_else(|| {
         (StatusCode::UNAUTHORIZED, "invalid or expired refresh token").into_response()
     })?;
     Ok(Json(RefreshOutput {
@@ -400,7 +403,7 @@ async fn logout(
     // signal. We don't reject on verify-failure here — the revoke
     // call below still runs, and a stale/expired token logout is a
     // valid audit event in its own right.
-    let claims = jwt_handle().verify_access(&bearer.0);
+    let claims = jwt_handle().verify_access(&bearer.0).await;
     // Audit N3 — if the token IS valid but bound to a DIFFERENT tenant,
     // don't let this subdomain's endpoint revoke it. (An unverifiable /
     // expired token falls through to a best-effort revoke as before.)
@@ -416,7 +419,7 @@ async fn logout(
     let user_id = claims.map(|c| c.sub);
     let meta = meta_from_headers(&headers, Some("/auth/logout"));
 
-    jwt_handle().revoke(&bearer.0);
+    jwt_handle().revoke(&bearer.0).await;
 
     send_user_logged_out(UserLoggedOutContext {
         source: "jwt",
@@ -436,9 +439,13 @@ async fn logout(
 /// would validate). Tokens without a `tenant` claim are rejected
 /// with 401 — they must have been minted by an old or external
 /// issuer that doesn't honor this contract.
-pub fn verify_for_tenant(bearer: &str, expected_slug: &str) -> Result<i64, &'static str> {
+///
+/// Async since v0.52 — the revocation check may consult a durable
+/// [`crate::jti_store::JtiStore`] (#1191).
+pub async fn verify_for_tenant(bearer: &str, expected_slug: &str) -> Result<i64, &'static str> {
     let claims = jwt_handle()
         .verify_access(bearer)
+        .await
         .ok_or("invalid or expired token")?;
     let claim_tenant = claims
         .custom_value("tenant")
@@ -465,6 +472,7 @@ async fn me(t: Tenant, bearer: Bearer) -> Result<Json<UserBrief>, Response> {
     use crate::tenancy::auth::User;
 
     let user_id = verify_for_tenant(&bearer.0, &t.org.slug)
+        .await
         .map_err(|msg| (StatusCode::UNAUTHORIZED, msg).into_response())?;
 
     let users = User::objects()
@@ -539,7 +547,7 @@ pub async fn require_bearer(
         return unauthorized("missing Bearer token");
     };
 
-    let user_id = match verify_for_tenant(token, &t.org.slug) {
+    let user_id = match verify_for_tenant(token, &t.org.slug).await {
         Ok(id) => id,
         // The reason is deliberately not echoed: "expired" vs "wrong tenant"
         // vs "revoked" tells a prober which of those they achieved.
@@ -644,8 +652,8 @@ mod tests {
         let _ = cfg.build_jwt();
     }
 
-    #[test]
-    fn config_uses_explicit_secret_when_set() {
+    #[tokio::test]
+    async fn config_uses_explicit_secret_when_set() {
         let cfg = Config {
             session_secret: Some(b"super-secret-key-for-tests-32b!!".to_vec()),
             ..Default::default()
@@ -653,7 +661,10 @@ mod tests {
         assert!(cfg.session_secret.as_ref().unwrap().len() >= 32);
         let jwt = cfg.build_jwt();
         let token = jwt.issue_pair(42);
-        let claims = jwt.verify_access(&token.access).expect("access valid");
+        let claims = jwt
+            .verify_access(&token.access)
+            .await
+            .expect("access valid");
         assert_eq!(claims.sub, 42);
     }
 

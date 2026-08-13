@@ -101,7 +101,7 @@ let pair = jwt.issue_pair(user_id);
 // → pair.refresh (lange TTL, in einem HttpOnly-Cookie / sicheren Speicher ablegen)
 
 // Authentifizierte Anfrage: den Access-Token verifizieren.
-match jwt.verify_access(&access) {
+match jwt.verify_access(&access).await {
     Some(claims) => { /* claims.sub ist die Benutzer-ID */ }
     None => { /* 401: ungültig, abgelaufen, widerrufen oder falscher Typ */ }
 }
@@ -113,8 +113,8 @@ Access-Token nicht zum Erzeugen neuer Tokens verwendet werden kann:
 
 ```rust
 let pair = jwt.issue_pair(42);
-assert!(jwt.verify_refresh(&pair.access).is_none());
-assert!(jwt.verify_access(&pair.refresh).is_none());
+assert!(jwt.verify_refresh(&pair.access).await.is_none());
+assert!(jwt.verify_access(&pair.refresh).await.is_none());
 ```
 
 ---
@@ -128,9 +128,9 @@ abgelehnt):
 
 ```rust
 let pair = jwt.issue_pair(7);
-let rotated = jwt.refresh(&pair.refresh).expect("refresh ok");
+let rotated = jwt.refresh(&pair.refresh).await.expect("refresh ok");
 assert_ne!(pair.access, rotated.access);
-assert!(jwt.refresh(&pair.refresh).is_none());   // der alte Refresh ist jetzt tot
+assert!(jwt.refresh(&pair.refresh).await.is_none());   // der alte Refresh ist jetzt tot
 ```
 
 Standardmäßig **bewahrt** `refresh` die benutzerdefinierten Claims des Tokens.
@@ -149,8 +149,8 @@ abgelaufen wäre — genau das ruft `POST /api/auth/logout` auf:
 
 ```rust
 let pair = jwt.issue_pair(1);
-assert!(jwt.revoke(&pair.access));
-assert!(jwt.verify_access(&pair.access).is_none());
+assert!(jwt.revoke(&pair.access).await);
+assert!(jwt.verify_access(&pair.access).await.is_none());
 ```
 
 Die Sperrliste liegt in einem austauschbaren `JtiStore`. Der Standard
@@ -168,14 +168,48 @@ let a = JwtLifecycle::new(secret.clone()).with_jti_store(Arc::clone(&shared));
 let b = JwtLifecycle::new(secret).with_jti_store(Arc::clone(&shared));
 
 let pair = a.issue_pair(5);
-a.revoke(&pair.access);
-assert!(b.verify_access(&pair.access).is_none());   // B sieht As Widerruf
+a.revoke(&pair.access).await;
+assert!(b.verify_access(&pair.access).await.is_none());   // B sieht As Widerruf
 ```
 
 > Ohne gemeinsamen Speicher ist `/logout` bestenfalls „best-effort“: Ein
 > widerrufener Token kann auf einer anderen Replica bis zu seinem natürlichen
 > Ablauf noch akzeptiert werden. Dies ist die einzelne wichtigste
 > Produktionseinstellung für JWT-Auth.
+
+### Einen dauerhaften Speicher schreiben
+
+`JtiStore` ist asynchron (seit v0.52, #1191), eine dauerhafte Implementierung ist
+also eine einzige Abfrage — kein Hintergrund-Flusher, kein Konvergenzfenster, in
+dem ein widerrufener `jti` woanders noch akzeptiert wird. Beide Methoden geben
+`JtiFuture<'_, T>` zurück (ein geboxtes Future — der Trait wird als
+`Arc<dyn JtiStore>` verwendet, und natives `async fn` in Traits ist nicht
+dyn-kompatibel):
+
+```rust
+use rustango::jti_store::{JtiFuture, JtiStore};
+
+impl JtiStore for PgJtiStore {
+    fn is_used<'a>(&'a self, jti: &'a str) -> JtiFuture<'a, bool> {
+        Box::pin(async move { self.lookup(jti).await })
+    }
+
+    fn mark_used<'a>(&'a self, jti: &'a str, exp_unix: i64) -> JtiFuture<'a, bool> {
+        Box::pin(async move { self.insert_if_absent(jti, exp_unix).await })
+    }
+}
+```
+
+`mark_used` MUSS atomar sein: Bei gleichzeitigen Aufrufen für denselben `jti`
+darf genau einer `true` sehen — ein einziger bedingter Schreibvorgang
+(`INSERT … ON CONFLICT DO NOTHING`, Redis `SET NX`), niemals Lesen-dann-Schreiben.
+Sonst ist die Einmalverwendungs-Garantie für Refresh-Tokens verloren.
+
+Da die Verifizierung den Speicher konsultiert, sind `verify_access`,
+`verify_refresh`, `refresh`, `revoke` und die MCP-/Tenant-Token-Helfer
+(`mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`) alle
+`async`. Der **Ablauf wird vor** dem Speicherzugriff geprüft, ein abgelaufener
+Token kostet also keinen Roundtrip.
 
 ---
 
@@ -190,7 +224,7 @@ let custom = serde_json::json!({ "roles": ["admin"], "tenant": "acme" })
     .as_object().unwrap().clone();
 let pair = jwt.issue_pair_with(99, custom)?;
 
-let claims = jwt.verify_access(&pair.access).unwrap();
+let claims = jwt.verify_access(&pair.access).await.unwrap();
 let roles: Vec<String> = claims.get_custom("roles").unwrap();   // ["admin"]
 ```
 

@@ -386,7 +386,7 @@ Los "claims" son los hechos clave/valor que incrustas en el token (roles, inquil
 ### Verificar un token
 
 ```rust
-let claims = jwt.verify_access(&access_token)
+let claims = jwt.verify_access(&access_token).await
     .ok_or(StatusCode::UNAUTHORIZED)?;
 
 let roles: Vec<String> = claims.get_custom("roles").unwrap_or_default();
@@ -396,7 +396,7 @@ let tenant: String = claims.get_custom("tenant").unwrap_or_default();
 ### Refrescar un token (mantiene tus claims personalizados)
 
 ```rust
-let new_pair = jwt.refresh(&refresh_token)
+let new_pair = jwt.refresh(&refresh_token).await
     .ok_or(StatusCode::UNAUTHORIZED)?;
 // new_pair has the same roles + scope + tenant
 ```
@@ -411,18 +411,18 @@ El JTI (su ID único) del antiguo token de refresco se añade a una lista negra 
 let new_pair = jwt.refresh_with(&refresh_token, json!({
     "roles": ["viewer"],     // role was demoted since login
     "tenant": "acme",
-}).as_object().unwrap().clone())?
+}).as_object().unwrap().clone()).await?
     .ok_or(StatusCode::UNAUTHORIZED)?;
 ```
 
 ### Revocar un token
 
 ```rust
-jwt.revoke(&access_token);     // adds JTI to blacklist
-jwt.revoke(&refresh_token);
+jwt.revoke(&access_token).await;     // adds JTI to blacklist
+jwt.revoke(&refresh_token).await;
 ```
 
-La lista negra en memoria por defecto (`InMemoryJtiStore`) limpia por sí sola las entradas caducadas, pero vive en un único proceso y olvida cada revocación al reiniciar. Para despliegues multiproceso, instala un almacén compartido y duradero vía `JwtLifecycle::new(secret).with_jti_store(store)` — `store` es cualquier `Arc<dyn JtiStore>` (por ejemplo uno respaldado por Redis o por BD). Sin un almacén compartido, un token que revocas en una réplica todavía puede repetirse en otra hasta que caduque.
+La lista negra en memoria por defecto (`InMemoryJtiStore`) limpia por sí sola las entradas caducadas, pero vive en un único proceso y olvida cada revocación al reiniciar. Para despliegues multiproceso, instala un almacén compartido y duradero vía `JwtLifecycle::new(secret).with_jti_store(store)` — `store` es cualquier `Arc<dyn JtiStore>` (por ejemplo uno respaldado por Redis o por BD). Sin un almacén compartido, un token que revocas en una réplica todavía puede repetirse en otra hasta que caduque. Desde v0.52 (#1191) todas estas llamadas son `async` — `verify_*`, `refresh*` y `revoke` esperan al almacén, de modo que un almacén duradero puede ser una única escritura condicional en lugar de una caché de consistencia eventual con volcado en segundo plano.
 
 > **Análisis en profundidad:** [API de auth JWT](auth-jwt-api.md) — el router incorporado `/api/auth/login|refresh|logout|me`, el refresco deslizante, y el almacén de revocación de JTI. Para un único token autogestionado, consulta [JWT (independiente)](auth-jwt.md). Para restringir rutas de navegador/API por inicio de sesión, consulta los [decoradores de acceso](auth-decorators.md).
 

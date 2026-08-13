@@ -218,9 +218,12 @@ impl JwtLifecycle {
 
     /// Verify an access token. Returns the claims on success, `None` if
     /// invalid, expired, blacklisted, or wrong type.
+    ///
+    /// Async since v0.52 — the revocation check consults the
+    /// [`crate::jti_store::JtiStore`], which may be a durable backend (#1191).
     #[must_use]
-    pub fn verify_access(&self, token: &str) -> Option<JwtClaims> {
-        let claims = self.verify_token(token)?;
+    pub async fn verify_access(&self, token: &str) -> Option<JwtClaims> {
+        let claims = self.verify_token(token).await?;
         if claims.typ != ACCESS_TYP {
             return None;
         }
@@ -229,9 +232,11 @@ impl JwtLifecycle {
 
     /// Verify a refresh token. Returns the claims on success, `None` if
     /// invalid, expired, blacklisted, or wrong type.
+    ///
+    /// Async since v0.52 — see [`Self::verify_access`].
     #[must_use]
-    pub fn verify_refresh(&self, token: &str) -> Option<JwtClaims> {
-        let claims = self.verify_token(token)?;
+    pub async fn verify_refresh(&self, token: &str) -> Option<JwtClaims> {
+        let claims = self.verify_token(token).await?;
         if claims.typ != REFRESH_TYP {
             return None;
         }
@@ -249,11 +254,11 @@ impl JwtLifecycle {
     ///
     /// Returns `None` if the refresh token is invalid, expired, or already
     /// blacklisted.
-    pub fn refresh(&self, refresh_token: &str) -> Option<JwtTokenPair> {
-        let claims = self.verify_refresh(refresh_token)?;
+    pub async fn refresh(&self, refresh_token: &str) -> Option<JwtTokenPair> {
+        let claims = self.verify_refresh(refresh_token).await?;
         // Rotate: blacklist the old refresh, issue a new pair carrying the
         // same custom payload (preserves `scope` / `roles` / `tenant`).
-        self.blacklist_jti(&claims.jti, claims.exp);
+        self.blacklist_jti(&claims.jti, claims.exp).await;
         // Safe to unwrap — the custom claims came from a token we ourselves
         // issued, so they can't contain reserved names (issue_pair_with
         // already rejected those at original issuance).
@@ -269,26 +274,26 @@ impl JwtLifecycle {
     /// # Errors
     /// [`JwtIssueError::ReservedClaim`] if `new_custom` overlaps reserved names.
     /// Returns `Ok(None)` if the refresh token is invalid / expired / blacklisted.
-    pub fn refresh_with(
+    pub async fn refresh_with(
         &self,
         refresh_token: &str,
         new_custom: serde_json::Map<String, serde_json::Value>,
     ) -> Result<Option<JwtTokenPair>, JwtIssueError> {
-        let Some(claims) = self.verify_refresh(refresh_token) else {
+        let Some(claims) = self.verify_refresh(refresh_token).await else {
             return Ok(None);
         };
-        self.blacklist_jti(&claims.jti, claims.exp);
+        self.blacklist_jti(&claims.jti, claims.exp).await;
         self.issue_pair_with(claims.sub, new_custom).map(Some)
     }
 
     /// Revoke a token by adding its JTI to the blacklist. Subsequent
     /// `verify_*` calls for this token will return `None` until the
     /// token's natural expiry passes.
-    pub fn revoke(&self, token: &str) -> bool {
+    pub async fn revoke(&self, token: &str) -> bool {
         let Some(claims) = self.decode_unchecked(token) else {
             return false;
         };
-        self.blacklist_jti(&claims.jti, claims.exp);
+        self.blacklist_jti(&claims.jti, claims.exp).await;
         true
     }
 
@@ -296,8 +301,8 @@ impl JwtLifecycle {
     /// / monitoring). Stores that don't cheaply expose a count
     /// (e.g. a Redis-backed [`JtiStore`]) return 0. v0.48.
     #[must_use]
-    pub fn blacklist_size(&self) -> usize {
-        self.jti_store.approx_size().unwrap_or(0)
+    pub async fn blacklist_size(&self) -> usize {
+        self.jti_store.approx_size().await.unwrap_or(0)
     }
 
     // ------------------------------------------------------------------ internals
@@ -331,14 +336,15 @@ impl JwtLifecycle {
         format!("{payload_b64}.{sig_b64}")
     }
 
-    fn verify_token(&self, token: &str) -> Option<JwtClaims> {
+    async fn verify_token(&self, token: &str) -> Option<JwtClaims> {
         let claims = self.decode_unchecked(token)?;
-        // Expiry
+        // Expiry — checked before the store, so an expired token never costs
+        // a round trip to a durable backend.
         if chrono::Utc::now().timestamp() >= claims.exp {
             return None;
         }
         // Blacklist
-        if self.is_blacklisted(&claims.jti) {
+        if self.is_blacklisted(&claims.jti).await {
             return None;
         }
         Some(claims)
@@ -389,24 +395,29 @@ impl JwtLifecycle {
         mac.finalize().into_bytes().to_vec()
     }
 
-    fn blacklist_jti(&self, jti: &str, expires_at: i64) {
+    async fn blacklist_jti(&self, jti: &str, expires_at: i64) {
         // v0.48 — delegate to the pluggable JtiStore. We ignore the
         // returned `bool` (newly-inserted vs already-present) because
         // re-revoking an already-revoked token is idempotent here:
         // either way the JTI is in the store on return. Pruning is
         // the store's responsibility (`InMemoryJtiStore` does it
         // opportunistically inside `mark_used`).
-        let _ = self.jti_store.mark_used(jti, expires_at);
+        //
+        // v0.52 (#1191) — awaited, so a durable store writes the revocation
+        // before we return. Previously the trait was sync, which forced
+        // durable stores into a write-behind cache with a window where a
+        // revoked token was still accepted on another instance.
+        let _ = self.jti_store.mark_used(jti, expires_at).await;
     }
 
-    fn is_blacklisted(&self, jti: &str) -> bool {
+    async fn is_blacklisted(&self, jti: &str) -> bool {
         // v0.48 — `JtiStore::is_used` doesn't filter by the entry's
         // expiry the way the pre-v0.48 in-line map did. That's a
         // tighter behaviour (a revoked-but-not-yet-pruned JTI stays
         // unusable for slightly longer), and harmless: the token
         // verify path rejects expired tokens before this check is
         // ever consulted.
-        self.jti_store.is_used(jti)
+        self.jti_store.is_used(jti).await
     }
 }
 
@@ -440,78 +451,84 @@ mod tests {
         JwtLifecycle::new(b"test-secret".to_vec())
     }
 
-    #[test]
-    fn issue_and_verify_access() {
+    #[tokio::test]
+    async fn issue_and_verify_access() {
         let j = jwt();
         let pair = j.issue_pair(42);
-        let claims = j.verify_access(&pair.access).expect("access verifies");
+        let claims = j
+            .verify_access(&pair.access)
+            .await
+            .expect("access verifies");
         assert_eq!(claims.sub, 42);
         assert_eq!(claims.typ, "access");
         assert!(!claims.jti.is_empty());
     }
 
-    #[test]
-    fn issue_and_verify_refresh() {
+    #[tokio::test]
+    async fn issue_and_verify_refresh() {
         let j = jwt();
         let pair = j.issue_pair(42);
-        let claims = j.verify_refresh(&pair.refresh).expect("refresh verifies");
+        let claims = j
+            .verify_refresh(&pair.refresh)
+            .await
+            .expect("refresh verifies");
         assert_eq!(claims.sub, 42);
         assert_eq!(claims.typ, "refresh");
     }
 
-    #[test]
-    fn access_token_rejected_as_refresh() {
+    #[tokio::test]
+    async fn access_token_rejected_as_refresh() {
         let j = jwt();
         let pair = j.issue_pair(1);
-        assert!(j.verify_refresh(&pair.access).is_none());
+        assert!(j.verify_refresh(&pair.access).await.is_none());
     }
 
-    #[test]
-    fn refresh_token_rejected_as_access() {
+    #[tokio::test]
+    async fn refresh_token_rejected_as_access() {
         let j = jwt();
         let pair = j.issue_pair(1);
-        assert!(j.verify_access(&pair.refresh).is_none());
+        assert!(j.verify_access(&pair.refresh).await.is_none());
     }
 
-    #[test]
-    fn refresh_returns_new_pair() {
+    #[tokio::test]
+    async fn refresh_returns_new_pair() {
         let j = jwt();
         let pair = j.issue_pair(7);
-        let new_pair = j.refresh(&pair.refresh).expect("refresh succeeds");
+        let new_pair = j.refresh(&pair.refresh).await.expect("refresh succeeds");
         assert_ne!(pair.access, new_pair.access);
         assert_ne!(pair.refresh, new_pair.refresh);
 
-        let claims = j.verify_access(&new_pair.access).unwrap();
+        let claims = j.verify_access(&new_pair.access).await.unwrap();
         assert_eq!(claims.sub, 7);
     }
 
-    #[test]
-    fn refresh_blacklists_old_refresh_token() {
+    #[tokio::test]
+    async fn refresh_blacklists_old_refresh_token() {
         let j = jwt();
         let pair = j.issue_pair(7);
-        let _new = j.refresh(&pair.refresh).unwrap();
+        let _new = j.refresh(&pair.refresh).await.unwrap();
         // The old refresh token can no longer be used.
-        assert!(j.refresh(&pair.refresh).is_none());
-        assert!(j.verify_refresh(&pair.refresh).is_none());
+        assert!(j.refresh(&pair.refresh).await.is_none());
+        assert!(j.verify_refresh(&pair.refresh).await.is_none());
     }
 
-    #[test]
-    fn revoke_invalidates_access_token() {
+    #[tokio::test]
+    async fn revoke_invalidates_access_token() {
         let j = jwt();
         let pair = j.issue_pair(1);
-        assert!(j.verify_access(&pair.access).is_some());
-        assert!(j.revoke(&pair.access));
-        assert!(j.verify_access(&pair.access).is_none());
+        assert!(j.verify_access(&pair.access).await.is_some());
+        assert!(j.revoke(&pair.access).await);
+        assert!(j.verify_access(&pair.access).await.is_none());
     }
 
-    #[test]
-    fn revoke_invalid_token_returns_false() {
+    #[tokio::test]
+    async fn revoke_invalid_token_returns_false() {
         let j = jwt();
-        assert!(!j.revoke("not-a-valid-token"));
+        assert!(!j.revoke("not-a-valid-token").await);
     }
 
-    #[test]
-    fn tampered_signature_fails_verification() {
+    #[tokio::test]
+    async fn tampered_signature_fails_verification() {
         let j = jwt();
         let pair = j.issue_pair(1);
         let mut bytes = pair.access.into_bytes();
@@ -519,24 +536,24 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
         let tampered = String::from_utf8(bytes).unwrap();
-        assert!(j.verify_access(&tampered).is_none());
+        assert!(j.verify_access(&tampered).await.is_none());
     }
 
-    #[test]
-    fn wrong_secret_fails_verification() {
+    #[tokio::test]
+    async fn wrong_secret_fails_verification() {
         let j1 = jwt();
         let j2 = JwtLifecycle::new(b"different-secret".to_vec());
         let pair = j1.issue_pair(5);
-        assert!(j2.verify_access(&pair.access).is_none());
+        assert!(j2.verify_access(&pair.access).await.is_none());
     }
 
-    #[test]
-    fn unique_jti_per_issuance() {
+    #[tokio::test]
+    async fn unique_jti_per_issuance() {
         let j = jwt();
         let pair1 = j.issue_pair(1);
         let pair2 = j.issue_pair(1);
-        let c1 = j.verify_access(&pair1.access).unwrap();
-        let c2 = j.verify_access(&pair2.access).unwrap();
+        let c1 = j.verify_access(&pair1.access).await.unwrap();
+        let c2 = j.verify_access(&pair2.access).await.unwrap();
         assert_ne!(c1.jti, c2.jti);
     }
 
@@ -555,8 +572,8 @@ mod tests {
         value.as_object().unwrap().clone()
     }
 
-    #[test]
-    fn issue_pair_with_embeds_custom_claims() {
+    #[tokio::test]
+    async fn issue_pair_with_embeds_custom_claims() {
         let j = jwt();
         let pair = j
             .issue_pair_with(
@@ -564,7 +581,7 @@ mod tests {
                 map(serde_json::json!({"roles": ["admin", "editor"], "tenant": "acme"})),
             )
             .unwrap();
-        let claims = j.verify_access(&pair.access).unwrap();
+        let claims = j.verify_access(&pair.access).await.unwrap();
         assert_eq!(claims.sub, 42);
         let roles: Vec<String> = claims.get_custom("roles").unwrap();
         assert_eq!(roles, vec!["admin", "editor"]);
@@ -572,11 +589,11 @@ mod tests {
         assert_eq!(tenant, "acme");
     }
 
-    #[test]
-    fn issue_pair_no_custom_returns_empty_custom_map() {
+    #[tokio::test]
+    async fn issue_pair_no_custom_returns_empty_custom_map() {
         let j = jwt();
         let pair = j.issue_pair(7);
-        let claims = j.verify_access(&pair.access).unwrap();
+        let claims = j.verify_access(&pair.access).await.unwrap();
         assert!(claims.custom.is_empty());
         let missing: Option<String> = claims.get_custom("anything");
         assert!(missing.is_none());
@@ -595,8 +612,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn refresh_preserves_custom_claims() {
+    #[tokio::test]
+    async fn refresh_preserves_custom_claims() {
         let j = jwt();
         let pair = j
             .issue_pair_with(
@@ -604,10 +621,10 @@ mod tests {
                 map(serde_json::json!({"scope": "read:posts write:posts"})),
             )
             .unwrap();
-        let new_pair = j.refresh(&pair.refresh).unwrap();
+        let new_pair = j.refresh(&pair.refresh).await.unwrap();
 
-        let new_access_claims = j.verify_access(&new_pair.access).unwrap();
-        let new_refresh_claims = j.verify_refresh(&new_pair.refresh).unwrap();
+        let new_access_claims = j.verify_access(&new_pair.access).await.unwrap();
+        let new_refresh_claims = j.verify_refresh(&new_pair.refresh).await.unwrap();
 
         assert_eq!(new_access_claims.sub, 7);
         let scope: String = new_access_claims.get_custom("scope").unwrap();
@@ -618,8 +635,8 @@ mod tests {
         assert_eq!(scope_r, "read:posts write:posts");
     }
 
-    #[test]
-    fn refresh_with_substitutes_new_custom_claims() {
+    #[tokio::test]
+    async fn refresh_with_substitutes_new_custom_claims() {
         let j = jwt();
         let pair = j
             .issue_pair_with(7, map(serde_json::json!({"roles": ["admin"]})))
@@ -627,64 +644,68 @@ mod tests {
         // Role got revoked since login — issue new pair with downgraded scope
         let new_pair = j
             .refresh_with(&pair.refresh, map(serde_json::json!({"roles": ["viewer"]})))
+            .await
             .unwrap()
             .unwrap();
 
-        let claims = j.verify_access(&new_pair.access).unwrap();
+        let claims = j.verify_access(&new_pair.access).await.unwrap();
         let roles: Vec<String> = claims.get_custom("roles").unwrap();
         assert_eq!(roles, vec!["viewer"]);
     }
 
-    #[test]
-    fn refresh_with_invalid_token_returns_ok_none() {
+    #[tokio::test]
+    async fn refresh_with_invalid_token_returns_ok_none() {
         let j = jwt();
         let r = j
             .refresh_with("not-a-token", map(serde_json::json!({})))
+            .await
             .unwrap();
         assert!(r.is_none());
     }
 
-    #[test]
-    fn refresh_with_rejects_reserved_claims() {
+    #[tokio::test]
+    async fn refresh_with_rejects_reserved_claims() {
         let j = jwt();
         let pair = j.issue_pair(1);
-        let r = j.refresh_with(&pair.refresh, map(serde_json::json!({"sub": 999})));
+        let r = j
+            .refresh_with(&pair.refresh, map(serde_json::json!({"sub": 999})))
+            .await;
         assert!(matches!(r, Err(JwtIssueError::ReservedClaim(_))));
     }
 
-    #[test]
-    fn issue_access_with_returns_single_token() {
+    #[tokio::test]
+    async fn issue_access_with_returns_single_token() {
         let j = jwt();
         let token = j
             .issue_access_with(42, map(serde_json::json!({"key_id": "abc"})))
             .unwrap();
-        let claims = j.verify_access(&token).unwrap();
+        let claims = j.verify_access(&token).await.unwrap();
         assert_eq!(claims.sub, 42);
         assert_eq!(claims.typ, "access");
         let key_id: String = claims.get_custom("key_id").unwrap();
         assert_eq!(key_id, "abc");
     }
 
-    #[test]
-    fn custom_value_returns_raw_json() {
+    #[tokio::test]
+    async fn custom_value_returns_raw_json() {
         let j = jwt();
         let token = j
             .issue_access_with(1, map(serde_json::json!({"nested": {"x": 1}})))
             .unwrap();
-        let claims = j.verify_access(&token).unwrap();
+        let claims = j.verify_access(&token).await.unwrap();
         let raw = claims.custom_value("nested").unwrap();
         assert_eq!(raw["x"], 1);
     }
 
-    #[test]
-    fn refresh_blacklists_old_refresh_even_with_custom_claims() {
+    #[tokio::test]
+    async fn refresh_blacklists_old_refresh_even_with_custom_claims() {
         let j = jwt();
         let pair = j
             .issue_pair_with(7, map(serde_json::json!({"role": "admin"})))
             .unwrap();
-        let _new = j.refresh(&pair.refresh).unwrap();
+        let _new = j.refresh(&pair.refresh).await.unwrap();
         // Original refresh token can no longer be used
-        assert!(j.refresh(&pair.refresh).is_none());
+        assert!(j.refresh(&pair.refresh).await.is_none());
     }
 
     // v0.48 — `with_jti_store` lets two JwtLifecycle handles share
@@ -696,8 +717,8 @@ mod tests {
     // wired. A Redis-backed JtiStore in production gives the same
     // semantics across actual replicas.
 
-    #[test]
-    fn shared_jti_store_makes_revoke_visible_across_handles() {
+    #[tokio::test]
+    async fn shared_jti_store_makes_revoke_visible_across_handles() {
         use crate::jti_store::{InMemoryJtiStore, JtiStore};
         let secret = b"shared-test-secret-32-bytes-long".to_vec();
         let shared: std::sync::Arc<dyn JtiStore> = std::sync::Arc::new(InMemoryJtiStore::new());
@@ -707,35 +728,35 @@ mod tests {
 
         let pair = j_a.issue_pair(7);
         // Both instances accept the token before revocation.
-        assert!(j_a.verify_access(&pair.access).is_some());
-        assert!(j_b.verify_access(&pair.access).is_some());
+        assert!(j_a.verify_access(&pair.access).await.is_some());
+        assert!(j_b.verify_access(&pair.access).await.is_some());
 
         // Revoke on A.
-        assert!(j_a.revoke(&pair.access));
+        assert!(j_a.revoke(&pair.access).await);
 
         // B must now reject the token even though revocation
         // happened on A. The shared store is the single source of
         // truth.
         assert!(
-            j_a.verify_access(&pair.access).is_none(),
+            j_a.verify_access(&pair.access).await.is_none(),
             "instance A must reject its own revoked token"
         );
         assert!(
-            j_b.verify_access(&pair.access).is_none(),
+            j_b.verify_access(&pair.access).await.is_none(),
             "instance B must see the revocation from A via the shared store"
         );
     }
 
-    #[test]
-    fn blacklist_size_uses_jti_store_approx_size() {
+    #[tokio::test]
+    async fn blacklist_size_uses_jti_store_approx_size() {
         // Confirms blacklist_size delegates to JtiStore::approx_size
         // rather than peeking at a private map.
         let j = jwt();
-        assert_eq!(j.blacklist_size(), 0);
+        assert_eq!(j.blacklist_size().await, 0);
         let pair = j.issue_pair(1);
-        j.revoke(&pair.access);
-        assert_eq!(j.blacklist_size(), 1);
-        j.revoke(&pair.refresh);
-        assert_eq!(j.blacklist_size(), 2);
+        j.revoke(&pair.access).await;
+        assert_eq!(j.blacklist_size().await, 1);
+        j.revoke(&pair.refresh).await;
+        assert_eq!(j.blacklist_size().await, 2);
     }
 }

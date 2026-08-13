@@ -119,7 +119,9 @@ fn jwt() -> Arc<JwtLifecycle> {
 async fn token_issue_and_verify_within_tenant() {
     let jwt = jwt();
     let token = rustango::mcp::issue_agent_token(&jwt, 42, "acme", &[], &[], None).expect("issue");
-    let agent = rustango::mcp::verify_agent_token(&jwt, &token, "acme").expect("verify");
+    let agent = rustango::mcp::verify_agent_token(&jwt, &token, "acme")
+        .await
+        .expect("verify");
     assert_eq!(agent.agent_id, 42);
     assert_eq!(agent.tenant, "acme");
     assert!(!agent.jti.is_empty());
@@ -130,16 +132,25 @@ async fn token_for_other_tenant_is_rejected() {
     let jwt = jwt();
     let token = rustango::mcp::issue_agent_token(&jwt, 42, "acme", &[], &[], None).expect("issue");
     // Same valid signature, wrong tenant → refused (cross-tenant replay).
-    assert!(rustango::mcp::verify_agent_token(&jwt, &token, "evilcorp").is_none());
+    assert!(rustango::mcp::verify_agent_token(&jwt, &token, "evilcorp")
+        .await
+        .is_none());
 }
 
 #[tokio::test]
 async fn revoked_token_is_refused() {
     let jwt = jwt();
     let token = rustango::mcp::issue_agent_token(&jwt, 7, "acme", &[], &[], None).expect("issue");
-    assert!(rustango::mcp::verify_agent_token(&jwt, &token, "acme").is_some());
-    assert!(jwt.revoke(&token), "revoke decodes + blacklists the jti");
-    assert!(rustango::mcp::verify_agent_token(&jwt, &token, "acme").is_none());
+    assert!(rustango::mcp::verify_agent_token(&jwt, &token, "acme")
+        .await
+        .is_some());
+    assert!(
+        jwt.revoke(&token).await,
+        "revoke decodes + blacklists the jti"
+    );
+    assert!(rustango::mcp::verify_agent_token(&jwt, &token, "acme")
+        .await
+        .is_none());
 }
 
 #[tokio::test]
@@ -149,5 +160,7 @@ async fn non_agent_token_is_refused() {
     let plain = jwt
         .issue_access_with(1, serde_json::Map::new())
         .expect("issue plain");
-    assert!(rustango::mcp::verify_agent_token(&jwt, &plain, "acme").is_none());
+    assert!(rustango::mcp::verify_agent_token(&jwt, &plain, "acme")
+        .await
+        .is_none());
 }
