@@ -1172,9 +1172,9 @@ impl ViewSetState {
         codenames: &[String],
         parts: &axum::http::request::Parts,
         conn: &mut AcquiredConn,
-    ) -> bool {
+    ) -> PermOutcome {
         if codenames.is_empty() {
-            return true;
+            return PermOutcome::Allow;
         }
         #[cfg(feature = "tenancy")]
         {
@@ -1182,25 +1182,28 @@ impl ViewSetState {
                 .extensions
                 .get::<crate::tenancy::middleware::AuthenticatedUser>()
             else {
-                return false;
+                // No principal at all — the client needs to authenticate,
+                // which is 401, not 403 (#1193).
+                return PermOutcome::Unauthenticated;
             };
             if auth.is_superuser {
-                return true;
+                return PermOutcome::Allow;
             }
             for cn in codenames {
                 if conn.has_perm(auth.id, cn).await {
-                    return true;
+                    return PermOutcome::Allow;
                 }
             }
-            false
+            PermOutcome::Forbidden
         }
         #[cfg(not(feature = "tenancy"))]
         {
             // Without tenancy there's no AuthenticatedUser extension
             // and no has_perm engine. Codenames present + no engine
-            // means we conservatively deny.
+            // means we conservatively deny. There is no principal to
+            // speak of either, so this reads as "authenticate first".
             let _ = (parts, conn);
-            false
+            PermOutcome::Unauthenticated
         }
     }
 
@@ -1385,6 +1388,21 @@ fn narrow(expr: WhereExpr, extra: Vec<WhereExpr>) -> WhereExpr {
     WhereExpr::And(all)
 }
 
+/// Outcome of a per-action permission check.
+///
+/// Three-valued on purpose: "no principal" and "principal without the
+/// permission" are different answers to the client. Collapsing them to a
+/// single bool is what produced a 403 for anonymous requests (#1193).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermOutcome {
+    /// Authorised — proceed.
+    Allow,
+    /// No authenticated principal → `401`.
+    Unauthenticated,
+    /// Authenticated, but lacks every required codename → `403`.
+    Forbidden,
+}
+
 async fn enter(
     state: &Arc<ViewSetState>,
     req: axum::extract::Request,
@@ -1398,8 +1416,21 @@ async fn enter(
         return Err(resp);
     }
     let mut acq = state.acquire(&mut parts).await?;
-    if !state.check_perm(codenames, &parts, &mut acq).await {
-        return Err(json_error(StatusCode::FORBIDDEN, "permission denied"));
+    match state.check_perm(codenames, &parts, &mut acq).await {
+        PermOutcome::Allow => {}
+        // 401 means "authenticate", 403 means "you cannot do this". A token
+        // client treats 401 as its cue to refresh; answering 403 to an
+        // anonymous request means the refresh never fires and the member is
+        // silently logged out (#1193).
+        PermOutcome::Unauthenticated => {
+            return Err(json_error(
+                StatusCode::UNAUTHORIZED,
+                "authentication required",
+            ))
+        }
+        PermOutcome::Forbidden => {
+            return Err(json_error(StatusCode::FORBIDDEN, "permission denied"))
+        }
     }
     Ok((parts, body, acq))
 }
