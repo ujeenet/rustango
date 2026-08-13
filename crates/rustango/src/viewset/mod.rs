@@ -1198,12 +1198,14 @@ impl ViewSetState {
         }
         #[cfg(not(feature = "tenancy"))]
         {
-            // Without tenancy there's no AuthenticatedUser extension
-            // and no has_perm engine. Codenames present + no engine
-            // means we conservatively deny. There is no principal to
-            // speak of either, so this reads as "authenticate first".
+            // Without tenancy there's no AuthenticatedUser extension and no
+            // has_perm engine, so codenames present + no engine means we
+            // conservatively deny. Deliberately 403, NOT 401: no amount of
+            // authenticating can satisfy a check with no engine behind it,
+            // and answering 401 would send a token client into exactly the
+            // futile refresh loop this issue set out to remove (#1193).
             let _ = (parts, conn);
-            PermOutcome::Unauthenticated
+            PermOutcome::Forbidden
         }
     }
 

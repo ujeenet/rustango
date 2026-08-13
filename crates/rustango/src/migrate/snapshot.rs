@@ -308,9 +308,37 @@ impl SchemaSnapshot {
                     slot.insert(e);
                 }
                 std::collections::btree_map::Entry::Occupied(mut slot) => {
-                    let held_is_framework = is_framework_model(slot.get());
-                    if held_is_framework && !is_framework_model(e) {
-                        slot.insert(e);
+                    let held = *slot.get();
+                    match (is_framework_model(held), is_framework_model(e)) {
+                        // Downstream model overrides the framework's own.
+                        (true, false) => {
+                            tracing::warn!(
+                                target: "rustango::migrate",
+                                table = %e.schema.table,
+                                model = %e.module_path,
+                                "a project model is overriding a framework table — its \
+                                 schema will be used instead of rustango's. If this was \
+                                 not intended, the table name is a typo."
+                            );
+                            slot.insert(e);
+                        }
+                        // Two downstream models claiming one table is ambiguous.
+                        // Resolve by module path so the emitted migration is
+                        // stable across builds (inventory order is link-order
+                        // dependent), and say so rather than silently picking.
+                        (false, false) => {
+                            tracing::warn!(
+                                target: "rustango::migrate",
+                                table = %e.schema.table,
+                                candidates = %format!("{}, {}", held.module_path, e.module_path),
+                                "two models declare the same table — using the \
+                                 lexicographically first module path; remove one"
+                            );
+                            if e.module_path < held.module_path {
+                                slot.insert(e);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
