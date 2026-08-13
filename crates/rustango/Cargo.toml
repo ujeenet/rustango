@@ -397,7 +397,12 @@ tenancy = [
     "_async_trait",
     "dep:argon2",
     "dep:cookie",
-    "_signing",
+    # Deliberately the exact pair tenancy carried before #1208, not `_signing`
+    # — that capability also pulls `base64`, which tenancy never depended on.
+    # The capability features exist to stop the feature table lying about what
+    # it pulls in; widening one while introducing them would defeat that.
+    "dep:hmac",
+    "dep:sha2",
     "dep:password-hash",
     "_rand",
     "dep:rpassword",
