@@ -10,6 +10,18 @@ action, and `OwnedBy` does the common case in one line.
 
 ### Fixed
 
+- **ViewSet page ceiling is the app's, not a hard-coded 1000** (#1196) — a
+  client could ask for `?page_size=1000` regardless of what the app configured,
+  so an app sized around `page_size(20)` faced a 50× amplification of its
+  serializer, joins and response budget; where the serializer does per-row work
+  against the database, that turns an N+1 into a thousand queries in one
+  request. **Behaviour change:** the ceiling now defaults to **100** (matching
+  `template_views`, which the two pagination surfaces previously disagreed
+  about by a factor of ten), and is configurable per ViewSet with
+  `max_page_size(n)`. `?limit=` is bounded by the same value, so limit/offset
+  isn't a way around it, and a `page_size` larger than the ceiling can't
+  smuggle a bigger page through the default path either.
+
 - **ViewSet: 401 for anonymous, 403 for authenticated-but-unauthorised**
   (#1193) — the permission check collapsed both cases to 403. A token client
   treats 401 as its cue to refresh, so answering 403 to a request that simply
