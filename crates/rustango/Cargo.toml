@@ -119,6 +119,10 @@ cache-page = ["cache", "admin", "dep:base64"]
 # Signals layer (`rustango::signals`) — Django-shape pre_save / post_save
 # / pre_delete / post_delete async dispatch. Receivers register globally
 # per model type; senders fire signals after write paths.
+#
+# Empty list, not dead config: the feature still gates `rustango::signals` and
+# the emission sites in `migrate::runner` / `sql::m2m`. It carried `dep:tokio`
+# until tokio became unconditional.
 signals = []
 
 # Email backends (`rustango::email`) — Mailer trait + ConsoleMailer +
@@ -156,6 +160,9 @@ auth_flows = ["signed_url"]
 
 # Broadcast event bus (`rustango::sse`) — fan-out for SSE / WebSocket /
 # signal-driven push. tokio::sync::broadcast under the hood.
+#
+# Empty list, not dead config — still gates `rustango::sse`. Carried
+# `dep:tokio` until tokio became unconditional.
 sse = []
 
 # WebSocket handler scaffold (`rustango::ws`) — fan-out via the SSE
@@ -251,6 +258,9 @@ storage = ["_async_trait"]
 
 # In-process scheduled task runner (`rustango::scheduler`) — fire async jobs
 # at fixed intervals with panic isolation per task.
+#
+# Empty list, not dead config — still gates `rustango::scheduler`. Carried
+# `dep:tokio` until tokio became unconditional.
 scheduler = []
 
 # Secrets manager (`rustango::secrets`) — Secrets trait + EnvSecrets +
@@ -417,15 +427,16 @@ tenancy = [
 # that don't want this dep can opt out by skipping the macro and
 # using `#[tokio::main]` directly.
 #
-# v0.31.1 (#4): `dep:tokio` so the macro can emit
-# `#[::rustango::__private_runtime::tokio::main]` and user crates no
-# longer need to add tokio to their own Cargo.toml just to use the
-# rustango entrypoint shim.
+# v0.31.1 (#4): the macro emits
+# `#[::rustango::__private_runtime::tokio::main]`, so user crates don't need
+# tokio in their own Cargo.toml just to use the rustango entrypoint shim.
+# That re-export no longer needs a feature to carry it — tokio is an
+# unconditional dependency (see the note on the `tokio` line below).
 runtime = ["dep:tracing-subscriber", "dep:tracing-appender"]
 
 # Minimal axum runserver — `rustango::server::AppBuilder`. Bi-dialect
-# single-pool bootstrap (SQLite / Postgres / MySQL). Implies axum +
-# tokio. The full multi-tenant `Builder` lives behind `tenancy` and
+# single-pool bootstrap (SQLite / Postgres / MySQL). Pulls axum; tokio is
+# unconditional. The full multi-tenant `Builder` lives behind `tenancy` and
 # pulls in much more.
 runserver = ["_axum"]
 
