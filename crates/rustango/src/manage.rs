@@ -536,6 +536,27 @@ impl Cli {
         // database, so none of them should care what `DATABASE_URL` says.
         {
             let mut out = std::io::stdout();
+
+            // A tenancy project has its own help — it lists `create-tenant`,
+            // `create-operator`, `create-user` and the rest of the tenancy
+            // verbs, which the plain migration runner knows nothing about.
+            // Route help there before the generic pool-free dispatch, or a
+            // tenancy project would print the wrong verb list. (Caught by
+            // `cookbook_blog`'s `cli_help_works_without_database_url`.)
+            //
+            // `write_help` needs no pool either, so tenancy projects get the
+            // same "help works whatever DATABASE_URL says" fix (#1216).
+            #[cfg(feature = "tenancy")]
+            if self.tenancy
+                && matches!(
+                    args.first().map(String::as_str),
+                    None | Some("") | Some("help") | Some("--help") | Some("-h")
+                )
+            {
+                crate::tenancy::manage::write_help(&mut out)?;
+                return Ok(());
+            }
+
             if let Some(res) = crate::migrate::manage::run_pool_free(&args, &mut out) {
                 res?;
                 return Ok(());
