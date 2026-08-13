@@ -406,7 +406,10 @@ Laravel's `make:*` commands (`make:controller`, `make:model`, …). Each
 generator writes to `src/<snake_name>.rs` (or `tests/<snake_name>.rs`
 for `make:test`) and:
 
-- Checks the name is valid (PascalCase, letters/digits/underscore).
+- Checks the name is valid (PascalCase, letters/digits/underscore) — these
+  generators emit a **type**, so the name is a type name. `make:test` is the
+  exception: it emits a file of test functions, so it takes any Rust
+  identifier and `make:test post_smoke` works as shown below.
 - Converts it to snake_case for the filename (`PostViewSet` →
   `post_view_set.rs`).
 - Won't overwrite an existing file.

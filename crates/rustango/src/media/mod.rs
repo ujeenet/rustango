@@ -663,7 +663,13 @@ impl MediaManager {
         if self.pool.dialect().name() == "mysql" {
             #[cfg(feature = "mysql")]
             {
-                let crate::sql::Pool::Mysql(my) = &self.pool else {
+                // `Pool`'s variants are feature-gated, so this destructure is
+                // refutable in a multi-backend build and irrefutable in a
+                // mysql-only one — where it warns. The `else` arm has to stay
+                // for the multi-backend case.
+                #[allow(irrefutable_let_patterns)]
+                let crate::sql::Pool::Mysql(my) = &self.pool
+                else {
                     unreachable!("dialect name matched mysql but variant didn't");
                 };
                 let insert_sql = format!(
@@ -918,7 +924,10 @@ impl MediaManager {
         if d.name() == "mysql" {
             #[cfg(feature = "mysql")]
             {
-                let crate::sql::Pool::Mysql(my) = &self.pool else {
+                // Irrefutable in a mysql-only build — see the note above.
+                #[allow(irrefutable_let_patterns)]
+                let crate::sql::Pool::Mysql(my) = &self.pool
+                else {
                     unreachable!()
                 };
                 let mut tx = my.begin().await?;
@@ -1173,7 +1182,10 @@ impl MediaManager {
         if d.name() == "mysql" {
             #[cfg(feature = "mysql")]
             {
-                let crate::sql::Pool::Mysql(my) = &self.pool else {
+                // Irrefutable in a mysql-only build — see the note above.
+                #[allow(irrefutable_let_patterns)]
+                let crate::sql::Pool::Mysql(my) = &self.pool
+                else {
                     unreachable!()
                 };
                 let insert_sql =

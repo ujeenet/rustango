@@ -79,16 +79,28 @@ fn print_help() {
     println!();
     println!("USAGE:");
     println!("  cargo rustango new <name> [--template api|fullstack|tenant]");
+    println!("                           [--rustango-path <dir>]");
     println!();
     println!("TEMPLATES:");
     println!("  api        bare ORM + axum, no admin (JSON-only services)");
     println!("  fullstack  ORM + auto-admin (default)");
     println!("  tenant     multi-tenancy + operator console + tenancy_manage CLI");
     println!();
+    println!("OPTIONS:");
+    println!("  -t, --template <name>    project template (default: fullstack)");
+    println!("      --rustango-path <d>  depend on a local rustango checkout");
+    println!("                           instead of the published crate");
+    println!();
+    println!("BACKEND:");
+    println!("  Projects default to Postgres. Switch without editing anything:");
+    println!("    cargo run --no-default-features --features sqlite");
+    println!();
     println!("EXAMPLES:");
     println!("  cargo rustango new myblog");
     println!("  cargo rustango new api_demo --template api");
+    println!("  cargo rustango new api_demo --template=api");
     println!("  cargo rustango new shop --template tenant");
+    println!("  cargo rustango new ex1 --rustango-path ../rustango/crates/rustango");
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +122,24 @@ impl Template {
         }
     }
 
+    /// The full `rustango = …` dependency value for a generated `Cargo.toml`.
+    ///
+    /// `path` is `--rustango-path`: it swaps the crates.io source for a local
+    /// checkout while keeping the same feature selection, so an in-repo example
+    /// needs no hand edit and the generate-and-check test can validate the
+    /// working tree rather than the last release (#1211).
+    fn rustango_dep(self, path: Option<&str>) -> String {
+        let Some(p) = path else {
+            return self.rustango_features();
+        };
+        let feats = match self {
+            Self::Api => r#", features = ["manage"]"#,
+            Self::Fullstack => r#", features = ["batteries"]"#,
+            Self::Tenant => r#", features = ["batteries", "tenancy"]"#,
+        };
+        format!(r#"{{ path = "{p}", default-features = false{feats} }}"#)
+    }
+
     fn rustango_features(self) -> String {
         // Track our own (cargo-rustango) version, which is bumped
         // in lockstep with the rustango crate via the workspace
@@ -121,13 +151,29 @@ impl Template {
         // moved to v0.28+, breaking `cargo build` on every fresh
         // tenant project (#79).
         let v = mm_version();
+        // #1211 — the backend is NOT named here. The generated `[features]`
+        // block forwards it (`postgres = ["rustango/postgres"]`, etc.), and
+        // `#[derive(Model)]` gates its emissions on the *project's* feature,
+        // because a cfg inside a derive resolves against the destination
+        // crate. Pinning `rustango/postgres` in the dependency while the
+        // project's own `postgres` feature was off made those two disagree:
+        // rustango wanted `MaybePgFromRow`, the derive had skipped emitting
+        // it, and `--no-default-features --features sqlite` — the switch the
+        // generated manifest advertises in a comment — failed to compile.
         match self {
             // Bare ORM + axum + manage dispatcher; no auto-admin UI.
-            Self::Api => format!(
-                r#"{{ version = "{v}", default-features = false, features = ["postgres", "manage"] }}"#
+            Self::Api => {
+                format!(r#"{{ version = "{v}", default-features = false, features = ["manage"] }}"#)
+            }
+            // `batteries` is rustango's default set minus the backend, so the
+            // project picks the backend through its own feature and still gets
+            // everything `default` would have given it.
+            Self::Fullstack => format!(
+                r#"{{ version = "{v}", default-features = false, features = ["batteries"] }}"#
             ),
-            Self::Fullstack => format!(r#""{v}""#),
-            Self::Tenant => format!(r#"{{ version = "{v}", features = ["tenancy"] }}"#),
+            Self::Tenant => format!(
+                r#"{{ version = "{v}", default-features = false, features = ["batteries", "tenancy"] }}"#
+            ),
         }
     }
 }
@@ -146,6 +192,9 @@ fn mm_version() -> String {
 struct NewArgs {
     name: String,
     template: Template,
+    /// `--rustango-path <dir>`: emit a path dependency instead of the crates.io
+    /// version. For in-repo examples and for testing the working tree (#1211).
+    rustango_path: Option<String>,
 }
 
 fn cmd_new(args: &[String]) -> Result<(), String> {
@@ -187,6 +236,7 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
 fn parse_new_args(args: &[String]) -> Result<NewArgs, String> {
     let mut name: Option<String> = None;
     let mut template = Template::Fullstack;
+    let mut rustango_path: Option<String> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -195,6 +245,28 @@ fn parse_new_args(args: &[String]) -> Result<NewArgs, String> {
                     .next()
                     .ok_or_else(|| "--template requires a value".to_owned())?;
                 template = Template::parse(v)?;
+            }
+            // #1211 — the equals form is universal CLI convention (cargo's own
+            // flags take it) and used to be rejected as an unknown flag.
+            _ if arg.starts_with("--template=") => {
+                template = Template::parse(&arg["--template=".len()..])?;
+            }
+            _ if arg.starts_with("-t=") => {
+                template = Template::parse(&arg["-t=".len()..])?;
+            }
+            // #1211 — generate against a local checkout instead of crates.io.
+            // Every in-repo example has to hand-rewrite the dependency line
+            // otherwise, and without this the "does a generated project
+            // compile?" test can only ever validate the last *release*, not
+            // the working tree — which is how a broken template shipped.
+            "--rustango-path" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| "--rustango-path requires a value".to_owned())?;
+                rustango_path = Some(v.clone());
+            }
+            _ if arg.starts_with("--rustango-path=") => {
+                rustango_path = Some(arg["--rustango-path=".len()..].to_owned());
             }
             "--help" | "-h" => {
                 print_help();
@@ -213,7 +285,11 @@ fn parse_new_args(args: &[String]) -> Result<NewArgs, String> {
     }
     let name =
         name.ok_or_else(|| "missing project name (e.g. `cargo rustango new myapp`)".to_owned())?;
-    Ok(NewArgs { name, template })
+    Ok(NewArgs {
+        name,
+        template,
+        rustango_path,
+    })
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
@@ -237,7 +313,11 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     let name = &args.name;
     let template = args.template;
 
-    write(root, "Cargo.toml", &templates::cargo_toml(name, template))?;
+    write(
+        root,
+        "Cargo.toml",
+        &templates::cargo_toml(name, template, args.rustango_path.as_deref()),
+    )?;
     write(root, ".env.example", &templates::env_example(name))?;
     write(root, ".gitignore", templates::GITIGNORE)?;
     write(root, "rust-toolchain.toml", templates::RUST_TOOLCHAIN)?;
