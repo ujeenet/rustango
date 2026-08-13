@@ -603,6 +603,9 @@ pub struct ViewSet {
     /// field-level projection. Tri-dialect. Wired via
     /// [`Self::serializer`].
     serializer: Option<Arc<dyn SerializerBridge>>,
+    /// Name of the path capture for the detail routes — `pk` by default,
+    /// giving `/{pk}`. See [`ViewSet::pk_param`].
+    pk_param: String,
 }
 
 impl ViewSet {
@@ -622,6 +625,7 @@ impl ViewSet {
             filter_backends: Vec::new(),
             throttle: ViewSetThrottle::default(),
             serializer: None,
+            pk_param: "pk".to_owned(),
         }
     }
 
@@ -800,6 +804,39 @@ impl ViewSet {
         self
     }
 
+    /// Rename the detail routes' path capture. Defaults to `pk`, i.e.
+    /// `/{pk}`.
+    ///
+    /// axum allows only **one** capture name per path position across a
+    /// router, so a hand-written route mounted beside a ViewSet that spells
+    /// the same position differently — `/{id}`, `/{token}` — panics at
+    /// startup, and the panic points at axum rather than at the ViewSet.
+    /// Rather than forcing every neighbouring route to adopt `pk`, match the
+    /// ViewSet to them:
+    ///
+    /// ```ignore
+    /// ViewSet::for_model(Post::SCHEMA).pk_param("id").router("/api/posts", pool)
+    /// // detail routes become /api/posts/{id}
+    /// ```
+    ///
+    /// The handlers read the capture positionally, so only the route string
+    /// and the generated OpenAPI parameter change.
+    ///
+    /// Note that a capture cannot share a segment with a literal, so an
+    /// AIP-style `/{token}:accept` is not expressible; use `/{token}/accept`.
+    #[must_use]
+    pub fn pk_param(mut self, name: impl Into<String>) -> Self {
+        self.pk_param = name.into();
+        self
+    }
+
+    /// The configured detail-route capture name (`pk` unless
+    /// [`ViewSet::pk_param`] changed it).
+    #[must_use]
+    pub fn pk_param_name(&self) -> &str {
+        &self.pk_param
+    }
+
     /// Allow GET only — wires list + retrieve, skips create/update/destroy.
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
@@ -878,7 +915,7 @@ impl ViewSet {
         });
         let prefix = prefix.trim_end_matches('/').to_owned();
         let collection = prefix.clone();
-        let item = format!("{prefix}/{{pk}}");
+        let item = format!("{prefix}/{{{}}}", self.pk_param);
 
         let collection_route = if self.read_only {
             get(handle_list)
