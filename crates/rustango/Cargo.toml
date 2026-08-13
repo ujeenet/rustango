@@ -23,7 +23,28 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver", "template_views"]
+default = ["postgres", "batteries"]
+
+# Everything `default` gives you **except** the database backend (#1211).
+#
+# A downstream project cannot use `default` and still choose its backend:
+# `#[derive(Model)]` gates its `FromRow` / `LoadRelated` emissions on the
+# *consumer's* features (a cfg inside a derive resolves against the destination
+# crate), so if the dependency pins `rustango/postgres` while the project's own
+# `postgres` feature is off, rustango demands impls the derive never emitted.
+# Naming `batteries` instead lets the project forward the backend through its
+# own feature:
+#
+#     rustango = { version = "…", default-features = false, features = ["batteries"] }
+#
+#     [features]
+#     default  = ["postgres"]
+#     postgres = ["rustango/postgres"]
+#     sqlite   = ["rustango/sqlite"]
+#
+# `cargo rustango new` emits exactly that. Keeping the list here rather than in
+# the generated manifest means it can't rot out of sync with `default`.
+batteries = ["manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver", "template_views"]
 postgres = ["sqlx/postgres"]
 
 # Unified `cargo run` / `cargo run -- <verb>` dispatcher. Pulls the

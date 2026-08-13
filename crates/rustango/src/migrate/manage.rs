@@ -1792,7 +1792,28 @@ fn version_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
 
 // ============================================================ make:* generators
 
+/// What shape of name a `make:*` generator accepts.
+///
+/// Most emit a **type** (`make:viewset Widget` → `struct WidgetViewSet`), so
+/// PascalCase is the right rule. `make:test` emits a **file of test functions**
+/// — `tests/post_smoke.rs` — where snake_case is the Rust convention and the
+/// name `docs/manage.md` itself documents (#1214).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameShape {
+    /// PascalCase, e.g. `PostViewSet`.
+    Type,
+    /// Any Rust identifier: `post_smoke` and `PostSmoke` both accepted.
+    Identifier,
+}
+
 fn parse_name_and_model(args: &[String]) -> Result<(String, Option<String>, String), MigrateError> {
+    parse_name_and_model_as(args, NameShape::Type)
+}
+
+fn parse_name_and_model_as(
+    args: &[String],
+    shape: NameShape,
+) -> Result<(String, Option<String>, String), MigrateError> {
     let mut name: Option<String> = None;
     let mut model: Option<String> = None;
     // Phase 2b of #145 — every `make:*` scaffolder emits `use rustango::…`
@@ -1838,10 +1859,19 @@ fn parse_name_and_model(args: &[String]) -> Result<(String, Option<String>, Stri
     let name = name.ok_or_else(|| {
         MigrateError::Validation("name is required (e.g. `manage make:viewset PostViewSet`)".into())
     })?;
-    if !is_valid_type_name(&name) {
-        return Err(MigrateError::Validation(format!(
-            "`{name}` is not a valid Rust type name (PascalCase, alphanumeric + underscore)"
-        )));
+    match shape {
+        NameShape::Type if !is_valid_type_name(&name) => {
+            return Err(MigrateError::Validation(format!(
+                "`{name}` is not a valid Rust type name (PascalCase, alphanumeric + underscore)"
+            )));
+        }
+        NameShape::Identifier if !is_valid_identifier(&name) => {
+            return Err(MigrateError::Validation(format!(
+                "`{name}` is not a valid Rust identifier (letters, digits, underscore; \
+                 must not start with a digit)"
+            )));
+        }
+        _ => {}
     }
     Ok((name, model, crate_root.unwrap_or_else(|| "rustango".into())))
 }
@@ -1850,6 +1880,17 @@ fn is_valid_type_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     !bytes.is_empty()
         && bytes[0].is_ascii_uppercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+/// A Rust identifier — any case. Used by `make:test`, whose output is a file of
+/// `#[test] fn`s rather than a type.
+fn is_valid_identifier(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
         && bytes
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
@@ -2387,7 +2428,12 @@ pub async fn {snake}(req: Request<Body>, next: Next) -> Response<Body> {{
 }
 
 fn make_test_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
-    let (name, _, crate_root) = parse_name_and_model(args)?;
+    // Identifier, not type name (#1214). `docs/manage.md` documents
+    // `make:test post_smoke`, and that invocation used to be rejected — a test
+    // file holds `#[test] fn`s, and `fn PostSmoke()` would warn under
+    // `non_snake_case`. `PostSmoke` still works and still lands on
+    // `tests/post_smoke.rs`, so the documented form and the old form agree.
+    let (name, _, crate_root) = parse_name_and_model_as(args, NameShape::Identifier)?;
     let snake = pascal_to_snake(&name);
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:test {name}`.
@@ -2403,7 +2449,7 @@ fn app() -> Router {{
 }}
 
 #[tokio::test]
-async fn {snake}_smoke() {{
+async fn {snake}() {{
     let client = TestClient::new(app());
     let r = client.get("/hello").send().await;
     assert_eq!(r.status, 200);
@@ -4525,6 +4571,47 @@ mod gen_tests {
         assert_eq!(pascal_to_snake("PostViewSet"), "post_view_set");
         assert_eq!(pascal_to_snake("API"), "a_p_i"); // simple impl — acceptable
         assert_eq!(pascal_to_snake("UserNotification"), "user_notification");
+    }
+
+    /// The regression from #1214: `docs/manage.md` documents
+    /// `make:test post_smoke`, and that exact invocation was rejected.
+    #[test]
+    fn make_test_accepts_the_documented_snake_case_name() {
+        let args = vec!["post_smoke".to_owned()];
+        let (name, _, _) = parse_name_and_model_as(&args, NameShape::Identifier)
+            .expect("the documented example must be accepted");
+        assert_eq!(name, "post_smoke");
+        // Already snake — the filename conversion must leave it alone.
+        assert_eq!(pascal_to_snake(&name), "post_smoke");
+    }
+
+    /// PascalCase keeps working, and lands on the same file as the snake form,
+    /// so neither spelling is a second way to name a different test.
+    #[test]
+    fn make_test_still_accepts_pascal_case() {
+        let args = vec!["PostSmoke".to_owned()];
+        let (name, _, _) = parse_name_and_model_as(&args, NameShape::Identifier).unwrap();
+        assert_eq!(pascal_to_snake(&name), "post_smoke");
+    }
+
+    /// The type-name generators are unchanged — snake_case is still refused
+    /// there, because their output really is a `struct`.
+    #[test]
+    fn type_generators_still_reject_snake_case() {
+        let args = vec!["post_view_set".to_owned()];
+        assert!(parse_name_and_model_as(&args, NameShape::Type).is_err());
+        assert!(parse_name_and_model(&args).is_err());
+    }
+
+    #[test]
+    fn identifier_rules() {
+        assert!(is_valid_identifier("post_smoke"));
+        assert!(is_valid_identifier("PostSmoke"));
+        assert!(is_valid_identifier("_leading"));
+        assert!(is_valid_identifier("a1"));
+        assert!(!is_valid_identifier("1leading")); // digit first
+        assert!(!is_valid_identifier("has-dash"));
+        assert!(!is_valid_identifier(""));
     }
 
     #[test]

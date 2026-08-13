@@ -10,8 +10,8 @@ use super::Template;
 
 // ---------------- Cargo.toml ----------------
 
-pub fn cargo_toml(name: &str, template: Template) -> String {
-    let rustango_dep = template.rustango_features();
+pub fn cargo_toml(name: &str, template: Template, rustango_path: Option<&str>) -> String {
+    let rustango_dep = template.rustango_dep(rustango_path);
     format!(
         r#"[package]
 name = "{name}"
@@ -370,6 +370,12 @@ pub fn models_rs(template: Template) -> String {
 use rustango::sql::Auto;
 use rustango::Model;
 
+// `#[derive(Model)]` registers this struct through `inventory` at *runtime* —
+// the admin, migrations and the ORM all reach it that way. rustc cannot see
+// runtime registration, so a model whose fields only the framework reads trips
+// `dead_code` and a fresh project could not be built with `-D warnings`
+// (#1210). Delete this line once your own code reads the fields.
+#[allow(dead_code)]
 #[derive(Model, Debug, Clone)]
 #[rustango(table = \"item\", display = \"name\")]
 pub struct Item {
@@ -384,9 +390,8 @@ pub struct Item {
     if matches!(template, Template::Tenant) {
         format!(
             "{header}
-// Tenancy registry models (Org, Operator, User) come along
-// automatically via the `rustango::tenancy::*` import in
-// src/bin/manage.rs — you don't need to redefine them here.
+// Tenancy registry models (Org, Operator, User) come along automatically
+// with the `tenancy` feature — you don't need to redefine them here.
 "
         )
     } else {
@@ -444,22 +449,24 @@ pub fn api() -> Router<()> {
             .to_owned()
         }
         Template::Fullstack => {
-            // Stateless aggregator + a separate `admin_router(pool)`
-            // helper that main.rs nests under `/admin`. Pool flows
-            // through `Extension<PgPool>` (attached by main.rs) so
-            // all apps' handlers can grab it without each one
-            // declaring the pool as a state type.
+            // #1210/#1211 — this used to also emit an `admin_router(pool)`
+            // helper. Nothing called it: `Cli` mounts the auto-admin itself,
+            // so calling the helper was never how you got an admin. It was
+            // therefore dead code (a warning in every fresh project) *and*
+            // misleading — and it was the only generated line naming `PgPool`,
+            // hard-wiring Postgres into a project whose manifest offers
+            // sqlite and mysql.
             "//! Project URL routing (template: fullstack — ORM + auto-admin).
 //!
 //! `Router::new()` in `api()` is the auto-mount anchor —
 //! `manage startapp` inserts `.merge(crate::<name>::urls::api())`
-//! lines here. The auto-admin is built separately via
-//! `admin_router(pool)` and nested at `/admin` from `main.rs`.
+//! lines here.
+//!
+//! The auto-admin needs no wiring: `Cli` mounts it at `/admin` when the
+//! `admin` feature is on. Set the prefix with `Cli::admin_prefix(..)`.
 
 use axum::routing::get;
 use axum::Router;
-use rustango::admin;
-use rustango::sql::sqlx::PgPool;
 
 use crate::views;
 
@@ -467,13 +474,6 @@ pub fn api() -> Router<()> {
     Router::new()
         .route(\"/\", get(views::index))
         .route(\"/healthz\", get(views::healthz))
-}
-
-pub fn admin_router(pool: PgPool) -> Router {
-    // `admin_prefix` must match the path you nest the admin under in
-    // `main.rs` (e.g. `.nest(\"/admin\", urls::admin_router(pool))`) so
-    // the admin's own links + form actions resolve.
-    admin::Builder::new(pool).admin_prefix(\"/admin\").build()
 }
 "
             .to_owned()
@@ -606,7 +606,13 @@ pub fn config_dev_settings_toml(name: &str) -> String {
 # Loaded when RUSTANGO_ENV=dev (the default when unset).
 
 [database]
-url = "postgres://postgres:postgres@localhost:5432/{name}_dev"
+# Matches the credentials in the generated docker-compose.yml and
+# .env.example. These three used to disagree — dev_settings said
+# postgres:postgres@localhost while compose created rustango:rustango, so the
+# first `cargo run -- migrate` failed to authenticate (#1211). Host is
+# `localhost` (not the compose service name) because this tier is for running
+# the app on the host against the containerised database.
+url = "postgres://rustango:rustango@localhost:5432/{name}_dev"
 
 [server]
 bind = "127.0.0.1:8080"
@@ -664,10 +670,16 @@ pub fn config_prod_settings_toml(name: &str) -> String {
 # (database url, secret key) come from RUSTANGO__* env vars or your
 # secrets manager — leaving them out of source control.
 
+# The whole section is commented out — the URL comes from
+# RUSTANGO__DATABASE__URL or your secrets manager. Uncomment the header
+# together with the keys if you want to pin pool sizes here: leaving
+# `pool_min_size` uncommented under a commented-out `[database]` puts it at
+# the TOML document root, where `Settings` silently ignores it — the tier
+# looks like it sizes the pool and doesn't (#1211).
 # [database]
-# url = "set via RUSTANGO__DATABASE__URL or your secrets manager"
-pool_min_size = 5
-pool_max_size = 50
+# url           = "set via RUSTANGO__DATABASE__URL or your secrets manager"
+# pool_min_size = 5
+# pool_max_size = 50
 
 [server]
 bind                 = "0.0.0.0:8080"

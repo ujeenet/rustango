@@ -55,6 +55,12 @@ enum TenantConnCell<DB: Database> {
     /// after the first `pool_conn()`/`into_conn()` call.
     Ready(TenantConn<DB>),
     /// No connection held yet; acquire from these pools on demand.
+    ///
+    /// Only the SQLite and MySQL extractors construct this (Postgres is eager,
+    /// per the note above), so in a Postgres-only build it is legitimately
+    /// unconstructed rather than dead — the arms that match it still have to
+    /// compile.
+    #[cfg_attr(not(any(feature = "sqlite", feature = "mysql")), allow(dead_code))]
     Deferred(Arc<TenantPools<DB>>),
 }
 

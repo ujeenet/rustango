@@ -173,6 +173,25 @@ jobs:
   # Runs `cargo check`, `cargo clippy`, and the SQLite pragma
   # regression test (foreign_keys ON, WAL on file-backed, busy_timeout
   # set, FK violation rejected — see tests/sqlite_pragmas_live.rs).
+  # #1207 — generate each project template and compile it. `templates.rs`
+  # claimed CI already did this; nothing did. The crate's unit tests are
+  # `.contains()` assertions on template *strings*, and no test ever wrote a
+  # project to disk — which is how `--template api` came to generate a project
+  # that failed with 75 compiler errors without anything going red.
+  #
+  # `--ignored` because each case compiles rustango, so `cargo test` stays fast
+  # for everyone else. The tests pass `--rustango-path`, so they validate this
+  # commit rather than the last published release.
+  scaffolded_projects:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: scaffolded-projects
+      - run: cargo test -p cargo-rustango --test generated_project_compiles -- --ignored --test-threads=1
+
   # #1208 — the feature table is a public promise, so check the promise.
   # `sqlite_litmus` below is a single combination, and it happens to be one
   # that *masks* gate gaps: `tenancy` pulls in rand / tower / hmac /
