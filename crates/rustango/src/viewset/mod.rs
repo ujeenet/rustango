@@ -39,7 +39,7 @@
 //! | Parameter | Default | Description |
 //! |---|---|---|
 //! | `page` | 1 | 1-based page number |
-//! | `page_size` | configured default | Items per page (capped at 1000) |
+//! | `page_size` | configured default | Items per page (capped at `max_page_size`, default 100) |
 //! | `ordering` | configured default | Comma-separated field names, prefix `-` for DESC |
 //! | `search` | — | Full-text search across `search_fields` |
 //! | `{field}` | — | Exact filter for any `filter_fields` |
@@ -55,7 +55,7 @@
 //! | Parameter | Default | Description |
 //! |---|---|---|
 //! | `cursor` | — | Opaque token from a previous response's `next` field |
-//! | `page_size` | configured default | Items per page (capped at 1000) |
+//! | `page_size` | configured default | Items per page (capped at `max_page_size`, default 100) |
 //! | `{field}` | — | Exact filter for any `filter_fields` |
 //!
 //! Response: `{"page_size": S, "next": "<token>" \| null, "results": [...]}`
@@ -69,7 +69,7 @@
 //!
 //! | Parameter | Default | Description |
 //! |---|---|---|
-//! | `limit` | configured default | Items to return (capped at 1000) |
+//! | `limit` | configured default | Items to return (capped at `max_page_size`, default 100) |
 //! | `offset` | 0 | Rows to skip before the window |
 //! | `ordering` | configured default | Comma-separated field names, prefix `-` for DESC |
 //! | `search` | — | Full-text search across `search_fields` |
@@ -603,6 +603,9 @@ pub struct ViewSet {
     /// field-level projection. Tri-dialect. Wired via
     /// [`Self::serializer`].
     serializer: Option<Arc<dyn SerializerBridge>>,
+    /// Largest page a client may request via `?page_size=` / `?limit=`.
+    /// Defaults to 100. See [`ViewSet::max_page_size`].
+    max_page_size: usize,
     /// Name of the path capture for the detail routes — `pk` by default,
     /// giving `/{pk}`. See [`ViewSet::pk_param`].
     pk_param: String,
@@ -625,6 +628,7 @@ impl ViewSet {
             filter_backends: Vec::new(),
             throttle: ViewSetThrottle::default(),
             serializer: None,
+            max_page_size: 100,
             pk_param: "pk".to_owned(),
         }
     }
@@ -760,9 +764,37 @@ impl ViewSet {
         self
     }
 
-    /// Default page size for list responses (default: 20, max: 1000).
+    /// Default page size for list responses (default: 20).
+    ///
+    /// This is the size used when the client asks for none. What a client may
+    /// *request* is bounded separately by [`ViewSet::max_page_size`], and the
+    /// effective size is clamped to that bound at request time — so the order
+    /// of these two builder calls doesn't matter.
     pub fn page_size(mut self, n: usize) -> Self {
-        self.default_page_size = n.min(1000);
+        self.default_page_size = n.max(1);
+        self
+    }
+
+    /// Largest page a client may request via `?page_size=` / `?limit=`
+    /// (default: 100).
+    ///
+    /// The ceiling used to be a hard-coded 1000 with no way to lower it, so an
+    /// app that sized its serializer, joins and response budget around
+    /// `page_size(20)` could still be asked for 1000 rows by any client — a
+    /// 50× amplification. If the serializer does per-row work that touches the
+    /// database, that is an N+1 turning into a thousand queries in a single
+    /// request (#1196).
+    ///
+    /// The default matches `template_views`' ceiling, so the framework's two
+    /// pagination surfaces now agree. Raise it deliberately when a consumer
+    /// genuinely needs bigger pages:
+    ///
+    /// ```ignore
+    /// ViewSet::for_model(Post::SCHEMA).page_size(20).max_page_size(500)
+    /// ```
+    #[must_use]
+    pub fn max_page_size(mut self, n: usize) -> Self {
+        self.max_page_size = n.max(1);
         self
     }
 
@@ -1647,11 +1679,14 @@ async fn run_list(
     mut acq: AcquiredConn,
     parts: &axum::http::request::Parts,
 ) -> Response {
+    // Clamp to the ViewSet's own ceiling, not a hard-coded 1000 (#1196). The
+    // default page size is clamped too, so a `page_size` larger than
+    // `max_page_size` can't smuggle a bigger page through the default path.
     let page_size: i64 = params
         .get("page_size")
         .and_then(|p| p.parse().ok())
         .unwrap_or(state.vs.default_page_size as i64)
-        .min(1000)
+        .min(state.vs.max_page_size as i64)
         .max(1);
 
     // Build WHERE from filter_fields in query params.
@@ -1807,11 +1842,13 @@ async fn run_list(
         PaginationStyle::LimitOffset => {
             // `?limit=` overrides the default page size; `?offset=` skips
             // rows. Same `COUNT(*)` cost as page-number pagination.
+            // Same ceiling as `?page_size=` — otherwise limit/offset would be
+            // an unbounded way around it (#1196).
             let limit: i64 = params
                 .get("limit")
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(page_size)
-                .min(1000)
+                .min(state.vs.max_page_size as i64)
                 .max(1);
             let offset: i64 = params
                 .get("offset")
