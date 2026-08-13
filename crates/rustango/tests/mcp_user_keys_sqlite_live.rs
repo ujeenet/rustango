@@ -179,7 +179,9 @@ async fn permission_grants_flow_into_a_user_key() {
     ));
     let token =
         issue_agent_token(&jwt, agent_id, "acme", &skills, &tools, Some(uid)).expect("issue");
-    let agent = verify_agent_token(&jwt, &token, "acme").expect("verify");
+    let agent = verify_agent_token(&jwt, &token, "acme")
+        .await
+        .expect("verify");
     assert_eq!(agent.user_id, Some(uid));
     assert_eq!(agent.tools, vec!["coach_log"]);
 

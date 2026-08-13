@@ -79,7 +79,7 @@ A method's return type tells you how it can fail. Rust has no exceptions, so fai
 
 **`Option<T>`** — either a value (`Some`) or nothing (`None`), like a nullable field. Use it when "nothing found" is a normal outcome and you don't need an error message explaining why:
 - Lookups: `cache.get(k) -> Result<Option<String>, _>` (the `Result` covers I/O failure; the `Option` covers "key not present")
-- Verification: `JwtLifecycle::verify_access(token) -> Option<Claims>` ("expired or invalid" is an expected outcome, so `None` is enough)
+- Verification: `async JwtLifecycle::verify_access(token) -> Option<Claims>` ("expired or invalid" is an expected outcome, so `None` is enough)
 - Optional config reads: `env::optional("FOO") -> Result<Option<T>, _>`
 
 **`bool`** — a plain yes/no when no further detail is needed:

@@ -8,6 +8,30 @@ Headline: **a `ViewSet` can finally be scoped to the caller** (#1183) — the
 authenticated identity is available to filter backends, backends apply to every
 action, and `OwnedBy` does the common case in one line.
 
+### Changed
+
+- **`JtiStore` is async** (#1191) — `is_used` / `mark_used` / `approx_size` now
+  return `JtiFuture<'_, T>`, and everything that consults the store is `async`
+  with it: `JwtLifecycle::{verify_token, verify_access, verify_refresh, refresh,
+  refresh_with, revoke, blacklist_jti, is_blacklisted, blacklist_size}`,
+  `mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`, and
+  `tenancy::admin::redeem_impersonation_handoff`. While the trait was
+  synchronous, a durable multi-instance store could not simply write — it had to
+  be a hot in-memory map with a background flusher, which is eventually
+  consistent, so a revoked `jti` stayed valid on other replicas for the length
+  of the convergence window. Revocation is exactly the operation that should be
+  immediate, and that constraint came from the signature rather than the
+  problem; a Redis- or Postgres-backed store is now one conditional write.
+
+  **Migration:** add `.await` at those call sites. A synchronous
+  implementation stays a one-line wrapper —
+  `fn is_used<'a>(&'a self, jti: &'a str) -> JtiFuture<'a, bool> { Box::pin(async move { … }) }`.
+  The trait returns boxed futures rather than using `async fn`, because every
+  consumer holds it as `Arc<dyn JtiStore>` and native `async fn` in traits is
+  not dyn-compatible. Token **expiry is now checked before** the store is
+  consulted, so an expired token costs no round trip. `InMemoryJtiStore`
+  behaves exactly as before.
+
 ### Fixed
 
 - **ViewSet: 401 for anonymous, 403 for authenticated-but-unauthorised**

@@ -79,7 +79,7 @@ Le type de retour d'une méthode indique comment elle peut échouer. Rust n'a pa
 
 **`Option<T>`** — soit une valeur (`Some`), soit rien (`None`), comme un champ nullable. À utiliser quand « rien trouvé » est un résultat normal et que vous n'avez pas besoin d'un message d'erreur expliquant pourquoi :
 - Recherches : `cache.get(k) -> Result<Option<String>, _>` (le `Result` couvre l'échec d'E/S ; l'`Option` couvre « clé absente »)
-- Vérification : `JwtLifecycle::verify_access(token) -> Option<Claims>` (« expiré ou invalide » est un résultat attendu, donc `None` suffit)
+- Vérification : `async JwtLifecycle::verify_access(token) -> Option<Claims>` (« expiré ou invalide » est un résultat attendu, donc `None` suffit)
 - Lectures de config optionnelles : `env::optional("FOO") -> Result<Option<T>, _>`
 
 **`bool`** — un simple oui/non quand aucun détail supplémentaire n'est nécessaire :

@@ -385,7 +385,7 @@ let pair = jwt.issue_pair_with(user_id, json!({
 ### Ein Token verifizieren
 
 ```rust
-let claims = jwt.verify_access(&access_token)
+let claims = jwt.verify_access(&access_token).await
     .ok_or(StatusCode::UNAUTHORIZED)?;
 
 let roles: Vec<String> = claims.get_custom("roles").unwrap_or_default();
@@ -395,7 +395,7 @@ let tenant: String = claims.get_custom("tenant").unwrap_or_default();
 ### Ein Token erneuern (behält deine benutzerdefinierten Claims)
 
 ```rust
-let new_pair = jwt.refresh(&refresh_token)
+let new_pair = jwt.refresh(&refresh_token).await
     .ok_or(StatusCode::UNAUTHORIZED)?;
 // new_pair has the same roles + scope + tenant
 ```
@@ -410,18 +410,18 @@ Die JTI des alten Refresh-Tokens (seine eindeutige ID) wird zu einer Blacklist h
 let new_pair = jwt.refresh_with(&refresh_token, json!({
     "roles": ["viewer"],     // role was demoted since login
     "tenant": "acme",
-}).as_object().unwrap().clone())?
+}).as_object().unwrap().clone()).await?
     .ok_or(StatusCode::UNAUTHORIZED)?;
 ```
 
 ### Ein Token widerrufen
 
 ```rust
-jwt.revoke(&access_token);     // adds JTI to blacklist
-jwt.revoke(&refresh_token);
+jwt.revoke(&access_token).await;     // adds JTI to blacklist
+jwt.revoke(&refresh_token).await;
 ```
 
-Die standardmäßige In-Memory-Blacklist (`InMemoryJtiStore`) räumt abgelaufene Einträge von selbst aus, aber sie lebt in einem Prozess und vergisst bei jedem Neustart jeden Widerruf. Für Multi-Prozess-Deployments installiere einen gemeinsamen, dauerhaften Store über `JwtLifecycle::new(secret).with_jti_store(store)` — `store` ist ein beliebiger `Arc<dyn JtiStore>` (zum Beispiel ein Redis- oder DB-gestützter). Ohne einen gemeinsamen Store kann ein Token, das du auf einer Replica widerrufst, auf einer anderen weiterhin abgespielt werden, bis es abläuft.
+Die standardmäßige In-Memory-Blacklist (`InMemoryJtiStore`) räumt abgelaufene Einträge von selbst aus, aber sie lebt in einem Prozess und vergisst bei jedem Neustart jeden Widerruf. Für Multi-Prozess-Deployments installiere einen gemeinsamen, dauerhaften Store über `JwtLifecycle::new(secret).with_jti_store(store)` — `store` ist ein beliebiger `Arc<dyn JtiStore>` (zum Beispiel ein Redis- oder DB-gestützter). Ohne einen gemeinsamen Store kann ein Token, das du auf einer Replica widerrufst, auf einer anderen weiterhin abgespielt werden, bis es abläuft. Seit v0.52 (#1191) sind all diese Aufrufe `async` — `verify_*`, `refresh*` und `revoke` warten auf den Store, sodass ein dauerhafter Store ein einzelner bedingter Schreibvorgang sein kann statt eines letztlich konsistenten Caches mit Hintergrund-Flusher.
 
 > **Vertiefung:** [JWT-Auth-API](auth-jwt-api.md) — der eingebaute `/api/auth/login|refresh|logout|me`-Router, gleitendes Refresh und der JTI-Widerrufs-Store. Für ein einzelnes selbstverwaltetes Token siehe [JWT (standalone)](auth-jwt.md). Um Browser-/API-Routen per Login zu gaten, siehe [Access-Decorators](auth-decorators.md).
 

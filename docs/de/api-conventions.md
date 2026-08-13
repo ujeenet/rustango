@@ -79,7 +79,7 @@ Der Rückgabetyp einer Methode sagt Ihnen, wie sie fehlschlagen kann. Rust hat k
 
 **`Option<T>`** — entweder ein Wert (`Some`) oder nichts (`None`), wie ein nullbares Feld. Verwenden Sie es, wenn „nichts gefunden“ ein normales Ergebnis ist und Sie keine Fehlermeldung benötigen, die erklärt, warum:
 - Nachschlagen: `cache.get(k) -> Result<Option<String>, _>` (das `Result` deckt den I/O-Fehler ab; die `Option` deckt „Schlüssel nicht vorhanden“ ab)
-- Verifizierung: `JwtLifecycle::verify_access(token) -> Option<Claims>` („abgelaufen oder ungültig“ ist ein erwartetes Ergebnis, also genügt `None`)
+- Verifizierung: `async JwtLifecycle::verify_access(token) -> Option<Claims>` („abgelaufen oder ungültig“ ist ein erwartetes Ergebnis, also genügt `None`)
 - Optionale Config-Lesevorgänge: `env::optional("FOO") -> Result<Option<T>, _>`
 
 **`bool`** — ein schlichtes Ja/Nein, wenn kein weiteres Detail benötigt wird:
