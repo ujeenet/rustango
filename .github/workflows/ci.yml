@@ -190,6 +190,9 @@ jobs:
       fail-fast: false
       matrix:
         features:
+          - sqlite                       # the bare ORM the manifest advertises
+          - postgres
+          - mysql
           - postgres,manage              # `cargo rustango new --template api`
           - sqlite,manage
           - sqlite,admin
@@ -206,6 +209,10 @@ jobs:
       - run: cargo check -p rustango --no-default-features --features ${{ matrix.features }}
         env:
           RUSTFLAGS: "-D warnings"
+      # Also run the unit tests: `cargo check` misses `#[cfg(test)]` code, and
+      # that is exactly where a gate mismatch hides — a test module can outlive
+      # the gated item it exercises without the library ever noticing.
+      - run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --lib
 
   sqlite_litmus:
     runs-on: ubuntu-latest
