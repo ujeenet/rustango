@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/ujeenet/rustango/main/crates/rustango/src/tenancy/static/rustango.png" alt="Rustango" width="480">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ujeenet/rustango/main/docs/rustango_dark.png">
+    <img src="https://raw.githubusercontent.com/ujeenet/rustango/main/docs/rustango_light.png" alt="Rustango — the Rust framework with Django spirit" width="640">
+  </picture>
 </p>
 
 # Rustango
