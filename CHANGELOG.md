@@ -8,6 +8,30 @@ Headline: **a `ViewSet` can finally be scoped to the caller** (#1183) — the
 authenticated identity is available to filter backends, backends apply to every
 action, and `OwnedBy` does the common case in one line.
 
+### Changed
+
+- **`JtiStore` is async** (#1191) — `is_used` / `mark_used` / `approx_size` now
+  return `JtiFuture<'_, T>`, and everything that consults the store is `async`
+  with it: `JwtLifecycle::{verify_token, verify_access, verify_refresh, refresh,
+  refresh_with, revoke, blacklist_jti, is_blacklisted, blacklist_size}`,
+  `mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`, and
+  `tenancy::admin::redeem_impersonation_handoff`. While the trait was
+  synchronous, a durable multi-instance store could not simply write — it had to
+  be a hot in-memory map with a background flusher, which is eventually
+  consistent, so a revoked `jti` stayed valid on other replicas for the length
+  of the convergence window. Revocation is exactly the operation that should be
+  immediate, and that constraint came from the signature rather than the
+  problem; a Redis- or Postgres-backed store is now one conditional write.
+
+  **Migration:** add `.await` at those call sites. A synchronous
+  implementation stays a one-line wrapper —
+  `fn is_used<'a>(&'a self, jti: &'a str) -> JtiFuture<'a, bool> { Box::pin(async move { … }) }`.
+  The trait returns boxed futures rather than using `async fn`, because every
+  consumer holds it as `Arc<dyn JtiStore>` and native `async fn` in traits is
+  not dyn-compatible. Token **expiry is now checked before** the store is
+  consulted, so an expired token costs no round trip. `InMemoryJtiStore`
+  behaves exactly as before.
+
 ### Fixed
 
 - **Most minimal feature sets did not build** (#1208) — nine modules were
@@ -35,6 +59,18 @@ action, and `OwnedBy` does the common case in one line.
 
   A `feature_combos` CI matrix now builds all seven combinations with
   `-D warnings`, so a new gate gap fails the build instead of shipping.
+
+- **ViewSet page ceiling is the app's, not a hard-coded 1000** (#1196) — a
+  client could ask for `?page_size=1000` regardless of what the app configured,
+  so an app sized around `page_size(20)` faced a 50× amplification of its
+  serializer, joins and response budget; where the serializer does per-row work
+  against the database, that turns an N+1 into a thousand queries in one
+  request. **Behaviour change:** the ceiling now defaults to **100** (matching
+  `template_views`, which the two pagination surfaces previously disagreed
+  about by a factor of ten), and is configurable per ViewSet with
+  `max_page_size(n)`. `?limit=` is bounded by the same value, so limit/offset
+  isn't a way around it, and a `page_size` larger than the ceiling can't
+  smuggle a bigger page through the default path either.
 
 - **ViewSet: 401 for anonymous, 403 for authenticated-but-unauthorised**
   (#1193) — the permission check collapsed both cases to 403. A token client

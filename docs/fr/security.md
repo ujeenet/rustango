@@ -385,7 +385,7 @@ Les « claims » sont les faits clé/valeur que vous intégrez dans le jeton (r�
 ### Vérifier un jeton
 
 ```rust
-let claims = jwt.verify_access(&access_token)
+let claims = jwt.verify_access(&access_token).await
     .ok_or(StatusCode::UNAUTHORIZED)?;
 
 let roles: Vec<String> = claims.get_custom("roles").unwrap_or_default();
@@ -395,7 +395,7 @@ let tenant: String = claims.get_custom("tenant").unwrap_or_default();
 ### Rafraîchir un jeton (conserve vos claims personnalisés)
 
 ```rust
-let new_pair = jwt.refresh(&refresh_token)
+let new_pair = jwt.refresh(&refresh_token).await
     .ok_or(StatusCode::UNAUTHORIZED)?;
 // new_pair has the same roles + scope + tenant
 ```
@@ -410,18 +410,18 @@ Le JTI de l'ancien jeton de rafraîchissement (son ID unique) est ajouté à une
 let new_pair = jwt.refresh_with(&refresh_token, json!({
     "roles": ["viewer"],     // role was demoted since login
     "tenant": "acme",
-}).as_object().unwrap().clone())?
+}).as_object().unwrap().clone()).await?
     .ok_or(StatusCode::UNAUTHORIZED)?;
 ```
 
 ### Révoquer un jeton
 
 ```rust
-jwt.revoke(&access_token);     // adds JTI to blacklist
-jwt.revoke(&refresh_token);
+jwt.revoke(&access_token).await;     // adds JTI to blacklist
+jwt.revoke(&refresh_token).await;
 ```
 
-La liste noire en mémoire par défaut (`InMemoryJtiStore`) nettoie d'elle-même les entrées expirées, mais elle vit dans un seul processus et oublie chaque révocation au redémarrage. Pour les déploiements multi-processus, installez un store partagé et durable via `JwtLifecycle::new(secret).with_jti_store(store)` — `store` est n'importe quel `Arc<dyn JtiStore>` (par exemple un store adossé à Redis ou à une base de données). Sans store partagé, un jeton que vous révoquez sur une réplique peut encore être rejoué sur une autre jusqu'à son expiration.
+La liste noire en mémoire par défaut (`InMemoryJtiStore`) nettoie d'elle-même les entrées expirées, mais elle vit dans un seul processus et oublie chaque révocation au redémarrage. Pour les déploiements multi-processus, installez un store partagé et durable via `JwtLifecycle::new(secret).with_jti_store(store)` — `store` est n'importe quel `Arc<dyn JtiStore>` (par exemple un store adossé à Redis ou à une base de données). Sans store partagé, un jeton que vous révoquez sur une réplique peut encore être rejoué sur une autre jusqu'à son expiration. Depuis v0.52 (#1191), tous ces appels sont `async` — `verify_*`, `refresh*` et `revoke` attendent le store, de sorte qu'un store durable peut être une simple écriture conditionnelle au lieu d'un cache à cohérence à terme doté d'un vidage en arrière-plan.
 
 > **À approfondir :** [API d'authentification JWT](auth-jwt-api.md) — le routeur intégré `/api/auth/login|refresh|logout|me`, le rafraîchissement glissant, et le store de révocation JTI. Pour un seul jeton auto-géré, voir [JWT (autonome)](auth-jwt.md). Pour restreindre les routes navigateur/API selon la connexion, voir [décorateurs d'accès](auth-decorators.md).
 

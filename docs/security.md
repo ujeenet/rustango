@@ -385,7 +385,7 @@ let pair = jwt.issue_pair_with(user_id, json!({
 ### Verifying a token
 
 ```rust
-let claims = jwt.verify_access(&access_token)
+let claims = jwt.verify_access(&access_token).await
     .ok_or(StatusCode::UNAUTHORIZED)?;
 
 let roles: Vec<String> = claims.get_custom("roles").unwrap_or_default();
@@ -395,7 +395,7 @@ let tenant: String = claims.get_custom("tenant").unwrap_or_default();
 ### Refreshing a token (keeps your custom claims)
 
 ```rust
-let new_pair = jwt.refresh(&refresh_token)
+let new_pair = jwt.refresh(&refresh_token).await
     .ok_or(StatusCode::UNAUTHORIZED)?;
 // new_pair has the same roles + scope + tenant
 ```
@@ -410,18 +410,18 @@ The old refresh token's JTI (its unique ID) is added to a blacklist so it can't 
 let new_pair = jwt.refresh_with(&refresh_token, json!({
     "roles": ["viewer"],     // role was demoted since login
     "tenant": "acme",
-}).as_object().unwrap().clone())?
+}).as_object().unwrap().clone()).await?
     .ok_or(StatusCode::UNAUTHORIZED)?;
 ```
 
 ### Revoking a token
 
 ```rust
-jwt.revoke(&access_token);     // adds JTI to blacklist
-jwt.revoke(&refresh_token);
+jwt.revoke(&access_token).await;     // adds JTI to blacklist
+jwt.revoke(&refresh_token).await;
 ```
 
-The default in-memory blacklist (`InMemoryJtiStore`) cleans out expired entries on its own, but it lives in one process and forgets every revocation on restart. For multi-process deployments, install a shared, durable store via `JwtLifecycle::new(secret).with_jti_store(store)` — `store` is any `Arc<dyn JtiStore>` (for example a Redis- or DB-backed one). Without a shared store, a token you revoke on one replica can still be replayed on another until it expires.
+The default in-memory blacklist (`InMemoryJtiStore`) cleans out expired entries on its own, but it lives in one process and forgets every revocation on restart. For multi-process deployments, install a shared, durable store via `JwtLifecycle::new(secret).with_jti_store(store)` — `store` is any `Arc<dyn JtiStore>` (for example a Redis- or DB-backed one). Without a shared store, a token you revoke on one replica can still be replayed on another until it expires. All of these are `async` since v0.52 (#1191) — `verify_*`, `refresh*` and `revoke` await the store, so a durable store can be a single conditional write instead of an eventually-consistent cache with a background flusher.
 
 > **Deep dive:** [JWT auth API](auth-jwt-api.md) — the built-in `/api/auth/login|refresh|logout|me` router, sliding refresh, and the JTI revocation store. For a single self-managed token, see [JWT (standalone)](auth-jwt.md). To gate browser/API routes by login, see [access decorators](auth-decorators.md).
 

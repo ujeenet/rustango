@@ -91,13 +91,16 @@ pub fn issue_agent_token(
 /// Verify an agent access token and pin it to `expected_tenant`. Returns
 /// the resolved [`McpAgent`], or `None` for any failure — bad signature,
 /// expired, revoked JTI, not an agent token, or wrong tenant. Fail-closed.
+///
+/// Async since v0.52 — the revoked-JTI check may consult a durable
+/// [`crate::jti_store::JtiStore`] (#1191).
 #[must_use]
-pub fn verify_agent_token(
+pub async fn verify_agent_token(
     jwt: &JwtLifecycle,
     token: &str,
     expected_tenant: &str,
 ) -> Option<McpAgent> {
-    let claims = jwt.verify_access(token)?;
+    let claims = jwt.verify_access(token).await?;
     if claims.get_custom::<String>(CLAIM_KIND).as_deref() != Some(KIND_AGENT) {
         return None;
     }
@@ -233,7 +236,7 @@ pub(crate) async fn post_authed(
     let Some(token) = bearer(&headers) else {
         return unauthorized(&headers, &uri);
     };
-    let Some(agent) = verify_agent_token(jwt, token, &t.org.slug) else {
+    let Some(agent) = verify_agent_token(jwt, token, &t.org.slug).await else {
         return unauthorized(&headers, &uri);
     };
     // Revocation immediacy: the JWT is stateless, so re-check at request time
@@ -365,8 +368,8 @@ mod tests {
     use super::*;
     use axum::http::Uri;
 
-    #[test]
-    fn token_round_trips_the_owning_user_id() {
+    #[tokio::test]
+    async fn token_round_trips_the_owning_user_id() {
         use crate::tenancy::jwt_lifecycle::JwtLifecycle;
         let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
 
@@ -380,7 +383,9 @@ mod tests {
             Some(99),
         )
         .expect("issue");
-        let agent = verify_agent_token(&jwt, &token, "acme").expect("verify");
+        let agent = verify_agent_token(&jwt, &token, "acme")
+            .await
+            .expect("verify");
         assert_eq!(agent.agent_id, 5);
         assert_eq!(agent.user_id, Some(99));
         assert_eq!(agent.tools, vec!["log"]);
@@ -389,6 +394,7 @@ mod tests {
         let token = issue_agent_token(&jwt, 5, "acme", &[], &[], None).expect("issue");
         assert_eq!(
             verify_agent_token(&jwt, &token, "acme")
+                .await
                 .expect("verify")
                 .user_id,
             None

@@ -15,46 +15,46 @@ fn jwt() -> JwtLifecycle {
     JwtLifecycle::new(b"a-signing-secret-at-least-32-bytes-long!!".to_vec())
 }
 
-#[test]
-fn login_issues_a_pair_and_the_token_types_are_distinct() {
+#[tokio::test]
+async fn login_issues_a_pair_and_the_token_types_are_distinct() {
     let j = jwt();
     let pair = j.issue_pair(42); // what POST /api/auth/login returns
 
-    let claims = j.verify_access(&pair.access).expect("access verifies");
+    let claims = j.verify_access(&pair.access).await.expect("access verifies");
     assert_eq!(claims.sub, 42);
     assert_eq!(claims.typ, "access");
 
     // An access token is rejected where a refresh is required, and vice versa —
     // so a stolen short-lived access token can't be used to mint new ones.
-    assert!(j.verify_refresh(&pair.access).is_none());
-    assert!(j.verify_access(&pair.refresh).is_none());
+    assert!(j.verify_refresh(&pair.access).await.is_none());
+    assert!(j.verify_access(&pair.refresh).await.is_none());
 }
 
-#[test]
-fn refresh_rotates_and_blacklists_the_old_refresh_token() {
+#[tokio::test]
+async fn refresh_rotates_and_blacklists_the_old_refresh_token() {
     let j = jwt();
     let pair = j.issue_pair(7);
 
-    let rotated = j.refresh(&pair.refresh).expect("POST /api/auth/refresh");
+    let rotated = j.refresh(&pair.refresh).await.expect("POST /api/auth/refresh");
     assert_ne!(pair.access, rotated.access);
-    assert_eq!(j.verify_access(&rotated.access).unwrap().sub, 7);
+    assert_eq!(j.verify_access(&rotated.access).await.unwrap().sub, 7);
 
     // Sliding refresh: the old refresh token is single-use — replay is rejected.
-    assert!(j.refresh(&pair.refresh).is_none());
+    assert!(j.refresh(&pair.refresh).await.is_none());
 }
 
-#[test]
-fn logout_revokes_the_token() {
+#[tokio::test]
+async fn logout_revokes_the_token() {
     let j = jwt();
     let pair = j.issue_pair(1);
-    assert!(j.verify_access(&pair.access).is_some());
+    assert!(j.verify_access(&pair.access).await.is_some());
 
-    assert!(j.revoke(&pair.access)); // what POST /api/auth/logout does
-    assert!(j.verify_access(&pair.access).is_none());
+    assert!(j.revoke(&pair.access).await); // what POST /api/auth/logout does
+    assert!(j.verify_access(&pair.access).await.is_none());
 }
 
-#[test]
-fn custom_claims_ride_in_the_token_and_survive_refresh() {
+#[tokio::test]
+async fn custom_claims_ride_in_the_token_and_survive_refresh() {
     let j = jwt();
     let custom = serde_json::json!({ "roles": ["admin"], "tenant": "acme" })
         .as_object()
@@ -62,7 +62,7 @@ fn custom_claims_ride_in_the_token_and_survive_refresh() {
         .clone();
 
     let pair = j.issue_pair_with(99, custom).unwrap();
-    let claims = j.verify_access(&pair.access).unwrap();
+    let claims = j.verify_access(&pair.access).await.unwrap();
     assert_eq!(
         claims.get_custom::<Vec<String>>("roles").unwrap(),
         vec!["admin".to_string()]
@@ -70,13 +70,13 @@ fn custom_claims_ride_in_the_token_and_survive_refresh() {
 
     // refresh() carries the same custom payload onto the new pair (use
     // refresh_with() to re-evaluate permissions instead).
-    let rotated = j.refresh(&pair.refresh).unwrap();
-    let rc = j.verify_access(&rotated.access).unwrap();
+    let rotated = j.refresh(&pair.refresh).await.unwrap();
+    let rc = j.verify_access(&rotated.access).await.unwrap();
     assert_eq!(rc.get_custom::<String>("tenant").as_deref(), Some("acme"));
 }
 
-#[test]
-fn revocation_is_visible_across_handles_via_a_shared_store() {
+#[tokio::test]
+async fn revocation_is_visible_across_handles_via_a_shared_store() {
     // The default in-memory store is single-process. In production pass a
     // Redis/DB-backed `JtiStore` so a logout on one replica is seen by all —
     // here two handles share one in-memory store to prove the wiring.
@@ -86,10 +86,10 @@ fn revocation_is_visible_across_handles_via_a_shared_store() {
     let b = JwtLifecycle::new(secret).with_jti_store(Arc::clone(&shared));
 
     let pair = a.issue_pair(5);
-    assert!(b.verify_access(&pair.access).is_some());
-    a.revoke(&pair.access);
+    assert!(b.verify_access(&pair.access).await.is_some());
+    a.revoke(&pair.access).await;
     assert!(
-        b.verify_access(&pair.access).is_none(),
+        b.verify_access(&pair.access).await.is_none(),
         "instance B must see the revocation made on instance A"
     );
 }

@@ -446,6 +446,7 @@ where
         // `JtiBlacklist` so a leaked URL can't be replayed.
         if path == routes.impersonation_handoff_url && method == axum::http::Method::GET {
             return redeem_impersonation_handoff(&org, cfg, routes, parts.uri.query())
+                .await
                 .into_response();
         }
         // SSO (admin-sso) — multi-provider OpenID Connect / social OAuth.
@@ -1111,7 +1112,9 @@ fn logout_response(routes: &super::routes::RouteConfig) -> Response {
 /// operator console emits descriptive logs on the mint side, and
 /// leaking detail here would help an attacker tune a brute-force
 /// against the token format.
-fn redeem_impersonation_handoff(
+/// Async since v0.52 — marking the handoff jti single-use goes through the
+/// [`crate::jti_store::JtiStore`], which may be durable (#1191).
+async fn redeem_impersonation_handoff(
     org: &super::Org,
     cfg: &TenantSessionConfig,
     routes: &super::routes::RouteConfig,
@@ -1135,7 +1138,10 @@ fn redeem_impersonation_handoff(
             return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
         }
     };
-    if let Err(e) = JtiBlacklist::shared().mark_used(&payload.jti, payload.exp) {
+    if let Err(e) = JtiBlacklist::shared()
+        .mark_used(&payload.jti, payload.exp)
+        .await
+    {
         tracing::warn!(
             target: "crate::tenancy::admin",
             slug = %org.slug,

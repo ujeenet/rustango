@@ -145,7 +145,9 @@ async fn agent_lists_and_calls_only_its_granted_tools() {
     let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools, None).unwrap();
 
     // The guarded endpoint verifies the token on every request (tenant-pinned).
-    let agent = verify_agent_token(&jwt, &token, "acme").expect("valid agent token");
+    let agent = verify_agent_token(&jwt, &token, "acme")
+        .await
+        .expect("valid agent token");
 
     // tools/list shows ONLY the granted tool, with its JSON Schema.
     let listed = list_tools(&agent);
