@@ -141,7 +141,9 @@ async fn limit_offset_clamps_hostile_bounds() {
     let app = make_router_and_pool(10).await;
     seed(&app, 4).await;
 
-    // limit above the 1000 cap clamps to 1000; offset below 0 clamps to 0.
+    // A hostile `limit` clamps to the ViewSet's ceiling — `max_page_size`,
+    // which defaults to 100 (#1196). It used to be a hard-coded 1000 that no
+    // app could lower. `offset` below 0 clamps to 0.
     let body = body_json(
         app.clone()
             .oneshot(get("/posts?limit=999999&offset=-5"))
@@ -149,7 +151,7 @@ async fn limit_offset_clamps_hostile_bounds() {
             .unwrap(),
     )
     .await;
-    assert_eq!(body["limit"], 1000);
+    assert_eq!(body["limit"], 100);
     assert_eq!(body["offset"], 0);
     assert_eq!(ids(&body), vec![1, 2, 3, 4]);
 }
