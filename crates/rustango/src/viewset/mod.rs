@@ -1158,6 +1158,10 @@ impl ViewSetState {
     /// pool. Errors return a fully-formed [`Response`] (with the
     /// appropriate status code) rather than a typed error so handlers
     /// can `?`-bubble straight to the client.
+    // Only the `PoolSource::Tenant` arm reads `parts` (it runs the tenant
+    // resolver chain), and that arm is `tenancy`-gated — so an admin-only
+    // build has an unused parameter it cannot rename (#1208).
+    #[cfg_attr(not(feature = "tenancy"), allow(unused_variables))]
     async fn acquire(
         &self,
         parts: &mut axum::http::request::Parts,
@@ -1432,6 +1436,11 @@ enum PermOutcome {
     /// Authorised — proceed.
     Allow,
     /// No authenticated principal → `401`.
+    ///
+    /// Only the permission engine constructs this, and that lives behind
+    /// `tenancy`; without it every denial is a `Forbidden` by design, so the
+    /// variant is legitimately unconstructed rather than dead (#1208).
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     Unauthenticated,
     /// Authenticated, but lacks every required codename → `403`.
     Forbidden,

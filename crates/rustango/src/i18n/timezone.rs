@@ -173,6 +173,11 @@ pub fn parse_offset(s: &str) -> Option<FixedOffset> {
 /// Used by [`from_request_headers`] to feed the active timezone.
 /// Public so apps that wire their own middleware stack can reuse
 /// the decode step.
+///
+/// This and [`from_request_headers`] are the only axum-typed items here, so
+/// they gate on `_axum` rather than taking the module with them — offset
+/// parsing, activation and the task-local stay available everywhere.
+#[cfg(feature = "_axum")]
 pub fn from_cookie(headers: &axum::http::HeaderMap, cookie_name: &str) -> Option<FixedOffset> {
     let raw = headers
         .get(axum::http::header::COOKIE)
@@ -201,6 +206,7 @@ pub fn from_cookie(headers: &axum::http::HeaderMap, cookie_name: &str) -> Option
 ///   document.cookie = `tz_offset=${m};path=/;max-age=31536000`;
 /// </script>
 /// ```
+#[cfg(feature = "_axum")]
 pub fn from_request_headers(
     headers: &axum::http::HeaderMap,
     cookie_name: &str,
@@ -362,6 +368,9 @@ mod tests {
         assert_eq!(parse_offset("+05:99"), None); // minute out of range
     }
 
+    // The next four follow the `_axum` gate on the header-reading functions
+    // they exercise; the offset-parsing and activation tests stay ungated.
+    #[cfg(feature = "_axum")]
     #[test]
     fn from_cookie_finds_named_cookie() {
         let mut headers = axum::http::HeaderMap::new();
@@ -373,12 +382,14 @@ mod tests {
         assert_eq!(off.local_minus_utc(), 5 * 3600 + 30 * 60);
     }
 
+    #[cfg(feature = "_axum")]
     #[test]
     fn from_cookie_returns_none_when_absent() {
         let headers = axum::http::HeaderMap::new();
         assert!(from_cookie(&headers, "tz_offset").is_none());
     }
 
+    #[cfg(feature = "_axum")]
     #[test]
     fn from_request_headers_falls_back_to_time_zone_header() {
         let mut headers = axum::http::HeaderMap::new();
@@ -387,6 +398,7 @@ mod tests {
         assert_eq!(off.local_minus_utc(), 9 * 3600);
     }
 
+    #[cfg(feature = "_axum")]
     #[test]
     fn from_request_headers_prefers_cookie_over_header() {
         let mut headers = axum::http::HeaderMap::new();

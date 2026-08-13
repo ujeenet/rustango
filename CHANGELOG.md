@@ -34,6 +34,61 @@ action, and `OwnedBy` does the common case in one line.
 
 ### Fixed
 
+- **Most minimal feature sets did not build** (#1208) — nine modules were
+  declared `pub mod` with no `cfg` while their bodies used *optional*
+  dependencies (`tera`, `rand`, `tower`, `hmac`, `async-trait`), so they only
+  compiled when some unrelated feature happened to pull the crate in. Measured
+  before: `postgres,manage` **75 errors**, `sqlite,admin` 26, `sqlite,manage`,
+  `postgres,manage,admin`, `sqlite,template_views` all broken — effectively
+  only combinations including `tenancy` worked, because `tenancy` enables all
+  four crates and masked every gap. `--no-default-features --features
+  sqlite,tenancy`, the one combination CI checked, was one of the masking ones.
+
+  `cargo rustango new --template api` emits exactly `postgres,manage`, so a
+  third of the shipped project templates generated a project that could not
+  compile (#1209).
+
+  Fixed by giving each optional dependency an internal capability feature
+  (`_rand`, `_tera`, `_tower`, `_async_trait`, `_base64`, `_signing`) that
+  product features enable in place of the raw `dep:`, and gating each module on
+  the capability it actually needs. `url_codec` and `list_params` became
+  **unconditional** — both are pure `std`, were gated for no reason, and are
+  imported by unconditional modules. Also fixed: `manage` merged the
+  `admin`-gated health router unconditionally, and `migrate::runner` /
+  `sql::m2m` emitted `signals` without the feature.
+
+  A `feature_combos` CI matrix now builds every combination with `-D warnings`
+  **and runs its unit tests**, so a new gate gap fails the build instead of
+  shipping. (`cargo check` alone misses `#[cfg(test)]` code, which is exactly
+  where a gate mismatch hides.)
+
+- **The bare ORM build finally works** — `--no-default-features --features
+  sqlite` (or `postgres`, or `mysql`) failed with **50 errors**, despite the
+  manifest advertising exactly that: *"Drop `default-features` for the bare ORM
+  (core + query + sql + migrate)"*. Same root cause as above, two more
+  dependency families:
+
+  **tokio is no longer optional.** `sqlx` is a hard dependency built with
+  `runtime-tokio`, so tokio was already compiled into every build — `optional =
+  true` only controlled whether rustango was allowed to *name* the crate it was
+  already linking. Meanwhile the modules needing it are core, not opt-in: the
+  transaction on-commit registry (`sql::executor::atomic`), the audit-source
+  task-local and the event bus are all built on `tokio::task_local!` /
+  `tokio::sync`. Gating those would have silently removed transaction hooks
+  from a bare-ORM build; making the dependency honest costs no extra crate.
+
+  **axum gets an `_axum` capability.** `http_methods`, `auth_decorators`,
+  `redirects` and `flatpages` are axum middleware end to end and now gate as
+  such. Where a module is mostly dependency-free, only the axum-typed items
+  gate: `cookies::Cookie::header_value` (the builder and `build()` stay),
+  `i18n::timezone`'s two header readers (offset parsing and activation stay),
+  and the `axum::Response` assertions in `test_assertions` — that module stays
+  unconditional because its `query_counter` submodule is ORM instrumentation
+  the executor bumps on every query.
+
+  All ten checked combinations now build clean **and pass their unit tests**
+  (1443 on bare `sqlite`, 1417 on `postgres`, 1449 on `mysql`).
+
 - **ViewSet page ceiling is the app's, not a hard-coded 1000** (#1196) — a
   client could ask for `?page_size=1000` regardless of what the app configured,
   so an app sized around `page_size(20)` faced a 50× amplification of its

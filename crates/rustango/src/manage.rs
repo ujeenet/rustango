@@ -837,6 +837,10 @@ impl Cli {
             } else {
                 api
             };
+            // `crate::health` is `#[cfg(feature = "admin")]`, so the merge has
+            // to be too (#1208) — it was unconditional, which broke every
+            // admin-less build.
+            #[cfg(feature = "admin")]
             let api = if self.health_endpoints {
                 api.merge(crate::health::health_router(pool.clone()))
             } else {
@@ -1537,6 +1541,9 @@ mod tests {
     /// router unchanged (no panic) when the user's api already
     /// routes `GET /`. Pre-fix this aborted the process at boot
     /// for any tenancy project with a per-tenant `/` handler.
+    // `try_mount_welcome` is `#[cfg(feature = "admin")]`, so these two follow
+    // it. Only visible once `postgres,manage` compiled at all (#1208).
+    #[cfg(feature = "admin")]
     #[test]
     fn try_mount_welcome_skips_on_root_collision_no_panic() {
         use axum::routing::get;
@@ -1551,6 +1558,7 @@ mod tests {
     /// `try_mount_welcome` mounts welcome cleanly when no
     /// conflict exists (the common case for fresh projects with
     /// no root handler).
+    #[cfg(feature = "admin")]
     #[test]
     fn try_mount_welcome_succeeds_on_empty_router() {
         let api = Router::new();
