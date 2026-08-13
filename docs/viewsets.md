@@ -715,8 +715,112 @@ let api = Router::new()
     .route("/api/posts/bulk_archive", post(bulk_archive));
 ```
 
-For per-list extra `WHERE` logic, `.filter_backend(…)` contributes predicates to
-the built-in list query without a separate route.
+For extra `WHERE` logic, `.filter_backend(…)` contributes predicates without a
+separate route.
+
+### Scoping rows to the authenticated principal
+
+A backend runs on **every** action — `list`, `retrieve`, `update`, `destroy` —
+so it behaves like DRF's `get_queryset()`. A row the backend excludes is a
+**404** on the item routes, not a 403: a 403 would confirm the id exists.
+
+Identity must come from the credential, never from the query string. A
+`?owner_id=` filter is not a scope — it is a parameter the caller chooses.
+
+#### `OwnedBy` — the shipped backend
+
+Most owned resources need exactly one rule: *rows whose ownership column is the
+caller*. Name the column and mount it.
+
+```rust
+use rustango::viewset::{OwnedBy, ViewSet};
+
+ViewSet::for_model(Note::SCHEMA)
+    .filter_backend(OwnedBy::column("member_id"))
+    .tenant_router("/api/notes")
+    .layer(axum::middleware::from_fn(
+        rustango::tenancy::auth_routes::require_bearer,
+    ))
+```
+
+Any column works — `owner_id`, `member_id`, `author_id` — because the backend
+takes the name rather than assuming a convention. It fails closed on the two
+ways it can be wrong: an unauthenticated request and a column the model does not
+have both match **nothing**, so a typo at mount time cannot turn into "no
+predicates, return the table".
+
+Superusers are not special by default; `.superuser_sees_all()` opts in, because
+"admins see everything" is a product decision, not a framework one.
+
+#### Where the identity comes from
+
+[`Principal`] is the one identity type, resolved from whatever verified the
+request — an explicit `Principal`, an `AuthenticatedUser` left by a session or
+Bearer middleware, or an MCP agent token (which acts as the user who minted it).
+It authenticates nothing itself; it only reads what a verifying middleware
+already proved, so nothing may insert one without checking a credential first.
+
+`require_bearer` is that middleware for a JSON API: it verifies the access token
+against the resolved tenant, re-reads the user row (a deactivated account stops
+working on the next request, not when the token expires), and inserts both
+`AuthenticatedUser` and `Principal`. Use it as an extractor anywhere:
+
+```rust
+use rustango::tenancy::{OptionalPrincipal, Principal};
+
+async fn mine(principal: Principal) -> String {          // 401 when absent
+    format!("user {}", principal.user_id)
+}
+
+async fn home(OptionalPrincipal(who): OptionalPrincipal) -> String {
+    who.map_or("anonymous".into(), |p| format!("user {}", p.user_id))
+}
+```
+
+#### Writing your own backend
+
+When ownership is not a single column — a shared team, a soft-deleted row, a
+window of dates — implement the trait and override `filter_with`, which receives
+the request `Parts`:
+
+```rust
+use axum::http::request::Parts;
+use rustango::tenancy::Principal;
+use rustango::viewset::ViewSetFilter;
+
+struct OwnerFilter;
+
+impl ViewSetFilter for OwnerFilter {
+    // No principal in hand — fail closed. Returning no predicates here would
+    // widen the query to every row in the table.
+    fn filter(&self, _p: &HashMap<String, String>, schema: &'static ModelSchema) -> Vec<WhereExpr> {
+        deny_all(schema)
+    }
+
+    fn filter_with(
+        &self,
+        parts: &Parts,
+        _p: &HashMap<String, String>,
+        schema: &'static ModelSchema,
+    ) -> Vec<WhereExpr> {
+        let Some(principal) = Principal::from_parts(parts) else {
+            return deny_all(schema);
+        };
+        vec![WhereExpr::Predicate(Filter {
+            column: schema.field("owner_id").expect("owner_id").column,
+            op: Op::Eq,
+            value: SqlValue::from(principal.user_id),
+        })]
+    }
+}
+
+ViewSet::for_model(Note::SCHEMA)
+    .filter_backend(OwnerFilter)
+    .tenant_router("/api/notes")
+```
+
+`filter_with` defaults to `filter`, so a backend that does not need the request
+— including the plain closure form — implements only `filter` as before.
 
 ---
 

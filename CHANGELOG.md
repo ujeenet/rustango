@@ -4,7 +4,91 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-_Nothing yet — next development cycle._
+Headline: **a `ViewSet` can finally be scoped to the caller** (#1183) — the
+authenticated identity is available to filter backends, backends apply to every
+action, and `OwnedBy` does the common case in one line.
+
+### Fixed
+
+- **ViewSet: 401 for anonymous, 403 for authenticated-but-unauthorised**
+  (#1193) — the permission check collapsed both cases to 403. A token client
+  treats 401 as its cue to refresh, so answering 403 to a request that simply
+  carried no credentials meant the refresh never fired and the member was
+  silently logged out. **Behaviour change:** an unauthenticated request to a
+  permission-gated ViewSet now returns `401`. (Without the `tenancy` feature
+  there is no permission engine at all, so the denial stays `403` — no amount
+  of authenticating could satisfy it.)
+- **Settings no longer inert in silence** (#1192) — CORS, body limit, request
+  timeout and security headers are read from the environment and then do
+  nothing unless `.with_settings_from_env()` is in the `Cli` chain. `runserver`
+  now emits a `WARN` naming exactly which layer-driving settings are configured
+  but unapplied, and the builder call that would activate them. Note that
+  turning them on also activates a strict CSP, which can break a
+  server-rendered app that was fine without it.
+- **A project model may own a framework table** (#1168) — the documented
+  custom-user-model path (extra columns on `rustango_users`) emitted a
+  duplicate `CREATE TABLE`, because the built-in `User` derive is unconditional
+  and the system snapshot did not dedup by table. Exactly one model now owns a
+  table, and a downstream model wins over the framework's own — with a warning,
+  since an accidental override is a typo'd table name. `Cli::user_model` itself
+  remains advisory.
+- **`migrate_manage` tests no longer assume the ledger exists** (#1186) — five
+  tests failed on a brand-new database and passed on re-run, so the suite's
+  result depended on test ordering and residue in the target database.
+
+### Added
+
+- **`AggregateBuilder::fetch_on` / `ValuesQuerySet::fetch_on`** (#1172) — the
+  aggregate and values terminals can now run on a borrowed executor, like
+  `QuerySet::fetch_on`. Schema-per-tenant Postgres selects the tenant with
+  `SET search_path` on the checked-out connection, so a pool-resolved aggregate
+  silently read `public`; a tenant app had no public way to run a GROUP BY
+  against its own schema short of raw SQL.
+- **`ViewSet::pk_param(name)`** (#1194) — rename the detail-route capture
+  (default `pk`). axum allows one capture name per path position across a
+  router, so a hand-written sibling route spelling it `{id}` panicked at
+  startup, pointing at axum rather than the ViewSet. The generated OpenAPI path
+  and parameter follow the rename.
+
+- **`ViewSetFilter::filter_with(&Parts, params, schema)`** — a default-provided
+  companion to `filter` that receives the request `Parts`, so a backend can read
+  the authenticated principal out of the extensions. `filter` alone sees only
+  the query string, which means "only this user's rows" could not be written at
+  all — apps were pushing the owner column into `filter_fields` and trusting the
+  client to send `?owner_id=`, which is not authorization. The default delegates
+  to `filter`, so every existing backend — including the plain closure form —
+  compiles and behaves exactly as before.
+
+- **`tenancy::Principal`** — one identity type, resolved from whichever
+  middleware verified the request: an explicit `Principal`, an
+  `AuthenticatedUser` (session or Bearer), or an MCP agent token, which acts as
+  the user who minted it. Available as an extractor (401 when absent) and as
+  `OptionalPrincipal` where anonymous is a valid answer. It authenticates
+  nothing itself — it reads only what a verifying layer already proved.
+
+- **`viewset::OwnedBy`** — the shipped ownership backend:
+  `.filter_backend(OwnedBy::column("member_id"))`. Any column name works, since
+  it takes the name rather than assuming a convention, and it fails closed on
+  both ways it can be wrong — an unauthenticated request and a column the model
+  does not have each match **nothing**, so a typo at mount time cannot become
+  "no predicates, return the table". `.superuser_sees_all()` opts superusers in;
+  they are not special by default, because "admins see everything" is a product
+  decision.
+
+- **`auth_routes::require_bearer`** — middleware that turns a Bearer access
+  token into a `Principal`: verifies against the resolved tenant, then re-reads
+  the user row, so a deactivated account stops working on the next request
+  rather than when the token expires. `Bearer` is now public alongside it.
+
+### Fixed
+
+- **Filter backends now scope `retrieve` / `update` / `destroy`, not just
+  `list`** — DRF's `get_queryset()` contract. Scoping the collection alone is
+  worse than not scoping: it reads as safe while every row stays reachable by
+  id. A row excluded by a backend is now a **404** on those actions (not a 403,
+  which would confirm the id exists), an `UPDATE` that matches nothing returns
+  404 rather than reporting success, and the read-back after an update is
+  scoped too.
 
 ## [0.51.2] — 2026-08-08
 

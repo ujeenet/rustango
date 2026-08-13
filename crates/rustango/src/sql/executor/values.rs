@@ -574,6 +574,50 @@ impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
     }
 }
 
+impl<T: crate::core::Model> crate::query::ValuesQuerySet<T> {
+    /// Like [`Self::fetch`] but runs on a borrowed executor rather than the
+    /// pool — the terminal a **tenant-scoped** connection needs.
+    ///
+    /// In schema-per-tenant Postgres the tenant is selected by `SET
+    /// search_path` on the checked-out connection, so resolving against the
+    /// pool silently reads `public` instead. `QuerySet` has had `fetch_on`
+    /// for this; the values/aggregate terminals did not, which left a tenant
+    /// app with no public way to run a projection against its own schema
+    /// (#1172).
+    ///
+    /// # Errors
+    /// As [`Self::fetch`].
+    #[cfg(feature = "postgres")]
+    pub async fn fetch_on<'c, E>(
+        self,
+        executor: E,
+    ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError>
+    where
+        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    {
+        let query = self.compile()?;
+        let stmt = {
+            use crate::sql::Dialect as _;
+            crate::sql::Postgres.compile_select(&query)?
+        };
+        let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
+        for v in stmt.params {
+            q = bind_query(q, v);
+        }
+        let rows = q.fetch_all(executor).await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            use sqlx::{Column as _, Row as _};
+            let mut map = std::collections::HashMap::new();
+            for (i, col) in row.columns().iter().enumerate() {
+                map.insert(col.name().to_owned(), pg_cell_to_sqlvalue(row, i));
+            }
+            out.push(map);
+        }
+        Ok(out)
+    }
+}
+
 impl<T: crate::core::Model> crate::query::AggregateBuilder<T> {
     /// Execute the aggregate / annotate query and return rows as
     /// `Vec<HashMap<String, SqlValue>>` keyed by output-column name.
@@ -594,6 +638,36 @@ impl<T: crate::core::Model> crate::query::AggregateBuilder<T> {
     ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError> {
         let q = self.compile()?;
         fetch_aggregate_dict(pool, &q).await
+    }
+
+    /// Like [`Self::fetch`] but runs on a borrowed executor rather than the
+    /// pool — the terminal a **tenant-scoped** connection needs.
+    ///
+    /// Schema-per-tenant Postgres selects the tenant with `SET search_path`
+    /// on the checked-out connection, so a pool-resolved aggregate reads
+    /// `public` instead of the tenant's schema. Mirrors
+    /// [`crate::query::QuerySet::fetch_on`] (#1172).
+    ///
+    /// ```ignore
+    /// SetLog::objects()
+    ///     .values(&["member_id"])
+    ///     .annotate("total", sum("volume").into())
+    ///     .fetch_on(t.conn())   // runs in the tenant's schema
+    ///     .await?;
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Self::fetch`].
+    #[cfg(feature = "postgres")]
+    pub async fn fetch_on<'c, E>(
+        self,
+        executor: E,
+    ) -> Result<Vec<std::collections::HashMap<String, SqlValue>>, ExecError>
+    where
+        E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    {
+        let q = self.compile()?;
+        super::fetch_aggregate_on(&q, executor).await
     }
 }
 
