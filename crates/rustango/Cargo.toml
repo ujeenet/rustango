@@ -15,6 +15,23 @@ categories.workspace = true
 # stay — they're baked into the binary via include_str! / include_bytes!.
 exclude = ["examples/", "tests/"]
 
+# docs.rs builds with **default features only** unless told otherwise, and
+# several headline modules are not in `default`: `tenancy`, `sso`, `mcp`,
+# `passkey`, `admin-sso`, `cache-redis`. Without this section every one of them
+# 404s on docs.rs — so multi-tenancy, the framework's flagship differentiator,
+# had no published API documentation at all, and a reader arriving from the
+# README would reasonably conclude the feature does not exist.
+#
+# `all-features` rather than an explicit list because the three backends
+# coexist by design (the tri-dialect work makes `postgres,mysql,sqlite`
+# together a supported, CI-tested combination), so there is nothing to exclude.
+#
+# `--cfg docsrs` enables `#[cfg_attr(docsrs, doc(cfg(...)))]` badges, so each
+# gated item shows which feature unlocks it instead of appearing unconditional.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 

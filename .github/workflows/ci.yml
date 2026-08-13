@@ -191,6 +191,12 @@ jobs:
         with:
           key: scaffolded-projects
       - run: cargo test -p cargo-rustango --test generated_project_compiles -- --ignored --test-threads=1
+      # #1217 — a generated project pins the *published* rustango, so a template
+      # may only name features that release actually has. Offline and fast: it
+      # compares the emitted feature list against `crates/rustango/Cargo.toml`.
+      # The compile test above cannot catch this — it builds with
+      # `--rustango-path`, where any new feature exists by definition.
+      - run: cargo test -p cargo-rustango --test templates_name_real_features
 
   # #1208 — the feature table is a public promise, so check the promise.
   # `sqlite_litmus` below is a single combination, and it happens to be one

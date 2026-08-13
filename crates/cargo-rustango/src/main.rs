@@ -151,6 +151,24 @@ impl Template {
         // moved to v0.28+, breaking `cargo build` on every fresh
         // tenant project (#79).
         let v = mm_version();
+        // RELEASE ORDER IS LOAD-BEARING (#1217). A generated project pins the
+        // *published* rustango by version, while this feature list is written
+        // against the tree in this repo. Naming a feature that is not in the
+        // pinned release fails at resolution, before anything compiles:
+        //
+        //     package `myblog` depends on `rustango` with feature `batteries`
+        //     but `rustango` does not have that feature.
+        //
+        // Two things keep that from happening:
+        //   1. All four crates publish from one version, `rustango` BEFORE
+        //      `cargo-rustango` — so the pinned version always already exists
+        //      and already has whatever this names.
+        //   2. `tests/templates_name_real_features.rs` asserts every feature
+        //      named here is defined in `crates/rustango/Cargo.toml`.
+        //
+        // `generated_project_compiles.rs` cannot catch this: it builds with
+        // `--rustango-path` against the local tree, where the feature exists.
+        //
         // #1211 — the backend is NOT named here. The generated `[features]`
         // block forwards it (`postgres = ["rustango/postgres"]`, etc.), and
         // `#[derive(Model)]` gates its emissions on the *project's* feature,

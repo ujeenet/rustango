@@ -528,6 +528,20 @@ impl Cli {
             return Ok(());
         }
 
+        // Verbs that need no database at all run here, before any pool is
+        // constructed (#1216). `connect_lazy` doesn't connect, but it does
+        // validate the URL scheme against the enabled backend features — so a
+        // SQLite-only build with a stale `postgres://` in the environment could
+        // not print its own `--help`. None of these verbs read or write a
+        // database, so none of them should care what `DATABASE_URL` says.
+        {
+            let mut out = std::io::stdout();
+            if let Some(res) = crate::migrate::manage::run_pool_free(&args, &mut out) {
+                res?;
+                return Ok(());
+            }
+        }
+
         // Verbs that print info and never touch the DB. We let these
         // run even when DATABASE_URL is unset so users can scaffold or
         // read help without configuring Postgres first.

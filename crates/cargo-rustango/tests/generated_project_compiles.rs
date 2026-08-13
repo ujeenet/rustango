@@ -31,6 +31,14 @@ fn rustango_crate() -> PathBuf {
         .join("rustango")
 }
 
+/// These tests need the sibling `crates/rustango` source, so they only mean
+/// anything inside the repo. The published `cargo-rustango` tarball carries
+/// this file but not its sibling, so skip rather than fail confusingly for
+/// anyone who runs the suite from a downloaded crate.
+fn in_repo() -> bool {
+    rustango_crate().join("Cargo.toml").is_file()
+}
+
 /// A unique scratch directory. No `tempfile` dep — this crate deliberately has
 /// zero dependencies, and the scaffolder must keep working without them.
 fn scratch(tag: &str) -> PathBuf {
@@ -118,6 +126,10 @@ fn check(root: &Path, extra: &[&str]) -> (bool, usize, String) {
 }
 
 fn assert_compiles(template: &str, extra: &[&str], label: &str) {
+    if !in_repo() {
+        eprintln!("skipping: crates/rustango not alongside — not a repo checkout");
+        return;
+    }
     let (work, root) = generate(template, label);
     let (ok, warnings, log) = check(&root, extra);
     let _ = std::fs::remove_dir_all(&work);
