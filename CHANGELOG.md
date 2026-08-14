@@ -4,9 +4,35 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.52.0] — 2026-08-13
+
 Headline: **a `ViewSet` can finally be scoped to the caller** (#1183) — the
 authenticated identity is available to filter backends, backends apply to every
 action, and `OwnedBy` does the common case in one line.
+
+Runner-up, and the one to read if you build against the feature table: **most
+minimal feature sets did not compile**, and now do. `--no-default-features
+--features sqlite` — the bare ORM the manifest has always advertised — failed
+with 50 errors; `postgres,manage`, which `cargo rustango new --template api`
+generates verbatim, failed with 75. Effectively only combinations including
+`tenancy` built, because `tenancy` happened to pull in the four crates those
+modules used ungated. Ten combinations are now checked in CI, with warnings
+denied, and their unit tests run too.
+
+### Upgrading
+
+Three changes need action:
+
+1. **`JtiStore` is async.** Add `.await` at the call sites listed under
+   *Changed*. A synchronous implementation stays a one-line
+   `Box::pin(async move { … })` wrapper.
+2. **The ViewSet page ceiling defaults to 100**, down from a hard-coded 1000.
+   A client asking for `?page_size=500` now receives 100 rows **with no
+   error** — it reads the real size from the response's `page_size`. Restore
+   the old bound per ViewSet with `.max_page_size(1000)`.
+3. **`tokio` is no longer an optional dependency.** No action for almost
+   everyone: `sqlx` is a hard dependency built with `runtime-tokio`, so tokio
+   was already compiled into every build. Only the manifest changed.
 
 ### Changed
 
