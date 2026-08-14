@@ -4,11 +4,128 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.52.0] — 2026-08-13
+
 Headline: **a `ViewSet` can finally be scoped to the caller** (#1183) — the
 authenticated identity is available to filter backends, backends apply to every
 action, and `OwnedBy` does the common case in one line.
 
+Runner-up, and the one to read if you build against the feature table: **most
+minimal feature sets did not compile**, and now do. `--no-default-features
+--features sqlite` — the bare ORM the manifest has always advertised — failed
+with 50 errors; `postgres,manage`, which `cargo rustango new --template api`
+generates verbatim, failed with 75. Effectively only combinations including
+`tenancy` built, because `tenancy` happened to pull in the four crates those
+modules used ungated. Ten combinations are now checked in CI, with warnings
+denied, and their unit tests run too.
+
+### Upgrading
+
+Three changes need action:
+
+1. **`JtiStore` is async.** Add `.await` at the call sites listed under
+   *Changed*. A synchronous implementation stays a one-line
+   `Box::pin(async move { … })` wrapper.
+2. **The ViewSet page ceiling defaults to 100**, down from a hard-coded 1000.
+   A client asking for `?page_size=500` now receives 100 rows **with no
+   error** — it reads the real size from the response's `page_size`. Restore
+   the old bound per ViewSet with `.max_page_size(1000)`.
+3. **`tokio` is no longer an optional dependency.** No action for almost
+   everyone: `sqlx` is a hard dependency built with `runtime-tokio`, so tokio
+   was already compiled into every build. Only the manifest changed.
+
+### Changed
+
+- **`JtiStore` is async** (#1191) — `is_used` / `mark_used` / `approx_size` now
+  return `JtiFuture<'_, T>`, and everything that consults the store is `async`
+  with it: `JwtLifecycle::{verify_token, verify_access, verify_refresh, refresh,
+  refresh_with, revoke, blacklist_jti, is_blacklisted, blacklist_size}`,
+  `mcp::verify_agent_token`, `tenancy::auth_routes::verify_for_tenant`, and
+  `tenancy::admin::redeem_impersonation_handoff`. While the trait was
+  synchronous, a durable multi-instance store could not simply write — it had to
+  be a hot in-memory map with a background flusher, which is eventually
+  consistent, so a revoked `jti` stayed valid on other replicas for the length
+  of the convergence window. Revocation is exactly the operation that should be
+  immediate, and that constraint came from the signature rather than the
+  problem; a Redis- or Postgres-backed store is now one conditional write.
+
+  **Migration:** add `.await` at those call sites. A synchronous
+  implementation stays a one-line wrapper —
+  `fn is_used<'a>(&'a self, jti: &'a str) -> JtiFuture<'a, bool> { Box::pin(async move { … }) }`.
+  The trait returns boxed futures rather than using `async fn`, because every
+  consumer holds it as `Arc<dyn JtiStore>` and native `async fn` in traits is
+  not dyn-compatible. Token **expiry is now checked before** the store is
+  consulted, so an expired token costs no round trip. `InMemoryJtiStore`
+  behaves exactly as before.
+
 ### Fixed
+
+- **Most minimal feature sets did not build** (#1208) — nine modules were
+  declared `pub mod` with no `cfg` while their bodies used *optional*
+  dependencies (`tera`, `rand`, `tower`, `hmac`, `async-trait`), so they only
+  compiled when some unrelated feature happened to pull the crate in. Measured
+  before: `postgres,manage` **75 errors**, `sqlite,admin` 26, `sqlite,manage`,
+  `postgres,manage,admin`, `sqlite,template_views` all broken — effectively
+  only combinations including `tenancy` worked, because `tenancy` enables all
+  four crates and masked every gap. `--no-default-features --features
+  sqlite,tenancy`, the one combination CI checked, was one of the masking ones.
+
+  `cargo rustango new --template api` emits exactly `postgres,manage`, so a
+  third of the shipped project templates generated a project that could not
+  compile (#1209).
+
+  Fixed by giving each optional dependency an internal capability feature
+  (`_rand`, `_tera`, `_tower`, `_async_trait`, `_base64`, `_signing`) that
+  product features enable in place of the raw `dep:`, and gating each module on
+  the capability it actually needs. `url_codec` and `list_params` became
+  **unconditional** — both are pure `std`, were gated for no reason, and are
+  imported by unconditional modules. Also fixed: `manage` merged the
+  `admin`-gated health router unconditionally, and `migrate::runner` /
+  `sql::m2m` emitted `signals` without the feature.
+
+  A `feature_combos` CI matrix now builds every combination with `-D warnings`
+  **and runs its unit tests**, so a new gate gap fails the build instead of
+  shipping. (`cargo check` alone misses `#[cfg(test)]` code, which is exactly
+  where a gate mismatch hides.)
+
+- **The bare ORM build finally works** — `--no-default-features --features
+  sqlite` (or `postgres`, or `mysql`) failed with **50 errors**, despite the
+  manifest advertising exactly that: *"Drop `default-features` for the bare ORM
+  (core + query + sql + migrate)"*. Same root cause as above, two more
+  dependency families:
+
+  **tokio is no longer optional.** `sqlx` is a hard dependency built with
+  `runtime-tokio`, so tokio was already compiled into every build — `optional =
+  true` only controlled whether rustango was allowed to *name* the crate it was
+  already linking. Meanwhile the modules needing it are core, not opt-in: the
+  transaction on-commit registry (`sql::executor::atomic`), the audit-source
+  task-local and the event bus are all built on `tokio::task_local!` /
+  `tokio::sync`. Gating those would have silently removed transaction hooks
+  from a bare-ORM build; making the dependency honest costs no extra crate.
+
+  **axum gets an `_axum` capability.** `http_methods`, `auth_decorators`,
+  `redirects` and `flatpages` are axum middleware end to end and now gate as
+  such. Where a module is mostly dependency-free, only the axum-typed items
+  gate: `cookies::Cookie::header_value` (the builder and `build()` stay),
+  `i18n::timezone`'s two header readers (offset parsing and activation stay),
+  and the `axum::Response` assertions in `test_assertions` — that module stays
+  unconditional because its `query_counter` submodule is ORM instrumentation
+  the executor bumps on every query.
+
+  All ten checked combinations now build clean **and pass their unit tests**
+  (1443 on bare `sqlite`, 1417 on `postgres`, 1449 on `mysql`).
+
+- **ViewSet page ceiling is the app's, not a hard-coded 1000** (#1196) — a
+  client could ask for `?page_size=1000` regardless of what the app configured,
+  so an app sized around `page_size(20)` faced a 50× amplification of its
+  serializer, joins and response budget; where the serializer does per-row work
+  against the database, that turns an N+1 into a thousand queries in one
+  request. **Behaviour change:** the ceiling now defaults to **100** (matching
+  `template_views`, which the two pagination surfaces previously disagreed
+  about by a factor of ten), and is configurable per ViewSet with
+  `max_page_size(n)`. `?limit=` is bounded by the same value, so limit/offset
+  isn't a way around it, and a `page_size` larger than the ceiling can't
+  smuggle a bigger page through the default path either.
 
 - **ViewSet: 401 for anonymous, 403 for authenticated-but-unauthorised**
   (#1193) — the permission check collapsed both cases to 403. A token client

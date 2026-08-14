@@ -528,6 +528,41 @@ impl Cli {
             return Ok(());
         }
 
+        // Verbs that need no database at all run here, before any pool is
+        // constructed (#1216). `connect_lazy` doesn't connect, but it does
+        // validate the URL scheme against the enabled backend features — so a
+        // SQLite-only build with a stale `postgres://` in the environment could
+        // not print its own `--help`. None of these verbs read or write a
+        // database, so none of them should care what `DATABASE_URL` says.
+        {
+            let mut out = std::io::stdout();
+
+            // A tenancy project has its own help — it lists `create-tenant`,
+            // `create-operator`, `create-user` and the rest of the tenancy
+            // verbs, which the plain migration runner knows nothing about.
+            // Route help there before the generic pool-free dispatch, or a
+            // tenancy project would print the wrong verb list. (Caught by
+            // `cookbook_blog`'s `cli_help_works_without_database_url`.)
+            //
+            // `write_help` needs no pool either, so tenancy projects get the
+            // same "help works whatever DATABASE_URL says" fix (#1216).
+            #[cfg(feature = "tenancy")]
+            if self.tenancy
+                && matches!(
+                    args.first().map(String::as_str),
+                    None | Some("") | Some("help") | Some("--help") | Some("-h")
+                )
+            {
+                crate::tenancy::manage::write_help(&mut out)?;
+                return Ok(());
+            }
+
+            if let Some(res) = crate::migrate::manage::run_pool_free(&args, &mut out) {
+                res?;
+                return Ok(());
+            }
+        }
+
         // Verbs that print info and never touch the DB. We let these
         // run even when DATABASE_URL is unset so users can scaffold or
         // read help without configuring Postgres first.
@@ -837,6 +872,10 @@ impl Cli {
             } else {
                 api
             };
+            // `crate::health` is `#[cfg(feature = "admin")]`, so the merge has
+            // to be too (#1208) — it was unconditional, which broke every
+            // admin-less build.
+            #[cfg(feature = "admin")]
             let api = if self.health_endpoints {
                 api.merge(crate::health::health_router(pool.clone()))
             } else {
@@ -1537,6 +1576,9 @@ mod tests {
     /// router unchanged (no panic) when the user's api already
     /// routes `GET /`. Pre-fix this aborted the process at boot
     /// for any tenancy project with a per-tenant `/` handler.
+    // `try_mount_welcome` is `#[cfg(feature = "admin")]`, so these two follow
+    // it. Only visible once `postgres,manage` compiled at all (#1208).
+    #[cfg(feature = "admin")]
     #[test]
     fn try_mount_welcome_skips_on_root_collision_no_panic() {
         use axum::routing::get;
@@ -1551,6 +1593,7 @@ mod tests {
     /// `try_mount_welcome` mounts welcome cleanly when no
     /// conflict exists (the common case for fresh projects with
     /// no root handler).
+    #[cfg(feature = "admin")]
     #[test]
     fn try_mount_welcome_succeeds_on_empty_router() {
         let api = Router::new();

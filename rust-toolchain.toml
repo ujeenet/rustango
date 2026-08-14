@@ -1,4 +1,8 @@
 [toolchain]
 channel = "1.88"
-components = ["rustfmt", "clippy"]
+# `rust-analyzer` is pinned here so the editor uses the toolchain's own
+# component rather than the one bundled with the extension. Without it the
+# VS Code extension warns that the pinned channel is too old for its shipped
+# rust-analyzer and degrades to no IDE services.
+components = ["rustfmt", "clippy", "rust-analyzer"]
 profile = "minimal"

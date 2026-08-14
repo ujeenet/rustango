@@ -15,6 +15,23 @@ categories.workspace = true
 # stay — they're baked into the binary via include_str! / include_bytes!.
 exclude = ["examples/", "tests/"]
 
+# docs.rs builds with **default features only** unless told otherwise, and
+# several headline modules are not in `default`: `tenancy`, `sso`, `mcp`,
+# `passkey`, `admin-sso`, `cache-redis`. Without this section every one of them
+# 404s on docs.rs — so multi-tenancy, the framework's flagship differentiator,
+# had no published API documentation at all, and a reader arriving from the
+# README would reasonably conclude the feature does not exist.
+#
+# `all-features` rather than an explicit list because the three backends
+# coexist by design (the tri-dialect work makes `postgres,mysql,sqlite`
+# together a supported, CI-tested combination), so there is nothing to exclude.
+#
+# `--cfg docsrs` enables `#[cfg_attr(docsrs, doc(cfg(...)))]` badges, so each
+# gated item shows which feature unlocks it instead of appearing unconditional.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lints]
 workspace = true
 
@@ -23,7 +40,28 @@ workspace = true
 # public forms framework. Opt in to multi-tenancy with
 # `features = ["tenancy"]`. Drop `default-features` for the bare
 # ORM (core + query + sql + migrate).
-default = ["postgres", "manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver", "template_views"]
+default = ["postgres", "batteries"]
+
+# Everything `default` gives you **except** the database backend (#1211).
+#
+# A downstream project cannot use `default` and still choose its backend:
+# `#[derive(Model)]` gates its `FromRow` / `LoadRelated` emissions on the
+# *consumer's* features (a cfg inside a derive resolves against the destination
+# crate), so if the dependency pins `rustango/postgres` while the project's own
+# `postgres` feature is off, rustango demands impls the derive never emitted.
+# Naming `batteries` instead lets the project forward the backend through its
+# own feature:
+#
+#     rustango = { version = "…", default-features = false, features = ["batteries"] }
+#
+#     [features]
+#     default  = ["postgres"]
+#     postgres = ["rustango/postgres"]
+#     sqlite   = ["rustango/sqlite"]
+#
+# `cargo rustango new` emits exactly that. Keeping the list here rather than in
+# the generated manifest means it can't rot out of sync with `default`.
+batteries = ["manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver", "template_views"]
 postgres = ["sqlx/postgres"]
 
 # Unified `cargo run` / `cargo run -- <verb>` dispatcher. Pulls the
@@ -31,7 +69,7 @@ postgres = ["sqlx/postgres"]
 # can still use `rustango::manage::Cli::new().api(...).run().await`.
 # v0.16+. Default-on so `cargo rustango new` projects work with no
 # extra opt-ins.
-manage = ["dep:axum", "dep:tokio", "runtime"]
+manage = ["_axum", "runtime"]
 
 # Test-only constructors for downstream live tests. Currently
 # unlocks `Tenant::for_test(org, conn)` so tenancy-aware crates
@@ -62,6 +100,32 @@ mysql = ["sqlx/mysql"]
 # don't have to remember the SQLite-default-off FK pragma.
 sqlite = ["sqlx/sqlite"]
 
+# ---------------------------------------------------------------------
+# Internal capability features (#1208). Not for downstream use — enable a
+# product feature instead; these carry a leading underscore to say so.
+#
+# The problem they solve: several modules are declared `pub mod` with no
+# `cfg` at all, but their bodies use an *optional* dependency. That only
+# builds when some unrelated product feature happens to have pulled the
+# dep in, so `--no-default-features --features postgres,manage` (and most
+# other minimal sets) failed with dozens of "unlinked crate" errors deep
+# inside the framework. `cfg(feature = "...")` cannot ask "is dep:rand
+# enabled?", so each optional dep that a module needs gets a capability
+# feature, every product feature enables the capability rather than the
+# dep, and the module gates on the capability.
+#
+# Adding an optional dep to a module? Give it a capability here, route the
+# product features through it, and gate the module — do not leave the
+# module unconditional.
+_rand         = ["dep:rand"]
+_tera         = ["dep:tera"]
+_tower        = ["dep:tower"]
+_axum         = ["dep:axum"]
+_async_trait  = ["dep:async-trait"]
+_base64       = ["dep:base64"]
+# The three that always travel together for cookie/token signing.
+_signing      = ["_base64", "dep:hmac", "dep:sha2"]
+
 # Layered TOML config (`rustango::config`). Loads `config/default.toml`
 # → `config/{env}.toml` → env-var overrides. Slice 8.3.
 config = ["dep:toml"]
@@ -82,7 +146,7 @@ serializer = ["forms"]
 # Caching layer (`rustango::cache`) — pluggable `Cache` trait with
 # `NullCache` (no-op) and `InMemoryCache` (tokio RwLock + TTL). Redis
 # backend is behind the separate `cache-redis` feature.
-cache = ["dep:async-trait", "dep:tokio", "dep:sha2"]
+cache = ["_async_trait", "dep:sha2"]
 
 # Per-view caching tower layer (`rustango::cache_page`) — Django's
 # @cache_page / @cache_control / @vary_on_headers analogs. Implies
@@ -93,18 +157,22 @@ cache-page = ["cache", "admin", "dep:base64"]
 # Signals layer (`rustango::signals`) — Django-shape pre_save / post_save
 # / pre_delete / post_delete async dispatch. Receivers register globally
 # per model type; senders fire signals after write paths.
-signals = ["dep:tokio"]
+#
+# Empty list, not dead config: the feature still gates `rustango::signals` and
+# the emission sites in `migrate::runner` / `sql::m2m`. It carried `dep:tokio`
+# until tokio became unconditional.
+signals = []
 
 # Email backends (`rustango::email`) — Mailer trait + ConsoleMailer +
 # InMemoryMailer + NullMailer. SMTP and external transports plug in via
 # the trait.
-email = ["dep:async-trait"]
+email = ["_async_trait"]
 
 # Production SMTP backend (`rustango::email::SmtpMailer`, issue #48).
 # Implies `email`. Pulls `lettre` with rustls TLS (no openssl).
 # Default builds don't include this — opt in when you ship to prod and
 # need a real relay (Postmark, SendGrid, AWS SES via SMTP, etc.).
-email-smtp = ["email", "dep:lettre", "dep:tokio"]
+email-smtp = ["email", "dep:lettre"]
 
 # Multi-channel notifications layer (`rustango::notifications`) — Laravel-shape
 # fan-out across mail / database / log / broadcast. Implies email + cache.
@@ -112,7 +180,7 @@ notifications = ["email", "cache"]
 
 # Background job queue (`rustango::jobs`) — Job trait, in-memory queue,
 # worker pool, retry with exponential backoff, dead-letter callback.
-jobs = ["dep:async-trait", "dep:tokio"]
+jobs = ["_async_trait"]
 
 # Database-backed job queue (`rustango::jobs::pg::PgJobQueue`).
 # v0.38 — tri-dialect: PostgreSQL + MySQL 8.0+ use `FOR UPDATE SKIP
@@ -130,7 +198,10 @@ auth_flows = ["signed_url"]
 
 # Broadcast event bus (`rustango::sse`) — fan-out for SSE / WebSocket /
 # signal-driven push. tokio::sync::broadcast under the hood.
-sse = ["dep:tokio"]
+#
+# Empty list, not dead config — still gates `rustango::sse`. Carried
+# `dep:tokio` until tokio became unconditional.
+sse = []
 
 # WebSocket handler scaffold (`rustango::ws`) — fan-out via the SSE
 # EventBus, axum upgrade handler with auto JSON encode/decode + ping/pong
@@ -145,19 +216,19 @@ websocket = ["admin", "sse", "axum/ws"]
 # notification bus; `serializer`/`openapi` the tool inputSchema; `jwt`
 # exposes `crate::signing` (agent-bound pagination cursors) and reflects that
 # MCP agent tokens are JWTs. Epic #1013.
-mcp = ["tenancy", "sse", "serializer", "openapi", "jwt", "dep:axum", "dep:tokio", "dep:async-stream"]
+mcp = ["tenancy", "sse", "serializer", "openapi", "jwt", "_axum", "dep:async-stream"]
 
 # OAuth2 / OIDC swiss-knife (`rustango::oauth2`) — works for pure OAuth2
 # providers (GitHub, Discord) AND OIDC providers (Google, Microsoft,
 # Apple, Keycloak) via the `/userinfo` endpoint as identity source.
 # Per-tenant via `OAuth2Registry`. Pulls reqwest (rustls — no openssl).
-oauth2 = ["dep:reqwest", "dep:urlencoding", "dep:tokio", "dep:hmac", "dep:sha2", "dep:base64", "dep:rand", "dep:subtle", "dep:async-trait"]
+oauth2 = ["_signing", "dep:reqwest", "dep:urlencoding", "_rand", "dep:subtle", "_async_trait"]
 
 # Opinionated HTTP client (`rustango::http_client`) — reqwest wrapper
 # with sane timeouts, exponential-backoff retry on idempotent verbs +
 # 5xx/timeout/connect failures, and a default User-Agent. Standalone
 # wrapper that any rustango app can use directly.
-http-client = ["dep:reqwest", "dep:tokio"]
+http-client = ["dep:reqwest"]
 
 # Response compression middleware (`rustango::compression`) — gzip +
 # deflate via flate2 (miniz_oxide by default, no C deps). Honors the
@@ -170,18 +241,18 @@ compression = ["admin", "dep:flate2"]
 # for handlers to consume, and substitutes it into the
 # Content-Security-Policy header so inline `<script nonce="…">` blocks
 # pass strict CSP. Implies `admin` (axum-only) + rand for the nonce.
-csp-nonce = ["admin", "dep:rand"]
+csp-nonce = ["admin", "_rand"]
 
 # Server-side sessions (`rustango::sessions`) — opaque cookie ID
 # backed by any `Cache` implementation. Implies `cache` + rand for
 # the ID + base64 for encoding it.
-sessions = ["cache", "dep:rand", "dep:base64"]
+sessions = ["cache", "_rand", "dep:base64"]
 
 # HMAC-signed request authentication (`rustango::hmac_auth`) for
 # service-to-service traffic. AWS-style canonical request signed with
 # SHA-256, replay-bounded by an X-Date tolerance window. Implies
 # `admin` (axum) + the existing webhook crypto deps.
-hmac-auth = ["admin", "dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
+hmac-auth = ["_signing", "admin", "dep:subtle"]
 
 # Standalone HS256 JWT (`rustango::jwt`) — sign / verify / decode for
 # magic links, microservice tokens, third-party SSO. Standalone
@@ -189,7 +260,7 @@ hmac-auth = ["admin", "dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
 # blacklist + sliding rotation but is gated on tenancy; since v0.48
 # its blacklist is also pluggable via `Arc<dyn rustango::jti_store::JtiStore>`
 # for multi-instance deployments).
-jwt = ["dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
+jwt = ["_signing", "dep:subtle"]
 
 # Multipart file upload helper (`rustango::uploads`) — wraps
 # axum's multipart extractor + the `storage::Storage` trait so file
@@ -221,32 +292,35 @@ openapi = ["rustango-macros/openapi"]
 
 # File storage backends (`rustango::storage`) — Storage trait + LocalStorage
 # (filesystem) + InMemoryStorage (tests). S3/GCS/Azure plug in via the trait.
-storage = ["dep:async-trait", "dep:tokio"]
+storage = ["_async_trait"]
 
 # In-process scheduled task runner (`rustango::scheduler`) — fire async jobs
 # at fixed intervals with panic isolation per task.
-scheduler = ["dep:tokio"]
+#
+# Empty list, not dead config — still gates `rustango::scheduler`. Carried
+# `dep:tokio` until tokio became unconditional.
+scheduler = []
 
 # Secrets manager (`rustango::secrets`) — Secrets trait + EnvSecrets +
 # InMemorySecrets. Vault / AWS / GCP plug in via the trait.
-secrets = ["dep:async-trait"]
+secrets = ["_async_trait"]
 # Attribute casts (#819) — `Cast<C>` field wrapper + `CastValue` trait;
 # the `EncryptedString` built-in pulls XChaCha20-Poly1305 + base64 + a
 # SHA-256 key derivation (`rand` for the per-write nonce).
-casts = ["dep:chacha20poly1305", "dep:base64", "dep:rand", "dep:sha2"]
+casts = ["dep:chacha20poly1305", "dep:base64", "_rand", "dep:sha2"]
 
 # TOTP / 2FA (`rustango::totp`) — RFC 6238 time-based one-time passwords
 # for second-factor authentication. SHA-1 (Google Authenticator default).
-totp = ["dep:hmac", "dep:sha1", "dep:rand", "dep:subtle"]
+totp = ["dep:hmac", "dep:sha1", "_rand", "dep:subtle"]
 # Passkey / WebAuthn (#392). Foundation slice = credential storage only
 # (no extra deps). The ceremony layer adds pure-Rust CBOR (`ciborium`) +
 # ES256 (`p256`) when it lands — keeping the all-RustCrypto, no-C-dep
 # stack (vs `webauthn-rs` → openssl).
-passkey = ["dep:rand", "dep:base64", "dep:sha2", "dep:subtle", "dep:ciborium", "dep:p256"]
+passkey = ["_rand", "dep:base64", "dep:sha2", "dep:subtle", "dep:ciborium", "dep:p256"]
 
 # Webhook signature verification (`rustango::webhook`) — HMAC-SHA256
 # constant-time verification for inbound webhooks (Stripe, GitHub, etc.).
-webhook = ["dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
+webhook = ["_signing", "dep:subtle"]
 
 # Outbound webhook delivery (`rustango::webhook_delivery`) — POSTs an
 # HMAC-signed JSON payload to a subscriber URL via the background job
@@ -256,7 +330,7 @@ webhook-delivery = ["webhook", "jobs", "dep:reqwest"]
 
 # API keys (`rustango::api_keys`) — standalone generate/hash/verify
 # helpers for `{prefix}.{secret}` keys with argon2id hashing.
-api_keys = ["dep:argon2", "dep:password-hash", "dep:rand"]
+api_keys = ["dep:argon2", "dep:password-hash", "_rand"]
 
 # Generic password helpers (`rustango::passwords`) — argon2id hash/verify
 # + minimal strength check. Standalone alternative to tenancy::password.
@@ -264,7 +338,7 @@ passwords = ["dep:argon2", "dep:password-hash"]
 
 # Signed URL helpers (`rustango::signed_url`) — HMAC-SHA256 signed URLs
 # with optional expiry. For magic-link login, password resets, etc.
-signed_url = ["dep:hmac", "dep:sha2", "dep:subtle", "dep:base64"]
+signed_url = ["_signing", "dep:subtle"]
 
 # Redis cache backend (`rustango::cache::RedisCache`). Adds the `redis`
 # async connection-manager client. Implies `cache`.
@@ -274,13 +348,13 @@ cache-redis = ["cache", "dep:redis"]
 # axum middleware. Lives behind its own flag so `forms`-only users
 # (parsers without CSRF) don't pull cookie + rand + tower
 # transitively.
-csrf = ["forms", "dep:axum", "dep:base64", "dep:cookie", "dep:rand", "dep:tower"]
+csrf = ["forms", "_axum", "dep:base64", "dep:cookie", "_rand", "_tower"]
 
 # Generic class-based views for HTML templates (`rustango::template_views`)
 # — Django-shape `ListView` / `DetailView` / `CreateView` / `UpdateView` /
 # `DeleteView` over `#[derive(Model)]` types, rendered through Tera.
 # The JSON-API counterpart is `rustango::viewset` (always on).
-template_views = ["forms", "dep:axum", "dep:tera", "dep:tokio"]
+template_views = ["forms", "_axum", "_tera", "dep:serde_urlencoded"]
 
 # Auto-admin HTTP layer (`rustango::admin`). Pulls in axum + Tera +
 # the supporting middleware deps. Implies `forms` + `csrf` so the
@@ -307,11 +381,9 @@ admin = [
     # Tokio was already in the admin closure; signals adds only the
     # in-process registry helpers.
     "signals",
-    "dep:axum",
-    "dep:tera",
-    "dep:base64",
-    "dep:hmac",
-    "dep:sha2",
+    "_axum",
+    "_tera",
+    "_signing",
     "dep:subtle",
     # `manage create-admin` (slice B) prompts for a password
     # interactively when `--password` isn't supplied. `rpassword` was
@@ -320,7 +392,6 @@ admin = [
     "dep:http",
     "dep:http-body-util",
     "dep:serde_urlencoded",
-    "dep:tokio",
 ]
 
 # SSO for the admin login (`rustango::admin::sso`) — sign in with an
@@ -371,18 +442,21 @@ tenancy = [
     "signals",
     "storage",
     "uploads",
-    "dep:async-trait",
+    "_async_trait",
     "dep:argon2",
     "dep:cookie",
+    # Deliberately the exact pair tenancy carried before #1208, not `_signing`
+    # — that capability also pulls `base64`, which tenancy never depended on.
+    # The capability features exist to stop the feature table lying about what
+    # it pulls in; widening one while introducing them would defeat that.
     "dep:hmac",
+    "dep:sha2",
     "dep:password-hash",
-    "dep:rand",
+    "_rand",
     "dep:rpassword",
     "dep:serde_urlencoded",
-    "dep:sha2",
     "dep:subtle",
-    "dep:tokio",
-    "dep:tower",
+    "_tower",
 ]
 
 # `#[rustango::main]` runserver shim (slice 9.0 / 0.8.2). Pulls in
@@ -391,21 +465,22 @@ tenancy = [
 # that don't want this dep can opt out by skipping the macro and
 # using `#[tokio::main]` directly.
 #
-# v0.31.1 (#4): `dep:tokio` so the macro can emit
-# `#[::rustango::__private_runtime::tokio::main]` and user crates no
-# longer need to add tokio to their own Cargo.toml just to use the
-# rustango entrypoint shim.
-runtime = ["dep:tracing-subscriber", "dep:tracing-appender", "dep:tokio"]
+# v0.31.1 (#4): the macro emits
+# `#[::rustango::__private_runtime::tokio::main]`, so user crates don't need
+# tokio in their own Cargo.toml just to use the rustango entrypoint shim.
+# That re-export no longer needs a feature to carry it — tokio is an
+# unconditional dependency (see the note on the `tokio` line below).
+runtime = ["dep:tracing-subscriber", "dep:tracing-appender"]
 
 # Minimal axum runserver — `rustango::server::AppBuilder`. Bi-dialect
-# single-pool bootstrap (SQLite / Postgres / MySQL). Implies axum +
-# tokio. The full multi-tenant `Builder` lives behind `tenancy` and
+# single-pool bootstrap (SQLite / Postgres / MySQL). Pulls axum; tokio is
+# unconditional. The full multi-tenant `Builder` lives behind `tenancy` and
 # pulls in much more.
-runserver = ["dep:axum", "dep:tokio"]
+runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.51.2", path = "../rustango-macros" }
+rustango-macros = { version = "0.52.0", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }
@@ -448,7 +523,16 @@ serde_urlencoded = { workspace = true, optional = true }
 sha1             = { workspace = true, optional = true }
 sha2             = { workspace = true, optional = true }
 subtle           = { workspace = true, optional = true }
-tokio            = { workspace = true, optional = true }
+# Non-optional since #1208 follow-up. `sqlx` is a hard dependency built with
+# `runtime-tokio`, so tokio is already compiled into every build including
+# `--no-default-features --features sqlite` — `optional = true` only controlled
+# whether rustango was allowed to *name* the crate it was already linking.
+# Meanwhile the modules that need it are core, not opt-in: the transaction
+# on-commit registry (`sql::executor::atomic`), the audit source task-local,
+# and the event bus are all built on `tokio::task_local!` / `tokio::sync`.
+# Gating those would have silently removed transaction hooks from a bare-ORM
+# build; making the dependency honest costs no extra crate.
+tokio            = { workspace = true }
 tower            = { workspace = true, optional = true }
 redis            = { workspace = true, optional = true }
 

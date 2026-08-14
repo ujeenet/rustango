@@ -79,7 +79,7 @@ El tipo de retorno de un método te dice cómo puede fallar. Rust no tiene excep
 
 **`Option<T>`** — o un valor (`Some`) o nada (`None`), como un campo anulable. Úsalo cuando «no se encontró nada» es un resultado normal y no necesitas un mensaje de error que explique por qué:
 - Búsquedas: `cache.get(k) -> Result<Option<String>, _>` (el `Result` cubre el fallo de E/S; el `Option` cubre «clave ausente»)
-- Verificación: `JwtLifecycle::verify_access(token) -> Option<Claims>` («expirado o inválido» es un resultado esperado, así que `None` basta)
+- Verificación: `async JwtLifecycle::verify_access(token) -> Option<Claims>` («expirado o inválido» es un resultado esperado, así que `None` basta)
 - Lecturas de configuración opcionales: `env::optional("FOO") -> Result<Option<T>, _>`
 
 **`bool`** — un simple sí/no cuando no se necesita más detalle:

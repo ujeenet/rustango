@@ -127,7 +127,9 @@ async fn full_agent_loop() {
     let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools, None).expect("issue");
 
     // 6. Verify the token (what the guarded endpoint does each request).
-    let agent = verify_agent_token(&jwt, &token, "acme").expect("verify");
+    let agent = verify_agent_token(&jwt, &token, "acme")
+        .await
+        .expect("verify");
     assert_eq!(agent.tools, vec!["echo"]);
 
     // 7. tools/list shows only the granted tool.

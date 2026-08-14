@@ -173,6 +173,72 @@ jobs:
   # Runs `cargo check`, `cargo clippy`, and the SQLite pragma
   # regression test (foreign_keys ON, WAL on file-backed, busy_timeout
   # set, FK violation rejected — see tests/sqlite_pragmas_live.rs).
+  # #1207 — generate each project template and compile it. `templates.rs`
+  # claimed CI already did this; nothing did. The crate's unit tests are
+  # `.contains()` assertions on template *strings*, and no test ever wrote a
+  # project to disk — which is how `--template api` came to generate a project
+  # that failed with 75 compiler errors without anything going red.
+  #
+  # `--ignored` because each case compiles rustango, so `cargo test` stays fast
+  # for everyone else. The tests pass `--rustango-path`, so they validate this
+  # commit rather than the last published release.
+  scaffolded_projects:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: scaffolded-projects
+      - run: cargo test -p cargo-rustango --test generated_project_compiles -- --ignored --test-threads=1
+      # #1217 — a generated project pins the *published* rustango, so a template
+      # may only name features that release actually has. Offline and fast: it
+      # compares the emitted feature list against `crates/rustango/Cargo.toml`.
+      # The compile test above cannot catch this — it builds with
+      # `--rustango-path`, where any new feature exists by definition.
+      - run: cargo test -p cargo-rustango --test templates_name_real_features
+
+  # #1208 — the feature table is a public promise, so check the promise.
+  # `sqlite_litmus` below is a single combination, and it happens to be one
+  # that *masks* gate gaps: `tenancy` pulls in rand / tower / hmac /
+  # async-trait, so modules that use those without gating on them still
+  # compiled. Meanwhile `postgres,manage` (what `cargo rustango new
+  # --template api` generates) failed with 75 errors, and `sqlite,admin`
+  # with 26 — undetected, because nothing built them.
+  #
+  # Warnings are errors here, unlike the rest of CI: these combinations are
+  # exactly where cfg'd-out code leaves unused imports and unconstructed
+  # variants behind, and a warning is the only signal that a gate is wrong.
+  feature_combos:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - sqlite                       # the bare ORM the manifest advertises
+          - postgres
+          - mysql
+          - postgres,manage              # `cargo rustango new --template api`
+          - sqlite,manage
+          - sqlite,admin
+          - sqlite,manage,admin
+          - postgres,manage,admin
+          - sqlite,template_views
+          - sqlite,tenancy               # the pre-existing litmus
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-combos
+      - run: cargo check -p rustango --no-default-features --features ${{ matrix.features }}
+        env:
+          RUSTFLAGS: "-D warnings"
+      # Also run the unit tests: `cargo check` misses `#[cfg(test)]` code, and
+      # that is exactly where a gate mismatch hides — a test module can outlive
+      # the gated item it exercises without the library ever noticing.
+      - run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --lib
+
   sqlite_litmus:
     runs-on: ubuntu-latest
     steps:

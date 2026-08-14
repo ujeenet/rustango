@@ -39,6 +39,9 @@
 
 #[cfg(feature = "admin")]
 use crate::i18n::db::{all_pool, delete_key_pool, upsert_pool, Translation};
+// Only the `admin`-gated functions below take a pool, so the import follows
+// the same gate — it was unconditional and warned in every admin-less build.
+#[cfg(feature = "admin")]
 use crate::sql::Pool;
 
 /// A single key's value across the active locales, for the pivoted grid.

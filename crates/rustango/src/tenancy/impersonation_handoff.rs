@@ -237,16 +237,21 @@ impl JtiBlacklist {
     }
 
     /// Returns `true` if the jti was previously marked used.
-    pub fn is_used(&self, jti: &str) -> bool {
-        self.store.is_used(jti)
+    ///
+    /// Async since v0.52 — the store may be durable (#1191).
+    pub async fn is_used(&self, jti: &str) -> bool {
+        self.store.is_used(jti).await
     }
 
     /// Atomically check + record. Returns `Err(AlreadyUsed)` if the
     /// jti is in the store; otherwise inserts `(jti, exp)` and
     /// returns `Ok(())`. Pruning of expired entries is the store's
     /// responsibility — the in-memory impl does it on every call.
-    pub fn mark_used(&self, jti: &str, exp: i64) -> Result<(), HandoffError> {
-        if self.store.mark_used(jti, exp) {
+    ///
+    /// Async since v0.52 — a single-use handoff redemption is exactly the
+    /// operation that wants a durable, immediately-visible write (#1191).
+    pub async fn mark_used(&self, jti: &str, exp: i64) -> Result<(), HandoffError> {
+        if self.store.mark_used(jti, exp).await {
             Ok(())
         } else {
             Err(HandoffError::AlreadyUsed)
@@ -353,21 +358,21 @@ mod tests {
         assert_ne!(p1.jti, p2.jti, "random jti collision is unacceptable");
     }
 
-    #[test]
-    fn jti_blacklist_first_use_succeeds_second_fails() {
+    #[tokio::test]
+    async fn jti_blacklist_first_use_succeeds_second_fails() {
         let bl = JtiBlacklist::new();
         let jti = "abc123";
         let exp = chrono::Utc::now().timestamp() + 60;
-        bl.mark_used(jti, exp).unwrap();
-        assert!(bl.is_used(jti));
+        bl.mark_used(jti, exp).await.unwrap();
+        assert!(bl.is_used(jti).await);
         assert_eq!(
-            bl.mark_used(jti, exp).unwrap_err(),
+            bl.mark_used(jti, exp).await.unwrap_err(),
             HandoffError::AlreadyUsed
         );
     }
 
-    #[test]
-    fn jti_blacklist_with_store_delegates_to_swapped_backend() {
+    #[tokio::test]
+    async fn jti_blacklist_with_store_delegates_to_swapped_backend() {
         // v0.47 — proves the multi-instance hook: an Arc<dyn JtiStore>
         // passed via `with_store` is the source of truth, not the
         // default in-memory map. Two JtiBlacklist handles built from
@@ -380,13 +385,13 @@ mod tests {
         let bl_b = JtiBlacklist::with_store(Arc::clone(&shared));
         let jti = "shared-token";
         let exp = chrono::Utc::now().timestamp() + 60;
-        bl_a.mark_used(jti, exp).unwrap();
+        bl_a.mark_used(jti, exp).await.unwrap();
         assert!(
-            bl_b.is_used(jti),
+            bl_b.is_used(jti).await,
             "second handle on the shared store must see the mark"
         );
         assert_eq!(
-            bl_b.mark_used(jti, exp).unwrap_err(),
+            bl_b.mark_used(jti, exp).await.unwrap_err(),
             HandoffError::AlreadyUsed,
             "single-use guard must hold across handles on the shared store"
         );

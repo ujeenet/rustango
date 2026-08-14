@@ -35,9 +35,9 @@ compilarse sin arrastrar `crate::admin`:
 ```toml
 [dependencies]
 # Admin login with SSO:
-rustango = { version = "0.51", features = ["admin-sso"] }
+rustango = { version = "0.52", features = ["admin-sso"] }
 # Member (end-user) SSO without the auto-admin:
-rustango = { version = "0.51", features = ["tenancy", "sso"] }
+rustango = { version = "0.52", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` y las rutas históricas del núcleo `admin::sso::*` son

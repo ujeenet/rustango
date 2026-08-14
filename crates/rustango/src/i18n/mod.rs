@@ -42,7 +42,13 @@ use std::sync::RwLock;
 
 pub mod admin;
 pub mod db;
+// Both gated since #1208: `middleware` is a tower `Service`/`Layer` impl and
+// `tera_tags` is a Tera integration, but `tower` and `tera` are optional
+// dependencies. Left unconditional, they broke every feature set that didn't
+// happen to pull those crates in.
+#[cfg(feature = "_tower")]
 pub mod middleware;
+#[cfg(feature = "_tera")]
 pub mod tera_tags;
 pub mod timezone;
 

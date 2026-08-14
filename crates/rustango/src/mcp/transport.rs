@@ -103,7 +103,7 @@ pub(crate) async fn sse_handler(
     let Some(token) = super::auth::bearer(&headers) else {
         return super::auth::unauthorized(&headers, &uri);
     };
-    let Some(agent) = super::auth::verify_agent_token(jwt, token, &t.org.slug) else {
+    let Some(agent) = super::auth::verify_agent_token(jwt, token, &t.org.slug).await else {
         return super::auth::unauthorized(&headers, &uri);
     };
     // Revocation immediacy: re-check the agent (and, for a user-owned key, its

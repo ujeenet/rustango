@@ -31,17 +31,65 @@
 //! rustango.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
+
+/// Future returned by the [`JtiStore`] methods.
+///
+/// Boxed rather than an `async fn` in the trait because every consumer
+/// holds the store as `Arc<dyn JtiStore>`, and native `async fn` in traits
+/// is not dyn-compatible. This is exactly what `#[async_trait]` expands to;
+/// it's written out by hand so `jti_store` — a core, ungated module — keeps
+/// building under every feature combination, including
+/// `--no-default-features --features sqlite,tenancy`, where the optional
+/// `async-trait` dependency isn't compiled in.
+pub type JtiFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Storage backend for "this JTI is no longer valid" lookups.
 ///
 /// Implementations MUST make `mark_used` atomic — concurrent callers
 /// for the same `jti` must observe exactly one success (the rest
 /// must observe `false`), or the single-use guarantee is broken.
+///
+/// # Async since v0.52 (#1191)
+///
+/// The methods return futures so a store can simply `await` a database
+/// write. While the trait was synchronous, a durable store had to be a hot
+/// `RwLock<HashMap>` with a background flusher — eventually consistent, with
+/// a convergence window during which a revoked `jti` was still accepted on
+/// another instance. Revoking a token is precisely the operation you want to
+/// be durable and immediate, and that constraint came from this signature
+/// rather than from the problem.
+///
+/// A synchronous implementation stays trivial — wrap the body:
+///
+/// ```ignore
+/// impl JtiStore for MyStore {
+///     fn is_used<'a>(&'a self, jti: &'a str) -> JtiFuture<'a, bool> {
+///         Box::pin(async move { self.map.lock().unwrap().contains_key(jti) })
+///     }
+///     fn mark_used<'a>(&'a self, jti: &'a str, exp_unix: i64) -> JtiFuture<'a, bool> {
+///         Box::pin(async move { /* … */ true })
+///     }
+/// }
+/// ```
+///
+/// …and a durable one is now just a query:
+///
+/// ```ignore
+/// fn mark_used<'a>(&'a self, jti: &'a str, exp_unix: i64) -> JtiFuture<'a, bool> {
+///     Box::pin(async move {
+///         // INSERT … ON CONFLICT DO NOTHING — one round trip, atomic,
+///         // and visible to every instance immediately.
+///         rows_affected == 1
+///     })
+/// }
+/// ```
 pub trait JtiStore: Send + Sync {
     /// Returns `true` if `jti` has previously been marked used /
     /// blacklisted. Read-only; never mutates the store.
-    fn is_used(&self, jti: &str) -> bool;
+    fn is_used<'a>(&'a self, jti: &'a str) -> JtiFuture<'a, bool>;
 
     /// Atomically check + record. Returns `true` when the JTI was
     /// newly recorded (i.e. the caller is the first to "use" it);
@@ -49,7 +97,12 @@ pub trait JtiStore: Send + Sync {
     ///
     /// `exp_unix` is the JWT's `exp` claim (unix seconds). Stores
     /// MAY use it to prune entries that are no longer relevant.
-    fn mark_used(&self, jti: &str, exp_unix: i64) -> bool;
+    ///
+    /// The atomicity requirement is unchanged by being async: a durable
+    /// store should express it as a single conditional write (e.g.
+    /// `INSERT … ON CONFLICT DO NOTHING`, or Redis `SET NX`), not as a
+    /// read followed by a write.
+    fn mark_used<'a>(&'a self, jti: &'a str, exp_unix: i64) -> JtiFuture<'a, bool>;
 
     /// Approximate count of currently-tracked JTIs. Used by admin
     /// dashboards and tests; not on the hot path.
@@ -59,8 +112,8 @@ pub trait JtiStore: Send + Sync {
     /// a status display would be silly). Default impl returns
     /// `None` so trait objects don't have to know how to count.
     /// v0.48.
-    fn approx_size(&self) -> Option<usize> {
-        None
+    fn approx_size(&self) -> JtiFuture<'_, Option<usize>> {
+        Box::pin(async { None })
     }
 }
 
@@ -93,26 +146,32 @@ impl Default for InMemoryJtiStore {
 }
 
 impl JtiStore for InMemoryJtiStore {
-    fn is_used(&self, jti: &str) -> bool {
-        let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        map.contains_key(jti)
+    // Bodies stay synchronous — nothing is awaited, so the `std::sync::Mutex`
+    // guard never crosses a suspend point.
+    fn is_used<'a>(&'a self, jti: &'a str) -> JtiFuture<'a, bool> {
+        Box::pin(async move {
+            let map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            map.contains_key(jti)
+        })
     }
 
-    fn mark_used(&self, jti: &str, exp_unix: i64) -> bool {
-        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        // Prune expired entries opportunistically so memory stays
-        // bounded without a background sweeper.
-        let now = chrono::Utc::now().timestamp();
-        map.retain(|_, &mut e| e > now);
-        if map.contains_key(jti) {
-            return false;
-        }
-        map.insert(jti.to_owned(), exp_unix);
-        true
+    fn mark_used<'a>(&'a self, jti: &'a str, exp_unix: i64) -> JtiFuture<'a, bool> {
+        Box::pin(async move {
+            let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            // Prune expired entries opportunistically so memory stays
+            // bounded without a background sweeper.
+            let now = chrono::Utc::now().timestamp();
+            map.retain(|_, &mut e| e > now);
+            if map.contains_key(jti) {
+                return false;
+            }
+            map.insert(jti.to_owned(), exp_unix);
+            true
+        })
     }
 
-    fn approx_size(&self) -> Option<usize> {
-        Some(self.inner.lock().unwrap_or_else(|e| e.into_inner()).len())
+    fn approx_size(&self) -> JtiFuture<'_, Option<usize>> {
+        Box::pin(async move { Some(self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()) })
     }
 }
 
@@ -120,44 +179,44 @@ impl JtiStore for InMemoryJtiStore {
 mod tests {
     use super::*;
 
-    #[test]
-    fn fresh_jti_is_not_used() {
+    #[tokio::test]
+    async fn fresh_jti_is_not_used() {
         let store = InMemoryJtiStore::new();
-        assert!(!store.is_used("token-1"));
+        assert!(!store.is_used("token-1").await);
     }
 
-    #[test]
-    fn first_mark_used_returns_true() {
+    #[tokio::test]
+    async fn first_mark_used_returns_true() {
         let store = InMemoryJtiStore::new();
         let exp = chrono::Utc::now().timestamp() + 60;
-        assert!(store.mark_used("token-1", exp));
-        assert!(store.is_used("token-1"));
+        assert!(store.mark_used("token-1", exp).await);
+        assert!(store.is_used("token-1").await);
     }
 
-    #[test]
-    fn second_mark_used_returns_false_single_use_guarantee() {
+    #[tokio::test]
+    async fn second_mark_used_returns_false_single_use_guarantee() {
         let store = InMemoryJtiStore::new();
         let exp = chrono::Utc::now().timestamp() + 60;
-        assert!(store.mark_used("token-1", exp));
+        assert!(store.mark_used("token-1", exp).await);
         assert!(
-            !store.mark_used("token-1", exp),
+            !store.mark_used("token-1", exp).await,
             "second use must return false to preserve single-use guard"
         );
     }
 
-    #[test]
-    fn distinct_jtis_dont_collide() {
+    #[tokio::test]
+    async fn distinct_jtis_dont_collide() {
         let store = InMemoryJtiStore::new();
         let exp = chrono::Utc::now().timestamp() + 60;
-        assert!(store.mark_used("token-a", exp));
-        assert!(store.mark_used("token-b", exp));
-        assert!(store.is_used("token-a"));
-        assert!(store.is_used("token-b"));
-        assert!(!store.is_used("token-c"));
+        assert!(store.mark_used("token-a", exp).await);
+        assert!(store.mark_used("token-b", exp).await);
+        assert!(store.is_used("token-a").await);
+        assert!(store.is_used("token-b").await);
+        assert!(!store.is_used("token-c").await);
     }
 
-    #[test]
-    fn expired_entries_are_pruned_on_next_mark() {
+    #[tokio::test]
+    async fn expired_entries_are_pruned_on_next_mark() {
         let store = InMemoryJtiStore::new();
         let already_expired = chrono::Utc::now().timestamp() - 60;
         // Pre-poison the store with an expired entry — we can't go
@@ -170,21 +229,61 @@ mod tests {
             .insert("stale".to_owned(), already_expired);
         assert_eq!(store.len(), 1);
         let fresh_exp = chrono::Utc::now().timestamp() + 60;
-        assert!(store.mark_used("fresh", fresh_exp));
+        assert!(store.mark_used("fresh", fresh_exp).await);
         // Pruning ran during `mark_used("fresh", …)` and removed
         // the expired `stale` entry. Now the map holds only `fresh`.
         assert_eq!(store.len(), 1);
-        assert!(!store.is_used("stale"));
-        assert!(store.is_used("fresh"));
+        assert!(!store.is_used("stale").await);
+        assert!(store.is_used("fresh").await);
     }
 
-    #[test]
-    fn trait_object_is_usable() {
+    #[tokio::test]
+    async fn trait_object_is_usable() {
         // Lock in the dyn-compatible contract — `Arc<dyn JtiStore>`
-        // is the shape every consumer takes.
+        // is the shape every consumer takes, and the reason the trait
+        // returns boxed futures rather than using `async fn` (#1191).
         let store: std::sync::Arc<dyn JtiStore> = std::sync::Arc::new(InMemoryJtiStore::new());
         let exp = chrono::Utc::now().timestamp() + 60;
-        assert!(store.mark_used("via-dyn", exp));
-        assert!(store.is_used("via-dyn"));
+        assert!(store.mark_used("via-dyn", exp).await);
+        assert!(store.is_used("via-dyn").await);
+    }
+
+    /// A store that actually awaits between the check and the record — the
+    /// shape a database-backed store has. `mark_used` must still be
+    /// single-use under concurrency, which is why the contract demands one
+    /// conditional write rather than read-then-write (#1191).
+    #[tokio::test]
+    async fn awaiting_store_keeps_the_single_use_guarantee() {
+        struct AwaitingStore(Mutex<HashMap<String, i64>>);
+        impl JtiStore for AwaitingStore {
+            fn is_used<'a>(&'a self, jti: &'a str) -> JtiFuture<'a, bool> {
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    self.0.lock().unwrap().contains_key(jti)
+                })
+            }
+            fn mark_used<'a>(&'a self, jti: &'a str, exp_unix: i64) -> JtiFuture<'a, bool> {
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    // Single conditional write, holding the lock across the
+                    // check and the insert.
+                    let mut map = self.0.lock().unwrap();
+                    if map.contains_key(jti) {
+                        return false;
+                    }
+                    map.insert(jti.to_owned(), exp_unix);
+                    true
+                })
+            }
+        }
+
+        let store: std::sync::Arc<dyn JtiStore> =
+            std::sync::Arc::new(AwaitingStore(Mutex::new(HashMap::new())));
+        let exp = chrono::Utc::now().timestamp() + 60;
+
+        // Two concurrent claims on the same jti: exactly one must win.
+        let (a, b) = tokio::join!(store.mark_used("race", exp), store.mark_used("race", exp));
+        assert!(a ^ b, "exactly one concurrent mark_used must succeed");
+        assert!(store.is_used("race").await);
     }
 }

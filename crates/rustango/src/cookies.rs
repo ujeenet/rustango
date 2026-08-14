@@ -241,6 +241,11 @@ impl Cookie {
     /// invalid (control characters, etc.) — should never happen
     /// with sane caller-supplied names/values, but exposed as
     /// `Option` to avoid panicking on attacker-controlled input.
+    ///
+    /// The one axum-typed method on an otherwise dependency-free builder, so
+    /// it gates alone rather than taking the module with it — `build()` still
+    /// returns the same cookie as a `String` in a bare-ORM build.
+    #[cfg(feature = "_axum")]
     #[must_use]
     pub fn header_value(&self) -> Option<axum::http::HeaderValue> {
         axum::http::HeaderValue::from_str(&self.build()).ok()
@@ -438,13 +443,18 @@ mod tests {
     }
 
     // -------- header_value --------
+    //
+    // Follow the `_axum` gate on the method they exercise; the rest of the
+    // cookie suite is dependency-free.
 
+    #[cfg(feature = "_axum")]
     #[test]
     fn header_value_returns_some_for_normal_cookie() {
         let v = Cookie::new("session", "abc").path("/").header_value();
         assert!(v.is_some());
     }
 
+    #[cfg(feature = "_axum")]
     #[test]
     fn header_value_returns_none_for_invalid_chars() {
         // A NUL byte in the value should make axum reject the

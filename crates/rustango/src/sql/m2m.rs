@@ -100,6 +100,9 @@ impl M2MManager {
         let binds = vec![SqlValue::I64(self.src_pk_i64()), SqlValue::I64(dst_id)];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
         // #410 — fire m2m_changed after successful junction-row write.
+        // `signals` is an optional feature, so every emission below is gated
+        // (#1208) — these statements were unconditional while the module is not.
+        #[cfg(feature = "signals")]
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
             action: crate::signals::m2m::M2mAction::Add,
             through: self.through,
@@ -130,6 +133,7 @@ impl M2MManager {
         let binds = vec![SqlValue::I64(self.src_pk_i64()), SqlValue::I64(dst_id)];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
         // #410 — fire m2m_changed after successful junction-row remove.
+        #[cfg(feature = "signals")]
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
             action: crate::signals::m2m::M2mAction::Remove,
             through: self.through,
@@ -197,6 +201,7 @@ impl M2MManager {
         // #410 — fire m2m_changed after the atomic DELETE+INSERT
         // commits. `dst_pks` is the new full set (may be empty when
         // `set([])` was called).
+        #[cfg(feature = "signals")]
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
             action: crate::signals::m2m::M2mAction::Set,
             through: self.through,
@@ -225,6 +230,7 @@ impl M2MManager {
         let binds = vec![SqlValue::I64(self.src_pk_i64())];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
         // #410 — fire m2m_changed after clear.
+        #[cfg(feature = "signals")]
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
             action: crate::signals::m2m::M2mAction::Clear,
             through: self.through,
@@ -319,6 +325,11 @@ impl GenericM2MManager {
 
     /// Fire `m2m_changed` for a junction mutation (reuses the monomorphic
     /// signal context; `src_col` reports the polymorphic `pk_col`).
+    ///
+    /// Gated with its call sites (#1208) — the parameter type comes from the
+    /// optional `signals` module, so the signature itself cannot exist without
+    /// the feature.
+    #[cfg(feature = "signals")]
     async fn signal(&self, action: crate::signals::m2m::M2mAction, dst_pks: Vec<i64>) {
         crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
             action,
@@ -378,6 +389,7 @@ impl GenericM2MManager {
             SqlValue::I64(dst_id),
         ];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Add, vec![dst_id])
             .await;
         Ok(())
@@ -406,6 +418,7 @@ impl GenericM2MManager {
             SqlValue::I64(dst_id),
         ];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Remove, vec![dst_id])
             .await;
         Ok(())
@@ -464,6 +477,7 @@ impl GenericM2MManager {
             crate::sql::raw_execute_tx(&mut tx, &ins_sql, binds).await?;
         }
         tx.commit().await.map_err(ExecError::Driver)?;
+        #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Set, ids.to_vec())
             .await;
         Ok(())
@@ -486,6 +500,7 @@ impl GenericM2MManager {
         );
         let binds = vec![SqlValue::I64(self.src_pk_i64()), SqlValue::I64(ct)];
         super::executor::raw_execute_pool(pool, &sql, binds).await?;
+        #[cfg(feature = "signals")]
         self.signal(crate::signals::m2m::M2mAction::Clear, Vec::new())
             .await;
         Ok(())
