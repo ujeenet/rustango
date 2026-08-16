@@ -4,6 +4,41 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.52.1] — 2026-08-15
+
+Patch. One fix, no breaking changes — `0.52.0` users can take it directly.
+
+### Fixed
+- **`#[rustango(soft_delete)]` did not compile on any build with `postgres`
+  off** (#1221). The derive emits `soft_delete_on` / `restore_on`, which take a
+  Postgres executor and reach `sql::__macro_internals` — a module that is itself
+  `#[cfg(feature = "postgres")]`. They were the only PG-executor methods in the
+  macro missing the matching gate, so a sqlite-only consumer got an expansion
+  referencing a module that had been configured out. The pool-based trio
+  (`soft_delete` / `restore` / `force_delete`, plus `active` / `only_trashed`)
+  already takes `&Pool` and was always backend-agnostic; only the two `_on`
+  methods needed the gate every other PG method in the file already carries.
+
+  Why the existing suites missed it: the three sqlite soft-delete tests are
+  `cfg(feature = "sqlite")`, and the crate's default features include
+  `postgres`, so each ran with the PG backend *also* compiled in — precisely the
+  condition that hid the fault. The regression test carries an inverted gate,
+  `not(feature = "postgres")`, so it exists only in the build the others cannot
+  see:
+
+  ```
+  cargo test -p rustango --no-default-features \
+    --features sqlite,testkit --test soft_delete_without_postgres
+  ```
+
+### Changed
+- **`find_or_provision_member` is now public.** The browser SSO flow is no
+  longer its only caller — a native mobile sign-in verifies an ID token itself
+  and then needs exactly this rule, and keeping it private forced a downstream
+  app to reimplement it. Two copies of "which existing member does this
+  verified email map to, and may it be provisioned" is the kind of duplication
+  that drifts into a security bug.
+
 ## [0.52.0] — 2026-08-13
 
 Headline: **a `ViewSet` can finally be scoped to the caller** (#1183) — the

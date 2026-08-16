@@ -6755,6 +6755,7 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`Self::delete`].
+                #[cfg(feature = "postgres")]
                 pub async fn soft_delete_on #executor_generics (
                     &self,
                     #executor_param,
@@ -6797,6 +6798,7 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`Self::delete`].
+                #[cfg(feature = "postgres")]
                 pub async fn restore_on #executor_generics (
                     &self,
                     #executor_param,

@@ -590,7 +590,13 @@ async fn sso_callback(
 /// Match the IdP email to an existing member, else auto-provision one
 /// (when `auto_provision`). Returns `Ok(Some(id))` on match/create,
 /// `Ok(None)` when unknown and auto-provision is off (caller refuses).
-async fn find_or_provision_member(
+///
+/// Public because the browser SSO flow is not the only caller any more: a
+/// native mobile sign-in verifies an ID token itself and then needs exactly
+/// this rule. Keeping it private forced the one downstream app that does so to
+/// reimplement it, and two copies of "which existing member is this, and may
+/// we create one" drift apart silently — both keep working, differently.
+pub async fn find_or_provision_member(
     pool: &Pool,
     email: &str,
     profile: &NormalizedUser,
