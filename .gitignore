@@ -10,7 +10,36 @@ crates/rustango/examples/*/Cargo.lock
 .DS_Store
 .idea/
 .vscode/
-.claude/settings.local.json
+
+# AI / coding-agent tooling — per-developer local config, never shared.
+# These files accumulate absolute paths, per-machine command allowlists,
+# and session state; they are not part of the project.
+.claude/
+CLAUDE.md
+AGENTS.md
+.mcp.json
+.cursor/
+.cursorrules
+.cursorignore
+.cursorindexingignore
+.aider*
+.continue/
+.windsurf/
+.windsurfrules
+.codeium/
+.roo/
+.roomodes
+.cline/
+.clinerules
+.gemini/
+GEMINI.md
+.junie/
+.qodo/
+.specstory/
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+
 # manage_demo example writes its migrations here at runtime
 /manage_demo_migrations/
 # tenancy_manage example writes packaged bootstrap migrations here on first run
