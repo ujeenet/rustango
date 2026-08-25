@@ -146,10 +146,16 @@ impl<DB: Database> Tenant<DB> {
     /// same code path.
     ///
     /// **PG schema-mode note**: the pool wraps the shared registry
-    /// pool; queries against it would hit `public` instead of the
-    /// tenant schema. For schema-mode-on-PG paths use
-    /// [`Tenant::conn`] (which has `SET search_path` applied).
-    /// Database-mode (any backend) is unaffected.
+    /// pool; queries against it hit `public` instead of the tenant
+    /// schema. For schema-mode-on-PG paths use [`Tenant::conn`] (which
+    /// has `SET search_path` applied). Database-mode (any backend) is
+    /// unaffected.
+    ///
+    /// That `public` is a guarantee, not a coincidence:
+    /// `TenantConn` resets `search_path` when it is released, so this
+    /// pool never hands out a connection still scoped to whichever
+    /// tenant borrowed it last (#1224). Wrong-namespace queries here
+    /// fail loudly rather than reading another tenant's rows.
     #[must_use]
     pub fn pool(&self) -> &crate::sql::Pool {
         &self.pool
