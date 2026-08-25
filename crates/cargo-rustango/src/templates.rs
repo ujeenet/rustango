@@ -105,14 +105,27 @@ pub const GITIGNORE: &str = "/target
 
 // ---------------- rust-toolchain.toml ----------------
 
-/// Pin rustup to 1.88 in the new project so users on macOS who have
-/// Homebrew's older `rust` binary on PATH (currently 1.86) don't get
-/// the "rustc 1.86.0 is not supported by the following packages"
+/// Point rustup at `stable` in the new project so users on macOS who
+/// have Homebrew's older `rust` binary on PATH (currently 1.86) don't
+/// get the "rustc 1.86.0 is not supported by the following packages"
 /// error when they `cd` into the project. rustup reads this file and
-/// silently uses 1.88 inside the project regardless of which cargo
-/// they invoked. v0.8 rustango requires 1.88 (workspace.package.rust-version).
+/// uses the named toolchain inside the project regardless of which
+/// cargo they invoked.
+///
+/// Deliberately **not** an exact version. rustango's MSRV lives in
+/// `Cargo.toml` (`rust-version`), which is a floor — a generated app
+/// has no reason to be held *at* that floor, and pinning one would
+/// leave every project born on an ageing compiler. A stale exact pin
+/// also breaks IDE support: rust-analyzer refuses toolchains much
+/// older than itself, so VS Code warns that the channel is too old
+/// and silently drops to no IDE services.
+///
+/// `components` is the second half of that fix — it makes the editor
+/// use the toolchain's own rust-analyzer rather than the one bundled
+/// with the extension. Mirrors this repo's own `rust-toolchain.toml`.
 pub const RUST_TOOLCHAIN: &str = "[toolchain]
-channel = \"1.88\"
+channel = \"stable\"
+components = [\"rustfmt\", \"clippy\", \"rust-analyzer\"]
 ";
 
 // ---------------- docker-compose.yml ----------------
@@ -183,11 +196,12 @@ volumes:
 /// project sources land via the bind mount; this image only needs
 /// the toolchain + cargo-watch installed.
 ///
-/// The rust version is pinned to the same value as
-/// `rust-toolchain.toml`'s `channel`. Override by editing both
-/// files together if you bump the toolchain.
+/// Tracks the latest Rust 1.x release, matching the `stable` channel
+/// in `rust-toolchain.toml` — see [`RUST_TOOLCHAIN`] for why neither
+/// is pinned to an exact version. Pin both together (`rust:1.90` +
+/// `channel = "1.90"`) if you need byte-reproducible dev images.
 pub fn dockerfile() -> &'static str {
-    "FROM rust:1.88\n\
+    "FROM rust:1\n\
      \n\
      WORKDIR /app\n\
      \n\
