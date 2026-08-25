@@ -36,6 +36,7 @@ de Laravel, en Rust.
 - [Nouvelles tentatives et backoff](#retries-and-backoff)
 - [Le handler dead-letter](#the-dead-letter-handler)
 - [La file persistante (production)](#the-persistent-queue-production)
+- [Les tâches en multi-tenancy](#jobs-under-multi-tenancy)
 - [Référence](#reference)
 - [Voir aussi](#see-also)
 
@@ -348,6 +349,80 @@ dogfooding contre SQLite dans `jobs_sqlite_live.rs`.
 
 ---
 
+## Les tâches en multi-tenancy
+
+Un worker n'est pas une requête. Rien n'a résolu de tenant pour lui — aucun
+host, aucun en-tête, aucun middleware ne s'est exécuté — donc **une tâche ne
+porte aucun contexte de tenant** : `run(&self)` ne reçoit que le payload
+désérialisé. L'isolation vient **du pool sur lequel la file a été construite**,
+et la règle en découle :
+
+> Une file par pool de tenant. Un id de tenant dans le payload, c'est du
+> routage, pas de l'isolation.
+
+C'est cette seule décision qui rend chaque mode sûr :
+
+| Mode | Où vit `rustango_jobs` | Pourquoi un worker reste cadré |
+|---|---|---|
+| `database` | dans la base de données / le fichier SQLite propre au tenant | les lignes d'un autre tenant ne sont pas dans la table que le worker interroge — les lectures inter-tenants ne sont pas exprimables |
+| `schema` (PG) | dans le schéma du tenant | `scoped_pool_dyn` renvoie un pool dont les **connect options** embarquent `search_path`, et non un `SET` par requête — chaque checkout est donc cadré pour toute la durée de vie du pool, y compris pour un worker qui vit des jours |
+
+Construisez les files au démarrage, une par tenant actif :
+
+```rust
+use rustango::core::Column as _;
+use rustango::jobs::{DatabaseJobQueue, JobQueue};
+use rustango::sql::FetcherPool as _;
+use rustango::tenancy::{Org, TenantPools};
+use std::sync::Arc;
+use std::time::Duration;
+
+let pools = Arc::new(TenantPools::new(registry));
+let registry_pool = pools.registry_pool();
+
+// The registry holds the tenant list; each `Org` names its own
+// database (or PG schema).
+let orgs: Vec<Org> = Org::objects()
+    .where_(Org::active.eq(true))
+    .fetch(&registry_pool)
+    .await?;
+
+let mut queues = Vec::new();
+for org in orgs {
+    let pool = pools.scoped_pool_dyn(&org).await?;   // scoped for its lifetime
+    DatabaseJobQueue::ensure_table_pool(&pool).await?;
+
+    let queue = Arc::new(
+        DatabaseJobQueue::with_workers_pool(pool, 2)
+            .poll_interval(Duration::from_secs(1)),
+    );
+    queue.register::<WelcomeEmail>().await;
+    queue.start().await;
+    queues.push((org.slug, queue));
+}
+```
+
+Le dispatch part alors vers la file *de ce tenant* — dans un handler de
+requête, celle indexée par l'`Org` que le resolver a déjà produit.
+
+**Ce qu'il ne faut pas faire.** Une seule file sur le pool du registry avec un
+champ `org_id` dans le payload met les tâches de tous les tenants dans une
+table partagée, et laisse chaque `run()` se souvenir de re-cadrer. Un seul
+re-cadrage oublié est une écriture inter-tenants. S'il vous faut une file
+partagée pour des raisons opérationnelles, résolvez le pool du tenant comme
+*première* chose que fait `run()`, et ne touchez plus au pool du registry
+ensuite.
+
+**Limites connues.** Le framework ne fait pas le fan-out pour vous : pas de
+superviseur de workers par tenant, pas de `Job::run(&ctx)` avec le tenant
+attaché, et pas de balayage `reclaim_stuck_jobs_pool` conscient du tenant —
+vous itérez vous-même sur les tenants, comme ci-dessus. Les tenants
+provisionnés après le démarrage n'ont aucun worker jusqu'au redémarrage du
+processus. Suivi dans
+[#1223](https://github.com/ujeenet/rustango/issues/1223).
+
+---
+
 ## Référence
 
 **Backends**
@@ -382,3 +457,5 @@ dogfooding contre SQLite dans `jobs_sqlite_live.rs`.
   requêtes rapides.
 - [Signals](orm.md) — des hooks fire-and-forget qui *dispatchent* souvent une
   tâche.
+- [Commandes de tenancy](manage.md#tenancy-commands) — le provisionnement des
+  tenants sur lesquels une file par tenant fait son fan-out.

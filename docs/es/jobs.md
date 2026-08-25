@@ -36,6 +36,7 @@ es Django-Q / Celery / las colas de Laravel, en Rust.
 - [Reintentos y backoff](#retries-and-backoff)
 - [El handler dead-letter](#the-dead-letter-handler)
 - [La cola persistente (producción)](#the-persistent-queue-production)
+- [Trabajos con multi-tenancy](#jobs-under-multi-tenancy)
 - [Referencia](#reference)
 - [Véase también](#see-also)
 
@@ -343,6 +344,78 @@ dogfooding contra SQLite en `jobs_sqlite_live.rs`.
 
 ---
 
+## Trabajos con multi-tenancy
+
+Un worker no es un request. Nada resolvió un tenant para él — ningún host,
+ninguna cabecera, ningún middleware se ejecutó — así que **un trabajo no lleva
+contexto de tenant**: `run(&self)` solo recibe el payload deserializado. El
+aislamiento viene **del pool sobre el que se construyó la cola**, y de ahí sale
+la regla:
+
+> Una cola por pool de tenant. Un id de tenant en el payload es enrutado, no
+> aislamiento.
+
+Esa única decisión es la que hace seguro cada modo:
+
+| Modo | Dónde vive `rustango_jobs` | Por qué un worker permanece acotado |
+|---|---|---|
+| `database` | dentro de la propia base de datos / archivo SQLite del tenant | las filas de otro tenant no están en la tabla que consulta el worker — las lecturas entre tenants no son expresables |
+| `schema` (PG) | en el esquema del tenant | `scoped_pool_dyn` devuelve un pool con `search_path` incorporado en sus **connect options**, no un `SET` por request — así cada checkout queda acotado durante toda la vida del pool, incluido un worker que viva días |
+
+Construye las colas en el arranque, una por tenant activo:
+
+```rust
+use rustango::core::Column as _;
+use rustango::jobs::{DatabaseJobQueue, JobQueue};
+use rustango::sql::FetcherPool as _;
+use rustango::tenancy::{Org, TenantPools};
+use std::sync::Arc;
+use std::time::Duration;
+
+let pools = Arc::new(TenantPools::new(registry));
+let registry_pool = pools.registry_pool();
+
+// The registry holds the tenant list; each `Org` names its own
+// database (or PG schema).
+let orgs: Vec<Org> = Org::objects()
+    .where_(Org::active.eq(true))
+    .fetch(&registry_pool)
+    .await?;
+
+let mut queues = Vec::new();
+for org in orgs {
+    let pool = pools.scoped_pool_dyn(&org).await?;   // scoped for its lifetime
+    DatabaseJobQueue::ensure_table_pool(&pool).await?;
+
+    let queue = Arc::new(
+        DatabaseJobQueue::with_workers_pool(pool, 2)
+            .poll_interval(Duration::from_secs(1)),
+    );
+    queue.register::<WelcomeEmail>().await;
+    queue.start().await;
+    queues.push((org.slug, queue));
+}
+```
+
+El despacho va entonces a la cola *de ese tenant* — en un handler de request, a
+la que está indexada por el `Org` que el resolver ya produjo.
+
+**Qué no hacer.** Una sola cola sobre el pool del registry con un campo
+`org_id` en el payload pone los trabajos de todos los tenants en una tabla
+compartida, y deja a cada `run()` la tarea de acordarse de reacotar. Un solo
+reacotado olvidado es una escritura entre tenants. Si necesitas una cola
+compartida por razones operativas, resuelve el pool del tenant como lo
+*primero* que hace `run()` y no vuelvas a tocar el pool del registry después.
+
+**Límites conocidos.** El framework no hace el fan-out por ti: no hay
+supervisor de workers por tenant, ni `Job::run(&ctx)` con el tenant adjunto, ni
+un barrido `reclaim_stuck_jobs_pool` consciente del tenant — iteras sobre los
+tenants tú mismo, como arriba. Los tenants provisionados después del arranque
+no obtienen workers hasta que el proceso se reinicia. Seguimiento en
+[#1223](https://github.com/ujeenet/rustango/issues/1223).
+
+---
+
 ## Referencia
 
 **Backends**
@@ -375,3 +448,5 @@ dogfooding contra SQLite en `jobs_sqlite_live.rs`.
 - [Caché](caching.md) — la otra manera de mantener rápidos los handlers de
   peticiones.
 - [Signals](orm.md) — hooks fire-and-forget que a menudo *despachan* un trabajo.
+- [Comandos de tenancy](manage.md#tenancy-commands) — el provisionamiento de los
+  tenants sobre los que una cola por tenant hace fan-out.
