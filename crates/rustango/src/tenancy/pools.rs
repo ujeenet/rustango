@@ -8,8 +8,11 @@
 //!   issue `SET search_path TO <schema>, public` so queries see the
 //!   tenant's schema, and on release [`TenantConn`] resets it so the
 //!   next borrower of that shared connection cannot inherit the
-//!   tenant's namespace (#1224). Cheap (one connection budget for all
-//!   tenants).
+//!   tenant's namespace (#1224). Cheap on connection budget (one for
+//!   all tenants); the reset costs one extra round trip per release,
+//!   with the connection still checked out while it runs, so a
+//!   registry pool sized near peak concurrency will feel it as
+//!   `acquire` latency.
 //!
 //! * **Database mode** (`Org.storage_mode == "database"`). Tenant data
 //!   lives in a separate Postgres database. `Org.database_url` is a
@@ -719,18 +722,24 @@ impl TenantPools<sqlx::Postgres> {
         let pool = self.pool_for_org(org).await?;
         match &pool {
             TenantPool::Schema { schema, registry } => {
-                let mut conn = registry.acquire().await?;
-                let stmt = format!("SET search_path TO {}, public", quote_ident(schema));
-                rustango::sql::sqlx::query(&stmt)
-                    .execute(&mut *conn)
-                    .await?;
-                Ok(TenantConn {
+                let conn = registry.acquire().await?;
+                // Install the reset *before* issuing the `SET`, not
+                // after. The statement is session-level on a **shared**
+                // pool, so it must be undone on release (#1224) — and
+                // if this future is cancelled (request timeout, client
+                // disconnect, `select!`) after PG has already applied
+                // the `SET`, only a live `TenantConn` can undo it.
+                // Constructing it afterwards leaves a window where the
+                // bare `PoolConnection` drops, sqlx's `ping()` recovers
+                // it, and it rejoins the shared pool tenant-scoped.
+                let mut tc = TenantConn {
                     inner: Some(conn),
                     schema: Some(schema.clone()),
-                    // The `SET` above is session-level on a *shared*
-                    // pool — it must be undone on release (#1224).
                     reset: Some(reset_pg_search_path),
-                })
+                };
+                let stmt = format!("SET search_path TO {}, public", quote_ident(schema));
+                rustango::sql::sqlx::query(&stmt).execute(&mut **tc).await?;
+                Ok(tc)
             }
             TenantPool::Database { pool } => {
                 let conn = pool.acquire().await?;
