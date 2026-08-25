@@ -57,6 +57,9 @@ pub mod redis_backend;
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub use db_backend::DatabaseCache;
 
+pub mod scoped;
+pub use scoped::{ScopedCache, TENANT_PREFIX};
+
 // ------------------------------------------------------------------ CacheError
 
 /// Errors returned by cache operations.
@@ -256,6 +259,35 @@ pub trait Cache: Send + Sync + 'static {
     /// on the hit path — the allocation only happens on miss.
     async fn get_or(&self, key: &str, default: &str) -> Result<String, CacheError> {
         Ok(self.get(key).await?.unwrap_or_else(|| default.to_owned()))
+    }
+
+    /// Delete every key starting with `prefix`. Powers
+    /// [`ScopedCache::clear`], which must drop one namespace's entries
+    /// without touching anyone else's (#1227).
+    ///
+    /// **The default over-deletes: it clears the whole cache** and logs
+    /// a warning. That is deliberate. A backend that cannot enumerate
+    /// its keys has two options, and only one of them is safe:
+    /// under-deleting leaves stale entries that a *different* namespace
+    /// can then read, which is a correctness bug; over-deleting costs
+    /// other namespaces a cache miss. [`FileCache`] is the concrete
+    /// case — it hashes keys into paths, so the prefix is not
+    /// recoverable from the filename.
+    ///
+    /// Backends that can enumerate override this:
+    /// [`InMemoryCache`] filters its map, [`DatabaseCache`] issues a
+    /// `DELETE … WHERE cache_key LIKE 'prefix%'`, and [`NullCache`]
+    /// has nothing to delete.
+    async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
+        tracing::warn!(
+            target: "rustango::cache",
+            prefix = %prefix,
+            "this cache backend cannot enumerate keys, so a prefix delete clears \
+             the WHOLE cache — other namespaces will see a cold cache. Use a \
+             backend that overrides `delete_prefix` (memory / database) if that \
+             matters",
+        );
+        self.clear().await
     }
 }
 
@@ -477,6 +509,12 @@ impl Cache for NullCache {
     }
 
     async fn clear(&self) -> Result<(), CacheError> {
+        Ok(())
+    }
+
+    /// Nothing is stored, so nothing needs deleting — and in particular
+    /// this must not fall through to the warning on the trait default.
+    async fn delete_prefix(&self, _prefix: &str) -> Result<(), CacheError> {
         Ok(())
     }
 }
@@ -704,6 +742,25 @@ impl Cache for InMemoryCache {
         let mut store = self.inner.write().await;
         store.map.clear();
         store.used_bytes = 0;
+        Ok(())
+    }
+
+    /// Exact prefix delete — the map is right here, so there is no need
+    /// to fall back to the trait default's whole-cache clear (#1227).
+    /// `used_bytes` is decremented by what actually left, keeping the
+    /// LRU budget honest.
+    async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
+        let mut store = self.inner.write().await;
+        let mut freed = 0usize;
+        store.map.retain(|k, e| {
+            if k.starts_with(prefix) {
+                freed += k.len() + e.value.len();
+                false
+            } else {
+                true
+            }
+        });
+        store.used_bytes = store.used_bytes.saturating_sub(freed);
         Ok(())
     }
 }

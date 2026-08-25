@@ -260,6 +260,43 @@ impl Cache for DatabaseCache {
             .map_err(|e| CacheError::Connection(format!("clear: {e}")))?;
         Ok(())
     }
+
+    /// Exact prefix delete via `LIKE 'prefix%'` — the keys are a real
+    /// column, so there is no need for the trait default's whole-table
+    /// clear (#1227).
+    ///
+    /// `%` and `_` are LIKE wildcards, so a prefix containing either
+    /// would match more rows than intended — an unescaped `_` matches
+    /// any single character, and one namespace's clear could sweep a
+    /// neighbour's rows.
+    ///
+    /// The escape character is **`!`, not `\`**. A backslash cannot be
+    /// written portably here: MySQL treats `\` as an escape *inside
+    /// string literals*, so `ESCAPE '\'` is a syntax error there, while
+    /// Postgres (with `standard_conforming_strings`) reads the same
+    /// literal as one backslash and accepts it. `!` needs no escaping in
+    /// any of the three dialects, so one statement works everywhere.
+    /// Covered on all three by `cache_db_backend_sqlite_live.rs` and
+    /// `cache_delete_prefix_live.rs`.
+    async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
+        let dialect = self.pool.dialect();
+        let table = dialect.quote_ident(&self.table);
+        let p = dialect.placeholder(1);
+        // Escape the escape character first, or `!` in a prefix would
+        // swallow the character after it.
+        let pattern = format!(
+            "{}%",
+            prefix
+                .replace('!', "!!")
+                .replace('%', "!%")
+                .replace('_', "!_")
+        );
+        let sql = format!("DELETE FROM {table} WHERE cache_key LIKE {p} ESCAPE '!'");
+        raw_execute_pool(&self.pool, &sql, vec![SqlValue::String(pattern)])
+            .await
+            .map_err(|e| CacheError::Connection(format!("delete_prefix: {e}")))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
