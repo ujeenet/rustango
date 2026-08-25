@@ -1,9 +1,9 @@
-# SSO admin (OpenID Connect / connexion sociale)
+# SSO (OpenID Connect / connexion sociale)
 
-Connectez-vous à l'admin rustango avec un fournisseur d'identité externe —
-Google, Microsoft / Azure AD, GitHub, GitLab, Discord, ou **n'importe quel
+Connectez-vous avec un fournisseur d'identité externe — Google,
+Microsoft / Azure AD, GitHub, GitLab, Discord, ou **n'importe quel
 fournisseur OpenID Connect** (Okta, Auth0, Keycloak, …) — au lieu d'un
-mot de passe local. Activez-le avec la fonctionnalité cargo `admin-sso`.
+mot de passe local.
 
 Vous pouvez configurer **plusieurs providers**, chacun géré depuis
 l'interface d'admin comme une ligne (pas de fichier de configuration, pas
@@ -12,15 +12,53 @@ découverts automatiquement à partir de son URL d'émetteur (issuer) OIDC
 lors de la connexion ; les providers sociaux utilisent des préréglages
 intégrés.
 
-Le SSO fonctionne en **liaison à un compte existant** : l'email vérifié
-renvoyé par l'IdP doit correspondre à un utilisateur admin existant. Le
-SSO authentifie la personne ; il ne crée jamais de comptes et n'accorde
-jamais d'accès par lui-même. Un email inconnu ou non vérifié est refusé.
+Pour l'admin, le SSO fonctionne en **liaison à un compte existant** :
+l'email vérifié renvoyé par l'IdP doit correspondre à un utilisateur
+admin existant. Il authentifie la personne ; il ne crée jamais de comptes
+et n'accorde jamais d'accès par lui-même. Un email inconnu ou non vérifié
+est refusé. (Le flux membre, ci-dessous, peut opter pour le
+provisionnement automatique.)
+
+> **Source :** le cœur `rustango::sso`, indépendant de l'admin
+> (`SsoProvider`, `build_provider`, `verified_email`, `ResolvedSso`,
+> `SsoError`), le câblage bare-admin `rustango::admin::sso`, le SSO
+> par tenant / console `rustango::tenancy::sso`
+> (`SharedSsoProvider`), et le SSO membre
+> `rustango::tenancy::member_auth`.
+
+## Fonctionnalités et qui les utilise
+
+Depuis la **0.49**, le cœur SSO est sa propre fonctionnalité, indépendante
+de l'auto-admin, si bien qu'une connexion d'utilisateur final (membre)
+peut se compiler sans tirer `crate::admin` :
+
+| Fonctionnalité | Tire | Vous donne |
+|---|---|---|
+| `sso` | `oauth2`, `casts` | Le cœur indépendant de l'admin : `rustango::sso` — la poignée de main OIDC / OAuth social, le modèle `SsoProvider` adossé à la base (secret chiffré au repos via `casts`), et le flux membre (`tenancy::member_auth`, avec `tenancy`). |
+| `admin-sso` | `admin`, `sso` | Ce qui précède **plus** le câblage de connexion bare-admin (`rustango::admin::sso`) — les boutons SSO sur la page de connexion de l'admin, qui émettent la session admin. |
 
 ```toml
 [dependencies]
-rustango = { version = "0.48", features = ["admin-sso"] }
+# Connexion admin avec SSO :
+rustango = { version = "0.52", features = ["admin-sso"] }
+# SSO membre (utilisateur final) sans l'auto-admin :
+rustango = { version = "0.52", features = ["tenancy", "sso"] }
 ```
+
+`admin::sso_provider` et les anciens chemins du cœur `admin::sso::*` sont
+désormais des **shims de ré-export** au-dessus de `sso::provider` /
+`sso::*`, donc les imports existants
+`crate::admin::sso::{build_provider, ResolvedSso, …}` et
+`crate::admin::sso_provider::SsoProvider` continuent de résoudre
+inchangés (le nom de table `rustango_sso_providers` et tous ses champs
+sont intacts — les migrations ne sont pas affectées).
+
+L'email sur lequel un utilisateur est lié est la colonne `email`. Sur le
+modèle `User` du tenant, elle est conditionnée à la fonctionnalité
+**`sso`** (déplacée hors de `admin-sso` en 0.49, pour que les builds
+membre-SSO-seul obtiennent quand même la colonne) ; le `AdminUser.email`
+nu reste derrière `admin-sso`. Activer ou désactiver la fonctionnalité
+émet une migration `AddColumn` / `DropColumn` pour cette colonne.
 
 ## Comment ça fonctionne
 
@@ -93,6 +131,82 @@ L'URL de callback est dérivée par requête à partir de l'hôte + du slug
 faut enregistrer auprès de l'IdP. Liez un utilisateur en définissant la
 colonne `email` sur sa ligne `rustango_users` (tenant) /
 `rustango_admin_users` (nu) à l'adresse renvoyée par l'IdP.
+
+## SSO membre (utilisateur final)
+
+Les surfaces ci-dessus connectent des personnes à un **admin**.
+`tenancy::member_auth` en est l'équivalent côté membre : il connecte un
+utilisateur final au pool d'utilisateurs propre au tenant
+(`rustango_users`) et émet une **session membre**, pour qu'un adhérent de
+salle de sport / client SaaS puisse « Se connecter avec Google » sans
+toucher à l'admin. Il réutilise exactement le même cœur `rustango::sso`
+et les lignes `SsoProvider` du tenant — seule la session émise diffère,
+d'où le fait qu'il vive derrière la fonctionnalité `sso` (et non
+`admin-sso`) et n'ait besoin d'aucun auto-admin.
+
+Montez `member_sso_router` dans une pile `tenancy::server::Builder` (il
+lit l'`Arc<TenantContext>` résolu que le builder injecte) :
+
+```rust
+use rustango::tenancy::member_auth::{member_sso_router, MemberAuthConfig};
+
+let members = member_sso_router(MemberAuthConfig {
+    login_base:     "/auth".into(),   // buttons link to /auth/sso/<slug>
+    landing_url:    "/".into(),       // post-login destination (honors a same-origin ?next)
+    auto_provision: true,             // create a user from a verified email on first sign-in
+    session_ttl:    7 * 24 * 60 * 60, // 7 days
+    ..Default::default()
+});
+```
+
+Il monte deux routes par slug sous `login_base` :
+
+- `GET {login_base}/sso/{slug}` — démarrer la poignée de main, rediriger
+  vers l'IdP.
+- `GET {login_base}/sso/{slug}/callback` — la terminer, trouver ou
+  provisionner le membre, émettre le cookie de session.
+
+Différences avec le flux admin :
+
+- **Provisionnement automatique.** Avec `auto_provision = true` (le
+  défaut), un email IdP vérifié sans ligne `rustango_users`
+  correspondante en **crée** une — nom d'utilisateur issu de la partie
+  locale de l'email (dédupliqué en cas de collision), avec un hash de mot
+  de passe aléatoire réel mais inutilisable (les utilisateurs SSO ne
+  peuvent pas se connecter par mot de passe). Mettez-le à `false` pour
+  une liaison à un compte existant à la manière de l'admin (email inconnu
+  refusé).
+- **Son propre cookie de session.** Le cookie membre
+  (`rustango_member_session`) est **séparé par domaine** des cookies de
+  session tenant / admin : le message signé porte une étiquette
+  par domaine et une revendication d'audience, si bien qu'un cookie
+  membre ne peut jamais valider comme cookie tenant/admin (ni
+  l'inverse), même si les deux sont signés avec
+  `RUSTANGO_SESSION_SECRET`. Il est lié au slug (un cookie émis pour
+  `acme` n'authentifie jamais sur `globex`) et invalidé par une rotation
+  de mot de passe (parité avec la session admin).
+
+Lisez le membre courant dans un handler avec l'extracteur
+**`CurrentMember`** — l'équivalent membre de `SessionUser`. Il est
+infaillible (`None` pour les sessions anonymes / expirées / invalidées
+par rotation / inter-tenants), donc il se compose avec les routes
+publiques :
+
+```rust
+use rustango::tenancy::member_auth::CurrentMember;
+
+async fn dashboard(CurrentMember(member): CurrentMember) -> impl axum::response::IntoResponse {
+    match member {
+        Some(user) => format!("Hi, {}", user.username),
+        None => "Please sign in".to_owned(),
+    }
+}
+```
+
+> **Périmètre v1.** Le SSO membre résout les providers uniquement depuis
+> les lignes `SsoProvider` du tenant — la fusion avec le
+> `SharedSsoProvider` à l'échelle du registry et un hook `provision`
+> personnalisé sont des suites.
 
 ## Stockage des secrets
 
