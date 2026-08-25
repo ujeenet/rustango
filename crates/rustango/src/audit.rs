@@ -990,6 +990,12 @@ pub async fn fetch_for_entity_pool(
 /// `cutoff_days = 0` clears the entire table (use with caution); a
 /// negative value is clamped to 0.
 ///
+/// **Under tenancy, pass a tenant-scoped pool.** `rustango_audit_log` is
+/// per-tenant, so this trims whichever tenant `pool` points at — on a
+/// registry pool in schema mode, only `public`, while every tenant's
+/// audit history grows unbounded and the sweep still reports success.
+/// Fan out with [`crate::tenancy::for_each_tenant`] (#1226).
+///
 /// # Errors
 /// Driver / SQL failures from the DELETE.
 pub async fn cleanup_older_than_pool(
