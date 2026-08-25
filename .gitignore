@@ -7,6 +7,8 @@
 # don't commit either.
 crates/rustango/examples/*/target/
 crates/rustango/examples/*/Cargo.lock
+# shared target dir bin/examples.sh builds every example into (override: EX_TARGET)
+/target-examples/
 .DS_Store
 .idea/
 .vscode/
