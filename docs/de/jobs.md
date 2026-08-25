@@ -37,6 +37,7 @@ Celery / Laravel-Queues, in Rust.
 - [Der Dead-Letter-Handler](#the-dead-letter-handler)
 - [Die persistente Queue (Produktion)](#the-persistent-queue-production)
 - [Jobs unter Multi-Tenancy](#jobs-under-multi-tenancy)
+- [Geplante Sweeps unter Multi-Tenancy](#scheduled-sweeps-under-multi-tenancy)
 - [Referenz](#reference)
 - [Siehe auch](#see-also)
 
@@ -418,6 +419,66 @@ angehängtem Tenant und keinen Tenant-bewussten `reclaim_stuck_jobs_pool`-Sweep
 provisioniert werden, bekommen bis zum Prozess-Neustart keine Worker.
 Verfolgt in
 [#1223](https://github.com/ujeenet/rustango/issues/1223).
+
+**Auch kein ambienter Kontext.** Worker werden per `tokio::spawn` gestartet,
+und Task-Locals überqueren keinen Spawn — ein Job läuft also mit der
+Audit-Quelle auf `AuditSource::System` und der Default-Zeitzone, egal was der
+dispatchende Request gesetzt hatte. Nimm mit, was du brauchst, im Payload, oder
+betritt den Scope in `run()` erneut mit `audit::with_source`. Verfolgt in
+[#1229](https://github.com/ujeenet/rustango/issues/1229).
+
+---
+
+## Geplante Sweeps unter Multi-Tenancy
+
+Dasselbe „ein Worker ist kein Request"-Problem trifft auch *zeitbasierte*
+Arbeit, und die Sweep-Helfer des Frameworks sind die Stelle, an der es beißt:
+`MediaLibrary::purge_orphans`, `audit::cleanup_older_than_pool` und
+`prunable::prune_all` nehmen jeweils **einen Pool**, und jede Tabelle, die sie
+anfassen, ist pro Tenant. Ein Pool heißt ein Tenant — und ein Registry-Pool im
+Schema-Modus heißt nur `public`, während die Zeilen jedes Tenants anwachsen und
+der Sweep trotzdem Erfolg meldet.
+
+Mach den Fan-out mit **`for_each_tenant`**: es löst für jeden aktiven Tenant
+dessen eigenen Pool auf und macht weiter, wenn ein Tenant scheitert:
+
+```rust
+use rustango::tenancy::for_each_tenant;
+
+let sweep = for_each_tenant(&pools, |_org, pool| async move {
+    rustango::prunable::prune_all(&pool, &opts).await
+})
+.await?;
+
+tracing::info!(ok = sweep.succeeded(), failed = sweep.failed(), "nightly prune");
+for (slug, err) in sweep.errors() {
+    tracing::warn!(%slug, %err, "tenant prune failed");
+}
+```
+
+Ein kaputter Tenant — rotiertes Credential, nicht erreichbare Datenbank —
+landet im Report, statt den Lauf abzubrechen, und kann so die Tenants danach
+nicht aushungern. Inaktive Orgs werden übersprungen. `purge_orphans` ist der
+eine Sweep, der über die Datenbank hinausgreift (er löscht Storage-Objekte),
+darum gibt es `purge_orphans_dry_run`: dieselbe Query, löscht nichts — ein Blick
+darauf lohnt sich, bevor du das echte Ding verdrahtest.
+
+Wenn du den Sweep so absicherst, dass nur eine Replica ihn ausführt, dann
+**scope das Lock pro Tenant**:
+
+```rust
+use rustango::distributed_lock::DistributedLock;
+
+let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
+lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
+```
+
+Ungescoped konkurrieren alle Tenants um dasselbe `lock:nightly_prune`: der
+erste Tenant gewinnt, die übrigen werden für die gesamte TTL übersprungen — und
+zwar still, denn ein abgelehntes Acquire ist das erwartete Ergebnis, es wird
+nichts geloggt. Verfolgt in
+[#1226](https://github.com/ujeenet/rustango/issues/1226) und
+[#1228](https://github.com/ujeenet/rustango/issues/1228).
 
 ---
 

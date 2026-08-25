@@ -32,6 +32,7 @@ Django ou la façade `Cache` de Laravel.
 - [Valeurs JSON typées](#typed-json-values)
 - [TTL et expiration](#ttl-and-expiry)
 - [Changer de backend](#swapping-backends)
+- [La mise en cache en multi-tenancy](#caching-under-multi-tenancy)
 - [Référence](#reference)
 - [Voir aussi](#see-also)
 
@@ -169,6 +170,45 @@ let cache: BoxedCache = std::sync::Arc::new(RedisCache::new("redis://localhost")
 ```
 
 Les mêmes appels `get` / `set` / `get_or_set` — seul le constructeur a changé.
+
+---
+
+## La mise en cache en multi-tenancy
+
+`Cache` est un magasin plat indexé par `&str`, ce qui en multi-tenancy fait de
+la clé naturelle la clé qui fuit : un handler — ou pire une tâche d'arrière-plan,
+qui n'a aucun tenant ambiant où puiser — écrit `"stats:monthly"` pour un tenant
+et tous les autres le relisent.
+
+Enveloppez le cache partagé dans un **`ScopedCache`** pour que l'espace de noms
+soit appliqué à votre place et que le site d'appel ne puisse pas l'oublier :
+
+```rust
+use rustango::cache::ScopedCache;
+
+// From the Org the resolver already produced:
+let cache = ScopedCache::for_tenant(shared.clone(), &t.org.slug);
+
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:acme:stats:monthly
+cache.get("stats:monthly").await?;               // reads only acme's entry
+cache.clear().await?;                            // drops ONLY acme's entries
+```
+
+`ScopedCache` est lui-même un `Cache`, il se glisse donc partout où un
+`BoxedCache` est attendu — `cache_page`, `cache_fragment`, les rate limiters,
+`DistributedLock`. Il transmet au backend interne avec les clés remappées plutôt
+que de réimplémenter quoi que ce soit, si bien que les primitives natives (Redis
+`INCRBY`, `SET NX`, `MGET`) gardent leur atomicité et leur traitement par lots.
+
+Deux choses à savoir :
+
+| | |
+|---|---|
+| **C'est un espace de noms, pas une frontière** | Tout vit encore dans un seul backend, et du code détenant le cache *non cadré* peut lire n'importe quelle clé. L'idée est que le chemin ergonomique soit le chemin correct. |
+| **`clear()` a besoin d'énumérer les clés** | Il passe par `Cache::delete_prefix`. `InMemoryCache` filtre sa map et `DatabaseCache` émet un `DELETE … LIKE 'prefix%'`. Un backend qui ne *peut pas* énumérer — `FileCache` hache les clés en chemins — se rabat sur un vidage complet et journalise un avertissement. C'est délibéré : trop peu supprimer laisserait un autre espace de noms lire une entrée périmée, ce qui est un bug de correction ; trop supprimer ne coûte qu'un défaut de cache. |
+
+Le `Cache::clear()` non cadré reste global au processus : utilisez la vue cadrée
+dès que c'est le changement d'un seul tenant qui a déclenché l'invalidation.
 
 ---
 

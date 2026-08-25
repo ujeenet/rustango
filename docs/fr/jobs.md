@@ -37,6 +37,7 @@ de Laravel, en Rust.
 - [Le handler dead-letter](#the-dead-letter-handler)
 - [La file persistante (production)](#the-persistent-queue-production)
 - [Les tâches en multi-tenancy](#jobs-under-multi-tenancy)
+- [Les balayages planifiés en multi-tenancy](#scheduled-sweeps-under-multi-tenancy)
 - [Référence](#reference)
 - [Voir aussi](#see-also)
 
@@ -420,6 +421,66 @@ vous itérez vous-même sur les tenants, comme ci-dessus. Les tenants
 provisionnés après le démarrage n'ont aucun worker jusqu'au redémarrage du
 processus. Suivi dans
 [#1223](https://github.com/ujeenet/rustango/issues/1223).
+
+**Pas de contexte ambiant non plus.** Les workers sont lancés par
+`tokio::spawn`, et les task-locals ne traversent pas un spawn — une tâche
+s'exécute donc avec la source d'audit à `AuditSource::System` et le fuseau
+horaire par défaut, quoi qu'ait posé la requête qui l'a dispatchée. Emportez ce
+qu'il vous faut dans le payload, ou ré-entrez le scope dans `run()` avec
+`audit::with_source`. Suivi dans
+[#1229](https://github.com/ujeenet/rustango/issues/1229).
+
+---
+
+## Les balayages planifiés en multi-tenancy
+
+Le même problème — « un worker n'est pas une requête » — frappe le travail
+*basé sur le temps*, et les helpers de balayage du framework sont l'endroit où
+ça mord : `MediaLibrary::purge_orphans`, `audit::cleanup_older_than_pool` et
+`prunable::prune_all` prennent chacun **un seul pool**, et chaque table qu'ils
+touchent est par tenant. Un pool veut dire un tenant — et un pool du registry en
+mode schéma veut dire seulement `public`, pendant que les lignes de chaque
+tenant s'accumulent et que le balayage annonce quand même une réussite.
+
+Faites le fan-out avec **`for_each_tenant`**, qui résout le pool propre à
+chaque tenant actif et continue quand l'un échoue :
+
+```rust
+use rustango::tenancy::for_each_tenant;
+
+let sweep = for_each_tenant(&pools, |_org, pool| async move {
+    rustango::prunable::prune_all(&pool, &opts).await
+})
+.await?;
+
+tracing::info!(ok = sweep.succeeded(), failed = sweep.failed(), "nightly prune");
+for (slug, err) in sweep.errors() {
+    tracing::warn!(%slug, %err, "tenant prune failed");
+}
+```
+
+Un tenant cassé — identifiant tourné, base injoignable — est consigné dans le
+rapport au lieu d'interrompre le run, et ne peut donc pas priver les tenants
+suivants. Les orgs inactives sont ignorées. `purge_orphans` est le seul
+balayage qui sort de la base (il supprime des objets de stockage), d'où
+`purge_orphans_dry_run` : la même requête, sans rien supprimer — à regarder
+avant de câbler le vrai balayage.
+
+Si vous protégez le balayage pour qu'une seule réplique l'exécute, **cadrez le
+verrou par tenant** :
+
+```rust
+use rustango::distributed_lock::DistributedLock;
+
+let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
+lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
+```
+
+Non cadré, tous les tenants se disputent un unique `lock:nightly_prune` : le
+premier gagne et les autres sont ignorés pendant toute la TTL, en silence — un
+acquire refusé est le résultat attendu, donc rien n'est journalisé. Suivi dans
+[#1226](https://github.com/ujeenet/rustango/issues/1226) et
+[#1228](https://github.com/ujeenet/rustango/issues/1228).
 
 ---
 

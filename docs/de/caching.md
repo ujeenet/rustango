@@ -33,6 +33,7 @@ oder Laravels `Cache`-Fassade.
 - [Typisierte JSON-Werte](#typed-json-values)
 - [TTL und Ablauf](#ttl-and-expiry)
 - [Backends tauschen](#swapping-backends)
+- [Caching unter Multi-Tenancy](#caching-under-multi-tenancy)
 - [Referenz](#reference)
 - [Siehe auch](#see-also)
 
@@ -169,6 +170,46 @@ let cache: BoxedCache = std::sync::Arc::new(RedisCache::new("redis://localhost")
 
 Dieselben `get` / `set` / `get_or_set`-Aufrufe — nur der Konstruktor hat sich
 geändert.
+
+---
+
+## Caching unter Multi-Tenancy
+
+`Cache` ist ein flacher, `&str`-indizierter Store — und das macht unter
+Multi-Tenancy den naheliegenden Key zum undichten Key: ein Handler (oder
+schlimmer ein Background-Task, der gar keinen ambienten Tenant hat) schreibt
+`"stats:monthly"` für einen Tenant, und jeder andere Tenant liest es zurück.
+
+Wickle den gemeinsamen Cache in einen **`ScopedCache`**, damit der Namespace
+für dich angewendet wird und die Aufrufstelle es nicht vergessen kann:
+
+```rust
+use rustango::cache::ScopedCache;
+
+// From the Org the resolver already produced:
+let cache = ScopedCache::for_tenant(shared.clone(), &t.org.slug);
+
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:acme:stats:monthly
+cache.get("stats:monthly").await?;               // reads only acme's entry
+cache.clear().await?;                            // drops ONLY acme's entries
+```
+
+`ScopedCache` ist selbst ein `Cache` und passt damit überall hinein, wo ein
+`BoxedCache` erwartet wird — `cache_page`, `cache_fragment`, die Rate-Limiter,
+`DistributedLock`. Er leitet mit gemappten Keys an das innere Backend weiter,
+statt etwas neu zu implementieren, sodass native Primitive (Redis `INCRBY`,
+`SET NX`, `MGET`) ihre Atomarität und Batching behalten.
+
+Zwei Dinge, die man wissen sollte:
+
+| | |
+|---|---|
+| **Ein Namespace, keine Sicherheitsgrenze** | Alles liegt weiter in einem Backend, und Code mit dem *ungescopeten* Cache kann jeden Key lesen. Der Punkt ist, dass der ergonomische Pfad der korrekte ist. |
+| **`clear()` braucht Key-Enumeration** | Es läuft über `Cache::delete_prefix`. `InMemoryCache` filtert seine Map, `DatabaseCache` schickt ein `DELETE … LIKE 'prefix%'`. Ein Backend, das *nicht* enumerieren kann — `FileCache` hasht Keys in Pfade — fällt darauf zurück, alles zu leeren, und loggt eine Warnung. Das ist Absicht: zu wenig zu löschen ließe einen anderen Namespace einen veralteten Eintrag lesen (ein Korrektheitsfehler), zu viel zu löschen kostet nur einen Cache-Miss. |
+
+Das ungescopete `Cache::clear()` ist weiterhin prozessweit — greife also zur
+gescopeten Sicht, wann immer die Änderung eines einzelnen Tenants die
+Invalidierung ausgelöst hat.
 
 ---
 
