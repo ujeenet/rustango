@@ -82,6 +82,16 @@ impl Scheduler {
     ///
     /// `name` appears in tracing logs and panic messages — keep it short
     /// and identifying.
+    ///
+    /// **The job runs with no ambient context.** Each tick is a
+    /// [`tokio::spawn`], which does not inherit `tokio::task_local!`
+    /// state — there is no request to inherit from anyway — so the audit
+    /// source is [`crate::audit::AuditSource::System`] and the timezone
+    /// is the default (#1229). Nor is there a tenant: a scheduled sweep
+    /// over per-tenant tables must fan out explicitly with
+    /// [`crate::tenancy::for_each_tenant`] (#1226), and a
+    /// once-per-cluster guard should be scoped per tenant with
+    /// [`crate::distributed_lock::DistributedLock::for_tenant`] (#1228).
     pub fn every<F, Fut>(&self, name: &str, period: Duration, job: F)
     where
         F: Fn() -> Fut + Send + Sync + 'static,
