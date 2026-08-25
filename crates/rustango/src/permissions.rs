@@ -36,8 +36,7 @@
 //! The typed helpers below are the migration step: they hide the
 //! string codename behind `T: Model` so future versions can swap
 //! the storage to `(content_type_id, action)` without breaking
-//! callers. See `~/.claude/projects/-Users-ievgeniisvyryd-projects-rustango/memory/v015-roadmap.md`
-//! for the longer-term plan.
+//! callers.
 //!
 //! Requires the `tenancy` Cargo feature (the underlying tables
 //! live in the tenancy bootstrap migration).

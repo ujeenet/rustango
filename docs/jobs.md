@@ -34,6 +34,7 @@ failures. This is Django-Q / Celery / Laravel queues, in Rust.
 - [Retries and backoff](#retries-and-backoff)
 - [The dead-letter handler](#the-dead-letter-handler)
 - [The persistent queue (production)](#the-persistent-queue-production)
+- [Jobs under multi-tenancy](#jobs-under-multi-tenancy)
 - [Reference](#reference)
 - [See also](#see-also)
 
@@ -332,6 +333,77 @@ against SQLite in `jobs_sqlite_live.rs`.
 
 ---
 
+## Jobs under multi-tenancy
+
+A worker is not a request. Nothing resolved a tenant for it — no host, no
+header, no middleware ran — so **a job carries no tenant context**:
+`run(&self)` receives only the deserialized payload. Isolation comes from
+**the pool the queue was built on**, and the rule follows from that:
+
+> One queue per tenant pool. A tenant id in the payload is routing, not
+> isolation.
+
+That single decision is what makes each mode safe:
+
+| Mode | Where `rustango_jobs` lives | Why a worker stays scoped |
+|---|---|---|
+| `database` | inside the tenant's own database / SQLite file | a different tenant's rows are not in the table the worker queries — cross-tenant reads aren't expressible |
+| `schema` (PG) | the tenant's schema | `scoped_pool_dyn` returns a pool with `search_path` baked into its **connect options**, not a per-request `SET` — so every checkout for the pool's whole lifetime is scoped, including a worker that lives for days |
+
+Build the queues at boot, one per active tenant:
+
+```rust
+use rustango::core::Column as _;
+use rustango::jobs::{DatabaseJobQueue, JobQueue};
+use rustango::sql::FetcherPool as _;
+use rustango::tenancy::{Org, TenantPools};
+use std::sync::Arc;
+use std::time::Duration;
+
+let pools = Arc::new(TenantPools::new(registry));
+let registry_pool = pools.registry_pool();
+
+// The registry holds the tenant list; each `Org` names its own
+// database (or PG schema).
+let orgs: Vec<Org> = Org::objects()
+    .where_(Org::active.eq(true))
+    .fetch(&registry_pool)
+    .await?;
+
+let mut queues = Vec::new();
+for org in orgs {
+    let pool = pools.scoped_pool_dyn(&org).await?;   // scoped for its lifetime
+    DatabaseJobQueue::ensure_table_pool(&pool).await?;
+
+    let queue = Arc::new(
+        DatabaseJobQueue::with_workers_pool(pool, 2)
+            .poll_interval(Duration::from_secs(1)),
+    );
+    queue.register::<WelcomeEmail>().await;
+    queue.start().await;
+    queues.push((org.slug, queue));
+}
+```
+
+Dispatch then goes to *that tenant's* queue — in a request handler, the one
+keyed by the `Org` the resolver already produced.
+
+**What not to do.** One queue on the registry pool with an `org_id` field in
+the payload puts every tenant's jobs in one shared table, and leaves each
+`run()` to remember to re-scope. One forgotten re-scope is a cross-tenant
+write. If you need a shared queue for operational reasons, resolve the tenant
+pool as the *first* thing `run()` does and never touch the registry pool
+afterwards.
+
+**Known limits.** The framework does not do the fan-out for you: there is no
+per-tenant worker supervisor, no `Job::run(&ctx)` with the tenant attached,
+and no tenant-aware `reclaim_stuck_jobs_pool` sweep — you loop over tenants
+yourself, as above. New tenants provisioned after boot get no workers until
+the process restarts. Tracked in
+[#1223](https://github.com/ujeenet/rustango/issues/1223).
+
+---
+
 ## Reference
 
 **Backends**
@@ -363,3 +435,5 @@ against SQLite in `jobs_sqlite_live.rs`.
 - [Email](email.md) — the canonical "do it in a job" workload.
 - [Caching](caching.md) — the other way to keep request handlers fast.
 - [Signals](orm.md) — fire-and-forget hooks that often *dispatch* a job.
+- [Tenancy commands](manage.md#tenancy-commands) — provisioning the tenants a
+  per-tenant queue fans out over.

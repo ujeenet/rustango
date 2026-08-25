@@ -973,7 +973,7 @@ Ranked by how often a real-world Django project hits the gap. Refreshed 2026-06-
 
 ## Source pointers used for this audit
 
-- Capability inventory + known-gaps research from the two agent reports earlier in the planning conversation
+- Capability inventory + known-gaps research from the planning notes for this audit
 - `crates/rustango/Cargo.toml` (49 features)
 - `crates/rustango/src/lib.rs` (top-level module gating)
 - `crates/rustango/src/core/field_type.rs` (`FieldType` enum — 14 variants)
@@ -984,8 +984,8 @@ Ranked by how often a real-world Django project hits the gap. Refreshed 2026-06-
 - `crates/rustango/src/i18n/timezone.rs` (i18n surface)
 - `crates/rustango/src/sql/executor.rs` (QuerySet executor)
 - `crates/rustango/src/tenancy/permissions.rs` (auth + permissions)
-- `~/.claude/projects/.../memory/future-backlog.md` (89-item backlog)
-- `~/.claude/projects/.../memory/framework-comparison-2026-05-02.md` (prior 5-dim audit)
+- Maintainer's out-of-repo notes: an 89-item feature backlog and the prior 5-dim
+  framework comparison (2026-05-02)
 - `gh issue list --state open` (open issues last checked 2026-06-15; the live `django-parity` / ORM-gap set is tracked in §26.5)
 - Django 6.0 docs (https://docs.djangoproject.com/en/6.0/) — all linked inline
 
