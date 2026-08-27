@@ -200,6 +200,11 @@ pub struct PruneReport {
 ///
 /// Use [`prune_pretend`] for the dry-run variant.
 ///
+/// **Under tenancy, pass a tenant-scoped pool.** Prunable models are
+/// per-tenant, so this prunes whichever tenant `pool` points at — one
+/// pool means one tenant, and a registry pool in schema mode means only
+/// `public`. Fan out with [`crate::tenancy::for_each_tenant`] (#1226).
+///
 /// # Errors
 ///
 /// Each entry's prune is awaited sequentially. The FIRST error

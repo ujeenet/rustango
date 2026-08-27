@@ -4,6 +4,56 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+- **`tenancy::for_each_tenant`** (#1226) — the per-tenant fan-out that scheduled
+  sweeps were missing. `MediaManager::purge_orphans`,
+  `audit::cleanup_older_than_pool` and `prunable::prune_all` each take one pool,
+  and every table they touch is per-tenant, so a sweep wired to one pool cleaned
+  one tenant — on a registry pool in schema mode, only `public` — while every
+  other tenant's rows grew forever and the sweep still reported success.
+  `Scheduler::every` takes `Fn() -> Future` with no context, so there was nowhere
+  for a tenant to come from.
+
+  It resolves each active tenant's own pool via `scoped_pool_dyn`, never
+  short-circuits (a tenant whose pool won't resolve is recorded and the loop
+  continues, so one rotated credential can't starve the rest), and runs
+  sequentially — background sweeps compete with request traffic for the same
+  upstream. `active_tenants` is public for callers wanting their own
+  concurrency. Note the `TenantPools` cache cap (default 64, no eviction) is a
+  hard ceiling: with more active database-mode tenants than that, the tail fails
+  every run, so raise it before scheduling a sweep and treat a non-zero
+  `failed()` as alertable.
+
+  `MediaManager::purge_orphans_dry_run` runs the same query and deletes nothing —
+  that sweep is the only one that reaches outside the database.
+- **`cache::ScopedCache`** (#1227) — a `Cache` view that folds a namespace into
+  every key, so per-tenant caching can't be forgotten at the call site. It is
+  itself a `Cache`, so it drops into `cache_page`, the rate limiters and
+  `DistributedLock`, and forwards to the inner backend with mapped keys so native
+  primitives (Redis `INCRBY` / `SET NX` / `MGET`) keep their atomicity.
+- **`Cache::delete_prefix`** (#1227) — powers `ScopedCache::clear`, which must
+  drop one namespace without touching others (the flat `Cache::clear` is
+  process-global, so a per-tenant invalidation wiped everyone). `InMemoryCache`
+  filters its map, `DatabaseCache` issues a `LIKE`, `RedisCache` runs
+  `SCAN MATCH` + `DEL`. The default over-deletes — clears everything and warns —
+  because a backend that cannot enumerate keys has only two options and only one
+  is safe: under-deleting leaves a stale entry another namespace can read, which
+  is a correctness bug, while over-deleting costs a cache miss. `FileCache` is
+  that case; it hashes keys into paths.
+- **`DistributedLock::for_tenant` / `scoped`** (#1228) — lock names were global,
+  so looping tenants around one `with_lock("daily_report")` let the first tenant
+  win and skipped the rest for the whole TTL, silently (a refused acquire is the
+  expected outcome, so nothing is logged). Scoped, each tenant gets its own lock.
+  Additive — the unscoped form is still right for process-wide work.
+
+### Notes
+- Ambient `task_local!` scopes (audit source, timezone, admin session, signals)
+  do not cross a `tokio::spawn`, so jobs and scheduled tasks run with
+  `AuditSource::System` and the default timezone (#1229). Nothing crosses a
+  tenant boundary — task-locals fail closed — so this is documented on
+  `Job::run` and `Scheduler::every` rather than changed; propagation belongs with
+  the `JobContext` work in #1223.
+
 ### Fixed
 - **Schema-mode tenancy leaked `search_path` between registry-pool borrowers**
   (#1224). `TenantPools::acquire` issues a session-level

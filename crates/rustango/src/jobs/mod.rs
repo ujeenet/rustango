@@ -101,6 +101,16 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
 
     /// Run the job. Return `Ok(())` on success, `Err(Retryable(_))` to
     /// retry with backoff, `Err(Fatal(_))` to dead-letter immediately.
+    ///
+    /// **No ambient context reaches here.** Workers are spawned with
+    /// [`tokio::spawn`], which does not inherit `tokio::task_local!`
+    /// state, so every scope the request path sets up is absent: the
+    /// audit source falls back to [`crate::audit::AuditSource::System`],
+    /// the active timezone falls back to the default, and there is no
+    /// admin session. Anything a job needs must travel in its payload
+    /// (#1229). For the audit case a job can re-enter the scope itself
+    /// with [`crate::audit::with_source`]. Tenant scoping is the same
+    /// story and is tracked separately in #1223.
     async fn run(&self) -> Result<(), JobError>;
 }
 

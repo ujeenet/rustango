@@ -48,6 +48,12 @@
 //! - TTL must be longer than the worst-case execution time of the
 //!   protected work, OR the work must be idempotent. A too-short TTL
 //!   means another replica could grab the lock mid-execution.
+//! - **Under tenancy, scope the lock.** Lock names are global by
+//!   default, so looping tenants around one `with_lock("daily_report")`
+//!   lets the first tenant win and skips the rest for the whole TTL —
+//!   silently, since a refused acquire is the expected outcome. Use
+//!   [`DistributedLock::for_tenant`] so each tenant gets its own lock
+//!   (#1228). Leave it unscoped only for genuinely process-wide work.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,12 +66,66 @@ const KEY_PREFIX: &str = "lock";
 #[derive(Clone)]
 pub struct DistributedLock {
     cache: BoxedCache,
+    /// Folded into every lock name. Empty for a process-wide lock;
+    /// `tenant:{slug}` after [`Self::for_tenant`] (#1228).
+    scope: Option<String>,
 }
 
 impl DistributedLock {
     #[must_use]
     pub fn new(cache: BoxedCache) -> Self {
-        Self { cache }
+        Self { cache, scope: None }
+    }
+
+    /// A lock factory whose names are scoped to one tenant, so the same
+    /// lock name in two tenants is two independent locks (#1228).
+    ///
+    /// Without this, the natural per-tenant cron —
+    ///
+    /// ```ignore
+    /// for org in active_orgs {
+    ///     lock.with_lock("daily_report", ttl, || async { report(&org).await }).await;
+    /// }
+    /// ```
+    ///
+    /// — has every tenant contend for one `lock:daily_report`. The first
+    /// tenant wins and the rest are skipped for the whole TTL, which
+    /// (with a TTL correctly sized to the work) means most tenants never
+    /// get their report. Nothing is logged, because a refused acquire is
+    /// the documented, expected outcome.
+    ///
+    /// Scoped, each tenant gets `lock:tenant:{slug}:daily_report` and
+    /// they no longer collide. Follows the `tenant:{slug}:…` convention
+    /// the tenancy layer already uses for lockout keys.
+    ///
+    /// ```ignore
+    /// let lock = DistributedLock::new(cache).for_tenant(&org.slug);
+    /// lock.with_lock("daily_report", ttl, || async { … }).await;
+    /// ```
+    ///
+    /// Keep using the unscoped form for genuinely process-wide work —
+    /// registry cleanup, a cross-tenant rollup — where "exactly one
+    /// replica, ever" is the point.
+    #[must_use]
+    pub fn for_tenant(mut self, slug: impl AsRef<str>) -> Self {
+        self.scope = Some(format!("tenant:{}", slug.as_ref()));
+        self
+    }
+
+    /// Scope lock names under an arbitrary namespace. [`Self::for_tenant`]
+    /// is this with the `tenant:` convention applied.
+    #[must_use]
+    pub fn scoped(mut self, namespace: impl AsRef<str>) -> Self {
+        self.scope = Some(namespace.as_ref().to_owned());
+        self
+    }
+
+    /// The cache key for `name`, including this factory's scope.
+    fn key_for(&self, name: &str) -> String {
+        match &self.scope {
+            Some(scope) => format!("{KEY_PREFIX}:{scope}:{name}"),
+            None => format!("{KEY_PREFIX}:{name}"),
+        }
     }
 
     /// Try to acquire `name` for `ttl`. Returns:
@@ -74,7 +134,7 @@ impl DistributedLock {
     ///   safe but slightly wasteful of contention slots).
     /// - `None` when someone else holds it.
     pub async fn try_acquire(&self, name: &str, ttl: Duration) -> Option<LockGuard> {
-        let key = format!("{KEY_PREFIX}:{name}");
+        let key = self.key_for(name);
         // `incr(key, 1, ttl)` returns 1 ONLY when the counter was
         // previously absent (or 0). On RedisCache the INCRBY+EXPIRE NX
         // sequence is atomic; on the in-memory default impl it's racy
@@ -294,5 +354,86 @@ mod tests {
         assert!(r.is_some());
         let g = l.try_acquire("job", Duration::from_secs(5)).await;
         assert!(g.is_some());
+    }
+
+    /// The bug from #1228: two tenants, one lock name, unscoped — the
+    /// second is refused. Pinned so the distinction between the scoped
+    /// and unscoped forms stays deliberate rather than accidental.
+    #[tokio::test]
+    async fn unscoped_lock_is_shared_across_tenants() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let lock = DistributedLock::new(cache);
+
+        let acme = lock
+            .try_acquire("daily_report", Duration::from_secs(30))
+            .await;
+        let globex = lock
+            .try_acquire("daily_report", Duration::from_secs(30))
+            .await;
+
+        assert!(acme.is_some(), "first caller takes the lock");
+        assert!(
+            globex.is_none(),
+            "unscoped, a second tenant contends for the same name — this is the \
+             starvation #1228 is about"
+        );
+    }
+
+    /// Scoped, the same lock name in two tenants is two locks, so a
+    /// per-tenant cron actually runs for every tenant.
+    #[tokio::test]
+    async fn scoped_locks_do_not_contend_across_tenants() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let acme_lock = DistributedLock::new(cache.clone()).for_tenant("acme");
+        let globex_lock = DistributedLock::new(cache).for_tenant("globex");
+
+        let acme = acme_lock
+            .try_acquire("daily_report", Duration::from_secs(30))
+            .await;
+        let globex = globex_lock
+            .try_acquire("daily_report", Duration::from_secs(30))
+            .await;
+
+        assert!(acme.is_some(), "acme gets its own lock");
+        assert!(globex.is_some(), "globex gets its own lock, not acme's");
+    }
+
+    /// Within one tenant the lock still excludes — scoping must not
+    /// weaken the guarantee it exists for.
+    #[tokio::test]
+    async fn scoped_lock_still_excludes_within_a_tenant() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let lock = DistributedLock::new(cache).for_tenant("acme");
+
+        let first = lock
+            .try_acquire("daily_report", Duration::from_secs(30))
+            .await;
+        let second = lock
+            .try_acquire("daily_report", Duration::from_secs(30))
+            .await;
+
+        assert!(first.is_some());
+        assert!(second.is_none(), "one holder at a time, per tenant");
+    }
+
+    /// A tenant scope must not let one slug's lock name collide with
+    /// another's by prefix (`acme` vs `acme-corp`).
+    #[tokio::test]
+    async fn tenant_scopes_are_separated_by_slug() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let acme = DistributedLock::new(cache.clone()).for_tenant("acme");
+        let acme_corp = DistributedLock::new(cache).for_tenant("acme-corp");
+
+        assert!(acme
+            .try_acquire("j", Duration::from_secs(30))
+            .await
+            .is_some());
+        assert!(
+            acme_corp
+                .try_acquire("j", Duration::from_secs(30))
+                .await
+                .is_some(),
+            "`acme-corp` must not be blocked by `acme`'s lock"
+        );
     }
 }

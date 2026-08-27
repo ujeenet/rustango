@@ -35,6 +35,7 @@ failures. This is Django-Q / Celery / Laravel queues, in Rust.
 - [The dead-letter handler](#the-dead-letter-handler)
 - [The persistent queue (production)](#the-persistent-queue-production)
 - [Jobs under multi-tenancy](#jobs-under-multi-tenancy)
+- [Scheduled sweeps under multi-tenancy](#scheduled-sweeps-under-multi-tenancy)
 - [Reference](#reference)
 - [See also](#see-also)
 
@@ -401,6 +402,65 @@ and no tenant-aware `reclaim_stuck_jobs_pool` sweep — you loop over tenants
 yourself, as above. New tenants provisioned after boot get no workers until
 the process restarts. Tracked in
 [#1223](https://github.com/ujeenet/rustango/issues/1223).
+
+**No ambient context, either.** Workers are `tokio::spawn`ed, and task-locals
+do not cross a spawn — so a job runs with the audit source at
+`AuditSource::System` and the default timezone, no matter what the dispatching
+request had set. Carry what you need in the payload, or re-enter the scope
+inside `run()` with `audit::with_source`. Tracked in
+[#1229](https://github.com/ujeenet/rustango/issues/1229).
+
+---
+
+## Scheduled sweeps under multi-tenancy
+
+The same "a worker is not a request" problem hits *time-based* work, and the
+framework's own sweep helpers are where it bites: `MediaManager::purge_orphans`,
+`audit::cleanup_older_than_pool` and `prunable::prune_all` each take **one
+pool**, and every table they touch is per-tenant. One pool means one tenant —
+and a registry pool in schema mode means only `public`, while every tenant's
+rows accumulate and the sweep still reports success.
+
+Fan out with **`for_each_tenant`**, which resolves each active tenant's own
+pool and keeps going when one tenant fails:
+
+```rust
+use rustango::tenancy::for_each_tenant;
+
+let opts = &opts;
+let sweep = for_each_tenant(&pools, move |_org, pool| async move {
+    rustango::prunable::prune_all(&pool, opts).await
+})
+.await?;
+
+tracing::info!(ok = sweep.succeeded(), failed = sweep.failed(), "nightly prune");
+for (slug, err) in sweep.errors() {
+    tracing::warn!(%slug, %err, "tenant prune failed");
+}
+```
+
+A broken tenant — rotated credential, unreachable database — is recorded in the
+report rather than aborting the run, so it cannot starve the tenants after it.
+Inactive orgs are skipped. `purge_orphans` is the one sweep that reaches outside
+the database (it deletes storage objects), so it has a
+`purge_orphans_dry_run` that runs the same query and deletes nothing — worth a
+look before you wire the real thing.
+
+If you guard the sweep so only one replica runs it, **scope the lock per
+tenant**:
+
+```rust
+use rustango::distributed_lock::DistributedLock;
+
+let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
+lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
+```
+
+Unscoped, every tenant contends for one `lock:nightly_prune`: the first tenant
+wins and the rest are skipped for the whole TTL, silently — a refused acquire is
+the expected outcome, so nothing is logged. Tracked in
+[#1226](https://github.com/ujeenet/rustango/issues/1226) and
+[#1228](https://github.com/ujeenet/rustango/issues/1228).
 
 ---
 

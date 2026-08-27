@@ -106,6 +106,7 @@ pub mod session;
 /// admin — the `admin-sso` feature. Reuses `crate::admin::sso`.
 #[cfg(feature = "admin-sso")]
 pub(crate) mod sso;
+pub mod sweep;
 // v0.38 slice 24 — `tenancy::server::run<DB>` is tri-dialect; the
 // operator console runs on whichever backend `TenantPools<DB>` was
 // built with, schema-mode dispatch only fires on PG (by language),
@@ -175,3 +176,4 @@ pub use routes::RouteConfig;
 pub use secrets::{
     ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,
 };
+pub use sweep::{active_tenants, for_each_tenant, SweepError, TenantOutcome, TenantSweep};

@@ -578,7 +578,47 @@ impl MediaManager {
     ///
     /// Run from the [`crate::scheduler`] (e.g. nightly) to keep
     /// orphan storage objects from accumulating.
+    ///
+    /// **Under tenancy, pass a tenant-scoped pool.** `rustango_media` is
+    /// a per-tenant table, so this sweeps whichever tenant `self.pool`
+    /// points at — one pool means one tenant, and on a registry pool in
+    /// schema mode it means only `public`. This is the one sweep that
+    /// reaches outside the database (it deletes storage objects), so
+    /// fan it out with [`crate::tenancy::for_each_tenant`] and reach for
+    /// [`Self::purge_orphans_dry_run`] first when you are unsure what a
+    /// pool is pointing at (#1226).
     pub async fn purge_orphans(&self, older_than: Duration) -> Result<u64, MediaError> {
+        let rows = self.orphans_older_than(older_than).await?;
+        let mut purged = 0u64;
+        for m in rows {
+            self.purge(&m).await?;
+            purged += 1;
+        }
+        Ok(purged)
+    }
+
+    /// What [`Self::purge_orphans`] *would* delete, without deleting
+    /// anything. Same query, no `purge` call — so no rows are dropped
+    /// and no storage objects are removed.
+    ///
+    /// Worth a run before wiring the real sweep in a tenancy app: the
+    /// rows come back with their `disk` and `storage_key`, so a glance
+    /// tells you whether the pool is pointing where you think it is
+    /// (#1226).
+    ///
+    /// # Errors
+    /// Driver error reading `rustango_media`.
+    pub async fn purge_orphans_dry_run(
+        &self,
+        older_than: Duration,
+    ) -> Result<Vec<Media>, MediaError> {
+        self.orphans_older_than(older_than).await
+    }
+
+    /// The soft-deleted rows older than `older_than`. Shared by
+    /// [`Self::purge_orphans`] and [`Self::purge_orphans_dry_run`] so the
+    /// dry run can never drift from what the real sweep acts on.
+    async fn orphans_older_than(&self, older_than: Duration) -> Result<Vec<Media>, MediaError> {
         // v0.38 — cutoff pre-computed in Rust so the same SQL runs
         // on PG / MySQL / SQLite without per-dialect `NOW() - INTERVAL`.
         let cutoff = Utc::now()
@@ -591,19 +631,13 @@ impl MediaManager {
                FROM rustango_media \
               WHERE deleted_at IS NOT NULL AND deleted_at < {p}"
         );
-        let rows: Vec<Media> = crate::sql::raw_query_pool(
+        crate::sql::raw_query_pool(
             &sql,
             vec![crate::core::SqlValue::DateTime(cutoff)],
             &self.pool,
         )
         .await
-        .map_err(media_err_from_exec)?;
-        let mut purged = 0u64;
-        for m in rows {
-            self.purge(&m).await?;
-            purged += 1;
-        }
-        Ok(purged)
+        .map_err(media_err_from_exec)
     }
 
     /// Hard-delete every Media row stuck in `Pending` for longer

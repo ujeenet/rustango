@@ -36,6 +36,8 @@ Celery / Laravel-Queues, in Rust.
 - [Retries und Backoff](#retries-and-backoff)
 - [Der Dead-Letter-Handler](#the-dead-letter-handler)
 - [Die persistente Queue (Produktion)](#the-persistent-queue-production)
+- [Jobs unter Multi-Tenancy](#jobs-under-multi-tenancy)
+- [Geplante Sweeps unter Multi-Tenancy](#scheduled-sweeps-under-multi-tenancy)
 - [Referenz](#reference)
 - [Siehe auch](#see-also)
 
@@ -346,6 +348,141 @@ Dogfooding gegen SQLite in `jobs_sqlite_live.rs` erprobt.
 
 ---
 
+## Jobs unter Multi-Tenancy
+
+Ein Worker ist kein Request. Nichts hat für ihn einen Tenant aufgelöst — kein
+Host, kein Header, keine Middleware lief — also **trägt ein Job keinen
+Tenant-Kontext**: `run(&self)` erhält nur das deserialisierte Payload. Die
+Isolation kommt aus **dem Pool, auf dem die Queue gebaut wurde**, und daraus
+folgt die Regel:
+
+> Eine Queue pro Tenant-Pool. Eine Tenant-Id im Payload ist Routing, keine
+> Isolation.
+
+Diese eine Entscheidung ist es, die jeden Modus sicher macht:
+
+| Modus | Wo `rustango_jobs` liegt | Warum ein Worker gescoped bleibt |
+|---|---|---|
+| `database` | in der eigenen Datenbank / SQLite-Datei des Tenants | die Zeilen eines anderen Tenants stehen nicht in der Tabelle, die der Worker abfragt — Cross-Tenant-Lesezugriffe sind nicht ausdrückbar |
+| `schema` (PG) | im Schema des Tenants | `scoped_pool_dyn` liefert einen Pool, in dessen **Connect-Options** `search_path` eingebacken ist, statt eines `SET` pro Request — jeder Checkout ist also für die gesamte Lebensdauer des Pools gescoped, auch bei einem Worker, der tagelang läuft |
+
+Baue die Queues beim Boot, eine pro aktivem Tenant:
+
+```rust
+use rustango::core::Column as _;
+use rustango::jobs::{DatabaseJobQueue, JobQueue};
+use rustango::sql::FetcherPool as _;
+use rustango::tenancy::{Org, TenantPools};
+use std::sync::Arc;
+use std::time::Duration;
+
+let pools = Arc::new(TenantPools::new(registry));
+let registry_pool = pools.registry_pool();
+
+// The registry holds the tenant list; each `Org` names its own
+// database (or PG schema).
+let orgs: Vec<Org> = Org::objects()
+    .where_(Org::active.eq(true))
+    .fetch(&registry_pool)
+    .await?;
+
+let mut queues = Vec::new();
+for org in orgs {
+    let pool = pools.scoped_pool_dyn(&org).await?;   // scoped for its lifetime
+    DatabaseJobQueue::ensure_table_pool(&pool).await?;
+
+    let queue = Arc::new(
+        DatabaseJobQueue::with_workers_pool(pool, 2)
+            .poll_interval(Duration::from_secs(1)),
+    );
+    queue.register::<WelcomeEmail>().await;
+    queue.start().await;
+    queues.push((org.slug, queue));
+}
+```
+
+Der Dispatch geht dann an *die Queue dieses Tenants* — in einem
+Request-Handler an die, die unter dem `Org` liegt, das der Resolver schon
+erzeugt hat.
+
+**Was man nicht tun sollte.** Eine Queue auf dem Registry-Pool mit einem
+`org_id`-Feld im Payload legt die Jobs aller Tenants in eine gemeinsame
+Tabelle und überlässt es jedem `run()`, sich ans Re-Scoping zu erinnern. Ein
+einziges vergessenes Re-Scoping ist ein Cross-Tenant-Write. Wenn du aus
+betrieblichen Gründen eine gemeinsame Queue brauchst, löse den Tenant-Pool als
+*erstes* in `run()` auf und fasse den Registry-Pool danach nicht mehr an.
+
+**Bekannte Grenzen.** Das Framework übernimmt den Fan-out nicht für dich: es
+gibt keinen Worker-Supervisor pro Tenant, kein `Job::run(&ctx)` mit
+angehängtem Tenant und keinen Tenant-bewussten `reclaim_stuck_jobs_pool`-Sweep
+— du iterierst selbst über die Tenants, wie oben. Tenants, die nach dem Boot
+provisioniert werden, bekommen bis zum Prozess-Neustart keine Worker.
+Verfolgt in
+[#1223](https://github.com/ujeenet/rustango/issues/1223).
+
+**Auch kein ambienter Kontext.** Worker werden per `tokio::spawn` gestartet,
+und Task-Locals überqueren keinen Spawn — ein Job läuft also mit der
+Audit-Quelle auf `AuditSource::System` und der Default-Zeitzone, egal was der
+dispatchende Request gesetzt hatte. Nimm mit, was du brauchst, im Payload, oder
+betritt den Scope in `run()` erneut mit `audit::with_source`. Verfolgt in
+[#1229](https://github.com/ujeenet/rustango/issues/1229).
+
+---
+
+## Geplante Sweeps unter Multi-Tenancy
+
+Dasselbe „ein Worker ist kein Request"-Problem trifft auch *zeitbasierte*
+Arbeit, und die Sweep-Helfer des Frameworks sind die Stelle, an der es beißt:
+`MediaManager::purge_orphans`, `audit::cleanup_older_than_pool` und
+`prunable::prune_all` nehmen jeweils **einen Pool**, und jede Tabelle, die sie
+anfassen, ist pro Tenant. Ein Pool heißt ein Tenant — und ein Registry-Pool im
+Schema-Modus heißt nur `public`, während die Zeilen jedes Tenants anwachsen und
+der Sweep trotzdem Erfolg meldet.
+
+Mach den Fan-out mit **`for_each_tenant`**: es löst für jeden aktiven Tenant
+dessen eigenen Pool auf und macht weiter, wenn ein Tenant scheitert:
+
+```rust
+use rustango::tenancy::for_each_tenant;
+
+let opts = &opts;
+let sweep = for_each_tenant(&pools, move |_org, pool| async move {
+    rustango::prunable::prune_all(&pool, opts).await
+})
+.await?;
+
+tracing::info!(ok = sweep.succeeded(), failed = sweep.failed(), "nightly prune");
+for (slug, err) in sweep.errors() {
+    tracing::warn!(%slug, %err, "tenant prune failed");
+}
+```
+
+Ein kaputter Tenant — rotiertes Credential, nicht erreichbare Datenbank —
+landet im Report, statt den Lauf abzubrechen, und kann so die Tenants danach
+nicht aushungern. Inaktive Orgs werden übersprungen. `purge_orphans` ist der
+eine Sweep, der über die Datenbank hinausgreift (er löscht Storage-Objekte),
+darum gibt es `purge_orphans_dry_run`: dieselbe Query, löscht nichts — ein Blick
+darauf lohnt sich, bevor du das echte Ding verdrahtest.
+
+Wenn du den Sweep so absicherst, dass nur eine Replica ihn ausführt, dann
+**scope das Lock pro Tenant**:
+
+```rust
+use rustango::distributed_lock::DistributedLock;
+
+let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
+lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
+```
+
+Ungescoped konkurrieren alle Tenants um dasselbe `lock:nightly_prune`: der
+erste Tenant gewinnt, die übrigen werden für die gesamte TTL übersprungen — und
+zwar still, denn ein abgelehntes Acquire ist das erwartete Ergebnis, es wird
+nichts geloggt. Verfolgt in
+[#1226](https://github.com/ujeenet/rustango/issues/1226) und
+[#1228](https://github.com/ujeenet/rustango/issues/1228).
+
+---
+
 ## Referenz
 
 **Backends**
@@ -377,3 +514,5 @@ Dogfooding gegen SQLite in `jobs_sqlite_live.rs` erprobt.
 - [E-Mail](email.md) — die kanonische „mach es in einem Job"-Workload.
 - [Caching](caching.md) — der andere Weg, Request-Handler schnell zu halten.
 - [Signals](orm.md) — Fire-and-Forget-Hooks, die oft einen Job *dispatchen*.
+- [Tenancy-Befehle](manage.md#tenancy-commands) — das Provisionieren der
+  Tenants, über die eine Queue pro Tenant fan-out macht.
