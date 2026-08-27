@@ -932,15 +932,23 @@ impl<DB: Database> std::ops::DerefMut for TenantConn<DB> {
 /// it is not racy: the task owns the `PoolConnection`, so the pool
 /// cannot hand it out again until the reset has completed and the task
 /// drops it.
+///
+/// The one residual case is a reset task cancelled by a runtime that is
+/// shutting down. That is benign in practice — the pool is being torn
+/// down with the runtime, so there is no later borrower to leak to.
 impl<DB: Database> Drop for TenantConn<DB> {
     fn drop(&mut self) {
-        let (Some(reset), Some(conn)) = (self.reset, self.inner.take()) else {
+        let (Some(reset), Some(mut conn)) = (self.reset, self.inner.take()) else {
             return;
         };
         // No runtime (a sync teardown, or the runtime is already gone)
-        // means nothing can run the reset. Dropping the connection here
-        // is what would have happened anyway.
+        // means nothing can run the reset. Fail **closed**: mark the
+        // connection to be closed on drop rather than returned, so a
+        // still-tenant-scoped connection can never rejoin the shared
+        // registry pool. Losing one connection is cheap; handing the
+        // next borrower another tenant's `search_path` is #1224.
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            conn.close_on_drop();
             return;
         };
         handle.spawn(reset(conn));

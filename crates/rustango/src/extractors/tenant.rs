@@ -153,6 +153,12 @@ impl<DB: Database> Tenant<DB> {
     /// registry pool and cannot pick up another tenant's session state.
     /// [`Tenant::conn`] is the shared-registry path; prefer it when you
     /// want the request's single pinned connection rather than a pool.
+    ///
+    /// **Cost, schema-mode only:** that dedicated pool is built per
+    /// extraction and is not cached, and sqlx's `connect_with` opens a
+    /// connection eagerly — so a schema-mode request that touches this
+    /// pool pays a fresh PG connection. Database-mode reuses the
+    /// tenant's cached pool and pays nothing.
     #[must_use]
     pub fn pool(&self) -> &crate::sql::Pool {
         &self.pool

@@ -174,6 +174,16 @@ async fn schema_mode_acquire_resets_search_path_on_release() {
     )
     .await;
 
+    // Baseline BEFORE any tenant touches the pool. Asserting against
+    // this rather than a hardcoded "public" keeps the test honest under
+    // a `DATABASE_URL` carrying `options=-csearch_path=…`, or a
+    // role-level default — `RESET search_path` restores the session's
+    // startup value, which is not always `public`.
+    let baseline = {
+        let mut conn = pool.acquire().await.unwrap();
+        current_schema(&mut conn).await
+    };
+
     let pools = TenantPools::new(pool.clone());
     {
         let mut conn = pools.acquire(&acme).await.unwrap();
@@ -184,10 +194,14 @@ async fn schema_mode_acquire_resets_search_path_on_release() {
     // `Tenant::pool()` query gets. It must NOT inherit the tenant's
     // search_path.
     let mut plain = pool.acquire().await.unwrap();
-    assert_eq!(
-        current_schema(&mut plain).await,
-        "public",
+    let after = current_schema(&mut plain).await;
+    assert_ne!(
+        after, "acme_tp_leak",
         "registry connection inherited the tenant's search_path after release"
+    );
+    assert_eq!(
+        after, baseline,
+        "release must restore the session's startup search_path, not just move off the tenant's"
     );
     drop(plain);
 
