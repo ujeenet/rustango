@@ -433,7 +433,7 @@ betritt den Scope in `run()` erneut mit `audit::with_source`. Verfolgt in
 
 Dasselbe „ein Worker ist kein Request"-Problem trifft auch *zeitbasierte*
 Arbeit, und die Sweep-Helfer des Frameworks sind die Stelle, an der es beißt:
-`MediaLibrary::purge_orphans`, `audit::cleanup_older_than_pool` und
+`MediaManager::purge_orphans`, `audit::cleanup_older_than_pool` und
 `prunable::prune_all` nehmen jeweils **einen Pool**, und jede Tabelle, die sie
 anfassen, ist pro Tenant. Ein Pool heißt ein Tenant — und ein Registry-Pool im
 Schema-Modus heißt nur `public`, während die Zeilen jedes Tenants anwachsen und
@@ -445,8 +445,9 @@ dessen eigenen Pool auf und macht weiter, wenn ein Tenant scheitert:
 ```rust
 use rustango::tenancy::for_each_tenant;
 
-let sweep = for_each_tenant(&pools, |_org, pool| async move {
-    rustango::prunable::prune_all(&pool, &opts).await
+let opts = &opts;
+let sweep = for_each_tenant(&pools, move |_org, pool| async move {
+    rustango::prunable::prune_all(&pool, opts).await
 })
 .await?;
 

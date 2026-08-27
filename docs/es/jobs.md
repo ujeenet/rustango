@@ -429,7 +429,7 @@ payload, o vuelve a entrar en el scope dentro de `run()` con
 
 El mismo problema de «un worker no es un request» golpea al trabajo *basado en
 el tiempo*, y los propios helpers de barrido del framework son donde muerde:
-`MediaLibrary::purge_orphans`, `audit::cleanup_older_than_pool` y
+`MediaManager::purge_orphans`, `audit::cleanup_older_than_pool` y
 `prunable::prune_all` toman **un solo pool**, y cada tabla que tocan es por
 tenant. Un pool significa un tenant — y un pool del registry en modo esquema
 significa solo `public`, mientras las filas de cada tenant se acumulan y el
@@ -441,8 +441,9 @@ tenant activo y sigue adelante cuando uno falla:
 ```rust
 use rustango::tenancy::for_each_tenant;
 
-let sweep = for_each_tenant(&pools, |_org, pool| async move {
-    rustango::prunable::prune_all(&pool, &opts).await
+let opts = &opts;
+let sweep = for_each_tenant(&pools, move |_org, pool| async move {
+    rustango::prunable::prune_all(&pool, opts).await
 })
 .await?;
 

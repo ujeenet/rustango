@@ -415,7 +415,7 @@ inside `run()` with `audit::with_source`. Tracked in
 ## Scheduled sweeps under multi-tenancy
 
 The same "a worker is not a request" problem hits *time-based* work, and the
-framework's own sweep helpers are where it bites: `MediaLibrary::purge_orphans`,
+framework's own sweep helpers are where it bites: `MediaManager::purge_orphans`,
 `audit::cleanup_older_than_pool` and `prunable::prune_all` each take **one
 pool**, and every table they touch is per-tenant. One pool means one tenant —
 and a registry pool in schema mode means only `public`, while every tenant's
@@ -427,8 +427,9 @@ pool and keeps going when one tenant fails:
 ```rust
 use rustango::tenancy::for_each_tenant;
 
-let sweep = for_each_tenant(&pools, |_org, pool| async move {
-    rustango::prunable::prune_all(&pool, &opts).await
+let opts = &opts;
+let sweep = for_each_tenant(&pools, move |_org, pool| async move {
+    rustango::prunable::prune_all(&pool, opts).await
 })
 .await?;
 

@@ -274,10 +274,14 @@ pub trait Cache: Send + Sync + 'static {
     /// case — it hashes keys into paths, so the prefix is not
     /// recoverable from the filename.
     ///
-    /// Backends that can enumerate override this:
-    /// [`InMemoryCache`] filters its map, [`DatabaseCache`] issues a
-    /// `DELETE … WHERE cache_key LIKE 'prefix%'`, and [`NullCache`]
-    /// has nothing to delete.
+    /// **Every shipped backend that can enumerate overrides this**, and
+    /// a new backend that can MUST: [`InMemoryCache`] filters its map,
+    /// [`DatabaseCache`] issues a `DELETE … WHERE cache_key LIKE
+    /// 'prefix%'`, `RedisCache` runs `SCAN MATCH` + `DEL`, and
+    /// [`NullCache`] has nothing to delete. Redis is the cautionary
+    /// one: its `clear()` is `FLUSHDB`, so inheriting this default
+    /// would let one tenant's invalidation wipe every other tenant,
+    /// every rate-limit counter and every lock key.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         tracing::warn!(
             target: "rustango::cache",

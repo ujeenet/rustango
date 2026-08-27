@@ -1,7 +1,7 @@
 //! Per-tenant fan-out for background sweeps (#1226).
 //!
 //! Every "run this from the [`scheduler`](crate::scheduler)" helper the
-//! framework ships — [`crate::media::MediaLibrary::purge_orphans`],
+//! framework ships — [`crate::media::MediaManager::purge_orphans`],
 //! [`crate::audit::cleanup_older_than_pool`],
 //! [`crate::prunable::prune_all`] — takes **one pool**. In a
 //! single-tenant app that is the whole story. Under tenancy each of
@@ -16,13 +16,22 @@
 //! ```ignore
 //! use rustango::tenancy::sweep::for_each_tenant;
 //!
-//! // Nightly, one prune per tenant:
-//! let sweep = for_each_tenant(&pools, |_org, pool| async move {
-//!     rustango::prunable::prune_all(&pool, &opts).await
+//! // Nightly, one prune per tenant. `opts` is borrowed, not moved:
+//! // the closure is `Fn` (it runs once per tenant), so an `async move`
+//! // body may only capture `Copy` values — and `&PruneOptions` is.
+//! let opts = &opts;
+//! let sweep = for_each_tenant(&pools, move |_org, pool| async move {
+//!     rustango::prunable::prune_all(&pool, opts).await
 //! })
 //! .await?;
 //!
+//! // `Ok` means the sweep RAN, not that every tenant succeeded —
+//! // always inspect the report, or a permanently-failing tenant is
+//! // exactly the silent under-coverage this exists to prevent.
 //! tracing::info!(ok = sweep.succeeded(), failed = sweep.failed(), "prune sweep");
+//! for (slug, err) in sweep.errors() {
+//!     tracing::warn!(%slug, %err, "tenant prune failed");
+//! }
 //! ```
 //!
 //! ## Semantics
@@ -42,6 +51,25 @@
 //!   with `search_path` in its connect options and database-mode tenants
 //!   get their own pool. The registry pool is never handed to the
 //!   closure.
+//!
+//! ## The pool-cache cap applies
+//!
+//! Database-mode pools come from `TenantPools`' cache, which is bounded
+//! by [`TenantPoolsConfig::max_cached_database_pools`] (default **64**)
+//! and does not evict — past the cap, `pool_for_org` errors rather than
+//! silently dropping someone's pool.
+//!
+//! For a sweep that means: with more active database-mode tenants than
+//! the cap, the tail of the list fails to resolve on **every run** and
+//! is recorded as [`SweepError::Pool`], while `for_each_tenant` still
+//! returns `Ok` — the unbounded-growth problem this module exists to
+//! solve, quietly reintroduced for those tenants.
+//!
+//! So: raise `max_cached_database_pools` to at least the number of
+//! active tenants before scheduling a sweep, and treat a non-zero
+//! [`TenantSweep::failed`] as alertable rather than informational.
+//! (A real LRU evictor is a `TenantPools` follow-up; until it lands the
+//! cap is a hard ceiling, not a soft one.)
 
 use crate::core::Column as _;
 use crate::sql::sqlx::Database;

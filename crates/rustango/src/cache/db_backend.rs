@@ -278,6 +278,13 @@ impl Cache for DatabaseCache {
     /// any of the three dialects, so one statement works everywhere.
     /// Covered on all three by `cache_db_backend_sqlite_live.rs` and
     /// `cache_delete_prefix_live.rs`.
+    ///
+    /// One asymmetry to know about: `LIKE` uses the column's collation,
+    /// which folds ASCII case on SQLite and is case-insensitive by
+    /// default on MySQL, while `get` / `delete` compare with `=`. Two
+    /// namespaces differing only in case therefore collide on a prefix
+    /// delete but not on a read. Keep namespaces lower-case — tenant
+    /// slugs already are — and it does not arise.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);

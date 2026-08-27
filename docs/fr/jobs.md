@@ -436,7 +436,7 @@ qu'il vous faut dans le payload, ou ré-entrez le scope dans `run()` avec
 
 Le même problème — « un worker n'est pas une requête » — frappe le travail
 *basé sur le temps*, et les helpers de balayage du framework sont l'endroit où
-ça mord : `MediaLibrary::purge_orphans`, `audit::cleanup_older_than_pool` et
+ça mord : `MediaManager::purge_orphans`, `audit::cleanup_older_than_pool` et
 `prunable::prune_all` prennent chacun **un seul pool**, et chaque table qu'ils
 touchent est par tenant. Un pool veut dire un tenant — et un pool du registry en
 mode schéma veut dire seulement `public`, pendant que les lignes de chaque
@@ -448,8 +448,9 @@ chaque tenant actif et continue quand l'un échoue :
 ```rust
 use rustango::tenancy::for_each_tenant;
 
-let sweep = for_each_tenant(&pools, |_org, pool| async move {
-    rustango::prunable::prune_all(&pool, &opts).await
+let opts = &opts;
+let sweep = for_each_tenant(&pools, move |_org, pool| async move {
+    rustango::prunable::prune_all(&pool, opts).await
 })
 .await?;
 

@@ -2,13 +2,17 @@
 //!
 //! The SQLite arm lives in `cache_db_backend_sqlite_live.rs`. This file
 //! covers Postgres and MySQL, because the statement is
-//! `DELETE … WHERE cache_key LIKE ? ESCAPE '\'` and `LIKE … ESCAPE` is
-//! exactly the kind of construct the three backends disagree about:
-//! MySQL treats `\` as an escape inside string literals (so the pattern
-//! needs the explicit `ESCAPE` clause to be unambiguous), while
-//! Postgres' `standard_conforming_strings` makes the same literal mean
-//! something slightly different. Emitting it once for all three is only
-//! safe if it is exercised on all three.
+//! `DELETE … WHERE cache_key LIKE ? ESCAPE '!'` and `LIKE … ESCAPE` is
+//! exactly the kind of construct the three backends disagree about.
+//!
+//! The escape character is `!` rather than the conventional `\` because
+//! the `\` form is *not* portable: MySQL treats a backslash as an escape
+//! inside string literals, so `ESCAPE '\'` is an unterminated literal
+//! and a 1064 syntax error there, while Postgres (with
+//! `standard_conforming_strings`) reads it as one backslash and accepts
+//! it happily. That divergence is the reason this file exists —
+//! emitting one statement for all three dialects is only safe if it is
+//! exercised on all three.
 //!
 //! Reads `DATABASE_URL` (Postgres) and `MYSQL_TEST_URL` (MySQL). Each
 //! test skips silently when its variable is unset, so the suite stays
