@@ -4,6 +4,42 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+- **Schema-mode tenancy leaked `search_path` between registry-pool borrowers**
+  (#1224). `TenantPools::acquire` issues a session-level
+  `SET search_path TO <schema>, public` on a connection borrowed from the
+  *shared* registry pool, and nothing undid it: `TenantConn` had no `Drop`, no
+  pool sets an `after_release` hook, and sqlx only pings on release — it never
+  issues `DISCARD ALL` / `RESET`. The connection returned to the pool still
+  pointing at that tenant's schema, so the next borrower silently inherited it,
+  and any registry-pool query against a table that also exists in tenant schemas
+  resolved against whichever tenant used that connection last.
+
+  Long-lived background work is the worst amplifier — a worker holding the
+  registry pool polls for the process lifetime, so it *will* draw dirtied
+  connections. It also hides in testing: when `public` lacks the table, the query
+  errors on a clean connection and succeeds against a random tenant on a dirty
+  one, so a single-tenant suite stays green.
+
+  `TenantConn` now resets `search_path` when released. `Drop` cannot be async, so
+  the reset runs in a spawned task — not racy, because the task owns the
+  `PoolConnection` and the pool cannot re-hand it out until the reset lands. A
+  failed reset closes the connection instead of returning it, and a drop with no
+  runtime available marks it `close_on_drop`, so both failure paths fail closed.
+  `after_release` would have been cheaper per request but is unreachable: apps
+  and `manage` hand `TenantPools::new` an already-built `PgPool`, and sqlx only
+  accepts that hook at `PoolOptions` construction.
+
+  Costs one extra round trip per release, with the connection still checked out
+  while it runs, so a registry pool sized near peak concurrency will feel it as
+  `acquire` latency.
+
+  Also corrects the `Tenant::pool()` docs, stale since v0.38: they claimed
+  schema-mode queries through it hit `public`. The PG extractor resolves that
+  pool via `scoped_pool_dyn`, which builds a *dedicated* pool with `search_path`
+  in its connect options — so `t.pool()` reads the tenant's schema and never
+  borrows from the shared registry pool.
+
 ## [0.52.1] — 2026-08-15
 
 Patch. One fix, no breaking changes — `0.52.0` users can take it directly.

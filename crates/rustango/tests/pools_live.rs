@@ -138,6 +138,145 @@ async fn schema_mode_acquire_sets_search_path_to_tenant_schema() {
     migrate::drop_all(&pool).await.unwrap();
 }
 
+/// Schema-mode `acquire` issues a session-level `SET search_path` on a
+/// connection borrowed from the **shared registry pool**. Dropping the
+/// `TenantConn` must leave that connection scoped back at `public`,
+/// because the very next borrower may be a registry query, a
+/// `Tenant::pool()` handler, or a long-lived background worker — none of
+/// which issue a `SET` of their own. sqlx does not reset session state
+/// on release (it only pings), so the reset is the framework's job.
+///
+/// Pinned to `max_connections(1)` so the second checkout is guaranteed to
+/// be the same physical connection the tenant just used.
+#[tokio::test]
+async fn schema_mode_acquire_resets_search_path_on_release() {
+    let _g = live_lock().lock().await;
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect to DATABASE_URL");
+
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    drop_schema(&pool, "acme_tp_leak").await;
+    create_schema(&pool, "acme_tp_leak").await;
+
+    let acme = seed_org(
+        &pool,
+        "acme_tp_leak",
+        StorageMode::Schema,
+        Some("acme_tp_leak"),
+        None,
+    )
+    .await;
+
+    // Baseline BEFORE any tenant touches the pool. Asserting against
+    // this rather than a hardcoded "public" keeps the test honest under
+    // a `DATABASE_URL` carrying `options=-csearch_path=…`, or a
+    // role-level default — `RESET search_path` restores the session's
+    // startup value, which is not always `public`.
+    let baseline = {
+        let mut conn = pool.acquire().await.unwrap();
+        current_schema(&mut conn).await
+    };
+
+    let pools = TenantPools::new(pool.clone());
+    {
+        let mut conn = pools.acquire(&acme).await.unwrap();
+        assert_eq!(current_schema(&mut conn).await, "acme_tp_leak");
+    } // TenantConn dropped — connection goes back to the registry pool.
+
+    // A plain registry checkout — what a background worker or a
+    // `Tenant::pool()` query gets. It must NOT inherit the tenant's
+    // search_path.
+    let mut plain = pool.acquire().await.unwrap();
+    let after = current_schema(&mut plain).await;
+    assert_ne!(
+        after, "acme_tp_leak",
+        "registry connection inherited the tenant's search_path after release"
+    );
+    assert_eq!(
+        after, baseline,
+        "release must restore the session's startup search_path, not just move off the tenant's"
+    );
+    drop(plain);
+
+    drop_schema(&pool, "acme_tp_leak").await;
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+/// The same leak stated as data rather than as a setting: a table name
+/// that exists in **both** the tenant schema and `public` must resolve to
+/// `public` for a plain registry checkout. This is the shape a background
+/// worker or a `Tenant::pool()` handler actually hits — it reads rows, not
+/// `current_schema()`.
+#[tokio::test]
+async fn released_registry_connection_does_not_read_tenant_rows() {
+    let _g = live_lock().lock().await;
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("connect to DATABASE_URL");
+
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    drop_schema(&pool, "acme_tp_rows").await;
+    create_schema(&pool, "acme_tp_rows").await;
+
+    // Same table name in both namespaces: one tenant row, zero public rows.
+    for stmt in [
+        "DROP TABLE IF EXISTS public.leak_probe",
+        "CREATE TABLE public.leak_probe (id int)",
+        r#"CREATE TABLE "acme_tp_rows".leak_probe (id int)"#,
+        r#"INSERT INTO "acme_tp_rows".leak_probe (id) VALUES (1)"#,
+    ] {
+        sqlx::query(stmt).execute(&pool).await.unwrap();
+    }
+
+    let acme = seed_org(
+        &pool,
+        "acme_tp_rows",
+        StorageMode::Schema,
+        Some("acme_tp_rows"),
+        None,
+    )
+    .await;
+
+    let pools = TenantPools::new(pool.clone());
+    {
+        let mut conn = pools.acquire(&acme).await.unwrap();
+        let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM leak_probe")
+            .fetch_one(&mut **conn)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "the tenant's own connection should see its row");
+    }
+
+    let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM leak_probe")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        n, 0,
+        "a released registry connection read the tenant's rows — search_path leaked"
+    );
+
+    sqlx::query("DROP TABLE IF EXISTS public.leak_probe")
+        .execute(&pool)
+        .await
+        .unwrap();
+    drop_schema(&pool, "acme_tp_rows").await;
+    migrate::drop_all(&pool).await.unwrap();
+}
+
 #[tokio::test]
 async fn schema_mode_pool_uses_slug_when_schema_name_is_none() {
     // `schema_name = None` means "use the slug as the schema name".

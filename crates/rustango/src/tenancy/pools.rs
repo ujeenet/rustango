@@ -6,7 +6,13 @@
 //!   lives in a Postgres schema inside the registry DB. The registry
 //!   pool is shared across all schema-mode tenants; per-checkout we
 //!   issue `SET search_path TO <schema>, public` so queries see the
-//!   tenant's schema. Cheap (one connection budget for all tenants).
+//!   tenant's schema, and on release [`TenantConn`] resets it so the
+//!   next borrower of that shared connection cannot inherit the
+//!   tenant's namespace (#1224). Cheap on connection budget (one for
+//!   all tenants); the reset costs one extra round trip per release,
+//!   with the connection still checked out while it runs, so a
+//!   registry pool sized near peak concurrency will feel it as
+//!   `acquire` latency.
 //!
 //! * **Database mode** (`Org.storage_mode == "database"`). Tenant data
 //!   lives in a separate Postgres database. `Org.database_url` is a
@@ -403,8 +409,11 @@ impl<DB: Database> TenantPools<DB> {
         };
         let conn = pool.acquire().await?;
         Ok(TenantConn {
-            inner: conn,
+            inner: Some(conn),
             schema: None,
+            // Database-mode pools are per-tenant and carry no
+            // per-checkout session state, so there is nothing to undo.
+            reset: None,
         })
     }
 
@@ -713,21 +722,31 @@ impl TenantPools<sqlx::Postgres> {
         let pool = self.pool_for_org(org).await?;
         match &pool {
             TenantPool::Schema { schema, registry } => {
-                let mut conn = registry.acquire().await?;
-                let stmt = format!("SET search_path TO {}, public", quote_ident(schema));
-                rustango::sql::sqlx::query(&stmt)
-                    .execute(&mut *conn)
-                    .await?;
-                Ok(TenantConn {
-                    inner: conn,
+                let conn = registry.acquire().await?;
+                // Install the reset *before* issuing the `SET`, not
+                // after. The statement is session-level on a **shared**
+                // pool, so it must be undone on release (#1224) — and
+                // if this future is cancelled (request timeout, client
+                // disconnect, `select!`) after PG has already applied
+                // the `SET`, only a live `TenantConn` can undo it.
+                // Constructing it afterwards leaves a window where the
+                // bare `PoolConnection` drops, sqlx's `ping()` recovers
+                // it, and it rejoins the shared pool tenant-scoped.
+                let mut tc = TenantConn {
+                    inner: Some(conn),
                     schema: Some(schema.clone()),
-                })
+                    reset: Some(reset_pg_search_path),
+                };
+                let stmt = format!("SET search_path TO {}, public", quote_ident(schema));
+                rustango::sql::sqlx::query(&stmt).execute(&mut **tc).await?;
+                Ok(tc)
             }
             TenantPool::Database { pool } => {
                 let conn = pool.acquire().await?;
                 Ok(TenantConn {
-                    inner: conn,
+                    inner: Some(conn),
                     schema: None,
+                    reset: None,
                 })
             }
         }
@@ -861,9 +880,23 @@ mod ensure_sqlite_creates_tests {
 /// Implements `Deref` to the inner [`sqlx::pool::PoolConnection`] for
 /// use as a sqlx executor.
 pub struct TenantConn<DB: Database = DefaultTenantDb> {
-    inner: sqlx::pool::PoolConnection<DB>,
+    /// `Option` only so [`Drop`] can move the connection into the
+    /// reset task. It is `Some` for the whole observable lifetime.
+    inner: Option<sqlx::pool::PoolConnection<DB>>,
     schema: Option<String>,
+    /// Session-state teardown, installed only by the schema-mode
+    /// branch of [`TenantPools::acquire`]. `None` means "this
+    /// connection carries no per-tenant session state" — the
+    /// database-mode and non-PG paths, which need no reset.
+    reset: Option<ResetFn<DB>>,
 }
+
+/// Undo whatever session state the acquire path installed, then let the
+/// connection fall back to its pool. Takes ownership so the pool cannot
+/// hand the connection to anyone else until the reset has landed.
+type ResetFn<DB> = fn(
+    sqlx::pool::PoolConnection<DB>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 impl<DB: Database> TenantConn<DB> {
     /// `Some(schema)` for schema-mode connections, `None` for
@@ -877,14 +910,72 @@ impl<DB: Database> TenantConn<DB> {
 impl<DB: Database> std::ops::Deref for TenantConn<DB> {
     type Target = sqlx::pool::PoolConnection<DB>;
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        self.inner.as_ref().expect("connection taken only on drop")
     }
 }
 
 impl<DB: Database> std::ops::DerefMut for TenantConn<DB> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+        self.inner.as_mut().expect("connection taken only on drop")
     }
+}
+
+/// Schema-mode `acquire` issues a **session-level** `SET search_path` on
+/// a connection borrowed from the *shared* registry pool. sqlx does not
+/// reset session state on release — it only pings — so without this the
+/// connection goes back to the pool still pointing at the tenant's
+/// schema, and the next borrower silently inherits it. That borrower is
+/// often a registry query, a `Tenant::pool()` handler, or a long-lived
+/// background worker, none of which issue a `SET` of their own (#1224).
+///
+/// The reset runs in a spawned task because `Drop` cannot be async, but
+/// it is not racy: the task owns the `PoolConnection`, so the pool
+/// cannot hand it out again until the reset has completed and the task
+/// drops it.
+///
+/// The one residual case is a reset task cancelled by a runtime that is
+/// shutting down. That is benign in practice — the pool is being torn
+/// down with the runtime, so there is no later borrower to leak to.
+impl<DB: Database> Drop for TenantConn<DB> {
+    fn drop(&mut self) {
+        let (Some(reset), Some(mut conn)) = (self.reset, self.inner.take()) else {
+            return;
+        };
+        // No runtime (a sync teardown, or the runtime is already gone)
+        // means nothing can run the reset. Fail **closed**: mark the
+        // connection to be closed on drop rather than returned, so a
+        // still-tenant-scoped connection can never rejoin the shared
+        // registry pool. Losing one connection is cheap; handing the
+        // next borrower another tenant's `search_path` is #1224.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            conn.close_on_drop();
+            return;
+        };
+        handle.spawn(reset(conn));
+    }
+}
+
+/// The [`ResetFn`] for schema-mode Postgres connections. On failure the
+/// connection is closed rather than returned, so a dirty one can never
+/// be reused.
+#[cfg(feature = "postgres")]
+fn reset_pg_search_path(
+    mut conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        match sqlx::query("RESET search_path").execute(&mut *conn).await {
+            Ok(_) => drop(conn),
+            Err(error) => {
+                tracing::warn!(
+                    target: "crate::tenancy::pools",
+                    %error,
+                    "could not reset search_path on release; closing the connection \
+                     rather than returning it to the registry pool",
+                );
+                let _ = conn.close().await;
+            }
+        }
+    })
 }
 
 /// Quote a Postgres identifier — wrap in double-quotes, escape any
