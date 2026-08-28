@@ -4,6 +4,33 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.53.0] — 2026-08-28
+
+Minor, not a patch. Two reasons to take the version bump rather than call this
+`0.52.2`:
+
+- `TenantPoolsConfig` gained two `pub` fields and is not `#[non_exhaustive]`, so
+  any exhaustive struct literal against it stops compiling. Under Cargo's `0.x`
+  rules `0.52.2` would be a *compatible* update — every `rustango = "0.52"`
+  dependant would pick it up on a routine `cargo update` and break. `0.53.0`
+  does not match `^0.52`, so the upgrade is opt-in.
+- Schema-mode scoped pools are now shared per tenant rather than built per
+  request, and their `max_connections` default moves 2 → 8. Nothing breaks at
+  compile time, but connection behaviour against the registry server changes.
+
+Everything else is additive. `Cache::delete_prefix` ships with a default body,
+so existing `Cache` implementors are unaffected.
+
+**Upgrading:** add `..Default::default()` to any `TenantPoolsConfig` literal. If
+you run schema mode with many tenants, read the new
+`max_cached_scoped_pools` / `scoped_pool_max_connections` docs — the worst-case
+connection count against your registry server is their product (64 × 8 by
+default), though quiet tenants hold none.
+
+Security: closes GHSA-2p6r-x3vv-xqm2 (`rpassword`) and GHSA-4w2j-m93h-cj5j
+(`quinn-proto`), plus a Redis `FLUSHDB` bug that let one tenant's cache
+invalidation wipe every other tenant's entries.
+
 ### Added
 - **`tenancy::for_each_tenant`** (#1226) — the per-tenant fan-out that scheduled
   sweeps were missing. `MediaManager::purge_orphans`,
