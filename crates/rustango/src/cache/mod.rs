@@ -784,11 +784,17 @@ impl Cache for InMemoryCache {
 /// ## File format
 ///
 /// Each entry is a small binary blob:
-///   `[expires_at_unix_secs: i64 big-endian][value bytes]`
+///   `[expires_at_unix_millis: i64 big-endian][value bytes]`
 ///
-/// `expires_at_unix_secs` is `0` when the entry has no TTL. Expired
+/// `expires_at_unix_millis` is `0` when the entry has no TTL. Expired
 /// entries are pruned lazily on the next `get` / `exists` call —
 /// there is no background reaper.
+///
+/// The header held **seconds** before #1233, which made sub-second TTLs
+/// unrepresentable and let a 1-second entry expire immediately. Entries
+/// written by an older build decode as long-past and are treated as
+/// expired, so upgrading costs one cold read per stale key — the safe
+/// direction for a cache.
 ///
 /// ## Limitations vs Django
 ///
@@ -831,18 +837,30 @@ impl FileCache {
         self.dir.join(name)
     }
 
-    fn now_unix_secs() -> i64 {
+    /// Epoch **milliseconds**. Seconds were too coarse: an entry whose
+    /// TTL was stamped at second granularity could be born already
+    /// expired (#1233).
+    fn now_unix_millis() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
             .unwrap_or(0)
     }
 
-    /// Encode `[expires_at: i64 BE][value bytes]`. expires_at = 0
-    /// means no TTL.
+    /// Encode `[expires_at: i64 BE epoch-millis][value bytes]`.
+    /// `expires_at = 0` means no TTL.
+    ///
+    /// Milliseconds, not seconds. At second granularity a `set` landing
+    /// at wall-clock `T.999` stamped `expires_at = T + 1`, and the read
+    /// a millisecond later was already at `T+1` — so a 1-second TTL
+    /// could expire in one millisecond, and any sub-second TTL rounded
+    /// to `as_secs() == 0` and was born expired (#1233). The header is
+    /// the same 8 bytes; only its unit changed.
     fn encode(value: &str, ttl: Option<Duration>) -> Vec<u8> {
         let expires_at = ttl
-            .map(|d| Self::now_unix_secs().saturating_add(d.as_secs() as i64))
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .map(|ms| Self::now_unix_millis().saturating_add(ms))
             .unwrap_or(0);
         let mut out = Vec::with_capacity(8 + value.len());
         out.extend_from_slice(&expires_at.to_be_bytes());
@@ -853,6 +871,9 @@ impl FileCache {
     /// Decode the file body. Returns `Some(value)` if present + not
     /// expired, else `None`. Caller is responsible for deleting the
     /// file when this returns `None` due to expiry.
+    ///
+    /// Expiry is `>`, not `>=`: an entry is live for the full duration
+    /// it was promised, rather than dying on the boundary tick.
     fn decode(buf: &[u8]) -> Option<(String, bool /* expired */)> {
         if buf.len() < 8 {
             return None;
@@ -861,7 +882,7 @@ impl FileCache {
         ts.copy_from_slice(&buf[..8]);
         let expires_at = i64::from_be_bytes(ts);
         let value = std::str::from_utf8(&buf[8..]).ok()?.to_owned();
-        let expired = expires_at != 0 && Self::now_unix_secs() >= expires_at;
+        let expired = expires_at != 0 && Self::now_unix_millis() > expires_at;
         Some((value, expired))
     }
 }

@@ -509,7 +509,7 @@ impl<DB: Database> TenantPools<DB> {
         })?;
         let url = self.secrets.resolve(reference).await?;
         tracing::debug!(
-            target: "crate::tenancy::pools",
+            target: "rustango::tenancy::pools",
             slug = %org.slug,
             elapsed_ms = resolve_start.elapsed().as_millis() as u64,
             "secrets resolver resolved tenant URL",
@@ -517,7 +517,7 @@ impl<DB: Database> TenantPools<DB> {
         let connect_start = std::time::Instant::now();
         let pool = build_database_pool::<DB>(&url, &self.config).await?;
         tracing::info!(
-            target: "crate::tenancy::pools",
+            target: "rustango::tenancy::pools",
             slug = %org.slug,
             elapsed_ms = connect_start.elapsed().as_millis() as u64,
             min_conn = self.config.database_pool_min_connections,
@@ -636,7 +636,7 @@ where
         for org in orgs {
             if self.cache.read().await.len() >= self.config.max_cached_database_pools {
                 tracing::warn!(
-                    target: "crate::tenancy::pools",
+                    target: "rustango::tenancy::pools",
                     slug = %org.slug,
                     cap = self.config.max_cached_database_pools,
                     "skipping pre-warm: cache cap reached",
@@ -648,7 +648,7 @@ where
                 Ok(_) => report.warmed += 1,
                 Err(e) => {
                     tracing::warn!(
-                        target: "crate::tenancy::pools",
+                        target: "rustango::tenancy::pools",
                         slug = %org.slug,
                         error = %e,
                         "pre-warm failed for tenant",
@@ -658,7 +658,7 @@ where
             }
         }
         tracing::info!(
-            target: "crate::tenancy::pools",
+            target: "rustango::tenancy::pools",
             elapsed_ms = started.elapsed().as_millis() as u64,
             total = report.total_active,
             warmed = report.warmed,
@@ -967,7 +967,7 @@ fn reset_pg_search_path(
             Ok(_) => drop(conn),
             Err(error) => {
                 tracing::warn!(
-                    target: "crate::tenancy::pools",
+                    target: "rustango::tenancy::pools",
                     %error,
                     "could not reset search_path on release; closing the connection \
                      rather than returning it to the registry pool",

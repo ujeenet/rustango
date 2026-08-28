@@ -203,7 +203,7 @@ where
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
-    tracing::info!(target: "crate::tenancy::server", "shutdown signal received");
+    tracing::info!(target: "rustango::tenancy::server", "shutdown signal received");
 }
 
 /// Print a loud warning if no operators exist — the operator UI
