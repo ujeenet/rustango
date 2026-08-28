@@ -55,6 +55,38 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   the `JobContext` work in #1223.
 
 ### Fixed
+- **Schema-mode `Tenant` extraction built an uncached `PgPool` per request**
+  (#1235). `TenantPools::scoped_pool` rebuilt its `search_path`-baked pool on
+  every call, and the `Tenant` extractor calls it once per request — so a
+  schema-mode app paid a TCP connect, TLS handshake and auth round-trip per
+  request. `PgPoolOptions::connect_with` is eager, so even a handler that only
+  touched `Tenant::conn` paid it, and a burst of N concurrent requests opened up
+  to 2N short-lived connections against the very server schema mode exists to
+  protect. Database mode, by contrast, returned a cached clone for free.
+
+  Scoped pools are now cached per slug in their own map, bounded by the new
+  `TenantPoolsConfig::max_cached_scoped_pools` (default 64). The budget is
+  separate from `max_cached_database_pools` so schema-mode tenants can't
+  silently eat a mixed deployment's database-mode capacity. Past the cap,
+  `scoped_pool` falls back to the old per-call build and warns rather than
+  erroring — schema mode is sold for high tenant counts, so a hard failure there
+  would break exactly the deployments it targets.
+
+  `TenantPools::invalidate` now evicts the scoped pool too. Without that, a
+  tenant whose `schema_name` changed would keep being handed a pool with the old
+  schema baked into its connect options — a cross-tenant read of the kind #1224
+  was about.
+
+  **Behaviour change worth noting:** the per-tenant scoped pool is now *shared*
+  between request handlers and any long-lived worker built on `scoped_pool_dyn`
+  (the pattern in `docs/jobs.md`), where each previously got its own. The old
+  hardcoded `max_connections = 2` is unsafe under sharing — `Tenant::conn` pins a
+  connection for the handler's lifetime, a handler also using `t.pool()` needs a
+  second, and a job worker holds one more or less permanently. It is now
+  `TenantPoolsConfig::scoped_pool_max_connections`, defaulting to 8, with
+  `min_connections = 0` and the configured idle timeout so a quiet cached tenant
+  settles back to zero connections.
+
 - **`rpassword` unpinned from `=7.3.1` to `7.5`** (#1239). The exact pin dated
   from rpassword 7.4 using `libc::__errno_location`, which is Linux-only and
   broke macOS builds. Upstream made the errno call portable, but the pin
