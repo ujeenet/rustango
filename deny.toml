@@ -1,7 +1,13 @@
 # cargo-deny configuration. Run `cargo deny check` in CI.
 
 [graph]
-all-features = false
+# Scan the FULL feature graph, not just default features (#1237).
+# With `all-features = false` nothing behind an optional feature was ever
+# checked — the whole mysql backend included — so an advisory in an
+# optional dep would go unreported. It also left the RUSTSEC-2023-0071
+# ignore below matching nothing, since `rsa` only enters the graph once
+# `mysql` is on, which cargo-deny reports as an unused-ignore warning.
+all-features = true
 no-default-features = false
 
 [advisories]

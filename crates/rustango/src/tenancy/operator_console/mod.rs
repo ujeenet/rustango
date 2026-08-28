@@ -536,7 +536,7 @@ async fn require_session(
             next.run(req).await
         }
         Err(e) => {
-            tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "registry lookup");
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "registry lookup");
             (StatusCode::INTERNAL_SERVER_ERROR, "registry lookup failed").into_response()
         }
     }
@@ -704,7 +704,7 @@ async fn login_submit(
                 .into_response();
             }
             Err(e) => {
-                tracing::warn!(target: "crate::tenancy::operator_console", error = %e);
+                tracing::warn!(target: "rustango::tenancy::operator_console", error = %e);
                 return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
             }
         };
@@ -812,7 +812,7 @@ async fn change_password_form(
             .tera
             .render("op_change_password.html", &ctx)
             .unwrap_or_else(|e| {
-                tracing::error!(target: "crate::tenancy::operator_console", error = %e, "op_change_password.html render");
+                tracing::error!(target: "rustango::tenancy::operator_console", error = %e, "op_change_password.html render");
                 "<!doctype html><h1>Change-password page unavailable</h1>".to_owned()
             }),
     )
@@ -880,7 +880,7 @@ async fn change_password_submit(
             }
         },
         Err(e) => {
-            tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "change-password lookup");
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "change-password lookup");
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
@@ -896,7 +896,7 @@ async fn change_password_submit(
     op_row.password_hash = new_hash;
     op_row.password_changed_at = Some(chrono::Utc::now());
     if let Err(e) = op_row.save_pool(&state.registry).await {
-        tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "change-password update");
+        tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "change-password update");
         return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
     }
     redir("ok=Password+updated")
@@ -1441,7 +1441,7 @@ async fn emit_op_audit(
     };
     if let Err(e) = crate::audit::emit_one_pool(registry, &entry).await {
         tracing::warn!(
-            target: "crate::tenancy::operator_console",
+            target: "rustango::tenancy::operator_console",
             error = %e,
             slug = slug,
             operator_id,
@@ -1601,7 +1601,7 @@ async fn serve_brand_asset(
             | branding::BrandError::InvalidFilename,
         ) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => {
-            tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "brand asset");
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "brand asset");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }
@@ -1694,7 +1694,7 @@ async fn org_impersonate(
     {
         Ok(rows) => rows,
         Err(e) => {
-            tracing::warn!(target: "crate::tenancy::operator_console", error = %e, "org lookup failed");
+            tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "org lookup failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "registry lookup failed").into_response();
         }
     };
@@ -1778,7 +1778,7 @@ async fn org_impersonate(
         HeaderValue::from_static("no-referrer"),
     );
     tracing::info!(
-        target: "crate::tenancy::operator_console",
+        target: "rustango::tenancy::operator_console",
         slug = %slug,
         operator_id,
         ttl_secs = handoff::HANDOFF_TTL_SECS,

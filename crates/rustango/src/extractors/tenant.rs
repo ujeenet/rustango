@@ -80,12 +80,13 @@ pub struct Tenant<DB: Database = DefaultTenantDb> {
     pub org: Org,
     conn: TenantConnCell<DB>,
     /// v0.38 — backend-erasing pool reference for the tenant's storage.
-    /// On PG schema-mode this wraps the registry pool (queries through
-    /// it would hit the `public` schema unless `SET search_path` is
-    /// applied — for that path prefer [`Tenant::conn`]). On non-PG
-    /// (and PG database-mode), this is the tenant's dedicated pool;
-    /// handlers can run `Model::objects().fetch(&t.pool)` for
-    /// tri-dialect ORM queries.
+    /// Always tenant-scoped, by whichever mechanism the storage mode
+    /// calls for: on PG schema-mode [`TenantPools::scoped_pool`] builds
+    /// a dedicated pool with `search_path` in its **connect options**
+    /// (so every checkout is scoped without a per-query `SET`); on
+    /// non-PG and PG database-mode it is the tenant's dedicated pool.
+    /// Handlers can run `Model::objects().fetch(&t.pool)` for
+    /// tri-dialect ORM queries in either mode.
     pool: crate::sql::Pool,
 }
 
@@ -145,11 +146,19 @@ impl<DB: Database> Tenant<DB> {
     /// `insert_pool` / `save_pool`) — every backend works through the
     /// same code path.
     ///
-    /// **PG schema-mode note**: the pool wraps the shared registry
-    /// pool; queries against it would hit `public` instead of the
-    /// tenant schema. For schema-mode-on-PG paths use
-    /// [`Tenant::conn`] (which has `SET search_path` applied).
-    /// Database-mode (any backend) is unaffected.
+    /// Tenant-scoped in **both** storage modes — schema-mode included.
+    /// [`TenantPools::scoped_pool`] bakes `search_path` into the
+    /// connect options of a dedicated pool rather than issuing a
+    /// per-checkout `SET`, so this pool never borrows from the shared
+    /// registry pool and cannot pick up another tenant's session state.
+    /// [`Tenant::conn`] is the shared-registry path; prefer it when you
+    /// want the request's single pinned connection rather than a pool.
+    ///
+    /// **Cost, schema-mode only:** that dedicated pool is built per
+    /// extraction and is not cached, and sqlx's `connect_with` opens a
+    /// connection eagerly — so a schema-mode request that touches this
+    /// pool pays a fresh PG connection. Database-mode reuses the
+    /// tenant's cached pool and pays nothing.
     #[must_use]
     pub fn pool(&self) -> &crate::sql::Pool {
         &self.pool
@@ -257,9 +266,10 @@ where
             .map_err(|e| TenantRejection::Internal(e.to_string()))?;
         // v0.38 — also resolve the backend-erasing Pool enum so
         // `t.pool()` lets handlers use tri-dialect ORM helpers
-        // (fetch / save_pool / etc.). Schema-mode picks the
-        // shared registry pool (which requires SET search_path);
-        // database-mode resolves to the dedicated tenant pool.
+        // (fetch / save_pool / etc.). Schema-mode gets a dedicated
+        // pool with `search_path` in its connect options (NOT the
+        // shared registry pool); database-mode resolves to the
+        // tenant's own pool.
         let pool = ctx
             .pools
             .scoped_pool_dyn(&org)

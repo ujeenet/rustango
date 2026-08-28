@@ -109,6 +109,68 @@ impl Cache for RedisCache {
             .map_err(|e| CacheError::Connection(e.to_string()))
     }
 
+    /// `SCAN MATCH <prefix>*` + `DEL`, in cursor batches.
+    ///
+    /// **This override is load-bearing.** Without it the trait default
+    /// falls through to [`Self::clear`], which is `FLUSHDB` — so a
+    /// single tenant's [`ScopedCache::clear`](super::ScopedCache) would
+    /// wipe every other tenant's entries, every rate-limit counter, and
+    /// every `lock:*` key (letting two replicas both take a
+    /// "once per cluster" lock). Redis can enumerate, so the trait
+    /// default's "cannot enumerate, so over-delete" bargain does not
+    /// apply here (#1227).
+    ///
+    /// `SCAN` is non-blocking and cursor-based, unlike `KEYS`: it will
+    /// not stall the server on a large keyspace. The trade-off is that
+    /// it gives no snapshot guarantee — keys created *during* the sweep
+    /// may be missed. That is the right trade for cache invalidation
+    /// (a missed key is a stale entry that still expires on its TTL,
+    /// and the alternative blocks every other client).
+    ///
+    /// `MATCH` takes a glob, not a literal, so `*`, `?`, `[`, `]` and
+    /// `\` in the prefix are escaped — otherwise a prefix containing one
+    /// would match beyond its own namespace.
+    async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
+        let mut conn = self.conn.clone();
+        let mut pattern = String::with_capacity(prefix.len() + 1);
+        for ch in prefix.chars() {
+            if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
+                pattern.push('\\');
+            }
+            pattern.push(ch);
+        }
+        pattern.push('*');
+
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(512)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| CacheError::Connection(format!("scan: {e}")))?;
+
+            if !keys.is_empty() {
+                redis::cmd("DEL")
+                    .arg(&keys)
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .map_err(|e| CacheError::Connection(format!("del: {e}")))?;
+            }
+
+            // A zero cursor means the iteration completed. It is only
+            // valid to stop here — a non-empty batch does not imply
+            // more, and an empty one does not imply done.
+            if next == 0 {
+                return Ok(());
+            }
+            cursor = next;
+        }
+    }
+
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let mut conn = self.conn.clone();
         let new: i64 = redis::cmd("INCRBY")

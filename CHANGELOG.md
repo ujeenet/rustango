@@ -4,6 +4,222 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.53.0] — 2026-08-28
+
+Minor, not a patch. Two reasons to take the version bump rather than call this
+`0.52.2`:
+
+- `TenantPoolsConfig` gained two `pub` fields and is not `#[non_exhaustive]`, so
+  any exhaustive struct literal against it stops compiling. Under Cargo's `0.x`
+  rules `0.52.2` would be a *compatible* update — every `rustango = "0.52"`
+  dependant would pick it up on a routine `cargo update` and break. `0.53.0`
+  does not match `^0.52`, so the upgrade is opt-in.
+- Schema-mode scoped pools are now shared per tenant rather than built per
+  request, and their `max_connections` default moves 2 → 8. Nothing breaks at
+  compile time, but connection behaviour against the registry server changes.
+
+Everything else is additive. `Cache::delete_prefix` ships with a default body,
+so existing `Cache` implementors are unaffected.
+
+**Upgrading:** add `..Default::default()` to any `TenantPoolsConfig` literal. If
+you run schema mode with many tenants, read the new
+`max_cached_scoped_pools` / `scoped_pool_max_connections` docs — the worst-case
+connection count against your registry server is their product (64 × 8 by
+default), though quiet tenants hold none.
+
+Security: closes GHSA-2p6r-x3vv-xqm2 (`rpassword`) and GHSA-4w2j-m93h-cj5j
+(`quinn-proto`), plus a Redis `FLUSHDB` bug that let one tenant's cache
+invalidation wipe every other tenant's entries.
+
+### Added
+- **`tenancy::for_each_tenant`** (#1226) — the per-tenant fan-out that scheduled
+  sweeps were missing. `MediaManager::purge_orphans`,
+  `audit::cleanup_older_than_pool` and `prunable::prune_all` each take one pool,
+  and every table they touch is per-tenant, so a sweep wired to one pool cleaned
+  one tenant — on a registry pool in schema mode, only `public` — while every
+  other tenant's rows grew forever and the sweep still reported success.
+  `Scheduler::every` takes `Fn() -> Future` with no context, so there was nowhere
+  for a tenant to come from.
+
+  It resolves each active tenant's own pool via `scoped_pool_dyn`, never
+  short-circuits (a tenant whose pool won't resolve is recorded and the loop
+  continues, so one rotated credential can't starve the rest), and runs
+  sequentially — background sweeps compete with request traffic for the same
+  upstream. `active_tenants` is public for callers wanting their own
+  concurrency. Note the `TenantPools` cache cap (default 64, no eviction) is a
+  hard ceiling: with more active database-mode tenants than that, the tail fails
+  every run, so raise it before scheduling a sweep and treat a non-zero
+  `failed()` as alertable.
+
+  `MediaManager::purge_orphans_dry_run` runs the same query and deletes nothing —
+  that sweep is the only one that reaches outside the database.
+- **`cache::ScopedCache`** (#1227) — a `Cache` view that folds a namespace into
+  every key, so per-tenant caching can't be forgotten at the call site. It is
+  itself a `Cache`, so it drops into `cache_page`, the rate limiters and
+  `DistributedLock`, and forwards to the inner backend with mapped keys so native
+  primitives (Redis `INCRBY` / `SET NX` / `MGET`) keep their atomicity.
+- **`Cache::delete_prefix`** (#1227) — powers `ScopedCache::clear`, which must
+  drop one namespace without touching others (the flat `Cache::clear` is
+  process-global, so a per-tenant invalidation wiped everyone). `InMemoryCache`
+  filters its map, `DatabaseCache` issues a `LIKE`, `RedisCache` runs
+  `SCAN MATCH` + `DEL`. The default over-deletes — clears everything and warns —
+  because a backend that cannot enumerate keys has only two options and only one
+  is safe: under-deleting leaves a stale entry another namespace can read, which
+  is a correctness bug, while over-deleting costs a cache miss. `FileCache` is
+  that case; it hashes keys into paths.
+- **`DistributedLock::for_tenant` / `scoped`** (#1228) — lock names were global,
+  so looping tenants around one `with_lock("daily_report")` let the first tenant
+  win and skipped the rest for the whole TTL, silently (a refused acquire is the
+  expected outcome, so nothing is logged). Scoped, each tenant gets its own lock.
+  Additive — the unscoped form is still right for process-wide work.
+
+### Notes
+- Ambient `task_local!` scopes (audit source, timezone, admin session, signals)
+  do not cross a `tokio::spawn`, so jobs and scheduled tasks run with
+  `AuditSource::System` and the default timezone (#1229). Nothing crosses a
+  tenant boundary — task-locals fail closed — so this is documented on
+  `Job::run` and `Scheduler::every` rather than changed; propagation belongs with
+  the `JobContext` work in #1223.
+
+### Fixed
+- **Schema-mode `Tenant` extraction built an uncached `PgPool` per request**
+  (#1235). `TenantPools::scoped_pool` rebuilt its `search_path`-baked pool on
+  every call, and the `Tenant` extractor calls it once per request — so a
+  schema-mode app paid a TCP connect, TLS handshake and auth round-trip per
+  request. `PgPoolOptions::connect_with` is eager, so even a handler that only
+  touched `Tenant::conn` paid it, and a burst of N concurrent requests opened up
+  to 2N short-lived connections against the very server schema mode exists to
+  protect. Database mode, by contrast, returned a cached clone for free.
+
+  Scoped pools are now cached per slug in their own map, bounded by the new
+  `TenantPoolsConfig::max_cached_scoped_pools` (default 64). The budget is
+  separate from `max_cached_database_pools` so schema-mode tenants can't
+  silently eat a mixed deployment's database-mode capacity. Past the cap,
+  `scoped_pool` falls back to the old per-call build and warns rather than
+  erroring — schema mode is sold for high tenant counts, so a hard failure there
+  would break exactly the deployments it targets.
+
+  `TenantPools::invalidate` now evicts the scoped pool too. Without that, a
+  tenant whose `schema_name` changed would keep being handed a pool with the old
+  schema baked into its connect options — a cross-tenant read of the kind #1224
+  was about.
+
+  **Behaviour change worth noting:** the per-tenant scoped pool is now *shared*
+  between request handlers and any long-lived worker built on `scoped_pool_dyn`
+  (the pattern in `docs/jobs.md`), where each previously got its own. The old
+  hardcoded `max_connections = 2` is unsafe under sharing — `Tenant::conn` pins a
+  connection for the handler's lifetime, a handler also using `t.pool()` needs a
+  second, and a job worker holds one more or less permanently. It is now
+  `TenantPoolsConfig::scoped_pool_max_connections`, defaulting to 8, with
+  `min_connections = 0` and the configured idle timeout so a quiet cached tenant
+  settles back to zero connections.
+
+- **`rpassword` unpinned from `=7.3.1` to `7.5`** (#1239). The exact pin dated
+  from rpassword 7.4 using `libc::__errno_location`, which is Linux-only and
+  broke macOS builds. Upstream made the errno call portable, but the pin
+  outlived its reason and had quietly become the problem: GHSA-2p6r-x3vv-xqm2
+  (partial password reveal when input is interrupted) covers `<= 7.4.0`, so
+  holding 7.3.1 held the interactive `manage create-admin` / tenancy CLI prompt
+  on the vulnerable side of it. Verified 7.5.4 builds clean on macOS aarch64 —
+  the platform the pin existed to protect — before lifting it.
+
+  Caught while refreshing the showcase lockfile for #1236, where `cargo update`
+  reported `Downgrading rpassword v7.5.0 -> v7.3.1` and it read as the example
+  being brought back in line with the workspace. It was the reverse: the example
+  had drifted onto the *patched* version, and honouring the pin moved it back.
+
+- **`FileCache` entries could expire the instant they were written** (#1233).
+  The on-disk header stamped `expires_at` in whole **seconds** and expired on
+  `now >= expires_at`, so a `set` landing at wall-clock `T.999` was already
+  expired by the read a millisecond later — a 1-second TTL that lived for one
+  millisecond. Sub-second TTLs were unrepresentable for the same reason:
+  `Duration::from_millis(500).as_secs()` is `0`, so the entry was born expired,
+  while `InMemoryCache` (which stores an `Instant`) handled the same API
+  correctly. The header is now epoch **milliseconds** and expiry is `>`, so an
+  entry lives for the full duration it was promised.
+
+  The header is the same 8 bytes, but its unit changed: entries written by an
+  older build decode as long-past and are dropped as expired, costing one cold
+  read per stale key on upgrade — the safe direction for a cache.
+
+- **48 `tracing` call sites were invisible to `RUST_LOG=rustango=…`** (#1234).
+  They passed `target: "crate::…"` — a literal string, not a path that expands —
+  so they sat in a namespace no realistic filter matches. Several were the only
+  diagnostic for a failure the framework deliberately swallows, including the
+  #1224 connection-reset path, the pre-warm cap warning, and `for_each_tenant`
+  skipping a tenant whose pool would not resolve. All six `tenancy/` files now
+  use `rustango::…`, matching the 60 sites that already did, and a test fails the
+  build if the literal form reappears.
+
+- **`quinn-proto` bumped to 0.11.15 in `examples/showcase/Cargo.lock`** (#1236),
+  closing the high-severity [GHSA-4w2j-m93h-cj5j](https://github.com/advisories/GHSA-4w2j-m93h-cj5j)
+  Dependabot alert (remote memory exhaustion via unbounded out-of-order stream
+  reassembly). Lockfile-only, and confined to the example — `examples/` is
+  outside the workspace, so nothing published to crates.io resolved through this
+  pin. The same refresh corrects a stale `rpassword 7.5.0` back to the `=7.3.1`
+  the workspace pins.
+
+- **`cargo deny` scanned neither optional features nor the one committed example
+  lockfile** (#1237).
+
+  `deny.toml` had `all-features = false`, so nothing behind an optional feature
+  was ever checked — the whole MySQL backend included — and an advisory in an
+  optional dependency would have gone unreported. It also left the
+  `RUSTSEC-2023-0071` ignore reporting as unmatched, since `rsa` only enters the
+  graph once `mysql` is on. Now `all-features = true`, verified clean across
+  advisories, bans, licenses and sources.
+
+  The CI `deny` job also ran only at the repo root. `examples/showcase` is
+  outside `members = ["crates/*"]` **and** is the only committed lockfile in the
+  repo, so it was both invisible to `deny` and the one place a stale pin can
+  actually persist — which is exactly how #1236 reached us as a Dependabot alert
+  rather than a failing build. A `deny-examples` matrix now gates it, along with
+  the other example manifests. Advisories-only: those crates are unpublished and
+  carry no `license` field, so `check licenses` fails them as `unlicensed` for
+  reasons unrelated to security.
+
+  `examples/showcase/Cargo.lock` also picks up `crossbeam-epoch` 0.9.20
+  (RUSTSEC-2026-0204 — invalid pointer dereference in the `fmt::Pointer` impl,
+  reached via `tera → globwalk → ignore`) and `spin` 0.9.9 (the previous 0.9.8
+  was yanked). The workspace `Cargo.lock` and the seven
+  `crates/rustango/examples/*/Cargo.lock` are gitignored, so they resolve fresh
+  on every build and needed no committed change.
+
+- **Schema-mode tenancy leaked `search_path` between registry-pool borrowers**
+  (#1224). `TenantPools::acquire` issues a session-level
+  `SET search_path TO <schema>, public` on a connection borrowed from the
+  *shared* registry pool, and nothing undid it: `TenantConn` had no `Drop`, no
+  pool sets an `after_release` hook, and sqlx only pings on release — it never
+  issues `DISCARD ALL` / `RESET`. The connection returned to the pool still
+  pointing at that tenant's schema, so the next borrower silently inherited it,
+  and any registry-pool query against a table that also exists in tenant schemas
+  resolved against whichever tenant used that connection last.
+
+  Long-lived background work is the worst amplifier — a worker holding the
+  registry pool polls for the process lifetime, so it *will* draw dirtied
+  connections. It also hides in testing: when `public` lacks the table, the query
+  errors on a clean connection and succeeds against a random tenant on a dirty
+  one, so a single-tenant suite stays green.
+
+  `TenantConn` now resets `search_path` when released. `Drop` cannot be async, so
+  the reset runs in a spawned task — not racy, because the task owns the
+  `PoolConnection` and the pool cannot re-hand it out until the reset lands. A
+  failed reset closes the connection instead of returning it, and a drop with no
+  runtime available marks it `close_on_drop`, so both failure paths fail closed.
+  `after_release` would have been cheaper per request but is unreachable: apps
+  and `manage` hand `TenantPools::new` an already-built `PgPool`, and sqlx only
+  accepts that hook at `PoolOptions` construction.
+
+  Costs one extra round trip per release, with the connection still checked out
+  while it runs, so a registry pool sized near peak concurrency will feel it as
+  `acquire` latency.
+
+  Also corrects the `Tenant::pool()` docs, stale since v0.38: they claimed
+  schema-mode queries through it hit `public`. The PG extractor resolves that
+  pool via `scoped_pool_dyn`, which builds a *dedicated* pool with `search_path`
+  in its connect options — so `t.pool()` reads the tenant's schema and never
+  borrows from the shared registry pool.
+
 ## [0.52.1] — 2026-08-15
 
 Patch. One fix, no breaking changes — `0.52.0` users can take it directly.

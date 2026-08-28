@@ -2,8 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `develop` is the default branch and where every PR lands, but it
+    # was absent here — so a merge into it ran nothing, and the branch
+    # everyone builds on had no post-merge gate. Only `main` (release)
+    # was covered. PRs were checked, which hides the gap right up until
+    # a squash-merge combination behaves differently from its PR.
+    branches: [main, develop]
   pull_request:
+  # Lets a run be triggered by hand against any branch, without
+  # inventing a no-op commit or opening a throwaway PR — useful for
+  # re-checking a branch after an advisory lands, since `deny` can go
+  # red with no code change at all.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -130,6 +140,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # The job above runs at the repo root, so it only ever sees the
+  # workspace lockfile — `examples/` sits outside `members = ["crates/*"]`
+  # and was invisible to it. That is how the quinn-proto advisory in #1236
+  # reached us via a Dependabot alert instead of a failing build (#1237).
+  #
+  # Advisories only, deliberately: the example crates are unpublished and
+  # carry no `license` field, so `check licenses` fails them as
+  # `unlicensed` for reasons that have nothing to do with security.
+  deny-examples:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest:
+          - examples/showcase/Cargo.toml
+          - crates/rustango/examples/admin_demo/Cargo.toml
+          - crates/rustango/examples/auth_demo/Cargo.toml
+          - crates/rustango/examples/cookbook_blog/Cargo.toml
+          - crates/rustango/examples/getting_started_blog/Cargo.toml
+          - crates/rustango/examples/mcp_demo/Cargo.toml
+          - crates/rustango/examples/orm_cookbook/Cargo.toml
+          - crates/rustango/examples/tenant_user_extension/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          command: check advisories
 
   # Trivy security scan — the non-bypassable "detect vulnerabilities
   # before releases" gate. Complements `deny` (RustSec advisories) with

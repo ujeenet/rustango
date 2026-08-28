@@ -67,7 +67,7 @@ Every template writes a self-contained Cargo project:
   Cargo.toml            # the rustango dependency + features for this template
   .env.example          # copy to .env (DATABASE_URL, RUSTANGO_SESSION_SECRET, …)
   .gitignore
-  rust-toolchain.toml   # pins the Rust toolchain
+  rust-toolchain.toml   # selects the `stable` toolchain + rustfmt/clippy/rust-analyzer
   docker-compose.yml    # a Postgres service to develop against
   Dockerfile            # production image
   README.md

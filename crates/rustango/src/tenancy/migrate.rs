@@ -201,7 +201,7 @@ pub async fn migrate_registry_pool(
     registry: &crate::sql::Pool,
     dir: &Path,
 ) -> Result<Vec<Migration>, TenancyError> {
-    info!(target: "crate::tenancy", "applying registry-scoped migrations");
+    info!(target: "rustango::tenancy", "applying registry-scoped migrations");
     let scoped_dir = scoped_subset(dir, MigrationScope::Registry).await?;
     let mut applied = match scoped_dir {
         ScopedDir::Owned(temp) => {
@@ -223,13 +223,13 @@ pub async fn migrate_registry_pool(
     // `contenttypes::ensure_seeded` (v0.34 slice 1).
     if let Err(e) = crate::contenttypes::ensure_seeded(registry).await {
         tracing::warn!(
-            target: "crate::tenancy",
+            target: "rustango::tenancy",
             error = %e,
             "contenttypes::ensure_seeded failed for registry pool",
         );
     }
     info!(
-        target: "crate::tenancy",
+        target: "rustango::tenancy",
         applied = applied.len(),
         "registry migrations done"
     );
@@ -274,7 +274,7 @@ pub async fn migrate_tenants(
         .await?;
 
     info!(
-        target: "crate::tenancy",
+        target: "rustango::tenancy",
         tenants = orgs.len(),
         migrations = migrations_in_scope,
         dir = %dir.display(),
@@ -287,7 +287,7 @@ pub async fn migrate_tenants(
         // was meant. The typed `tenancy::manage::api` auto-detects via
         // `resolve_migration_dirs`, but raw callers can still hit this.
         warn!(
-            target: "crate::tenancy",
+            target: "rustango::tenancy",
             dir = %dir.display(),
             "no tenant-scoped migrations found in dir; tenants will record applied=0 — \
              pass the flat migrations directory or a project root containing one"
@@ -299,13 +299,13 @@ pub async fn migrate_tenants(
         let outcome = run_for_one_tenant(pools, org, &scoped_path, registry_url).await;
         match &outcome {
             Ok(applied) => info!(
-                target: "crate::tenancy",
+                target: "rustango::tenancy",
                 slug = %org.slug,
                 applied = applied.len(),
                 "tenant migrations done"
             ),
             Err(e) => warn!(
-                target: "crate::tenancy",
+                target: "rustango::tenancy",
                 slug = %org.slug,
                 error = %e,
                 "tenant migration failed; continuing with remaining tenants"
@@ -363,7 +363,7 @@ where
         .await?;
 
     info!(
-        target: "crate::tenancy",
+        target: "rustango::tenancy",
         tenants = orgs.len(),
         dir = %dir.display(),
         "applying tenant-scoped migrations (db-mode only)"
@@ -374,13 +374,13 @@ where
         let outcome = run_for_one_tenant_db(pools, org, &scoped_path).await;
         match &outcome {
             Ok(applied) => info!(
-                target: "crate::tenancy",
+                target: "rustango::tenancy",
                 slug = %org.slug,
                 applied = applied.len(),
                 "tenant migrations done"
             ),
             Err(e) => warn!(
-                target: "crate::tenancy",
+                target: "rustango::tenancy",
                 slug = %org.slug,
                 error = %e,
                 "tenant migration failed; continuing with remaining tenants"
@@ -446,10 +446,10 @@ where
     // Data seeders (rows, not DDL — kept): the CRUD permission codenames
     // for every registered model (#61) + the content-type catalog (#89).
     if let Err(e) = super::permissions::auto_create_permissions_pool(&inner_pool).await {
-        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions_pool failed for database-mode tenant");
+        tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "auto_create_permissions_pool failed for database-mode tenant");
     }
     if let Err(e) = crate::contenttypes::ensure_seeded(&inner_pool).await {
-        tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
+        tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
     }
     Ok(applied)
 }
@@ -510,10 +510,10 @@ async fn run_for_one_tenant(
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.
             if let Err(e) = super::permissions::auto_create_permissions(&pool).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for schema-mode tenant");
+                tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for schema-mode tenant");
             }
             if let Err(e) = crate::contenttypes::ensure_seeded(&dbpool).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for schema-mode tenant");
+                tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for schema-mode tenant");
             }
             pool.close().await;
             Ok(applied)
@@ -527,10 +527,10 @@ async fn run_for_one_tenant(
             applied.extend(migrate::migrate(tenant_pool.pool(), dir).await?);
             // Data seeders (rows, not DDL — kept): #61 + #89.
             if let Err(e) = super::permissions::auto_create_permissions(tenant_pool.pool()).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for database-mode tenant");
+                tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for database-mode tenant");
             }
             if let Err(e) = crate::contenttypes::ensure_seeded(&dbpool).await {
-                tracing::warn!(target: "crate::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
+                tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
             }
             Ok(applied)
         }

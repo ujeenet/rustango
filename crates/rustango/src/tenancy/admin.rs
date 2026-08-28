@@ -381,7 +381,7 @@ where
         Ok(Some(o)) => o,
         Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
         Err(e) => {
-            warn!(target: "crate::tenancy::admin", error = %e, "resolver error");
+            warn!(target: "rustango::tenancy::admin", error = %e, "resolver error");
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     };
@@ -397,7 +397,7 @@ where
         Ok(p) => p,
         Err(e) => {
             warn!(
-                target: "crate::tenancy::admin",
+                target: "rustango::tenancy::admin",
                 slug = %org.slug,
                 error = %e,
                 "tenant pool build failed",
@@ -566,7 +566,7 @@ where
                         }
                         Err(e) => {
                             warn!(
-                                target: "crate::tenancy::admin",
+                                target: "rustango::tenancy::admin",
                                 slug = %org.slug,
                                 user_id,
                                 error = %e,
@@ -779,7 +779,7 @@ async fn validate_session(
             Ok(v) => v,
             Err(e) => {
                 warn!(
-                    target: "crate::tenancy::admin",
+                    target: "rustango::tenancy::admin",
                     operator_id,
                     error = %e,
                     "operator re-check failed during impersonation session validation",
@@ -809,7 +809,7 @@ async fn validate_session(
         Ok(v) => v,
         Err(e) => {
             warn!(
-                target: "crate::tenancy::admin",
+                target: "rustango::tenancy::admin",
                 slug = %org.slug,
                 error = %e,
                 "tenant user lookup failed during session validation",
@@ -925,7 +925,7 @@ async fn login_form(
         Ok(html) => html,
         Err(e) => {
             tracing::error!(
-                target: "crate::tenancy::admin",
+                target: "rustango::tenancy::admin",
                 slug = %org.slug,
                 error = %e,
                 "tenant_login.html render failed",
@@ -984,7 +984,7 @@ async fn login_submit(
     {
         Ok(v) => v,
         Err(e) => {
-            warn!(target: "crate::tenancy::admin", error = %e, "login query");
+            warn!(target: "rustango::tenancy::admin", error = %e, "login query");
             return (StatusCode::INTERNAL_SERVER_ERROR, "login failed").into_response();
         }
     };
@@ -1130,7 +1130,7 @@ async fn redeem_impersonation_handoff(
         Ok(p) => p,
         Err(e) => {
             tracing::info!(
-                target: "crate::tenancy::admin",
+                target: "rustango::tenancy::admin",
                 slug = %org.slug,
                 error = %e,
                 "handoff token rejected",
@@ -1143,7 +1143,7 @@ async fn redeem_impersonation_handoff(
         .await
     {
         tracing::warn!(
-            target: "crate::tenancy::admin",
+            target: "rustango::tenancy::admin",
             slug = %org.slug,
             jti = %payload.jti,
             error = %e,
@@ -1186,7 +1186,7 @@ async fn redeem_impersonation_handoff(
         HeaderValue::from_static("no-referrer"),
     );
     tracing::info!(
-        target: "crate::tenancy::admin",
+        target: "rustango::tenancy::admin",
         slug = %org.slug,
         operator_id = payload.op,
         ttl_secs,
@@ -1309,7 +1309,7 @@ fn change_password_form(
         Ok(html) => html,
         Err(e) => {
             tracing::error!(
-                target: "crate::tenancy::admin",
+                target: "rustango::tenancy::admin",
                 slug = %org.slug,
                 error = %e,
                 "tenant_change_password.html render failed",
@@ -1373,7 +1373,7 @@ async fn change_password_submit(
     {
         Ok(v) => v,
         Err(e) => {
-            warn!(target: "crate::tenancy::admin", error = %e, "change-password lookup");
+            warn!(target: "rustango::tenancy::admin", error = %e, "change-password lookup");
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
@@ -1393,7 +1393,7 @@ async fn change_password_submit(
     user.password_hash = new_hash;
     user.password_changed_at = Some(chrono::Utc::now());
     if let Err(e) = user.save_pool(tenant_pool).await {
-        warn!(target: "crate::tenancy::admin", error = %e, "change-password update");
+        warn!(target: "rustango::tenancy::admin", error = %e, "change-password update");
         return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
     }
     Redirect::to(&format!(
@@ -1589,7 +1589,7 @@ async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStor
             | branding::BrandError::InvalidFilename,
         ) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => {
-            warn!(target: "crate::tenancy::admin", error = %e, "brand asset");
+            warn!(target: "rustango::tenancy::admin", error = %e, "brand asset");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }

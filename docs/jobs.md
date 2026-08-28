@@ -34,6 +34,8 @@ failures. This is Django-Q / Celery / Laravel queues, in Rust.
 - [Retries and backoff](#retries-and-backoff)
 - [The dead-letter handler](#the-dead-letter-handler)
 - [The persistent queue (production)](#the-persistent-queue-production)
+- [Jobs under multi-tenancy](#jobs-under-multi-tenancy)
+- [Scheduled sweeps under multi-tenancy](#scheduled-sweeps-under-multi-tenancy)
 - [Reference](#reference)
 - [See also](#see-also)
 
@@ -332,6 +334,136 @@ against SQLite in `jobs_sqlite_live.rs`.
 
 ---
 
+## Jobs under multi-tenancy
+
+A worker is not a request. Nothing resolved a tenant for it — no host, no
+header, no middleware ran — so **a job carries no tenant context**:
+`run(&self)` receives only the deserialized payload. Isolation comes from
+**the pool the queue was built on**, and the rule follows from that:
+
+> One queue per tenant pool. A tenant id in the payload is routing, not
+> isolation.
+
+That single decision is what makes each mode safe:
+
+| Mode | Where `rustango_jobs` lives | Why a worker stays scoped |
+|---|---|---|
+| `database` | inside the tenant's own database / SQLite file | a different tenant's rows are not in the table the worker queries — cross-tenant reads aren't expressible |
+| `schema` (PG) | the tenant's schema | `scoped_pool_dyn` returns a pool with `search_path` baked into its **connect options**, not a per-request `SET` — so every checkout for the pool's whole lifetime is scoped, including a worker that lives for days |
+
+Build the queues at boot, one per active tenant:
+
+```rust
+use rustango::core::Column as _;
+use rustango::jobs::{DatabaseJobQueue, JobQueue};
+use rustango::sql::FetcherPool as _;
+use rustango::tenancy::{Org, TenantPools};
+use std::sync::Arc;
+use std::time::Duration;
+
+let pools = Arc::new(TenantPools::new(registry));
+let registry_pool = pools.registry_pool();
+
+// The registry holds the tenant list; each `Org` names its own
+// database (or PG schema).
+let orgs: Vec<Org> = Org::objects()
+    .where_(Org::active.eq(true))
+    .fetch(&registry_pool)
+    .await?;
+
+let mut queues = Vec::new();
+for org in orgs {
+    let pool = pools.scoped_pool_dyn(&org).await?;   // scoped for its lifetime
+    DatabaseJobQueue::ensure_table_pool(&pool).await?;
+
+    let queue = Arc::new(
+        DatabaseJobQueue::with_workers_pool(pool, 2)
+            .poll_interval(Duration::from_secs(1)),
+    );
+    queue.register::<WelcomeEmail>().await;
+    queue.start().await;
+    queues.push((org.slug, queue));
+}
+```
+
+Dispatch then goes to *that tenant's* queue — in a request handler, the one
+keyed by the `Org` the resolver already produced.
+
+**What not to do.** One queue on the registry pool with an `org_id` field in
+the payload puts every tenant's jobs in one shared table, and leaves each
+`run()` to remember to re-scope. One forgotten re-scope is a cross-tenant
+write. If you need a shared queue for operational reasons, resolve the tenant
+pool as the *first* thing `run()` does and never touch the registry pool
+afterwards.
+
+**Known limits.** The framework does not do the fan-out for you: there is no
+per-tenant worker supervisor, no `Job::run(&ctx)` with the tenant attached,
+and no tenant-aware `reclaim_stuck_jobs_pool` sweep — you loop over tenants
+yourself, as above. New tenants provisioned after boot get no workers until
+the process restarts. Tracked in
+[#1223](https://github.com/ujeenet/rustango/issues/1223).
+
+**No ambient context, either.** Workers are `tokio::spawn`ed, and task-locals
+do not cross a spawn — so a job runs with the audit source at
+`AuditSource::System` and the default timezone, no matter what the dispatching
+request had set. Carry what you need in the payload, or re-enter the scope
+inside `run()` with `audit::with_source`. Tracked in
+[#1229](https://github.com/ujeenet/rustango/issues/1229).
+
+---
+
+## Scheduled sweeps under multi-tenancy
+
+The same "a worker is not a request" problem hits *time-based* work, and the
+framework's own sweep helpers are where it bites: `MediaManager::purge_orphans`,
+`audit::cleanup_older_than_pool` and `prunable::prune_all` each take **one
+pool**, and every table they touch is per-tenant. One pool means one tenant —
+and a registry pool in schema mode means only `public`, while every tenant's
+rows accumulate and the sweep still reports success.
+
+Fan out with **`for_each_tenant`**, which resolves each active tenant's own
+pool and keeps going when one tenant fails:
+
+```rust
+use rustango::tenancy::for_each_tenant;
+
+let opts = &opts;
+let sweep = for_each_tenant(&pools, move |_org, pool| async move {
+    rustango::prunable::prune_all(&pool, opts).await
+})
+.await?;
+
+tracing::info!(ok = sweep.succeeded(), failed = sweep.failed(), "nightly prune");
+for (slug, err) in sweep.errors() {
+    tracing::warn!(%slug, %err, "tenant prune failed");
+}
+```
+
+A broken tenant — rotated credential, unreachable database — is recorded in the
+report rather than aborting the run, so it cannot starve the tenants after it.
+Inactive orgs are skipped. `purge_orphans` is the one sweep that reaches outside
+the database (it deletes storage objects), so it has a
+`purge_orphans_dry_run` that runs the same query and deletes nothing — worth a
+look before you wire the real thing.
+
+If you guard the sweep so only one replica runs it, **scope the lock per
+tenant**:
+
+```rust
+use rustango::distributed_lock::DistributedLock;
+
+let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
+lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
+```
+
+Unscoped, every tenant contends for one `lock:nightly_prune`: the first tenant
+wins and the rest are skipped for the whole TTL, silently — a refused acquire is
+the expected outcome, so nothing is logged. Tracked in
+[#1226](https://github.com/ujeenet/rustango/issues/1226) and
+[#1228](https://github.com/ujeenet/rustango/issues/1228).
+
+---
+
 ## Reference
 
 **Backends**
@@ -363,3 +495,5 @@ against SQLite in `jobs_sqlite_live.rs`.
 - [Email](email.md) — the canonical "do it in a job" workload.
 - [Caching](caching.md) — the other way to keep request handlers fast.
 - [Signals](orm.md) — fire-and-forget hooks that often *dispatch* a job.
+- [Tenancy commands](manage.md#tenancy-commands) — provisioning the tenants a
+  per-tenant queue fans out over.

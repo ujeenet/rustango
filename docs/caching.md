@@ -31,6 +31,7 @@ Django's cache framework or Laravel's `Cache` facade.
 - [Typed JSON values](#typed-json-values)
 - [TTL and expiry](#ttl-and-expiry)
 - [Swapping backends](#swapping-backends)
+- [Caching under multi-tenancy](#caching-under-multi-tenancy)
 - [Reference](#reference)
 - [See also](#see-also)
 
@@ -162,6 +163,45 @@ let cache: BoxedCache = std::sync::Arc::new(RedisCache::new("redis://localhost")
 ```
 
 Same `get` / `set` / `get_or_set` calls — only the constructor changed.
+
+---
+
+## Caching under multi-tenancy
+
+`Cache` is a flat `&str`-keyed store, which under tenancy makes the natural
+key the leaky key: a handler — or worse a background task, which has no
+ambient tenant to borrow from — writes `"stats:monthly"` for one tenant and
+every other tenant reads it back.
+
+Wrap the shared cache in a **`ScopedCache`** so the namespace is applied for
+you and the call site cannot forget:
+
+```rust
+use rustango::cache::ScopedCache;
+
+// From the Org the resolver already produced:
+let cache = ScopedCache::for_tenant(shared.clone(), &t.org.slug);
+
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:acme:stats:monthly
+cache.get("stats:monthly").await?;               // reads only acme's entry
+cache.clear().await?;                            // drops ONLY acme's entries
+```
+
+`ScopedCache` is itself a `Cache`, so it drops into anything taking a
+`BoxedCache` — `cache_page`, `cache_fragment`, the rate limiters,
+`DistributedLock`. It forwards to the inner backend with mapped keys rather
+than reimplementing anything, so native primitives (Redis `INCRBY`, `SET NX`,
+`MGET`) keep their atomicity and batching.
+
+Two things worth knowing:
+
+| | |
+|---|---|
+| **It is a namespace, not a boundary** | Everything still lives in one backend, and code holding the *unscoped* cache can read any key. The point is that the ergonomic path is the correct one. |
+| **`clear()` needs key enumeration** | It routes through `Cache::delete_prefix`. `InMemoryCache` filters its map and `DatabaseCache` issues a `DELETE … LIKE 'prefix%'`. A backend that *cannot* enumerate — `FileCache` hashes keys into paths — falls back to clearing everything and logs a warning. That is deliberate: under-deleting would let another namespace read a stale entry, which is a correctness bug, while over-deleting only costs a cache miss. |
+
+The unscoped `Cache::clear()` is still process-global, so reach for the scoped
+view whenever a single tenant's change is what triggered the invalidation.
 
 ---
 

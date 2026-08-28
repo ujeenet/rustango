@@ -170,3 +170,93 @@ async fn purge_expired_is_no_op_when_table_has_only_live_rows() {
     assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
     assert_eq!(cache.get("ttl").await.unwrap().as_deref(), Some("v"));
 }
+
+/// `delete_prefix` (#1227) drops exactly the matching keys. This is the
+/// path `ScopedCache::clear` uses, so getting it wrong means either a
+/// tenant's invalidation silently doing nothing or wiping a neighbour's
+/// entries.
+#[tokio::test]
+async fn delete_prefix_drops_only_the_matching_keys() {
+    let pool = fresh_pool().await;
+    let cache = DatabaseCache::new(pool, "rustango_cache_prefix");
+    cache.ensure_table().await.unwrap();
+
+    cache.set("tenant:acme:a", "1", None).await.unwrap();
+    cache.set("tenant:acme:b", "2", None).await.unwrap();
+    cache.set("tenant:globex:a", "9", None).await.unwrap();
+    cache.set("unrelated", "keep", None).await.unwrap();
+
+    cache
+        .delete_prefix("tenant:acme:")
+        .await
+        .expect("prefix delete");
+
+    assert_eq!(cache.get("tenant:acme:a").await.unwrap(), None);
+    assert_eq!(cache.get("tenant:acme:b").await.unwrap(), None);
+    assert_eq!(
+        cache.get("tenant:globex:a").await.unwrap().as_deref(),
+        Some("9"),
+        "another tenant's entry must survive"
+    );
+    assert_eq!(
+        cache.get("unrelated").await.unwrap().as_deref(),
+        Some("keep")
+    );
+}
+
+/// A slug that is a prefix of a longer one must not be swept by it —
+/// `tenant:acme:` vs `tenant:acme-corp:`.
+#[tokio::test]
+async fn delete_prefix_respects_the_separator() {
+    let pool = fresh_pool().await;
+    let cache = DatabaseCache::new(pool, "rustango_cache_prefix_sep");
+    cache.ensure_table().await.unwrap();
+
+    cache.set("tenant:acme:k", "short", None).await.unwrap();
+    cache.set("tenant:acme-corp:k", "long", None).await.unwrap();
+
+    cache.delete_prefix("tenant:acme:").await.unwrap();
+
+    assert_eq!(cache.get("tenant:acme:k").await.unwrap(), None);
+    assert_eq!(
+        cache.get("tenant:acme-corp:k").await.unwrap().as_deref(),
+        Some("long"),
+    );
+}
+
+/// `%` and `_` are LIKE wildcards. A prefix containing them must match
+/// literally, or one namespace's clear could sweep another's rows —
+/// `_` alone would match *any* single character.
+#[tokio::test]
+async fn delete_prefix_escapes_like_wildcards() {
+    let pool = fresh_pool().await;
+    let cache = DatabaseCache::new(pool, "rustango_cache_prefix_wild");
+    cache.ensure_table().await.unwrap();
+
+    cache.set("a_b:key", "underscore", None).await.unwrap();
+    cache
+        .set("axb:key", "wildcard-would-match", None)
+        .await
+        .unwrap();
+    cache.set("100%:key", "percent", None).await.unwrap();
+    cache
+        .set("100zz:key", "percent-would-match", None)
+        .await
+        .unwrap();
+
+    cache.delete_prefix("a_b:").await.unwrap();
+    assert_eq!(cache.get("a_b:key").await.unwrap(), None);
+    assert_eq!(
+        cache.get("axb:key").await.unwrap().as_deref(),
+        Some("wildcard-would-match"),
+        "`_` must be escaped, not treated as a single-character wildcard"
+    );
+
+    cache.delete_prefix("100%:").await.unwrap();
+    assert_eq!(cache.get("100%:key").await.unwrap(), None);
+    assert_eq!(
+        cache.get("100zz:key").await.unwrap().as_deref(),
+        Some("percent-would-match"),
+        "`%` must be escaped, not treated as a multi-character wildcard"
+    );
+}

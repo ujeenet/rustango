@@ -126,3 +126,79 @@ async fn from_settings_file_backend_without_dir_falls_back_to_memory() {
     cache.set("k", "v", None).await.unwrap();
     assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
 }
+
+/// #1233 — an entry must be readable for the *whole* TTL it was
+/// promised, including immediately after the write.
+///
+/// The old encoding stamped `expires_at` in whole seconds and expired on
+/// `now >= expires_at`, so a `set` landing at wall-clock `T.999` was
+/// already expired by the read a millisecond later. This deliberately
+/// starts each iteration just before a second boundary, which is the
+/// window that made the failure load-dependent rather than impossible.
+#[tokio::test]
+async fn entry_is_readable_immediately_even_across_a_second_boundary() {
+    let dir = unique_tmp_dir("boundary");
+    let cache = FileCache::new(&dir);
+
+    for i in 0..5 {
+        // Sleep to within ~5ms of the next whole second.
+        let sub_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| u64::from(d.subsec_millis()))
+            .unwrap_or(0);
+        tokio::time::sleep(Duration::from_millis(995u64.saturating_sub(sub_ms))).await;
+
+        let key = format!("boundary-{i}");
+        cache
+            .set(&key, "v", Some(Duration::from_secs(1)))
+            .await
+            .unwrap();
+        assert_eq!(
+            cache.get(&key).await.unwrap().as_deref(),
+            Some("v"),
+            "entry {i} expired immediately after being written",
+        );
+    }
+}
+
+/// #1233 — sub-second TTLs were unrepresentable: `as_secs()` truncated
+/// them to `0`, so `expires_at == now` and the entry was born expired.
+#[tokio::test]
+async fn sub_second_ttl_is_honored_not_truncated_to_zero() {
+    let dir = unique_tmp_dir("subsec");
+    let cache = FileCache::new(&dir);
+
+    cache
+        .set("k", "v", Some(Duration::from_millis(500)))
+        .await
+        .unwrap();
+    assert_eq!(
+        cache.get("k").await.unwrap().as_deref(),
+        Some("v"),
+        "a 500ms entry must exist immediately after the write",
+    );
+
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        cache.get("k").await.unwrap(),
+        None,
+        "a 500ms entry must be gone after 700ms",
+    );
+}
+
+/// Parity guard: `InMemoryCache` already handled both cases (it stores an
+/// `Instant`). Pinning them side by side stops the two backends drifting
+/// apart on the same public API again.
+#[tokio::test]
+async fn memory_backend_agrees_on_sub_second_ttl() {
+    let cache = rustango::cache::InMemoryCache::new();
+
+    cache
+        .set("k", "v", Some(Duration::from_millis(500)))
+        .await
+        .unwrap();
+    assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(cache.get("k").await.unwrap(), None);
+}
