@@ -189,7 +189,7 @@ where
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
-                    target: "crate::tenancy::sweep",
+                    target: "rustango::tenancy::sweep",
                     slug = %slug,
                     error = %e,
                     "skipping tenant: could not resolve its pool",
@@ -212,7 +212,7 @@ where
             // render the error from `TenantSweep::errors`.
             let _ = e;
             tracing::warn!(
-                target: "crate::tenancy::sweep",
+                target: "rustango::tenancy::sweep",
                 slug = %slug,
                 "tenant sweep returned an error; continuing with the remaining tenants",
             );
