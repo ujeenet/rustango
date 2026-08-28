@@ -55,6 +55,37 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   the `JobContext` work in #1223.
 
 ### Fixed
+- **`FileCache` entries could expire the instant they were written** (#1233).
+  The on-disk header stamped `expires_at` in whole **seconds** and expired on
+  `now >= expires_at`, so a `set` landing at wall-clock `T.999` was already
+  expired by the read a millisecond later — a 1-second TTL that lived for one
+  millisecond. Sub-second TTLs were unrepresentable for the same reason:
+  `Duration::from_millis(500).as_secs()` is `0`, so the entry was born expired,
+  while `InMemoryCache` (which stores an `Instant`) handled the same API
+  correctly. The header is now epoch **milliseconds** and expiry is `>`, so an
+  entry lives for the full duration it was promised.
+
+  The header is the same 8 bytes, but its unit changed: entries written by an
+  older build decode as long-past and are dropped as expired, costing one cold
+  read per stale key on upgrade — the safe direction for a cache.
+
+- **48 `tracing` call sites were invisible to `RUST_LOG=rustango=…`** (#1234).
+  They passed `target: "crate::…"` — a literal string, not a path that expands —
+  so they sat in a namespace no realistic filter matches. Several were the only
+  diagnostic for a failure the framework deliberately swallows, including the
+  #1224 connection-reset path, the pre-warm cap warning, and `for_each_tenant`
+  skipping a tenant whose pool would not resolve. All six `tenancy/` files now
+  use `rustango::…`, matching the 60 sites that already did, and a test fails the
+  build if the literal form reappears.
+
+- **`quinn-proto` bumped to 0.11.15 in `examples/showcase/Cargo.lock`** (#1236),
+  closing the high-severity [GHSA-4w2j-m93h-cj5j](https://github.com/advisories/GHSA-4w2j-m93h-cj5j)
+  Dependabot alert (remote memory exhaustion via unbounded out-of-order stream
+  reassembly). Lockfile-only, and confined to the example — `examples/` is
+  outside the workspace, so nothing published to crates.io resolved through this
+  pin. The same refresh corrects a stale `rpassword 7.5.0` back to the `=7.3.1`
+  the workspace pins.
+
 - **Schema-mode tenancy leaked `search_path` between registry-pool borrowers**
   (#1224). `TenantPools::acquire` issues a session-level
   `SET search_path TO <schema>, public` on a connection borrowed from the
