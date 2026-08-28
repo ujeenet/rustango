@@ -92,9 +92,14 @@ chacha20poly1305 = "0.10"
 
 # Interactive manage CLI
 dotenvy   = "0.15"
-# 7.4+ uses `libc::__errno_location` which is Linux-only (breaks macOS
-# builds); pin to 7.3 until rpassword adopts a portable errno call.
-rpassword = "=7.3.1"
+# Was pinned `=7.3.1`: 7.4 used `libc::__errno_location`, which is
+# Linux-only and broke macOS builds. Upstream made the errno call
+# portable, and 7.5.4 compiles clean on macOS aarch64 — verified before
+# lifting the pin. The pin had become a liability: GHSA-2p6r-x3vv-xqm2
+# (partial password reveal when input is interrupted) covers `<= 7.4.0`,
+# so holding 7.3.1 held us on the vulnerable side of it. Keep this at
+# `>= 7.5`.
+rpassword = "7.5"
 
 # Admin (HTTP)
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query", "original-uri"] }

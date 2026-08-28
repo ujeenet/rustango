@@ -55,6 +55,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   the `JobContext` work in #1223.
 
 ### Fixed
+- **`rpassword` unpinned from `=7.3.1` to `7.5`** (#1239). The exact pin dated
+  from rpassword 7.4 using `libc::__errno_location`, which is Linux-only and
+  broke macOS builds. Upstream made the errno call portable, but the pin
+  outlived its reason and had quietly become the problem: GHSA-2p6r-x3vv-xqm2
+  (partial password reveal when input is interrupted) covers `<= 7.4.0`, so
+  holding 7.3.1 held the interactive `manage create-admin` / tenancy CLI prompt
+  on the vulnerable side of it. Verified 7.5.4 builds clean on macOS aarch64 —
+  the platform the pin existed to protect — before lifting it.
+
+  Caught while refreshing the showcase lockfile for #1236, where `cargo update`
+  reported `Downgrading rpassword v7.5.0 -> v7.3.1` and it read as the example
+  being brought back in line with the workspace. It was the reverse: the example
+  had drifted onto the *patched* version, and honouring the pin moved it back.
+
 - **`FileCache` entries could expire the instant they were written** (#1233).
   The on-disk header stamped `expires_at` in whole **seconds** and expired on
   `now >= expires_at`, so a `set` landing at wall-clock `T.999` was already
