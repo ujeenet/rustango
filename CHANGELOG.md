@@ -86,6 +86,32 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   pin. The same refresh corrects a stale `rpassword 7.5.0` back to the `=7.3.1`
   the workspace pins.
 
+- **`cargo deny` scanned neither optional features nor the one committed example
+  lockfile** (#1237).
+
+  `deny.toml` had `all-features = false`, so nothing behind an optional feature
+  was ever checked — the whole MySQL backend included — and an advisory in an
+  optional dependency would have gone unreported. It also left the
+  `RUSTSEC-2023-0071` ignore reporting as unmatched, since `rsa` only enters the
+  graph once `mysql` is on. Now `all-features = true`, verified clean across
+  advisories, bans, licenses and sources.
+
+  The CI `deny` job also ran only at the repo root. `examples/showcase` is
+  outside `members = ["crates/*"]` **and** is the only committed lockfile in the
+  repo, so it was both invisible to `deny` and the one place a stale pin can
+  actually persist — which is exactly how #1236 reached us as a Dependabot alert
+  rather than a failing build. A `deny-examples` matrix now gates it, along with
+  the other example manifests. Advisories-only: those crates are unpublished and
+  carry no `license` field, so `check licenses` fails them as `unlicensed` for
+  reasons unrelated to security.
+
+  `examples/showcase/Cargo.lock` also picks up `crossbeam-epoch` 0.9.20
+  (RUSTSEC-2026-0204 — invalid pointer dereference in the `fmt::Pointer` impl,
+  reached via `tera → globwalk → ignore`) and `spin` 0.9.9 (the previous 0.9.8
+  was yanked). The workspace `Cargo.lock` and the seven
+  `crates/rustango/examples/*/Cargo.lock` are gitignored, so they resolve fresh
+  on every build and needed no committed change.
+
 - **Schema-mode tenancy leaked `search_path` between registry-pool borrowers**
   (#1224). `TenantPools::acquire` issues a session-level
   `SET search_path TO <schema>, public` on a connection borrowed from the
