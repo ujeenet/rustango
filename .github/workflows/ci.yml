@@ -2,8 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `develop` is the default branch and where every PR lands, but it
+    # was absent here — so a merge into it ran nothing, and the branch
+    # everyone builds on had no post-merge gate. Only `main` (release)
+    # was covered. PRs were checked, which hides the gap right up until
+    # a squash-merge combination behaves differently from its PR.
+    branches: [main, develop]
   pull_request:
+  # Lets a run be triggered by hand against any branch, without
+  # inventing a no-op commit or opening a throwaway PR — useful for
+  # re-checking a branch after an advisory lands, since `deny` can go
+  # red with no code change at all.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
