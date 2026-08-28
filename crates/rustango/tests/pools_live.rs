@@ -387,3 +387,217 @@ async fn database_mode_resolves_secret_reference_via_resolver() {
 
     migrate::drop_all(&pool).await.unwrap();
 }
+
+// ---------------------------------------------------------------- #1235
+// Schema-mode scoped pools are cached per tenant. They used to be
+// rebuilt on every call, and the `Tenant` extractor calls
+// `scoped_pool` once per request — so a schema-mode app paid a full
+// connection establishment per request, in the mode that exists to
+// reduce per-tenant connection overhead.
+//
+// These lean on `PgPool::size()` (connections the pool currently
+// owns) as the observable: a cached pool carries its predecessor's
+// connections, a freshly built one does not.
+
+#[tokio::test]
+async fn scoped_pool_is_cached_per_tenant() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    drop_schema(&pool, "acme_sp_cache").await;
+    create_schema(&pool, "acme_sp_cache").await;
+
+    let acme = seed_org(
+        &pool,
+        "acme_sp_cache",
+        StorageMode::Schema,
+        Some("acme_sp_cache"),
+        None,
+    )
+    .await;
+    let pools = TenantPools::new(pool.clone());
+
+    // Saturate the first pool: default `scoped_pool_max_connections`
+    // is 2, so holding two checkouts puts its size at 2.
+    let first = pools.scoped_pool(&acme).await.unwrap();
+    let _c1 = first.acquire().await.unwrap();
+    let _c2 = first.acquire().await.unwrap();
+    assert_eq!(first.size(), 2, "expected both connections established");
+
+    // A cached pool IS the first one, so it reports the same size.
+    // Pre-#1235 this was a brand-new pool and reported 1 — the single
+    // connection `connect_with` opens eagerly.
+    let second = pools.scoped_pool(&acme).await.unwrap();
+    assert_eq!(
+        second.size(),
+        2,
+        "second scoped_pool must reuse the cached pool, not build a new one",
+    );
+
+    drop(_c1);
+    drop(_c2);
+    drop_schema(&pool, "acme_sp_cache").await;
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_pool_cache_is_keyed_per_tenant_and_stays_scoped() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    for s in ["acme_sp_key", "globex_sp_key"] {
+        drop_schema(&pool, s).await;
+        create_schema(&pool, s).await;
+    }
+
+    let acme = seed_org(
+        &pool,
+        "acme_sp_key",
+        StorageMode::Schema,
+        Some("acme_sp_key"),
+        None,
+    )
+    .await;
+    let globex = seed_org(
+        &pool,
+        "globex_sp_key",
+        StorageMode::Schema,
+        Some("globex_sp_key"),
+        None,
+    )
+    .await;
+    let pools = TenantPools::new(pool.clone());
+
+    // Caching must not collapse two tenants onto one pool — each keeps
+    // its own baked-in search_path. Interleaved on purpose, so a
+    // single shared entry would show up.
+    let a1 = pools.scoped_pool(&acme).await.unwrap();
+    let g1 = pools.scoped_pool(&globex).await.unwrap();
+    let a2 = pools.scoped_pool(&acme).await.unwrap();
+    let g2 = pools.scoped_pool(&globex).await.unwrap();
+
+    for (p, want) in [
+        (&a1, "acme_sp_key"),
+        (&a2, "acme_sp_key"),
+        (&g1, "globex_sp_key"),
+        (&g2, "globex_sp_key"),
+    ] {
+        let mut conn = p.acquire().await.unwrap();
+        assert_eq!(current_schema(&mut conn).await, want);
+    }
+
+    for s in ["acme_sp_key", "globex_sp_key"] {
+        drop_schema(&pool, s).await;
+    }
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn invalidate_drops_the_scoped_pool_too() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    drop_schema(&pool, "acme_sp_inval").await;
+    create_schema(&pool, "acme_sp_inval").await;
+
+    let acme = seed_org(
+        &pool,
+        "acme_sp_inval",
+        StorageMode::Schema,
+        Some("acme_sp_inval"),
+        None,
+    )
+    .await;
+    let pools = TenantPools::new(pool.clone());
+
+    let first = pools.scoped_pool(&acme).await.unwrap();
+    let c1 = first.acquire().await.unwrap();
+    let c2 = first.acquire().await.unwrap();
+    assert_eq!(first.size(), 2);
+    drop(c1);
+    drop(c2);
+
+    // Without this eviction a tenant whose `schema_name` changed would
+    // keep being handed a pool with the OLD schema baked into its
+    // connect options — a cross-tenant read.
+    pools.invalidate(&acme.slug).await;
+
+    let rebuilt = pools.scoped_pool(&acme).await.unwrap();
+    assert!(
+        rebuilt.size() < 2,
+        "invalidate must drop the scoped pool; got a pool with {} connections \
+         (i.e. the cached one)",
+        rebuilt.size(),
+    );
+
+    drop_schema(&pool, "acme_sp_inval").await;
+    migrate::drop_all(&pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn scoped_pool_past_the_cap_falls_back_instead_of_failing() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    migrate::drop_all(&pool).await.unwrap();
+    migrate::apply_all(&pool).await.unwrap();
+    for s in ["acme_sp_cap", "globex_sp_cap"] {
+        drop_schema(&pool, s).await;
+        create_schema(&pool, s).await;
+    }
+
+    let acme = seed_org(
+        &pool,
+        "acme_sp_cap",
+        StorageMode::Schema,
+        Some("acme_sp_cap"),
+        None,
+    )
+    .await;
+    let globex = seed_org(
+        &pool,
+        "globex_sp_cap",
+        StorageMode::Schema,
+        Some("globex_sp_cap"),
+        None,
+    )
+    .await;
+
+    // Cap of 1: the second tenant cannot be cached. Schema mode is
+    // sold for high tenant counts, so exceeding the cap must degrade
+    // to the old per-call build — never error.
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        max_cached_scoped_pools: 1,
+        ..Default::default()
+    };
+    let pools = TenantPools::new(pool.clone()).config(cfg);
+
+    let a = pools.scoped_pool(&acme).await.unwrap();
+    let g = pools.scoped_pool(&globex).await.unwrap();
+
+    // Both still work, and both are still correctly scoped — the
+    // uncached one is just rebuilt each time.
+    let mut ca = a.acquire().await.unwrap();
+    assert_eq!(current_schema(&mut ca).await, "acme_sp_cap");
+    let mut cg = g.acquire().await.unwrap();
+    assert_eq!(current_schema(&mut cg).await, "globex_sp_cap");
+
+    let g_again = pools.scoped_pool(&globex).await.unwrap();
+    let mut cg2 = g_again.acquire().await.unwrap();
+    assert_eq!(current_schema(&mut cg2).await, "globex_sp_cap");
+
+    for s in ["acme_sp_cap", "globex_sp_cap"] {
+        drop_schema(&pool, s).await;
+    }
+    migrate::drop_all(&pool).await.unwrap();
+}

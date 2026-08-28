@@ -28,8 +28,22 @@
 //! uncached org returns a [`TenancyError::Validation`] error. A real
 //! LRU evictor lands in a follow-up; the bounded-with-error semantics
 //! is the safest first version (silent eviction is its own footgun).
-//! Schema-mode tenants don't consume cache slots — they always reuse
-//! the registry pool.
+//!
+//! Schema-mode tenants don't consume *that* cache — acquiring a
+//! connection reuses the registry pool. They do have a second, separate
+//! cache: [`TenantPools::scoped_pool`] hands out a small pool with
+//! `search_path` baked into its connect options, and those are cached
+//! per slug under [`TenantPoolsConfig::max_cached_scoped_pools`]
+//! (#1235). Before that they were rebuilt on every call, which meant a
+//! full TCP + TLS + auth round-trip per request, since the `Tenant`
+//! extractor resolves one per request — the opposite of what schema
+//! mode is for. Past the cap they fall back to the old per-call build
+//! and warn, rather than erroring, because schema mode's whole premise
+//! is a high tenant count.
+//!
+//! The two budgets are deliberately separate: one shared cap would let
+//! schema-mode tenants silently eat a mixed deployment's database-mode
+//! capacity.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -104,6 +118,63 @@ pub struct TenantPoolsConfig {
     /// Schema-mode tenants are never pre-warmed (they share the
     /// registry pool which is already up). Default: `false`.
     pub prewarm_active_tenants: bool,
+
+    // v0.53 — schema-mode scoped-pool caching (#1235).
+    /// Maximum number of schema-mode *scoped* pools cached
+    /// simultaneously — the `search_path`-baked pools handed out by
+    /// [`TenantPools::scoped_pool`].
+    ///
+    /// Counted separately from `max_cached_database_pools` on
+    /// purpose: sharing one budget would silently halve a mixed
+    /// deployment's database-mode capacity the moment schema-mode
+    /// tenants started consuming slots.
+    ///
+    /// Past the cap, `scoped_pool` falls back to building a transient
+    /// pool per call — the pre-#1235 behavior — and warns, rather
+    /// than erroring. Schema mode exists for high tenant counts, so
+    /// turning "more tenants than the cap" into a hard failure would
+    /// break exactly the deployments the mode is for.
+    ///
+    /// Budget the worst case as `max_cached_scoped_pools *
+    /// scoped_pool_max_connections` concurrent connections against
+    /// the registry server, and keep that under its
+    /// `max_connections`. The default pair gives 64 × 8 = 512, far
+    /// above a stock Postgres' 100 — but that ceiling needs every
+    /// cached tenant saturated simultaneously, and these pools hold no
+    /// idle connections (`min_connections = 0` plus
+    /// `database_pool_idle_timeout`), so a quiet tenant costs nothing.
+    /// Lower this, or `scoped_pool_max_connections`, if your registry
+    /// server's limit is tight and your tenants are uniformly busy.
+    /// Default: 64.
+    pub max_cached_scoped_pools: usize,
+
+    /// Per-pool `max_connections` for schema-mode scoped pools.
+    ///
+    /// Was a hardcoded 2 while these pools were per-call throwaways.
+    /// Caching them (#1235) made every caller for a given tenant share
+    /// one pool, which makes 2 actively dangerous: the `Tenant`
+    /// extractor pins a connection for the handler's whole lifetime,
+    /// so a handler that also uses `t.pool()` needs a second slot, and
+    /// a long-lived per-tenant job worker built on `scoped_pool_dyn`
+    /// (see `docs/jobs.md`) holds one more or less permanently. At 2
+    /// those three uses deadlock each other. This is the same
+    /// reasoning that puts `database_pool_max_connections` at 16.
+    ///
+    /// Still smaller than the database-mode figure, because every
+    /// scoped pool points at the *same* registry server — this
+    /// multiplies across cached tenants instead of being spread over
+    /// separate databases. Budget the worst case as
+    /// `max_cached_scoped_pools * scoped_pool_max_connections` and
+    /// keep it under the server's `max_connections`; the defaults give
+    /// 64 × 8 = 512, which is only reachable with every cached tenant
+    /// saturated at once.
+    ///
+    /// These pools are built with `min_connections = 0` and inherit
+    /// `database_pool_idle_timeout`, so a cached-but-quiet tenant
+    /// settles back to zero connections. That is what makes caching
+    /// them affordable — the cache costs a `PgPool` struct, not a
+    /// held connection. Default: 8.
+    pub scoped_pool_max_connections: u32,
 }
 
 impl Default for TenantPoolsConfig {
@@ -119,6 +190,11 @@ impl Default for TenantPoolsConfig {
             database_pool_idle_timeout: Some(std::time::Duration::from_secs(10 * 60)),
             database_pool_max_lifetime: Some(std::time::Duration::from_secs(30 * 60)),
             prewarm_active_tenants: false,
+            max_cached_scoped_pools: 64,
+            // Raised from the pre-#1235 hardcoded 2: these pools are
+            // shared per tenant now, and 2 deadlocks the documented
+            // `Tenant::conn` + `t.pool()` + job-worker combination.
+            scoped_pool_max_connections: 8,
         }
     }
 }
@@ -272,6 +348,12 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     config: TenantPoolsConfig,
     secrets: Arc<dyn SecretsResolver>,
     cache: RwLock<HashMap<String, Arc<sqlx::Pool<DB>>>>,
+    /// Schema-mode scoped pools, keyed by `slug` (#1235). Separate
+    /// from `cache` so the two capacity budgets can't cannibalise
+    /// each other. Generic over `DB` rather than `PgPool`-typed so
+    /// this file still builds under `--no-default-features --features
+    /// sqlite,tenancy`; only the Postgres impl ever populates it.
+    scoped_cache: RwLock<HashMap<String, Arc<sqlx::Pool<DB>>>>,
 }
 
 impl<DB: Database> TenantPools<DB> {
@@ -295,6 +377,7 @@ impl<DB: Database> TenantPools<DB> {
             config: TenantPoolsConfig::default(),
             secrets: Arc::new(secrets),
             cache: RwLock::new(HashMap::new()),
+            scoped_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -417,13 +500,18 @@ impl<DB: Database> TenantPools<DB> {
         })
     }
 
-    /// Drop a database-mode tenant's pool from the cache. Useful
-    /// when the operator updates `Org.database_url` (vault rotation,
-    /// migration to new server) and wants the next acquire to
-    /// rebuild from the new URL.
+    /// Drop a tenant's cached pools. Useful when the operator updates
+    /// `Org.database_url` (vault rotation, migration to new server)
+    /// and wants the next acquire to rebuild from the new URL.
+    ///
+    /// Evicts both the database-mode pool and the schema-mode scoped
+    /// pool (#1235). The scoped pool bakes `search_path` into its
+    /// connect options, so a tenant whose `schema_name` changed would
+    /// otherwise keep being served a pool pointing at the old schema —
+    /// a cross-tenant read, and the exact failure #1224 was about.
     pub async fn invalidate(&self, slug: &str) {
-        let mut cache = self.cache.write().await;
-        cache.remove(slug);
+        self.cache.write().await.remove(slug);
+        self.scoped_cache.write().await.remove(slug);
     }
 }
 
@@ -760,22 +848,94 @@ impl TenantPools<sqlx::Postgres> {
     /// every checkout is correctly scoped. Database mode just clones
     /// the cached pool.
     ///
+    /// Scoped pools are **cached per tenant** (#1235). They were built
+    /// fresh on every call before, and the `Tenant` extractor calls
+    /// this once per request — so a schema-mode app paid a TCP
+    /// connect, TLS handshake and auth round-trip per request, and
+    /// `PgPoolOptions::connect_with` is eager, so even a handler that
+    /// only ever touched `Tenant::conn` paid it. That inverted the
+    /// point of schema mode, which exists to *reduce* per-tenant
+    /// connection overhead relative to database mode.
+    ///
+    /// Past `max_cached_scoped_pools` this falls back to the old
+    /// per-call build and warns, rather than erroring — see that
+    /// field for why, and for the connection arithmetic.
+    ///
     /// # Errors
     /// As [`Self::pool_for_org`] plus [`TenancyError::Driver`] for
     /// the schema-mode dedicated pool build.
     pub async fn scoped_pool(&self, org: &Org) -> Result<PgPool, TenancyError> {
         match self.pool_for_org(org).await? {
             TenantPool::Schema { schema, registry } => {
-                let mut opts = (*registry.connect_options()).clone();
-                opts = opts.options([("search_path", &format!("{schema},public") as &str)]);
-                let scoped = PgPoolOptions::new()
-                    .max_connections(2)
-                    .connect_with(opts)
-                    .await?;
+                // Fast path: cache hit. Mirrors `pool_for_database_mode`.
+                {
+                    let cache = self.scoped_cache.read().await;
+                    if let Some(pool) = cache.get(&org.slug) {
+                        return Ok((**pool).clone());
+                    }
+                }
+
+                let span =
+                    tracing::info_span!("tenant_pool_init", slug = %org.slug, mode = "schema");
+                let _enter = span.enter();
+                let connect_start = std::time::Instant::now();
+                let scoped = self.build_scoped_pool(&schema, &registry).await?;
+                tracing::info!(
+                    target: "rustango::tenancy::pools",
+                    slug = %org.slug,
+                    schema = %schema,
+                    elapsed_ms = connect_start.elapsed().as_millis() as u64,
+                    max_conn = self.config.scoped_pool_max_connections,
+                    "tenant pool connected (schema mode)",
+                );
+
+                // Insert under write lock; check for race + capacity.
+                let mut cache = self.scoped_cache.write().await;
+                if let Some(existing) = cache.get(&org.slug) {
+                    return Ok((**existing).clone());
+                }
+                if cache.len() >= self.config.max_cached_scoped_pools {
+                    tracing::warn!(
+                        target: "rustango::tenancy::pools",
+                        slug = %org.slug,
+                        cap = self.config.max_cached_scoped_pools,
+                        "scoped-pool cache is full; this tenant rebuilds its pool on every \
+                         request. Raise `TenantPoolsConfig::max_cached_scoped_pools`.",
+                    );
+                    return Ok(scoped);
+                }
+                cache.insert(org.slug.clone(), Arc::new(scoped.clone()));
                 Ok(scoped)
             }
             TenantPool::Database { pool } => Ok((*pool).clone()),
         }
+    }
+
+    /// Build one `search_path`-scoped pool against the registry
+    /// server. Split out of [`Self::scoped_pool`] so the cache-miss
+    /// path stays readable.
+    async fn build_scoped_pool(
+        &self,
+        schema: &str,
+        registry: &PgPool,
+    ) -> Result<PgPool, TenancyError> {
+        let mut opts = (*registry.connect_options()).clone();
+        opts = opts.options([("search_path", &format!("{schema},public") as &str)]);
+        let mut builder = PgPoolOptions::new()
+            .max_connections(self.config.scoped_pool_max_connections)
+            // Explicitly 0: these are cached now, and every one of
+            // them points at the same registry server. Holding warm
+            // connections per tenant is what would make caching them
+            // expensive.
+            .min_connections(0)
+            .acquire_timeout(self.config.database_pool_acquire_timeout);
+        if let Some(idle) = self.config.database_pool_idle_timeout {
+            builder = builder.idle_timeout(idle);
+        }
+        if let Some(lifetime) = self.config.database_pool_max_lifetime {
+            builder = builder.max_lifetime(lifetime);
+        }
+        Ok(builder.connect_with(opts).await?)
     }
 }
 
