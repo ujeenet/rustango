@@ -19,7 +19,7 @@ the `CurrentUser` extractor to read the result.
 > `rustango::auth_backends` (always compiled).
 >
 > **Runnable version:** every snippet is copied from
-> [`auth_backends_doc.rs`](../crates/rustango/tests/auth_backends_doc.rs)
+> [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
 > (`cargo test -p rustango --features sqlite,tenancy --test auth_backends_doc`).
 
 ## Table of contents

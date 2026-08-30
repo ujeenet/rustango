@@ -2,14 +2,14 @@
 
 Muster für das **Rustango**-ORM jenseits der Grundlagen. Wenn du von Djangos ORM, Laravel Eloquent oder Rails ActiveRecord kommst, werden dir die Formen hier vertraut vorkommen. Die meisten Beispiele setzen voraus, dass du bereits ein `Post`-Model aus `Getting Started` hast.
 
-[![Typgeprüfte ORM-Abfragen: verkettete Filter, Sortierung, Limits und Aggregation — alles ohne rohes SQL](img/orm.png)](img/orm.png)
+[![Typgeprüfte ORM-Abfragen: verkettete Filter, Sortierung, Limits und Aggregation — alles ohne rohes SQL](../img/orm.png)](../img/orm.png)
 
 > **Quelle:** `rustango::sql` (`QuerySet`, das `Q!`-Makro / der `Qb`-Builder) und die
 > `#[derive(Model)]`-Query-API — immer kompiliert; wähle ein Backend-Feature
 > (`postgres` / `mysql` / `sqlite`).
 >
 > **Lauffähige Version:** die Muster hier laufen im getesteten
-> [`orm_cookbook`](../crates/rustango/examples/orm_cookbook)-Beispiel.
+> [`orm_cookbook`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/orm_cookbook)-Beispiel.
 >
 > **Neu bei einem Begriff hier?** Das [Glossar](glossary.md) definiert *model*, *queryset*,
 > *pool* und *migration* in einfacher Sprache.

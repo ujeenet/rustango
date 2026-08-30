@@ -10,7 +10,7 @@ Live-Modellreferenz. Alles Folgende wird deklarativ in einem `admin(...)`-Block 
 Derive konfiguriert, oder mit einer Handvoll `Builder`-Methoden und Registrierungsmakros
 auf Modulebene.
 
-[![Das automatisch generierte Admin: eine Beitragsliste mit Filter-Facetten, Suche, Massenaktionen und Paginierung — alles aus einem einzigen `admin(...)`-Block](img/admin.png)](img/admin.png)
+[![Das automatisch generierte Admin: eine Beitragsliste mit Filter-Facetten, Suche, Massenaktionen und Paginierung — alles aus einem einzigen `admin(...)`-Block](../img/admin.png)](../img/admin.png)
 
 > **Quelle:** `rustango::admin` (die `admin(...)`-Derive-Optionen, die `Builder`-
 > API und die Registrierungsmakros) — hinter dem `admin`-Feature (standardmäßig
@@ -18,7 +18,7 @@ auf Modulebene.
 >
 > **Lauffähige Version:** jedes Feature auf dieser Seite wird in einem getesteten,
 > kompilierbaren Beispiel unter
-> [`crates/rustango/examples/admin_demo`](../crates/rustango/examples/admin_demo)
+> [`crates/rustango/examples/admin_demo`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/admin_demo)
 > ausgeführt. Die Screenshots auf dieser Seite stammen aus diesem Beispiel. Wenn ein
 > Snippet seltsam aussieht, vergleiche es damit.
 
@@ -84,7 +84,7 @@ Die Admin-Wurzel (`GET /<prefix>`) listet jedes registrierte Modell auf, gruppie
 App, mit Tabellennamen und Feldanzahl jedes Modells — plus einem **Recent actions**-
 Feed der neuesten geprüften Änderungen.
 
-[![Die Admin-Startseite: jedes registrierte Modell nach App gruppiert mit Tabellen- und Feldanzahl sowie ein Aktivitäts-Feed der letzten Aktionen](img/admin-home.png)](img/admin-home.png)
+[![Die Admin-Startseite: jedes registrierte Modell nach App gruppiert mit Tabellen- und Feldanzahl sowie ein Aktivitäts-Feed der letzten Aktionen](../img/admin-home.png)](../img/admin-home.png)
 
 ---
 
@@ -158,7 +158,7 @@ und Zeilenanzahl sowie Facetten-Anzahlen aktualisieren sich. Filter, Suche, Sort
 und die Datumshierarchie fügen sich alle in der Query-Zeichenkette zusammen und lassen
 sich kombinieren.
 
-[![Die nach status=published gefilterte Beitragsliste: ein aktiver Filter-Chip, die passende hervorgehobene Facette, das Suchfeld und der Massenaktionsauswähler](img/admin-list-filtered.png)](img/admin-list-filtered.png)
+[![Die nach status=published gefilterte Beitragsliste: ein aktiver Filter-Chip, die passende hervorgehobene Facette, das Suchfeld und der Massenaktionsauswähler](../img/admin-list-filtered.png)](../img/admin-list-filtered.png)
 
 **Sortieren.** Klicke auf einen Spaltenkopf zum Sortieren; erneut klicken, um die
 Richtung umzukehren (`?sort=col&order=asc|desc`). Der Standard kommt aus `ordering`.
@@ -185,7 +185,7 @@ Spalte hinzu, unter Verwendung der tri-dialektalen Datumsextraktion (PostgreSQL
 (bearbeiten) rendern das Formular. `fieldsets` gruppiert die Eingaben in benannte
 Abschnitte; ohne es erscheinen alle bearbeitbaren Felder in einem Block.
 
-[![Das Post-Änderungsformular gegliedert in die Feldgruppen Content und Publishing, jedes Feld mit dem passenden Eingabe-Widget für seinen Typ](img/admin-fieldsets.png)](img/admin-fieldsets.png)
+[![Das Post-Änderungsformular gegliedert in die Feldgruppen Content und Publishing, jedes Feld mit dem passenden Eingabe-Widget für seinen Typ](../img/admin-fieldsets.png)](../img/admin-fieldsets.png)
 
 Das Absenden eines Formulars validiert die Eingabe, schreibt die Zeile, erfasst einen
 Prüfpfad-Eintrag und leitet zur schreibgeschützten **Detail**-Ansicht
@@ -256,7 +256,7 @@ Tabellenzeile pro Kind, oder `Stacked` — eine Feldgruppe pro Kind), `label`, `
 (Standard: jedes Skalar außer dem FK), `extra` (leere Zeilen zum Hinzufügen angeboten),
 `max_num` und `readonly_fields`.
 
-[![Die Detailseite eines Beitrags: schreibgeschützte Felder, die Comments-Inline-Tabelle und die Prüfpfad-Karte, die den Erstellungs-Eintrag als JSON-Diff zeigt](img/admin-detail.png)](img/admin-detail.png)
+[![Die Detailseite eines Beitrags: schreibgeschützte Felder, die Comments-Inline-Tabelle und die Prüfpfad-Karte, die den Erstellungs-Eintrag als JSON-Diff zeigt](../img/admin-detail.png)](../img/admin-detail.png)
 
 Für Kindzeilen, die über einen generischen Fremdschlüssel (Paar aus Content-Type +
 Objekt-PK) statt über eine einzelne FK-Spalte angehängt sind, verwende
@@ -324,7 +324,7 @@ manipulationssicheren Fingerabdruck. Zwei Stellen zeigen es an:
   / Quelle und einem Aufräumformular, um Einträge älter als N Tage zu bereinigen (was
   selbst als Prüfpfad-Eintrag erfasst wird).
 
-[![Der Activity-Feed: jede geprüfte Änderung über Modelle hinweg mit JSON-Diffs, Facetten-Karten nach Tabelle/Operation/Quelle und einem Aufräumformular](img/admin-audit.png)](img/admin-audit.png)
+[![Der Activity-Feed: jede geprüfte Änderung über Modelle hinweg mit JSON-Diffs, Facetten-Karten nach Tabelle/Operation/Quelle und einem Aufräumformular](../img/admin-audit.png)](../img/admin-audit.png)
 
 ---
 
@@ -518,7 +518,7 @@ Jedes Admin liefert eine Live-Modellreferenz (Djangos admindocs) unter
 Feldern, Spalten, Typen, Flags (PK, unique, …) und Beziehungen. Nichts zu konfigurieren;
 es wird aus deinen Modellen generiert, also weicht es nie vom Schema ab.
 
-[![Die Modellreferenz: die Felder jedes Modells mit Spaltenname, Rust-Typ, Flags und Beziehungen — aus den Modellen generiert](img/admin-model-reference.png)](img/admin-model-reference.png)
+[![Die Modellreferenz: die Felder jedes Modells mit Spaltenname, Rust-Typ, Flags und Beziehungen — aus den Modellen generiert](../img/admin-model-reference.png)](../img/admin-model-reference.png)
 
 ---
 

@@ -5,7 +5,7 @@
 # becomes one documentation page, rendered in the order listed here. Files
 # not listed below are not published (e.g. internal audits / inventories).
 
-version = "0.52"
+version = "0.53"
 
 [[section]]
 title = "Getting started"

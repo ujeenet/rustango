@@ -7,7 +7,7 @@ Refresh und **Widerruf** für das Abmelden. **Rustango** liefert das als
 `JwtLifecycle` — und einen schlüsselfertigen Router, der `POST /api/auth/login`,
 `/refresh`, `/logout` und `GET /me` für Sie einhängt.
 
-[![JWT-Auth-API: login stellt ein Access+Refresh-Paar aus, refresh rotiert und setzt den alten Token auf die Sperrliste, logout widerruft über einen JTI-Speicher](img/auth-jwt-api.png)](img/auth-jwt-api.png)
+[![JWT-Auth-API: login stellt ein Access+Refresh-Paar aus, refresh rotiert und setzt den alten Token auf die Sperrliste, logout widerruft über einen JTI-Speicher](../img/auth-jwt-api.png)](../img/auth-jwt-api.png)
 
 > **Quelle:** `rustango::tenancy::jwt_lifecycle` (`JwtLifecycle`, `JwtTokenPair`,
 > `JwtClaims`) und `rustango::tenancy::auth_routes` (`jwt_router`, `Config`) +
@@ -15,7 +15,7 @@ Refresh und **Widerruf** für das Abmelden. **Rustango** liefert das als
 > `tenancy`.
 >
 > **Lauffähige Version:** Die Token-Engine wird durch den getesteten
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_jwt_api.rs)
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_jwt_api.rs)
 > abgedeckt — `cargo test -p auth_demo --test auth_jwt_api`. Die HTTP-Endpunkte
 > sind tenant-bezogen und werden durchgängig durch das eigene
 > `crates/rustango/tests/tenant_auth_live.rs` des Frameworks geprüft.

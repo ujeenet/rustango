@@ -5,7 +5,7 @@
 1. **Der Projektgenerator** — `cargo rustango new` erstellt ein komplett neues Projekt aus einer Vorlage.
 2. **Projektinterne Generatoren** — `manage startapp` und die `manage make:*`-Familie fügen Apps, Views, Serializer, Jobs und mehr in einem bestehenden Projekt hinzu.
 
-[![`cargo rustango new` scaffoldet ein komplettes, sofort lauffähiges Projekt — Cargo-Manifest, Config-Tiers, Docker, Migrationen und src — mit einem einzigen Befehl](img/scaffolding.png)](img/scaffolding.png)
+[![`cargo rustango new` scaffoldet ein komplettes, sofort lauffähiges Projekt — Cargo-Manifest, Config-Tiers, Docker, Migrationen und src — mit einem einzigen Befehl](../img/scaffolding.png)](../img/scaffolding.png)
 
 ## Inhaltsverzeichnis
 
@@ -149,7 +149,7 @@ Optionen:
 
 ## Einzelne Dateien generieren: die `make:*`-Befehle
 
-Innerhalb eines Projekts scaffolden die `make:*`-Verben jeweils eine Datei. Die vollständige Referenz pro Flag findest du in der [manage-CLI-Referenz](manage); die gängigen Formen sind:
+Innerhalb eines Projekts scaffolden die `make:*`-Verben jeweils eine Datei. Die vollständige Referenz pro Flag findest du in der [manage-CLI-Referenz](manage.md); die gängigen Formen sind:
 
 | Befehl | Generiert | Vergleichbar mit |
 |---|---|---|

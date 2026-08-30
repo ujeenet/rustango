@@ -8,7 +8,7 @@ máquinas en las mismas rutas. Es la idea de `AUTHENTICATION_BACKENDS` de Django
 cableada a axum. Combínalo con `require_auth` / `require_perm` para restringir
 rutas y el extractor `CurrentUser` para leer el resultado.
 
-[![Backends de autenticación en Rustango: una petición fluye por una cadena de backends (ModelBackend, ApiKeyBackend, JwtBackend); el primero que reconoce la credencial gana e inyecta CurrentUser, luego require_perm comprueba un codename](img/auth-backends.png)](img/auth-backends.png)
+[![Backends de autenticación en Rustango: una petición fluye por una cadena de backends (ModelBackend, ApiKeyBackend, JwtBackend); el primero que reconoce la credencial gana e inyecta CurrentUser, luego require_perm comprueba un codename](../img/auth-backends.png)](../img/auth-backends.png)
 
 > **¿Algún término aquí es nuevo para ti?** *Backend*, *middleware*, *extractor*,
 > *codename de permiso* — consulta el [glosario](glossary.md).
@@ -20,7 +20,7 @@ rutas y el extractor `CurrentUser` para leer el resultado.
 > vive en `rustango::auth_backends` (siempre compilado).
 >
 > **Versión ejecutable:** cada fragmento está copiado de
-> [`auth_backends_doc.rs`](../crates/rustango/tests/auth_backends_doc.rs)
+> [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
 > (`cargo test -p rustango --features sqlite,tenancy --test auth_backends_doc`).
 
 ## Tabla de contenidos

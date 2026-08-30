@@ -8,7 +8,7 @@ Ihnen zwei Ebenen: einen eigenständigen Erzeugungs-/Verifizierungshelfer, den
 Sie an Ihre eigene Tabelle anbinden können, und ein schlüsselfertiges Backend,
 das Schlüssel speichert und `Authorization: Bearer`-Anfragen authentifiziert.
 
-[![API-Schlüssel in Rustango: generate_key liefert einen Einmal-Token prefix.secret, Sie speichern das 8-stellige Präfix plus einen argon2id-Hash, und verify_key prüft ein eingehendes Secret](img/auth-api-keys.png)](img/auth-api-keys.png)
+[![API-Schlüssel in Rustango: generate_key liefert einen Einmal-Token prefix.secret, Sie speichern das 8-stellige Präfix plus einen argon2id-Hash, und verify_key prüft ein eingehendes Secret](../img/auth-api-keys.png)](../img/auth-api-keys.png)
 
 > **Ein Begriff hier neu für Sie?** *Token*, *Hash*, *Bearer*, *argon2id* — das
 > [Glossar](glossary.md) definiert die Bausteine.
@@ -20,10 +20,10 @@ das Schlüssel speichert und `Authorization: Bearer`-Anfragen authentifiziert.
 > `ensure_api_keys_table_pool`) — hinter dem Feature `tenancy`.
 >
 > **Lauffähige Version:** Die Helfer-Snippets sind aus
-> [`auth_api_keys_doc.rs`](../crates/rustango/tests/auth_api_keys_doc.rs) kopiert
+> [`auth_api_keys_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_api_keys_doc.rs) kopiert
 > (`cargo test -p rustango --test auth_api_keys_doc`); der Middleware-Ablauf des
 > `ApiKeyBackend` aus
-> [`auth_backends_doc.rs`](../crates/rustango/tests/auth_backends_doc.rs)
+> [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
 > (`cargo test -p rustango --features sqlite,tenancy --test auth_backends_doc`).
 
 ## Inhaltsverzeichnis

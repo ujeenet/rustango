@@ -9,7 +9,7 @@ quelques instants plus tard, avec des **nouvelles tentatives automatiques** et
 un chemin **dead-letter** pour les échecs. C'est Django-Q / Celery / les queues
 de Laravel, en Rust.
 
-[![Background jobs in Rustango: a handler dispatches a Job onto a queue, worker tasks run it, retryable failures back off and retry, fatal ones go to a dead-letter handler](img/jobs.png)](img/jobs.png)
+[![Background jobs in Rustango: a handler dispatches a Job onto a queue, worker tasks run it, retryable failures back off and retry, fatal ones go to a dead-letter handler](../img/jobs.png)](../img/jobs.png)
 
 > **Un terme vous est inconnu ?** *file*, *worker*, *nouvelle tentative/backoff*,
 > *dead-letter* — voir le [glossaire](glossary.md).
@@ -20,10 +20,10 @@ de Laravel, en Rust.
 > (activée par défaut).
 >
 > **Version exécutable :** les extraits in-memory, nouvelle tentative et
-> dead-letter sont copiés depuis [`jobs_doc.rs`](../crates/rustango/tests/jobs_doc.rs)
+> dead-letter sont copiés depuis [`jobs_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_doc.rs)
 > (`cargo test -p rustango --test jobs_doc`) ; la file persistante est
 > éprouvée en dogfooding sur SQLite par
-> [`jobs_sqlite_live.rs`](../crates/rustango/tests/jobs_sqlite_live.rs)
+> [`jobs_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_sqlite_live.rs)
 > (`cargo test -p rustango --features sqlite,jobs-postgres --test jobs_sqlite_live`).
 
 ## Table des matières

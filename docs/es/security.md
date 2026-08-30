@@ -2,7 +2,7 @@
 
 Esta guía cubre todas las funciones de seguridad que incluye **Rustango** y cómo combinarlas. Si vienes de Django, Laravel o Rails, la mayoría te resultarán familiares — los nombres difieren, pero las ideas son las mismas. Cada función de abajo suele ser una sola línea de configuración. Cuando estés listo para desplegar, ejecuta `manage check --deploy` para una auditoría automatizada.
 
-[![La pila de middleware endurecida conectada en una sola cadena: identificadores de petición, registro de accesos, limitación de tasa, CORS y cabeceras de seguridad](img/security.png)](img/security.png)
+[![La pila de middleware endurecida conectada en una sola cadena: identificadores de petición, registro de accesos, limitación de tasa, CORS y cabeceras de seguridad](../img/security.png)](../img/security.png)
 
 ## Tabla de contenidos
 

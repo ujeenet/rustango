@@ -6,7 +6,7 @@ axum composables : attachez-en une à un routeur et les requêtes anonymes sont
 refoulées — redirigées par 302 vers votre page de connexion (flux navigateur) ou
 répondues par 401/403 (flux API) — avant même d'atteindre le handler.
 
-[![Décorateurs d'accès : login_required redirige par 302 les navigateurs anonymes vers /login?next=, la famille _or_403 renvoie 401/403 pour les API, superuser_required verrouille par rôle](img/auth-decorators.png)](img/auth-decorators.png)
+[![Décorateurs d'accès : login_required redirige par 302 les navigateurs anonymes vers /login?next=, la famille _or_403 renvoie 401/403 pour les API, superuser_required verrouille par rôle](../img/auth-decorators.png)](../img/auth-decorators.png)
 
 > **Source :** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,
@@ -15,7 +15,7 @@ répondues par 401/403 (flux API) — avant même d'atteindre le handler.
 > `SessionUser`).
 >
 > **Version exécutable :** le comportement de verrouillage est couvert par le
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_decorators.rs)
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_decorators.rs)
 > testé — `cargo test -p auth_demo --test auth_decorators`.
 
 > **Un terme vous est inconnu ici ?** *middleware/couche*, *extracteur*,

@@ -11,7 +11,7 @@ Tout ce qui suit est configuré de manière déclarative dans un bloc
 `admin(...)` sur le derive, ou avec une poignée de méthodes `Builder` et de
 macros d'enregistrement au niveau du module.
 
-[![L'admin auto-généré : une liste de posts avec des facettes de filtre, la recherche, des actions groupées et la pagination — tout à partir d'un seul bloc `admin(...)`](img/admin.png)](img/admin.png)
+[![L'admin auto-généré : une liste de posts avec des facettes de filtre, la recherche, des actions groupées et la pagination — tout à partir d'un seul bloc `admin(...)`](../img/admin.png)](../img/admin.png)
 
 > **Source :** `rustango::admin` (les options du derive `admin(...)`, l'API
 > `Builder` et les macros d'enregistrement) — derrière la feature `admin`
@@ -19,7 +19,7 @@ macros d'enregistrement au niveau du module.
 >
 > **Version exécutable :** chaque fonctionnalité de cette page est illustrée
 > dans un exemple testé et compilable à
-> [`crates/rustango/examples/admin_demo`](../crates/rustango/examples/admin_demo).
+> [`crates/rustango/examples/admin_demo`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/admin_demo).
 > Les captures d'écran de cette page proviennent de cet exemple. Si un extrait
 > semble incorrect, comparez-le à celui-ci.
 
@@ -88,7 +88,7 @@ La racine de l'admin (`GET /<prefix>`) liste chaque modèle enregistré,
 regroupé par app, avec le nom de table et le nombre de champs de chaque
 modèle — plus un flux **Actions récentes** des derniers changements audités.
 
-[![La page d'accueil de l'admin : chaque modèle enregistré regroupé par app avec le nombre de tables et de champs, et un flux d'activité des actions récentes](img/admin-home.png)](img/admin-home.png)
+[![La page d'accueil de l'admin : chaque modèle enregistré regroupé par app avec le nombre de tables et de champs, et un flux d'activité des actions récentes](../img/admin-home.png)](../img/admin-home.png)
 
 ---
 
@@ -164,7 +164,7 @@ un lien **effacer**, et le nombre de lignes ainsi que les compteurs de
 facettes se mettent à jour. Les filtres, la recherche, le tri et la hiérarchie
 de dates se combinent tous dans la chaîne de requête et peuvent être associés.
 
-[![La liste des posts filtrée par status=published : une puce de filtre actif, la facette correspondante mise en évidence, la boîte de recherche et le sélecteur d'actions groupées](img/admin-list-filtered.png)](img/admin-list-filtered.png)
+[![La liste des posts filtrée par status=published : une puce de filtre actif, la facette correspondante mise en évidence, la boîte de recherche et le sélecteur d'actions groupées](../img/admin-list-filtered.png)](../img/admin-list-filtered.png)
 
 **Tri.** Cliquez sur l'en-tête d'une colonne pour trier ; cliquez à nouveau
 pour inverser le sens (`?sort=col&order=asc|desc`). La valeur par défaut vient
@@ -195,7 +195,7 @@ SQLite `strftime`).
 sections titrées ; sans lui, tous les champs modifiables apparaissent en un
 seul bloc.
 
-[![Le formulaire de modification de Post regroupé en fieldsets Content et Publishing, chaque champ avec le widget de saisie adapté à son type](img/admin-fieldsets.png)](img/admin-fieldsets.png)
+[![Le formulaire de modification de Post regroupé en fieldsets Content et Publishing, chaque champ avec le widget de saisie adapté à son type](../img/admin-fieldsets.png)](../img/admin-fieldsets.png)
 
 Soumettre un formulaire valide la saisie, écrit la ligne, enregistre une
 entrée d'audit, et redirige vers la vue **détail** en lecture seule
@@ -271,7 +271,7 @@ un fieldset par enfant), `label`, `fields` (par défaut : chaque scalaire sauf
 la FK), `extra` (lignes vierges proposées pour l'ajout), `max_num`, et
 `readonly_fields`.
 
-[![La page de détail d'un post : champs en lecture seule, le tableau inline Comments, et la carte de piste d'audit montrant l'entrée de création sous forme de diff JSON](img/admin-detail.png)](img/admin-detail.png)
+[![La page de détail d'un post : champs en lecture seule, le tableau inline Comments, et la carte de piste d'audit montrant l'entrée de création sous forme de diff JSON](../img/admin-detail.png)](../img/admin-detail.png)
 
 Pour les lignes enfants rattachées par une clé étrangère générique (paire
 type-de-contenu + pk-d'objet) plutôt que par une seule colonne FK, utilisez
@@ -343,7 +343,7 @@ empreinte inviolable. Deux endroits l'exposent :
   purger les entrées plus anciennes que N jours (lui-même enregistré comme
   une entrée d'audit).
 
-[![Le flux Activité : chaque changement audité à travers les modèles avec des diffs JSON, des cartes de facettes par table/opération/source, et un formulaire de nettoyage](img/admin-audit.png)](img/admin-audit.png)
+[![Le flux Activité : chaque changement audité à travers les modèles avec des diffs JSON, des cartes de facettes par table/opération/source, et un formulaire de nettoyage](../img/admin-audit.png)](../img/admin-audit.png)
 
 ---
 
@@ -526,7 +526,7 @@ enregistré avec ses champs, colonnes, types, drapeaux (PK, unique, …) et
 relations. Rien à configurer ; elle est générée à partir de vos modèles, donc
 elle ne dérive jamais du schéma.
 
-[![La référence de modèle : les champs de chaque modèle avec le nom de colonne, le type Rust, les drapeaux et les relations — générée à partir des modèles](img/admin-model-reference.png)](img/admin-model-reference.png)
+[![La référence de modèle : les champs de chaque modèle avec le nom de colonne, le type Rust, les drapeaux et les relations — générée à partir des modèles](../img/admin-model-reference.png)](../img/admin-model-reference.png)
 
 ---
 

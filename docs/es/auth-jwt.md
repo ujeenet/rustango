@@ -6,7 +6,7 @@ un secreto — sin consultas a base de datos ni a caché por petición. El módu
 `rustango::jwt` de **Rustango** es el bloque mínimo: `encode` para firmar
 claims, `decode` para verificarlos y volver a leerlos, HS256 por debajo.
 
-[![JWT independiente en Rustango: los Claims llevan campos sub/exp/personalizados, encode() firma con un secreto compartido, decode() verifica la firma + la expiración](img/auth-jwt.png)](img/auth-jwt.png)
+[![JWT independiente en Rustango: los Claims llevan campos sub/exp/personalizados, encode() firma con un secreto compartido, decode() verifica la firma + la expiración](../img/auth-jwt.png)](../img/auth-jwt.png)
 
 > **Fuente:** `rustango::jwt` (`Claims`, `encode`, `decode`, `decode_at`,
 > `decode_unverified`, `JwtError`) — tras la característica `jwt` (activada por
@@ -14,7 +14,7 @@ claims, `decode` para verificarlos y volver a leerlos, HS256 por debajo.
 > [API de autenticación JWT](auth-jwt-api.md).
 >
 > **Versión ejecutable:** los fragmentos están copiados del test
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_jwt.rs) —
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_jwt.rs) —
 > `cargo test -p auth_demo --test auth_jwt`.
 
 > **¿Algún término te resulta nuevo?** *JWT*, *claims*, *sin estado*, *secreto* — consulta el

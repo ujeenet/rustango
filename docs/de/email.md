@@ -7,7 +7,7 @@ einen flüssigen `Email`-Builder mit Schutz vor Header-Injection und
 Template-Rendering. Schreibe `mailer.send(&email)` einmal; wechsle vom Drucken
 in dein Terminal zu echtem SMTP mit einer einzeiligen Änderung — wie Djangos E-Mail-Framework.
 
-[![E-Mail in Rustango: Ein Email-Builder (to/subject/body/html) wird gegen Header-Injection validiert und dann durch das Mailer-Trait versendet — ConsoleMailer in dev, SmtpMailer in prod, InMemoryMailer in Tests](img/email.png)](img/email.png)
+[![E-Mail in Rustango: Ein Email-Builder (to/subject/body/html) wird gegen Header-Injection validiert und dann durch das Mailer-Trait versendet — ConsoleMailer in dev, SmtpMailer in prod, InMemoryMailer in Tests](../img/email.png)](../img/email.png)
 
 > **Neu bei einem Begriff hier?** *transaktionale E-Mail*, *SMTP*, *Mailer-Backend* — siehe
 > das [Glossar](glossary.md).
@@ -18,7 +18,7 @@ in dein Terminal zu echtem SMTP mit einer einzeiligen Änderung — wie Djangos 
 > `email-smtp`-Feature.
 >
 > **Lauffähige Version:** Jedes Snippet ist kopiert aus
-> [`email_doc.rs`](../crates/rustango/tests/email_doc.rs)
+> [`email_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/email_doc.rs)
 > (`cargo test -p rustango --test email_doc`); die Send-Helfer und Anhänge
 > werden von `email_send_helpers.rs` und `email_attachments.rs` selbst erprobt.
 

@@ -8,7 +8,7 @@ ne transporte aucun secret et qu'une session peut être **révoquée
 instantanément** — supprimez l'entrée et chaque réplique voit la déconnexion à la
 requête suivante.
 
-[![Les sessions dans Rustango : le cookie ne contient qu'un identifiant opaque, le SessionStore conserve les données dans Redis, et destroy() les révoque partout](img/auth-sessions.png)](img/auth-sessions.png)
+[![Les sessions dans Rustango : le cookie ne contient qu'un identifiant opaque, le SessionStore conserve les données dans Redis, et destroy() les révoque partout](../img/auth-sessions.png)](../img/auth-sessions.png)
 
 > **Source :** `rustango::sessions` (`Session`, `SessionStore`) +
 > `rustango::cache` (`BoxedCache`, `InMemoryCache`) — derrière la fonctionnalité
@@ -17,7 +17,7 @@ requête suivante.
 > pour obtenir `RedisCache`.
 >
 > **Version exécutable :** les extraits ci-dessous sont copiés depuis l'exemple
-> testé [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_sessions.rs)
+> testé [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_sessions.rs)
 > — `cargo test -p auth_demo --test auth_sessions`.
 
 > **Un terme vous est inconnu ici ?** *session*, *identifiant opaque*, *cookie*,

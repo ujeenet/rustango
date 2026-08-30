@@ -13,7 +13,7 @@ or answered with 401/403 (API flow) — before they ever reach the handler.
 > behind the `tenancy` feature (the gates read the `SessionUser` extractor).
 >
 > **Runnable version:** the gating behavior is covered by the tested
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_decorators.rs) —
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_decorators.rs) —
 > `cargo test -p auth_demo --test auth_decorators`.
 
 > **New to a term here?** *middleware/layer*, *extractor*, *401/403* — see the

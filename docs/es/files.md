@@ -8,7 +8,7 @@ biblioteca de medios rastreada — un `MediaManager` respaldado por base de dato
 prefirmadas. Escribe tu código una sola vez contra el trait; cambia de disco local a S3 con un
 cambio de una línea.
 
-[![Archivos en Rustango: una subida multipart se comprueba en tamaño y extensión y luego se escribe a través del trait Storage; el mismo trait respalda disco local, S3 y memoria, y url() devuelve una dirección pública](img/files.png)](img/files.png)
+[![Archivos en Rustango: una subida multipart se comprueba en tamaño y extensión y luego se escribe a través del trait Storage; el mismo trait respalda disco local, S3 y memoria, y url() devuelve una dirección pública](../img/files.png)](../img/files.png)
 
 > **¿Nuevo con algún término aquí?** *backend de almacenamiento*, *multipart*, *almacenamiento de
 > objetos*, *URL prefirmada* — ver el [glosario](glossary.md).
@@ -20,11 +20,11 @@ cambio de una línea.
 > `media` (todas activadas por defecto).
 >
 > **Versión ejecutable:** los snippets de Storage + guardas de subida se copian de
-> [`files_doc.rs`](../crates/rustango/tests/files_doc.rs)
+> [`files_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/files_doc.rs)
 > (`cargo test -p rustango --test files_doc`); el flujo multipart `save_uploads` de
 > extremo a extremo se somete a prueba mediante los tests internos en
 > `crates/rustango/src/uploads.rs`, y la biblioteca de medios mediante
-> [`media_sqlite_live.rs`](../crates/rustango/tests/media_sqlite_live.rs).
+> [`media_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/media_sqlite_live.rs).
 
 ## Tabla de contenidos
 

@@ -7,7 +7,7 @@ Cache-Abfrage pro Anfrage. Das Modul `rustango::jwt` von **Rustango** ist der
 minimale Baustein: `encode` zum Signieren von Claims, `decode` zum Verifizieren
 und Zurücklesen, HS256 unter der Haube.
 
-[![Eigenständiges JWT in Rustango: Claims tragen sub-/exp-/benutzerdefinierte Felder, encode() signiert mit einem gemeinsamen Secret, decode() verifiziert Signatur + Ablauf](img/auth-jwt.png)](img/auth-jwt.png)
+[![Eigenständiges JWT in Rustango: Claims tragen sub-/exp-/benutzerdefinierte Felder, encode() signiert mit einem gemeinsamen Secret, decode() verifiziert Signatur + Ablauf](../img/auth-jwt.png)](../img/auth-jwt.png)
 
 > **Quelle:** `rustango::jwt` (`Claims`, `encode`, `decode`, `decode_at`,
 > `decode_unverified`, `JwtError`) — hinter dem Feature `jwt` (standardmäßig
@@ -15,7 +15,7 @@ und Zurücklesen, HS256 unter der Haube.
 > [JWT-Auth-API](auth-jwt-api.md).
 >
 > **Lauffähige Version:** Die Snippets sind aus dem getesteten
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_jwt.rs) kopiert —
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_jwt.rs) kopiert —
 > `cargo test -p auth_demo --test auth_jwt`.
 
 > **Ein Begriff hier neu für Sie?** *JWT*, *Claims*, *zustandslos*, *Secret* —

@@ -18,14 +18,14 @@ zu leiten.
 > **Neu bei einem Begriff hier?** — *serializer*, *model*, *ORM*, *DRF*? Das
 > [Glossar](glossary.md) erklärt jeden Begriff in klarer Sprache.
 
-[![Ein Rustango-Serializer: read_only, source-Umbenennung, ein berechnetes Methodenfeld, ein verschachtelter FK und ein write_only-Feld — deklariert auf einem einzigen Struct](img/serializers.png)](img/serializers.png)
+[![Ein Rustango-Serializer: read_only, source-Umbenennung, ein berechnetes Methodenfeld, ein verschachtelter FK und ein write_only-Feld — deklariert auf einem einzigen Struct](../img/serializers.png)](../img/serializers.png)
 
 > **Quelle:** `rustango::serializer` (`ModelSerializer`, `#[derive(Serializer)]`,
 > die `#[serializer(...)]`-Feldattribute) — hinter dem `serializer`-Feature
 > (standardmäßig aktiv).
 >
 > **Lauffähige Versionen:** der minimale Serializer ist Teil des getesteten
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog/src/post_serializer.rs)-Beispiels,
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/getting_started_blog/src/post_serializer.rs)-Beispiels,
 > und das vollständige Verhalten des Derive wird durch die eigenen Unit-Tests des
 > Frameworks abgedeckt — `crates/rustango/tests/serializer_derive.rs` und
 > `serializer_cross_validate.rs`. Wenn ein Snippet seltsam aussieht, vergleiche
@@ -536,7 +536,7 @@ Ein paar scharfe Kanten und Schlupflöcher, die man kennen sollte:
 ## Probier es aus
 
 Der minimale Serializer ist Teil des
-[`getting_started_blog`](../crates/rustango/examples/getting_started_blog/src/post_serializer.rs)-Beispiels
+[`getting_started_blog`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/getting_started_blog/src/post_serializer.rs)-Beispiels
 (Schritt 13 des Getting-Started-Leitfadens). Das vollständige Verhalten des
 Derive — die Feldattribute, berechnete/verschachtelte/many-Felder und beide
 Validierungsschichten — wird durch die eigenen Unit-Tests des Frameworks

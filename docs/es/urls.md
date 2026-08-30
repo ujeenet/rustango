@@ -8,7 +8,7 @@ su nombre en todas partes** — en Rust con `reverse(...)`, en templates con
 la API refleja los `reverse()` / `{% url %}` / `resolve_url()` / `redirect()` de
 Django.
 
-[![URLs reverse al estilo Django: register_url! nombra un patrón, reverse() construye la URL en Rust, y {{ url(...) }} construye la URL en un template](img/urls.png)](img/urls.png)
+[![URLs reverse al estilo Django: register_url! nombra un patrón, reverse() construye la URL en Rust, y {{ url(...) }} construye la URL en un template](../img/urls.png)](../img/urls.png)
 
 > **Fuente:** `rustango::urls` (`register_url!`, `reverse`, `reverse_owned`,
 > `all_routes`, `duplicates`, `register_url_tag`) y `rustango::shortcuts`
@@ -236,7 +236,7 @@ motor de regex de entrada.
 
 La forma `{int:id}` se acepta solo como **facilidad de portado** para `reverse()`:
 el constructor divide el placeholder por `:` y conserva solo el nombre, descartando
-el prefijo de tipo ([`urls.rs`](../crates/rustango/src/urls.rs)). Eso permite que
+el prefijo de tipo ([`urls.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/urls.rs)). Eso permite que
 `reverse()` funcione sobre un patrón copiado literalmente de un
 `path("<int:id>/", …)` de Django — pero nada valida que el valor suministrado sea
 realmente un entero.

@@ -9,7 +9,7 @@ Patterns for the **Rustango** ORM beyond the basics. If you come from Django's O
 > (`postgres` / `mysql` / `sqlite`).
 >
 > **Runnable version:** the patterns here run in the tested
-> [`orm_cookbook`](../crates/rustango/examples/orm_cookbook) example.
+> [`orm_cookbook`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/orm_cookbook) example.
 >
 > **New to a term here?** The [glossary](glossary.md) defines *model*, *queryset*,
 > *pool*, and *migration* in plain language.

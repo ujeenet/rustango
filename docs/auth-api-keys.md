@@ -19,10 +19,10 @@ backend that stores keys and authenticates `Authorization: Bearer` requests.
 > `ensure_api_keys_table_pool`) — behind the `tenancy` feature.
 >
 > **Runnable version:** the helper snippets are copied from
-> [`auth_api_keys_doc.rs`](../crates/rustango/tests/auth_api_keys_doc.rs)
+> [`auth_api_keys_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_api_keys_doc.rs)
 > (`cargo test -p rustango --test auth_api_keys_doc`); the `ApiKeyBackend`
 > middleware flow from
-> [`auth_backends_doc.rs`](../crates/rustango/tests/auth_backends_doc.rs)
+> [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
 > (`cargo test -p rustango --features sqlite,tenancy --test auth_backends_doc`).
 
 ## Table of contents

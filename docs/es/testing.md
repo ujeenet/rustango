@@ -9,7 +9,7 @@ reversión de transacción para las pruebas de base de datos y un conjunto de
 aserciones de respuesta, y tienes el cliente de pruebas de Django + `TestCase`, en
 Rust.
 
-[![Pruebas en Rustango: TestClient envuelve tu Router y envía peticiones en proceso a través de la pila real de manejadores; el TestResponse expone el estado, el texto y el JSON para hacer aserciones — sin socket, sin servidor](img/testing.png)](img/testing.png)
+[![Pruebas en Rustango: TestClient envuelve tu Router y envía peticiones en proceso a través de la pila real de manejadores; el TestResponse expone el estado, el texto y el JSON para hacer aserciones — sin socket, sin servidor](../img/testing.png)](../img/testing.png)
 
 > **¿Hay algún término nuevo para ti aquí?** *router*, *handler*, *fixture*, *rollback* — consulta el
 > [glosario](glossary.md).
@@ -20,7 +20,7 @@ Rust.
 > compilados.
 >
 > **Versión ejecutable:** los fragmentos de abajo *son* una prueba que pasa —
-> [`testing_doc.rs`](../crates/rustango/tests/testing_doc.rs)
+> [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
 > (`cargo test -p rustango --test testing_doc`). Casi cualquier otro `*_doc.rs`
 > de este repositorio usa `TestClient` de la misma manera.
 

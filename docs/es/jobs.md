@@ -8,7 +8,7 @@ retorna de inmediato, y un pool de workers ejecuta el trabajo momentos después,
 con **reintentos automáticos** y una ruta **dead-letter** para los fallos. Esto
 es Django-Q / Celery / las colas de Laravel, en Rust.
 
-[![Background jobs in Rustango: a handler dispatches a Job onto a queue, worker tasks run it, retryable failures back off and retry, fatal ones go to a dead-letter handler](img/jobs.png)](img/jobs.png)
+[![Background jobs in Rustango: a handler dispatches a Job onto a queue, worker tasks run it, retryable failures back off and retry, fatal ones go to a dead-letter handler](../img/jobs.png)](../img/jobs.png)
 
 > **¿Un término nuevo aquí?** *cola*, *worker*, *reintento/backoff*,
 > *dead-letter* — ver el [glosario](glossary.md).
@@ -20,10 +20,10 @@ es Django-Q / Celery / las colas de Laravel, en Rust.
 >
 > **Versión ejecutable:** los fragmentos in-memory, de reintento y de
 > dead-letter están copiados de
-> [`jobs_doc.rs`](../crates/rustango/tests/jobs_doc.rs)
+> [`jobs_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_doc.rs)
 > (`cargo test -p rustango --test jobs_doc`); la cola persistente se prueba con
 > dogfooding sobre SQLite mediante
-> [`jobs_sqlite_live.rs`](../crates/rustango/tests/jobs_sqlite_live.rs)
+> [`jobs_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_sqlite_live.rs)
 > (`cargo test -p rustango --features sqlite,jobs-postgres --test jobs_sqlite_live`).
 
 ## Tabla de contenidos

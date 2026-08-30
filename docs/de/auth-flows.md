@@ -7,7 +7,7 @@ dann handeln, wenn er darauf klickt — und **Rustango** baut sie auf einem einz
 **signierten URLs**. Eine signierte URL ist eine normale URL mit angehängter HMAC-Signatur, sodass
 der Server ihren Parametern vertrauen kann, ohne irgendetwas zu speichern.
 
-[![Konto-Abläufe in Rustango: signed_url::sign hängt eine HMAC-Signatur + Ablauf an; die drei Abläufe (Passwort-Zurücksetzung, E-Mail-Verifizierung, Magic Link) stellen einen Link aus, versenden ihn per E-Mail und verifizieren ihn beim Klick](img/auth-flows.png)](img/auth-flows.png)
+[![Konto-Abläufe in Rustango: signed_url::sign hängt eine HMAC-Signatur + Ablauf an; die drei Abläufe (Passwort-Zurücksetzung, E-Mail-Verifizierung, Magic Link) stellen einen Link aus, versenden ihn per E-Mail und verifizieren ihn beim Klick](../img/auth-flows.png)](../img/auth-flows.png)
 
 > **Ein Begriff hier neu für Sie?** *HMAC*, *Token*, *Ablauf* — siehe das [Glossar](glossary.md).
 
@@ -17,7 +17,7 @@ der Server ihren Parametern vertrauen kann, ohne irgendetwas zu speichern.
 > (standardmäßig aktiv; die Reset-Bestätigung braucht zusätzlich `passwords` + ein DB-Backend).
 >
 > **Ausführbare Version:** jeder Ausschnitt ist aus
-> [`auth_flows_doc.rs`](../crates/rustango/tests/auth_flows_doc.rs) kopiert
+> [`auth_flows_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_flows_doc.rs) kopiert
 > (`cargo test -p rustango --features sqlite --test auth_flows_doc`).
 
 ## Inhaltsverzeichnis

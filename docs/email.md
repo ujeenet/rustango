@@ -18,7 +18,7 @@ terminal to real SMTP with a one-line change — like Django's email framework.
 > `email-smtp` feature.
 >
 > **Runnable version:** every snippet is copied from
-> [`email_doc.rs`](../crates/rustango/tests/email_doc.rs)
+> [`email_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/email_doc.rs)
 > (`cargo test -p rustango --test email_doc`); the send helpers and attachments
 > are dogfooded by `email_send_helpers.rs` and `email_attachments.rs`.
 

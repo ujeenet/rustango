@@ -20,7 +20,7 @@ the [ORM cookbook](orm.md).
 >
 > **Runnable version:** the field-type round-trips, custom-PK, and SCHEMA
 > snippets are copied from
-> [`models_doc.rs`](../crates/rustango/tests/models_doc.rs)
+> [`models_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/models_doc.rs)
 > (`cargo test -p rustango --features sqlite --test models_doc`).
 
 ## Table of contents

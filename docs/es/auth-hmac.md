@@ -9,7 +9,7 @@ y el cuerpo, de modo que una solicitud manipulada o caducada se rechaza. Es el
 esquema que usan AWS SigV4 y las firmas de webhooks, y **Rustango** lo incluye
 como una única capa tower.
 
-[![Firma HMAC en Rustango: el cliente firma method+path+query+date+body-hash con un secreto compartido; HmacAuthLayer recalcula y compara en tiempo constante, rechazando solicitudes manipuladas o caducadas](img/auth-hmac.png)](img/auth-hmac.png)
+[![Firma HMAC en Rustango: el cliente firma method+path+query+date+body-hash con un secreto compartido; HmacAuthLayer recalcula y compara en tiempo constante, rechazando solicitudes manipuladas o caducadas](../img/auth-hmac.png)](../img/auth-hmac.png)
 
 > **¿Nuevo en algún término de aquí?** *HMAC*, *secreto compartido*, *replay*,
 > *comparación en tiempo constante* — consulta el [glosario](glossary.md).
@@ -19,7 +19,7 @@ como una única capa tower.
 > protección contra replay además necesita `cache`).
 >
 > **Versión ejecutable:** cada fragmento está copiado de
-> [`auth_hmac_doc.rs`](../crates/rustango/tests/auth_hmac_doc.rs)
+> [`auth_hmac_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_hmac_doc.rs)
 > (`cargo test -p rustango --test auth_hmac_doc`).
 
 ## Tabla de contenidos

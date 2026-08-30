@@ -10,7 +10,7 @@ de modelos en vivo. Todo lo que sigue se configura de forma declarativa en un bl
 `admin(...)` sobre el derive, o con un puñado de métodos del `Builder` y macros de
 registro a nivel de módulo.
 
-[![El admin autogenerado: una lista de entradas con facetas de filtro, búsqueda, acciones masivas y paginación — todo desde un solo bloque `admin(...)`](img/admin.png)](img/admin.png)
+[![El admin autogenerado: una lista de entradas con facetas de filtro, búsqueda, acciones masivas y paginación — todo desde un solo bloque `admin(...)`](../img/admin.png)](../img/admin.png)
 
 > **Fuente:** `rustango::admin` (las opciones del derive `admin(...)`, la API del
 > `Builder` y las macros de registro) — tras la característica `admin` (activada por
@@ -18,7 +18,7 @@ registro a nivel de módulo.
 >
 > **Versión ejecutable:** cada característica de esta página se ejercita en un ejemplo
 > probado y compilable en
-> [`crates/rustango/examples/admin_demo`](../crates/rustango/examples/admin_demo).
+> [`crates/rustango/examples/admin_demo`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/admin_demo).
 > Las capturas de esta página provienen de ese ejemplo. Si un fragmento parece extraño,
 > compáralo con él.
 
@@ -84,7 +84,7 @@ La raíz del admin (`GET /<prefix>`) lista cada modelo registrado, agrupado por 
 el nombre de tabla y el recuento de campos de cada modelo — más un feed de **Recent
 actions** con los cambios auditados más recientes.
 
-[![La página de inicio del admin: cada modelo registrado agrupado por app con recuentos de tabla y campos, y un feed de actividad de acciones recientes](img/admin-home.png)](img/admin-home.png)
+[![La página de inicio del admin: cada modelo registrado agrupado por app con recuentos de tabla y campos, y un feed de actividad de acciones recientes](../img/admin-home.png)](../img/admin-home.png)
 
 ---
 
@@ -158,7 +158,7 @@ recuento de filas y los recuentos de facetas se actualizan. Los filtros, la bús
 ordenación y la jerarquía de fechas se componen todos en la cadena de consulta y pueden
 combinarse.
 
-[![La lista de entradas filtrada por status=published: un chip de filtro activo, la faceta coincidente resaltada, el cuadro de búsqueda y el selector de acciones masivas](img/admin-list-filtered.png)](img/admin-list-filtered.png)
+[![La lista de entradas filtrada por status=published: un chip de filtro activo, la faceta coincidente resaltada, el cuadro de búsqueda y el selector de acciones masivas](../img/admin-list-filtered.png)](../img/admin-list-filtered.png)
 
 **Ordenación.** Haz clic en un encabezado de columna para ordenar; clic de nuevo para
 invertir la dirección (`?sort=col&order=asc|desc`). El valor por defecto proviene de
@@ -186,7 +186,7 @@ columna usando extracción de fechas tri-dialecto (PostgreSQL `EXTRACT`, MySQL, 
 renderizan el formulario. `fieldsets` agrupa las entradas en secciones con título; sin
 él, todos los campos editables aparecen en un solo bloque.
 
-[![El formulario de cambio de Post agrupado en los conjuntos de campos Content y Publishing, cada campo con el widget de entrada adecuado para su tipo](img/admin-fieldsets.png)](img/admin-fieldsets.png)
+[![El formulario de cambio de Post agrupado en los conjuntos de campos Content y Publishing, cada campo con el widget de entrada adecuado para su tipo](../img/admin-fieldsets.png)](../img/admin-fieldsets.png)
 
 Enviar un formulario valida la entrada, escribe la fila, registra una entrada de
 auditoría y redirige a la vista de **detalle** de solo lectura
@@ -257,7 +257,7 @@ por hijo, o `Stacked` — un conjunto de campos por hijo), `label`, `fields` (po
 cada escalar excepto el FK), `extra` (filas en blanco ofrecidas para añadir), `max_num`
 y `readonly_fields`.
 
-[![La página de detalle de una entrada: campos de solo lectura, la tabla inline de Comments y la tarjeta de registro de auditoría que muestra la entrada de creación como un diff JSON](img/admin-detail.png)](img/admin-detail.png)
+[![La página de detalle de una entrada: campos de solo lectura, la tabla inline de Comments y la tarjeta de registro de auditoría que muestra la entrada de creación como un diff JSON](../img/admin-detail.png)](../img/admin-detail.png)
 
 Para filas hijas adjuntadas mediante una clave foránea genérica (par content-type +
 object-pk) en lugar de una única columna FK, usa
@@ -324,7 +324,7 @@ resistente a manipulaciones. Dos lugares lo exponen:
   operación / fuente y un formulario de limpieza para purgar entradas de más de N días
   (lo cual se registra a su vez como una entrada de auditoría).
 
-[![El feed de Activity: cada cambio auditado a través de los modelos con diffs JSON, tarjetas de faceta por tabla/operación/fuente y un formulario de limpieza](img/admin-audit.png)](img/admin-audit.png)
+[![El feed de Activity: cada cambio auditado a través de los modelos con diffs JSON, tarjetas de faceta por tabla/operación/fuente y un formulario de limpieza](../img/admin-audit.png)](../img/admin-audit.png)
 
 ---
 
@@ -516,7 +516,7 @@ Cada admin incluye una referencia de modelos en vivo (los admindocs de Django) e
 columnas, tipos, flags (PK, unique, …) y relaciones. Nada que configurar; se genera a
 partir de tus modelos, así que nunca se desvía del esquema.
 
-[![La referencia de modelos: los campos de cada modelo con nombre de columna, tipo Rust, flags y relaciones — generados a partir de los modelos](img/admin-model-reference.png)](img/admin-model-reference.png)
+[![La referencia de modelos: los campos de cada modelo con nombre de columna, tipo Rust, flags y relaciones — generados a partir de los modelos](../img/admin-model-reference.png)](../img/admin-model-reference.png)
 
 ---
 

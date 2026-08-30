@@ -6,7 +6,7 @@ una a un router y las peticiones anónimas son rechazadas — redirigidas con 30
 tu página de inicio de sesión (flujo de navegador) o respondidas con 401/403
 (flujo de API) — antes de que lleguen siquiera al handler.
 
-[![Decoradores de acceso: login_required redirige con 302 a los navegadores anónimos a /login?next=, la familia _or_403 devuelve 401/403 para APIs, superuser_required restringe por rol](img/auth-decorators.png)](img/auth-decorators.png)
+[![Decoradores de acceso: login_required redirige con 302 a los navegadores anónimos a /login?next=, la familia _or_403 devuelve 401/403 para APIs, superuser_required restringe por rol](../img/auth-decorators.png)](../img/auth-decorators.png)
 
 > **Fuente:** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,
@@ -15,7 +15,7 @@ tu página de inicio de sesión (flujo de navegador) o respondidas con 401/403
 > `SessionUser`).
 >
 > **Versión ejecutable:** el comportamiento de restricción está cubierto por el
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_decorators.rs)
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_decorators.rs)
 > probado — `cargo test -p auth_demo --test auth_decorators`.
 
 > **¿Algún término aquí es nuevo para ti?** *middleware/capa*, *extractor*,

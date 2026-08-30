@@ -14,7 +14,7 @@ first choice. You never store, log, or compare the plaintext.
 > `rustango::tenancy::password`.
 >
 > **Runnable version:** every snippet below is copied from the tested
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_passwords.rs)
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_passwords.rs)
 > example — `cargo test -p auth_demo --test auth_passwords`.
 
 > **New to a term here?** *hash*, *salt*, *argon2id*, *PHC string* — see the
@@ -169,7 +169,7 @@ assert!(strength_score("short").contains(&StrengthIssue::TooShort));
 ## Where the hash lives
 
 The PHC string is just a `String` column on whatever account model you own. In
-the [`auth_demo`](../crates/rustango/examples/auth_demo/src/models.rs) example:
+the [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/src/models.rs) example:
 
 ```rust
 #[derive(Model, Clone, Debug)]

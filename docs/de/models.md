@@ -8,7 +8,7 @@ Modelle oder Laravels Eloquent, mit dem Compiler, der deine Spalten prüft. Dies
 `#[rustango(...)]`-Attribut. Für das *Abfragen* von Modellen, sobald sie deklariert sind,
 siehe das [ORM-Kochbuch](orm.md).
 
-[![Modelle in Rustango: ein #[derive(Model)]-Struct bildet Rust-Feldtypen auf dialektspezifische Spalten ab, der Primärschlüssel kann ein auto-inkrementierender Auto<i64> oder ein benutzerdefinierter, anwendungsseitig zugewiesener Schlüssel sein, und das Derive generiert SCHEMA + objects() + save/find](img/models.png)](img/models.png)
+[![Modelle in Rustango: ein #[derive(Model)]-Struct bildet Rust-Feldtypen auf dialektspezifische Spalten ab, der Primärschlüssel kann ein auto-inkrementierender Auto<i64> oder ein benutzerdefinierter, anwendungsseitig zugewiesener Schlüssel sein, und das Derive generiert SCHEMA + objects() + save/find](../img/models.png)](../img/models.png)
 
 > **Ein Begriff hier ist neu für dich?** *model*, *primary key*, *foreign key*,
 > *migration*, *nullable* — siehe das [Glossar](glossary.md).
@@ -20,7 +20,7 @@ siehe das [ORM-Kochbuch](orm.md).
 >
 > **Lauffähige Version:** die Feldtyp-Round-Trips, der benutzerdefinierte PK und die
 > SCHEMA-Snippets sind aus
-> [`models_doc.rs`](../crates/rustango/tests/models_doc.rs) kopiert
+> [`models_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/models_doc.rs) kopiert
 > (`cargo test -p rustango --features sqlite --test models_doc`).
 
 ## Inhaltsverzeichnis

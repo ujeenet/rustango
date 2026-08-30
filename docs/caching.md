@@ -18,10 +18,10 @@ Django's cache framework or Laravel's `Cache` facade.
 > feature (off by default).
 >
 > **Runnable version:** every snippet is copied from
-> [`cache_doc.rs`](../crates/rustango/tests/cache_doc.rs)
+> [`cache_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/cache_doc.rs)
 > (`cargo test -p rustango --test cache_doc`); the database backend is dogfooded
 > on SQLite by
-> [`cache_db_backend_sqlite_live.rs`](../crates/rustango/tests/cache_db_backend_sqlite_live.rs).
+> [`cache_db_backend_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/cache_db_backend_sqlite_live.rs).
 
 ## Table of contents
 

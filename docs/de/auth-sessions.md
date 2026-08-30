@@ -7,7 +7,7 @@ behält. Der `SessionStore` von **Rustango** legt diesen Zustand in einen Cache
 trägt und eine Session **sofort widerrufen** werden kann — löschen Sie den
 Eintrag, und jede Replik sieht das Abmelden bei der nächsten Anfrage.
 
-[![Sessions in Rustango: das Cookie enthält nur eine opake ID, der SessionStore hält die Daten in Redis, und destroy() widerruft sie überall](img/auth-sessions.png)](img/auth-sessions.png)
+[![Sessions in Rustango: das Cookie enthält nur eine opake ID, der SessionStore hält die Daten in Redis, und destroy() widerruft sie überall](../img/auth-sessions.png)](../img/auth-sessions.png)
 
 > **Quelle:** `rustango::sessions` (`Session`, `SessionStore`) +
 > `rustango::cache` (`BoxedCache`, `InMemoryCache`) — hinter dem Feature
@@ -16,7 +16,7 @@ Eintrag, und jede Replik sieht das Abmelden bei der nächsten Anfrage.
 > hinzu (standardmäßig deaktiviert), um `RedisCache` zu erhalten.
 >
 > **Ausführbare Version:** die Ausschnitte unten sind aus dem getesteten Beispiel
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_sessions.rs)
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_sessions.rs)
 > kopiert — `cargo test -p auth_demo --test auth_sessions`.
 
 > **Ein Begriff hier neu?** *Session*, *opake ID*, *Cookie*, *Cache* — siehe das

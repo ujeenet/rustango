@@ -4,7 +4,7 @@
 
 Esta página explica los patrones que sigue la API de **Rustango**, para que puedas predecir cómo se comporta cualquier método antes de leer su documentación. Si estás contribuyendo o auditando una funcionalidad, estas son las reglas.
 
-[![Convención de nombres de Rustango: el sufijo del método te dice qué recibe — `*_on` para un pool tipado, sin sufijo para el pool multi-backend, y señales sin pool](img/api-conventions.png)](img/api-conventions.png)
+[![Convención de nombres de Rustango: el sufijo del método te dice qué recibe — `*_on` para un pool tipado, sin sufijo para el pool multi-backend, y señales sin pool](../img/api-conventions.png)](../img/api-conventions.png)
 
 ## Tabla de contenidos
 
