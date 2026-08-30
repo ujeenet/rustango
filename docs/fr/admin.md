@@ -439,6 +439,24 @@ Verrouillez-le de l'une des deux façons suivantes :
   et placez une authentification HTTP Basic, OAuth2, ou un SSO d'entreprise
   devant le chemin de nesting avec votre propre middleware.
 
+Lorsque l'authentification par session est active, le pied de la barre latérale
+affiche une ligne **« Connecté en tant que _username_ »** et un bouton
+**Déconnexion** (un formulaire `POST`). Les admins autonomes postent vers
+`{admin_prefix}/logout` par défaut ; un admin de tenant se trouve derrière la
+route de déconnexion propre à la couche de multi-tenancy, alors pointez le
+bouton dessus avec `Builder::logout_url` :
+
+```rust
+let admin = admin::Builder::new(pool)
+    .with_session_auth(session_secret)
+    .logout_url("/staff-logout")       // POST target for the sidebar Logout button
+    .build();
+```
+
+Le builder d'admin de tenant câble cela automatiquement sur son
+`RouteConfig::logout_url`, de sorte que le bouton atteint toujours une route qui
+existe.
+
 ---
 
 ## Thème et image de marque
