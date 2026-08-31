@@ -200,6 +200,14 @@ cache.clear().await?;                            // drops ONLY acme's entries
 que de réimplémenter quoi que ce soit, si bien que les primitives natives (Redis
 `INCRBY`, `SET NX`, `MGET`) gardent leur atomicité et leur traitement par lots.
 
+**Compteurs atomiques.** `Cache::incr(key, by, ttl)` renvoie la valeur après
+l'incrément et est la primitive derrière le [rate limiting](middleware.md), le
+verrouillage par compte et `DistributedLock`. Il est atomique sur `RedisCache`
+(`INCRBY` natif) et sur `InMemoryCache` (qui garde son verrou pendant tout le
+read-modify-write) ; `DatabaseCache` utilise un get-puis-set non atomique —
+suffisant pour un seul processus, mais passez à Redis lorsqu'un compteur doit
+être exact entre réplicas.
+
 Deux choses à savoir :
 
 | | |
