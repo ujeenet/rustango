@@ -8,7 +8,7 @@ Routen akzeptieren kann. Das ist Djangos `AUTHENTICATION_BACKENDS`-Idee, an axum
 verdrahtet. Kombinieren Sie es mit `require_auth` / `require_perm`, um Routen
 abzusichern, und dem `CurrentUser`-Extraktor, um das Ergebnis zu lesen.
 
-[![Auth-Backends in Rustango: eine Anfrage durchläuft eine Kette von Backends (ModelBackend, ApiKeyBackend, JwtBackend); das erste, das den Anmeldenachweis erkennt, gewinnt und injiziert CurrentUser, dann prüft require_perm einen Codename](img/auth-backends.png)](img/auth-backends.png)
+[![Auth-Backends in Rustango: eine Anfrage durchläuft eine Kette von Backends (ModelBackend, ApiKeyBackend, JwtBackend); das erste, das den Anmeldenachweis erkennt, gewinnt und injiziert CurrentUser, dann prüft require_perm einen Codename](../img/auth-backends.png)](../img/auth-backends.png)
 
 > **Ein Begriff hier neu?** *Backend*, *Middleware*, *Extraktor*,
 > *Berechtigungs-Codename* — siehe das [Glossar](glossary.md).
@@ -20,7 +20,7 @@ abzusichern, und dem `CurrentUser`-Extraktor, um das Ergebnis zu lesen.
 > `rustango::auth_backends` (immer kompiliert).
 >
 > **Ausführbare Version:** jeder Ausschnitt ist aus
-> [`auth_backends_doc.rs`](../crates/rustango/tests/auth_backends_doc.rs)
+> [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
 > kopiert (`cargo test -p rustango --features sqlite,tenancy --test auth_backends_doc`).
 
 ## Inhaltsverzeichnis

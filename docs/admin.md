@@ -17,7 +17,7 @@ and module-scope registration macros.
 >
 > **Runnable version:** every feature on this page is exercised in a tested,
 > compilable example at
-> [`crates/rustango/examples/admin_demo`](../crates/rustango/examples/admin_demo).
+> [`crates/rustango/examples/admin_demo`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/admin_demo).
 > The screenshots on this page are that example. If a snippet looks off, diff
 > against it.
 

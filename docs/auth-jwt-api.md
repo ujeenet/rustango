@@ -14,7 +14,7 @@ ships that as `JwtLifecycle` — and a batteries-included router that mounts
 > `tenancy`.
 >
 > **Runnable version:** the token engine is covered by the tested
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_jwt_api.rs) —
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_jwt_api.rs) —
 > `cargo test -p auth_demo --test auth_jwt_api`. The HTTP endpoints are
 > tenant-scoped and exercised end-to-end by the framework's own
 > `crates/rustango/tests/tenant_auth_live.rs`.

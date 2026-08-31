@@ -8,7 +8,7 @@ réponse sur laquelle faire des assertions. Ajoutez l'isolation par rollback de 
 un ensemble d'assertions de réponse, et vous obtenez le client de test de Django + `TestCase`, en
 Rust.
 
-[![Les tests dans Rustango : TestClient enveloppe votre Router et envoie des requêtes in-process à travers la vraie pile de handlers ; la TestResponse expose le statut, le texte et le JSON sur lesquels faire des assertions — pas de socket, pas de serveur](img/testing.png)](img/testing.png)
+[![Les tests dans Rustango : TestClient enveloppe votre Router et envoie des requêtes in-process à travers la vraie pile de handlers ; la TestResponse expose le statut, le texte et le JSON sur lesquels faire des assertions — pas de socket, pas de serveur](../img/testing.png)](../img/testing.png)
 
 > **Un terme nouveau ici ?** *router*, *handler*, *fixture*, *rollback* — voir le
 > [glossaire](glossary.md).
@@ -19,7 +19,7 @@ Rust.
 > compilés.
 >
 > **Version exécutable :** les snippets ci-dessous *sont* un test qui passe —
-> [`testing_doc.rs`](../crates/rustango/tests/testing_doc.rs)
+> [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
 > (`cargo test -p rustango --test testing_doc`). Presque tous les autres `*_doc.rs`
 > de ce dépôt utilisent `TestClient` de la même manière.
 

@@ -7,7 +7,7 @@ serializadores y ViewSets que ya escribiste: los esquemas de campo vienen de
 monta `/openapi.json` + una página de documentación interactiva. Cuando necesitas
 control total, los mismos tipos te permiten construir a mano cualquier especificación.
 
-[![OpenAPI de Rustango: los campos del serializador se convierten en un esquema de componente, el ViewSet se convierte en rutas CRUD, y openapi_router sirve /openapi.json + Swagger UI](img/openapi.png)](img/openapi.png)
+[![OpenAPI de Rustango: los campos del serializador se convierten en un esquema de componente, el ViewSet se convierte en rutas CRUD, y openapi_router sirve /openapi.json + Swagger UI](../img/openapi.png)](../img/openapi.png)
 
 > **Fuente:** `rustango::openapi` (`OpenApiSpec`, `Schema`, `OpenApiSchema`,
 > `PathItem`, `Operation`, `SecurityScheme`, `router::openapi_router`) y
@@ -15,7 +15,7 @@ control total, los mismos tipos te permiten construir a mano cualquier especific
 > router del visor también necesita `admin`).
 >
 > **Versión ejecutable:** cada fragmento de abajo está copiado del ejemplo probado
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog/tests/openapi.rs)
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/getting_started_blog/tests/openapi.rs)
 > — `cargo test -p getting_started_blog --test openapi`. Los tipos del builder, del
 > esquema y del router están cubiertos además por las propias pruebas unitarias del
 > framework (`crates/rustango/src/openapi/`).

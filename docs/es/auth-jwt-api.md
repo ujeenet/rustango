@@ -7,7 +7,7 @@ duración, un token de *refresco* de larga duración, rotación en el refresco, 
 `JwtLifecycle` — y un router listo para usar que monta por ti
 `POST /api/auth/login`, `/refresh`, `/logout`, y `GET /me`.
 
-[![API de autenticación JWT: login emite un par access+refresh, refresh rota y pone en lista negra el token antiguo, logout revoca a través de un almacén de JTI](img/auth-jwt-api.png)](img/auth-jwt-api.png)
+[![API de autenticación JWT: login emite un par access+refresh, refresh rota y pone en lista negra el token antiguo, logout revoca a través de un almacén de JTI](../img/auth-jwt-api.png)](../img/auth-jwt-api.png)
 
 > **Fuente:** `rustango::tenancy::jwt_lifecycle` (`JwtLifecycle`, `JwtTokenPair`,
 > `JwtClaims`) y `rustango::tenancy::auth_routes` (`jwt_router`, `Config`) +
@@ -15,7 +15,7 @@ duración, un token de *refresco* de larga duración, rotación en el refresco, 
 > `tenancy`.
 >
 > **Versión ejecutable:** el motor de tokens está cubierto por el test
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_jwt_api.rs) —
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_jwt_api.rs) —
 > `cargo test -p auth_demo --test auth_jwt_api`. Los endpoints HTTP están
 > delimitados por tenant y se ejercitan de extremo a extremo por el propio
 > `crates/rustango/tests/tenant_auth_live.rs` del framework.

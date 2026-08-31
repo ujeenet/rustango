@@ -8,7 +8,7 @@ Antwort zum Assertieren zurück. Füge Transaction-Rollback-Isolation für Daten
 ein Set von Response-Assertions hinzu, und du hast Djangos Test-Client + `TestCase`, in
 Rust.
 
-[![Testen in Rustango: TestClient umschließt deinen Router und sendet In-process-Anfragen durch den echten Handler-Stack; die TestResponse macht Status, Text und JSON zum Assertieren verfügbar — kein Socket, kein Server](img/testing.png)](img/testing.png)
+[![Testen in Rustango: TestClient umschließt deinen Router und sendet In-process-Anfragen durch den echten Handler-Stack; die TestResponse macht Status, Text und JSON zum Assertieren verfügbar — kein Socket, kein Server](../img/testing.png)](../img/testing.png)
 
 > **Neu bei einem Begriff hier?** *router*, *handler*, *fixture*, *rollback* — siehe das
 > [Glossar](glossary.md).
@@ -19,7 +19,7 @@ Rust.
 > kompiliert.
 >
 > **Lauffähige Version:** die untenstehenden Snippets *sind* ein bestehender Test —
-> [`testing_doc.rs`](../crates/rustango/tests/testing_doc.rs)
+> [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
 > (`cargo test -p rustango --test testing_doc`). Nahezu jede andere `*_doc.rs`
 > in diesem Repo verwendet `TestClient` auf dieselbe Weise.
 

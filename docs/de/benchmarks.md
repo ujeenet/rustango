@@ -27,7 +27,7 @@ Ein-Kommando-Harness (siehe [Reproduce](#reproduce)). Nichts hier ist mit Handbe
 > liefert ein vollständiges, batteries-included Framework. Selbst das schnellste nicht kompilierte
 > Ergebnis, **Laravel auf Octane**, liegt um das 4- bis 7-Fache hinter beiden Binaries.
 
-[![Requests/Sek. auf dem nicht gecachten Blog-Index über alle sechs Laufzeiten — Go 6.651, Rustango 4.781, Laravel+Octane 1.238, Django+Hypercorn 910, Django+gunicorn 850, Laravel+php-fpm 408](img/benchmarks.png)](img/benchmarks.png)
+[![Requests/Sek. auf dem nicht gecachten Blog-Index über alle sechs Laufzeiten — Go 6.651, Rustango 4.781, Laravel+Octane 1.238, Django+Hypercorn 910, Django+gunicorn 850, Laravel+php-fpm 408](../img/benchmarks.png)](../img/benchmarks.png)
 
 ---
 

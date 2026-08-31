@@ -18,7 +18,7 @@ tower layer.
 > protection additionally needs `cache`).
 >
 > **Runnable version:** every snippet is copied from
-> [`auth_hmac_doc.rs`](../crates/rustango/tests/auth_hmac_doc.rs)
+> [`auth_hmac_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_hmac_doc.rs)
 > (`cargo test -p rustango --test auth_hmac_doc`).
 
 ## Table of contents

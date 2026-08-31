@@ -23,13 +23,13 @@ Ce guide est avant tout un tutoriel : nous **construisons une API REST de blog c
 des entrées, le filtrage/la recherche/la pagination, et les tests — puis le reste de la page
 est une référence pour chaque réglage.
 
-[![Un ViewSet Rustango branché sur un sérialiseur : un seul bloc #[viewset(serializer = …)] fournit une sortie JSON typée et une entrée validée sur les six routes CRUD](img/viewsets.png)](img/viewsets.png)
+[![Un ViewSet Rustango branché sur un sérialiseur : un seul bloc #[viewset(serializer = …)] fournit une sortie JSON typée et une entrée validée sur les six routes CRUD](../img/viewsets.png)](../img/viewsets.png)
 
 > **Source :** `rustango::viewset` (`ViewSet`, `#[derive(ViewSet)]`, les
 > options `#[viewset(...)]` + le builder `for_model`) — toujours compilé.
 >
 > **Version exécutable :** le blog construit ici reflète l'exemple testé et compilable
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog)
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
 > (ses `Post` / `PostSerializer` / `PostViewSet`), et chaque comportement est
 > verrouillé par les propres tests live du framework — `crates/rustango/tests/viewset_*.rs`
 > (notamment `viewset_serializer_render_sqlite_live` et

@@ -9,7 +9,7 @@ weniger Zeilen. Wenn du von Django kommst, ist das die `MIDDLEWARE`-Liste; von
 Express `app.use()`; von Laravel der HTTP-Kernel — dieselbe Idee, an deinen
 Router angehängt.
 
-[![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](img/middleware.png)](img/middleware.png)
+[![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](../img/middleware.png)](../img/middleware.png)
 
 > **Quelle:** Middleware baut auf [`tower::Layer`](https://docs.rs/tower) +
 > `axum::middleware::from_fn` auf. Die eingebauten Bausteine verteilen sich über

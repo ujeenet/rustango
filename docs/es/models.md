@@ -8,7 +8,7 @@ la referencia de **declaración**: cada tipo de campo, cada opción de clave pri
 cada atributo `#[rustango(...)]`. Para *consultar* los modelos una vez declarados,
 consulta el [recetario del ORM](orm.md).
 
-[![Modelos en Rustango: una struct #[derive(Model)] asigna tipos de campo Rust a columnas por dialecto, la clave primaria puede ser un Auto<i64> autoincremental o una clave personalizada asignada por la aplicación, y el derive genera SCHEMA + objects() + save/find](img/models.png)](img/models.png)
+[![Modelos en Rustango: una struct #[derive(Model)] asigna tipos de campo Rust a columnas por dialecto, la clave primaria puede ser un Auto<i64> autoincremental o una clave personalizada asignada por la aplicación, y el derive genera SCHEMA + objects() + save/find](../img/models.png)](../img/models.png)
 
 > **¿Un término aquí es nuevo para ti?** *model*, *primary key*, *foreign key*,
 > *migration*, *nullable* — consulta el [glosario](glossary.md).
@@ -21,7 +21,7 @@ consulta el [recetario del ORM](orm.md).
 >
 > **Versión ejecutable:** los round-trips de tipos de campo, la PK personalizada y los
 > fragmentos de SCHEMA están copiados de
-> [`models_doc.rs`](../crates/rustango/tests/models_doc.rs)
+> [`models_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/models_doc.rs)
 > (`cargo test -p rustango --features sqlite --test models_doc`).
 
 ## Tabla de contenidos

@@ -7,7 +7,7 @@ manipulaciones y con tiempo limitado, y luego actuar cuando hace clic en él —
 construye sobre un mismo sustrato: las **URL firmadas**. Una URL firmada es una URL normal con una
 firma HMAC añadida, de modo que el servidor puede confiar en sus parámetros sin almacenar nada.
 
-[![Flujos de cuenta en Rustango: signed_url::sign añade una firma HMAC + caducidad; los tres flujos (restablecimiento de contraseña, verificación de correo, enlace mágico) emiten un enlace, lo envían por correo y lo verifican al hacer clic](img/auth-flows.png)](img/auth-flows.png)
+[![Flujos de cuenta en Rustango: signed_url::sign añade una firma HMAC + caducidad; los tres flujos (restablecimiento de contraseña, verificación de correo, enlace mágico) emiten un enlace, lo envían por correo y lo verifican al hacer clic](../img/auth-flows.png)](../img/auth-flows.png)
 
 > **¿Algún término aquí es nuevo para ti?** *HMAC*, *token*, *caducidad* — consulta el [glosario](glossary.md).
 
@@ -17,7 +17,7 @@ firma HMAC añadida, de modo que el servidor puede confiar en sus parámetros si
 > (activadas por defecto; la confirmación de restablecimiento también necesita `passwords` + un backend de BD).
 >
 > **Versión ejecutable:** cada fragmento está copiado de
-> [`auth_flows_doc.rs`](../crates/rustango/tests/auth_flows_doc.rs)
+> [`auth_flows_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_flows_doc.rs)
 > (`cargo test -p rustango --features sqlite --test auth_flows_doc`).
 
 ## Tabla de contenidos

@@ -4,6 +4,44 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+- **160 broken documentation references, across all four locales** (#1248).
+  Reported as three 404s on the docs site; an audit found the whole class.
+
+  `docs/index.toml` publishes only the files it lists, and the site has no
+  `crates/` tree — so every `../crates/…` pointer in a published page 404s
+  there. Those are mostly the "Runnable version:" links nearly every guide
+  carries, and they were **worse in the translations**: `../crates/…` from
+  `docs/fr/` resolves to `docs/crates/`, which has never existed, so the
+  translated pages were broken on GitHub too. All 160 now use absolute
+  `https://github.com/…` URLs (`/blob/` for files, `/tree/` for directories),
+  which resolve from any renderer.
+
+  Also fixed: `getting-started.md` linked `django-parity-audit-2026-05-21.md`,
+  which `index.toml` deliberately does not publish; **111 broken images** in
+  `de` / `es` / `fr`, which copied `img/foo.png` verbatim although images live
+  only in `docs/img/`; and one extensionless `](manage)` link against 246 that
+  use `.md`.
+
+  `tests/docs_links.rs` now walks every published page in every locale and fails
+  the build on a link that escapes the docs tree, does not resolve, or targets an
+  unpublished page — plus a second test pinning locale coverage to `index.toml`.
+
+### Changed
+- **Docker is no longer presented as a prerequisite** (#1247). The getting-started
+  guide listed it as required and had readers verify it with `docker --version`,
+  so a user on Windows — where the Hyper-V/WSL2 backend is a common source of
+  start-up failures — reasonably concluded rustango needed it. It never did:
+  generated projects already ship a `sqlite` feature (CI-gated via
+  `feature_combos`), and a natively-installed Postgres only needs the compose
+  hostname `postgres` swapped for `localhost`. Neither path was documented.
+
+  The prerequisites table now points at a "Choosing a database" section covering
+  all three options, SQLite is recommended for learning, and Step 4 tells the
+  non-Docker reader what to skip. Translated into all four locales.
+
+- `docs/index.toml` declares `version = "0.53"` (was `0.52`).
+
 ## [0.53.0] — 2026-08-28
 
 Minor, not a patch. Two reasons to take the version bump rather than call this

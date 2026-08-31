@@ -22,7 +22,7 @@ templates.
 >
 > **Runnable version:** the API-vs-HTML example below is pinned by the
 > framework test
-> [`html_and_api_contrast_sqlite_live.rs`](../crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
+> [`html_and_api_contrast_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
 > (`cargo test -p rustango --features sqlite --test html_and_api_contrast_sqlite_live`).
 > The individual views are covered by `template_view.rs` and
 > `template_views_context_object_name_sqlite_live.rs`.
@@ -321,7 +321,7 @@ let app = axum::Router::new()
 
 Now `GET /api/posts` returns the paginated JSON envelope and `GET /posts`
 returns a rendered HTML list — same rows, same pool, two shapes. This exact
-setup is what the [backing test](../crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
+setup is what the [backing test](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
 asserts.
 
 ---

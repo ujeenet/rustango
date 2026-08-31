@@ -8,7 +8,7 @@ Compute-on-Miss-Helfer (`get_or_set`) und typisierte JSON-Helfer. Tausche das
 Backend, ohne eine einzige Aufrufstelle anzufassen — wie Djangos Cache-Framework
 oder Laravels `Cache`-Fassade.
 
-[![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](img/caching.png)](img/caching.png)
+[![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](../img/caching.png)](../img/caching.png)
 
 > **Ein Begriff hier neu für dich?** *Cache*, *TTL*, *Key*, *Backend* — siehe
 > das [Glossar](glossary.md).
@@ -19,10 +19,10 @@ oder Laravels `Cache`-Fassade.
 > `cache-redis`-Feature (standardmäßig aus).
 >
 > **Ausführbare Version:** jeder Codeausschnitt ist aus
-> [`cache_doc.rs`](../crates/rustango/tests/cache_doc.rs) kopiert
+> [`cache_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/cache_doc.rs) kopiert
 > (`cargo test -p rustango --test cache_doc`); das Datenbank-Backend wird per
 > Dogfooding auf SQLite durch
-> [`cache_db_backend_sqlite_live.rs`](../crates/rustango/tests/cache_db_backend_sqlite_live.rs)
+> [`cache_db_backend_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/cache_db_backend_sqlite_live.rs)
 > erprobt.
 
 ## Inhaltsverzeichnis

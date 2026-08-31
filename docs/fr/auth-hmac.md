@@ -9,7 +9,7 @@ corps, de sorte qu'une requête altérée ou périmée est rejetée. C'est le sc
 utilisé par AWS SigV4 et les signatures de webhooks, et **Rustango** le fournit
 sous la forme d'une seule couche tower.
 
-[![Signature HMAC dans Rustango : le client signe méthode+chemin+requête+date+hash-du-corps avec un secret partagé ; HmacAuthLayer recalcule et compare en temps constant, rejetant les requêtes altérées ou périmées](img/auth-hmac.png)](img/auth-hmac.png)
+[![Signature HMAC dans Rustango : le client signe méthode+chemin+requête+date+hash-du-corps avec un secret partagé ; HmacAuthLayer recalcule et compare en temps constant, rejetant les requêtes altérées ou périmées](../img/auth-hmac.png)](../img/auth-hmac.png)
 
 > **Un terme vous est inconnu ?** *HMAC*, *secret partagé*, *rejeu*, *comparaison en temps constant* —
 > voir le [glossaire](glossary.md).
@@ -19,7 +19,7 @@ sous la forme d'une seule couche tower.
 > la protection contre le rejeu nécessite en plus `cache`).
 >
 > **Version exécutable :** chaque extrait est copié depuis
-> [`auth_hmac_doc.rs`](../crates/rustango/tests/auth_hmac_doc.rs)
+> [`auth_hmac_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_hmac_doc.rs)
 > (`cargo test -p rustango --test auth_hmac_doc`).
 
 ## Table des matières

@@ -14,7 +14,7 @@ them back, HS256 under the hood.
 > [JWT auth API](auth-jwt-api.md).
 >
 > **Runnable version:** snippets are copied from the tested
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_jwt.rs) —
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_jwt.rs) —
 > `cargo test -p auth_demo --test auth_jwt`.
 
 > **New to a term here?** *JWT*, *claims*, *stateless*, *secret* — see the

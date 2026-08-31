@@ -230,7 +230,7 @@ engine to begin with.
 
 The `{int:id}` form is accepted only as a **porting affordance** for `reverse()`:
 the builder splits the placeholder on `:` and keeps just the name, discarding the
-type prefix ([`urls.rs`](../crates/rustango/src/urls.rs)). That lets `reverse()`
+type prefix ([`urls.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/urls.rs)). That lets `reverse()`
 run on a pattern copied verbatim from a Django `path("<int:id>/", …)` — but
 nothing validates that the supplied value is actually an integer.
 

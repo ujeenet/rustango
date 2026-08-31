@@ -5,7 +5,7 @@
 1. **El generador de proyectos** — `cargo rustango new` crea un proyecto entero nuevo a partir de una plantilla.
 2. **Generadores dentro del proyecto** — `manage startapp` y la familia `manage make:*` añaden apps, vistas, serializers, jobs y más dentro de un proyecto existente.
 
-[![`cargo rustango new` genera un proyecto completo y listo para ejecutar — manifiesto de Cargo, niveles de configuración, Docker, migraciones y src — en un solo comando](img/scaffolding.png)](img/scaffolding.png)
+[![`cargo rustango new` genera un proyecto completo y listo para ejecutar — manifiesto de Cargo, niveles de configuración, Docker, migraciones y src — en un solo comando](../img/scaffolding.png)](../img/scaffolding.png)
 
 ## Tabla de contenidos
 
@@ -149,7 +149,7 @@ Opciones:
 
 ## Generar archivos sueltos: los comandos `make:*`
 
-Dentro de un proyecto, los verbos `make:*` generan el andamiaje de un archivo cada vez. La referencia completa por flag vive en la [referencia de la CLI de manage](manage); las formas comunes son:
+Dentro de un proyecto, los verbos `make:*` generan el andamiaje de un archivo cada vez. La referencia completa por flag vive en la [referencia de la CLI de manage](manage.md); las formas comunes son:
 
 | Comando | Genera | Comparable a |
 |---|---|---|

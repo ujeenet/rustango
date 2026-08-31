@@ -7,7 +7,7 @@ mit Größen-/Typ-Schutzvorkehrungen und — wenn du eine nachverfolgte Mediathe
 datenbankgestützten `MediaManager` mit vorsignierten URLs. Schreibe deinen Code
 einmal gegen das Trait; wechsle von lokaler Festplatte zu S3 mit einer einzeiligen Änderung.
 
-[![Dateien in Rustango: Ein Multipart-Upload wird größen- und erweiterungsgeprüft und dann durch das Storage-Trait geschrieben; dasselbe Trait unterlegt lokale Festplatte, S3 und In-Memory, und url() gibt eine öffentliche Adresse zurück](img/files.png)](img/files.png)
+[![Dateien in Rustango: Ein Multipart-Upload wird größen- und erweiterungsgeprüft und dann durch das Storage-Trait geschrieben; dasselbe Trait unterlegt lokale Festplatte, S3 und In-Memory, und url() gibt eine öffentliche Adresse zurück](../img/files.png)](../img/files.png)
 
 > **Neu bei einem Begriff hier?** *Storage-Backend*, *Multipart*, *Objektspeicher*,
 > *vorsignierte URL* — siehe das [Glossar](glossary.md).
@@ -19,11 +19,11 @@ einmal gegen das Trait; wechsle von lokaler Festplatte zu S3 mit einer einzeilig
 > `media` (alle standardmäßig aktiviert).
 >
 > **Lauffähige Version:** Die Storage- + Upload-Schutzvorkehrungs-Snippets sind kopiert aus
-> [`files_doc.rs`](../crates/rustango/tests/files_doc.rs)
+> [`files_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/files_doc.rs)
 > (`cargo test -p rustango --test files_doc`); der End-to-End-Multipart-`save_uploads`-Ablauf
 > wird von den In-File-Tests in
 > `crates/rustango/src/uploads.rs` selbst erprobt, und die Mediathek von
-> [`media_sqlite_live.rs`](../crates/rustango/tests/media_sqlite_live.rs).
+> [`media_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/media_sqlite_live.rs).
 
 ## Inhaltsverzeichnis
 

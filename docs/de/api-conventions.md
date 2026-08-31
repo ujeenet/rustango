@@ -4,7 +4,7 @@
 
 Diese Seite erklärt die Muster, denen die API von **Rustango** folgt, damit Sie das Verhalten jeder Methode vorhersagen können, bevor Sie deren Dokumentation lesen. Wenn Sie zu einem Feature beitragen oder es auditieren, sind dies die Regeln.
 
-[![Namenskonvention von Rustango: das Methodensuffix sagt Ihnen, was sie entgegennimmt — `*_on` für einen typisierten Pool, blank für den Multi-Backend-Pool und pool-freie Signale](img/api-conventions.png)](img/api-conventions.png)
+[![Namenskonvention von Rustango: das Methodensuffix sagt Ihnen, was sie entgegennimmt — `*_on` für einen typisierten Pool, blank für den Multi-Backend-Pool und pool-freie Signale](../img/api-conventions.png)](../img/api-conventions.png)
 
 ## Inhaltsverzeichnis
 

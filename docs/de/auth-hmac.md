@@ -10,7 +10,7 @@ veraltete Anfrage abgelehnt wird. Es ist das Schema, das AWS SigV4 und
 Webhook-Signaturen verwenden, und **Rustango** liefert es als einen einzigen
 Tower-Layer.
 
-[![HMAC-Signierung in Rustango: der Client signiert Methode+Pfad+Query+Datum+Body-Hash mit einem gemeinsamen Secret; HmacAuthLayer berechnet neu und vergleicht in konstanter Zeit, manipulierte oder veraltete Anfragen werden abgelehnt](img/auth-hmac.png)](img/auth-hmac.png)
+[![HMAC-Signierung in Rustango: der Client signiert Methode+Pfad+Query+Datum+Body-Hash mit einem gemeinsamen Secret; HmacAuthLayer berechnet neu und vergleicht in konstanter Zeit, manipulierte oder veraltete Anfragen werden abgelehnt](../img/auth-hmac.png)](../img/auth-hmac.png)
 
 > **Ein Begriff hier neu für Sie?** *HMAC*, *gemeinsames Secret*, *Replay*, *Vergleich in konstanter Zeit* —
 > siehe das [Glossar](glossary.md).
@@ -20,7 +20,7 @@ Tower-Layer.
 > Replay-Schutz benötigt zusätzlich `cache`).
 >
 > **Lauffähige Version:** Jedes Snippet ist aus
-> [`auth_hmac_doc.rs`](../crates/rustango/tests/auth_hmac_doc.rs) kopiert
+> [`auth_hmac_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_hmac_doc.rs) kopiert
 > (`cargo test -p rustango --test auth_hmac_doc`).
 
 ## Inhaltsverzeichnis

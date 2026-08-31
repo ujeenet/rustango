@@ -8,7 +8,7 @@ l'injection d'en-têtes, et le rendu de templates. Écrivez `mailer.send(&email)
 passez de l'impression dans votre terminal à un vrai SMTP avec un changement d'une ligne — comme le
 framework d'e-mail de Django.
 
-[![L'e-mail dans Rustango : un builder Email (to/subject/body/html) est validé contre l'injection d'en-têtes, puis envoyé à travers le trait Mailer — ConsoleMailer en dev, SmtpMailer en prod, InMemoryMailer en test](img/email.png)](img/email.png)
+[![L'e-mail dans Rustango : un builder Email (to/subject/body/html) est validé contre l'injection d'en-têtes, puis envoyé à travers le trait Mailer — ConsoleMailer en dev, SmtpMailer en prod, InMemoryMailer en test](../img/email.png)](../img/email.png)
 
 > **Un terme vous est inconnu ?** *e-mail transactionnel*, *SMTP*, *backend de messagerie* — voir
 > le [glossaire](glossary.md).
@@ -19,7 +19,7 @@ framework d'e-mail de Django.
 > fonctionnalité `email-smtp`.
 >
 > **Version exécutable :** chaque snippet est copié depuis
-> [`email_doc.rs`](../crates/rustango/tests/email_doc.rs)
+> [`email_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/email_doc.rs)
 > (`cargo test -p rustango --test email_doc`) ; les helpers d'envoi et les pièces jointes
 > sont mis à l'épreuve par `email_send_helpers.rs` et `email_attachments.rs`.
 

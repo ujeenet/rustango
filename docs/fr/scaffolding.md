@@ -5,7 +5,7 @@
 1. **Le générateur de projet** — `cargo rustango new` crée un tout nouveau projet à partir d'un template.
 2. **Les générateurs internes au projet** — `manage startapp` et la famille `manage make:*` ajoutent des apps, des vues, des sérialiseurs, des jobs, et bien plus au sein d'un projet existant.
 
-[![`cargo rustango new` scaffolds a complete, ready-to-run project — Cargo manifest, config tiers, Docker, migrations, and src — in one command](img/scaffolding.png)](img/scaffolding.png)
+[![`cargo rustango new` scaffolds a complete, ready-to-run project — Cargo manifest, config tiers, Docker, migrations, and src — in one command](../img/scaffolding.png)](../img/scaffolding.png)
 
 ## Table des matières
 
@@ -149,7 +149,7 @@ Options :
 
 ## Générer des fichiers individuels : les commandes `make:*`
 
-Au sein d'un projet, les verbes `make:*` échafaudent un fichier à la fois. La référence complète, drapeau par drapeau, se trouve dans la [référence CLI manage](manage) ; les formes les plus courantes sont :
+Au sein d'un projet, les verbes `make:*` échafaudent un fichier à la fois. La référence complète, drapeau par drapeau, se trouve dans la [référence CLI manage](manage.md) ; les formes les plus courantes sont :
 
 | Commande | Génère | Comparable à |
 |---|---|---|

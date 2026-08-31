@@ -19,11 +19,11 @@ once against the trait; switch from local disk to S3 with a one-line change.
 > `media` features (all on by default).
 >
 > **Runnable version:** the Storage + upload-guard snippets are copied from
-> [`files_doc.rs`](../crates/rustango/tests/files_doc.rs)
+> [`files_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/files_doc.rs)
 > (`cargo test -p rustango --test files_doc`); the end-to-end multipart
 > `save_uploads` flow is dogfooded by the in-file tests in
 > `crates/rustango/src/uploads.rs`, and the media library by
-> [`media_sqlite_live.rs`](../crates/rustango/tests/media_sqlite_live.rs).
+> [`media_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/media_sqlite_live.rs).
 
 ## Table of contents
 

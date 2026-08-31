@@ -9,7 +9,7 @@ n'importe quel client MCP peut le découvrir et l'appeler via le transport
 JSON-RPC standard — avec une autorisation **fail-closed** par agent et OAuth 2.1
 intégrés.
 
-[![Serveur MCP dans Rustango : un agent LLM se connecte via JSON-RPC + SSE ; le serveur authentifie le JWT de l'agent, ne liste que les tools que ses skills accordés autorisent, et exécute le handler du tool contre le pool de votre application](img/mcp.png)](img/mcp.png)
+[![Serveur MCP dans Rustango : un agent LLM se connecte via JSON-RPC + SSE ; le serveur authentifie le JWT de l'agent, ne liste que les tools que ses skills accordés autorisent, et exécute le handler du tool contre le pool de votre application](../img/mcp.png)](../img/mcp.png)
 
 > **Nouveau ici ?** *MCP*, *JSON-RPC*, *tool/resource/prompt*, *agent*,
 > *JWT*, *OAuth* — voir le [glossaire](glossary.md).
@@ -21,11 +21,11 @@ intégrés.
 > par défaut ; tire `tenancy, sse, serializer, openapi, jwt`).
 >
 > **Version exécutable :** chaque extrait est copié depuis
-> [`mcp_doc.rs`](../crates/rustango/tests/mcp_doc.rs)
+> [`mcp_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/mcp_doc.rs)
 > (`cargo test -p rustango --features sqlite,mcp --test mcp_doc`) ; toute la
 > surface protocolaire est testée en conditions réelles par la suite
 > `crates/rustango/tests/mcp_*.rs`, et un serveur exécutable se trouve dans
-> [`examples/mcp_demo`](../crates/rustango/examples/mcp_demo).
+> [`examples/mcp_demo`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/mcp_demo).
 
 ## Table des matières
 
@@ -247,7 +247,7 @@ println!("copy once: {}", issued.token);
 ```
 
 À l'émission du token, le serveur appelle
-[`resolve_user_agent_grants_pool`](../crates/rustango/src/tenancy/agents.rs) —
+[`resolve_user_agent_grants_pool`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/tenancy/agents.rs) —
 les permissions effectives du propriétaire (`user_permissions_pool`, c.-à-d.
 rôles + grants directs − refus) sélectionnent les skills mappés, dont les
 tools/prompts/resources sont aplatis dans les claims `skills`/`tools` du JWT.
@@ -428,12 +428,12 @@ Passez à l'onglet **Tools** et cliquez **List Tools** — vous verrez *seulemen
 le tool `add` que le skill de l'agent accorde, avec son JSON Schema.
 Sélectionnez-le, entrez `a = 2`, `b = 3`, et **Run Tool** :
 
-[![Le MCP Inspector connecté à la démo Rustango via Streamable HTTP, montrant le tool `add` accordé et son schéma d'entrée a/b](img/mcp-inspector-tools.png)](img/mcp-inspector-tools.png)
+[![Le MCP Inspector connecté à la démo Rustango via Streamable HTTP, montrant le tool `add` accordé et son schéma d'entrée a/b](../img/mcp-inspector-tools.png)](../img/mcp-inspector-tools.png)
 
 L'appel retourne un résultat structuré — `{ "sum": 5 }` — et la requête apparaît
 dans le panneau History (`initialize` → `tools/list` → `tools/call`) :
 
-[![Le même Inspector après l'exécution du tool : Tool Result Success avec le contenu structuré { sum: 5 }, et l'historique des appels JSON-RPC](img/mcp-inspector-call.png)](img/mcp-inspector-call.png)
+[![Le même Inspector après l'exécution du tool : Tool Result Success avec le contenu structuré { sum: 5 }, et l'historique des appels JSON-RPC](../img/mcp-inspector-call.png)](../img/mcp-inspector-call.png)
 
 ### (d) Connectez un vrai client MCP
 

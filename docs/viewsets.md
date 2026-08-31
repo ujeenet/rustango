@@ -29,7 +29,7 @@ is a reference for every knob.
 > `#[viewset(...)]` options + the `for_model` builder) — always compiled.
 >
 > **Runnable version:** the blog built here mirrors the tested, compilable
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog)
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
 > example (its `Post` / `PostSerializer` / `PostViewSet`), and every behavior is
 > pinned by the framework's own live tests — `crates/rustango/tests/viewset_*.rs`
 > (notably `viewset_serializer_render_sqlite_live` and

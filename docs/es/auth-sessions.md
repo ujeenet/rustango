@@ -8,7 +8,7 @@ cookie no lleva ningún secreto y una sesión puede **revocarse al instante** �
 elimina la entrada y cada réplica ve el cierre de sesión en la siguiente
 petición.
 
-[![Sesiones en Rustango: la cookie solo contiene un id opaco, el SessionStore guarda los datos en Redis, y destroy() la revoca en todas partes](img/auth-sessions.png)](img/auth-sessions.png)
+[![Sesiones en Rustango: la cookie solo contiene un id opaco, el SessionStore guarda los datos en Redis, y destroy() la revoca en todas partes](../img/auth-sessions.png)](../img/auth-sessions.png)
 
 > **Fuente:** `rustango::sessions` (`Session`, `SessionStore`) +
 > `rustango::cache` (`BoxedCache`, `InMemoryCache`) — detrás de la característica
@@ -18,7 +18,7 @@ petición.
 >
 > **Versión ejecutable:** los fragmentos a continuación están copiados del
 > ejemplo probado
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_sessions.rs) —
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_sessions.rs) —
 > `cargo test -p auth_demo --test auth_sessions`.
 
 > **¿Algún término aquí es nuevo para ti?** *sesión*, *id opaco*, *cookie*,
