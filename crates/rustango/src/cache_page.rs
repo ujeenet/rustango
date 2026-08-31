@@ -49,8 +49,15 @@
 //!   over the 1 MiB cacheable cap gets `413`.
 //! - **Status 200-only.** Errors / redirects / 304s aren't cached so
 //!   transient failures don't poison the cache.
-//! - **`Cache-Control: no-store`** on the response disables caching
-//!   for that response (matches RFC 9111 — caches must not store it).
+//! - **`Cache-Control: no-store` / `private` / `no-cache`** on the
+//!   response disables caching for it — `private` because this is a
+//!   shared cache (matches RFC 9111).
+//! - **Per-user responses are never shared (#1251).** A response
+//!   carrying `Set-Cookie` is never cached, and by default a request
+//!   carrying `Authorization` or `Cookie` is neither served from nor
+//!   stored in the cache — its response is assumed to depend on the
+//!   caller. Opt a known-public route back in with
+//!   [`CachePageLayer::cache_authenticated`].
 //! - **Body is buffered.** The layer materializes the full response
 //!   body so it can store it; streaming responses lose their streaming
 //!   property under the cache. Use `[never_cache]` headers on
@@ -99,6 +106,12 @@ pub struct CachePageLayer {
     key_prefix: String,
     vary_on: Vec<HeaderName>,
     cache_query: bool,
+    /// When `false` (default), a request carrying `Authorization` or
+    /// `Cookie` is neither served from nor stored in the shared cache —
+    /// its response is assumed per-user. Opt in only for a route you
+    /// know is genuinely public despite the header. See
+    /// [`Self::cache_authenticated`] (#1251).
+    cache_authenticated: bool,
 }
 
 impl CachePageLayer {
@@ -112,6 +125,7 @@ impl CachePageLayer {
             key_prefix: "rustango.cache_page".to_owned(),
             vary_on: Vec::new(),
             cache_query: false,
+            cache_authenticated: false,
         }
     }
 
@@ -154,6 +168,26 @@ impl CachePageLayer {
         self
     }
 
+    /// Allow caching responses to requests that carry `Authorization`
+    /// or `Cookie` (#1251).
+    ///
+    /// **Off by default, and leave it off unless you are certain.** The
+    /// safe default treats a request bearing either header as per-user:
+    /// it is neither served from nor stored in the shared cache, so one
+    /// user's page can't be handed to another. Enable this only for a
+    /// route whose response you know does not depend on the caller's
+    /// identity even though the header is present (e.g. a public page on
+    /// a site that sets an analytics cookie on everyone).
+    ///
+    /// A response that itself sends `Set-Cookie`, or marks itself
+    /// `Cache-Control: private` / `no-cache` / `no-store`, is **never**
+    /// cached regardless of this flag — that is not configurable.
+    #[must_use]
+    pub fn cache_authenticated(mut self, enabled: bool) -> Self {
+        self.cache_authenticated = enabled;
+        self
+    }
+
     /// Opt into caching RFC 10008 `QUERY` requests (default `false`).
     ///
     /// QUERY is safe + idempotent and its response is cacheable, keyed on
@@ -184,6 +218,7 @@ impl<S> tower::Layer<S> for CachePageLayer {
             key_prefix: Arc::new(self.key_prefix.clone()),
             vary_on: Arc::new(self.vary_on.clone()),
             cache_query: self.cache_query,
+            cache_authenticated: self.cache_authenticated,
         }
     }
 }
@@ -197,6 +232,7 @@ pub struct CachePageService<S> {
     key_prefix: Arc<String>,
     vary_on: Arc<Vec<HeaderName>>,
     cache_query: bool,
+    cache_authenticated: bool,
 }
 
 impl<S> Service<Request<Body>> for CachePageService<S>
@@ -222,6 +258,7 @@ where
         let prefix = self.key_prefix.clone();
         let vary = self.vary_on.clone();
         let cache_query = self.cache_query;
+        let cache_authenticated = self.cache_authenticated;
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
@@ -264,6 +301,19 @@ where
                 (req, None)
             };
 
+            // A request bearing `Authorization` or `Cookie` is treated as
+            // per-user unless the route opted in: it is neither served
+            // from nor stored in the shared cache, so one user's response
+            // can't be handed to another (#1251).
+            let req_is_authed = !cache_authenticated
+                && (req
+                    .headers()
+                    .contains_key(axum::http::header::AUTHORIZATION)
+                    || req.headers().contains_key(axum::http::header::COOKIE));
+            if req_is_authed {
+                return inner.call(req).await;
+            }
+
             let key = compute_cache_key(&prefix, &req, &vary, body_digest.as_deref());
 
             // Cache hit?
@@ -281,20 +331,32 @@ where
 
             // Cache miss — run inner, then store the response.
             let resp = inner.call(req).await?;
-            // Only cache 200 OK responses. Don't cache responses
-            // that explicitly opt out via Cache-Control: no-store.
+            // Only cache 200 OK responses. Refuse to cache anything that
+            // is per-user or explicitly opted out:
+            //   - `Set-Cookie`: the response mints a cookie, so it is
+            //     definitionally per-user. Caching it would replay one
+            //     user's session cookie to the next (#1251).
+            //   - `Cache-Control: no-store | private | no-cache`: the
+            //     handler said don't (`private` = not for a shared cache,
+            //     which this is).
             let status = resp.status();
+            let sets_cookie = resp.headers().contains_key(axum::http::header::SET_COOKIE);
             let cache_control_opt_out = resp
                 .headers()
                 .get_all(axum::http::header::CACHE_CONTROL)
                 .iter()
                 .any(|v| {
                     v.to_str()
-                        .map(|s| s.to_ascii_lowercase().contains("no-store"))
+                        .map(|s| {
+                            let s = s.to_ascii_lowercase();
+                            s.contains("no-store")
+                                || s.contains("private")
+                                || s.contains("no-cache")
+                        })
                         .unwrap_or(false)
                 });
 
-            if status != StatusCode::OK || cache_control_opt_out {
+            if status != StatusCode::OK || sets_cookie || cache_control_opt_out {
                 return Ok(resp);
             }
 

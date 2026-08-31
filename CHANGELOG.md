@@ -5,6 +5,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ## [Unreleased]
 
 ### Fixed
+- **`cache_page` could serve one user's session cookie to another** (#1251).
+  The layer cached any 200 and replayed its stored headers verbatim on a HIT,
+  including `Set-Cookie` — so an authenticated response that minted
+  `Set-Cookie: session=<A>` was cached and handed to the next visitor, a session
+  hijack. It also shared personalized pages across users, since the cache key did
+  not consider `Authorization` / `Cookie` and the response `Vary` was not
+  consulted.
+
+  Now safe by default: a response carrying `Set-Cookie`, or marked
+  `Cache-Control: private` / `no-cache` / `no-store`, is never cached; and a
+  request carrying `Authorization` or `Cookie` is neither served from nor stored
+  in the shared cache. A route known to be public despite such a header can opt
+  back in with `CachePageLayer::cache_authenticated(true)`. The `Set-Cookie` and
+  `private` guards are unconditional and not configurable.
 - **ETag middleware ignored `If-None-Match` lists and `*`, and dropped required
   headers from the 304** (#1258). It compared the whole `If-None-Match` header
   against one etag, so a conditional request sending a list (`"a", "b"`) or the

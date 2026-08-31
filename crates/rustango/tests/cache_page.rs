@@ -313,23 +313,31 @@ fn vary_on_emits_comma_separated_list() {
 /// Multi-value `Set-Cookie` headers survive the cache round-trip.
 /// Pre-fix: HashMap dedup truncated to one cookie.
 #[tokio::test]
-async fn multi_value_set_cookie_headers_survive_round_trip() {
-    use axum::http::{header::SET_COOKIE, HeaderName, HeaderValue};
+async fn multi_value_headers_survive_round_trip() {
+    // Regression for the JSON header round-trip: a response with two
+    // values of the same header must come back with both after a
+    // cache HIT. Uses `Link` — a legitimately multi-valued *and*
+    // cacheable header. (This test used to use `Set-Cookie`, which is
+    // now deliberately never cached — see
+    // `response_setting_a_cookie_is_never_cached` (#1251).)
+    use axum::http::{HeaderName, HeaderValue};
+    let link = HeaderName::from_static("link");
     let cache = Arc::new(InMemoryCache::new());
     let app: Router = Router::new()
         .route(
-            "/login",
-            get(|| async {
-                // Two distinct Set-Cookie headers — what a real
-                // login handler would emit.
-                let mut resp = axum::response::Response::new(Body::from("ok"));
-                resp.headers_mut().append(
-                    SET_COOKIE,
-                    HeaderValue::from_static("session=abc; HttpOnly"),
-                );
-                resp.headers_mut()
-                    .append(SET_COOKIE, HeaderValue::from_static("csrf=xyz; HttpOnly"));
-                resp
+            "/page",
+            get(move || {
+                let link = link.clone();
+                async move {
+                    let mut resp = axum::response::Response::new(Body::from("ok"));
+                    resp.headers_mut().append(
+                        link.clone(),
+                        HeaderValue::from_static("</a.css>; rel=preload"),
+                    );
+                    resp.headers_mut()
+                        .append(link, HeaderValue::from_static("</b.js>; rel=preload"));
+                    resp
+                }
             }),
         )
         .layer(CachePageLayer::new(cache));
@@ -337,23 +345,13 @@ async fn multi_value_set_cookie_headers_survive_round_trip() {
     // Warm the cache.
     let _ = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/page").body(Body::empty()).unwrap())
         .await
         .unwrap();
     // Hit.
     let r2 = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/page").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -362,19 +360,15 @@ async fn multi_value_set_cookie_headers_survive_round_trip() {
             .and_then(|h| h.to_str().ok()),
         Some("HIT")
     );
-    let cookies: Vec<String> = r2
+    let links: Vec<String> = r2
         .headers()
-        .get_all(HeaderName::from_static("set-cookie"))
+        .get_all(HeaderName::from_static("link"))
         .iter()
         .filter_map(|v| v.to_str().ok().map(str::to_owned))
         .collect();
-    assert_eq!(
-        cookies.len(),
-        2,
-        "both Set-Cookie headers must survive: {cookies:?}"
-    );
-    assert!(cookies.iter().any(|c| c.contains("session=abc")));
-    assert!(cookies.iter().any(|c| c.contains("csrf=xyz")));
+    assert_eq!(links.len(), 2, "both Link headers must survive: {links:?}");
+    assert!(links.iter().any(|c| c.contains("a.css")));
+    assert!(links.iter().any(|c| c.contains("b.js")));
 }
 
 /// Content-Type and other handler-set headers survive a HIT.
@@ -738,4 +732,169 @@ async fn get_and_query_do_not_collide() {
 
     let q = app.clone().oneshot(query_req("q=x")).await.unwrap();
     assert_eq!(body_to_string(q.into_body()).await, "q0:q=x");
+}
+
+// -------------------------------------------------------------- #1251
+// A cached page must never carry one user's identity to another.
+
+/// A 200 that mints a `Set-Cookie` is per-user and must not be cached:
+/// the second request runs the handler again (fresh cookie), rather than
+/// replaying the first user's cookie from cache.
+#[tokio::test]
+async fn response_setting_a_cookie_is_never_cached() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+
+    let cache = Arc::new(InMemoryCache::new());
+    let app: Router = Router::new()
+        .route(
+            "/me",
+            get(|| async {
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                axum::response::Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::SET_COOKIE, format!("session=user-{n}"))
+                    .body(Body::from(format!("hi user-{n}")))
+                    .unwrap()
+            }),
+        )
+        .layer(CachePageLayer::new(cache));
+
+    let r1 = app
+        .clone()
+        .oneshot(Request::builder().uri("/me").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        r1.headers().get(header::SET_COOKIE).unwrap(),
+        "session=user-0"
+    );
+
+    // Second request: if the response had been cached, we'd replay
+    // `session=user-0`. It must not be — the handler runs again.
+    let r2 = app
+        .clone()
+        .oneshot(Request::builder().uri("/me").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        r2.headers().get(header::SET_COOKIE).unwrap(),
+        "session=user-1",
+        "a Set-Cookie response was cached and replayed to the next request",
+    );
+    assert_eq!(body_to_string(r2.into_body()).await, "hi user-1");
+}
+
+/// `Cache-Control: private` opts a response out, like `no-store`.
+#[tokio::test]
+async fn private_response_is_not_cached() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+
+    let cache = Arc::new(InMemoryCache::new());
+    let app: Router = Router::new()
+        .route(
+            "/priv",
+            get(|| async {
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                axum::response::Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CACHE_CONTROL, "private, max-age=60")
+                    .body(Body::from(format!("body-{n}")))
+                    .unwrap()
+            }),
+        )
+        .layer(CachePageLayer::new(cache));
+
+    for _ in 0..2 {
+        app.clone()
+            .oneshot(Request::builder().uri("/priv").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+    }
+    // Two distinct handler runs → not cached.
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 2);
+}
+
+/// A request carrying `Cookie` is treated as per-user by default: it is
+/// not served a shared cached body, and its own response is not stored.
+#[tokio::test]
+async fn request_with_cookie_bypasses_shared_cache_by_default() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+
+    let cache = Arc::new(InMemoryCache::new());
+    let app: Router = Router::new()
+        .route(
+            "/p",
+            get(|| async {
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                format!("body-{n}")
+            }),
+        )
+        .layer(CachePageLayer::new(cache));
+
+    // Prime the cache with an anonymous request.
+    app.clone()
+        .oneshot(Request::builder().uri("/p").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    // A request with a Cookie must not be served the anonymous cached
+    // body — it bypasses to the handler.
+    let authed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/p")
+                .header(header::COOKIE, "session=abc")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Handler ran a second time for the cookie'd request.
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        authed
+            .headers()
+            .get("x-cache-status")
+            .and_then(|h| h.to_str().ok()),
+        None,
+        "a cookie-bearing request should bypass, not report HIT",
+    );
+}
+
+/// Opt-in restores caching for cookie-bearing requests on a route the
+/// app has declared public.
+#[tokio::test]
+async fn cache_authenticated_opt_in_allows_cookie_requests() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+
+    let cache = Arc::new(InMemoryCache::new());
+    let app: Router = Router::new()
+        .route(
+            "/public",
+            get(|| async {
+                let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+                format!("body-{n}")
+            }),
+        )
+        .layer(CachePageLayer::new(cache).cache_authenticated(true));
+
+    for _ in 0..2 {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/public")
+                    .header(header::COOKIE, "a=b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    // Second served from cache → handler ran once.
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 1);
 }
