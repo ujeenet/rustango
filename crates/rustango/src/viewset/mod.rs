@@ -1605,6 +1605,18 @@ fn build_lookup_filter(
     let column = field.column;
     let predicate =
         |op: Op, value: SqlValue| Some(WhereExpr::Predicate(Filter { column, op, value }));
+    // The escaped-LIKE builder: escapes the user value and pairs it with
+    // the matching `*Escaped` op in one place (#1257), so no arm can
+    // combine an escaped value with a plain `Op::Like` (or vice versa).
+    let escaped_like = |prefix: &str, suffix: &str, raw: &str, case_insensitive: bool| {
+        let escaped = crate::core::escape_like(raw);
+        let op = if case_insensitive {
+            Op::ILikeEscaped
+        } else {
+            Op::LikeEscaped
+        };
+        predicate(op, SqlValue::String(format!("{prefix}{escaped}{suffix}")))
+    };
     // #808 part 6 — six binary-comparison arms had byte-identical
     // bodies modulo the `Op` constant. Map the lookup token to its
     // `Op`, parse once, branch once.
@@ -1640,12 +1652,17 @@ fn build_lookup_filter(
             };
             predicate(op, SqlValue::List(parts))
         }
-        "contains" => predicate(Op::Like, SqlValue::String(format!("%{raw}%"))),
-        "icontains" => predicate(Op::ILike, SqlValue::String(format!("%{raw}%"))),
-        "startswith" => predicate(Op::Like, SqlValue::String(format!("{raw}%"))),
-        "istartswith" => predicate(Op::ILike, SqlValue::String(format!("{raw}%"))),
-        "endswith" => predicate(Op::Like, SqlValue::String(format!("%{raw}"))),
-        "iendswith" => predicate(Op::ILike, SqlValue::String(format!("%{raw}"))),
+        // Escape LIKE metacharacters in `raw` (URL-supplied) so `%`/`_`
+        // match literally, and pair with the *Escaped ops so the ESCAPE
+        // clause is emitted — required for correctness on SQLite
+        // (#1257). One helper owns the escape⟷op pairing so a future
+        // arm cannot mismatch them.
+        "contains" => escaped_like("%", "%", raw, false),
+        "icontains" => escaped_like("%", "%", raw, true),
+        "startswith" => escaped_like("", "%", raw, false),
+        "istartswith" => escaped_like("", "%", raw, true),
+        "endswith" => escaped_like("%", "", raw, false),
+        "iendswith" => escaped_like("%", "", raw, true),
         "isnull" => {
             let is_null = matches!(raw.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
             predicate(Op::IsNull, SqlValue::Bool(is_null))
@@ -2824,14 +2841,14 @@ mod lookup_tests {
     fn contains_wraps_with_percents_and_uses_like() {
         let f =
             extract_pred(build_lookup_filter(string_field(), Some("contains"), "hello").unwrap());
-        assert_eq!(f.op, Op::Like);
+        assert_eq!(f.op, Op::LikeEscaped);
         assert!(matches!(f.value, SqlValue::String(ref s) if s == "%hello%"));
     }
 
     #[test]
     fn icontains_uses_ilike() {
         let f = extract_pred(build_lookup_filter(string_field(), Some("icontains"), "hi").unwrap());
-        assert_eq!(f.op, Op::ILike);
+        assert_eq!(f.op, Op::ILikeEscaped);
         assert!(matches!(f.value, SqlValue::String(ref s) if s == "%hi%"));
     }
 

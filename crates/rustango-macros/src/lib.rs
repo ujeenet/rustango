@@ -432,48 +432,30 @@ fn expand_q(input: TokenStream2) -> syn::Result<TokenStream2> {
         "lte" => quote! {
             #root::core::Column::lte(#path::#base_ident, #value)
         },
+        // The escaped-LIKE lookups delegate to the typed Column
+        // methods, which escape the value and pair it with the
+        // *Escaped ops so `%` / `_` match literally on every dialect
+        // (#1257) — the macro no longer owns any pattern wrapping.
         "iexact" => quote! {
-            // Django emulates `__iexact` as case-insensitive equality.
-            // The non-wildcard `ILIKE value` is semantically identical
-            // for plain strings; LIKE-metachars `%` `_` in the rhs would
-            // accidentally match more — document the caveat.
-            #root::core::Column::ilike(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
+            #root::core::Column::iexact(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
         },
         "contains" => quote! {
-            #root::core::Column::like(
-                #path::#base_ident,
-                ::std::format!("%{}%", #value),
-            )
+            #root::core::Column::contains(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
         },
         "icontains" => quote! {
-            #root::core::Column::ilike(
-                #path::#base_ident,
-                ::std::format!("%{}%", #value),
-            )
+            #root::core::Column::icontains(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
         },
         "startswith" => quote! {
-            #root::core::Column::like(
-                #path::#base_ident,
-                ::std::format!("{}%", #value),
-            )
+            #root::core::Column::startswith(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
         },
         "istartswith" => quote! {
-            #root::core::Column::ilike(
-                #path::#base_ident,
-                ::std::format!("{}%", #value),
-            )
+            #root::core::Column::istartswith(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
         },
         "endswith" => quote! {
-            #root::core::Column::like(
-                #path::#base_ident,
-                ::std::format!("%{}", #value),
-            )
+            #root::core::Column::endswith(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
         },
         "iendswith" => quote! {
-            #root::core::Column::ilike(
-                #path::#base_ident,
-                ::std::format!("%{}", #value),
-            )
+            #root::core::Column::iendswith(#path::#base_ident, ::std::string::ToString::to_string(&(#value)))
         },
         "in" => quote! {
             #root::core::Column::is_in(#path::#base_ident, #value)

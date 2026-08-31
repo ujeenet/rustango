@@ -736,7 +736,7 @@ fn search_alone_emits_or_chain_with_one_param_per_column() {
     // a hair more explicit.
     assert_eq!(
         stmt.sql,
-        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1 OR "is_active" ILIKE $2)"#,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1 ESCAPE '!' OR "is_active" ILIKE $2 ESCAPE '!')"#,
     );
     assert_eq!(
         stmt.params,
@@ -764,7 +764,7 @@ fn search_combined_with_filter_uses_and() {
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(
         stmt.sql,
-        r#"SELECT "id", "name", "is_active" FROM "user" WHERE "is_active" = $1 AND ("name" ILIKE $2)"#,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE "is_active" = $1 AND ("name" ILIKE $2 ESCAPE '!')"#,
     );
     assert_eq!(
         stmt.params,
@@ -813,7 +813,7 @@ fn search_with_limit_offset_orders_clauses_correctly() {
     let stmt = pg().compile_select(&q).unwrap();
     assert_eq!(
         stmt.sql,
-        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1) LIMIT 10 OFFSET 20"#,
+        r#"SELECT "id", "name", "is_active" FROM "user" WHERE ("name" ILIKE $1 ESCAPE '!') LIMIT 10 OFFSET 20"#,
     );
 }
 
@@ -906,7 +906,8 @@ fn join_with_search_qualifies_search_columns() {
     };
     let stmt = pg().compile_select(&q).unwrap();
     assert!(
-        stmt.sql.contains(r#"WHERE ("post"."title" ILIKE $1)"#),
+        stmt.sql
+            .contains(r#"WHERE ("post"."title" ILIKE $1 ESCAPE '!')"#),
         "search column not qualified: {}",
         stmt.sql,
     );

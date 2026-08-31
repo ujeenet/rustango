@@ -1700,6 +1700,8 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__between` / `__range` | `BETWEEN … AND …` | 2-elt `SqlValue::List` | inclusive on both ends |
 | `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | string | case-insensitive emulated on MySQL/SQLite via `LOWER()` wrap; SQLite needs a `regexp` user-function |
 
+> **LIKE metacharacters are escaped.** `__contains` / `__startswith` / `__endswith` (and their `i` variants) treat the value as a **literal** substring — a `%` or `_` in it matches itself, not as a wildcard, matching Django. The framework escapes them and emits `ESCAPE '!'`, honored on all three dialects (#1257). For a raw pattern where you place your own `%` / `_`, use `__like` / `__ilike`, which bind the value verbatim.
+
 **Errors surface at `.compile()`, not at `.filter()` call time** — value-shape mismatches (e.g. `__in` with a scalar, `__isnull` with a non-bool, `__between` with the wrong arity) and unknown suffixes (`status__nope`) return `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` from `.compile()` so the fluent chain stays type-clean. Chained traversals (`author__name__icontains`) are **not** supported in v0.39 — the splitter takes the suffix after the first `__`, so the whole tail `name__icontains` is treated as an unknown suffix.
 
 Each filter call AND-joins to any preceding ones; mix Django-shape, `filter_op`, and `where_` freely on the same queryset.

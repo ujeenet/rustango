@@ -121,66 +121,72 @@ impl Q {
         Self::predicate(column, Op::ILike, value.into())
     }
 
-    /// Django `__contains` — `column LIKE '%value%'`. Wraps the
-    /// supplied string in `%` wildcards before binding.
+    /// Build one escaped-LIKE predicate: the user value is run through
+    /// [`crate::core::escape_like`] and paired with the matching
+    /// `*Escaped` op, so `%` / `_` in it match literally on every
+    /// dialect (#1257). The wrapping wildcards `prefix` / `suffix` are
+    /// added after escaping and keep their pattern meaning. Bundling the
+    /// escape with the op here is what makes the pairing invariant
+    /// unbreakable at the call sites below.
+    fn wrap_escaped(
+        column: &'static str,
+        prefix: &str,
+        suffix: &str,
+        value: impl AsRef<str>,
+        case_insensitive: bool,
+    ) -> Self {
+        let escaped = crate::core::escape_like(value.as_ref());
+        let op = if case_insensitive {
+            Op::ILikeEscaped
+        } else {
+            Op::LikeEscaped
+        };
+        Self::predicate(
+            column,
+            op,
+            SqlValue::String(format!("{prefix}{escaped}{suffix}")),
+        )
+    }
+
+    /// Django `__contains` — the value is a **literal** substring: `%`
+    /// and `_` in it match themselves (#1257). Use [`Q::like`] for a
+    /// raw pattern you build yourself.
     #[must_use]
     pub fn contains(column: &'static str, value: impl AsRef<str>) -> Self {
-        Self::predicate(
-            column,
-            Op::Like,
-            SqlValue::String(format!("%{}%", value.as_ref())),
-        )
+        Self::wrap_escaped(column, "%", "%", value, false)
     }
 
-    /// Django `__icontains` — `column ILIKE '%value%'`. Case-insensitive
-    /// substring match.
+    /// Django `__icontains` — case-insensitive literal substring match
+    /// (`%` / `_` in the value match themselves, #1257).
     #[must_use]
     pub fn icontains(column: &'static str, value: impl AsRef<str>) -> Self {
-        Self::predicate(
-            column,
-            Op::ILike,
-            SqlValue::String(format!("%{}%", value.as_ref())),
-        )
+        Self::wrap_escaped(column, "%", "%", value, true)
     }
 
-    /// Django `__startswith` — `column LIKE 'value%'`.
+    /// Django `__startswith` — literal prefix match (#1257).
     #[must_use]
     pub fn startswith(column: &'static str, value: impl AsRef<str>) -> Self {
-        Self::predicate(
-            column,
-            Op::Like,
-            SqlValue::String(format!("{}%", value.as_ref())),
-        )
+        Self::wrap_escaped(column, "", "%", value, false)
     }
 
-    /// Django `__istartswith` — `column ILIKE 'value%'`.
+    /// Django `__istartswith` — case-insensitive literal prefix match
+    /// (#1257).
     #[must_use]
     pub fn istartswith(column: &'static str, value: impl AsRef<str>) -> Self {
-        Self::predicate(
-            column,
-            Op::ILike,
-            SqlValue::String(format!("{}%", value.as_ref())),
-        )
+        Self::wrap_escaped(column, "", "%", value, true)
     }
 
-    /// Django `__endswith` — `column LIKE '%value'`.
+    /// Django `__endswith` — literal suffix match (#1257).
     #[must_use]
     pub fn endswith(column: &'static str, value: impl AsRef<str>) -> Self {
-        Self::predicate(
-            column,
-            Op::Like,
-            SqlValue::String(format!("%{}", value.as_ref())),
-        )
+        Self::wrap_escaped(column, "%", "", value, false)
     }
 
-    /// Django `__iendswith` — `column ILIKE '%value'`.
+    /// Django `__iendswith` — case-insensitive literal suffix match
+    /// (#1257).
     #[must_use]
     pub fn iendswith(column: &'static str, value: impl AsRef<str>) -> Self {
-        Self::predicate(
-            column,
-            Op::ILike,
-            SqlValue::String(format!("%{}", value.as_ref())),
-        )
+        Self::wrap_escaped(column, "%", "", value, true)
     }
 
     /// `column IN (v1, v2, …)`. Empty iterators are accepted at
@@ -394,7 +400,8 @@ mod tests {
         let WhereExpr::Predicate(f) = we else {
             panic!()
         };
-        assert_eq!(f.op, Op::Like);
+        // #1257 — contains escapes and pairs with the escaped op.
+        assert_eq!(f.op, Op::LikeEscaped);
         assert_eq!(f.value, SqlValue::String("%alice%".into()));
     }
 
