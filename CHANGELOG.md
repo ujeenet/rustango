@@ -4,6 +4,45 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.54.0] — 2026-08-31
+
+Security and correctness batch — a bug-sweep of the cache / concurrency / HTTP
+middleware, plus the multi-tenancy isolation fixes and a documentation overhaul.
+No API removals; one behaviour change worth calling out.
+
+**Security-relevant:**
+
+- `cache_page` no longer caches a response carrying `Set-Cookie` or serves a
+  cached body to an `Authorization`/`Cookie`-bearing request — it previously
+  replayed one user's session cookie to the next (#1251).
+- The cache-backed rate limiter hashes secret header values instead of storing
+  them raw as cache keys, and warns instead of silently collapsing keyless
+  clients into one shared bucket (#1252).
+- The counter behind account lockout, and the `DistributedLock` acquire, are now
+  atomic (`InMemoryCache::incr` / new `Cache::add` = `SET NX`) — the lockout
+  threshold is no longer evadable by parallel attempts, and a lock can't be
+  double-held, wedged, or left permanently unacquirable (#1253, #1254).
+- Schema-mode tenancy resets `search_path` on connection release, so a shared
+  registry connection can't leak one tenant's schema to the next borrower
+  (#1224); scoped pools are cached per tenant (#1235); scheduled sweeps fan out
+  per tenant, and cache/locks scope per tenant (#1226–#1229).
+
+**Behaviour change:** `cache_page` refuses by default to cache responses that set
+a cookie or are marked `Cache-Control: private`, and bypasses the shared cache
+for authenticated requests. A route known to be public despite such a header
+opts back in with `CachePageLayer::cache_authenticated(true)`.
+
+**Also:** `FileCache`/`DatabaseCache` sub-second TTL correctness groundwork
+(#1233), scheduler zero-period + shutdown fixes (#1256), ETag RFC-7232
+conformance (#1258), 160 broken doc links fixed across all four locales with a
+guard test, and Docker demoted from a prerequisite in the getting-started guide
+(#1247, #1248). Supply-chain: `rpassword`, `quinn-proto`, `crossbeam-epoch`,
+`spin` advisories cleared, and `cargo deny` widened to optional features and
+example lockfiles.
+
+`Cache::add` (atomic set-if-absent) is new public API; `CachePageLayer` and
+`TenantPoolsConfig` gained methods/fields. All additive.
+
 ### Fixed
 - **`DistributedLock` acquire was non-atomic off Redis and could wedge or never
   re-grant** (#1254). Acquire used an `incr` counter plus a *separate* token
@@ -74,8 +113,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   `INCRBY`); `DatabaseCache`'s default `incr` is still get-then-set, fine for a
   single process. A multi-threaded regression test drives 50–100 concurrent
   increments and asserts none are lost — it fails against the pre-fix code.
-
-### Fixed
 - **160 broken documentation references, across all four locales** (#1248).
   Reported as three 404s on the docs site; an audit found the whole class.
 
