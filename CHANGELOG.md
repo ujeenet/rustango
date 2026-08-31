@@ -5,6 +5,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ## [Unreleased]
 
 ### Fixed
+- **ETag middleware ignored `If-None-Match` lists and `*`, and dropped required
+  headers from the 304** (#1258). It compared the whole `If-None-Match` header
+  against one etag, so a conditional request sending a list (`"a", "b"`) or the
+  wildcard `*` — both valid per RFC 7232 — got a full `200` where a `304` was
+  due. And the `304` it did send carried only `ETag`, dropping `Cache-Control` /
+  `Vary` / `Expires` that RFC 7232 §4.1 requires, which could let a downstream
+  cache apply the wrong freshness. `If-None-Match` is now parsed as a list (and
+  `*`), and the 304 carries the caching-relevant headers.
 - **The scheduler panicked on a zero period and left in-flight jobs running
   after shutdown** (#1256). `every(_, Duration::ZERO, _)` panicked
   `tokio::time::interval` at spawn, silently killing that task's loop — now

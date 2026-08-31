@@ -14,10 +14,12 @@
 //! ## How it works
 //!
 //! For every successful (2xx) response with a non-empty body:
-//! 1. Compute a SHA-256 hash of the body bytes
+//! 1. Compute a hash of the body bytes (64-bit FNV-1a + length)
 //! 2. Set `ETag: "<base64 hash>"` on the response
-//! 3. If the request had `If-None-Match: <same etag>`, replace the body with
-//!    empty + `304 Not Modified` to save bandwidth
+//! 3. If the request's `If-None-Match` matches — a comma-separated list
+//!    of etags, or the wildcard `*` — reply `304 Not Modified` with an
+//!    empty body, carrying the caching headers (`Cache-Control`, `Vary`,
+//!    `Expires`, …) a matching 200 would have sent (RFC 7232 §4.1).
 //!
 //! Non-2xx responses are passed through untouched.
 //!
@@ -115,15 +117,34 @@ async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response
     }
 
     if let Some(client) = client_etag {
-        if normalize_etag(&client) == normalize_etag(&etag) {
-            // 304 Not Modified — drop body
+        // `If-None-Match` is a comma-separated list, or the wildcard `*`
+        // which matches any current representation (#1258). Weak
+        // comparison applies for a conditional GET (RFC 7232 §3.2).
+        let ours = normalize_etag(&etag);
+        let matched = client.trim() == "*"
+            || client
+                .split(',')
+                .any(|candidate| normalize_etag(candidate) == ours);
+        if matched {
+            // 304 Not Modified — drop the body, but carry the headers a
+            // matching 200 would have sent that govern caching (RFC 7232
+            // §4.1), not just the ETag. Dropping `Cache-Control` / `Vary`
+            // would let a downstream cache apply the wrong freshness or
+            // vary key.
             let mut not_modified = Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .body(Body::empty())
                 .unwrap();
-            // Preserve the ETag header on 304 (RFC 7232)
+            let carry = [
+                ETAG,
+                axum::http::header::CACHE_CONTROL,
+                axum::http::header::VARY,
+                axum::http::header::EXPIRES,
+                axum::http::header::CONTENT_LOCATION,
+                axum::http::header::DATE,
+            ];
             for (k, v) in response.headers() {
-                if k == ETAG {
+                if carry.contains(k) {
                     not_modified.headers_mut().insert(k.clone(), v.clone());
                 }
             }
@@ -176,6 +197,104 @@ fn normalize_etag(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use axum::http::header;
+    use axum::routing::get;
+    use tower::ServiceExt as _;
+
+    fn app() -> Router {
+        Router::new()
+            .route(
+                "/page",
+                get(|| async {
+                    axum::response::Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CACHE_CONTROL, "max-age=60")
+                        .header(header::VARY, "Accept-Encoding")
+                        .body(Body::from("stable-body"))
+                        .unwrap()
+                }),
+            )
+            .etag(EtagLayer::new())
+    }
+
+    async fn etag_of(app: &Router) -> String {
+        let r = app
+            .clone()
+            .oneshot(Request::builder().uri("/page").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        r.headers().get(ETAG).unwrap().to_str().unwrap().to_owned()
+    }
+
+    /// #1258 — `If-None-Match: *` matches any representation → 304.
+    #[tokio::test]
+    async fn if_none_match_wildcard_returns_304() {
+        let app = app();
+        let r = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/page")
+                    .header(IF_NONE_MATCH, "*")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    /// #1258 — a comma-separated `If-None-Match` list containing our etag
+    /// must 304, not return a full 200.
+    #[tokio::test]
+    async fn if_none_match_list_matches_one_entry() {
+        let app = app();
+        let ours = etag_of(&app).await;
+        let list = format!("\"deadbeef\", {ours}");
+        let r = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/page")
+                    .header(IF_NONE_MATCH, list)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::NOT_MODIFIED,
+            "list match should 304"
+        );
+    }
+
+    /// #1258 — the 304 must carry the caching headers a 200 would
+    /// (RFC 7232 §4.1), not just the ETag.
+    #[tokio::test]
+    async fn not_modified_carries_caching_headers() {
+        let app = app();
+        let ours = etag_of(&app).await;
+        let r = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/page")
+                    .header(IF_NONE_MATCH, ours)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            r.headers().get(header::CACHE_CONTROL).unwrap(),
+            "max-age=60"
+        );
+        assert_eq!(r.headers().get(header::VARY).unwrap(), "Accept-Encoding");
+        assert!(r.headers().get(ETAG).is_some());
+    }
 
     #[test]
     fn etag_is_deterministic_for_same_bytes() {
