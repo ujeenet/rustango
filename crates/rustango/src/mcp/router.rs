@@ -77,10 +77,9 @@ pub fn secure_tenant_router() -> Router {
     tenant_router_authed(default_jwt())
 }
 
-/// Defensive cap on a JSON-RPC request body (tighter than axum's 2 MiB
-/// default). MCP messages are small; this bounds a hostile oversized payload.
-#[cfg(feature = "config")]
-const MCP_MAX_BODY_BYTES: usize = 1024 * 1024;
+// The JSON-RPC body cap defaults to 1 MiB (tighter than axum's 2 MiB) and
+// is configurable via `[mcp] max_body_bytes` for hosts whose tools accept
+// inline payloads (e.g. base64 media uploads).
 
 /// Agent-guarded tenant router configured from `[mcp]` settings. Applies the
 /// full knob set (#1098): `token_ttl_secs` → agent-token lifetime,
@@ -114,10 +113,10 @@ pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings)
             std::time::Duration::from_secs(60),
         ));
     }
-    // Defensive body cap on every MCP route.
+    // Defensive body cap on every MCP route (`[mcp] max_body_bytes`).
     {
         use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt};
-        router = router.body_limit(BodyLimitLayer::new(MCP_MAX_BODY_BYTES));
+        router = router.body_limit(BodyLimitLayer::new(settings.max_body_bytes()));
     }
     router
 }

@@ -193,7 +193,23 @@ grant_skill_pool(&pool, "acme", "calc-bot", "calculator").await?;
 The client exchanges its credential for a **tenant-pinned, scoped JWT** at
 `POST /mcp/token` (or the OAuth `client_credentials` flow at `/mcp/oauth/token`).
 The server resolves the grant into the token's `skills` + `tools` claims; every
-request re-verifies it. The effect, verified end to end:
+request re-verifies it.
+
+**Or skip the exchange entirely (#1272):** the raw `prefix.secret` credential
+itself is accepted as the Bearer token — paste the show-once key straight into
+any MCP client:
+
+```bash
+claude mcp add --transport http my-app https://acme.example/mcp \
+  --header "Authorization: Bearer 3f9c1a2b.7d…"
+```
+
+On the raw-key path the server verifies the secret (argon2, with a short
+process-local cache so the hash isn't recomputed per request), re-checks
+liveness, and resolves grants **on every request** — a user-owned key always
+reflects its owner's live RBAC, and revocation applies immediately instead of
+waiting out a JWT's TTL. Set `[mcp] rate_limit_per_minute` in production to
+bound verification work. The effect, verified end to end:
 
 ```rust
 // tools/list returns ONLY the granted tool, with its JSON Schema:
@@ -350,6 +366,8 @@ enable_sse            = true     # serve the GET {prefix} SSE stream
 allowed_origins       = []       # CORS allow-list (empty = same-origin only)
 rate_limit_per_minute = 0        # per-IP cap (0/unset = unlimited)
 max_tools_listed      = 0        # tools/list page size (0/unset = unlimited)
+max_body_bytes        = 1048576  # JSON-RPC body cap — raise for tools that
+                                 # accept inline payloads (base64 uploads)
 ```
 
 ---

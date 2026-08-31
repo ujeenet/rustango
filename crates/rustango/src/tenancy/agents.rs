@@ -232,6 +232,42 @@ pub async fn authenticate_agent_pool(
     }
 }
 
+/// Authenticate a full `prefix.secret` credential by its **secret prefix**
+/// (the lookup half) rather than the agent name — the shape a bearer token
+/// carries when the raw credential itself is presented (#1272), where the
+/// client never knows the agent's name. Same fail-closed + timing-neutral
+/// contract as [`authenticate_agent_pool`].
+///
+/// # Errors
+/// Propagates DB errors only; an unverifiable secret is `Ok(None)`.
+pub async fn authenticate_agent_by_prefix_pool(
+    pool: &Pool,
+    prefix: &str,
+    secret: &str,
+) -> Result<Option<Agent>, AgentError> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
+    let Some(agent) = Agent::objects()
+        .where_(Agent::secret_prefix.eq(prefix))
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+        .filter(|a| a.active)
+    else {
+        // Timing-neutral for unknown prefixes (#1099).
+        super::password::verify_dummy(secret);
+        return Ok(None);
+    };
+
+    match super::password::verify(secret, &agent.secret_hash) {
+        Ok(true) => Ok(Some(agent)),
+        _ => Ok(None),
+    }
+}
+
 // ============================================================= skills (Slice 4)
 // Skills are the grant unit (epic #1013, Slice 4 / #1017): a skill bundles a
 // set of tools (+ a prompt + resources, Slice 5). Granting a skill to an agent

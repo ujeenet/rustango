@@ -236,23 +236,39 @@ pub(crate) async fn post_authed(
     let Some(token) = bearer(&headers) else {
         return unauthorized(&headers, &uri);
     };
-    let Some(agent) = verify_agent_token(jwt, token, &t.org.slug).await else {
-        return unauthorized(&headers, &uri);
-    };
-    // Revocation immediacy: the JWT is stateless, so re-check at request time
-    // that the agent (and, for a user-owned key, its owner) still exists and is
-    // active. A revoked / deactivated key is refused straight away rather than
-    // lingering until the token expires.
-    match crate::tenancy::agent_token_still_valid_pool(t.pool(), agent.agent_id, agent.user_id)
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => return unauthorized(&headers, &uri),
-        Err(e) => {
-            tracing::warn!(error = %e, "mcp agent liveness re-check failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed").into_response();
+    // Two accepted bearer shapes: a minted agent JWT, or the raw
+    // `name.secret` credential itself (#1272) — the copy-paste key a member
+    // generates in an app's UI works directly in any MCP client without a
+    // token-exchange step. The raw path verifies liveness and resolves grants
+    // per request inside [`verify_raw_agent_credential`], so RBAC changes and
+    // revocation apply immediately (no 15-minute JWT window).
+    let agent = match verify_agent_token(jwt, token, &t.org.slug).await {
+        Some(agent) => {
+            // Revocation immediacy: the JWT is stateless, so re-check at
+            // request time that the agent (and, for a user-owned key, its
+            // owner) still exists and is active. A revoked / deactivated key
+            // is refused straight away rather than lingering until expiry.
+            match crate::tenancy::agent_token_still_valid_pool(
+                t.pool(),
+                agent.agent_id,
+                agent.user_id,
+            )
+            .await
+            {
+                Ok(true) => agent,
+                Ok(false) => return unauthorized(&headers, &uri),
+                Err(e) => {
+                    tracing::warn!(error = %e, "mcp agent liveness re-check failed");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed")
+                        .into_response();
+                }
+            }
         }
-    }
+        None => match verify_raw_agent_credential(t.pool(), &t.org.slug, token).await {
+            Some(agent) => agent,
+            None => return unauthorized(&headers, &uri),
+        },
+    };
     // Agent verified + tenant-pinned: hand the tools layer the resolved
     // tenant pool + principal so `tools/call` runs against the right tenant.
     let ctx = super::tools::McpContext {
@@ -263,6 +279,137 @@ pub(crate) async fn post_authed(
         cancel: super::progress::CancelToken::never(),
     };
     handle_message(&state, &body, Some(ctx)).await
+}
+
+/// Resolve a raw `name.secret` agent credential presented directly as the
+/// Bearer token (#1272). Returns the same [`McpAgent`] shape
+/// [`verify_agent_token`] yields, or `None` for any failure — fail-closed.
+///
+/// This is the copy-paste path: the show-once key a member generates works
+/// directly in any MCP client (`Authorization: Bearer <prefix.secret>`)
+/// without a token-exchange step. Liveness
+/// ([`crate::tenancy::agent_token_still_valid_pool`]) and grant resolution
+/// run on **every request**, so a user-owned key always reflects its owner's
+/// live RBAC and revocation is immediate — strictly fresher than a minted
+/// JWT's claim snapshot.
+///
+/// Cost control: the argon2 verification is the expensive step, so a
+/// successful verification is remembered for [`RAW_KEY_CACHE_TTL`] in a
+/// small bounded, process-local cache keyed by `(tenant, sha256(token))`.
+/// Only the *hash check* is skipped on a cache hit — liveness and grants are
+/// never cached. A garbage bearer never reaches argon2: the shape gate
+/// requires a `name.secret` split, and
+/// [`crate::tenancy::authenticate_agent_pool`] burns a dummy verification
+/// for unknown names to stay timing-neutral (#1099).
+pub async fn verify_raw_agent_credential(
+    pool: &crate::sql::Pool,
+    slug: &str,
+    token: &str,
+) -> Option<McpAgent> {
+    // Shape gate: credentials are `<8-hex prefix>.<hex secret>` (see
+    // `tenancy::agents::generate_credential`) — anything else (a JWT, a
+    // random string) is refused before any DB or argon2 work.
+    let (prefix, secret) = token.split_once('.')?;
+    let is_hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if prefix.len() != 8 || !is_hex(prefix) || !is_hex(secret) {
+        return None;
+    }
+
+    let cache_key = raw_key_cache_key(slug, token);
+    let (agent_id, user_id) = match raw_key_cache_get(&cache_key) {
+        Some(hit) => hit,
+        None => {
+            let agent =
+                match crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret).await
+                {
+                    Ok(Some(a)) => a,
+                    Ok(None) => return None,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "mcp raw-key authentication failed");
+                        return None;
+                    }
+                };
+            let agent_id = agent.id.get().copied().unwrap_or_default();
+            raw_key_cache_put(cache_key, (agent_id, agent.user_id));
+            (agent_id, agent.user_id)
+        }
+    };
+
+    // Liveness on every request (covers the cache-hit path too): a revoked
+    // key or a deactivated owner is refused immediately.
+    match crate::tenancy::agent_token_still_valid_pool(pool, agent_id, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "mcp raw-key liveness check failed");
+            return None;
+        }
+    }
+
+    // Grants resolve fresh on every request — never cached.
+    let grants = match user_id {
+        Some(uid) => crate::tenancy::resolve_user_agent_grants_pool(pool, agent_id, uid).await,
+        None => crate::tenancy::resolve_agent_grants_pool(pool, agent_id).await,
+    };
+    let (skills, tools) = match grants {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "mcp raw-key grant resolution failed");
+            return None;
+        }
+    };
+    Some(McpAgent {
+        agent_id,
+        tenant: slug.to_owned(),
+        skills,
+        tools,
+        user_id,
+        jti: format!("raw:{agent_id}"),
+    })
+}
+
+/// TTL for a positive raw-key verification (argon2 skip window).
+const RAW_KEY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Bound on cached verifications; oldest entries are evicted past this.
+const RAW_KEY_CACHE_CAP: usize = 256;
+
+type RawKeyCache = std::collections::HashMap<[u8; 32], ((i64, Option<i64>), std::time::Instant)>;
+
+fn raw_key_cache() -> &'static std::sync::Mutex<RawKeyCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<RawKeyCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Cache key = SHA-256 over `tenant \0 token` — tenant-scoped so a credential
+/// verified against one tenant's pool can never authenticate on another.
+fn raw_key_cache_key(slug: &str, token: &str) -> [u8; 32] {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(slug.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(token.as_bytes());
+    hasher.finalize().into()
+}
+
+fn raw_key_cache_get(key: &[u8; 32]) -> Option<(i64, Option<i64>)> {
+    let cache = raw_key_cache().lock().ok()?;
+    let (identity, verified_at) = cache.get(key)?;
+    (verified_at.elapsed() < RAW_KEY_CACHE_TTL).then_some(*identity)
+}
+
+fn raw_key_cache_put(key: [u8; 32], identity: (i64, Option<i64>)) {
+    let Ok(mut cache) = raw_key_cache().lock() else {
+        return;
+    };
+    if cache.len() >= RAW_KEY_CACHE_CAP {
+        // Drop expired entries first; if still over cap, clear outright —
+        // the cache is a pure optimization and refilling costs one argon2.
+        cache.retain(|_, (_, at)| at.elapsed() < RAW_KEY_CACHE_TTL);
+        if cache.len() >= RAW_KEY_CACHE_CAP {
+            cache.clear();
+        }
+    }
+    cache.insert(key, (identity, std::time::Instant::now()));
 }
 
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
