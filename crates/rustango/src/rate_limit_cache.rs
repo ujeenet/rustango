@@ -53,6 +53,43 @@ use axum::Router;
 use crate::cache::BoxedCache;
 use crate::rate_limit::KeyBy;
 
+/// One-way hash of a bucket discriminator (#1252). A `SHA-256` prefix —
+/// enough to distribute keys and to make the same client hash the same,
+/// while never exposing a secret header value (API key / bearer token)
+/// as a readable cache key.
+fn hash_discriminator(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(value.as_bytes());
+    // 16 hex chars (64 bits) — collision-negligible for a rate-limit
+    // keyspace, and short enough to keep cache keys compact.
+    digest[..8]
+        .iter()
+        .fold(String::with_capacity(16), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// Warn (at most once per process) that the limiter could not derive a
+/// per-client key and is falling back to a shared bucket — a
+/// misconfiguration that turns the limiter into a site-wide throttle
+/// (#1252). Rate-limited to one line so a hot path can't flood logs.
+fn warn_missing_discriminator(what: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            target: "rustango::rate_limit",
+            discriminator = %what,
+            "rate limiter could not derive a per-client key; ALL such requests \
+             share ONE bucket, so one client throttles everyone. For IP keying, \
+             serve with `into_make_service_with_connect_info::<SocketAddr>()`; \
+             for header keying, ensure the header is present.",
+        );
+    }
+}
+
 /// Fixed-window counter rate limiter backed by a [`Cache`](crate::cache::Cache).
 ///
 /// Cheap to clone (everything is `Arc`-wrapped or `Copy`).
@@ -98,13 +135,25 @@ impl CacheRateLimitLayer {
                 .extensions()
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|ci| ci.ip().to_string())
-                .unwrap_or_else(|| "<no-ip>".to_owned()),
+                .unwrap_or_else(|| {
+                    warn_missing_discriminator("IP (ConnectInfo missing)");
+                    "<no-ip>".to_owned()
+                }),
+            // Hash the header value, never store it raw (#1252). Keyed by
+            // `authorization` / `x-api-key`, the raw value is a live
+            // secret; this counter lives in a shared cache (Redis), so a
+            // raw key would leak credentials to anyone who can enumerate
+            // keys (`SCAN`, an RDB dump). A SHA-256 prefix distributes
+            // just as well and is one-way.
             KeyBy::Header(name) => req
                 .headers()
                 .get(*name)
                 .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-                .unwrap_or_else(|| "<no-header>".to_owned()),
+                .map(hash_discriminator)
+                .unwrap_or_else(|| {
+                    warn_missing_discriminator(name);
+                    "<no-header>".to_owned()
+                }),
             KeyBy::Global => "<global>".to_owned(),
         }
     }
@@ -219,6 +268,25 @@ mod tests {
         let cache: BoxedCache = Arc::new(InMemoryCache::new());
         CacheRateLimitLayer::new(cache, capacity, Duration::from_secs(window_secs))
             .key_prefix("test")
+    }
+
+    #[test]
+    fn header_value_is_hashed_not_stored_raw() {
+        // #1252 — a secret header value (API key / bearer token) must
+        // never appear verbatim in a cache key.
+        let secret = "super-secret-api-key-abc123";
+        let h = hash_discriminator(secret);
+        assert_ne!(h, secret, "value must be transformed");
+        assert!(
+            !h.contains("secret"),
+            "raw secret must not leak into the key"
+        );
+        assert_eq!(h.len(), 16, "expected a 16-hex-char digest prefix");
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        // Deterministic: the same client hashes to the same bucket.
+        assert_eq!(h, hash_discriminator(secret));
+        // Distinct values → distinct keys.
+        assert_ne!(h, hash_discriminator("a-different-key"));
     }
 
     #[tokio::test]

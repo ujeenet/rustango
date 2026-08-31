@@ -166,6 +166,9 @@ let app = axum::Router::new()
     );
 ```
 
+> **Keyear por una cabecera secreta es seguro de compartir.** Con `key_by(KeyBy::Header("authorization"))` o `"x-api-key"`, el limitador respaldado por caché **hashea** el valor de la cabecera antes de usarlo como clave (#1252), de modo que un Redis compartido nunca almacena una credencial viva donde alguien con acceso de lectura a las claves pudiera cosecharla. `KeyBy::Ip` necesita `ConnectInfo` (o un `RealIpLayer` delante); sin ello, el limitador avisa una vez y recae en un único bucket compartido.
+
+
 ---
 
 ## Permitir o bloquear IPs

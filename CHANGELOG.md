@@ -5,6 +5,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ## [Unreleased]
 
 ### Fixed
+- **The cache-backed rate limiter leaked secrets and shared one bucket among
+  keyless clients** (#1252). Keyed by `Authorization` / `x-api-key`, it used the
+  raw header value as the cache key — so a shared Redis stored live credentials
+  where anyone able to enumerate keys (`SCAN`, an RDB dump) could harvest them.
+  The value is now hashed (a SHA-256 prefix) before use. And when the limiter
+  cannot derive a per-client key — `KeyBy::Ip` with no `ConnectInfo`, or a
+  missing header — every request fell into one shared bucket, so one client
+  throttled the whole site; it now logs a one-time warning so the
+  misconfiguration is visible. The in-process `RateLimitLayer` keeps raw keys
+  (they never leave the process) but gets the same warning.
 - **The failure counter behind account lockout, distributed locks, and rate
   limiting was not atomic** (#1253). `AccountLockout::record_failure` did a
   get-parse-set, which loses updates under concurrent failed logins: several
