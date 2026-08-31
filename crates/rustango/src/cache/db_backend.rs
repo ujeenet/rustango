@@ -289,16 +289,15 @@ impl Cache for DatabaseCache {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
         let p = dialect.placeholder(1);
-        // Escape the escape character first, or `!` in a prefix would
-        // swallow the character after it.
-        let pattern = format!(
-            "{}%",
-            prefix
-                .replace('!', "!!")
-                .replace('%', "!%")
-                .replace('_', "!_")
+        // One escape algorithm for the whole crate (#1257 promoted this
+        // module's `!`-based escaping to `core::escape_like`); reusing
+        // it here means the escape character can never drift between
+        // the cache and the ORM's LIKE lookups.
+        let pattern = format!("{}%", crate::core::escape_like(prefix));
+        let sql = format!(
+            "DELETE FROM {table} WHERE cache_key LIKE {p}{}",
+            crate::core::LIKE_ESCAPE_CLAUSE
         );
-        let sql = format!("DELETE FROM {table} WHERE cache_key LIKE {p} ESCAPE '!'");
         raw_execute_pool(&self.pool, &sql, vec![SqlValue::String(pattern)])
             .await
             .map_err(|e| CacheError::Connection(format!("delete_prefix: {e}")))?;

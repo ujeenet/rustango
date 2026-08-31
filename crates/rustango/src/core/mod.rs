@@ -25,11 +25,11 @@ pub use error::QueryError;
 pub use expr::{BinOp, CaseBranch, Expr, JsonPathStep, ScalarFn, VectorMetric, F};
 pub use field_type::{ArrayElem, FieldType, RangeElem};
 pub use query::{
-    AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery, ColumnFilter,
-    CompoundBranch, ConflictClause, CountQuery, CtFilter, DeleteQuery, DerivedSource, DistinctMode,
-    Filter, InsertQuery, Join, JoinKind, LockMode, NullsOrder, Op, OrderClause, OrderItem,
-    RelAggKind, RelCorrelation, SearchClause, SelectQuery, SetOp, SubqueryJoin, UpdateQuery,
-    WhereExpr,
+    escape_like, AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery,
+    ColumnFilter, CompoundBranch, ConflictClause, CountQuery, CtFilter, DeleteQuery, DerivedSource,
+    DistinctMode, Filter, InsertQuery, Join, JoinKind, LockMode, NullsOrder, Op, OrderClause,
+    OrderItem, RelAggKind, RelCorrelation, SearchClause, SelectQuery, SetOp, SubqueryJoin,
+    UpdateQuery, WhereExpr, LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CLAUSE,
 };
 pub use schema::{
     infer_app_label_from_module_path, AdminConfig, CheckConstraint, CompositeFkRelation,

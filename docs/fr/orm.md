@@ -1700,6 +1700,8 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__between` / `__range` | `BETWEEN … AND …` | `SqlValue::List` à 2 éléments | inclusif aux deux bornes |
 | `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | chaîne | insensible à la casse émulé sur MySQL/SQLite via encapsulation `LOWER()` ; SQLite nécessite une fonction utilisateur `regexp` |
 
+> **Les métacaractères de LIKE sont échappés.** `__contains` / `__startswith` / `__endswith` (et leurs variantes `i`) traitent la valeur comme une sous-chaîne **littérale** — un `%` ou `_` y correspond à lui-même, pas comme joker, comme dans Django. Le framework les échappe et émet `ESCAPE '!'`, respecté sur les trois dialectes (#1257). Pour un motif brut où vous placez vos propres `%` / `_`, utilisez `__like` / `__ilike`, qui lient la valeur telle quelle.
+
 **Les erreurs remontent à `.compile()`, pas au moment de l'appel `.filter()`** — les incohérences de forme de valeur (p. ex. `__in` avec un scalaire, `__isnull` avec un non-bool, `__between` avec la mauvaise arité) et les suffixes inconnus (`status__nope`) renvoient `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` depuis `.compile()` afin que la chaîne fluide reste propre au niveau du typage. Les traversées chaînées (`author__name__icontains`) ne sont **pas** prises en charge en v0.39 — le séparateur prend le suffixe après le premier `__`, donc toute la queue `name__icontains` est traitée comme un suffixe inconnu.
 
 Chaque appel de filtre se joint par AND à ceux qui le précèdent ; mélangez librement forme Django, `filter_op` et `where_` sur le même queryset.
