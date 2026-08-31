@@ -4,6 +4,27 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+- **LIKE lookups did not escape user wildcards, on any dialect** (#1257).
+  `__contains` / `__startswith` / `__endswith` (and the admin/viewset `?q=`
+  search and `template_views` list search) built `%value%` from raw user input
+  with no escaping and no `ESCAPE` clause — so a `%` or `_` typed by a user acted
+  as a SQL wildcard (`50%` matched "50" then anything; a lone `%` matched every
+  row — a table-scan foot-gun), diverging from Django, which treats the value as
+  a literal substring. The one path that *did* escape (`template_views`, with
+  `\`) was itself wrong on SQLite, which has no default LIKE escape character.
+
+  Now escaped with a portable `!` escape char and emitted as `LIKE ? ESCAPE '!'`
+  via new `Op::LikeEscaped` / `Op::ILikeEscaped` (`\` is not portable — MySQL
+  eats it as a string-literal escape; `!` is why the cache layer chose it too).
+  Verified live on **all three backends** (SQLite/PG/MySQL) that `%`, `_` and `!`
+  now match literally. Raw `__like` / `__ilike` still bind the caller's pattern
+  verbatim (they own the wildcards).
+
+  **Behaviour change:** `name__contains = "50%"` now matches a literal `50%`
+  instead of "50 then anything". New public API: `core::escape_like`,
+  `Op::LikeEscaped`, `Op::ILikeEscaped`.
+
 ## [0.54.0] — 2026-08-31
 
 Security and correctness batch — a bug-sweep of the cache / concurrency / HTTP

@@ -1640,12 +1640,33 @@ fn build_lookup_filter(
             };
             predicate(op, SqlValue::List(parts))
         }
-        "contains" => predicate(Op::Like, SqlValue::String(format!("%{raw}%"))),
-        "icontains" => predicate(Op::ILike, SqlValue::String(format!("%{raw}%"))),
-        "startswith" => predicate(Op::Like, SqlValue::String(format!("{raw}%"))),
-        "istartswith" => predicate(Op::ILike, SqlValue::String(format!("{raw}%"))),
-        "endswith" => predicate(Op::Like, SqlValue::String(format!("%{raw}"))),
-        "iendswith" => predicate(Op::ILike, SqlValue::String(format!("%{raw}"))),
+        // Escape LIKE metacharacters in `raw` (URL-supplied) so `%`/`_`
+        // match literally, and pair with the *Escaped ops so `ESCAPE '!'`
+        // is emitted — required for correctness on SQLite (#1257).
+        "contains" => predicate(
+            Op::LikeEscaped,
+            SqlValue::String(format!("%{}%", crate::core::escape_like(raw))),
+        ),
+        "icontains" => predicate(
+            Op::ILikeEscaped,
+            SqlValue::String(format!("%{}%", crate::core::escape_like(raw))),
+        ),
+        "startswith" => predicate(
+            Op::LikeEscaped,
+            SqlValue::String(format!("{}%", crate::core::escape_like(raw))),
+        ),
+        "istartswith" => predicate(
+            Op::ILikeEscaped,
+            SqlValue::String(format!("{}%", crate::core::escape_like(raw))),
+        ),
+        "endswith" => predicate(
+            Op::LikeEscaped,
+            SqlValue::String(format!("%{}", crate::core::escape_like(raw))),
+        ),
+        "iendswith" => predicate(
+            Op::ILikeEscaped,
+            SqlValue::String(format!("%{}", crate::core::escape_like(raw))),
+        ),
         "isnull" => {
             let is_null = matches!(raw.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
             predicate(Op::IsNull, SqlValue::Bool(is_null))
@@ -2824,14 +2845,14 @@ mod lookup_tests {
     fn contains_wraps_with_percents_and_uses_like() {
         let f =
             extract_pred(build_lookup_filter(string_field(), Some("contains"), "hello").unwrap());
-        assert_eq!(f.op, Op::Like);
+        assert_eq!(f.op, Op::LikeEscaped);
         assert!(matches!(f.value, SqlValue::String(ref s) if s == "%hello%"));
     }
 
     #[test]
     fn icontains_uses_ilike() {
         let f = extract_pred(build_lookup_filter(string_field(), Some("icontains"), "hi").unwrap());
-        assert_eq!(f.op, Op::ILike);
+        assert_eq!(f.op, Op::ILikeEscaped);
         assert!(matches!(f.value, SqlValue::String(ref s) if s == "%hi%"));
     }
 

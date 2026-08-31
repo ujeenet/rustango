@@ -2986,27 +2986,27 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
         "iexact" => Ok(pair(field, Op::ILike, value)),
         "contains" => {
             let v = wrap_like(&value, "%", "%", &field, suffix)?;
-            Ok(pair(field, Op::Like, v))
+            Ok(pair(field, Op::LikeEscaped, v))
         }
         "icontains" => {
             let v = wrap_like(&value, "%", "%", &field, suffix)?;
-            Ok(pair(field, Op::ILike, v))
+            Ok(pair(field, Op::ILikeEscaped, v))
         }
         "startswith" => {
             let v = wrap_like(&value, "", "%", &field, suffix)?;
-            Ok(pair(field, Op::Like, v))
+            Ok(pair(field, Op::LikeEscaped, v))
         }
         "istartswith" => {
             let v = wrap_like(&value, "", "%", &field, suffix)?;
-            Ok(pair(field, Op::ILike, v))
+            Ok(pair(field, Op::ILikeEscaped, v))
         }
         "endswith" => {
             let v = wrap_like(&value, "%", "", &field, suffix)?;
-            Ok(pair(field, Op::Like, v))
+            Ok(pair(field, Op::LikeEscaped, v))
         }
         "iendswith" => {
             let v = wrap_like(&value, "%", "", &field, suffix)?;
-            Ok(pair(field, Op::ILike, v))
+            Ok(pair(field, Op::ILikeEscaped, v))
         }
         // Raw LIKE / ILIKE / NOT LIKE / NOT ILIKE — Eloquent
         // `whereLike` / `whereNotLike` parity. Unlike `__contains` /
@@ -3236,7 +3236,13 @@ fn wrap_like(
             });
         }
     };
-    Ok(SqlValue::String(format!("{prefix}{s}{suffix_char}")))
+    // Escape LIKE metacharacters in the user value so `%` / `_` match
+    // literally (#1257) — the wrapping wildcards `prefix`/`suffix_char`
+    // are added AFTER escaping so they keep their pattern meaning. The
+    // resulting value is only correct under `ESCAPE '!'`, so every
+    // caller pairs it with `Op::LikeEscaped` / `Op::ILikeEscaped`.
+    let escaped = crate::core::escape_like(s);
+    Ok(SqlValue::String(format!("{prefix}{escaped}{suffix_char}")))
 }
 
 /// Human-readable shape name for an `SqlValue` — used in

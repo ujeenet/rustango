@@ -3539,7 +3539,13 @@ pub(super) fn write_where_with_search(
             if i > 0 {
                 b.sql.push_str(" OR ");
             }
-            b.params.push(SqlValue::String(format!("%{}%", s.query)));
+            // Escape LIKE metacharacters in the user's `?q=` before
+            // wrapping in `%…%`, and append `ESCAPE '!'` below — so a
+            // `%` or `_` typed into the admin search box matches
+            // literally instead of acting as a wildcard, on every
+            // dialect (#1257).
+            let escaped = crate::core::escape_like(&s.query);
+            b.params.push(SqlValue::String(format!("%{escaped}%")));
             let placeholder = b.d.placeholder(b.params.len());
             // Build the qualified column identifier the same way the
             // rest of the writer does, then hand it to `write_ilike`.
@@ -3550,6 +3556,7 @@ pub(super) fn write_where_with_search(
             }
             qualified.push_str(&b.d.quote_ident(col));
             b.d.write_ilike(&mut b.sql, &qualified, &placeholder, false);
+            b.sql.push_str(" ESCAPE '!'");
         }
         b.sql.push(')');
     }
@@ -4017,6 +4024,18 @@ fn write_filter(
         Op::Gte => simple_op(b, &qualified_col, " >= ", filter.value.clone(), cast),
         Op::Like => simple_op(b, &qualified_col, " LIKE ", filter.value.clone(), cast),
         Op::NotLike => simple_op(b, &qualified_col, " NOT LIKE ", filter.value.clone(), cast),
+        // The escaped variants carry a value produced by
+        // `core::query::escape_like` and MUST emit `ESCAPE '!'` (#1257):
+        // SQLite has no default LIKE escape character, so without the
+        // clause the escaping is not just ignored but wrong (a `!` in
+        // the pattern would be matched literally... and `!%` would match
+        // "!, then anything"). `ESCAPE '!'` is portable across all
+        // three dialects — `'\'` is not, MySQL eats it as a
+        // string-literal escape.
+        Op::LikeEscaped => {
+            simple_op(b, &qualified_col, " LIKE ", filter.value.clone(), cast);
+            b.sql.push_str(" ESCAPE '!'");
+        }
         Op::ILike | Op::NotILike => {
             require_op(b.d, filter.op)?;
             b.params.push(filter.value.clone());
@@ -4027,6 +4046,16 @@ fn write_filter(
                 &p,
                 matches!(filter.op, Op::NotILike),
             );
+        }
+        Op::ILikeEscaped => {
+            // Same dialect gate as ILike; the `ESCAPE` suffix is valid
+            // after both the native `ILIKE ?` shape and the
+            // `LOWER(col) LIKE LOWER(?)` fallback.
+            require_op(b.d, Op::ILike)?;
+            b.params.push(filter.value.clone());
+            let p = b.d.placeholder(b.params.len());
+            b.d.write_ilike(&mut b.sql, &qualified_col, &p, false);
+            b.sql.push_str(" ESCAPE '!'");
         }
         Op::Regex | Op::NotRegex | Op::IRegex | Op::NotIRegex => {
             // Pattern shape is checked upstream — the typed builder
@@ -4314,6 +4343,8 @@ fn op_label(op: Op) -> &'static str {
         Op::NotLike => "NOT LIKE",
         Op::ILike => "ILIKE",
         Op::NotILike => "NOT ILIKE",
+        Op::LikeEscaped => "LIKE ... ESCAPE",
+        Op::ILikeEscaped => "ILIKE ... ESCAPE",
         Op::Between => "BETWEEN",
         Op::NotBetween => "NOT BETWEEN",
         Op::IsNull => "IS NULL",

@@ -2270,9 +2270,11 @@ fn resolve_active_order(
 /// subset, not the unsearched total.
 ///
 /// The `%` and `_` characters in the user's search input are
-/// escaped via the framework's `escape_like_pattern` so they
-/// match literally rather than acting as wildcards. This matches
-/// the viewset's behavior (defense against pattern injection).
+/// escaped via the framework's `core::escape_like` (paired with
+/// `Op::ILikeEscaped`, which emits `ESCAPE '!'`) so they match
+/// literally rather than acting as wildcards on any dialect (#1257).
+/// This matches the viewset's behavior (defense against pattern
+/// injection).
 fn build_list_where(
     schema: &'static ModelSchema,
     filter_fields: &[String],
@@ -2309,14 +2311,16 @@ fn build_list_where(
 
     // ILIKE search across `search_fields`, OR-combined.
     if let Some(q) = params.get("search").filter(|s| !s.is_empty()) {
-        let escaped = escape_like_pattern(q);
-        let pattern = format!("%{escaped}%");
+        // Escape LIKE metacharacters (`!`-based, portable) and pair
+        // with `Op::ILikeEscaped` so `ESCAPE '!'` is emitted — the only
+        // way the escaping is honored on SQLite (#1257).
+        let pattern = format!("%{}%", crate::core::escape_like(q));
         let mut or_branches: Vec<WhereExpr> = Vec::new();
         for name in search_fields {
             if let Some(field) = schema.field(name) {
                 or_branches.push(WhereExpr::Predicate(Filter {
                     column: field.column,
-                    op: Op::ILike,
+                    op: Op::ILikeEscaped,
                     value: SqlValue::String(pattern.clone()),
                 }));
             }
@@ -2340,13 +2344,6 @@ fn build_list_where(
 /// Escape `%` and `_` so the user's search input matches literally
 /// in `LIKE` / `ILIKE` rather than acting as wildcards. Mirrors
 /// what the viewset does with user input.
-fn escape_like_pattern(input: &str) -> String {
-    input
-        .replace('\\', r"\\")
-        .replace('%', r"\%")
-        .replace('_', r"\_")
-}
-
 /// Read or mint a CSRF token and stamp it into the Tera context as
 /// `csrf_token`. Returns the optional `Set-Cookie` header value the
 /// caller should attach to the response when the cookie was missing
@@ -4202,7 +4199,7 @@ mod tests {
         match where_clause {
             WhereExpr::Predicate(f) => {
                 assert_eq!(f.column, "title");
-                assert_eq!(f.op, Op::ILike);
+                assert_eq!(f.op, Op::ILikeEscaped);
                 if let SqlValue::String(p) = f.value {
                     assert!(p.contains("Hello"), "got: {p}");
                     assert!(p.starts_with('%') && p.ends_with('%'), "got: {p}");
@@ -4239,11 +4236,12 @@ mod tests {
     /// `%` and `_` in user input get escaped so they match
     /// literally rather than acting as `LIKE` wildcards.
     #[test]
-    fn escape_like_pattern_neutralizes_wildcards() {
-        assert_eq!(escape_like_pattern("100%"), r"100\%");
-        assert_eq!(escape_like_pattern("foo_bar"), r"foo\_bar");
-        assert_eq!(escape_like_pattern(r"a\b"), r"a\\b");
-        assert_eq!(escape_like_pattern("plain"), "plain");
+    fn escape_like_neutralizes_wildcards() {
+        use crate::core::escape_like;
+        assert_eq!(escape_like("100%"), "100!%");
+        assert_eq!(escape_like("foo_bar"), "foo!_bar");
+        assert_eq!(escape_like("a!b"), "a!!b");
+        assert_eq!(escape_like("plain"), "plain");
     }
 
     /// Empty `?search=` is treated as "no search" — different from

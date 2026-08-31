@@ -70,7 +70,11 @@ fn gt_gte_lt_lte_ne_map_directly() {
 fn contains_wraps_value_in_percent() {
     let qs = Post::objects().filter("title__contains", "rust");
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
-    assert!(stmt.sql.contains(r#""title" LIKE $1"#), "got: {}", stmt.sql);
+    assert!(
+        stmt.sql.contains(r#""title" LIKE $1 ESCAPE '!'"#),
+        "got: {}",
+        stmt.sql
+    );
     assert_eq!(stmt.params, vec![SqlValue::String("%rust%".into())]);
 }
 
@@ -79,7 +83,7 @@ fn icontains_uses_ilike_with_percent_wrap() {
     let qs = Post::objects().filter("title__icontains", "rust");
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
     assert!(
-        stmt.sql.contains(r#""title" ILIKE $1"#),
+        stmt.sql.contains(r#""title" ILIKE $1 ESCAPE '!'"#),
         "got: {}",
         stmt.sql
     );
@@ -90,7 +94,7 @@ fn icontains_uses_ilike_with_percent_wrap() {
 fn startswith_wraps_value_with_trailing_percent_only() {
     let qs = Post::objects().filter("title__startswith", "Hello");
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
-    assert!(stmt.sql.contains(r#""title" LIKE $1"#));
+    assert!(stmt.sql.contains(r#""title" LIKE $1 ESCAPE '!'"#));
     assert_eq!(stmt.params, vec![SqlValue::String("Hello%".into())]);
 }
 
@@ -98,8 +102,9 @@ fn startswith_wraps_value_with_trailing_percent_only() {
 fn endswith_wraps_value_with_leading_percent_only() {
     let qs = Post::objects().filter("title__endswith", "!");
     let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
-    assert!(stmt.sql.contains(r#""title" LIKE $1"#));
-    assert_eq!(stmt.params, vec![SqlValue::String("%!".into())]);
+    assert!(stmt.sql.contains(r#""title" LIKE $1 ESCAPE '!'"#));
+    // "!" is the escape char, so it is doubled: %!! matches a literal "!".
+    assert_eq!(stmt.params, vec![SqlValue::String("%!!".into())]);
 }
 
 #[test]
@@ -122,9 +127,84 @@ fn istartswith_iendswith_use_ilike() {
         stmt.params,
         vec![
             SqlValue::String("Hello%".into()),
-            SqlValue::String("%!".into()),
+            SqlValue::String("%!!".into()),
         ]
     );
+}
+
+// ---------- #1257: LIKE metacharacter escaping (tri-dialect) ----------
+
+#[test]
+fn contains_escapes_wildcards_in_user_value() {
+    // A `%` or `_` in the value must be neutralised so it matches
+    // literally — otherwise `50%` would match "50 then anything".
+    let qs = Post::objects().filter("title__contains", "50%_x");
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(
+        stmt.sql.contains(r#""title" LIKE $1 ESCAPE '!'"#),
+        "{}",
+        stmt.sql
+    );
+    // 50 !% (escaped %) !_ (escaped _) x, wrapped in unescaped %…%.
+    assert_eq!(stmt.params, vec![SqlValue::String("%50!%!_x%".into())]);
+}
+
+#[test]
+fn escaped_like_emits_escape_clause_on_every_dialect() {
+    let qs = Post::objects().filter("title__contains", "a%b");
+    let pg = Postgres
+        .compile_select(&qs.clone().compile().unwrap())
+        .unwrap();
+    let my = MySql
+        .compile_select(&qs.clone().compile().unwrap())
+        .unwrap();
+    let sq = Sqlite.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(pg.sql.contains("LIKE $1 ESCAPE '!'"), "pg: {}", pg.sql);
+    assert!(my.sql.contains("LIKE ? ESCAPE '!'"), "mysql: {}", my.sql);
+    assert!(sq.sql.contains("LIKE ? ESCAPE '!'"), "sqlite: {}", sq.sql);
+    // All three escape the value identically.
+    for stmt in [&pg, &my, &sq] {
+        assert_eq!(stmt.params, vec![SqlValue::String("%a!%b%".into())]);
+    }
+}
+
+#[test]
+fn icontains_escape_clause_survives_the_ilike_fallback() {
+    // On MySQL/SQLite icontains lowers to LOWER(col) LIKE LOWER(?);
+    // the ESCAPE clause must still be appended after the fallback.
+    let qs = Post::objects().filter("title__icontains", "x_y");
+    let my = MySql
+        .compile_select(&qs.clone().compile().unwrap())
+        .unwrap();
+    let sq = Sqlite.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(
+        my.sql.contains("LIKE LOWER(?) ESCAPE '!'"),
+        "mysql: {}",
+        my.sql
+    );
+    assert!(
+        sq.sql.contains("LIKE LOWER(?) ESCAPE '!'"),
+        "sqlite: {}",
+        sq.sql
+    );
+    for stmt in [&my, &sq] {
+        assert_eq!(stmt.params, vec![SqlValue::String("%x!_y%".into())]);
+    }
+}
+
+#[test]
+fn raw_like_lookup_is_not_escaped() {
+    // The raw `__like` lookup binds the caller's pattern verbatim —
+    // no escaping, no ESCAPE clause (they own the wildcards).
+    let qs = Post::objects().filter("title__like", "%foo_bar%");
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(stmt.sql.contains(r#""title" LIKE $1"#), "{}", stmt.sql);
+    assert!(
+        !stmt.sql.contains("ESCAPE"),
+        "raw like must NOT add ESCAPE: {}",
+        stmt.sql
+    );
+    assert_eq!(stmt.params, vec![SqlValue::String("%foo_bar%".into())]);
 }
 
 // ---------- __in / __isnull / __between ----------

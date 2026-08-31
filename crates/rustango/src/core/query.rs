@@ -30,6 +30,19 @@ pub enum Op {
     ILike,
     /// Case-insensitive `NOT ILIKE` (Postgres).
     NotILike,
+    /// Case-sensitive `LIKE` whose bound value was produced by
+    /// [`escape_like`] — emitted as `LIKE ? ESCAPE '!'` so the escaping
+    /// is honored on every dialect (#1257). SQLite has **no** default
+    /// LIKE escape character, so escaped values are meaningless there
+    /// without the explicit clause; `!` (rather than `\`) because MySQL
+    /// treats `\` as a string-literal escape, making `ESCAPE '\'`
+    /// non-portable. Used by the `contains` / `startswith` / `endswith`
+    /// lookups, which wrap **user input** in wildcards — a plain
+    /// [`Op::Like`] is for caller-owned patterns and is never escaped.
+    LikeEscaped,
+    /// Case-insensitive sibling of [`Op::LikeEscaped`] — the dialect's
+    /// ILIKE shape plus `ESCAPE '!'`.
+    ILikeEscaped,
     /// Range check. The bound value must be `SqlValue::List([lo, hi])`.
     /// Emits `col BETWEEN $lo AND $hi`.
     Between,
@@ -153,6 +166,30 @@ pub enum Op {
     /// abuts the value range (no overlap, no gap). **PG-only**.
     /// Issue #31.
     RangeAdjacent,
+}
+
+/// The LIKE escape character used by [`Op::LikeEscaped`] /
+/// [`Op::ILikeEscaped`] — `!`, because it is portable: `ESCAPE '\'`
+/// breaks on MySQL (backslash is its string-literal escape) and SQLite
+/// has no default escape at all (#1257).
+pub const LIKE_ESCAPE_CHAR: char = '!';
+
+/// Escape LIKE metacharacters in **user input** so `%` and `_` match
+/// literally (#1257, Django parity: `__contains` treats the value as a
+/// literal substring, not a pattern).
+///
+/// The output is only meaningful under `ESCAPE '!'`, i.e. bound to an
+/// [`Op::LikeEscaped`] / [`Op::ILikeEscaped`] predicate — pair them.
+/// Wildcards the *caller* adds around the escaped value (the `%…%` of a
+/// contains) stay unescaped and keep their meaning.
+#[must_use]
+pub fn escape_like(input: &str) -> String {
+    // Escape the escape character first, or a literal `!` would arm
+    // whatever character follows it.
+    input
+        .replace('!', "!!")
+        .replace('%', "!%")
+        .replace('_', "!_")
 }
 
 /// One predicate in a `WHERE` clause: `column <op> value`. Always
