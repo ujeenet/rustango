@@ -7,11 +7,11 @@
 //!
 //! ## Mechanism
 //!
-//! Acquire is a Cache `set` of `lock:<name>` to a per-acquire token,
-//! gated on the existing default `incr`-based check. The lock auto-
-//! expires after `ttl`, so a process that crashes while holding the
-//! lock doesn't deadlock the system — at worst, the next acquirer
-//! waits `ttl` seconds.
+//! Acquire is one atomic set-if-absent (`Cache::add`) of `lock:<name>`
+//! to a per-acquire token: the key is written only if absent, and the
+//! call reports whether it won. The lock auto-expires after `ttl`, so a
+//! process that crashes while holding it doesn't deadlock the system —
+//! at worst, the next acquirer waits `ttl` seconds.
 //!
 //! Release is conditional on the token: a process that lost its lock
 //! (because TTL expired and someone else acquired) does NOT
@@ -40,11 +40,18 @@
 //!
 //! ## Caveats
 //!
-//! - The non-atomic default `Cache::incr` can race under heavy
-//!   contention with two acquirers in the same millisecond. RedisCache
-//!   uses native `INCRBY` so it's safe across replicas.
+//! - Acquire is a single atomic set-if-absent (`Cache::add`): `SET NX`
+//!   on `RedisCache` (safe across replicas) and a lock-guarded
+//!   test-and-set on `InMemoryCache` (#1254). `DatabaseCache`'s `add`
+//!   is still the non-atomic default, so a DB-backed lock is safe only
+//!   within one process — use Redis for multi-replica locking.
 //! - This is "best-effort exactly-once" — fine for cron-style work,
-//!   not a substitute for a transaction when correctness matters.
+//!   not a substitute for a transaction when correctness matters. The
+//!   one residual race is release: it reads the key then deletes it, so
+//!   a lock whose TTL expired mid-release could in principle be freed
+//!   just as another holder takes it. Bounded by the TTL, which the
+//!   design already relies on; a compare-and-delete script would close
+//!   it if you need stricter guarantees.
 //! - TTL must be longer than the worst-case execution time of the
 //!   protected work, OR the work must be idempotent. A too-short TTL
 //!   means another replica could grab the lock mid-execution.
@@ -135,33 +142,35 @@ impl DistributedLock {
     /// - `None` when someone else holds it.
     pub async fn try_acquire(&self, name: &str, ttl: Duration) -> Option<LockGuard> {
         let key = self.key_for(name);
-        // `incr(key, 1, ttl)` returns 1 ONLY when the counter was
-        // previously absent (or 0). On RedisCache the INCRBY+EXPIRE NX
-        // sequence is atomic; on the in-memory default impl it's racy
-        // but acceptable for tests.
-        let n = self.cache.incr(&key, 1, Some(ttl)).await.ok()?;
-        if n == 1 {
-            // We got the lock. Stash a token so release knows it's us.
-            let token = format!(
-                "{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos())
-            );
-            // Keep the counter, but ALSO write a token — release reads
-            // both. (The counter is the gate; the token is the receipt.)
-            let token_key = format!("{key}:token");
-            let _ = self.cache.set(&token_key, &token, Some(ttl)).await;
-            Some(LockGuard {
+        // A single atomic set-if-absent (#1254). `add` writes the key
+        // ONLY when it is absent and returns whether it did — the whole
+        // acquire in one operation. On `RedisCache` it is `SET NX EX`
+        // (atomic across replicas); on `InMemoryCache` it holds the
+        // store lock across the test-and-set. This replaces the old
+        // incr-counter + separate token dance, which had three bugs: a
+        // non-atomic acquire off Redis, a crash window between the
+        // counter and the token that wedged the lock until TTL, and a
+        // counter that, once left above zero, could never be acquired
+        // again. The key's *value* is the token, so there is nothing to
+        // desynchronise.
+        let token = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        );
+        match self.cache.add(&key, &token, Some(ttl)).await {
+            Ok(true) => Some(LockGuard {
                 cache: self.cache.clone(),
                 key,
-                token_key,
                 token: Arc::new(token),
                 released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            })
-        } else {
-            None
+            }),
+            // `Ok(false)` — someone else holds it. `Err` — cache
+            // unreachable; treat as "could not acquire" (fail closed:
+            // better to skip the work than run it unguarded).
+            _ => None,
         }
     }
 
@@ -186,7 +195,6 @@ impl DistributedLock {
 pub struct LockGuard {
     cache: BoxedCache,
     key: String,
-    token_key: String,
     token: Arc<String>,
     released: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -205,15 +213,17 @@ impl LockGuard {
         {
             return;
         }
-        // Token check — if our token is still the one stored, we still
-        // hold the lock, so we can clear it. Otherwise someone else
-        // acquired after our TTL expired and we mustn't touch theirs.
-        let stored = self.cache.get(&self.token_key).await.ok().flatten();
-        if stored.as_deref() != Some(self.token.as_str()) {
-            return;
+        // The lock key's value IS our token. Only delete it if it is
+        // still ours: if our TTL expired and someone else re-acquired,
+        // the value is their token and we must not free their lock.
+        // (A get-then-delete has a small window on Redis — a compare-
+        // and-delete Lua script would close it — but this is a
+        // best-effort lock: the residual case is bounded by the TTL,
+        // which the whole design already leans on.)
+        let stored = self.cache.get(&self.key).await.ok().flatten();
+        if stored.as_deref() == Some(self.token.as_str()) {
+            let _ = self.cache.delete(&self.key).await;
         }
-        let _ = self.cache.delete(&self.key).await;
-        let _ = self.cache.delete(&self.token_key).await;
     }
 }
 
@@ -240,6 +250,50 @@ mod tests {
     fn lock() -> DistributedLock {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
         DistributedLock::new(cache)
+    }
+
+    /// #1254 — under contention exactly ONE of many racing acquirers
+    /// may win. The old incr-counter acquire could hand the lock to two
+    /// callers that both read `1`; the atomic `add` cannot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn only_one_of_many_racing_acquirers_wins() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let l = StdArc::new(DistributedLock::new(cache));
+        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let l = l.clone();
+            handles.push(tokio::spawn(async move {
+                l.try_acquire("hot", Duration::from_secs(30))
+                    .await
+                    .map(|g| {
+                        // hold it — never release — so a second winner
+                        // would be a true double-acquire, not a
+                        // release/re-acquire.
+                        std::mem::forget(g);
+                    })
+                    .is_some()
+            }));
+        }
+        let mut winners = 0;
+        for h in handles {
+            if h.await.unwrap() {
+                winners += 1;
+            }
+        }
+        assert_eq!(winners, 1, "exactly one acquirer must win; got {winners}");
+    }
+
+    /// #1254 — a released lock is immediately re-acquirable. The old
+    /// design could leave the counter above zero so the lock was never
+    /// grantable again; the value-is-token design frees cleanly.
+    #[tokio::test]
+    async fn lock_is_reacquirable_after_release() {
+        let l = lock();
+        for _ in 0..5 {
+            let g = l.try_acquire("cycle", Duration::from_secs(5)).await;
+            assert!(g.is_some(), "should re-acquire after each release");
+            g.unwrap().release().await;
+        }
     }
 
     #[tokio::test]

@@ -193,12 +193,12 @@ cache.clear().await?;                            // drops ONLY acme's entries
 than reimplementing anything, so native primitives (Redis `INCRBY`, `SET NX`,
 `MGET`) keep their atomicity and batching.
 
-**Atomic counters.** `Cache::incr(key, by, ttl)` returns the value after the
-increment and is the primitive behind [rate limiting](middleware.md),
-per-account lockout, and `DistributedLock`. It is atomic on `RedisCache`
-(native `INCRBY`) and on `InMemoryCache` (which holds its lock across the whole
-read-modify-write); `DatabaseCache` uses a non-atomic get-then-set — fine for
-one process, but reach for Redis when a counter must be exact across replicas.
+**Atomic counters and locks.** `Cache::incr` backs [rate limiting](middleware.md)
+and per-account lockout; `Cache::add` (set-if-absent) backs `DistributedLock`.
+Both are atomic on `RedisCache` (native `INCRBY` / `SET NX`) and on
+`InMemoryCache` (which holds its lock across the read-modify-write);
+`DatabaseCache` leaves both at the non-atomic default — fine for one process,
+but reach for Redis when a counter or lock must be exact across replicas.
 
 Two things worth knowing:
 
