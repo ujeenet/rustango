@@ -31,7 +31,12 @@
 //! - **First fire**: occurs after one full interval, not immediately.
 //! - **Panic isolation**: a panicking job aborts only that task; other
 //!   scheduled jobs keep running. The panic is logged via `tracing::error!`.
-//! - **Shutdown**: `Handle::shutdown()` aborts every spawned task.
+//! - **Zero period is clamped**: `every(_, Duration::ZERO, _)` would
+//!   panic tokio's timer at spawn; it is clamped to 1s with a warning
+//!   instead (#1256).
+//! - **Shutdown**: `Handle::shutdown()` stops every task loop *and*
+//!   aborts any job currently in flight — a running job does not outlive
+//!   shutdown (#1256).
 //!
 //! ## Production note
 //!
@@ -97,6 +102,21 @@ impl Scheduler {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
+        // A zero period panics `tokio::time::interval` at spawn time,
+        // which would silently kill this task's loop (#1256). A zero
+        // interval is always a caller mistake — clamp it to 1s and warn
+        // rather than take the loop down.
+        let period = if period.is_zero() {
+            tracing::warn!(
+                target: "rustango::scheduler",
+                task = %name,
+                "every() called with a zero period; clamping to 1s (a zero \
+                 interval panics tokio's timer)",
+            );
+            Duration::from_secs(1)
+        } else {
+            period
+        };
         let factory: JobFactory = Arc::new(move || Box::pin(job()));
         self.tasks
             .lock()
@@ -126,6 +146,17 @@ impl Scheduler {
     }
 }
 
+/// Aborts the wrapped task when dropped. A bare `JoinHandle` detaches on
+/// drop (the task keeps running); this makes dropping it stop the task,
+/// so aborting a scheduler loop stops any job it has in flight (#1256).
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn spawn_task_loop(task: Task) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = interval(task.period);
@@ -138,16 +169,22 @@ fn spawn_task_loop(task: Task) -> JoinHandle<()> {
             let factory = task.factory.clone();
             let name = task.name.clone();
             // Run each invocation as a separate spawned task so a panic
-            // doesn't kill the loop.
-            let job_handle = tokio::spawn(async move {
+            // doesn't kill the loop. Wrap it in an abort-on-drop guard so
+            // that when the loop itself is aborted (`Handle::shutdown`),
+            // an in-flight job is aborted with it rather than left
+            // running detached (#1256) — dropping a bare `JoinHandle`
+            // does NOT stop its task.
+            let mut job = AbortOnDrop(tokio::spawn(async move {
                 let fut = (factory)();
                 fut.await;
-            });
-            if let Err(e) = job_handle.await {
+            }));
+            if let Err(e) = (&mut job.0).await {
                 if e.is_panic() {
                     tracing::error!(task = %name, "scheduled job panicked");
                 }
             }
+            // Normal completion: `job` drops here and aborts an
+            // already-finished task, which is a documented no-op.
         }
     })
 }
@@ -186,6 +223,51 @@ impl Drop for Handle {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// #1256 — a zero period must not panic the task loop. Before the
+    /// clamp, `interval(Duration::ZERO)` panicked at spawn, silently
+    /// killing this task; now it is clamped to 1s with a warning, so the
+    /// scheduler starts and runs.
+    #[tokio::test]
+    async fn zero_period_does_not_panic() {
+        let s = Scheduler::new();
+        s.every("zero", Duration::ZERO, || async {});
+        let handle = s.start();
+        assert_eq!(handle.running_count(), 1, "loop must be running, not dead");
+        handle.shutdown().await;
+    }
+
+    /// #1256 — `shutdown()` must stop a job that is in flight, not leave
+    /// it running detached. A long job increments a flag only if it is
+    /// allowed to finish; shutting down mid-run must prevent that.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_aborts_in_flight_job() {
+        use std::sync::Arc;
+        let finished = Arc::new(AtomicUsize::new(0));
+        let f = finished.clone();
+        let s = Scheduler::new();
+        // Fire quickly, then the job sleeps well past our shutdown.
+        s.every("slow", Duration::from_millis(50), move || {
+            let f = f.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                f.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let handle = s.start();
+        // Let the first tick fire and the job start, then shut down while
+        // it is still sleeping.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        handle.shutdown().await;
+        // Give the (aborted) job more than its sleep to prove it did NOT
+        // complete.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            0,
+            "in-flight job kept running after shutdown",
+        );
+    }
 
     #[tokio::test]
     async fn task_count_tracks_registrations() {
