@@ -166,6 +166,9 @@ let app = axum::Router::new()
     );
 ```
 
+> **Keying by a secret header is safe to share.** When you `key_by(KeyBy::Header("authorization"))` or `"x-api-key"`, the cache-backed limiter **hashes** the header value before using it as a key (#1252), so a shared Redis never stores a live credential where someone reading keys could harvest it. Keying by `KeyBy::Ip` needs `ConnectInfo` (or a `RealIpLayer` in front); without it the limiter warns once and falls back to a single shared bucket.
+
+
 ---
 
 ## Allowing or blocking IPs
