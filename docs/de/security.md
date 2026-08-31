@@ -166,6 +166,9 @@ let app = axum::Router::new()
     );
 ```
 
+> **Nach einem geheimen Header zu keyen ist teilbar-sicher.** Bei `key_by(KeyBy::Header("authorization"))` oder `"x-api-key"` **hasht** der cache-gestützte Limiter den Header-Wert, bevor er ihn als Schlüssel verwendet (#1252) — ein geteiltes Redis speichert also nie eine gültige Anmeldeinformation dort, wo jemand mit Schlüssel-Lesezugriff sie abgreifen könnte. `KeyBy::Ip` braucht `ConnectInfo` (oder ein vorgeschaltetes `RealIpLayer`); fehlt das, warnt der Limiter einmalig und fällt auf einen einzigen geteilten Bucket zurück.
+
+
 ---
 
 ## IPs erlauben oder blockieren

@@ -33,15 +33,43 @@ use axum::http::{header, HeaderValue, Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
 
+/// Warn (at most once per process) that the limiter could not derive a
+/// per-client key and is falling back to a shared bucket — a
+/// misconfiguration that turns the limiter into a site-wide throttle
+/// (#1252). Rate-limited to one line so a hot path can't flood logs.
+fn warn_missing_discriminator(what: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            target: "rustango::rate_limit",
+            discriminator = %what,
+            "rate limiter could not derive a per-client key; ALL such requests \
+             share ONE bucket, so one client throttles everyone. For IP keying, \
+             serve with `into_make_service_with_connect_info::<SocketAddr>()`; \
+             for header keying, ensure the header is present.",
+        );
+    }
+}
+
 /// Strategy for picking the bucket key per request.
 #[derive(Clone, Debug)]
 pub enum KeyBy {
     /// Use the connecting client's IP address (`ConnectInfo<SocketAddr>`).
-    /// Falls back to a constant key when `ConnectInfo` is missing — set up
-    /// `into_make_service_with_connect_info` so this works.
+    ///
+    /// Requires the server to be built with
+    /// `into_make_service_with_connect_info::<SocketAddr>()`. If it is
+    /// **not**, every request falls back to one shared bucket, so one
+    /// client throttles the whole site — a self-inflicted DoS. The
+    /// limiter logs a one-time warning when this happens (#1252); make
+    /// sure your bind wires up `ConnectInfo`.
     Ip,
     /// Use the value of a request header (e.g. `"x-api-key"` or `"authorization"`).
-    /// Requests missing the header get the constant fallback key.
+    ///
+    /// In the cache-backed limiter the value is **hashed** before use as
+    /// a key, so a shared cache never exposes a raw credential (#1252).
+    /// Requests missing the header fall back to one shared bucket and
+    /// log a one-time warning, as with `Ip`.
     Header(&'static str),
     /// Single global bucket — coarse but easy. Good for "max N requests/sec for the whole endpoint".
     Global,
@@ -139,13 +167,23 @@ impl RateLimitLayer {
                 .extensions()
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|ci| ci.ip().to_string())
-                .unwrap_or_else(|| "<no-ip>".to_owned()),
+                .unwrap_or_else(|| {
+                    warn_missing_discriminator("IP (ConnectInfo missing)");
+                    "<no-ip>".to_owned()
+                }),
+            // Unlike the cache-backed limiter, this store is a
+            // process-local `HashMap` that never leaves memory, so the
+            // header value is not persisted anywhere an attacker could
+            // read it — no hashing needed here (#1252).
             KeyBy::Header(name) => req
                 .headers()
                 .get(*name)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned)
-                .unwrap_or_else(|| "<no-header>".to_owned()),
+                .unwrap_or_else(|| {
+                    warn_missing_discriminator(name);
+                    "<no-header>".to_owned()
+                }),
             KeyBy::Global => "<global>".to_owned(),
         }
     }
