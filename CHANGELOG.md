@@ -4,6 +4,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.55.0] — 2026-08-31
+
+Follows 0.54.0 with the LIKE-escaping correctness fix and a README version
+refresh.
+
+**Behaviour change:** LIKE lookups now escape user-supplied wildcards — a `%`
+or `_` in a `__contains` / `__startswith` / `__endswith` / `__iexact` value (and
+the admin/viewset `?q=` search) matches literally instead of acting as a SQL
+wildcard, matching Django (#1257). Covers every producer: the `.filter()` lookup
+path, the `Q::contains` builder, the `Q!()` macro, and relation-spanning
+lookups. New public API: `core::escape_like`, `core::LIKE_ESCAPE_CHAR`,
+`core::LIKE_ESCAPE_CLAUSE`, `Op::LikeEscaped` / `Op::ILikeEscaped`, and
+`Column::contains` / `icontains` / `startswith` / `istartswith` / `endswith` /
+`iendswith` / `iexact`. Verified live on SQLite, Postgres and MySQL.
+
+Also: README install snippets bumped to the current version (docs.rs renders the
+README as the crate landing page).
+
 ### Fixed
 - **LIKE lookups did not escape user wildcards, on any dialect** (#1257).
   `__contains` / `__startswith` / `__endswith` (and the admin/viewset `?q=`

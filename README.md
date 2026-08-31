@@ -21,16 +21,16 @@ Rustango gives you the productivity of Django or Laravel with the speed and type
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.52"
+rustango = "0.55"
 
 # SQLite — file-backed or in-memory
-rustango = { version = "0.52", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.55", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.52", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.55", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 ```
 
-Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.52" }` needs no extra wiring.
+Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.55" }` needs no extra wiring.
 
 ## An app on SQLite in 30 lines
 
