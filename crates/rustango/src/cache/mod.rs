@@ -772,6 +772,34 @@ impl Cache for InMemoryCache {
         Ok(new)
     }
 
+    /// Atomic set-if-absent (#1254). The trait default is a racy
+    /// `exists` then `set`; this holds the single write lock across the
+    /// check and the insert, so it is a genuine test-and-set — the
+    /// primitive `DistributedLock` acquire is built on.
+    async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let tick = self.next_tick();
+        let mut store = self.inner.write().await;
+        if store.map.get(key).is_some_and(|e| !e.is_expired()) {
+            return Ok(false);
+        }
+        let size = key.len() + value.len();
+        if let Some(old) = store.map.remove(key) {
+            store.used_bytes = store.used_bytes.saturating_sub(old.size);
+        }
+        store.used_bytes += size;
+        store.map.insert(
+            key.to_owned(),
+            CacheEntry {
+                value: value.to_owned(),
+                expires_at: self.resolve_ttl(ttl),
+                last_used: AtomicU64::new(tick),
+                size,
+            },
+        );
+        self.evict_locked(&mut store);
+        Ok(true)
+    }
+
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
         let mut store = self.inner.write().await;
         if let Some(e) = store.map.remove(key) {

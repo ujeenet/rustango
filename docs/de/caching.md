@@ -200,13 +200,13 @@ cache.clear().await?;                            // drops ONLY acme's entries
 statt etwas neu zu implementieren, sodass native Primitive (Redis `INCRBY`,
 `SET NX`, `MGET`) ihre Atomarität und Batching behalten.
 
-**Atomare Zähler.** `Cache::incr(key, by, ttl)` liefert den Wert nach dem
-Inkrement und ist das Primitiv hinter [Rate-Limiting](middleware.md),
-Konto-Sperren und `DistributedLock`. Es ist atomar bei `RedisCache` (natives
-`INCRBY`) und bei `InMemoryCache` (das seine Sperre über das gesamte
-Read-Modify-Write hält); `DatabaseCache` nutzt ein nicht-atomares Get-dann-Set —
-für einen Prozess in Ordnung, aber greife zu Redis, wenn ein Zähler über
-Replikate hinweg exakt sein muss.
+**Atomare Zähler und Sperren.** `Cache::incr` steckt hinter
+[Rate-Limiting](middleware.md) und Konto-Sperren; `Cache::add` (set-if-absent)
+steckt hinter `DistributedLock`. Beide sind atomar bei `RedisCache` (natives
+`INCRBY` / `SET NX`) und bei `InMemoryCache` (das seine Sperre über das
+Read-Modify-Write hält); `DatabaseCache` belässt beide beim nicht-atomaren
+Standard — für einen Prozess in Ordnung, aber greife zu Redis, wenn ein Zähler
+oder eine Sperre über Replikate hinweg exakt sein muss.
 
 Zwei Dinge, die man wissen sollte:
 

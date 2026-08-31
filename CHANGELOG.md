@@ -5,6 +5,21 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ## [Unreleased]
 
 ### Fixed
+- **`DistributedLock` acquire was non-atomic off Redis and could wedge or never
+  re-grant** (#1254). Acquire used an `incr` counter plus a *separate* token
+  write, which had three failure modes: the `incr` default is a racy get+set on
+  every non-Redis backend, so two acquirers could both read `1` and both believe
+  they held the lock; a crash between the counter and the token write left the
+  lock held with no token, unreleasable until its TTL; and a counter left above
+  zero could never be acquired again. Rebuilt on a single atomic set-if-absent —
+  `Cache::add`, now overridden as `SET NX EX` on `RedisCache` and a
+  lock-guarded test-and-set on `InMemoryCache`. The key's value *is* the token,
+  so there is nothing to desynchronise; release deletes it only when it is still
+  ours. `DatabaseCache`'s `add` stays the non-atomic default (documented) — a
+  DB-backed lock is single-process only; use Redis across replicas. Regression
+  tests: 50 racing acquirers yield exactly one winner, a released lock is
+  immediately re-acquirable, and `add` is atomic under 100 concurrent callers —
+  all fail against the pre-fix code.
 - **`cache_page` could serve one user's session cookie to another** (#1251).
   The layer cached any 200 and replayed its stored headers verbatim on a HIT,
   including `Set-Cookie` — so an authenticated response that minted
