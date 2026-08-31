@@ -136,19 +136,24 @@ impl Lockout {
     ///   only fires for users who actually exist + are being attacked.
     pub async fn record_failure(&self, account: &str) -> u32 {
         let counter_key = self.counter_key(account);
-        let current: u32 = self
-            .cache
-            .get(&counter_key)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let next = current + 1;
-        let _ = self
-            .cache
-            .set(&counter_key, &next.to_string(), Some(self.counter_ttl))
-            .await;
+        // Atomic increment, not get-parse-set (#1253). Under concurrent
+        // failed logins a read-modify-write loses updates — several
+        // attempts read the same value and each write back the same
+        // `+1`, so N parallel guesses record far fewer than N and the
+        // threshold can be out-run by parallelising. `incr` is atomic on
+        // `RedisCache` (native `INCRBY`) and now on `InMemoryCache` (it
+        // holds its write lock across the read-modify-write). The one
+        // remaining racy backend is `DatabaseCache`, whose default
+        // `incr` is still get+set — acceptable for single-process use,
+        // and the multi-replica deploy that needs cross-process
+        // atomicity is on Redis anyway.
+        let next = u32::try_from(
+            self.cache
+                .incr(&counter_key, 1, Some(self.counter_ttl))
+                .await
+                .unwrap_or(0),
+        )
+        .unwrap_or(u32::MAX);
         if next >= self.max_attempts {
             // Set the lock flag with TTL = lockout_duration
             let _ = self
@@ -407,5 +412,33 @@ mod tests {
         // Smoke: the process-global default exists and answers. Unique
         // key so parallel tests can't perturb the assertion.
         assert!(!shared().is_locked("smoke:unique-unused-key").await);
+    }
+
+    /// #1253 — concurrent failed attempts must each count. The old
+    /// get-parse-set lost updates under contention, letting the
+    /// threshold be out-run by parallelising guesses. With an atomic
+    /// `incr` (now overridden on `InMemoryCache`) 50 racing failures
+    /// record exactly 50.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_failures_all_count() {
+        let cache: Arc<dyn Cache> = Arc::new(InMemoryCache::new());
+        let l = Arc::new(
+            Lockout::new(cache)
+                .max_attempts(1000) // don't lock; we're counting
+                .counter_ttl(Duration::from_secs(60)),
+        );
+        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let l = l.clone();
+            handles.push(tokio::spawn(async move { l.record_failure("alice").await }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(
+            l.attempt_count("alice").await,
+            50,
+            "lost-update race: concurrent failures did not all count",
+        );
     }
 }

@@ -5,6 +5,23 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ## [Unreleased]
 
 ### Fixed
+- **The failure counter behind account lockout, distributed locks, and rate
+  limiting was not atomic** (#1253). `AccountLockout::record_failure` did a
+  get-parse-set, which loses updates under concurrent failed logins: several
+  attempts read the same value and write back the same `+1`, so N parallel
+  guesses record far fewer than N and the lockout threshold can be out-run by
+  parallelising. Root cause was one level down — `InMemoryCache::incr` was the
+  racy trait default (a separate `get` then `set`), which every counter built on
+  the cache inherited.
+
+  `InMemoryCache::incr` now holds its write lock across the whole
+  read-modify-write, so an in-process increment is atomic, and `record_failure`
+  uses `incr` rather than get-parse-set. `RedisCache` was already atomic (native
+  `INCRBY`); `DatabaseCache`'s default `incr` is still get-then-set, fine for a
+  single process. A multi-threaded regression test drives 50–100 concurrent
+  increments and asserts none are lost — it fails against the pre-fix code.
+
+### Fixed
 - **160 broken documentation references, across all four locales** (#1248).
   Reported as three 404s on the docs site; an audit found the whole class.
 

@@ -197,6 +197,13 @@ tome un `BoxedCache` — `cache_page`, `cache_fragment`, los rate limiters,
 de reimplementar nada, de modo que las primitivas nativas (Redis `INCRBY`,
 `SET NX`, `MGET`) conservan su atomicidad y su batching.
 
+**Contadores atómicos.** `Cache::incr(key, by, ttl)` devuelve el valor tras el
+incremento y es la primitiva tras el [rate limiting](middleware.md), el bloqueo
+por cuenta y `DistributedLock`. Es atómico en `RedisCache` (`INCRBY` nativo) y en
+`InMemoryCache` (que mantiene su cerrojo durante todo el read-modify-write);
+`DatabaseCache` usa un get-luego-set no atómico — suficiente para un proceso,
+pero usa Redis cuando un contador deba ser exacto entre réplicas.
+
 Dos cosas que conviene saber:
 
 | | |
