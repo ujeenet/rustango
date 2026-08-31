@@ -8,7 +8,7 @@ ViewSet, et un routeur d'une ligne monte `/openapi.json` + une page de
 documentation interactive. Lorsqu'un contrôle total est nécessaire, ces mêmes
 types permettent de construire n'importe quelle spécification à la main.
 
-[![OpenAPI Rustango : les champs du serializer deviennent un schéma de composant, le ViewSet devient des chemins CRUD, et openapi_router sert /openapi.json + Swagger UI](img/openapi.png)](img/openapi.png)
+[![OpenAPI Rustango : les champs du serializer deviennent un schéma de composant, le ViewSet devient des chemins CRUD, et openapi_router sert /openapi.json + Swagger UI](../img/openapi.png)](../img/openapi.png)
 
 > **Source :** `rustango::openapi` (`OpenApiSpec`, `Schema`, `OpenApiSchema`,
 > `PathItem`, `Operation`, `SecurityScheme`, `router::openapi_router`) et
@@ -16,7 +16,7 @@ types permettent de construire n'importe quelle spécification à la main.
 > routeur du visualiseur nécessite aussi `admin`).
 >
 > **Version exécutable :** chaque extrait ci-dessous est copié de l'exemple testé
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog/tests/openapi.rs)
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/getting_started_blog/tests/openapi.rs)
 > — `cargo test -p getting_started_blog --test openapi`. Le builder, le schéma et
 > les types de routeur sont en outre couverts par les tests unitaires du framework
 > lui-même (`crates/rustango/src/openapi/`).

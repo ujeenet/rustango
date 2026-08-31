@@ -19,7 +19,7 @@ Rust.
 > compiled.
 >
 > **Runnable version:** the snippets below *are* a passing test —
-> [`testing_doc.rs`](../crates/rustango/tests/testing_doc.rs)
+> [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
 > (`cargo test -p rustango --test testing_doc`). Nearly every other `*_doc.rs`
 > in this repo uses `TestClient` the same way.
 

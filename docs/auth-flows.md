@@ -17,7 +17,7 @@ trust its parameters without storing anything.
 > features (on by default; reset-confirm also needs `passwords` + a DB backend).
 >
 > **Runnable version:** every snippet is copied from
-> [`auth_flows_doc.rs`](../crates/rustango/tests/auth_flows_doc.rs)
+> [`auth_flows_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_flows_doc.rs)
 > (`cargo test -p rustango --features sqlite --test auth_flows_doc`).
 
 ## Table of contents

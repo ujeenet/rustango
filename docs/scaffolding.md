@@ -149,7 +149,7 @@ Options:
 
 ## Generate single files: the `make:*` commands
 
-Inside a project, the `make:*` verbs scaffold one file at a time. The full per-flag reference lives in the [manage CLI reference](manage); the common shapes are:
+Inside a project, the `make:*` verbs scaffold one file at a time. The full per-flag reference lives in the [manage CLI reference](manage.md); the common shapes are:
 
 | Command | Generates | Comparable to |
 |---|---|---|

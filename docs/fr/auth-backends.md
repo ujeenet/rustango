@@ -9,7 +9,7 @@ accepter humains et machines sur les mêmes routes. C'est l'idée
 `require_auth` / `require_perm` pour verrouiller les routes et à l'extracteur
 `CurrentUser` pour lire le résultat.
 
-[![Les backends d'authentification dans Rustango : une requête traverse une chaîne de backends (ModelBackend, ApiKeyBackend, JwtBackend) ; le premier à reconnaître l'identifiant l'emporte et injecte CurrentUser, puis require_perm vérifie un codename](img/auth-backends.png)](img/auth-backends.png)
+[![Les backends d'authentification dans Rustango : une requête traverse une chaîne de backends (ModelBackend, ApiKeyBackend, JwtBackend) ; le premier à reconnaître l'identifiant l'emporte et injecte CurrentUser, puis require_perm vérifie un codename](../img/auth-backends.png)](../img/auth-backends.png)
 
 > **Un terme vous est inconnu ici ?** *Backend*, *middleware*, *extracteur*,
 > *codename de permission* — voir le [glossaire](glossary.md).
@@ -21,7 +21,7 @@ accepter humains et machines sur les mêmes routes. C'est l'idée
 > à `rustango::auth_backends` (toujours compilé).
 >
 > **Version exécutable :** chaque extrait est copié depuis
-> [`auth_backends_doc.rs`](../crates/rustango/tests/auth_backends_doc.rs)
+> [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
 > (`cargo test -p rustango --features sqlite,tenancy --test auth_backends_doc`).
 
 ## Table des matières

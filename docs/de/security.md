@@ -2,7 +2,7 @@
 
 Dieser Leitfaden behandelt jede Sicherheitsfunktion, die **Rustango** mitbringt, und wie man sie kombiniert. Wenn du von Django, Laravel oder Rails kommst, werden dir die meisten davon vertraut vorkommen — die Namen unterscheiden sich, aber die Ideen sind dieselben. Jede der folgenden Funktionen benötigt in der Regel eine Zeile Setup. Wenn du bereit bist, in Produktion zu gehen, führe `manage check --deploy` für ein automatisiertes Audit aus.
 
-[![Der gehärtete Middleware-Stack in einer Kette verdrahtet: Request-IDs, Zugriffsprotokollierung, Rate Limiting, CORS und Security-Header](img/security.png)](img/security.png)
+[![Der gehärtete Middleware-Stack in einer Kette verdrahtet: Request-IDs, Zugriffsprotokollierung, Rate Limiting, CORS und Security-Header](../img/security.png)](../img/security.png)
 
 ## Inhaltsverzeichnis
 
@@ -165,6 +165,9 @@ let app = axum::Router::new()
             .key_prefix("login"),
     );
 ```
+
+> **Nach einem geheimen Header zu keyen ist teilbar-sicher.** Bei `key_by(KeyBy::Header("authorization"))` oder `"x-api-key"` **hasht** der cache-gestützte Limiter den Header-Wert, bevor er ihn als Schlüssel verwendet (#1252) — ein geteiltes Redis speichert also nie eine gültige Anmeldeinformation dort, wo jemand mit Schlüssel-Lesezugriff sie abgreifen könnte. `KeyBy::Ip` braucht `ConnectInfo` (oder ein vorgeschaltetes `RealIpLayer`); fehlt das, warnt der Limiter einmalig und fällt auf einen einzigen geteilten Bucket zurück.
+
 
 ---
 

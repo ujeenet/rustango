@@ -500,3 +500,57 @@ async fn get_or_does_not_write_default_back() {
     let _ = c.get_or("ghost", "would-not-be-stored").await.unwrap();
     assert!(!c.has_key("ghost").await.unwrap());
 }
+
+/// #1253 — `InMemoryCache::incr` must be atomic under concurrency.
+/// The trait default is get-parse-set, which loses updates; the counters
+/// built on it (lockout, distributed lock, rate limit) rely on this.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn inmemory_incr_is_atomic_under_contention() {
+    use std::sync::Arc;
+    let cache: Arc<rustango::cache::InMemoryCache> =
+        Arc::new(rustango::cache::InMemoryCache::new());
+    let mut handles = Vec::new();
+    for _ in 0..100 {
+        let c = cache.clone();
+        handles.push(tokio::spawn(async move {
+            rustango::cache::Cache::incr(&*c, "counter", 1, None)
+                .await
+                .unwrap()
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+    let final_val = rustango::cache::Cache::get(&*cache, "counter")
+        .await
+        .unwrap()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap();
+    assert_eq!(final_val, 100, "incr lost updates under contention");
+}
+
+/// #1254 — `InMemoryCache::add` (set-if-absent) must be atomic: exactly
+/// one of many racing callers may create the key. The trait default is
+/// a racy exists+set; `DistributedLock` acquire relies on this.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn inmemory_add_is_atomic_under_contention() {
+    use std::sync::Arc;
+    let cache: Arc<rustango::cache::InMemoryCache> =
+        Arc::new(rustango::cache::InMemoryCache::new());
+    let mut handles = Vec::new();
+    for _ in 0..100 {
+        let c = cache.clone();
+        handles.push(tokio::spawn(async move {
+            rustango::cache::Cache::add(&*c, "once", "v", None)
+                .await
+                .unwrap()
+        }));
+    }
+    let mut winners = 0;
+    for h in handles {
+        if h.await.unwrap() {
+            winners += 1;
+        }
+    }
+    assert_eq!(winners, 1, "exactly one add() may win; got {winners}");
+}

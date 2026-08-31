@@ -2,7 +2,7 @@
 
 Esta guía cubre todas las funciones de seguridad que incluye **Rustango** y cómo combinarlas. Si vienes de Django, Laravel o Rails, la mayoría te resultarán familiares — los nombres difieren, pero las ideas son las mismas. Cada función de abajo suele ser una sola línea de configuración. Cuando estés listo para desplegar, ejecuta `manage check --deploy` para una auditoría automatizada.
 
-[![La pila de middleware endurecida conectada en una sola cadena: identificadores de petición, registro de accesos, limitación de tasa, CORS y cabeceras de seguridad](img/security.png)](img/security.png)
+[![La pila de middleware endurecida conectada en una sola cadena: identificadores de petición, registro de accesos, limitación de tasa, CORS y cabeceras de seguridad](../img/security.png)](../img/security.png)
 
 ## Tabla de contenidos
 
@@ -165,6 +165,9 @@ let app = axum::Router::new()
             .key_prefix("login"),
     );
 ```
+
+> **Keyear por una cabecera secreta es seguro de compartir.** Con `key_by(KeyBy::Header("authorization"))` o `"x-api-key"`, el limitador respaldado por caché **hashea** el valor de la cabecera antes de usarlo como clave (#1252), de modo que un Redis compartido nunca almacena una credencial viva donde alguien con acceso de lectura a las claves pudiera cosecharla. `KeyBy::Ip` necesita `ConnectInfo` (o un `RealIpLayer` delante); sin ello, el limitador avisa una vez y recae en un único bucket compartido.
+
 
 ---
 

@@ -7,7 +7,7 @@ la **révocation** pour la déconnexion. **Rustango** fournit tout cela sous la
 forme de `JwtLifecycle` — et un routeur clé en main qui monte pour vous
 `POST /api/auth/login`, `/refresh`, `/logout`, et `GET /me`.
 
-[![API d'authentification JWT : login émet une paire access+refresh, refresh effectue une rotation et met en liste noire l'ancien token, logout révoque via un magasin de JTI](img/auth-jwt-api.png)](img/auth-jwt-api.png)
+[![API d'authentification JWT : login émet une paire access+refresh, refresh effectue une rotation et met en liste noire l'ancien token, logout révoque via un magasin de JTI](../img/auth-jwt-api.png)](../img/auth-jwt-api.png)
 
 > **Source :** `rustango::tenancy::jwt_lifecycle` (`JwtLifecycle`, `JwtTokenPair`,
 > `JwtClaims`) et `rustango::tenancy::auth_routes` (`jwt_router`, `Config`) +
@@ -15,7 +15,7 @@ forme de `JwtLifecycle` — et un routeur clé en main qui monte pour vous
 > `tenancy`.
 >
 > **Version exécutable :** le moteur de tokens est couvert par le test
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_jwt_api.rs) —
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_jwt_api.rs) —
 > `cargo test -p auth_demo --test auth_jwt_api`. Les endpoints HTTP sont
 > cloisonnés par tenant et éprouvés de bout en bout par le propre
 > `crates/rustango/tests/tenant_auth_live.rs` du framework.

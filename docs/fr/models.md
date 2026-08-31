@@ -8,7 +8,7 @@ chaque type de champ, chaque option de clé primaire, et chaque
 attribut `#[rustango(...)]`. Pour *interroger* les modèles une fois déclarés, voir
 le [cookbook ORM](orm.md).
 
-[![Models in Rustango: a #[derive(Model)] struct maps Rust field types to per-dialect columns, the primary key can be an auto-increment Auto<i64> or a custom application-assigned key, and the derive generates SCHEMA + objects() + save/find](img/models.png)](img/models.png)
+[![Models in Rustango: a #[derive(Model)] struct maps Rust field types to per-dialect columns, the primary key can be an auto-increment Auto<i64> or a custom application-assigned key, and the derive generates SCHEMA + objects() + save/find](../img/models.png)](../img/models.png)
 
 > **Nouveau sur un terme ici ?** *modèle*, *clé primaire*, *clé étrangère*, *migration*,
 > *nullable* — voir le [glossaire](glossary.md).
@@ -20,7 +20,7 @@ le [cookbook ORM](orm.md).
 >
 > **Version exécutable :** les allers-retours de types de champs, la PK personnalisée, et les
 > extraits SCHEMA sont copiés depuis
-> [`models_doc.rs`](../crates/rustango/tests/models_doc.rs)
+> [`models_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/models_doc.rs)
 > (`cargo test -p rustango --features sqlite --test models_doc`).
 
 ## Table des matières

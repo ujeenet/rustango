@@ -8,7 +8,7 @@ les templates avec `{{ url(...) }}`, et dans les redirections avec
 `redirect_to_view(...)`. La surface de l'API reflète les
 `reverse()` / `{% url %}` / `resolve_url()` / `redirect()` de Django.
 
-[![URL reverse à la Django : register_url! nomme un motif, reverse() construit l'URL en Rust, et {{ url(...) }} construit l'URL dans un template](img/urls.png)](img/urls.png)
+[![URL reverse à la Django : register_url! nomme un motif, reverse() construit l'URL en Rust, et {{ url(...) }} construit l'URL dans un template](../img/urls.png)](../img/urls.png)
 
 > **Source :** `rustango::urls` (`register_url!`, `reverse`, `reverse_owned`,
 > `all_routes`, `duplicates`, `register_url_tag`) et `rustango::shortcuts`
@@ -236,7 +236,7 @@ jamais été un moteur de regex au départ.
 
 La forme `{int:id}` n'est acceptée que comme **facilité de portage** pour
 `reverse()` : le constructeur découpe le placeholder sur `:` et ne garde que le
-nom, jetant le préfixe de type ([`urls.rs`](../crates/rustango/src/urls.rs)). Cela
+nom, jetant le préfixe de type ([`urls.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/urls.rs)). Cela
 permet à `reverse()` de fonctionner sur un motif copié verbatim d'un
 `path("<int:id>/", …)` de Django — mais rien ne valide que la valeur fournie est
 réellement un entier.

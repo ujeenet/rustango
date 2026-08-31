@@ -7,7 +7,7 @@ die URL überall über den Namen** — in Rust mit `reverse(...)`, in Templates 
 `{{ url(...) }}` und in Redirects mit `redirect_to_view(...)`. Die API-Oberfläche
 spiegelt Djangos `reverse()` / `{% url %}` / `resolve_url()` / `redirect()`.
 
-[![Reverse-URLs im Django-Stil: register_url! benennt ein Muster, reverse() baut die URL in Rust, und {{ url(...) }} baut die URL in einem Template](img/urls.png)](img/urls.png)
+[![Reverse-URLs im Django-Stil: register_url! benennt ein Muster, reverse() baut die URL in Rust, und {{ url(...) }} baut die URL in einem Template](../img/urls.png)](../img/urls.png)
 
 > **Quelle:** `rustango::urls` (`register_url!`, `reverse`, `reverse_owned`,
 > `all_routes`, `duplicates`, `register_url_tag`) und `rustango::shortcuts`
@@ -234,7 +234,7 @@ eine Regex-Engine.
 
 Die Form `{int:id}` wird nur als **Portierungshilfe** für `reverse()` akzeptiert:
 Der Builder teilt den Platzhalter an `:` und behält nur den Namen, verwirft das
-Typpräfix ([`urls.rs`](../crates/rustango/src/urls.rs)). Das lässt `reverse()` auf
+Typpräfix ([`urls.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/urls.rs)). Das lässt `reverse()` auf
 einem Muster laufen, das wortwörtlich aus einem Django-`path("<int:id>/", …)`
 kopiert wurde — aber nichts validiert, dass der gelieferte Wert tatsächlich eine
 Ganzzahl ist.

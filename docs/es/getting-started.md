@@ -4,9 +4,9 @@ Este recorrido te lleva desde un directorio vacío hasta un blog desplegado: pub
 
 > **Tiempo:** ~45 minutos para el recorrido completo, ~10 minutos si solo quieres verlo funcionar.
 >
-> **Versión ejecutable:** cada paso a continuación está replicado en un ejemplo probado y compilable en [`crates/rustango/examples/getting_started_blog`](../crates/rustango/examples/getting_started_blog). Si algún paso parece estar mal, compáralo con ese ejemplo.
+> **Versión ejecutable:** cada paso a continuación está replicado en un ejemplo probado y compilable en [`crates/rustango/examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog). Si algún paso parece estar mal, compáralo con ese ejemplo.
 
-[![Construir un blog con Rustango: generar la migración, aplicarla, arrancar el servidor y consultar la API JSON — todo desde un único binario](img/getting-started.png)](img/getting-started.png)
+[![Construir un blog con Rustango: generar la migración, aplicarla, arrancar el servidor y consultar la API JSON — todo desde un único binario](../img/getting-started.png)](../img/getting-started.png)
 
 ---
 
@@ -15,15 +15,69 @@ Este recorrido te lleva desde un directorio vacío hasta un blog desplegado: pub
 | Herramienta | Para qué | Instalación |
 |---|---|---|
 | Rust 1.88+ | Compilador | <https://rustup.rs> |
-| Docker | Postgres local | <https://docker.com> |
+| Una base de datos | Esta guía usa Postgres | ver [Elegir base de datos](#elegir-base-de-datos) abajo |
 | `psql` (opcional) | Inspeccionar la BD | `brew install libpq` / `apt install postgresql-client` |
-
-Comprueba las versiones que tienes instaladas:
 
 ```bash
 rustc --version    # should print 1.88+
-docker --version   # any recent version
 ```
+
+### Elegir base de datos
+
+**Docker no es obligatorio.** Esta guía lo usa porque un solo comando te da un
+Postgres desechable, pero nada en rustango depende de él. Elige la fila que
+encaje con tu máquina; todo lo demás es idéntico:
+
+| Si quieres | Haz esto | Notas |
+|---|---|---|
+| **Ningún servidor de base de datos** | Ejecutar con SQLite (abajo) | Nada que instalar. Lo mejor para aprender. |
+| Postgres **sin** Docker | Instalar Postgres de forma nativa y apuntar `DATABASE_URL` a `localhost` | Ver [Postgres nativo](#postgres-nativo-sin-docker). |
+| Postgres **con** Docker | `docker compose up -d` en el proyecto generado | Lo que asume el resto de esta guía. |
+
+#### SQLite — sin configuración
+
+Los proyectos generados incluyen una feature `sqlite`, así que puedes ejecutar
+uno sin instalar ni arrancar nada:
+
+```bash
+cargo run --no-default-features --features sqlite
+```
+
+con una URL basada en fichero en `.env` en lugar de la de Postgres:
+
+```bash
+DATABASE_URL=sqlite://myblog_dev.db?mode=rwc
+```
+
+`mode=rwc` le dice a SQLite que cree el fichero si no existe. Todo lo de esta
+guía — modelos, migraciones, el admin, el ORM — funciona igual; solo quedan
+fuera las funciones específicas de Postgres (operadores `JSONB`, multi-tenancy
+en modo esquema).
+
+#### Postgres nativo (sin Docker)
+
+Instala Postgres con tu gestor de paquetes (`brew install postgresql@16`,
+`apt install postgresql`, o el instalador de Windows en
+<https://www.postgresql.org/download/windows/>) y crea el rol y la base de datos
+que espera la configuración generada:
+
+```bash
+createuser -s rustango          # o: CREATE ROLE rustango LOGIN SUPERUSER PASSWORD 'rustango';
+createdb myblog_dev -O rustango
+```
+
+El `.env.example` generado apunta al nombre del servicio de Docker. Cambia el
+host a `localhost`:
+
+```bash
+# .env  —  `postgres` es el nombre del servicio de docker-compose; en nativo, localhost
+DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
+```
+
+> **¿En Windows?** El backend Hyper-V / WSL2 de Docker Desktop es una causa
+> frecuente de fallos al arrancar. Si te da guerra, usa la vía SQLite de arriba
+> para aprender el framework y vuelve a Docker cuando prepares el despliegue —
+> para eso está realmente la configuración de contenedores.
 
 ---
 
@@ -123,7 +177,15 @@ openssl rand -base64 32     # paste output as RUSTANGO_SESSION_SECRET value
 
 ---
 
-## Paso 4: Arrancar Postgres
+## Paso 4: Arrancar la base de datos
+
+> **¿Usas SQLite?** Sáltate este paso — no hay servidor que arrancar. Asegúrate
+> de que `.env` tenga `DATABASE_URL=sqlite://myblog_dev.db?mode=rwc` y añade
+> `--no-default-features --features sqlite` a cada `cargo run` de abajo.
+>
+> **¿Usas un Postgres nativo?** Ya está corriendo como servicio; solo comprueba
+> que `psql "$DATABASE_URL" -c "SELECT version();"` funciona y sigue adelante.
+
 
 El proyecto incluye un `docker-compose.yml` que ejecuta Postgres en un contenedor, para que no instales una base de datos a mano. La app en sí la ejecutaremos con `cargo` en el host, así que arranca solo el servicio `postgres` en segundo plano (el archivo de compose también define un contenedor de desarrollo `rust` opcional que, de lo contrario, ocuparía el puerto 8080):
 
@@ -713,15 +775,15 @@ Asegúrate de que tu proxy inverso:
 
 | Tema | Doc |
 |---|---|
-| Versión ejecutable de esta guía | [`examples/getting_started_blog`](../crates/rustango/examples/getting_started_blog) |
+| Versión ejecutable de esta guía | [`examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog) |
 | Cada subcomando de `manage` | [`docs/manage.md`](manage.md) |
 | Recetario del ORM (filtros avanzados, agregaciones, M2M, soft delete) | [`docs/orm.md`](orm.md) |
 | Middleware (el catálogo completo de capas + ordenamiento) | [`docs/middleware.md`](middleware.md) |
 | Benchmarks de rendimiento (vs. Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | Convenciones de la API (nomenclatura, patrones builder, feature gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Funciones de seguridad en profundidad | [`docs/security.md`](security.md) |
-| Auditoría de paridad con Django | [`docs/django-parity-audit-2026-05-21.md`](django-parity-audit-2026-05-21.md) |
-| Multi-tenancy | [README — sección Multi-tenancy](../README.md#multi-tenancy) |
+| Auditoría de paridad con Django | [`docs/django-parity-audit-2026-05-21.md`](https://github.com/ujeenet/rustango/blob/main/docs/django-parity-audit-2026-05-21.md) |
+| Multi-tenancy | [README — sección Multi-tenancy](https://github.com/ujeenet/rustango/blob/main/README.md#multi-tenancy) |
 | Documentación de la API | <https://docs.rs/rustango> |
 
 Si te topas con algo que no funciona o no queda claro, abre un issue.

@@ -10,14 +10,14 @@ cargo run -- migrate               # any other verb
 cargo run -- --help                # full subcommand list
 ```
 
-[![One binary runs every manage verb — server, migrations, scaffolders, database utilities, and system commands — like Django's manage.py or Laravel's artisan](img/manage.png)](img/manage.png)
+[![One binary runs every manage verb — server, migrations, scaffolders, database utilities, and system commands — like Django's manage.py or Laravel's artisan](../img/manage.png)](../img/manage.png)
 
 > **Quelle:** `rustango::manage` (`Cli`, der Verb-Dispatcher) — hinter dem
 > `manage`-Feature (standardmäßig aktiviert).
 >
 > **Ausführbare Version:** jedes Verb hier läuft in einem generierten Projekt;
 > das Beispiel
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog)
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
 > wird von `cargo run -- migrate` und Konsorten angetrieben.
 
 > **Neu bei einem Begriff hier?** *scaffold*, *migration*, *tenant* — siehe das
@@ -1152,7 +1152,7 @@ cargo run -- purge-tenant acme           # hard (drops schema/db)
 
 Tenants im database-Modus erhalten ihren eigenen Verbindungspool (einen
 `PgPool` — eine Menge wiederverwendeter Datenbankverbindungen), zwischengespeichert
-nach Slug in [`TenantPools`](../crates/rustango/src/tenancy/pools.rs).
+nach Slug in [`TenantPools`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/tenancy/pools.rs).
 Standardmäßig wird ein Pool **faul, beim ersten Request des Tenants** gebaut, es
 sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 `TenantPoolsConfig`:

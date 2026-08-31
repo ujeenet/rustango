@@ -15,7 +15,7 @@ request.
 > production, add the `cache-redis` feature (off by default) to get `RedisCache`.
 >
 > **Runnable version:** snippets below are copied from the tested
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_sessions.rs)
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_sessions.rs)
 > example — `cargo test -p auth_demo --test auth_sessions`.
 
 > **New to a term here?** *session*, *opaque id*, *cookie*, *cache* — see the

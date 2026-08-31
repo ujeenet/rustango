@@ -9,7 +9,7 @@ l'écriture des vôtres possible en quelques lignes. Si vous venez de Django,
 c'est la liste `MIDDLEWARE` ; d'Express, c'est `app.use()` ; de Laravel, c'est
 le kernel HTTP — la même idée, rattachée à votre routeur.
 
-[![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](img/middleware.png)](img/middleware.png)
+[![Middleware in Rustango: a request flows down through a stack of tower layers (request-id, locale, security headers, CSRF) into the handler and back up through the response side of each layer](../img/middleware.png)](../img/middleware.png)
 
 > **Source :** le middleware est bâti sur [`tower::Layer`](https://docs.rs/tower) +
 > `axum::middleware::from_fn`. Les composants intégrés se répartissent dans

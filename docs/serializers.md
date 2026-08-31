@@ -23,7 +23,7 @@ validates. You compose it with the ORM and ViewSets rather than routing writes
 > (on by default).
 >
 > **Runnable versions:** the minimal serializer ships in the tested
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog/src/post_serializer.rs)
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/getting_started_blog/src/post_serializer.rs)
 > example, and the derive's full behavior is covered by the framework's own
 > unit tests — `crates/rustango/tests/serializer_derive.rs` and
 > `serializer_cross_validate.rs`. If a snippet looks off, diff against them.
@@ -511,7 +511,7 @@ A few sharp edges and escape hatches worth knowing:
 ## Try it
 
 The minimal serializer ships in the
-[`getting_started_blog`](../crates/rustango/examples/getting_started_blog/src/post_serializer.rs)
+[`getting_started_blog`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/getting_started_blog/src/post_serializer.rs)
 example (Step 13 of the getting-started guide). The derive's full behavior — the
 field attributes, computed/nested/many fields, and both validation layers — is
 covered by the framework's own unit tests (no database needed):

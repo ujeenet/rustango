@@ -2,14 +2,14 @@
 
 Patrones para el ORM de **Rustango** más allá de lo básico. Si vienes del ORM de Django, de Eloquent de Laravel o de ActiveRecord de Rails, las formas que verás aquí te resultarán familiares. La mayoría de los ejemplos asumen que ya tienes un modelo `Post` de `Getting Started`.
 
-[![Consultas del ORM verificadas por tipos: filtros encadenados, ordenamiento, límites y agregación — todo sin SQL crudo](img/orm.png)](img/orm.png)
+[![Consultas del ORM verificadas por tipos: filtros encadenados, ordenamiento, límites y agregación — todo sin SQL crudo](../img/orm.png)](../img/orm.png)
 
 > **Fuente:** `rustango::sql` (`QuerySet`, la macro `Q!` / el builder `Qb`) y la
 > API de consulta de `#[derive(Model)]` — siempre compilada; elige una característica de backend
 > (`postgres` / `mysql` / `sqlite`).
 >
 > **Versión ejecutable:** los patrones aquí se ejecutan en el ejemplo probado
-> [`orm_cookbook`](../crates/rustango/examples/orm_cookbook).
+> [`orm_cookbook`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/orm_cookbook).
 >
 > **¿Nuevo con algún término de aquí?** El [glosario](glossary.md) define *model*, *queryset*,
 > *pool* y *migración* en lenguaje sencillo.

@@ -18,10 +18,10 @@ failures. This is Django-Q / Celery / Laravel queues, in Rust.
 > by default).
 >
 > **Runnable version:** the in-memory, retry, and dead-letter snippets are
-> copied from [`jobs_doc.rs`](../crates/rustango/tests/jobs_doc.rs)
+> copied from [`jobs_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_doc.rs)
 > (`cargo test -p rustango --test jobs_doc`); the persistent queue is dogfooded
 > on SQLite by
-> [`jobs_sqlite_live.rs`](../crates/rustango/tests/jobs_sqlite_live.rs)
+> [`jobs_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_sqlite_live.rs)
 > (`cargo test -p rustango --features sqlite,jobs-postgres --test jobs_sqlite_live`).
 
 ## Table of contents

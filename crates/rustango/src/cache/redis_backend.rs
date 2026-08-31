@@ -87,6 +87,28 @@ impl Cache for RedisCache {
         }
     }
 
+    /// Atomic set-if-absent via `SET key value NX [EX secs]` (#1254).
+    /// The default `add` is a racy `exists` + `set`; `NX` makes the
+    /// server do the test-and-set in one round trip, which is what makes
+    /// `DistributedLock` safe across replicas. Returns `true` when this
+    /// call created the key.
+    async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let mut conn = self.conn.clone();
+        let mut cmd = redis::cmd("SET");
+        cmd.arg(key).arg(value).arg("NX");
+        if let Some(secs) = self.effective_ttl(ttl) {
+            cmd.arg("EX").arg(secs);
+        }
+        // `SET ... NX` replies with the string "OK" on success and a nil
+        // bulk on a no-op (key already existed). `Option<String>`
+        // decodes that as `Some("OK")` / `None`.
+        let reply: Option<String> = cmd
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| CacheError::Connection(e.to_string()))?;
+        Ok(reply.is_some())
+    }
+
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
         let mut conn = self.conn.clone();
         conn.del::<_, ()>(key)

@@ -7,7 +7,7 @@ eso en dos llamadas — `hash` a la entrada, `verify` a la salida — respaldada
 primera opción actual de OWASP. Nunca almacenas, registras ni comparas el texto
 plano.
 
-[![Contraseñas en Rustango: hash() produce una cadena PHC argon2id con sal, verify() comprueba un intento contra ella, y verify_dummy() iguala los tiempos de inicio de sesión](img/auth-passwords.png)](img/auth-passwords.png)
+[![Contraseñas en Rustango: hash() produce una cadena PHC argon2id con sal, verify() comprueba un intento contra ella, y verify_dummy() iguala los tiempos de inicio de sesión](../img/auth-passwords.png)](../img/auth-passwords.png)
 
 > **Fuente:** `rustango::passwords` (`hash`, `verify`, `verify_dummy`,
 > `strength_score`, `StrengthIssue`) — detrás de la característica `passwords`
@@ -15,7 +15,7 @@ plano.
 > con la multitenencia, consulta `rustango::tenancy::password`.
 >
 > **Versión ejecutable:** cada fragmento a continuación está copiado del ejemplo
-> probado [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_passwords.rs)
+> probado [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_passwords.rs)
 > — `cargo test -p auth_demo --test auth_passwords`.
 
 > **¿Algún término aquí es nuevo para ti?** *hash*, *sal*, *argon2id*, *cadena
@@ -177,7 +177,7 @@ assert!(strength_score("short").contains(&StrengthIssue::TooShort));
 
 La cadena PHC no es más que una columna `String` en el modelo de cuenta que sea
 tuyo. En el ejemplo
-[`auth_demo`](../crates/rustango/examples/auth_demo/src/models.rs):
+[`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/src/models.rs):
 
 ```rust
 #[derive(Model, Clone, Debug)]

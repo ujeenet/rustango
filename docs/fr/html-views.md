@@ -12,7 +12,7 @@ Ce sont l'équivalent dans **Rustango** des vues génériques basées sur les cl
 ressources de Laravel qui renvoient des vues Blade. Elles effectuent leur rendu via des templates
 [Tera](https://keats.github.io/tera/).
 
-[![Les vues HTML dans Rustango : un modèle alimente ListView, DetailView et CreateView/UpdateView/DeleteView, chacune effectuant le rendu d'un template Tera en une page rendue côté serveur](img/html-views.png)](img/html-views.png)
+[![Les vues HTML dans Rustango : un modèle alimente ListView, DetailView et CreateView/UpdateView/DeleteView, chacune effectuant le rendu d'un template Tera en une page rendue côté serveur](../img/html-views.png)](../img/html-views.png)
 
 > **Un terme vous est inconnu ?** Si *modèle*, *template*, *routeur* ou *rendu côté serveur* ne
 > vous sont pas familiers, le [glossaire](glossary.md) explique chacun d'eux en langage simple.
@@ -23,7 +23,7 @@ ressources de Laravel qui renvoient des vues Blade. Elles effectuent leur rendu 
 >
 > **Version exécutable :** l'exemple API-vs-HTML ci-dessous est fixé par le
 > test du framework
-> [`html_and_api_contrast_sqlite_live.rs`](../crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
+> [`html_and_api_contrast_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
 > (`cargo test -p rustango --features sqlite --test html_and_api_contrast_sqlite_live`).
 > Les vues individuelles sont couvertes par `template_view.rs` et
 > `template_views_context_object_name_sqlite_live.rs`.
@@ -322,7 +322,7 @@ let app = axum::Router::new()
 
 Maintenant `GET /api/posts` renvoie l'enveloppe JSON paginée et `GET /posts`
 renvoie une liste HTML rendue — mêmes lignes, même pool, deux formes. Cette configuration exacte est
-ce qu'affirme le [test de support](../crates/rustango/tests/html_and_api_contrast_sqlite_live.rs).
+ce qu'affirme le [test de support](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs).
 
 ---
 

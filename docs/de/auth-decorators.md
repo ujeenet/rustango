@@ -6,7 +6,7 @@ hängen Sie einen an einen Router, und anonyme Anfragen werden abgewiesen — pe
 302 auf Ihre Anmeldeseite umgeleitet (Browser-Ablauf) oder mit 401/403
 beantwortet (API-Ablauf) —, bevor sie je den Handler erreichen.
 
-[![Zugriffs-Dekoratoren: login_required leitet anonyme Browser per 302 auf /login?next= um, die _or_403-Familie gibt 401/403 für APIs zurück, superuser_required sichert nach Rolle ab](img/auth-decorators.png)](img/auth-decorators.png)
+[![Zugriffs-Dekoratoren: login_required leitet anonyme Browser per 302 auf /login?next= um, die _or_403-Familie gibt 401/403 für APIs zurück, superuser_required sichert nach Rolle ab](../img/auth-decorators.png)](../img/auth-decorators.png)
 
 > **Quelle:** `rustango::auth_decorators` (`login_required`, `login_required_or_401`,
 > `user_passes_test`, `superuser_required`, `active_required`,
@@ -14,7 +14,7 @@ beantwortet (API-Ablauf) —, bevor sie je den Handler erreichen.
 > hinter dem Feature `tenancy` (die Gatter lesen den `SessionUser`-Extraktor).
 >
 > **Ausführbare Version:** das Absicherungsverhalten wird vom getesteten
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_decorators.rs)
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_decorators.rs)
 > abgedeckt — `cargo test -p auth_demo --test auth_decorators`.
 
 > **Ein Begriff hier neu?** *Middleware/Layer*, *Extraktor*, *401/403* — siehe das

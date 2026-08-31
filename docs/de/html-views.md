@@ -11,7 +11,7 @@ Dies sind das Äquivalent von **Rustango** zu Djangos generischen klassenbasiert
 (`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) oder Laravels
 Resource-Controllern, die Blade-Views zurückgeben. Sie rendern über [Tera](https://keats.github.io/tera/)-Templates.
 
-[![HTML-Views in Rustango: Ein Modell speist ListView, DetailView und CreateView/UpdateView/DeleteView, die jeweils ein Tera-Template zu einer serverseitig gerenderten Seite rendern](img/html-views.png)](img/html-views.png)
+[![HTML-Views in Rustango: Ein Modell speist ListView, DetailView und CreateView/UpdateView/DeleteView, die jeweils ein Tera-Template zu einer serverseitig gerenderten Seite rendern](../img/html-views.png)](../img/html-views.png)
 
 > **Neu bei einem Begriff hier?** Falls *Modell*, *Template*, *Router* oder *serverseitig gerendert*
 > unbekannt sind, erklärt das [Glossar](glossary.md) jeden in einfacher Sprache.
@@ -22,7 +22,7 @@ Resource-Controllern, die Blade-Views zurückgeben. Sie rendern über [Tera](htt
 >
 > **Lauffähige Version:** Das API-vs-HTML-Beispiel unten ist durch den
 > Framework-Test
-> [`html_and_api_contrast_sqlite_live.rs`](../crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
+> [`html_and_api_contrast_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
 > festgeschrieben (`cargo test -p rustango --features sqlite --test html_and_api_contrast_sqlite_live`).
 > Die einzelnen Views werden von `template_view.rs` und
 > `template_views_context_object_name_sqlite_live.rs` abgedeckt.
@@ -318,7 +318,7 @@ let app = axum::Router::new()
 
 Jetzt gibt `GET /api/posts` die paginierte JSON-Hülle zurück und `GET /posts`
 gibt eine gerenderte HTML-Liste zurück — dieselben Zeilen, derselbe Pool, zwei Formen. Genau dieses
-Setup ist es, was der [zugrunde liegende Test](../crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
+Setup ist es, was der [zugrunde liegende Test](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
 behauptet.
 
 ---

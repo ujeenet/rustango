@@ -8,7 +8,7 @@ datos), un helper de cálculo-al-fallar (`get_or_set`) y helpers JSON tipados.
 Cambia el backend sin tocar un solo sitio de llamada — como el framework de caché
 de Django o la fachada `Cache` de Laravel.
 
-[![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](img/caching.png)](img/caching.png)
+[![Caching in Rustango: get_or_set checks the cache, runs the factory only on a miss, stores the result with a TTL, and serves hits instantly; the same Cache trait backs InMemory, Redis, and DB](../img/caching.png)](../img/caching.png)
 
 > **¿Un término nuevo aquí?** *caché*, *TTL*, *clave*, *backend* — ver el
 > [glosario](glossary.md).
@@ -19,10 +19,10 @@ de Django o la fachada `Cache` de Laravel.
 > `cache-redis` (desactivada por defecto).
 >
 > **Versión ejecutable:** cada fragmento está copiado de
-> [`cache_doc.rs`](../crates/rustango/tests/cache_doc.rs)
+> [`cache_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/cache_doc.rs)
 > (`cargo test -p rustango --test cache_doc`); el backend de base de datos se
 > prueba con dogfooding sobre SQLite mediante
-> [`cache_db_backend_sqlite_live.rs`](../crates/rustango/tests/cache_db_backend_sqlite_live.rs).
+> [`cache_db_backend_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/cache_db_backend_sqlite_live.rs).
 
 ## Tabla de contenidos
 
@@ -196,6 +196,14 @@ tome un `BoxedCache` — `cache_page`, `cache_fragment`, los rate limiters,
 `DistributedLock`. Reenvía al backend interno con las claves mapeadas en lugar
 de reimplementar nada, de modo que las primitivas nativas (Redis `INCRBY`,
 `SET NX`, `MGET`) conservan su atomicidad y su batching.
+
+**Contadores atómicos y bloqueos.** `Cache::incr` está detrás del
+[rate limiting](middleware.md) y el bloqueo por cuenta; `Cache::add`
+(set-if-absent) está detrás de `DistributedLock`. Ambos son atómicos en
+`RedisCache` (`INCRBY` / `SET NX` nativos) y en `InMemoryCache` (que mantiene su
+cerrojo durante el read-modify-write); `DatabaseCache` deja ambos en el valor no
+atómico por defecto — suficiente para un proceso, pero usa Redis cuando un
+contador o bloqueo deba ser exacto entre réplicas.
 
 Dos cosas que conviene saber:
 

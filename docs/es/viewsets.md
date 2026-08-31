@@ -24,13 +24,13 @@ de principio a fin — scaffolding, modelos, un serializador, el ViewSet, los se
 endpoints CRUD, validación de entrada, filtrado/búsqueda/paginación y pruebas —
 y luego el resto de la página es una referencia de cada perilla.
 
-[![Un ViewSet de Rustango conectado a un serializador: un solo bloque #[viewset(serializer = …)] da salida JSON tipada y entrada validada en las seis rutas CRUD](img/viewsets.png)](img/viewsets.png)
+[![Un ViewSet de Rustango conectado a un serializador: un solo bloque #[viewset(serializer = …)] da salida JSON tipada y entrada validada en las seis rutas CRUD](../img/viewsets.png)](../img/viewsets.png)
 
 > **Fuente:** `rustango::viewset` (`ViewSet`, `#[derive(ViewSet)]`, las opciones
 > `#[viewset(...)]` + el builder `for_model`) — siempre compilado.
 >
 > **Versión ejecutable:** el blog construido aquí refleja el ejemplo probado y
-> compilable [`getting_started_blog`](../crates/rustango/examples/getting_started_blog)
+> compilable [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
 > (sus `Post` / `PostSerializer` / `PostViewSet`), y cada comportamiento está
 > fijado por las propias pruebas en vivo del framework — `crates/rustango/tests/viewset_*.rs`
 > (en particular `viewset_serializer_render_sqlite_live` y

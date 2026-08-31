@@ -31,7 +31,7 @@ palabrería.
 > completo con todo incluido. Incluso el resultado no compilado más rápido,
 > **Laravel sobre Octane**, va 4–7× por detrás de ambos binarios.
 
-[![Solicitudes/s en el índice del blog sin caché a través de los seis runtimes — Go 6.651, Rustango 4.781, Laravel+Octane 1.238, Django+Hypercorn 910, Django+gunicorn 850, Laravel+php-fpm 408](img/benchmarks.png)](img/benchmarks.png)
+[![Solicitudes/s en el índice del blog sin caché a través de los seis runtimes — Go 6.651, Rustango 4.781, Laravel+Octane 1.238, Django+Hypercorn 910, Django+gunicorn 850, Laravel+php-fpm 408](../img/benchmarks.png)](../img/benchmarks.png)
 
 ---
 

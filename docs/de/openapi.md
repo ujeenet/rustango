@@ -8,7 +8,7 @@ deinem ViewSet, und ein einzeiliger Router hängt `/openapi.json` + eine
 interaktive Docs-Seite ein. Wenn du volle Kontrolle brauchst, lassen dich
 dieselben Typen jede beliebige Spec von Hand bauen.
 
-[![Rustango OpenAPI: Serializer-Felder werden zu einem Component-Schema, das ViewSet wird zu CRUD-Pfaden, und openapi_router liefert /openapi.json + Swagger UI aus](img/openapi.png)](img/openapi.png)
+[![Rustango OpenAPI: Serializer-Felder werden zu einem Component-Schema, das ViewSet wird zu CRUD-Pfaden, und openapi_router liefert /openapi.json + Swagger UI aus](../img/openapi.png)](../img/openapi.png)
 
 > **Quelle:** `rustango::openapi` (`OpenApiSpec`, `Schema`, `OpenApiSchema`,
 > `PathItem`, `Operation`, `SecurityScheme`, `router::openapi_router`) und
@@ -16,7 +16,7 @@ dieselben Typen jede beliebige Spec von Hand bauen.
 > der Viewer-Router benötigt zusätzlich `admin`).
 >
 > **Lauffähige Version:** jedes Snippet unten ist aus dem getesteten
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog/tests/openapi.rs)-Beispiel
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/getting_started_blog/tests/openapi.rs)-Beispiel
 > kopiert — `cargo test -p getting_started_blog --test openapi`. Die Builder-,
 > Schema- und Router-Typen werden zusätzlich durch die eigenen Unit-Tests des
 > Frameworks abgedeckt (`crates/rustango/src/openapi/`).

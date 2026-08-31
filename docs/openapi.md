@@ -15,7 +15,7 @@ control, the same types let you hand-build any spec.
 > viewer router also needs `admin`).
 >
 > **Runnable version:** every snippet below is copied from the tested
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog/tests/openapi.rs)
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/getting_started_blog/tests/openapi.rs)
 > example — `cargo test -p getting_started_blog --test openapi`. The builder,
 > schema, and router types are additionally covered by the framework's own unit
 > tests (`crates/rustango/src/openapi/`).

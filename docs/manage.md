@@ -16,7 +16,7 @@ cargo run -- --help                # full subcommand list
 > `manage` feature (on by default).
 >
 > **Runnable version:** every verb here runs in a scaffolded project; the
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog)
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
 > example is driven by `cargo run -- migrate` and friends.
 
 > **New to a term here?** *scaffold*, *migration*, *tenant* — see the
@@ -1132,7 +1132,7 @@ cargo run -- purge-tenant acme           # hard (drops schema/db)
 
 Database-mode tenants get their own connection pool (a `PgPool` — a set
 of reused database connections), cached by slug in
-[`TenantPools`](../crates/rustango/src/tenancy/pools.rs). By default a
+[`TenantPools`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/tenancy/pools.rs). By default a
 pool is built **lazily, on the tenant's first request**, unless you turn
 on pre-warming. The settings live on `TenantPoolsConfig`:
 

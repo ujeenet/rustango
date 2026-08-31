@@ -17,14 +17,14 @@ escrituras *a través* de él.
 > **¿Algún término nuevo aquí?** — *serializer*, *model*, *ORM*, *DRF*? El
 > [glosario](glossary.md) define cada uno en lenguaje llano.
 
-[![Un serializador de Rustango: read_only, renombrado con source, un campo de método calculado, una FK anidada y un campo write_only — declarados en una sola struct](img/serializers.png)](img/serializers.png)
+[![Un serializador de Rustango: read_only, renombrado con source, un campo de método calculado, una FK anidada y un campo write_only — declarados en una sola struct](../img/serializers.png)](../img/serializers.png)
 
 > **Fuente:** `rustango::serializer` (`ModelSerializer`, `#[derive(Serializer)]`,
 > los atributos de campo `#[serializer(...)]`) — tras la característica `serializer`
 > (activada por defecto).
 >
 > **Versiones ejecutables:** el serializador mínimo se incluye en el ejemplo probado
-> [`getting_started_blog`](../crates/rustango/examples/getting_started_blog/src/post_serializer.rs),
+> [`getting_started_blog`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/getting_started_blog/src/post_serializer.rs),
 > y el comportamiento completo del derive está cubierto por las propias pruebas
 > unitarias del framework — `crates/rustango/tests/serializer_derive.rs` y
 > `serializer_cross_validate.rs`. Si algún fragmento parece desalineado, compáralo
@@ -523,7 +523,7 @@ Unos cuantos filos afilados y escotillas de escape que conviene conocer:
 ## Pruébalo
 
 El serializador mínimo se incluye en el ejemplo
-[`getting_started_blog`](../crates/rustango/examples/getting_started_blog/src/post_serializer.rs)
+[`getting_started_blog`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/getting_started_blog/src/post_serializer.rs)
 (Paso 13 de la guía de primeros pasos). El comportamiento completo del derive — los
 atributos de campo, los campos calculados/anidados/many, y ambas capas de validación —
 está cubierto por las propias pruebas unitarias del framework (sin necesidad de base

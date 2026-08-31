@@ -7,7 +7,7 @@ gestützt auf **argon2id**, den *memory-hard* Gewinner der Password Hashing
 Competition und die aktuelle Erstwahl der OWASP. Sie speichern, protokollieren
 oder vergleichen den Klartext niemals.
 
-[![Passwörter in Rustango: hash() erzeugt eine gesalzene argon2id-PHC-Zeichenkette, verify() prüft einen Versuch dagegen, und verify_dummy() gleicht die Anmelde-Timing an](img/auth-passwords.png)](img/auth-passwords.png)
+[![Passwörter in Rustango: hash() erzeugt eine gesalzene argon2id-PHC-Zeichenkette, verify() prüft einen Versuch dagegen, und verify_dummy() gleicht die Anmelde-Timing an](../img/auth-passwords.png)](../img/auth-passwords.png)
 
 > **Quelle:** `rustango::passwords` (`hash`, `verify`, `verify_dummy`,
 > `strength_score`, `StrengthIssue`) — hinter dem Feature `passwords`
@@ -15,7 +15,7 @@ oder vergleichen den Klartext niemals.
 > Passwort-Hilfsfunktionen siehe `rustango::tenancy::password`.
 >
 > **Ausführbare Version:** jeder Ausschnitt unten ist aus dem getesteten Beispiel
-> [`auth_demo`](../crates/rustango/examples/auth_demo/tests/auth_passwords.rs)
+> [`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/tests/auth_passwords.rs)
 > kopiert — `cargo test -p auth_demo --test auth_passwords`.
 
 > **Ein Begriff hier neu?** *hash*, *salt*, *argon2id*, *PHC-Zeichenkette* — siehe
@@ -177,7 +177,7 @@ assert!(strength_score("short").contains(&StrengthIssue::TooShort));
 
 Die PHC-Zeichenkette ist lediglich eine `String`-Spalte auf dem beliebigen
 Kontomodell, das Ihnen gehört. Im Beispiel
-[`auth_demo`](../crates/rustango/examples/auth_demo/src/models.rs):
+[`auth_demo`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/auth_demo/src/models.rs):
 
 ```rust
 #[derive(Model, Clone, Debug)]

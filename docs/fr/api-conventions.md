@@ -4,7 +4,7 @@
 
 Cette page explique les patterns que suit l'API de **Rustango**, afin que vous puissiez prédire le comportement de n'importe quelle méthode avant même d'en lire la documentation. Si vous contribuez ou auditez une fonctionnalité, ce sont les règles à connaître.
 
-[![Convention de nommage de Rustango : le suffixe de la méthode indique ce qu'elle attend — `*_on` pour un pool typé, forme nue pour le pool multi-backend, et signaux sans pool](img/api-conventions.png)](img/api-conventions.png)
+[![Convention de nommage de Rustango : le suffixe de la méthode indique ce qu'elle attend — `*_on` pour un pool typé, forme nue pour le pool multi-backend, et signaux sans pool](../img/api-conventions.png)](../img/api-conventions.png)
 
 ## Table des matières
 

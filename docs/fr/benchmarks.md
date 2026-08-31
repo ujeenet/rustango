@@ -27,7 +27,7 @@ harnais en une seule commande (voir [Reproduce](#reproduce)). Rien ici n'est esq
 > livre un framework complet et tout compris. Même le résultat non compilé le plus rapide,
 > **Laravel sur Octane**, reste 4 à 7× derrière les deux binaires.
 
-[![Requêtes/s sur l'index de blog non caché pour les six runtimes — Go 6 651, Rustango 4 781, Laravel+Octane 1 238, Django+Hypercorn 910, Django+gunicorn 850, Laravel+php-fpm 408](img/benchmarks.png)](img/benchmarks.png)
+[![Requêtes/s sur l'index de blog non caché pour les six runtimes — Go 6 651, Rustango 4 781, Laravel+Octane 1 238, Django+Hypercorn 910, Django+gunicorn 850, Laravel+php-fpm 408](../img/benchmarks.png)](../img/benchmarks.png)
 
 ---
 

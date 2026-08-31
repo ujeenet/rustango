@@ -12,7 +12,7 @@ Son el equivalente en **Rustango** de las vistas genéricas basadas en clases de
 recursos de Laravel que devuelven vistas Blade. Renderizan mediante plantillas
 [Tera](https://keats.github.io/tera/).
 
-[![Vistas HTML en Rustango: un modelo alimenta ListView, DetailView y CreateView/UpdateView/DeleteView, cada una renderizando una plantilla Tera en una página renderizada en el servidor](img/html-views.png)](img/html-views.png)
+[![Vistas HTML en Rustango: un modelo alimenta ListView, DetailView y CreateView/UpdateView/DeleteView, cada una renderizando una plantilla Tera en una página renderizada en el servidor](../img/html-views.png)](../img/html-views.png)
 
 > **¿Nuevo con algún término aquí?** Si *modelo*, *plantilla*, *router* o *renderizado en el
 > servidor* no te resultan familiares, el [glosario](glossary.md) explica cada uno en lenguaje
@@ -24,7 +24,7 @@ recursos de Laravel que devuelven vistas Blade. Renderizan mediante plantillas
 >
 > **Versión ejecutable:** el ejemplo API-vs-HTML de abajo está fijado por el
 > test del framework
-> [`html_and_api_contrast_sqlite_live.rs`](../crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
+> [`html_and_api_contrast_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs)
 > (`cargo test -p rustango --features sqlite --test html_and_api_contrast_sqlite_live`).
 > Las vistas individuales están cubiertas por `template_view.rs` y
 > `template_views_context_object_name_sqlite_live.rs`.
@@ -324,7 +324,7 @@ let app = axum::Router::new()
 
 Ahora `GET /api/posts` devuelve el sobre JSON paginado y `GET /posts`
 devuelve un listado HTML renderizado — las mismas filas, el mismo pool, dos formas. Esta
-configuración exacta es lo que afirma el [test de respaldo](../crates/rustango/tests/html_and_api_contrast_sqlite_live.rs).
+configuración exacta es lo que afirma el [test de respaldo](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/html_and_api_contrast_sqlite_live.rs).
 
 ---
 

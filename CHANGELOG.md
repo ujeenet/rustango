@@ -4,6 +4,152 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.54.0] — 2026-08-31
+
+Security and correctness batch — a bug-sweep of the cache / concurrency / HTTP
+middleware, plus the multi-tenancy isolation fixes and a documentation overhaul.
+No API removals; one behaviour change worth calling out.
+
+**Security-relevant:**
+
+- `cache_page` no longer caches a response carrying `Set-Cookie` or serves a
+  cached body to an `Authorization`/`Cookie`-bearing request — it previously
+  replayed one user's session cookie to the next (#1251).
+- The cache-backed rate limiter hashes secret header values instead of storing
+  them raw as cache keys, and warns instead of silently collapsing keyless
+  clients into one shared bucket (#1252).
+- The counter behind account lockout, and the `DistributedLock` acquire, are now
+  atomic (`InMemoryCache::incr` / new `Cache::add` = `SET NX`) — the lockout
+  threshold is no longer evadable by parallel attempts, and a lock can't be
+  double-held, wedged, or left permanently unacquirable (#1253, #1254).
+- Schema-mode tenancy resets `search_path` on connection release, so a shared
+  registry connection can't leak one tenant's schema to the next borrower
+  (#1224); scoped pools are cached per tenant (#1235); scheduled sweeps fan out
+  per tenant, and cache/locks scope per tenant (#1226–#1229).
+
+**Behaviour change:** `cache_page` refuses by default to cache responses that set
+a cookie or are marked `Cache-Control: private`, and bypasses the shared cache
+for authenticated requests. A route known to be public despite such a header
+opts back in with `CachePageLayer::cache_authenticated(true)`.
+
+**Also:** `FileCache`/`DatabaseCache` sub-second TTL correctness groundwork
+(#1233), scheduler zero-period + shutdown fixes (#1256), ETag RFC-7232
+conformance (#1258), 160 broken doc links fixed across all four locales with a
+guard test, and Docker demoted from a prerequisite in the getting-started guide
+(#1247, #1248). Supply-chain: `rpassword`, `quinn-proto`, `crossbeam-epoch`,
+`spin` advisories cleared, and `cargo deny` widened to optional features and
+example lockfiles.
+
+`Cache::add` (atomic set-if-absent) is new public API; `CachePageLayer` and
+`TenantPoolsConfig` gained methods/fields. All additive.
+
+### Fixed
+- **`DistributedLock` acquire was non-atomic off Redis and could wedge or never
+  re-grant** (#1254). Acquire used an `incr` counter plus a *separate* token
+  write, which had three failure modes: the `incr` default is a racy get+set on
+  every non-Redis backend, so two acquirers could both read `1` and both believe
+  they held the lock; a crash between the counter and the token write left the
+  lock held with no token, unreleasable until its TTL; and a counter left above
+  zero could never be acquired again. Rebuilt on a single atomic set-if-absent —
+  `Cache::add`, now overridden as `SET NX EX` on `RedisCache` and a
+  lock-guarded test-and-set on `InMemoryCache`. The key's value *is* the token,
+  so there is nothing to desynchronise; release deletes it only when it is still
+  ours. `DatabaseCache`'s `add` stays the non-atomic default (documented) — a
+  DB-backed lock is single-process only; use Redis across replicas. Regression
+  tests: 50 racing acquirers yield exactly one winner, a released lock is
+  immediately re-acquirable, and `add` is atomic under 100 concurrent callers —
+  all fail against the pre-fix code.
+- **`cache_page` could serve one user's session cookie to another** (#1251).
+  The layer cached any 200 and replayed its stored headers verbatim on a HIT,
+  including `Set-Cookie` — so an authenticated response that minted
+  `Set-Cookie: session=<A>` was cached and handed to the next visitor, a session
+  hijack. It also shared personalized pages across users, since the cache key did
+  not consider `Authorization` / `Cookie` and the response `Vary` was not
+  consulted.
+
+  Now safe by default: a response carrying `Set-Cookie`, or marked
+  `Cache-Control: private` / `no-cache` / `no-store`, is never cached; and a
+  request carrying `Authorization` or `Cookie` is neither served from nor stored
+  in the shared cache. A route known to be public despite such a header can opt
+  back in with `CachePageLayer::cache_authenticated(true)`. The `Set-Cookie` and
+  `private` guards are unconditional and not configurable.
+- **ETag middleware ignored `If-None-Match` lists and `*`, and dropped required
+  headers from the 304** (#1258). It compared the whole `If-None-Match` header
+  against one etag, so a conditional request sending a list (`"a", "b"`) or the
+  wildcard `*` — both valid per RFC 7232 — got a full `200` where a `304` was
+  due. And the `304` it did send carried only `ETag`, dropping `Cache-Control` /
+  `Vary` / `Expires` that RFC 7232 §4.1 requires, which could let a downstream
+  cache apply the wrong freshness. `If-None-Match` is now parsed as a list (and
+  `*`), and the 304 carries the caching-relevant headers.
+- **The scheduler panicked on a zero period and left in-flight jobs running
+  after shutdown** (#1256). `every(_, Duration::ZERO, _)` panicked
+  `tokio::time::interval` at spawn, silently killing that task's loop — now
+  clamped to 1s with a warning. And each tick ran its job on a detached
+  `tokio::spawn`, so `Handle::shutdown()` (which aborts the loop tasks) left a
+  job that was mid-run executing to completion; the job is now held in an
+  abort-on-drop guard, so shutting the scheduler down stops in-flight work too.
+- **The cache-backed rate limiter leaked secrets and shared one bucket among
+  keyless clients** (#1252). Keyed by `Authorization` / `x-api-key`, it used the
+  raw header value as the cache key — so a shared Redis stored live credentials
+  where anyone able to enumerate keys (`SCAN`, an RDB dump) could harvest them.
+  The value is now hashed (a SHA-256 prefix) before use. And when the limiter
+  cannot derive a per-client key — `KeyBy::Ip` with no `ConnectInfo`, or a
+  missing header — every request fell into one shared bucket, so one client
+  throttled the whole site; it now logs a one-time warning so the
+  misconfiguration is visible. The in-process `RateLimitLayer` keeps raw keys
+  (they never leave the process) but gets the same warning.
+- **The failure counter behind account lockout, distributed locks, and rate
+  limiting was not atomic** (#1253). `AccountLockout::record_failure` did a
+  get-parse-set, which loses updates under concurrent failed logins: several
+  attempts read the same value and write back the same `+1`, so N parallel
+  guesses record far fewer than N and the lockout threshold can be out-run by
+  parallelising. Root cause was one level down — `InMemoryCache::incr` was the
+  racy trait default (a separate `get` then `set`), which every counter built on
+  the cache inherited.
+
+  `InMemoryCache::incr` now holds its write lock across the whole
+  read-modify-write, so an in-process increment is atomic, and `record_failure`
+  uses `incr` rather than get-parse-set. `RedisCache` was already atomic (native
+  `INCRBY`); `DatabaseCache`'s default `incr` is still get-then-set, fine for a
+  single process. A multi-threaded regression test drives 50–100 concurrent
+  increments and asserts none are lost — it fails against the pre-fix code.
+- **160 broken documentation references, across all four locales** (#1248).
+  Reported as three 404s on the docs site; an audit found the whole class.
+
+  `docs/index.toml` publishes only the files it lists, and the site has no
+  `crates/` tree — so every `../crates/…` pointer in a published page 404s
+  there. Those are mostly the "Runnable version:" links nearly every guide
+  carries, and they were **worse in the translations**: `../crates/…` from
+  `docs/fr/` resolves to `docs/crates/`, which has never existed, so the
+  translated pages were broken on GitHub too. All 160 now use absolute
+  `https://github.com/…` URLs (`/blob/` for files, `/tree/` for directories),
+  which resolve from any renderer.
+
+  Also fixed: `getting-started.md` linked `django-parity-audit-2026-05-21.md`,
+  which `index.toml` deliberately does not publish; **111 broken images** in
+  `de` / `es` / `fr`, which copied `img/foo.png` verbatim although images live
+  only in `docs/img/`; and one extensionless `](manage)` link against 246 that
+  use `.md`.
+
+  `tests/docs_links.rs` now walks every published page in every locale and fails
+  the build on a link that escapes the docs tree, does not resolve, or targets an
+  unpublished page — plus a second test pinning locale coverage to `index.toml`.
+
+### Changed
+- **Docker is no longer presented as a prerequisite** (#1247). The getting-started
+  guide listed it as required and had readers verify it with `docker --version`,
+  so a user on Windows — where the Hyper-V/WSL2 backend is a common source of
+  start-up failures — reasonably concluded rustango needed it. It never did:
+  generated projects already ship a `sqlite` feature (CI-gated via
+  `feature_combos`), and a natively-installed Postgres only needs the compose
+  hostname `postgres` swapped for `localhost`. Neither path was documented.
+
+  The prerequisites table now points at a "Choosing a database" section covering
+  all three options, SQLite is recommended for learning, and Step 4 tells the
+  non-Docker reader what to skip. Translated into all four locales.
+
+- `docs/index.toml` declares `version = "0.53"` (was `0.52`).
+
 ## [0.53.0] — 2026-08-28
 
 Minor, not a patch. Two reasons to take the version bump rather than call this

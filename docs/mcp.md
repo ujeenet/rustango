@@ -19,11 +19,11 @@ per-agent, **fail-closed** authorization and OAuth 2.1 built in.
 > default; pulls `tenancy, sse, serializer, openapi, jwt`).
 >
 > **Runnable version:** every snippet is copied from
-> [`mcp_doc.rs`](../crates/rustango/tests/mcp_doc.rs)
+> [`mcp_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/mcp_doc.rs)
 > (`cargo test -p rustango --features sqlite,mcp --test mcp_doc`); the full
 > protocol surface is dogfooded by the `crates/rustango/tests/mcp_*.rs` suite,
 > and a runnable server lives in
-> [`examples/mcp_demo`](../crates/rustango/examples/mcp_demo).
+> [`examples/mcp_demo`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/mcp_demo).
 
 ## Table of contents
 
@@ -239,7 +239,7 @@ println!("copy once: {}", issued.token);
 ```
 
 At token-issue the server calls
-[`resolve_user_agent_grants_pool`](../crates/rustango/src/tenancy/agents.rs) —
+[`resolve_user_agent_grants_pool`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/src/tenancy/agents.rs) —
 the owner's effective permissions (`user_permissions_pool`, i.e. roles + direct
 grants − denials) select the mapped skills, whose tools/prompts/resources are
 flattened into the JWT's `skills`/`tools` claims. So `tools/list`,

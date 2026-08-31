@@ -8,7 +8,7 @@ la clave en cada petición; el servidor la busca e identifica al llamante.
 que puedes conectar a tu propia tabla, y un backend listo para usar que almacena
 las claves y autentica las peticiones `Authorization: Bearer`.
 
-[![Claves de API en Rustango: generate_key devuelve un token de un solo uso prefix.secret, almacenas el prefijo de 8 caracteres más un hash argon2id, y verify_key comprueba un secreto entrante](img/auth-api-keys.png)](img/auth-api-keys.png)
+[![Claves de API en Rustango: generate_key devuelve un token de un solo uso prefix.secret, almacenas el prefijo de 8 caracteres más un hash argon2id, y verify_key comprueba un secreto entrante](../img/auth-api-keys.png)](../img/auth-api-keys.png)
 
 > **¿Algún término te resulta nuevo?** *Token*, *hash*, *Bearer*, *argon2id* — el
 > [glosario](glossary.md) define los bloques de construcción.
@@ -20,10 +20,10 @@ las claves y autentica las peticiones `Authorization: Bearer`.
 > `ensure_api_keys_table_pool`) — tras la característica `tenancy`.
 >
 > **Versión ejecutable:** los fragmentos del ayudante están copiados de
-> [`auth_api_keys_doc.rs`](../crates/rustango/tests/auth_api_keys_doc.rs)
+> [`auth_api_keys_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_api_keys_doc.rs)
 > (`cargo test -p rustango --test auth_api_keys_doc`); el flujo del middleware
 > `ApiKeyBackend` de
-> [`auth_backends_doc.rs`](../crates/rustango/tests/auth_backends_doc.rs)
+> [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
 > (`cargo test -p rustango --features sqlite,tenancy --test auth_backends_doc`).
 
 ## Tabla de contenidos

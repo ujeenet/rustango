@@ -18,10 +18,10 @@ Django's cache framework or Laravel's `Cache` facade.
 > feature (off by default).
 >
 > **Runnable version:** every snippet is copied from
-> [`cache_doc.rs`](../crates/rustango/tests/cache_doc.rs)
+> [`cache_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/cache_doc.rs)
 > (`cargo test -p rustango --test cache_doc`); the database backend is dogfooded
 > on SQLite by
-> [`cache_db_backend_sqlite_live.rs`](../crates/rustango/tests/cache_db_backend_sqlite_live.rs).
+> [`cache_db_backend_sqlite_live.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/cache_db_backend_sqlite_live.rs).
 
 ## Table of contents
 
@@ -192,6 +192,13 @@ cache.clear().await?;                            // drops ONLY acme's entries
 `DistributedLock`. It forwards to the inner backend with mapped keys rather
 than reimplementing anything, so native primitives (Redis `INCRBY`, `SET NX`,
 `MGET`) keep their atomicity and batching.
+
+**Atomic counters and locks.** `Cache::incr` backs [rate limiting](middleware.md)
+and per-account lockout; `Cache::add` (set-if-absent) backs `DistributedLock`.
+Both are atomic on `RedisCache` (native `INCRBY` / `SET NX`) and on
+`InMemoryCache` (which holds its lock across the read-modify-write);
+`DatabaseCache` leaves both at the non-atomic default — fine for one process,
+but reach for Redis when a counter or lock must be exact across replicas.
 
 Two things worth knowing:
 
