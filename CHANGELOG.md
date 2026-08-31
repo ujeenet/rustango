@@ -5,6 +5,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ## [Unreleased]
 
 ### Fixed
+- **The scheduler panicked on a zero period and left in-flight jobs running
+  after shutdown** (#1256). `every(_, Duration::ZERO, _)` panicked
+  `tokio::time::interval` at spawn, silently killing that task's loop — now
+  clamped to 1s with a warning. And each tick ran its job on a detached
+  `tokio::spawn`, so `Handle::shutdown()` (which aborts the loop tasks) left a
+  job that was mid-run executing to completion; the job is now held in an
+  abort-on-drop guard, so shutting the scheduler down stops in-flight work too.
 - **The cache-backed rate limiter leaked secrets and shared one bucket among
   keyless clients** (#1252). Keyed by `Authorization` / `x-api-key`, it used the
   raw header value as the cache key — so a shared Redis stored live credentials
