@@ -2983,7 +2983,13 @@ fn parse_lookup(key: &str, value: SqlValue) -> Result<ParsedLookup, QueryError> 
         "gte" => Ok(pair(field, Op::Gte, value)),
         "lt" => Ok(pair(field, Op::Lt, value)),
         "lte" => Ok(pair(field, Op::Lte, value)),
-        "iexact" => Ok(pair(field, Op::ILike, value)),
+        "iexact" => {
+            // Case-insensitive EQUALITY, not a pattern: escape the
+            // value so `%` / `_` match themselves (#1257) — otherwise
+            // `email__iexact` with `%` matched every row.
+            let v = wrap_like(&value, "", "", &field, suffix)?;
+            Ok(pair(field, Op::ILikeEscaped, v))
+        }
         "contains" => {
             let v = wrap_like(&value, "%", "%", &field, suffix)?;
             Ok(pair(field, Op::LikeEscaped, v))

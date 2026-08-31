@@ -29,7 +29,7 @@ pub use query::{
     ColumnFilter, CompoundBranch, ConflictClause, CountQuery, CtFilter, DeleteQuery, DerivedSource,
     DistinctMode, Filter, InsertQuery, Join, JoinKind, LockMode, NullsOrder, Op, OrderClause,
     OrderItem, RelAggKind, RelCorrelation, SearchClause, SelectQuery, SetOp, SubqueryJoin,
-    UpdateQuery, WhereExpr, LIKE_ESCAPE_CHAR,
+    UpdateQuery, WhereExpr, LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CLAUSE,
 };
 pub use schema::{
     infer_app_label_from_module_path, AdminConfig, CheckConstraint, CompositeFkRelation,

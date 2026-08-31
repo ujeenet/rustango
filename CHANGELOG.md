@@ -21,9 +21,19 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   now match literally. Raw `__like` / `__ilike` still bind the caller's pattern
   verbatim (they own the wildcards).
 
+  Covered on **every** producer, not just `.filter()`: the ORM lookup path
+  (`wrap_like`), the `Q::contains`/`icontains`/… builder, the `Q!()` macro (now
+  via typed `Column::contains`/`icontains`/`iexact`/… methods), and the
+  admin/viewset `?q=` search. Relation-spanning lookups
+  (`author__name__icontains`, which route through `ExprCompare`) and `__iexact`
+  (case-insensitive equality — `email__iexact` with `%` had matched every row)
+  are included.
+
   **Behaviour change:** `name__contains = "50%"` now matches a literal `50%`
   instead of "50 then anything". New public API: `core::escape_like`,
-  `Op::LikeEscaped`, `Op::ILikeEscaped`.
+  `core::LIKE_ESCAPE_CHAR`, `core::LIKE_ESCAPE_CLAUSE`, `Op::LikeEscaped`,
+  `Op::ILikeEscaped`, and `Column::contains`/`icontains`/`startswith`/
+  `istartswith`/`endswith`/`iendswith`/`iexact`.
 
 ## [0.54.0] — 2026-08-31
 

@@ -99,11 +99,12 @@ fn gt_gte_lt_lte_lower_to_comparison_methods() {
 
 #[test]
 fn icontains_wraps_with_percent_and_uses_ilike() {
+    // #1257 — the escaped typed method is the equivalence now.
     let qs_macro = base_qs().where_(Q!(User.email__icontains = "alice"));
-    let qs_typed = base_qs().where_(User::email.ilike("%alice%"));
+    let qs_typed = base_qs().where_(User::email.icontains("alice"));
     let sql_macro = compile_pg(qs_macro);
     let sql_typed = compile_pg(qs_typed);
-    assert_eq!(sql_macro, sql_typed, "Q!() must match hand-rolled ILIKE");
+    assert_eq!(sql_macro, sql_typed, "Q!() must match Column::icontains");
     assert!(
         sql_macro.contains("ILIKE"),
         "expected ILIKE in: {sql_macro}"
@@ -112,8 +113,10 @@ fn icontains_wraps_with_percent_and_uses_ilike() {
 
 #[test]
 fn contains_uses_like_with_percent_wrap() {
+    // #1257 — the macro delegates to the escaped typed method, so the
+    // hand-rolled equivalent is Column::contains, not raw like().
     let qs_macro = base_qs().where_(Q!(User.email__contains = "alice"));
-    let qs_typed = base_qs().where_(User::email.like("%alice%"));
+    let qs_typed = base_qs().where_(User::email.contains("alice"));
     assert_eq!(compile_pg(qs_macro), compile_pg(qs_typed));
 }
 
@@ -121,19 +124,19 @@ fn contains_uses_like_with_percent_wrap() {
 fn startswith_and_endswith_lower_correctly() {
     assert_eq!(
         compile_pg(base_qs().where_(Q!(User.email__startswith = "ali"))),
-        compile_pg(base_qs().where_(User::email.like("ali%"))),
+        compile_pg(base_qs().where_(User::email.startswith("ali"))),
     );
     assert_eq!(
         compile_pg(base_qs().where_(Q!(User.email__endswith = ".com"))),
-        compile_pg(base_qs().where_(User::email.like("%.com"))),
+        compile_pg(base_qs().where_(User::email.endswith(".com"))),
     );
     assert_eq!(
         compile_pg(base_qs().where_(Q!(User.email__istartswith = "ali"))),
-        compile_pg(base_qs().where_(User::email.ilike("ali%"))),
+        compile_pg(base_qs().where_(User::email.istartswith("ali"))),
     );
     assert_eq!(
         compile_pg(base_qs().where_(Q!(User.email__iendswith = ".COM"))),
-        compile_pg(base_qs().where_(User::email.ilike("%.COM"))),
+        compile_pg(base_qs().where_(User::email.iendswith(".COM"))),
     );
 }
 

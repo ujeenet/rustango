@@ -2341,21 +2341,6 @@ fn build_list_where(
     }
 }
 
-/// Escape `%` and `_` so the user's search input matches literally
-/// in `LIKE` / `ILIKE` rather than acting as wildcards. Mirrors
-/// what the viewset does with user input.
-/// Read or mint a CSRF token and stamp it into the Tera context as
-/// `csrf_token`. Returns the optional `Set-Cookie` header value the
-/// caller should attach to the response when the cookie was missing
-/// (so the first-ever GET to the form doesn't render an empty
-/// token, which would make the subsequent POST fail CSRF
-/// validation).
-///
-/// Without the `csrf` feature compiled in, this is a no-op:
-/// `csrf_token` is stamped as an empty string and `None` is
-/// returned. The `<input type="hidden" name="_csrf" value="">`
-/// in the rendered HTML is harmless — CSRF validation isn't
-/// enforced when the feature is off.
 fn stamp_csrf(_headers: &axum::http::HeaderMap, ctx: &mut Context) -> Option<String> {
     #[cfg(feature = "csrf")]
     {

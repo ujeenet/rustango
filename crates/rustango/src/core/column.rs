@@ -76,6 +76,75 @@ pub trait Column: Copy + 'static {
         TypedFilter::scalar(Self::COLUMN, Op::NotILike, value.into().into())
     }
 
+    /// Django `__contains` — the value is a **literal** substring: `%`
+    /// and `_` in it match themselves, escaped and emitted with
+    /// `ESCAPE '!'` on every dialect (#1257). Use [`Column::like`] for a
+    /// raw pattern you build yourself.
+    fn contains(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
+        Self::escaped_like(self, "%", "%", value, false)
+    }
+
+    /// Django `__icontains` — case-insensitive literal substring match
+    /// (#1257).
+    fn icontains(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
+        Self::escaped_like(self, "%", "%", value, true)
+    }
+
+    /// Django `__startswith` — literal prefix match (#1257).
+    fn startswith(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
+        Self::escaped_like(self, "", "%", value, false)
+    }
+
+    /// Django `__istartswith` — case-insensitive literal prefix match
+    /// (#1257).
+    fn istartswith(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
+        Self::escaped_like(self, "", "%", value, true)
+    }
+
+    /// Django `__endswith` — literal suffix match (#1257).
+    fn endswith(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
+        Self::escaped_like(self, "%", "", value, false)
+    }
+
+    /// Django `__iendswith` — case-insensitive literal suffix match
+    /// (#1257).
+    fn iendswith(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
+        Self::escaped_like(self, "%", "", value, true)
+    }
+
+    /// Django `__iexact` — case-insensitive **equality**. The value is a
+    /// literal, never a pattern: `%` / `_` in it match themselves
+    /// (#1257), unlike [`Column::ilike`], which binds the caller's
+    /// pattern verbatim.
+    fn iexact(self, value: impl AsRef<str>) -> TypedFilter<Self::Model> {
+        Self::escaped_like(self, "", "", value, true)
+    }
+
+    /// Shared builder for the escaped-LIKE lookups: escapes the user
+    /// value with [`crate::core::escape_like`] and pairs it with the
+    /// matching `*Escaped` op, so the escape⟷op invariant cannot be
+    /// broken at the call sites above (#1257).
+    #[doc(hidden)]
+    fn escaped_like(
+        self,
+        prefix: &str,
+        suffix: &str,
+        value: impl AsRef<str>,
+        case_insensitive: bool,
+    ) -> TypedFilter<Self::Model> {
+        let escaped = super::query::escape_like(value.as_ref());
+        let op = if case_insensitive {
+            Op::ILikeEscaped
+        } else {
+            Op::LikeEscaped
+        };
+        TypedFilter::scalar(
+            Self::COLUMN,
+            op,
+            SqlValue::String(format!("{prefix}{escaped}{suffix}")),
+        )
+    }
+
     /// `column REGEXP pattern` — POSIX regex match. Django `__regex`
     /// (issue #26). Pattern is bound as a `String` parameter. Emits
     /// PG `~`, MySQL `REGEXP`, SQLite `REGEXP`. SQLite's `REGEXP`

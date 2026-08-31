@@ -135,6 +135,21 @@ fn istartswith_iendswith_use_ilike() {
 // ---------- #1257: LIKE metacharacter escaping (tri-dialect) ----------
 
 #[test]
+fn escape_char_clause_and_helper_agree() {
+    // The escape char, the emitted ESCAPE clause, and the helper must
+    // never drift apart — each would silently corrupt the others.
+    use rustango::core::{escape_like, LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CLAUSE};
+    assert_eq!(
+        LIKE_ESCAPE_CLAUSE,
+        format!(" ESCAPE '{LIKE_ESCAPE_CHAR}'"),
+        "clause must embed the escape char",
+    );
+    let e = LIKE_ESCAPE_CHAR;
+    assert_eq!(escape_like("%_"), format!("{e}%{e}_"));
+    assert_eq!(escape_like(&e.to_string()), format!("{e}{e}"));
+}
+
+#[test]
 fn contains_escapes_wildcards_in_user_value() {
     // A `%` or `_` in the value must be neutralised so it matches
     // literally — otherwise `50%` would match "50 then anything".
@@ -190,6 +205,33 @@ fn icontains_escape_clause_survives_the_ilike_fallback() {
     for stmt in [&my, &sq] {
         assert_eq!(stmt.params, vec![SqlValue::String("%x!_y%".into())]);
     }
+}
+
+#[test]
+fn iexact_escapes_wildcards_as_literal_equality() {
+    // iexact is case-insensitive EQUALITY — a `%` in the value must not
+    // act as a wildcard (pre-#1257 fix, `email__iexact` with `%`
+    // matched every row).
+    let qs = Post::objects().filter("title__iexact", "50%");
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(
+        stmt.sql.contains(r#""title" ILIKE $1 ESCAPE '!'"#),
+        "{}",
+        stmt.sql
+    );
+    assert_eq!(stmt.params, vec![SqlValue::String("50!%".into())]);
+}
+
+#[test]
+fn q_builder_contains_escapes_wildcards() {
+    use rustango::query::{QuerySet, Q};
+    // The OR-composition API must escape exactly like .filter() does.
+    let qs: QuerySet<Post> =
+        QuerySet::default().where_(Q::icontains("title", "a%b") | Q::contains("status", "x_y"));
+    let stmt = Postgres.compile_select(&qs.compile().unwrap()).unwrap();
+    assert!(stmt.sql.contains("ESCAPE '!'"), "{}", stmt.sql);
+    assert!(stmt.params.contains(&SqlValue::String("%a!%b%".into())));
+    assert!(stmt.params.contains(&SqlValue::String("%x!_y%".into())));
 }
 
 #[test]

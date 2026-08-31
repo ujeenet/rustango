@@ -174,22 +174,32 @@ pub enum Op {
 /// has no default escape at all (#1257).
 pub const LIKE_ESCAPE_CHAR: char = '!';
 
+/// The SQL suffix the escaped ops emit after their `LIKE` — pairs with
+/// [`LIKE_ESCAPE_CHAR`] (a unit test pins the two together, so neither
+/// can drift alone).
+pub const LIKE_ESCAPE_CLAUSE: &str = " ESCAPE '!'";
+
 /// Escape LIKE metacharacters in **user input** so `%` and `_` match
 /// literally (#1257, Django parity: `__contains` treats the value as a
 /// literal substring, not a pattern).
 ///
-/// The output is only meaningful under `ESCAPE '!'`, i.e. bound to an
-/// [`Op::LikeEscaped`] / [`Op::ILikeEscaped`] predicate — pair them.
-/// Wildcards the *caller* adds around the escaped value (the `%…%` of a
-/// contains) stay unescaped and keep their meaning.
+/// The output is only meaningful under [`LIKE_ESCAPE_CLAUSE`], i.e.
+/// bound to an [`Op::LikeEscaped`] / [`Op::ILikeEscaped`] predicate —
+/// pair them. Wildcards the *caller* adds around the escaped value (the
+/// `%…%` of a contains) stay unescaped and keep their meaning.
 #[must_use]
 pub fn escape_like(input: &str) -> String {
-    // Escape the escape character first, or a literal `!` would arm
-    // whatever character follows it.
-    input
-        .replace('!', "!!")
-        .replace('%', "!%")
-        .replace('_', "!_")
+    let e = LIKE_ESCAPE_CHAR;
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        // Escape the escape character itself, and the two LIKE
+        // metacharacters. Single pass, derived from the one const.
+        if ch == e || ch == '%' || ch == '_' {
+            out.push(e);
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// One predicate in a `WHERE` clause: `column <op> value`. Always

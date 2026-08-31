@@ -74,6 +74,18 @@ async fn run_matrix(pool: Pool, dialect: &str) {
         "[{dialect}] `!` (the escape char) was mishandled",
     );
 
+    // iexact is case-insensitive EQUALITY: `%` must not wildcard.
+    assert_eq!(
+        names(&pool, "name__iexact", "100%").await,
+        vec!["100%".to_string()],
+        "[{dialect}] iexact let `%` act as a wildcard",
+    );
+    assert_eq!(
+        names(&pool, "name__iexact", "%").await,
+        Vec::<String>::new(),
+        "[{dialect}] iexact with a lone `%` matched rows",
+    );
+
     // Case-insensitive path (ILIKE / LOWER-LIKE fallback) escapes too.
     assert_eq!(
         names(&pool, "name__icontains", "A_B").await,

@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 use crate::core::{
     AggregateExpr, AggregateQuery, BulkInsertQuery, BulkUpdateQuery, CountQuery, DeleteQuery,
     Filter, InsertQuery, ModelSchema, Op, SearchClause, SelectQuery, SqlValue, UpdateQuery,
-    WhereExpr,
+    WhereExpr, LIKE_ESCAPE_CLAUSE,
 };
 
 use super::{CompiledStatement, Dialect, SqlError};
@@ -3534,18 +3534,18 @@ pub(super) fn write_where_with_search(
         // column got the bound value; subsequent ones bound to NULL
         // / empty / nothing depending on driver). Keeping per-column
         // binds also keeps the writer dialect-agnostic.
+        // Escape LIKE metacharacters in the user's `?q=` before
+        // wrapping in `%…%`, and append the ESCAPE clause per column —
+        // so a `%` or `_` typed into the admin search box matches
+        // literally instead of acting as a wildcard, on every dialect
+        // (#1257). Built once: the pattern is loop-invariant.
+        let pattern = format!("%{}%", crate::core::escape_like(&s.query));
         b.sql.push('(');
         for (i, col) in s.columns.iter().enumerate() {
             if i > 0 {
                 b.sql.push_str(" OR ");
             }
-            // Escape LIKE metacharacters in the user's `?q=` before
-            // wrapping in `%…%`, and append `ESCAPE '!'` below — so a
-            // `%` or `_` typed into the admin search box matches
-            // literally instead of acting as a wildcard, on every
-            // dialect (#1257).
-            let escaped = crate::core::escape_like(&s.query);
-            b.params.push(SqlValue::String(format!("%{escaped}%")));
+            b.params.push(SqlValue::String(pattern.clone()));
             let placeholder = b.d.placeholder(b.params.len());
             // Build the qualified column identifier the same way the
             // rest of the writer does, then hand it to `write_ilike`.
@@ -3556,7 +3556,7 @@ pub(super) fn write_where_with_search(
             }
             qualified.push_str(&b.d.quote_ident(col));
             b.d.write_ilike(&mut b.sql, &qualified, &placeholder, false);
-            b.sql.push_str(" ESCAPE '!'");
+            b.sql.push_str(LIKE_ESCAPE_CLAUSE);
         }
         b.sql.push(')');
     }
@@ -3756,6 +3756,18 @@ fn write_expr_compare(
         write_expr(b, rhs, None)?;
         return Ok(());
     }
+    // The escaped LIKE — same shape as Op::Like above plus the ESCAPE
+    // clause. Relation-spanning lookups (`author__name__contains`) land
+    // here: `resolve_span` re-parses the suffix through `parse_lookup`,
+    // which produces the escaped ops (#1257), and packs the comparison
+    // into an ExprCompare.
+    if matches!(op, Op::LikeEscaped) {
+        write_expr(b, lhs, None)?;
+        b.sql.push_str(" LIKE ");
+        write_expr(b, rhs, None)?;
+        b.sql.push_str(LIKE_ESCAPE_CLAUSE);
+        return Ok(());
+    }
 
     match op {
         Op::Search => {
@@ -3771,8 +3783,17 @@ fn write_expr_compare(
             write_expr(b, rhs, None)?;
             Ok(())
         }
-        Op::ILike | Op::NotILike => {
-            require_op(b.d, op)?;
+        Op::ILike | Op::NotILike | Op::ILikeEscaped => {
+            // ILikeEscaped shares the dialect gate + shape with ILike; it
+            // only appends the ESCAPE clause after the composed LIKE.
+            require_op(
+                b.d,
+                if matches!(op, Op::ILikeEscaped) {
+                    Op::ILike
+                } else {
+                    op
+                },
+            )?;
             // Render lhs first so its params land in the param vector
             // before the rhs literal — keeps `?`-positional dialects
             // (MySQL / SQLite) in textual order. Then carve the lhs
@@ -3791,6 +3812,9 @@ fn write_expr_compare(
             b.params.push(v.clone());
             let p = b.d.placeholder(b.params.len());
             b.d.write_ilike(&mut b.sql, &lhs_str, &p, matches!(op, Op::NotILike));
+            if matches!(op, Op::ILikeEscaped) {
+                b.sql.push_str(LIKE_ESCAPE_CLAUSE);
+            }
             Ok(())
         }
         Op::In | Op::NotIn => {
@@ -4024,20 +4048,29 @@ fn write_filter(
         Op::Gte => simple_op(b, &qualified_col, " >= ", filter.value.clone(), cast),
         Op::Like => simple_op(b, &qualified_col, " LIKE ", filter.value.clone(), cast),
         Op::NotLike => simple_op(b, &qualified_col, " NOT LIKE ", filter.value.clone(), cast),
-        // The escaped variants carry a value produced by
-        // `core::query::escape_like` and MUST emit `ESCAPE '!'` (#1257):
-        // SQLite has no default LIKE escape character, so without the
-        // clause the escaping is not just ignored but wrong (a `!` in
-        // the pattern would be matched literally... and `!%` would match
-        // "!, then anything"). `ESCAPE '!'` is portable across all
-        // three dialects — `'\'` is not, MySQL eats it as a
-        // string-literal escape.
+        // The escaped variant carries a value produced by
+        // `core::escape_like` and MUST emit the ESCAPE clause (#1257):
+        // SQLite has no default LIKE escape character, so without it the
+        // escaping is not just ignored but wrong. `!` is the portable
+        // choice — `'\'` is not, MySQL eats it as a string-literal
+        // escape.
         Op::LikeEscaped => {
             simple_op(b, &qualified_col, " LIKE ", filter.value.clone(), cast);
-            b.sql.push_str(" ESCAPE '!'");
+            b.sql.push_str(LIKE_ESCAPE_CLAUSE);
         }
-        Op::ILike | Op::NotILike => {
-            require_op(b.d, filter.op)?;
+        // ILikeEscaped shares the dialect gate + LOWER-fallback shape
+        // with ILike; it only appends the ESCAPE clause afterwards, so
+        // any future fix to the case-insensitive fallback applies to
+        // both automatically.
+        Op::ILike | Op::NotILike | Op::ILikeEscaped => {
+            require_op(
+                b.d,
+                if matches!(filter.op, Op::ILikeEscaped) {
+                    Op::ILike
+                } else {
+                    filter.op
+                },
+            )?;
             b.params.push(filter.value.clone());
             let p = b.d.placeholder(b.params.len());
             b.d.write_ilike(
@@ -4046,16 +4079,9 @@ fn write_filter(
                 &p,
                 matches!(filter.op, Op::NotILike),
             );
-        }
-        Op::ILikeEscaped => {
-            // Same dialect gate as ILike; the `ESCAPE` suffix is valid
-            // after both the native `ILIKE ?` shape and the
-            // `LOWER(col) LIKE LOWER(?)` fallback.
-            require_op(b.d, Op::ILike)?;
-            b.params.push(filter.value.clone());
-            let p = b.d.placeholder(b.params.len());
-            b.d.write_ilike(&mut b.sql, &qualified_col, &p, false);
-            b.sql.push_str(" ESCAPE '!'");
+            if matches!(filter.op, Op::ILikeEscaped) {
+                b.sql.push_str(LIKE_ESCAPE_CLAUSE);
+            }
         }
         Op::Regex | Op::NotRegex | Op::IRegex | Op::NotIRegex => {
             // Pattern shape is checked upstream — the typed builder
