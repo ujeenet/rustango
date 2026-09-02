@@ -189,3 +189,64 @@ async fn garbage_and_wrong_secrets_are_refused() {
         .await
         .is_none());
 }
+
+/// A credential minted in one tenant must not authenticate against another —
+/// end to end, and specifically not via a cache warmed by the owning tenant.
+///
+/// The primary control is the pool boundary: the agent row exists only in its
+/// own tenant's database, so the prefix lookup finds nothing elsewhere. The
+/// per-request liveness re-check backstops it even on a cache hit, which is
+/// why this stays green regardless of whether the argon2-skip cache key
+/// carries the tenant (it does — `sha256(tenant \0 token)` — but that is
+/// defence in depth here, not the property under test).
+#[tokio::test]
+async fn credential_does_not_cross_tenants() {
+    let acme = world().await;
+    let globex = world().await;
+    skill_world(&acme).await;
+    skill_world(&globex).await;
+
+    let uid = make_user(&acme, "alice").await;
+    set_user_perm_pool(uid, "thing.edit", true, &acme)
+        .await
+        .expect("grant perm");
+    let issued = create_user_key_pool(&acme, uid, "alice's key", &[])
+        .await
+        .expect("key");
+
+    // Warm the cache on the owning tenant first.
+    assert!(
+        verify_raw_agent_credential(&acme, "acme", &issued.token)
+            .await
+            .is_some(),
+        "owning tenant must authenticate"
+    );
+
+    // Same token, other tenant's pool + slug: no such agent, and the warm
+    // cache entry must not be reused across the slug boundary.
+    assert!(
+        verify_raw_agent_credential(&globex, "globex", &issued.token)
+            .await
+            .is_none(),
+        "credential must not authenticate against another tenant"
+    );
+
+    // Cross-tenant is refused even when the foreign slug is presented
+    // against the owning pool's token first — i.e. the cache key, not just
+    // the pool, carries the tenant.
+    assert!(
+        verify_raw_agent_credential(&globex, "acme", &issued.token)
+            .await
+            .is_none(),
+        "foreign pool must refuse even with the owning slug"
+    );
+
+    // The owning tenant still works afterwards — isolation must not have
+    // poisoned the legitimate entry.
+    assert!(
+        verify_raw_agent_credential(&acme, "acme", &issued.token)
+            .await
+            .is_some(),
+        "owning tenant still authenticates after cross-tenant attempts"
+    );
+}
