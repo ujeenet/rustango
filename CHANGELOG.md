@@ -23,6 +23,12 @@ Also: README install snippets bumped to the current version (docs.rs renders the
 README as the crate landing page).
 
 ### Fixed
+- **`#[derive(ViewSet)]` failed to compile without the `postgres` feature**
+  (#1273). The generated `router()` named `sqlx::PgPool`, so any sqlite/mysql-only
+  project got `cannot find type PgPool`. It now takes `impl Into<sql::Pool>` and
+  calls `router_pool`, accepting every backend's pool (PG callers unaffected). A
+  tri-dialect compile test — run under sqlite-only and mysql-only in CI — guards
+  it; the old derive test was `postgres`-gated, so nothing caught this.
 - **LIKE lookups did not escape user wildcards, on any dialect** (#1257).
   `__contains` / `__startswith` / `__endswith` (and the admin/viewset `?q=`
   search and `template_views` list search) built `%value%` from raw user input
