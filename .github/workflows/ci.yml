@@ -459,6 +459,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rustango --features mysql,jobs-postgres --test jobs_mysql_live
       - run: cargo test -p rustango --features mysql --test mysql_live
+      # Again under --all-features. #1277: MySQL enforces FKs and has no
+      # `DROP TABLE … CASCADE`, so `drop_all_pool` failed whenever it dropped
+      # a parent (`rustango_users`) before its child (`rustango_api_keys`).
+      # Which order that walk takes depends on how many models are registered,
+      # so only a full-feature build reliably provokes it — the bare
+      # `--features mysql` run above never did, which is why this went
+      # unnoticed. Keep both: the narrow run guards the common config, this
+      # one guards the FK-ordering regression.
+      - run: cargo test -p rustango --all-features --test mysql_live
       - run: cargo test -p rustango --features mysql --test explain_pool_mysql_live
       - run: cargo test -p rustango --features mysql --test bulk_upsert_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
