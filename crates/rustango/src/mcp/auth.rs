@@ -237,7 +237,7 @@ pub(crate) async fn post_authed(
         return unauthorized(&headers, &uri);
     };
     // Two accepted bearer shapes: a minted agent JWT, or the raw
-    // `name.secret` credential itself (#1272) — the copy-paste key a member
+    // `prefix.secret` credential itself (epic #1013) — the copy-paste key a member
     // generates in an app's UI works directly in any MCP client without a
     // token-exchange step. The raw path verifies liveness and resolves grants
     // per request inside [`verify_raw_agent_credential`], so RBAC changes and
@@ -281,8 +281,8 @@ pub(crate) async fn post_authed(
     handle_message(&state, &body, Some(ctx)).await
 }
 
-/// Resolve a raw `name.secret` agent credential presented directly as the
-/// Bearer token (#1272). Returns the same [`McpAgent`] shape
+/// Resolve a raw `prefix.secret` agent credential presented directly as the
+/// Bearer token (epic #1013). Returns the same [`McpAgent`] shape
 /// [`verify_agent_token`] yields, or `None` for any failure — fail-closed.
 ///
 /// This is the copy-paste path: the show-once key a member generates works
@@ -298,9 +298,9 @@ pub(crate) async fn post_authed(
 /// small bounded, process-local cache keyed by `(tenant, sha256(token))`.
 /// Only the *hash check* is skipped on a cache hit — liveness and grants are
 /// never cached. A garbage bearer never reaches argon2: the shape gate
-/// requires a `name.secret` split, and
-/// [`crate::tenancy::authenticate_agent_pool`] burns a dummy verification
-/// for unknown names to stay timing-neutral (#1099).
+/// requires a `prefix.secret` split, and
+/// [`crate::tenancy::authenticate_agent_by_prefix_pool`] burns a dummy
+/// verification for unknown prefixes to stay timing-neutral (#1099).
 pub async fn verify_raw_agent_credential(
     pool: &crate::sql::Pool,
     slug: &str,

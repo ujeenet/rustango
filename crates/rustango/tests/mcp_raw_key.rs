@@ -1,4 +1,4 @@
-//! Raw-credential bearer (#1272) — the copy-paste key path.
+//! Raw-credential bearer (epic #1013) — the copy-paste key path.
 //!
 //! A user-owned key's show-once `prefix.secret` token works directly as the
 //! Bearer credential: [`rustango::mcp::verify_raw_agent_credential`] verifies

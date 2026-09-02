@@ -234,7 +234,7 @@ pub async fn authenticate_agent_pool(
 
 /// Authenticate a full `prefix.secret` credential by its **secret prefix**
 /// (the lookup half) rather than the agent name — the shape a bearer token
-/// carries when the raw credential itself is presented (#1272), where the
+/// carries when the raw credential itself is presented (epic #1013), where the
 /// client never knows the agent's name. Same fail-closed + timing-neutral
 /// contract as [`authenticate_agent_pool`].
 ///
