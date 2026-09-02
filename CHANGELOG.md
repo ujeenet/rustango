@@ -4,6 +4,34 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+- **MCP: the raw `prefix.secret` credential is accepted as the Bearer token.**
+  A show-once agent key now works directly in any MCP client
+  (`Authorization: Bearer <prefix.secret>`) with no `POST /mcp/token` exchange
+  step. New `mcp::verify_raw_agent_credential` and
+  `tenancy::authenticate_agent_by_prefix_pool` (lookup by secret prefix rather
+  than agent name — a bearer client never knows the agent's name; fail-closed
+  and timing-neutral, burning a dummy argon2 verify on unknown prefixes per
+  #1099).
+
+  On this path liveness **and** grant resolution run on *every* request, so
+  capabilities always track the owner's live RBAC and revocation applies
+  immediately — strictly fresher than a minted JWT's claim snapshot. Only the
+  argon2 hash check is memoised, in a bounded process-local cache (256 entries,
+  60s TTL) keyed by `sha256(tenant \0 token)` so a credential verified for one
+  tenant can never authenticate against another. A malformed bearer is rejected
+  by a shape gate before any DB or argon2 work. The JWT path is tried first and
+  is unchanged.
+
+  **Deployment note:** because unknown prefixes deliberately burn a dummy argon2
+  verify to stay timing-neutral, set `[mcp] rate_limit_per_minute` in production
+  to bound the verification work an unauthenticated caller can induce.
+
+### Changed
+- **`[mcp] max_body_bytes` is now configurable** (default unchanged at 1 MiB,
+  still tighter than axum's 2 MiB). Raise it for tools that accept inline
+  payloads such as base64 media uploads; it was previously a hard-coded const.
+
 ## [0.55.0] — 2026-08-31
 
 Follows 0.54.0 with the LIKE-escaping correctness fix and a README version
