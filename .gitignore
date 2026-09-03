@@ -1,5 +1,11 @@
 /target
-/Cargo.lock
+# Cargo.lock IS committed. This workspace ships a binary
+# (`cargo-rustango`), which is the textbook case for committing it, and
+# ignoring it cost us twice: a fresh CI resolve picked up the broken
+# `time` 0.3.48 and then `tinyvec` 1.13.0, reddening every job on a
+# green commit with no change of ours. Committing it makes CI
+# reproducible and lets a bad upstream release be handled deliberately
+# (bump the lock when we choose) instead of at the moment it lands.
 **/*.rs.bk
 
 # Nested example projects (cookbook_blog, blog_demo, etc.) are
