@@ -78,6 +78,15 @@ impl Dialect for Sqlite {
         true
     }
 
+    /// `SQLITE_MAX_VARIABLE_NUMBER` — 32766 since SQLite 3.32 (it was
+    /// 999 before). sqlx bundles a modern build, so 32766 is right
+    /// here; a host linking an ancient system SQLite would need the
+    /// lower figure. Half Postgres' ceiling, so an 8-column model
+    /// chunks at ~4k rows rather than ~8k (#1284).
+    fn max_bind_params(&self) -> usize {
+        32766
+    }
+
     fn supports_returning(&self) -> bool {
         // SQLite ≥ 3.35 (released 2021-03). Lower versions reject the
         // clause; rustango doesn't try to detect the runtime version

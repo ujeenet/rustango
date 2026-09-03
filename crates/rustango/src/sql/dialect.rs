@@ -120,6 +120,24 @@ pub trait Dialect {
         false
     }
 
+    /// Maximum bind parameters the backend accepts in one statement.
+    ///
+    /// Every backend has a ceiling, and a multi-row `INSERT` reaches it
+    /// at `rows × columns` (#1284):
+    ///
+    /// * **Postgres** — 65535, a hard protocol limit (the parameter
+    ///   count is an `int16` on the wire).
+    /// * **SQLite** — `SQLITE_MAX_VARIABLE_NUMBER`, 32766 since 3.32
+    ///   (999 before it; sqlx bundles a modern build).
+    /// * **MySQL** — no fixed cap; bounded by `max_allowed_packet`.
+    ///   65535 is a safe proxy well inside the default 64 MiB.
+    ///
+    /// The default is Postgres' figure — the most conservative of the
+    /// three that is also correct for a hard-limit backend.
+    fn max_bind_params(&self) -> usize {
+        65535
+    }
+
     /// Translate a `DEFAULT` expression authored in Postgres dialect
     /// (the rustango canonical form) to the target backend's spelling.
     /// `ty` is the field's `FieldType` token (e.g. `"json"`, `"datetime"`,

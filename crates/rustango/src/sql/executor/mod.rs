@@ -1271,8 +1271,44 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
     if query.rows.is_empty() {
         return Ok(());
     }
-    let stmt = pool.dialect().compile_bulk_insert(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await?;
+    // Every `pool.dialect()` here is a short-lived temporary, deliberately
+    // not bound to a variable: it yields `&dyn Dialect`, which is not
+    // `Sync`, so holding one across an `.await` makes this future non-Send
+    // and breaks every boxed handler that transitively calls it.
+    //
+    // Split into batches that fit the backend's bind-parameter ceiling
+    // (#1284). One multi-row INSERT binds `rows × columns` parameters,
+    // and every backend caps that — 65535 on Postgres (an int16 on the
+    // wire), 32766 on modern SQLite, `max_allowed_packet` on MySQL. A
+    // single statement past the cap fails with an opaque driver error,
+    // so an 8-column model died at ~8k rows on PG and ~4k on SQLite.
+    // Django's `bulk_create` batches for the same reason.
+    //
+    // Small inserts are untouched: under the ceiling this is the same
+    // single statement it always was. Only oversized batches split, and
+    // those previously failed outright.
+    //
+    // Note the trade-off, which matches Django's: above the threshold
+    // this is no longer one statement, so a mid-way failure leaves the
+    // earlier chunks committed. Callers needing all-or-nothing should
+    // wrap the call in a transaction.
+    let columns = query.columns.len().max(1);
+    let max_rows = (pool.dialect().max_bind_params() / columns).max(1);
+
+    if query.rows.len() <= max_rows {
+        let stmt = pool.dialect().compile_bulk_insert(query)?;
+        execute_pool(pool, &stmt.sql, stmt.params).await?;
+        return Ok(());
+    }
+
+    for chunk in query.rows.chunks(max_rows) {
+        let batch = BulkInsertQuery {
+            rows: chunk.to_vec(),
+            ..query.clone()
+        };
+        let stmt = pool.dialect().compile_bulk_insert(&batch)?;
+        execute_pool(pool, &stmt.sql, stmt.params).await?;
+    }
     Ok(())
 }
 
