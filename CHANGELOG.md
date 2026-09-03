@@ -31,6 +31,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - **`[mcp] max_body_bytes` is now configurable** (default unchanged at 1 MiB,
   still tighter than axum's 2 MiB). Raise it for tools that accept inline
   payloads such as base64 media uploads; it was previously a hard-coded const.
+### Fixed
+- **`migrate::drop_all_pool` failed on MySQL whenever the schema had foreign
+  keys** (#1277). It dropped tables in model-registration order with `CASCADE`
+  emitted for Postgres only — fine on PG (cascades) and on SQLite (which leaves
+  `foreign_keys` off by default), but MySQL enforces FKs and rejects `CASCADE`
+  on `DROP TABLE`, so the call failed outright as soon as a parent was dropped
+  before its child (`rustango_users` before `rustango_api_keys`). Whether that
+  happened depended on how many models were registered, making it look
+  intermittent.
+
+  `drop_all_pool` is now two-phase — drop FK constraints, then drop tables —
+  mirroring `apply_all`'s two-phase create, so drop order is irrelevant on every
+  dialect. New emitter `migrate::ddl::drop_constraints_sql_with_dialect` (the
+  inverse of `create_constraints_sql_with_dialect`; empty for SQLite, which
+  inlines FKs and has no named constraint to drop). No session-level
+  `FOREIGN_KEY_CHECKS` toggling, which on a pooled connection would not reliably
+  reach the connection doing the drops — and would leak to the next borrower
+  (#1224).
 
 ## [0.55.0] — 2026-08-31
 

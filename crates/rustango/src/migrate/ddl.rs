@@ -174,6 +174,57 @@ pub fn drop_table_sql_with_dialect(
     s
 }
 
+/// The inverse of [`create_constraints_sql_with_dialect`]: one statement
+/// per FK / O2O field and per composite FK, dropping the constraint that
+/// the create emitter named `{table}_{column}_fkey`.
+///
+/// Needed because `DROP TABLE` is only FK-safe on two of the three
+/// dialects: Postgres has `CASCADE`, SQLite leaves `foreign_keys` off by
+/// default, but MySQL enforces FKs and rejects `CASCADE` — so dropping a
+/// parent before its child fails outright (#1277). Dropping constraints
+/// first makes table drop order irrelevant, mirroring the way
+/// [`create_constraints_sql_with_dialect`] makes create order irrelevant.
+///
+/// Returns empty for dialects that inline FKs in `CREATE TABLE` (SQLite):
+/// there is no named constraint to drop, and the table drop is unimpeded.
+///
+/// The statements are best-effort by nature — a constraint may already be
+/// gone, and only Postgres can say `IF EXISTS` here (MySQL's
+/// `DROP FOREIGN KEY` has no such form), so callers should ignore errors.
+#[must_use]
+pub fn drop_constraints_sql_with_dialect(
+    dialect: &dyn Dialect,
+    model: &ModelSchema,
+) -> Vec<String> {
+    if dialect.inline_fks_in_create_table() {
+        return Vec::new();
+    }
+    // MySQL spells it `DROP FOREIGN KEY`; Postgres `DROP CONSTRAINT`,
+    // which additionally accepts `IF EXISTS`.
+    let mysql = dialect.name() == "mysql";
+    let mut out = Vec::new();
+    let mut push = |name: String| {
+        let mut s = String::from("ALTER TABLE ");
+        s.push_str(&dialect.quote_ident(model.table));
+        if mysql {
+            s.push_str(" DROP FOREIGN KEY ");
+        } else {
+            s.push_str(" DROP CONSTRAINT IF EXISTS ");
+        }
+        s.push_str(&dialect.quote_ident(&name));
+        out.push(s);
+    };
+    for field in model.scalar_fields() {
+        if field.relation.is_some() {
+            push(format!("{}_{}_fkey", model.table, field.column));
+        }
+    }
+    for rel in model.composite_relations {
+        push(format!("{}_{}_fkey", model.table, rel.name));
+    }
+    out
+}
+
 /// One `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` per FK / O2O field,
 /// plus one per composite FK declared via `#[rustango(fk_composite(...))]`
 /// (sub-slice F.2 of the v0.15.0 ContentType plan). MySQL accepts the

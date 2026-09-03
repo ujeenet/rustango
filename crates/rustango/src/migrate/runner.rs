@@ -401,7 +401,19 @@ pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> 
     let dialect = pool.dialect();
     // Cascade only emitted for PG — MySQL parses it as syntax error.
     let cascade = dialect.name() == "postgres";
-    for model in bootstrap_models() {
+    let models = bootstrap_models();
+    // Phase 1 — drop FK constraints, so table drop order can't matter.
+    // The mirror of `apply_all`'s two-phase create. Without it MySQL, which
+    // enforces FKs and has no `DROP TABLE … CASCADE`, fails as soon as a
+    // parent is dropped before its child (#1277). Best-effort: a constraint
+    // may already be absent, and only PG can say `IF EXISTS` here.
+    for model in &models {
+        for sql in ddl::drop_constraints_sql_with_dialect(dialect, model) {
+            let _ = crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await;
+        }
+    }
+    // Phase 2 — drop the tables themselves.
+    for model in &models {
         let sql =
             ddl::drop_table_sql_with_dialect(dialect, model, /* if_exists */ true, cascade);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
