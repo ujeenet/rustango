@@ -115,7 +115,7 @@ p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"]
 tera = { version = "1.20", default-features = false }
 
 # Caching
-redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
 
 # OAuth2 / OIDC HTTP client (rustls — no openssl footprint)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
