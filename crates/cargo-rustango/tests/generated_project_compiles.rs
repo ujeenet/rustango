@@ -79,6 +79,31 @@ fn generate(template: &str, tag: &str) -> (PathBuf, PathBuf) {
     (work, root)
 }
 
+/// Work around upstream releases that do not compile.
+///
+/// **Temporary. Delete the whole function when the entry below clears.**
+///
+/// Every other build in this repo is protected by a committed `Cargo.lock`,
+/// but a *freshly scaffolded* project has none by definition — it resolves
+/// from scratch, so it picks up whatever was published minutes ago. That is
+/// not a hypothetical: `tinyvec` 1.13.0 shipped a `vec!` call that is not in
+/// scope under `alloc`-without-`std` (upstream Lokathor/tinyvec#225), and it
+/// arrives here four levels down via
+/// `sqlx-postgres → stringprep → unicode-normalization → tinyvec`. Nothing in
+/// the generated project or in rustango can be changed to make it build.
+///
+/// A failure here is ignored on purpose: if the bad version has been yanked or
+/// the dependency graph moved on, `cargo update --precise` errors, and that is
+/// fine — the pin simply is not needed any more.
+fn pin_broken_transitives(root: &Path) {
+    for (krate, good) in [("tinyvec", "1.12.0")] {
+        let _ = Command::new(env!("CARGO"))
+            .current_dir(root)
+            .args(["update", "-p", krate, "--precise", good])
+            .output();
+    }
+}
+
 /// `cargo check` the generated project, returning (compiled, warnings, log).
 ///
 /// Warnings are counted **only for the generated crate**, never for rustango.
@@ -91,6 +116,7 @@ fn generate(template: &str, tag: &str) -> (PathBuf, PathBuf) {
 /// when there is nothing of yours to blame: anything the compiler says about it
 /// is the generator's (#1210).
 fn check(root: &Path, extra: &[&str]) -> (bool, usize, String) {
+    pin_broken_transitives(root);
     let out = Command::new(env!("CARGO"))
         .current_dir(root)
         .args(["check", "--message-format=json-diagnostic-rendered-ansi"])
