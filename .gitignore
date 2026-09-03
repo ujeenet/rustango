@@ -12,7 +12,11 @@
 # standalone Cargo packages with their own target/ + Cargo.lock —
 # don't commit either.
 crates/rustango/examples/*/target/
-crates/rustango/examples/*/Cargo.lock
+# …but their Cargo.lock IS committed, for the same reason as the
+# workspace one above. These packages sit outside `members`, so they
+# resolve their own dependency tree — the workspace lock does not reach
+# them, and `tinyvec` 1.13.0 reddened every `doc_examples` job even
+# after the workspace lock was pinned.
 # shared target dir bin/examples.sh builds every example into (override: EX_TARGET)
 /target-examples/
 .DS_Store
