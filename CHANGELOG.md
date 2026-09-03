@@ -4,6 +4,70 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security
+- **Rate limiting and account lockout silently did nothing on Redis 6.x**
+  (#1280). `RedisCache::incr` set its window TTL with `EXPIRE key secs NX`, and
+  the `NX` flag is Redis **7.0+**; on 6.x the server rejects the command, so
+  `incr` returned `Err` on every call. Both callers fail open — the rate
+  limiter returns `Ok((0, 0))` and account lockout `unwrap_or(0)`, never
+  reaching `max_attempts` — so neither control engaged, with no signal beyond a
+  per-request warning. The `INCRBY` had already landed, so counters were also
+  created with no TTL and never expired.
+
+  Now a single `EVAL` script does the increment and a conditional expiry
+  together, preserving the set-TTL-only-once semantic a fixed window needs.
+  `EVAL` is Redis 2.6+, so it works on 6.x and managed hosts alike. Verified
+  against real 6.2 and 7.4 servers; CI now runs the Redis suite as a 6-and-7
+  matrix, since a 7-only job passes on the broken code.
+
+  Account lockout still fails open on a cache error (locking every account out
+  during an outage is its own denial of service) but now logs a warning instead
+  of failing silently.
+- **CSV export did not neutralise spreadsheet formula injection** (#1283,
+  CWE-1236). A cell beginning `=`, `+`, `-`, `@` (or tab/CR) was written
+  verbatim and evaluated on open in Excel / LibreOffice / Sheets; RFC 4180
+  quoting does not help, since the quotes are stripped before the cell is
+  parsed. Reachable via the module's own documented recipe — exporting user
+  names and emails for an operator to download.
+
+  Such values are now prefixed with `'`. Numbers are deliberately exempt so
+  exports full of negative numbers are not mangled. New
+  `csv::neutralize_formula`; opt out with `CsvWriter::raw_formulas()` for
+  machine-consumed output.
+- **`?ordering=` accepted columns the ViewSet does not expose** (#1282). With
+  no explicit `ordering_fields`, the allowlist check was skipped entirely, so a
+  ViewSet declaring `fields = "id, title"` still honoured
+  `?ordering=password_hash` — a sort oracle over a column the API never
+  returns. The allowlist now defaults to the exposed field set, matching DRF.
+  Where `fields` is unset every column is exposed anyway, so that case is
+  unchanged.
+
+### Fixed
+- **`DistributedLock` provided no mutual exclusion on `DatabaseCache`**
+  (#1281). `DatabaseCache` never overrode `Cache::add`, inheriting the trait
+  default — `exists()` then `set()`, a check-then-act whose `set` is an
+  unconditional upsert. Two racers both saw "absent", both wrote, and both got
+  `Ok(true)`. Measured: 16 concurrent acquirers produced **13 winners**; now
+  exactly one.
+
+  `add` now takes the row only when absent or already expired. Postgres and
+  SQLite use one `ON CONFLICT … DO UPDATE … WHERE`; MySQL, which has no `WHERE`
+  on `ON DUPLICATE KEY UPDATE`, uses `INSERT IGNORE` plus a conditional
+  `UPDATE`. `expires = 0` still means never, so a live persistent entry is
+  never stolen.
+- **`bulk_insert_pool` ignored the backend's bind-parameter ceiling** (#1284).
+  A multi-row `INSERT` binds `rows × columns` parameters and every backend caps
+  that — 65535 on Postgres, 32766 on modern SQLite — so a large import failed
+  with an opaque driver error (`too many SQL variables`) having inserted
+  nothing. It now batches, via the new `Dialect::max_bind_params`. Inserts
+  under the ceiling are byte-for-byte unchanged.
+
+  As in Django, a batch split across statements is no longer atomic: a mid-way
+  failure leaves earlier chunks committed. Wrap the call in a transaction when
+  you need all-or-nothing. The Postgres-only generated `Model::bulk_insert` is
+  not yet batched — it routes through an executor consumed per call and does
+  `RETURNING` PK write-back; #1284 stays open for that.
+
 ### Added
 - **MCP: the raw `prefix.secret` credential is accepted as the Bearer token.**
   A show-once agent key now works directly in any MCP client
