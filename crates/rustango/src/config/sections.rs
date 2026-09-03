@@ -175,6 +175,9 @@ pub struct McpSettings {
     pub rate_limit_per_minute: Option<u32>,
     /// Max tools returned by `tools/list` (`None` = unlimited).
     pub max_tools_listed: Option<usize>,
+    /// Max JSON-RPC request body in bytes. Default 1 MiB — raise it when a
+    /// tool accepts inline payloads (e.g. base64 media uploads).
+    pub max_body_bytes: Option<usize>,
 }
 
 impl McpSettings {
@@ -192,6 +195,11 @@ impl McpSettings {
     #[must_use]
     pub fn sse_enabled(&self) -> bool {
         self.enable_sse.unwrap_or(true)
+    }
+    /// Request-body cap in bytes, defaulting to 1 MiB.
+    #[must_use]
+    pub fn max_body_bytes(&self) -> usize {
+        self.max_body_bytes.unwrap_or(1024 * 1024)
     }
 }
 
