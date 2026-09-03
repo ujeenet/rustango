@@ -31,6 +31,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - **`[mcp] max_body_bytes` is now configurable** (default unchanged at 1 MiB,
   still tighter than axum's 2 MiB). Raise it for tools that accept inline
   payloads such as base64 media uploads; it was previously a hard-coded const.
+
 ### Fixed
 - **`migrate::drop_all_pool` failed on MySQL whenever the schema had foreign
   keys** (#1277). It dropped tables in model-registration order with `CASCADE`
@@ -49,6 +50,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   `FOREIGN_KEY_CHECKS` toggling, which on a pooled connection would not reliably
   reach the connection doing the drops — and would leak to the next borrower
   (#1224).
+- **`cargo test` opened a browser tab.** `manage docs` launches
+  `https://docs.rs/rustango` via the OS opener, and `docs` is one of the verbs
+  the `pool_free_verbs_need_no_database` unit test dispatches — so every
+  `cargo test --lib` run spawned a real tab on the developer's machine. The URL
+  is still printed, but the launch is now skipped under `cfg!(test)`, and also
+  when `RUSTANGO_NO_BROWSER` is set (for headless and CI shells, which have
+  nothing to open).
 
 ## [0.55.0] — 2026-08-31
 
