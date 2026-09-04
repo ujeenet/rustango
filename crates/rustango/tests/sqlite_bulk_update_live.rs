@@ -11,7 +11,7 @@
 
 #![cfg(feature = "sqlite")]
 
-use rustango::core::{BulkUpdateQuery, Model as _, SqlValue};
+use rustango::core::{BulkUpdateQuery, SqlValue};
 use rustango::sql::{bulk_update_pool, sqlx, Dialect as _, Pool, Sqlite};
 use rustango::Model;
 

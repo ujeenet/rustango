@@ -466,6 +466,12 @@ use axum::response::Html;
 
 /// `GET /<app-prefix>/hello` — placeholder. Wire the actual path
 /// in `urls.rs` once you decide on the app's URL prefix.
+///
+/// `dead_code` is allowed because the matching `.route(...)` line in
+/// `urls.rs` ships commented out on purpose — the stub is there to be
+/// wired up, so until you do, nothing references it. Without this a
+/// freshly generated app warns before you have written a line.
+#[allow(dead_code)]
 pub async fn hello() -> Html<&'static str> {
     Html(\"<h1>hello from your new app</h1>\")
 }

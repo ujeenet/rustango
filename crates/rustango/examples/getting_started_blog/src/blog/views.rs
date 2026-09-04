@@ -10,6 +10,10 @@ use axum::response::Html;
 
 /// `GET /<app-prefix>/hello` — placeholder. Wire the actual path
 /// in `urls.rs` once you decide on the app's URL prefix.
+///
+/// The matching `.route(...)` in `urls.rs` ships commented out on
+/// purpose, so nothing references this until you wire it.
+#[allow(dead_code)]
 pub async fn hello() -> Html<&'static str> {
     Html("<h1>hello from your new app</h1>")
 }

@@ -10,7 +10,7 @@
 use std::sync::OnceLock;
 
 use rustango::core::joins::aliased;
-use rustango::core::{Model as _, Op, WhereExpr};
+use rustango::core::{Op, WhereExpr};
 use rustango::sql::{sqlx, Auto, FetcherPool as _, Pool};
 use rustango::Model;
 use tokio::sync::Mutex;
