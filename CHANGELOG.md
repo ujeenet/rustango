@@ -4,6 +4,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.56.0] — 2026-09-04
+
+A correctness and hardening release. Three of these were **silent** failures —
+a control that reported success while doing nothing — which is the property
+that makes a bug dangerous regardless of its severity.
+
+The headline items: rate limiting and account lockout did nothing at all on
+Redis 6.x; `DistributedLock` provided no mutual exclusion on `DatabaseCache`
+(measured: 13 of 16 concurrent acquirers won); and `drop_all_pool` failed on
+MySQL for any schema with foreign keys. CSV export gained formula-injection
+neutralisation, `bulk_insert` now batches against the backend's bind-parameter
+ceiling, and sqlx finally has a TLS backend so managed Postgres/MySQL
+(Supabase, Neon, RDS) work at all.
+
+Also: `Cargo.lock` is now committed. Ignoring it let two separate broken
+upstream releases (`time` 0.3.48, then `tinyvec` 1.13.0) turn every CI job red
+on unchanged code.
+
 ### Security
 - **Rate limiting and account lockout silently did nothing on Redis 6.x**
   (#1280). `RedisCache::incr` set its window TTL with `EXPIRE key secs NX`, and
