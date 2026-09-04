@@ -80,6 +80,14 @@ pub struct S3Storage {
     http: reqwest::Client,
 }
 
+/// Endpoint minus its `http(s)://` scheme, if any.
+fn strip_scheme(endpoint: &str) -> &str {
+    endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+        .unwrap_or(endpoint)
+}
+
 impl S3Storage {
     #[must_use]
     pub fn new(cfg: S3Config) -> Self {
@@ -97,14 +105,18 @@ impl S3Storage {
         self
     }
 
+    /// Bare authority (`host[:port]`) — never a path.
+    ///
+    /// This is sent as the `Host` header *and* signed as the SigV4
+    /// `host:` canonical header, so it must not carry the endpoint's
+    /// path. Endpoints that include one (Supabase Storage exposes its
+    /// S3 API at `https://<ref>.storage.supabase.co/storage/v1/s3`)
+    /// used to leak it into both, producing an invalid `Host` that
+    /// proxies reject with 400 before S3 ever sees the request.
     fn host(&self) -> String {
         if let Some(ep) = &self.cfg.endpoint {
-            // Strip scheme + trailing slash to get bare host.
-            let no_scheme = ep
-                .strip_prefix("https://")
-                .or_else(|| ep.strip_prefix("http://"))
-                .unwrap_or(ep);
-            no_scheme.trim_end_matches('/').to_owned()
+            let no_scheme = strip_scheme(ep);
+            no_scheme.split('/').next().unwrap_or(no_scheme).to_owned()
         } else if self.cfg.path_style {
             format!("s3.{}.amazonaws.com", self.cfg.region)
         } else {
@@ -121,20 +133,30 @@ impl S3Storage {
         "https"
     }
 
-    /// URL path component for a key: `/key` (virtual) or
-    /// `/bucket/key` (path style).
+    /// Path prefix carried by a custom endpoint — `/storage/v1/s3` for
+    /// Supabase Storage, empty for a bare-host endpoint (AWS, R2,
+    /// MinIO). It belongs to both the request target and the signed
+    /// canonical path, or the signature covers a different resource
+    /// than the one requested.
+    fn endpoint_prefix(&self) -> String {
+        let Some(ep) = &self.cfg.endpoint else {
+            return String::new();
+        };
+        let no_scheme = strip_scheme(ep).trim_end_matches('/');
+        match no_scheme.find('/') {
+            Some(i) => no_scheme[i..].to_owned(),
+            None => String::new(),
+        }
+    }
+
+    /// URL path component for a key: `<prefix>/key` (virtual-hosted —
+    /// bucket lives in the host) or `<prefix>/bucket/key` (path style).
     fn key_path(&self, key: &str) -> String {
-        if self.cfg.path_style || self.cfg.endpoint.is_some() {
-            // Custom endpoints typically use path-style.
-            if self.cfg.path_style {
-                format!("/{}/{}", self.cfg.bucket, encode_key(key))
-            } else {
-                // Custom endpoint, virtual-hosted: bucket is in the
-                // host, so path is just the key.
-                format!("/{}", encode_key(key))
-            }
+        let prefix = self.endpoint_prefix();
+        if self.cfg.path_style {
+            format!("{prefix}/{}/{}", self.cfg.bucket, encode_key(key))
         } else {
-            format!("/{}", encode_key(key))
+            format!("{prefix}/{}", encode_key(key))
         }
     }
 
@@ -701,5 +723,82 @@ mod tests {
             .presigned_put_url("x", std::time::Duration::from_secs(60), None)
             .await
             .is_none());
+    }
+
+    // -------- Endpoints that carry a path prefix (Supabase Storage)
+
+    fn supabase_cfg() -> S3Config {
+        S3Config {
+            endpoint: Some("https://abc123.storage.supabase.co/storage/v1/s3".into()),
+            bucket: "media".into(),
+            region: "us-west-2".into(),
+            path_style: true,
+            ..cfg()
+        }
+    }
+
+    #[test]
+    fn host_is_the_bare_authority_even_when_the_endpoint_has_a_path() {
+        // Sent as the `Host` header and signed as the canonical
+        // `host:` header — a path here is an invalid Host, which
+        // proxies reject with 400 before S3 sees the request.
+        let s = S3Storage::new(supabase_cfg());
+        assert_eq!(s.host(), "abc123.storage.supabase.co");
+    }
+
+    #[test]
+    fn endpoint_path_prefix_is_kept_in_the_request_path() {
+        let s = S3Storage::new(supabase_cfg());
+        assert_eq!(s.endpoint_prefix(), "/storage/v1/s3");
+        assert_eq!(s.key_path("a/b.png"), "/storage/v1/s3/media/a/b.png");
+        assert_eq!(
+            s.full_url("a/b.png"),
+            "https://abc123.storage.supabase.co/storage/v1/s3/media/a/b.png",
+        );
+    }
+
+    #[test]
+    fn bare_host_endpoints_are_unaffected() {
+        // MinIO / R2 style: no path prefix, so nothing changes.
+        let s = S3Storage::new(S3Config {
+            endpoint: Some("http://127.0.0.1:9000".into()),
+            bucket: "media".into(),
+            path_style: true,
+            ..cfg()
+        });
+        assert_eq!(s.host(), "127.0.0.1:9000");
+        assert_eq!(s.endpoint_prefix(), "");
+        assert_eq!(s.key_path("a.png"), "/media/a.png");
+        assert_eq!(s.full_url("a.png"), "http://127.0.0.1:9000/media/a.png");
+    }
+
+    #[test]
+    fn aws_endpoints_are_unaffected() {
+        // No custom endpoint: virtual-hosted by default, path-style on request.
+        let virt = S3Storage::new(cfg());
+        assert_eq!(virt.host(), "examplebucket.s3.us-east-1.amazonaws.com");
+        assert_eq!(virt.endpoint_prefix(), "");
+        assert_eq!(virt.key_path("a.png"), "/a.png");
+
+        let path = S3Storage::new(S3Config {
+            path_style: true,
+            ..cfg()
+        });
+        assert_eq!(path.host(), "s3.us-east-1.amazonaws.com");
+        assert_eq!(path.key_path("a.png"), "/examplebucket/a.png");
+    }
+
+    #[test]
+    fn signed_canonical_path_matches_the_url_path() {
+        // The signature covers `key_path`; if the URL carried the
+        // endpoint prefix and the canonical path did not, every
+        // request would fail SignatureDoesNotMatch.
+        let s = S3Storage::new(supabase_cfg());
+        let url = s.full_url("a/b.png");
+        let signed_path = s.key_path("a/b.png");
+        assert!(
+            url.ends_with(&signed_path),
+            "url {url} must end with signed path {signed_path}",
+        );
     }
 }
