@@ -4,6 +4,35 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.56.1] — 2026-09-04
+
+Documentation fixes. No code changes — the crate is byte-for-byte 0.56.0
+plus corrected docs and scaffolder comments. Cut as a release because the
+docs site publishes from a release tag.
+
+### Fixed
+
+- **getting-started no longer claims the scaffolder generates
+  `admin_router`.** #1210/#1211 removed that helper from the fullstack
+  template (nothing generated called it, and it was the only generated
+  line naming `PgPool`, hard-wiring Postgres into a project whose manifest
+  offers sqlite and mysql), but the guide still told readers it was
+  already there. Step 11 now says to add it, and why the generator won't.
+  The removal note's claim that `Cli` mounts the auto-admin itself was
+  also wrong — there is no `Cli::admin_prefix` and no single-tenant
+  auto-mount (that exists only under `tenancy`), so a fullstack project
+  has no admin until the author writes the helper. Reported in #1179.
+- **Generated `src/main.rs` no longer points at the removed helper.**
+  Every freshly scaffolded project shipped a header comment referring to
+  `urls::admin_router(pool)`, which the scaffolder stopped emitting.
+- **getting-started Steps 14 and 15 now name their files.** The JWT and
+  security-middleware steps were bare snippets while every other step
+  says "Edit `src/…`". 14a/14b are fragments for a handler in
+  `src/views.rs` (or an extractor / layer); Step 15 lives in
+  `src/main.rs`, replacing the `let api = …` line. Reported in #1179.
+- Both fixes applied to the French translation as well.
+
+
 ## [0.56.0] — 2026-09-04
 
 A correctness and hardening release. Three of these were **silent** failures —
