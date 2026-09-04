@@ -9,7 +9,6 @@
 
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]
 
-use rustango::core::{Column as _, Model as _};
 use rustango::sql::{sqlx, Auto, FetcherPool as _, Pool};
 use rustango::test_assertions::{assert_num_queries, QueryCounter};
 use rustango::Model;

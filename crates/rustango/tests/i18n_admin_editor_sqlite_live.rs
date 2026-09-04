@@ -65,7 +65,7 @@ async fn editor_save_store_render_round_trip() {
     ];
     apply_edits(&p, &edits2, "bob").await.unwrap();
 
-    let (locales, rows) = pivot(&editor_rows(&p).await.unwrap());
+    let (_locales, rows) = pivot(&editor_rows(&p).await.unwrap());
     let greeting = rows.iter().find(|r| r.key == "greeting").unwrap();
     // en unchanged, fr updated — no duplicate rows.
     assert_eq!(

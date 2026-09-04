@@ -253,7 +253,6 @@ pub fn admin_user() -> crate::admin::AdminUser {
 #[cfg(all(test, feature = "sqlite", feature = "tenancy", feature = "admin"))]
 mod tests {
     use super::*;
-    use crate::core::Model as _;
 
     #[tokio::test]
     async fn framework_tables_and_factories_roundtrip() {

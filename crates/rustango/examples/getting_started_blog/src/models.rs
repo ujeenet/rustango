@@ -9,6 +9,11 @@ use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "item", display = "name")]
+// Schema columns exist for the table definition and the admin; this
+// tutorial's own code never reads them back, which is what `dead_code`
+// measures. Allowed rather than removed — dropping them would gut the
+// example the docs walk through.
+#[allow(dead_code)]
 pub struct Item {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

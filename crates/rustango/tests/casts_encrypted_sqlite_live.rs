@@ -4,7 +4,7 @@
 //! and decrypts on SELECT, while the raw column holds ciphertext.
 
 use rustango::casts::{Cast, EncryptedString};
-use rustango::sql::{sqlx, Auto, FetcherPool as _, Pool};
+use rustango::sql::{sqlx, Auto, Pool};
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]

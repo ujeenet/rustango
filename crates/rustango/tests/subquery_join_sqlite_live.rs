@@ -6,7 +6,7 @@
 
 use rustango::core::joins::aliased;
 use rustango::core::window::row_number;
-use rustango::core::{Expr, Model as _, Op, SqlValue, WhereExpr};
+use rustango::core::{Expr, Op, SqlValue, WhereExpr};
 use rustango::sql::{sqlx, Auto, FetcherPool as _, ForeignKey, Pool};
 use rustango::Model;
 

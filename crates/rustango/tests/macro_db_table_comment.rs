@@ -4,7 +4,6 @@
 
 #![cfg(feature = "sqlite")]
 
-use rustango::core::Model as _;
 use rustango::migrate::ddl::{
     create_table_sql_with_dialect, table_comment_statements_with_dialect,
 };
