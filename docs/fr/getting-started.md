@@ -122,7 +122,7 @@ myblog/
     ├── main.rs                 # entry point: `Cli::new().api(urls::api()).run()`
     ├── models.rs               # every #[derive(Model)] lives here
     ├── views.rs                # axum request handlers
-    └── urls.rs                 # `pub fn api()` route aggregator + `admin_router(pool)`
+    └── urls.rs                 # agrégateur de routes `pub fn api()`
 ```
 
 Il n'y a qu'un seul binaire : `cargo run` démarre le serveur HTTP, et chaque verbe de style Django (`migrate`, `makemigrations`, `startapp`, `check`, …) passe par ce même binaire via `cargo run -- <verb>`. Il n'y a pas de binaire `manage` séparé.
@@ -415,9 +415,9 @@ Vous devriez voir l'identifiant de votre nouvel article ainsi que les lignes lue
 
 ## Étape 11 : activer l'administration automatique
 
-**Rustango** fournit une interface d'administration générée pour vos modèles, tout comme l'administration Django. Le générateur de squelette vous a déjà donné un utilitaire `admin_router(pool)` dans `src/urls.rs` qui construit l'administration automatique à partir d'un pool — vous n'avez qu'à l'imbriquer sous `/admin` et à l'injecter dans le `Cli`.
+**Rustango** fournit une interface d'administration générée pour vos modèles, tout comme l'administration Django. Sa mise en place tient en deux petites étapes : un utilitaire qui transforme un pool en routeur d'administration, et un seul appel `.nest(...)` pour le monter.
 
-Donnez d'abord un titre à l'administration dans `src/urls.rs`. Le `admin_prefix` doit correspondre au chemin sous lequel vous l'imbriquerez à l'étape suivante (`/admin`) afin que les propres liens et actions de formulaire de l'administration se résolvent correctement :
+Ajoutez vous-même cet utilitaire dans `src/urls.rs` — le générateur de squelette ne le crée pas (il n'émet volontairement aucun code typé `PgPool`, afin que le même modèle fonctionne sur SQLite et MySQL). Le `admin_prefix` doit correspondre au chemin sous lequel vous l'imbriquerez à l'étape suivante (`/admin`) afin que les propres liens et actions de formulaire de l'administration se résolvent correctement :
 
 ```rust
 pub fn admin_router(pool: PgPool) -> Router {
@@ -587,6 +587,8 @@ Les JWT sont des jetons signés que vous remettez à un client après la connexi
 
 ### 14a. Émettre un jeton à la connexion
 
+Il s'agit de fragments, et non de fichiers autonomes : celui-ci se place à l'intérieur de votre gestionnaire de connexion dans `src/views.rs`, aux côtés des gestionnaires de l'étape 6.
+
 Intégrez l'identifiant de l'utilisateur (le « sujet » du jeton) et toute revendication (claim) personnalisée, comme les rôles, dans un jeton signé, puis remettez-le au client :
 
 ```rust
@@ -604,6 +606,8 @@ let token = encode(&claims.ttl(Duration::from_secs(900)), &secret)?;
 ```
 
 ### 14b. Vérifier le jeton à chaque requête
+
+Ce code se place là où vous protégez une route — dans un gestionnaire protégé de `src/views.rs`, ou dans un extracteur axum / une couche `middleware::from_fn` si vous souhaitez l'appliquer à toute une sous-arborescence.
 
 Décodez le jeton — ceci vérifie la signature et l'expiration — puis relisez les revendications (claims). S'il est absent ou invalide, rejetez la requête comme non autorisée :
 
@@ -625,7 +629,7 @@ let roles: Vec<String> = claims.get("roles").unwrap_or_default();
 
 ## Étape 15 : ajouter le middleware de sécurité
 
-Le middleware englobe chaque requête pour y ajouter un comportement transversal. Ici, vous empilez les identifiants de requête, la journalisation des accès, la limitation de débit, le CORS et les en-têtes de sécurité en une seule chaîne. Chaque `.method(...)` ajoute une couche, de manière similaire au middleware Django ou à la pile de middleware de Laravel. Voir le [guide du middleware](middleware.md) pour le catalogue complet des couches et les règles d'ordonnancement.
+Le middleware englobe chaque requête pour y ajouter un comportement transversal. Ce code se place dans `src/main.rs` : il remplace la ligne `let api = ...` de l'étape 11, afin que le routeur soit entièrement assemblé avant d'atteindre le `Cli`. Ici, vous empilez les identifiants de requête, la journalisation des accès, la limitation de débit, le CORS et les en-têtes de sécurité en une seule chaîne. Chaque `.method(...)` ajoute une couche, de manière similaire au middleware Django ou à la pile de middleware de Laravel. Voir le [guide du middleware](middleware.md) pour le catalogue complet des couches et les règles d'ordonnancement.
 
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};

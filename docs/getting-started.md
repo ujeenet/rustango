@@ -122,7 +122,7 @@ myblog/
     ├── main.rs                 # entry point: `Cli::new().api(urls::api()).run()`
     ├── models.rs               # every #[derive(Model)] lives here
     ├── views.rs                # axum request handlers
-    └── urls.rs                 # `pub fn api()` route aggregator + `admin_router(pool)`
+    └── urls.rs                 # `pub fn api()` route aggregator
 ```
 
 There is a single binary: `cargo run` boots the HTTP server, and every Django-style verb (`migrate`, `makemigrations`, `startapp`, `check`, …) flows through the same binary via `cargo run -- <verb>`. There's no separate `manage` binary.
@@ -413,9 +413,9 @@ You should see your new post id and the rows read back. Restore `src/main.rs` to
 
 ## Step 11: Turn on the auto-admin
 
-**Rustango** ships a generated admin UI for your models, just like Django admin. The scaffolder already gave you an `admin_router(pool)` helper in `src/urls.rs` that builds the auto-admin from a pool — you just need to nest it under `/admin` and feed it into the `Cli`.
+**Rustango** ships a generated admin UI for your models, just like Django admin. Building it is two small steps: a helper that turns a pool into an admin router, and one `.nest(...)` call to mount it.
 
-First, give the admin a title in `src/urls.rs`. The `admin_prefix` must match the path you'll nest it under in the next step (`/admin`) so the admin's own links and form actions resolve:
+Add the helper to `src/urls.rs` yourself — the scaffolder does not generate it (it deliberately emits no `PgPool`-typed code, so the same template works on SQLite and MySQL). The `admin_prefix` must match the path you'll nest it under in the next step (`/admin`) so the admin's own links and form actions resolve:
 
 ```rust
 pub fn admin_router(pool: PgPool) -> Router {
@@ -585,6 +585,8 @@ JWTs are signed tokens you hand a client after login and check on each request, 
 
 ### 14a. Issue a token at login
 
+These are fragments, not standalone files: this one goes inside your login handler in `src/views.rs`, alongside the handlers from Step 6.
+
 Bake the user id (the token's "subject") and any custom claims, like roles, into a signed token, then hand it to the client:
 
 ```rust
@@ -602,6 +604,8 @@ let token = encode(&claims.ttl(Duration::from_secs(900)), &secret)?;
 ```
 
 ### 14b. Verify the token on each request
+
+This belongs wherever you guard a route — inside a protected handler in `src/views.rs`, or in an axum extractor / `middleware::from_fn` layer if you want it applied to a whole subtree.
 
 Decode the token — this checks the signature and expiry — then read the claims back. If it's missing or invalid, reject the request as unauthorized:
 
@@ -623,7 +627,7 @@ let roles: Vec<String> = claims.get("roles").unwrap_or_default();
 
 ## Step 15: Add security middleware
 
-Middleware wraps every request to add cross-cutting behavior. Here you stack request IDs, access logging, rate limiting, CORS, and security headers in one chain. Each `.method(...)` adds one layer, similar to Django middleware or Laravel's middleware stack. See the [Middleware guide](middleware.md) for the full layer catalog and ordering rules.
+Middleware wraps every request to add cross-cutting behavior. This one goes in `src/main.rs`: it replaces the `let api = ...` line from Step 11, so the router is fully assembled before it reaches the `Cli`. Here you stack request IDs, access logging, rate limiting, CORS, and security headers in one chain. Each `.method(...)` adds one layer, similar to Django middleware or Laravel's middleware stack. See the [Middleware guide](middleware.md) for the full layer catalog and ordering rules.
 
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};
