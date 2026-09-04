@@ -62,7 +62,13 @@ default = ["postgres", "batteries"]
 # `cargo rustango new` emits exactly that. Keeping the list here rather than in
 # the generated manifest means it can't rot out of sync with `default`.
 batteries = ["manage", "admin", "config", "forms", "serializer", "cache", "signals", "email", "storage", "scheduler", "secrets", "totp", "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket", "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver", "template_views"]
-postgres = ["sqlx/postgres"]
+# `tls-rustls` (→ rustls-ring + webpki roots, no openssl — matching the
+# reqwest / lettre stance) is folded in because a NETWORK database backend
+# is useless without it: every managed Postgres (Supabase, Neon, RDS,
+# Cloud SQL, …) mandates TLS, and sqlx built with no TLS backend cannot
+# honour `sslmode=require` — the handshake just fails. SQLite deliberately
+# stays TLS-free (local file, no socket).
+postgres = ["sqlx/postgres", "sqlx/tls-rustls"]
 
 # Unified `cargo run` / `cargo run -- <verb>` dispatcher. Pulls the
 # minimum axum + tokio surface so bare-API projects (without admin)
@@ -90,7 +96,7 @@ testkit = []
 # Serializer) works against MySQL through the same `&Pool` API as
 # Postgres. Schema-mode tenancy remains Postgres-only by language
 # semantics (`SET search_path` has no MySQL equivalent).
-mysql = ["sqlx/mysql"]
+mysql = ["sqlx/mysql", "sqlx/tls-rustls"]
 
 # SQLite 3.35+ backend. Fully tri-dialect since v0.38: every framework
 # surface works against a file-backed or in-memory SQLite DB through
