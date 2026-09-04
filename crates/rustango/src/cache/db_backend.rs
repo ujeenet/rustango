@@ -236,6 +236,108 @@ impl Cache for DatabaseCache {
         Ok(())
     }
 
+    /// Atomic set-if-absent (#1281).
+    ///
+    /// Without this override `DatabaseCache` inherited the trait default
+    /// — `exists()` then `set()` — which is a check-then-act across two
+    /// round trips, and `set` is an unconditional upsert, so two racers
+    /// both saw "absent", both wrote, and **both got `Ok(true)`**. That
+    /// silently voided `DistributedLock`'s entire guarantee on this
+    /// backend: two processes ran the same guarded body. Redis and
+    /// in-memory already overrode `add`; this was the third backend.
+    ///
+    /// An expired row must still be acquirable, so this is not a bare
+    /// `INSERT` — it takes the row when it is absent *or* already
+    /// expired, and reports whether it did. `expires = 0` means "never
+    /// expires" (see [`Self::expires_for`]), so a live persistent entry
+    /// is never stolen.
+    ///
+    /// The database does the test-and-set under row locks, so a race
+    /// resolves to exactly one winner: the loser's `WHERE` no longer
+    /// matches once the winner has pushed `expires` into the future.
+    async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let dialect = self.pool.dialect();
+        let table = dialect.quote_ident(&self.table);
+        let p1 = dialect.placeholder(1);
+        let p2 = dialect.placeholder(2);
+        let p3 = dialect.placeholder(3);
+        let p4 = dialect.placeholder(4);
+        let expires = Self::expires_for(ttl);
+        let now = Self::now_unix_ms();
+
+        // Bind order is *textual* placeholder order, not logical order:
+        // MySQL and SQLite use positional `?`, so the args must appear in
+        // the sequence the placeholders do. (Postgres' numbered `$n`
+        // would tolerate any order, which is exactly how a MySQL-only
+        // mismatch stays hidden until a MySQL test runs it.)
+        if dialect.name() == "mysql" {
+            // MySQL's `ON DUPLICATE KEY UPDATE` takes no WHERE, so the
+            // conditional take is two statements. Both are individually
+            // atomic and the pair is still race-free: the INSERT settles
+            // the absent case, and for the expired case the UPDATE's own
+            // predicate is the compare-and-swap — whoever lands first
+            // moves `expires` forward and the other matches nothing.
+            let inserted = raw_execute_pool(
+                &self.pool,
+                &format!(
+                    "INSERT IGNORE INTO {table} (cache_key, value, expires) \
+                     VALUES ({p1}, {p2}, {p3})"
+                ),
+                vec![
+                    SqlValue::String(key.to_owned()),
+                    SqlValue::String(value.to_owned()),
+                    SqlValue::I64(expires),
+                ],
+            )
+            .await
+            .map_err(|e| CacheError::Connection(format!("add: {e}")))?;
+            if inserted == 1 {
+                return Ok(true);
+            }
+            let took = raw_execute_pool(
+                &self.pool,
+                &format!(
+                    "UPDATE {table} SET value = {p1}, expires = {p2} \
+                     WHERE cache_key = {p3} AND expires <> 0 AND expires <= {p4}"
+                ),
+                vec![
+                    SqlValue::String(value.to_owned()),
+                    SqlValue::I64(expires),
+                    SqlValue::String(key.to_owned()),
+                    SqlValue::I64(now),
+                ],
+            )
+            .await
+            .map_err(|e| CacheError::Connection(format!("add: {e}")))?;
+            return Ok(took == 1);
+        }
+
+        // Postgres and SQLite both support `ON CONFLICT … DO UPDATE …
+        // WHERE`, which expresses the whole thing in one statement:
+        // insert, or overwrite only an expired row. When the predicate
+        // fails nothing is written and the statement reports 0 rows.
+        let took = raw_execute_pool(
+            &self.pool,
+            &format!(
+                "INSERT INTO {table} (cache_key, value, expires) \
+                 VALUES ({p1}, {p2}, {p3}) \
+                 ON CONFLICT (cache_key) DO UPDATE \
+                 SET value = EXCLUDED.value, expires = EXCLUDED.expires \
+                 WHERE {table}.expires <> 0 AND {table}.expires <= {p4}"
+            ),
+            // Textual placeholder order — see the note above.
+            vec![
+                SqlValue::String(key.to_owned()),
+                SqlValue::String(value.to_owned()),
+                SqlValue::I64(expires),
+                SqlValue::I64(now),
+            ],
+        )
+        .await
+        .map_err(|e| CacheError::Connection(format!("add: {e}")))?;
+        Ok(took == 1)
+    }
+
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);

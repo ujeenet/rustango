@@ -1,191 +1,161 @@
-//! rustango — a Django-shaped, batteries-included web framework for Rust.
+//! **rustango** — a Django-shaped, batteries-included web framework for Rust.
 //!
-//! ORM with auto-migrations, auto-admin, multi-tenancy, sessions +
-//! JWT + OAuth2/OIDC + HMAC auth, DRF-style serializers + viewsets,
-//! signals, caching, media (S3/R2/B2/MinIO), email pipeline,
-//! background jobs, scheduled tasks, OpenAPI 3.1 auto-derive, every
-//! standard middleware. Postgres + MySQL + **SQLite** through the
-//! same `&Pool` API, opt-in via Cargo features.
+//! A full-stack toolkit around one derive macro and one connection type:
+//! a typed ORM with auto-migrations, an auto-generated admin, multi-tenancy,
+//! auth (sessions / JWT / OAuth2-OIDC / HMAC / passkeys), DRF-style serializers
+//! and viewsets, signals, caching, media (S3 / R2 / B2 / MinIO), an email
+//! pipeline, background jobs, scheduled tasks, OpenAPI 3.1, and the standard
+//! production middleware. **Postgres, MySQL and SQLite** run through the same
+//! [`sql::Pool`] and the same `#[derive(Model)]` types — the backend is a
+//! Cargo feature, not a rewrite.
+//!
+//! Everything is opt-in: pull only the features you use, down to the bare ORM
+//! with no HTTP stack. See the
+//! [CHANGELOG](https://github.com/ujeenet/rustango/blob/main/CHANGELOG.md) for
+//! release history.
+//!
+//! # Install
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.41"                                       # Postgres (default)
-//! rustango = { version = "0.41", features = ["sqlite"] }  # SQLite
-//! rustango = { version = "0.41", features = ["mysql"] }   # MySQL 8.0+
+//! rustango = "0.56"                                        # Postgres (the default backend)
+//! # or pick another backend — see "Choosing a backend" below:
+//! rustango = { version = "0.56", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.56", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
-//! ## What's new in v0.41 (May 2026) — Tier 1 ORM gap-closure batch
+//! `default = ["postgres", "batteries"]`. The **`batteries`** feature is
+//! everything-except-the-backend (admin, tenancy-ready ORM, serializers,
+//! auth, jobs, cache, media, middleware, …); a backend feature is added
+//! separately so a project can keep the batteries while choosing its
+//! database. Drop `batteries` for the bare ORM (no axum, no Tera).
 //!
-//! Django-shape syntax with Rust-shape compile-time safety. Ten ORM
-//! tickets across 14 PRs ([epic #273]):
+//! # A taste
 //!
-//! - **[`Q!()`] compile-time macro** ([#269]) — `Q!(User.email__icontains
-//!   = "alice")` expands at parse time to the typed-column call.
-//!   Typo'd field names fail the build.
-//! - **[`query::Q`] runtime composable predicate** ([#263]) — for
-//!   dynamic filter trees (admin chips, REST query params). Operator
-//!   overloads: `&` / `|` / `^` / `!`.
-//! - **[`QuerySet::distinct_on`]** ([#264]) — PG `DISTINCT ON` native +
-//!   `ROW_NUMBER()` portable fallback on MySQL/SQLite. The "latest per
-//!   group" pattern, tri-dialect.
-//! - **[`Model::bulk_upsert_pool`] / [`Model::bulk_insert_or_ignore_pool`]**
-//!   ([#267]) — Django `bulk_create(update_conflicts=True)` /
-//!   `(ignore_conflicts=True)` across PG, MySQL, and SQLite.
-//! - **`#[rustango(unique_when(...))]`** ([#265]) — partial unique
-//!   indexes (Django `UniqueConstraint(condition=Q(...))`). PG/SQLite
-//!   native; MySQL warns + falls back.
-//! - **DB functions batch 1** ([#266]) — Cast, LPad, RPad, MD5, SHA1,
-//!   SHA256, Position, Repeat, Reverse, Sign, Mod, Power, Sqrt — per-
-//!   dialect emission with clean `NotSupported` errors on SQLite for
-//!   the genuinely-missing items (hashes, Reverse, Power/Sqrt without
-//!   `SQLITE_ENABLE_MATH_FUNCTIONS`).
-//! - **`AggregateBuilder::alias()`** ([#268]) — Django 3.2 non-
-//!   projected annotation. Filter/order by a derived aggregate without
-//!   paying the column-decode cost.
-//! - **`#[rustango(manager(ext = "..."))]`** ([#271]) — derive emits
-//!   the custom-manager extension trait next to the model.
-//! - **[`sql::explain_pool`]** ([#272]) — tri-dialect query plan
-//!   helper. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)`, MySQL
-//!   `EXPLAIN ANALYZE` / `FORMAT=TREE` / `FORMAT=JSON`, SQLite
-//!   `EXPLAIN QUERY PLAN`.
-//! - **PG-typed legacy executor deleted** ([#270], 4 waves) — the
-//!   bi-API confusion is gone. `Fetcher`/`Counter`/`Updater`/`Deleter`
-//!   extension traits + the `&PgPool` standalone fns +
-//!   `transaction`/`count_rows`/`raw_execute`/`bulk_update` are
-//!   removed. The `_on` family moved to a `#[doc(hidden)]` module for
-//!   macro use only. **Migration**: drop the trait imports, switch
-//!   `.fetch(pool)` → `.fetch_on(pool)` (inherent on QuerySet),
-//!   `.delete(pool)` → `.delete_on(pool)`, `.execute(pool)` (on
-//!   UpdateBuilder) → `.execute_on(pool)`. Use the `_pool` family for
-//!   tri-dialect calls.
+//! ```ignore
+//! use rustango::Model;
+//! use rustango::sql::{Auto, Pool, FetcherPool};
 //!
-//! Full ticket index: PRs #274–#286.
+//! // One derive gives a table, typed columns, migrations, and admin wiring.
+//! #[derive(Model, Clone, Debug)]
+//! #[rustango(table = "posts")]
+//! struct Post {
+//!     #[rustango(primary_key)]
+//!     id: Auto<i64>,                 // server-assigned auto-increment PK
+//!     #[rustango(max_length = 200)]
+//!     title: String,
+//!     body: String,
+//!     published: bool,
+//! }
 //!
-//! [`Q!()`]: rustango_macros::Q
-//! [`query::Q`]: crate::query::Q
-//! [`QuerySet::distinct_on`]: crate::query::QuerySet::distinct_on
-//! [`Model::bulk_upsert_pool`]: crate::core::Model
-//! [`Model::bulk_insert_or_ignore_pool`]: crate::core::Model
-//! [`sql::explain_pool`]: crate::sql::explain_pool
-//! [epic #273]: https://github.com/ujeenet/rustango/issues/273
-//! [#263]: https://github.com/ujeenet/rustango/pull/279
-//! [#264]: https://github.com/ujeenet/rustango/pull/280
-//! [#265]: https://github.com/ujeenet/rustango/pull/282
-//! [#266]: https://github.com/ujeenet/rustango/pull/277
-//! [#267]: https://github.com/ujeenet/rustango/pull/281
-//! [#268]: https://github.com/ujeenet/rustango/pull/274
-//! [#269]: https://github.com/ujeenet/rustango/pull/276
-//! [#270]: https://github.com/ujeenet/rustango/issues/270
-//! [#271]: https://github.com/ujeenet/rustango/pull/278
-//! [#272]: https://github.com/ujeenet/rustango/pull/275
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+//! // One connection type for every backend — the driver is chosen from the
+//! // URL scheme (postgres://…, mysql://…, sqlite://…).
+//! let pool = Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 //!
-//! ## What's new in v0.40 (May 2026)
+//! // Django-shape queries, compiled to your dialect.
+//! let recent: Vec<Post> = Post::objects()
+//!     .filter("published", true)
+//!     .order_by_desc("id")
+//!     .limit(10)
+//!     .fetch(&pool)
+//!     .await?;
+//! # let _ = recent; Ok(())
+//! # }
+//! ```
 //!
-//! - **Admin session auth without tenancy** ([epic #253]) — bare
-//!   [`admin`] now ships a styled `/login` form, signed-cookie
-//!   sessions ([`session::SessionSecret`]), sidebar Logout, password
-//!   change at `/account/password`, [`manage create-admin`][admin-cli]
-//!   CLI verb, and `is_superuser` gating. Opt in via
-//!   [`admin::Builder::with_session_auth`]. Same signing key works
-//!   across [`tenancy::session`] + [`admin::session`] (different
-//!   cookie names + payloads so cookies never cross-decode).
-//! - **GenericForeignKey ergonomics + admin inlines** ([epic #246])
-//!   — `#[rustango(generic_fk(name, ct_column, pk_column))]` emits
-//!   typed `target_pool()` accessor + `set_target_for::<T>()`
-//!   setter. Admin list view collapses the `(ct_id, object_pk)` pair
-//!   into one clickable target link. New
-//!   [`register_admin_inline_generic!`] renders polymorphic children
-//!   as inline panels on the parent's detail + edit pages.
-//!   ContentType `<select>` picker replaces raw integer inputs on
-//!   the standalone create/edit form.
-//! - **Field [`help_text`]** — `#[rustango(help_text = "…")]` on any
-//!   field renders a muted caption below the admin form input.
-//!   The string lives on [`core::FieldSchema::help_text`] so future
-//!   surfaces (DRF schemas, OpenAPI descriptions) can read the same
-//!   source.
-//! - **Shared `.btn` family** — admin + operator-console buttons,
-//!   links, sidebar Logout, inline-panel row links all look like
-//!   one product. Consistent across bare admin / tenant admin /
-//!   operator console.
-//! - **Reusable foundations** — [`session::SessionSecret`] +
-//!   [`session::sign`] (HMAC primitive) and
-//!   [`manage_interactive`] (TTY prompts) promoted to the crate
-//!   root so the bare admin can reuse them without `tenancy`
-//!   compiled in.
-//! - **Runnable demo**: [`examples/gfk_demo`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/gfk_demo)
-//!   exercises every new admin + GFK surface end-to-end on SQLite.
+//! # Choosing a backend
 //!
-//! [epic #246]: https://github.com/ujeenet/rustango/issues/246
-//! [epic #253]: https://github.com/ujeenet/rustango/issues/253
-//! [admin-cli]: crate::manage::Cli
-//! [`help_text`]: crate::core::FieldSchema::help_text
-//! [`register_admin_inline_generic!`]: crate::register_admin_inline_generic
-//! [`manage_interactive`]: crate::manage_interactive
+//! rustango is **tri-dialect**. The same models and queries emit Postgres,
+//! MySQL or SQLite SQL; the backend is selected by Cargo feature and by the
+//! `DATABASE_URL` scheme.
 //!
-//! Defaults pull `postgres`, `admin`, and `runserver` (the bi-dialect
-//! single-pool [`server::AppBuilder`]). Add `"tenancy"` for the
-//! multi-tenant resolver / pools / per-tenant auth. Tenancy is
-//! tri-dialect since v0.33: [`tenancy::TenantPools`] is generic over
-//! the backend, database-mode tenants work on every backend, and
-//! schema-mode stays Postgres-only by language semantics. Add
-//! `"mysql"` or `"sqlite"` for additional backends — the same
-//! `#[derive(Model)]` types and `_pool` ORM API work against any of
-//! them. Drop `default-features` for the bare ORM (no axum, no Tera).
+//! - **Connect with [`sql::Pool::connect`]** — it reads the URL scheme and
+//!   builds the right pool. Prefer it over `sqlx::PgPool::connect(...)`, which
+//!   only exists when the `postgres` feature is on and fails to compile
+//!   without it.
+//! - **[`sql::Pool`]** is the backend-erasing enum every rustango API takes
+//!   (`&Pool`). A concrete `sqlx::PgPool` / `SqlitePool` / `MySqlPool` converts
+//!   into it via `From`, so you can pass either.
+//! - **Enable exactly one backend feature** (`postgres`, `mysql`, or `sqlite`)
+//!   for a single-database app; enable several to build one binary that serves
+//!   any of them.
+//! - Multi-tenancy is tri-dialect: [`tenancy::TenantPools`] is generic over the
+//!   backend and database-mode tenants work everywhere. Schema-mode tenancy is
+//!   Postgres-only (it uses `SET search_path`, which MySQL/SQLite lack).
 //!
-//! # Quick start
+//! # Feature flags
+//!
+//! | Feature | Gives you |
+//! |---|---|
+//! | `postgres` / `mysql` / `sqlite` | The database backend(s). |
+//! | `batteries` | The default bundle minus the backend (see [Install](#install)). |
+//! | `admin` | Auto-generated admin UI + session auth. |
+//! | `tenancy` | Multi-tenant resolver, per-tenant pools, operator console. |
+//! | `serializer` | DRF-style serializers + `#[derive(ViewSet)]` REST endpoints. |
+//! | `jwt` / `oauth2` | Token auth; social / OIDC login. |
+//! | `jobs` / `jobs-postgres` | Background jobs (in-memory / durable). |
+//! | `cache` / `cache-redis` | Cache layer; Redis backend. |
+//! | `storage` / `storage-s3` / `media` | File storage + the `Media` model. |
+//! | `mcp` | Model Context Protocol server over HTTP. |
+//! | `openapi` | OpenAPI 3.1 schema auto-derive. |
+//!
+//! Every feature has an entry in the crate's `Cargo.toml` with a one-line note.
+//!
+//! # Quick start (scaffolder)
 //!
 //! ```bash
 //! cargo install cargo-rustango
 //! cargo rustango new myblog                 # default: ORM + admin
 //! cargo rustango new myapi --template api   # JSON-only, no admin
 //! cargo rustango new shop --template tenant # multi-tenancy + operator console
-//! ```
 //!
-//! Then:
-//!
-//! ```bash
 //! cd myblog
 //! cp .env.example .env                      # set DATABASE_URL
 //! cargo run -- migrate                      # apply bootstrap migrations
 //! cargo run                                 # http://localhost:8080
 //! ```
 //!
-//! # Unified manage runner (since v0.16)
+//! # The manage runner
 //!
-//! Since v0.16 there is **one binary** that serves HTTP and dispatches
-//! manage commands. `cargo run` starts the server; `cargo run -- <verb>`
-//! runs a CLI command. A scaffolded `src/main.rs` looks like:
+//! One binary serves HTTP and dispatches CLI commands: `cargo run` starts the
+//! server, `cargo run -- <verb>` runs a command. A scaffolded `main.rs`:
 //!
 //! ```ignore
 //! #[rustango::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let _ = dotenvy::dotenv();
 //!     rustango::manage::Cli::new()
-//!         .api(myblog::urls::router())
-//!         .tenancy()                                            // optional, with `tenancy` feature
-//!         .migrations_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"))
+//!         .api(myblog::urls::api())
+//!         .tenancy()                         // optional, with the `tenancy` feature
 //!         .run()
 //!         .await
 //! }
 //! ```
 //!
-//! Common manage verbs (every command supports `--help`):
+//! Common verbs (each supports `--help`):
 //!
 //! | Group | Verbs |
 //! |---|---|
-//! | Migrations | `makemigrations`, `migrate [target]`, `downgrade [N]`, `showmigrations`, `add-data-op` |
-//! | Scaffolders | `startapp <name>`, `make:viewset`, `make:serializer`, `make:form`, `make:job`, `make:notification`, `make:middleware`, `make:test` |
-//! | System | `about`, `check`, `check --deploy`, `version`, `docs` |
-//! | Tenancy | `create-tenant`, `create-operator`, `create-user`, `list-tenants`, `create-api-key`, `grant-perm`, `revoke-perm`, `audit-cleanup` |
+//! | Migrations | `makemigrations`, `migrate [target]`, `downgrade [N]`, `showmigrations` |
+//! | Scaffolders | `startapp`, `make:viewset`, `make:serializer`, `make:form`, `make:job`, `make:middleware`, `make:test` |
+//! | System | `about`, `check`, `check --deploy`, `version` |
+//! | Tenancy | `create-tenant`, `create-operator`, `create-user`, `list-tenants`, `create-api-key`, `grant-perm`, `audit-cleanup` |
 //!
-//! # Full reference
+//! # Where to look
 //!
-//! See the workspace [README](https://github.com/ujeenet/rustango)
-//! for the complete feature matrix, ORM cookbook, viewset / serializer
-//! recipes, multi-tenancy guide, and production checklist. The
+//! - Models & queries — [`core`], [`sql`]
+//! - Admin — [`admin`]
+//! - REST — [`viewset`], [`serializer`]
+//! - Multi-tenancy — [`tenancy`]
+//! - Auth — [`auth_backends`], [`jwt`], [`sso`]
+//! - Background work — [`jobs`], [`scheduler`]
+//! - Caching — [`cache`]
+//!
+//! The workspace [README](https://github.com/ujeenet/rustango) has the full
+//! feature matrix and guides, and
 //! [`examples/cookbook_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/cookbook_blog)
-//! crate ships a runnable multi-tenant blog with one chapter per
-//! feature surface.
+//! is a runnable multi-tenant blog with one chapter per feature.
 
 // Lets `::rustango::core::Model` (emitted by the proc-macro) and
 // `rustango::sql::Auto<i64>` (used in tenancy source code carried

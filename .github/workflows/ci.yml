@@ -318,6 +318,9 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_none
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_exclude_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlmigrate
+      # #1273 — derive(ViewSet) must compile with no postgres feature.
+      - run: cargo test -p rustango --no-default-features --features sqlite,admin --test viewset_derive_pool_tridialect_compile --no-run
+      - run: cargo test -p rustango --no-default-features --features mysql,admin --test viewset_derive_pool_tridialect_compile --no-run
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_set_ops
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test set_algebra_emission
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test migrate_runpython_sqlite_live
@@ -422,6 +425,41 @@ jobs:
             --test django6_writes \
             --test django6_delta
 
+  # Redis live suite. `cache-redis` is off by default, so until #1280
+  # there was no Redis service here at all and nothing exercised
+  # `RedisCache` — which is how `incr` shipped using `EXPIRE … NX`, a
+  # Redis 7.0+ form. On 6.x every call errored, and both callers fail
+  # open, so rate limiting and account lockout silently did nothing.
+  #
+  # The matrix is the point: run the SAME suite against 6 and 7. A
+  # 7-only job passes on the broken code and proves nothing.
+  redis_live:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        redis: ["6", "7"]
+    services:
+      redis:
+        # AWS Public ECR mirror — same Docker Hub rate-limit reason as
+        # the `postgres_test` / `mysql_live` services.
+        image: public.ecr.aws/docker/library/redis:${{ matrix.redis }}
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      REDIS_TEST_URL: redis://127.0.0.1:6379/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_incr_live
+      - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_prefix_live
+
   # v0.41 MySQL parity — the marketing claim is tri-dialect end-to-end
   # since v0.38, but every MySQL `_live.rs` test was skipped silently
   # in CI because `MYSQL_TEST_URL` was never set. This job runs the
@@ -456,11 +494,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p rustango --features mysql,jobs-postgres --test jobs_mysql_live
       - run: cargo test -p rustango --features mysql --test mysql_live
+      # Again under --all-features. #1277: MySQL enforces FKs and has no
+      # `DROP TABLE … CASCADE`, so `drop_all_pool` failed whenever it dropped
+      # a parent (`rustango_users`) before its child (`rustango_api_keys`).
+      # Which order that walk takes depends on how many models are registered,
+      # so only a full-feature build reliably provokes it — the bare
+      # `--features mysql` run above never did, which is why this went
+      # unnoticed. Keep both: the narrow run guards the common config, this
+      # one guards the FK-ordering regression.
+      - run: cargo test -p rustango --all-features --test mysql_live
       - run: cargo test -p rustango --features mysql --test explain_pool_mysql_live
       - run: cargo test -p rustango --features mysql --test bulk_upsert_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test permissions_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test database_pools_mysql_live
+      # #1281 — the MySQL arm of DatabaseCache::add is bespoke SQL
+      # (INSERT IGNORE + conditional UPDATE, since ON DUPLICATE KEY
+      # UPDATE takes no WHERE). It is also positional-`?`, so a bind
+      # ordering that Postgres' numbered `$n` tolerates breaks here.
+      #
+      # `--no-default-features` matters: the default set includes
+      # `postgres`, which would compile this file's Postgres case into a
+      # job that runs no Postgres service. `DATABASE_URL` is defined
+      # workflow-wide, so that case would find the variable set, dial a
+      # server that is not there, and spend 30s timing out. The test
+      # skips unreachable backends rather than failing, but not building
+      # the arm at all is both faster and more honest about what this
+      # job covers. Postgres is exercised by `postgres_test`.
+      - run: cargo test -p rustango --no-default-features --features mysql,cache --test cache_db_backend_add_live
       - run: cargo test -p rustango --features mysql,tenancy,mcp,testkit --test mcp_user_keys_mysql_live
       - run: cargo test -p rustango --features mysql --test audit_mysql_live
       - run: cargo test -p rustango --features mysql --test fixtures_mysql_live

@@ -408,7 +408,11 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      --model limits to a single model; pass multiple times for a set.\n"
     )?;
     writeln!(w, "  docs")?;
-    writeln!(w, "      Open docs.rs/rustango in the default browser.\n")?;
+    writeln!(
+        w,
+        "      Open docs.rs/rustango in the default browser. Set \
+         RUSTANGO_NO_BROWSER to just print the URL.\n"
+    )?;
     writeln!(w, "  version | --version")?;
     writeln!(w, "      Print the rustango framework version.\n")?;
     writeln!(
@@ -1812,9 +1816,19 @@ async fn check_cmd<W: Write>(
 }
 
 /// `manage docs` — try to open https://docs.rs/rustango in the user's browser.
+///
+/// The URL is always printed; the browser launch is skipped under `cfg!(test)`
+/// and when `RUSTANGO_NO_BROWSER` is set. Without the test guard this verb
+/// really did open a browser during `cargo test`: `docs` is in the pool-free
+/// verb list that `pool_free_verbs_need_no_database` dispatches, so every
+/// `cargo test --lib` spawned a tab. `RUSTANGO_NO_BROWSER` covers the same
+/// nuisance for headless and CI shells, which have nothing to open.
 fn docs_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
     let url = "https://docs.rs/rustango";
     writeln!(w, "{url}")?;
+    if cfg!(test) || std::env::var_os("RUSTANGO_NO_BROWSER").is_some() {
+        return Ok(());
+    }
     // Best-effort — don't fail if the OS has no `open` / `xdg-open` / `start`
     let opener = if cfg!(target_os = "macos") {
         Some(("open", url))

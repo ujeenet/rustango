@@ -12530,7 +12530,16 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
         impl #struct_name {
             /// Build an `axum::Router` with the six standard REST endpoints
             /// for this ViewSet, mounted at `prefix`.
-            pub fn router(prefix: &str, pool: #root::sql::sqlx::PgPool) -> #root::__axum::Router {
+            ///
+            /// Accepts any backend's pool — a `sqlx::PgPool`,
+            /// `SqlitePool`, `MySqlPool`, or the [`rustango::sql::Pool`]
+            /// enum — because they all `Into<Pool>` (#1273). This is why
+            /// the derive no longer names `PgPool`, which would not
+            /// exist on a project built without the `postgres` feature.
+            pub fn router(
+                prefix: &str,
+                pool: impl ::core::convert::Into<#root::sql::Pool>,
+            ) -> #root::__axum::Router {
                 #root::viewset::ViewSet::for_model(
                     <#model_path as #root::core::Model>::SCHEMA
                 )
@@ -12542,7 +12551,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #perms_call
                     #read_only_call
                     #serializer_call
-                    .router(prefix, pool)
+                    .router_pool(prefix, pool.into())
             }
         }
     })

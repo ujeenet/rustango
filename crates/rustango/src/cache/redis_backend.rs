@@ -195,25 +195,41 @@ impl Cache for RedisCache {
 
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let mut conn = self.conn.clone();
-        let new: i64 = redis::cmd("INCRBY")
-            .arg(key)
+        // Increment and set the TTL *only if the key has none*, in one
+        // atomic server-side step.
+        //
+        // Setting the TTL on first creation only is what makes a
+        // fixed-window rate limiter work: an unconditional EXPIRE on
+        // every tick would slide the window forward forever and the
+        // limit would never be reached.
+        //
+        // This was `INCRBY` followed by `EXPIRE key secs NX` (#1280).
+        // The `NX` flag on EXPIRE is Redis **7.0+**; on 6.x the server
+        // answers `ERR wrong number of arguments for 'expire' command`,
+        // so `incr` returned `Err` on every call — and both callers fail
+        // open, silently disabling rate limiting
+        // (`rate_limit_cache::take`) and account lockout
+        // (`account_lockout`). Worse, the INCRBY had already landed, so
+        // each counter was created with no TTL at all and never expired.
+        //
+        // `EVAL` is Redis 2.6+, so the Lua form is portable to every
+        // version we could plausibly meet (and to ElastiCache /
+        // Cosmos / DocumentDB). `TTL` returns -1 for "exists, no
+        // expiry" and -2 for "missing"; after the INCRBY the key
+        // always exists, so `< 0` means "no expiry set".
+        let script = redis::Script::new(
+            r"local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+              if tonumber(ARGV[2]) > 0 and redis.call('TTL', KEYS[1]) < 0 then
+                redis.call('EXPIRE', KEYS[1], ARGV[2])
+              end
+              return n",
+        );
+        script
+            .key(key)
             .arg(by)
-            .query_async(&mut conn)
+            .arg(self.effective_ttl(ttl).unwrap_or(0))
+            .invoke_async(&mut conn)
             .await
-            .map_err(|e| CacheError::Connection(e.to_string()))?;
-        // EXPIRE on first creation only — INCR-then-EXPIRE on every call
-        // would reset the window each tick, breaking fixed-window rate
-        // limiters. The NX flag is exactly the "set TTL only if no TTL"
-        // semantic we want.
-        if let Some(secs) = self.effective_ttl(ttl) {
-            let _: i64 = redis::cmd("EXPIRE")
-                .arg(key)
-                .arg(secs)
-                .arg("NX")
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| CacheError::Connection(e.to_string()))?;
-        }
-        Ok(new)
+            .map_err(|e| CacheError::Connection(e.to_string()))
     }
 }

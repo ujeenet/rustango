@@ -1770,11 +1770,27 @@ async fn run_list(
     // #809 — was a hand-rolled `-`-prefix split + allowlist filter +
     // schema-field lookup. Route through `list_params::parse_ordering`
     // (single source of truth shared with template_views::ListView).
+    // #1282 — with no explicit `ordering_fields`, fall back to the fields
+    // this ViewSet actually *exposes* rather than every column on the
+    // model. The comment above described this protection, but an empty
+    // allowlist skipped the check entirely, so a ViewSet declaring
+    // `fields = "id, title"` still honoured `?ordering=password_hash` —
+    // a sort oracle over a column the API never returns. DRF defaults to
+    // the serializer's readable fields for the same reason. When `fields`
+    // is unset, `effective_fields` is every scalar column, so the
+    // permissive behaviour is retained exactly where it is harmless.
+    let ordering_allowlist: Vec<String> = if state.vs.ordering_fields.is_empty() {
+        state
+            .effective_fields()
+            .iter()
+            .map(|f| f.name.to_owned())
+            .collect()
+    } else {
+        state.vs.ordering_fields.clone()
+    };
     let order_by: Vec<crate::core::OrderItem> = params
         .get("ordering")
-        .map(|raw| {
-            crate::list_params::parse_ordering(raw, &state.vs.ordering_fields, state.vs.schema)
-        })
+        .map(|raw| crate::list_params::parse_ordering(raw, &ordering_allowlist, state.vs.schema))
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| {
             state

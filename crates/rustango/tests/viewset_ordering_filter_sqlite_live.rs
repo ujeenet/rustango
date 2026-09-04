@@ -227,3 +227,111 @@ async fn ordering_fields_whitelist_drops_off_list_names() {
     .await;
     assert_eq!(ids(&body), vec![2, 3, 1]); // rating ASC
 }
+
+// ===================================================================
+// #1282 — with no explicit `ordering_fields`, the allowlist defaults to
+// the fields the ViewSet EXPOSES, not every column on the model.
+//
+// The old default skipped the allowlist check entirely when
+// `ordering_fields` was empty, so a ViewSet restricted to
+// `fields = "id, title, rating"` still honoured
+// `?ordering=secret_score` — a sort oracle over a column the API never
+// returns. DRF defaults to the serializer's readable fields.
+// ===================================================================
+
+/// Rows are seeded so that sorting by `secret_score` gives a *different*
+/// order from the default — if the unexposed sort were honoured, the ids
+/// would come back in secret order, which is exactly the leak.
+async fn seed_divergent(app: &axum::Router) {
+    for (title, rating, secret) in [("a", 1, "zzz"), ("b", 2, "mmm"), ("c", 3, "aaa")] {
+        let payload = serde_json::json!({
+            "title": title, "rating": rating, "secret_score": secret
+        })
+        .to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/posts")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+    }
+}
+
+#[tokio::test]
+async fn ordering_on_an_unexposed_field_is_dropped_by_default() {
+    let pool = fresh_pool().await;
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+        .page_size(50)
+        .fields(&["id", "title", "rating"]) // secret_score NOT exposed
+        .ordering(&[("id", false)])
+        .router_pool("/posts", pool);
+
+    seed_divergent(&app).await;
+
+    // secret_score ASC would be c(aaa), b(mmm), a(zzz) => [3, 2, 1].
+    // It must be ignored, leaving the default id ASC => [1, 2, 3].
+    let resp = app
+        .clone()
+        .oneshot(get("/posts?ordering=secret_score"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(
+        ids(&body),
+        vec![1, 2, 3],
+        "sorting by an unexposed column must be dropped, not honoured — \
+         got the secret order, which leaks its values"
+    );
+}
+
+/// The restriction must not break ordering on fields that ARE exposed.
+#[tokio::test]
+async fn ordering_on_an_exposed_field_still_works() {
+    let pool = fresh_pool().await;
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+        .page_size(50)
+        .fields(&["id", "title", "rating"])
+        .router_pool("/posts", pool);
+
+    seed_divergent(&app).await;
+
+    let resp = app
+        .clone()
+        .oneshot(get("/posts?ordering=-rating"))
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    assert_eq!(ids(&body), vec![3, 2, 1], "exposed field must still sort");
+}
+
+/// When `fields` is unset the ViewSet exposes everything, so ordering
+/// stays permissive — the fix must not tighten that case.
+#[tokio::test]
+async fn ordering_stays_open_when_no_fields_restriction_is_set() {
+    let pool = fresh_pool().await;
+    let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA)
+        .page_size(50)
+        .router_pool("/posts", pool);
+
+    seed_divergent(&app).await;
+
+    let resp = app
+        .clone()
+        .oneshot(get("/posts?ordering=secret_score"))
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    assert_eq!(
+        ids(&body),
+        vec![3, 2, 1],
+        "with no `fields` restriction every column is exposed anyway"
+    );
+}

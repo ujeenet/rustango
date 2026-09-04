@@ -4,6 +4,142 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.56.0] — 2026-09-04
+
+A correctness and hardening release. Three of these were **silent** failures —
+a control that reported success while doing nothing — which is the property
+that makes a bug dangerous regardless of its severity.
+
+The headline items: rate limiting and account lockout did nothing at all on
+Redis 6.x; `DistributedLock` provided no mutual exclusion on `DatabaseCache`
+(measured: 13 of 16 concurrent acquirers won); and `drop_all_pool` failed on
+MySQL for any schema with foreign keys. CSV export gained formula-injection
+neutralisation, `bulk_insert` now batches against the backend's bind-parameter
+ceiling, and sqlx finally has a TLS backend so managed Postgres/MySQL
+(Supabase, Neon, RDS) work at all.
+
+Also: `Cargo.lock` is now committed. Ignoring it let two separate broken
+upstream releases (`time` 0.3.48, then `tinyvec` 1.13.0) turn every CI job red
+on unchanged code.
+
+### Security
+- **Rate limiting and account lockout silently did nothing on Redis 6.x**
+  (#1280). `RedisCache::incr` set its window TTL with `EXPIRE key secs NX`, and
+  the `NX` flag is Redis **7.0+**; on 6.x the server rejects the command, so
+  `incr` returned `Err` on every call. Both callers fail open — the rate
+  limiter returns `Ok((0, 0))` and account lockout `unwrap_or(0)`, never
+  reaching `max_attempts` — so neither control engaged, with no signal beyond a
+  per-request warning. The `INCRBY` had already landed, so counters were also
+  created with no TTL and never expired.
+
+  Now a single `EVAL` script does the increment and a conditional expiry
+  together, preserving the set-TTL-only-once semantic a fixed window needs.
+  `EVAL` is Redis 2.6+, so it works on 6.x and managed hosts alike. Verified
+  against real 6.2 and 7.4 servers; CI now runs the Redis suite as a 6-and-7
+  matrix, since a 7-only job passes on the broken code.
+
+  Account lockout still fails open on a cache error (locking every account out
+  during an outage is its own denial of service) but now logs a warning instead
+  of failing silently.
+- **CSV export did not neutralise spreadsheet formula injection** (#1283,
+  CWE-1236). A cell beginning `=`, `+`, `-`, `@` (or tab/CR) was written
+  verbatim and evaluated on open in Excel / LibreOffice / Sheets; RFC 4180
+  quoting does not help, since the quotes are stripped before the cell is
+  parsed. Reachable via the module's own documented recipe — exporting user
+  names and emails for an operator to download.
+
+  Such values are now prefixed with `'`. Numbers are deliberately exempt so
+  exports full of negative numbers are not mangled. New
+  `csv::neutralize_formula`; opt out with `CsvWriter::raw_formulas()` for
+  machine-consumed output.
+- **`?ordering=` accepted columns the ViewSet does not expose** (#1282). With
+  no explicit `ordering_fields`, the allowlist check was skipped entirely, so a
+  ViewSet declaring `fields = "id, title"` still honoured
+  `?ordering=password_hash` — a sort oracle over a column the API never
+  returns. The allowlist now defaults to the exposed field set, matching DRF.
+  Where `fields` is unset every column is exposed anyway, so that case is
+  unchanged.
+
+### Fixed
+- **`DistributedLock` provided no mutual exclusion on `DatabaseCache`**
+  (#1281). `DatabaseCache` never overrode `Cache::add`, inheriting the trait
+  default — `exists()` then `set()`, a check-then-act whose `set` is an
+  unconditional upsert. Two racers both saw "absent", both wrote, and both got
+  `Ok(true)`. Measured: 16 concurrent acquirers produced **13 winners**; now
+  exactly one.
+
+  `add` now takes the row only when absent or already expired. Postgres and
+  SQLite use one `ON CONFLICT … DO UPDATE … WHERE`; MySQL, which has no `WHERE`
+  on `ON DUPLICATE KEY UPDATE`, uses `INSERT IGNORE` plus a conditional
+  `UPDATE`. `expires = 0` still means never, so a live persistent entry is
+  never stolen.
+- **`bulk_insert_pool` ignored the backend's bind-parameter ceiling** (#1284).
+  A multi-row `INSERT` binds `rows × columns` parameters and every backend caps
+  that — 65535 on Postgres, 32766 on modern SQLite — so a large import failed
+  with an opaque driver error (`too many SQL variables`) having inserted
+  nothing. It now batches, via the new `Dialect::max_bind_params`. Inserts
+  under the ceiling are byte-for-byte unchanged.
+
+  As in Django, a batch split across statements is no longer atomic: a mid-way
+  failure leaves earlier chunks committed. Wrap the call in a transaction when
+  you need all-or-nothing. The Postgres-only generated `Model::bulk_insert` is
+  not yet batched — it routes through an executor consumed per call and does
+  `RETURNING` PK write-back; #1284 stays open for that.
+
+### Added
+- **MCP: the raw `prefix.secret` credential is accepted as the Bearer token.**
+  A show-once agent key now works directly in any MCP client
+  (`Authorization: Bearer <prefix.secret>`) with no `POST /mcp/token` exchange
+  step. New `mcp::verify_raw_agent_credential` and
+  `tenancy::authenticate_agent_by_prefix_pool` (lookup by secret prefix rather
+  than agent name — a bearer client never knows the agent's name; fail-closed
+  and timing-neutral, burning a dummy argon2 verify on unknown prefixes per
+  #1099).
+
+  On this path liveness **and** grant resolution run on *every* request, so
+  capabilities always track the owner's live RBAC and revocation applies
+  immediately — strictly fresher than a minted JWT's claim snapshot. Only the
+  argon2 hash check is memoised, in a bounded process-local cache (256 entries,
+  60s TTL) keyed by `sha256(tenant \0 token)` so a credential verified for one
+  tenant can never authenticate against another. A malformed bearer is rejected
+  by a shape gate before any DB or argon2 work. The JWT path is tried first and
+  is unchanged.
+
+  **Deployment note:** because unknown prefixes deliberately burn a dummy argon2
+  verify to stay timing-neutral, set `[mcp] rate_limit_per_minute` in production
+  to bound the verification work an unauthenticated caller can induce.
+
+### Changed
+- **`[mcp] max_body_bytes` is now configurable** (default unchanged at 1 MiB,
+  still tighter than axum's 2 MiB). Raise it for tools that accept inline
+  payloads such as base64 media uploads; it was previously a hard-coded const.
+
+### Fixed
+- **`migrate::drop_all_pool` failed on MySQL whenever the schema had foreign
+  keys** (#1277). It dropped tables in model-registration order with `CASCADE`
+  emitted for Postgres only — fine on PG (cascades) and on SQLite (which leaves
+  `foreign_keys` off by default), but MySQL enforces FKs and rejects `CASCADE`
+  on `DROP TABLE`, so the call failed outright as soon as a parent was dropped
+  before its child (`rustango_users` before `rustango_api_keys`). Whether that
+  happened depended on how many models were registered, making it look
+  intermittent.
+
+  `drop_all_pool` is now two-phase — drop FK constraints, then drop tables —
+  mirroring `apply_all`'s two-phase create, so drop order is irrelevant on every
+  dialect. New emitter `migrate::ddl::drop_constraints_sql_with_dialect` (the
+  inverse of `create_constraints_sql_with_dialect`; empty for SQLite, which
+  inlines FKs and has no named constraint to drop). No session-level
+  `FOREIGN_KEY_CHECKS` toggling, which on a pooled connection would not reliably
+  reach the connection doing the drops — and would leak to the next borrower
+  (#1224).
+- **`cargo test` opened a browser tab.** `manage docs` launches
+  `https://docs.rs/rustango` via the OS opener, and `docs` is one of the verbs
+  the `pool_free_verbs_need_no_database` unit test dispatches — so every
+  `cargo test --lib` run spawned a real tab on the developer's machine. The URL
+  is still printed, but the launch is now skipped under `cfg!(test)`, and also
+  when `RUSTANGO_NO_BROWSER` is set (for headless and CI shells, which have
+  nothing to open).
+
 ## [0.55.0] — 2026-08-31
 
 Follows 0.54.0 with the LIKE-escaping correctness fix and a README version
@@ -23,6 +159,12 @@ Also: README install snippets bumped to the current version (docs.rs renders the
 README as the crate landing page).
 
 ### Fixed
+- **`#[derive(ViewSet)]` failed to compile without the `postgres` feature**
+  (#1273). The generated `router()` named `sqlx::PgPool`, so any sqlite/mysql-only
+  project got `cannot find type PgPool`. It now takes `impl Into<sql::Pool>` and
+  calls `router_pool`, accepting every backend's pool (PG callers unaffected). A
+  tri-dialect compile test — run under sqlite-only and mysql-only in CI — guards
+  it; the old derive test was `postgres`-gated, so nothing caught this.
 - **LIKE lookups did not escape user wildcards, on any dialect** (#1257).
   `__contains` / `__startswith` / `__endswith` (and the admin/viewset `?q=`
   search and `template_views` list search) built `%value%` from raw user input

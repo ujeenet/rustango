@@ -260,3 +260,122 @@ async fn delete_prefix_escapes_like_wildcards() {
         "`%` must be escaped, not treated as a multi-character wildcard"
     );
 }
+
+// ===================================================================
+// #1281 — `add` must be atomic set-if-absent.
+//
+// `DatabaseCache` never overrode `add`, so it inherited the trait
+// default (`exists()` then `set()`) — a check-then-act whose `set` is an
+// unconditional upsert. Two racers both saw "absent", both wrote, and
+// both got `Ok(true)`, which silently voided `DistributedLock`'s mutual
+// exclusion on this backend.
+// ===================================================================
+
+/// The core contract: first caller takes it, everyone after is refused
+/// while it is still live.
+#[tokio::test]
+async fn add_is_set_if_absent() {
+    let pool = fresh_pool().await;
+    let cache = DatabaseCache::new(pool, "rustango_cache_add");
+    cache.ensure_table().await.unwrap();
+
+    assert!(
+        cache.add("lock:job", "token-a", None).await.unwrap(),
+        "first add must take the key"
+    );
+    assert!(
+        !cache.add("lock:job", "token-b", None).await.unwrap(),
+        "second add must be refused while the key is live"
+    );
+    assert_eq!(
+        cache.get("lock:job").await.unwrap().as_deref(),
+        Some("token-a"),
+        "the loser must not overwrite the winner's value"
+    );
+}
+
+/// An expired entry is not a held lock — the next caller must be able
+/// to take it, or a lock whose holder died would wedge forever.
+#[tokio::test]
+async fn add_reclaims_an_expired_entry() {
+    let pool = fresh_pool().await;
+    let cache = DatabaseCache::new(pool, "rustango_cache_add_exp");
+    cache.ensure_table().await.unwrap();
+
+    assert!(cache
+        .add("lock:short", "token-a", Some(Duration::from_millis(150)))
+        .await
+        .unwrap());
+    assert!(
+        !cache
+            .add("lock:short", "token-b", Some(Duration::from_secs(60)))
+            .await
+            .unwrap(),
+        "still live — must be refused"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(
+        cache
+            .add("lock:short", "token-c", Some(Duration::from_secs(60)))
+            .await
+            .unwrap(),
+        "expired entry must be reclaimable"
+    );
+    assert_eq!(
+        cache.get("lock:short").await.unwrap().as_deref(),
+        Some("token-c")
+    );
+}
+
+/// `expires = 0` means "never expires". A persistent entry must never
+/// be treated as stale and stolen.
+#[tokio::test]
+async fn add_never_steals_a_persistent_entry() {
+    let pool = fresh_pool().await;
+    let cache = DatabaseCache::new(pool, "rustango_cache_add_persist");
+    cache.ensure_table().await.unwrap();
+
+    assert!(cache.add("k", "first", None).await.unwrap());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !cache.add("k", "second", None).await.unwrap(),
+        "a no-TTL entry must never look expired"
+    );
+    assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("first"));
+}
+
+/// The scenario the bug actually broke: many concurrent acquirers,
+/// exactly one winner. Under the old non-atomic default this reports
+/// more than one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_adds_produce_exactly_one_winner() {
+    use std::sync::Arc;
+
+    let pool = fresh_pool().await;
+    let cache = Arc::new(DatabaseCache::new(pool, "rustango_cache_add_race"));
+    cache.ensure_table().await.unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..16 {
+        let c = Arc::clone(&cache);
+        handles.push(tokio::spawn(async move {
+            c.add("lock:contended", &format!("token-{i}"), None)
+                .await
+                .unwrap_or(false)
+        }));
+    }
+
+    let mut winners = 0;
+    for h in handles {
+        if h.await.unwrap() {
+            winners += 1;
+        }
+    }
+    assert_eq!(
+        winners, 1,
+        "exactly one concurrent acquirer may win; {winners} won, so \
+         DistributedLock would have run its guarded body {winners} times"
+    );
+}
