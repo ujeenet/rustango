@@ -512,7 +512,16 @@ jobs:
       # (INSERT IGNORE + conditional UPDATE, since ON DUPLICATE KEY
       # UPDATE takes no WHERE). It is also positional-`?`, so a bind
       # ordering that Postgres' numbered `$n` tolerates breaks here.
-      - run: cargo test -p rustango --features mysql,cache --test cache_db_backend_add_live
+      #
+      # `--no-default-features` matters: the default set includes
+      # `postgres`, which would compile this file's Postgres case into a
+      # job that runs no Postgres service. `DATABASE_URL` is defined
+      # workflow-wide, so that case would find the variable set, dial a
+      # server that is not there, and spend 30s timing out. The test
+      # skips unreachable backends rather than failing, but not building
+      # the arm at all is both faster and more honest about what this
+      # job covers. Postgres is exercised by `postgres_test`.
+      - run: cargo test -p rustango --no-default-features --features mysql,cache --test cache_db_backend_add_live
       - run: cargo test -p rustango --features mysql,tenancy,mcp,testkit --test mcp_user_keys_mysql_live
       - run: cargo test -p rustango --features mysql --test audit_mysql_live
       - run: cargo test -p rustango --features mysql --test fixtures_mysql_live
