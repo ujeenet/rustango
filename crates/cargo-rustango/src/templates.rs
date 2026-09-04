@@ -316,9 +316,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the unified dispatcher
 //! that handles `cargo run` (runserver) AND `cargo run -- migrate` /
 //! `makemigrations` / `startapp` / etc. from one binary. No
-//! `src/bin/manage.rs` needed. The auto-admin lives in
-//! `urls::admin_router(pool)`; nest it under `/admin` when you want
-//! it (see the getting-started guide).
+//! `src/bin/manage.rs` needed. The auto-admin is not wired up for
+//! you: add an `admin_router(pool)` helper to `src/urls.rs` and nest
+//! it under `/admin` (see the getting-started guide, Step 11).
 //!
 //! Logging is auto-configured by `#[rustango::main]` —
 //! `tracing_subscriber::fmt` with env-filter, default
@@ -464,12 +464,18 @@ pub fn api() -> Router<()> {
         }
         Template::Fullstack => {
             // #1210/#1211 — this used to also emit an `admin_router(pool)`
-            // helper. Nothing called it: `Cli` mounts the auto-admin itself,
-            // so calling the helper was never how you got an admin. It was
-            // therefore dead code (a warning in every fresh project) *and*
-            // misleading — and it was the only generated line naming `PgPool`,
-            // hard-wiring Postgres into a project whose manifest offers
-            // sqlite and mysql.
+            // helper. Nothing generated called it (the generated `main.rs`
+            // never nested it), so it was dead code — a warning in every
+            // fresh project — and it was the only generated line naming
+            // `PgPool`, hard-wiring Postgres into a project whose manifest
+            // offers sqlite and mysql.
+            //
+            // Removing it means a fullstack project has NO admin until the
+            // author adds one. There is no `Cli` auto-mount for the
+            // single-tenant admin (that exists only for `tenancy`), so
+            // getting-started Step 11 has to spell the helper out — see
+            // `examples/getting_started_blog/src/urls.rs`, which defines it
+            // by hand and is covered by `tests/admin_smoke.rs`.
             "//! Project URL routing (template: fullstack — ORM + auto-admin).
 //!
 //! `Router::new()` in `api()` is the auto-mount anchor —
