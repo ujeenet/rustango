@@ -4,6 +4,31 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+- **`makemigrations` re-claimed the framework's own tables, breaking the first
+  `migrate` of every new project** (#1271, #1298). `migrate` generates and
+  applies a *system* migration chain (`system/migrations/`, ledger
+  `__rustango_system_migrations__`) that owns every `rustango_*` table, and it
+  does so on the very first run. The user-app diff didn't know: it baselined
+  against the (still empty) user migration directory, so the first
+  `makemigrations` emitted `CreateTable` for all seven framework tables and the
+  next `migrate` died on `table "rustango_admin_users" already exists`.
+  Reproduced on all three backends — SQLite `code 1`, Postgres `42P07`, MySQL
+  `1050`.
+
+  The guard for this already existed (`fold_in_framework_tables`, added for #2)
+  but had a single call site on the tenancy path; the ordinary path — plain
+  projects and `makemigrations --app` — never called it. Now shared, so a
+  user-app migration only ever claims user tables. `make_migrations_system` is
+  deliberately unchanged: there the `rustango_*` tables *are* the subject.
+
+### Added
+- `LICENSE-MIT` and `LICENSE-APACHE` at the repository root, referenced from the
+  README. Every manifest has always declared `license = "MIT OR Apache-2.0"`,
+  but the texts existed nowhere — GitHub reported no license at all, and the
+  terms an attribution claim would rest on were absent from the published
+  crates. Both files are now packaged into all four published crates.
+
 ## [0.56.1] — 2026-09-04
 
 Documentation fixes. No code changes — the crate is byte-for-byte 0.56.0
@@ -31,7 +56,6 @@ docs site publishes from a release tag.
   `src/views.rs` (or an extractor / layer); Step 15 lives in
   `src/main.rs`, replacing the `let api = …` line. Reported in #1179.
 - Both fixes applied to the French translation as well.
-
 
 ## [0.56.0] — 2026-09-04
 
