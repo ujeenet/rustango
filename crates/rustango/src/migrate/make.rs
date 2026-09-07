@@ -300,9 +300,24 @@ pub fn make_migrations_from(
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
     let prior = file::list_dir(dir)?;
-    let prev_snapshot = prior
+    let mut prev_snapshot = prior
         .last()
         .map_or_else(empty_snapshot, |m| m.snapshot.clone());
+    // #1271 / #1298 — the framework owns its own `rustango_*` tables:
+    // `migrate` generates and applies a **system** migration chain
+    // (`system/migrations/`, ledger `__rustango_system_migrations__`)
+    // that creates them, on the very first run. A user-app diff must
+    // therefore treat them as already-present, or the first
+    // `makemigrations` after that emits `CreateTable` for every one of
+    // them and the next `migrate` dies on `table "rustango_admin_users"
+    // already exists`.
+    //
+    // This fold already existed for the tenancy path
+    // (`make_migrations_scoped`, #2) but had only that one call site, so
+    // the ordinary path — plain projects and `--app` — walked straight
+    // into it. `make_migrations_system` deliberately does NOT fold:
+    // there the `rustango_*` tables ARE the subject.
+    fold_in_framework_tables(&mut prev_snapshot, current);
     let prev_name = prior.last().map(|m| m.name.clone());
     let next_index = prior
         .last()
@@ -931,6 +946,143 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    // ==================================================== #1271 / #1298
+    //
+    // `migrate` generates and applies a **system** migration chain
+    // (`system/migrations/`, ledger `__rustango_system_migrations__`)
+    // that owns every `rustango_*` table, and it does so on the very
+    // first run. So by the time a user runs their first
+    // `makemigrations`, those tables already exist in the database
+    // while the user-app migration dir is still empty.
+    //
+    // The diff baseline for a user-app migration therefore has to
+    // treat them as already-present. Before the fix it didn't on the
+    // ordinary path, so `makemigrations` emitted `CreateTable` for
+    // every framework table and the next `migrate` died on
+    // `table "rustango_admin_users" already exists` — reported on
+    // SQLite (#1271) and Postgres 42P07 (#1298), i.e. every fresh
+    // project following the documented flow.
+    //
+    // The tenancy path (`make_migrations_scoped`) already folded them
+    // in for #2; these tests pin the same guarantee onto the plain and
+    // `--app` paths, which share `make_migrations_from`.
+
+    fn idx(name: &str, table: &str) -> crate::migrate::snapshot::IndexSnapshot {
+        crate::migrate::snapshot::IndexSnapshot {
+            name: name.into(),
+            table: table.into(),
+            columns: vec!["id".into()],
+            unique: false,
+            method: "btree".into(),
+            where_clause: None,
+            include: vec![],
+        }
+    }
+
+    /// The headline regression: a first `makemigrations` in an empty
+    /// dir must claim the user's tables and leave the framework's
+    /// alone.
+    #[test]
+    fn plain_makemigrations_does_not_re_emit_framework_tables() {
+        let dir = tempdir();
+        // Mirrors the reproduced scaffold: two user models alongside
+        // the framework tables the system chain has already created.
+        let current = snap_with(vec![
+            t("blog"),
+            t("item"),
+            t("rustango_admin_users"),
+            t("rustango_audit_log"),
+            t("rustango_content_types"),
+        ]);
+
+        let mig = make_migrations_from(&dir, &current, None)
+            .expect("diff succeeds")
+            .expect("user tables are new, so a migration is written");
+
+        let created: Vec<&str> = mig
+            .forward
+            .iter()
+            .filter_map(|op| match op {
+                Operation::Schema(SchemaChange::CreateTable(n)) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            created,
+            vec!["blog", "item"],
+            "a user-app migration must create only user tables; any \
+             rustango_* table here is what crashes the next `migrate`"
+        );
+    }
+
+    /// Indexes ride along with the tables — an index on a framework
+    /// table is just as fatal on re-apply, and the repro emitted eight
+    /// of them.
+    #[test]
+    fn plain_makemigrations_does_not_re_emit_framework_indexes() {
+        let dir = tempdir();
+        let mut current = snap_with(vec![t("blog"), t("rustango_audit_log")]);
+        current.indexes = vec![
+            idx("blog_id_idx", "blog"),
+            idx("rustango_audit_log_occurred_at_idx", "rustango_audit_log"),
+        ];
+
+        let mig = make_migrations_from(&dir, &current, None)
+            .expect("diff succeeds")
+            .expect("migration written");
+
+        let indexed: Vec<&str> = mig
+            .forward
+            .iter()
+            .filter_map(|op| match op {
+                Operation::Schema(SchemaChange::CreateIndex { table, .. }) => Some(table.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            indexed,
+            vec!["blog"],
+            "framework indexes belong to the system chain"
+        );
+    }
+
+    /// The fold must not swallow real work: when the user's own schema
+    /// is unchanged and only framework tables are present, there is
+    /// genuinely nothing to write.
+    #[test]
+    fn framework_only_registry_yields_no_migration() {
+        let dir = tempdir();
+        let current = snap_with(vec![t("rustango_admin_users"), t("rustango_media")]);
+        assert!(
+            make_migrations_from(&dir, &current, None)
+                .expect("diff succeeds")
+                .is_none(),
+            "nothing but framework tables means no user-app migration"
+        );
+    }
+
+    /// And the fold must stay scoped to the reserved prefix — a user
+    /// table whose name merely *contains* `rustango` is still theirs.
+    #[test]
+    fn fold_only_matches_the_reserved_prefix() {
+        let dir = tempdir();
+        let current = snap_with(vec![t("my_rustango_notes"), t("rustango_media")]);
+
+        let mig = make_migrations_from(&dir, &current, None)
+            .expect("diff succeeds")
+            .expect("the user table is new");
+
+        let created: Vec<&str> = mig
+            .forward
+            .iter()
+            .filter_map(|op| match op {
+                Operation::Schema(SchemaChange::CreateTable(n)) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created, vec!["my_rustango_notes"]);
     }
 
     // ============================================================ #346
