@@ -7,7 +7,6 @@
 
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]
 
-use rustango::core::Model as _;
 use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::permissions::auto_create_permissions_pool;
 use rustango::Model;

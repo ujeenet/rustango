@@ -7,7 +7,6 @@
 //! placeholder) ahead of the OFFSET on MySQL. PG + SQLite accept
 //! the bare OFFSET and the writer leaves the LIMIT off.
 
-use rustango::core::Model as _;
 use rustango::sql::{Dialect, MySql, Postgres, Sqlite};
 use rustango::Model;
 

@@ -15,7 +15,6 @@
 #![cfg(feature = "postgres")]
 
 use rustango::core::aggregates::sum;
-use rustango::core::Model as _;
 use rustango::sql::sqlx::{self, PgPool};
 use rustango::sql::Auto;
 use rustango::Model;

@@ -15,7 +15,7 @@
 //!    SQLite — no hardcoded dialect.
 
 use rustango::core::aggregates::count_all;
-use rustango::core::{Model as _, Op};
+use rustango::core::Op;
 use rustango::query::QuerySet;
 use rustango::sql::{Dialect, MySql, Postgres, Sqlite};
 use rustango::Model;

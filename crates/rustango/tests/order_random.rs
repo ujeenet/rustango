@@ -3,7 +3,6 @@
 //! direction / NULLS slot; the writer emits exactly
 //! `ORDER BY <fn>()` (no `DESC`, no `NULLS …`).
 
-use rustango::core::Model as _;
 use rustango::sql::{Dialect, MySql, Postgres, Sqlite};
 use rustango::Model;
 

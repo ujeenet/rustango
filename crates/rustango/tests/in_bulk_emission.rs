@@ -4,7 +4,7 @@
 //! shape (a plain `WHERE <col> IN (...)`) across all three dialects
 //! without needing a database.
 
-use rustango::core::{Model as _, Op, SqlValue};
+use rustango::core::{Op, SqlValue};
 #[cfg(feature = "mysql")]
 use rustango::sql::MySql;
 #[cfg(feature = "sqlite")]

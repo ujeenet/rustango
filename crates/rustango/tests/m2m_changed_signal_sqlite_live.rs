@@ -62,7 +62,7 @@ async fn add_fires_with_add_action_and_single_dst_pk() {
     });
 
     let pool = pool_with_junction().await;
-    mgr(1).add_pool(7, &pool).await.unwrap();
+    mgr(1).add(7, &pool).await.unwrap();
 
     let got = captured.lock().await;
     assert_eq!(got.len(), 1, "exactly one fire, got: {got:?}");
@@ -90,10 +90,10 @@ async fn remove_fires_with_remove_action() {
 
     let pool = pool_with_junction().await;
     let m = mgr(1);
-    m.add_pool(7, &pool).await.unwrap();
+    m.add(7, &pool).await.unwrap();
     captured.lock().await.clear(); // ignore the Add for clarity
 
-    m.remove_pool(7, &pool).await.unwrap();
+    m.remove(7, &pool).await.unwrap();
 
     let got = captured.lock().await;
     assert_eq!(got.len(), 1);
@@ -116,7 +116,7 @@ async fn set_fires_with_set_action_and_full_new_set() {
     });
 
     let pool = pool_with_junction().await;
-    mgr(1).set_pool(&[7, 8, 9], &pool).await.unwrap();
+    mgr(1).set(&[7, 8, 9], &pool).await.unwrap();
 
     let got = captured.lock().await;
     assert_eq!(got.len(), 1, "set fires once, got: {got:?}");
@@ -139,10 +139,10 @@ async fn set_with_empty_slice_fires_set_with_empty_pks() {
     });
 
     let pool = pool_with_junction().await;
-    mgr(1).add_pool(7, &pool).await.unwrap();
+    mgr(1).add(7, &pool).await.unwrap();
     captured.lock().await.clear();
 
-    mgr(1).set_pool(&[], &pool).await.unwrap();
+    mgr(1).set(&[], &pool).await.unwrap();
 
     let got = captured.lock().await;
     assert_eq!(got.len(), 1);
@@ -166,11 +166,11 @@ async fn clear_fires_with_clear_action_and_empty_pks() {
 
     let pool = pool_with_junction().await;
     let m = mgr(1);
-    m.add_pool(7, &pool).await.unwrap();
-    m.add_pool(8, &pool).await.unwrap();
+    m.add(7, &pool).await.unwrap();
+    m.add(8, &pool).await.unwrap();
     captured.lock().await.clear();
 
-    m.clear_pool(&pool).await.unwrap();
+    m.clear(&pool).await.unwrap();
 
     let got = captured.lock().await;
     assert_eq!(got.len(), 1);
@@ -187,9 +187,9 @@ async fn no_receivers_does_not_break_m2m_ops() {
     let pool = pool_with_junction().await;
     let m = mgr(1);
     // All four mutating ops must succeed with no receivers connected.
-    m.add_pool(7, &pool).await.unwrap();
-    m.add_pool(8, &pool).await.unwrap();
-    m.remove_pool(7, &pool).await.unwrap();
-    m.set_pool(&[9, 10], &pool).await.unwrap();
-    m.clear_pool(&pool).await.unwrap();
+    m.add(7, &pool).await.unwrap();
+    m.add(8, &pool).await.unwrap();
+    m.remove(7, &pool).await.unwrap();
+    m.set(&[9, 10], &pool).await.unwrap();
+    m.clear(&pool).await.unwrap();
 }
