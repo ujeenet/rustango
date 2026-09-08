@@ -401,7 +401,24 @@ where
             // the CSRF cookie is set so the next safe-method GET
             // doesn't have to seed it.
             let mut response = inner.call(req).await?;
-            if cookie_value.is_none() {
+            // Only seed a cookie the response does not already carry.
+            //
+            // A view that renders a form calls `ensure_token` /
+            // `stamp_into_context`, which mints a token, puts it in the
+            // template AND hands back a `Set-Cookie` the view attaches.
+            // Appending a second one here sent two `Set-Cookie:
+            // <name>=…` headers with *different* values: the browser
+            // keeps the last, the form was rendered with the first, so
+            // the first submission of any form by a brand-new visitor
+            // failed CSRF validation. Invisible to anyone with a warm
+            // cookie, which is why it survived so long.
+            let already_set = response
+                .headers()
+                .get_all(axum::http::header::SET_COOKIE)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .any(|v| v.trim_start().starts_with(&format!("{}=", cfg.cookie_name)));
+            if cookie_value.is_none() && !already_set {
                 let token = mint_token();
                 let cookie_str = format!(
                     "{}={token}; Path=/; SameSite=Lax{}",
