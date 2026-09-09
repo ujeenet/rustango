@@ -51,6 +51,15 @@ pub struct OrgHost {
 
     #[rustango(auto_now_add)]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
+
+    /// Bumped on every write, including an enable/disable toggle.
+    ///
+    /// This is what makes cross-process cache invalidation possible: a
+    /// toggle changes neither the row count nor the max id, so without a
+    /// timestamp another pod has no way to notice it happened. See
+    /// [`generation`].
+    #[rustango(auto_now)]
+    pub updated_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A hostname a tenant answers on, from either source.
@@ -211,6 +220,7 @@ pub async fn add_host(
         hostname: host,
         enabled: true,
         created_at: crate::sql::Auto::Unset,
+        updated_at: crate::sql::Auto::Unset,
     };
     row.insert_pool(registry).await?;
     super::invalidate_host_cache();
@@ -352,4 +362,32 @@ mod tests {
         assert!(base.is_base);
         assert!(base.id.is_none());
     }
+}
+
+/// A cheap fingerprint of the whole host table, used to detect a change
+/// made by **another process**.
+///
+/// `invalidate_host_cache` only clears the pod that called it. Behind a
+/// load balancer the others would keep serving a stale answer until their
+/// TTL expired — a host added on one pod 404ing on the rest, which is
+/// exactly the kind of thing that gets diagnosed as "DNS hasn't
+/// propagated". Each pod re-reads this fingerprint periodically and drops
+/// its cache when it moves.
+///
+/// `(count, max(updated_at))` covers all three mutations with one
+/// aggregate and no extra table: an add moves both, a delete moves the
+/// count, and a toggle moves the timestamp. Deliberately not `max(id)` —
+/// that misses a toggle entirely.
+///
+/// # Errors
+/// Driver / query failures.
+pub async fn generation(registry: &Pool) -> Result<(i64, i64), HostError> {
+    let rows: Vec<OrgHost> = OrgHost::objects().fetch(registry).await?;
+    let count = i64::try_from(rows.len()).unwrap_or(i64::MAX);
+    let newest = rows
+        .iter()
+        .filter_map(|r| r.updated_at.get().map(chrono::DateTime::timestamp_micros))
+        .max()
+        .unwrap_or(0);
+    Ok((count, newest))
 }

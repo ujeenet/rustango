@@ -176,8 +176,9 @@ pub use pools::{
     TenantPoolsConfig,
 };
 pub use resolver::{
-    invalidate_host_cache, ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver,
-    PortResolver, RegisteredHostResolver, SubdomainResolver,
+    expire_generation_for_test, invalidate_host_cache, reset_generation_for_test, ChainResolver,
+    HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, RegisteredHostResolver,
+    SubdomainResolver,
 };
 pub use routes::RouteConfig;
 pub use secrets::{

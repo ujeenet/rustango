@@ -10,6 +10,7 @@
 //! one registry per process, which is why the cache needs no registry key.
 #![cfg(all(feature = "tenancy", feature = "sqlite"))]
 
+use rustango::core::Column as _;
 use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::{
     add_host, list_for_org, normalize_hostname, remove_host, set_host_enabled, HostError, Org,
@@ -407,5 +408,103 @@ async fn mutations_invalidate_the_resolution_cache() {
     assert!(
         gone.is_none(),
         "removing a host must invalidate its cached hit"
+    );
+}
+
+// ------------------------------------------------- cross-process staleness
+
+/// Write straight to the table, the way a **different pod** would: no call
+/// to this process's `invalidate_host_cache`, because that pod has its own.
+async fn insert_host_behind_the_cache(pool: &Pool, org_slug: &str, hostname: &str) {
+    use rustango::sql::FetcherPool as _;
+    let org = Org::objects()
+        .where_(rustango::tenancy::Org::slug.eq(org_slug.to_owned()))
+        .first(pool)
+        .await
+        .expect("query")
+        .expect("org");
+    let mut row = rustango::tenancy::OrgHost {
+        id: rustango::sql::Auto::Unset,
+        org_id: org.id.get().copied().unwrap_or_default(),
+        hostname: hostname.to_owned(),
+        enabled: true,
+        created_at: rustango::sql::Auto::Unset,
+        updated_at: rustango::sql::Auto::Unset,
+    };
+    row.insert_pool(pool).await.expect("insert");
+}
+
+/// The gap local invalidation cannot close: another pod binds a host, and
+/// this one is still answering from a cached miss. The generation check has
+/// to notice and drop the cache.
+#[tokio::test]
+async fn a_host_added_by_another_pod_is_picked_up() {
+    use rustango::tenancy::{OrgResolver, RegisteredHostResolver};
+    let _guard = cache_lock().lock().await;
+    let pool = registry_with_org().await;
+    rustango::tenancy::invalidate_host_cache();
+    rustango::tenancy::reset_generation_for_test();
+
+    // This pod caches the miss.
+    let miss = RegisteredHostResolver
+        .resolve(&parts_for_host("otherpod.acme.com"), &pool)
+        .await
+        .expect("resolve");
+    assert!(miss.is_none());
+
+    // Another pod binds it — nothing invalidates *this* process.
+    insert_host_behind_the_cache(&pool, "acme", "otherpod.acme.com").await;
+
+    // Without the generation check this stays None until the 30s TTL.
+    rustango::tenancy::expire_generation_for_test();
+    let hit = RegisteredHostResolver
+        .resolve(&parts_for_host("otherpod.acme.com"), &pool)
+        .await
+        .expect("resolve");
+    assert_eq!(
+        hit.map(|o| o.slug),
+        Some("acme".to_owned()),
+        "a host bound by another pod must invalidate this pod's cached miss"
+    );
+}
+
+/// A toggle changes neither the row count nor the max id, so it is the
+/// mutation a naive fingerprint misses — hence `max(updated_at)`.
+#[tokio::test]
+async fn a_deactivation_by_another_pod_is_picked_up() {
+    use rustango::sql::FetcherPool as _;
+    use rustango::tenancy::{OrgResolver, RegisteredHostResolver};
+    let _guard = cache_lock().lock().await;
+    let pool = registry_with_org().await;
+    rustango::tenancy::invalidate_host_cache();
+    rustango::tenancy::reset_generation_for_test();
+
+    insert_host_behind_the_cache(&pool, "acme", "toggle.acme.com").await;
+    rustango::tenancy::expire_generation_for_test();
+    let hit = RegisteredHostResolver
+        .resolve(&parts_for_host("toggle.acme.com"), &pool)
+        .await
+        .expect("resolve");
+    assert!(hit.is_some(), "precondition: it routes while enabled");
+
+    // Another pod deactivates it — count and max(id) are unchanged.
+    let mut row = rustango::tenancy::OrgHost::objects()
+        .where_(rustango::tenancy::OrgHost::hostname.eq("toggle.acme.com".to_owned()))
+        .first(&pool)
+        .await
+        .expect("query")
+        .expect("row");
+    row.enabled = false;
+    row.save_pool(&pool).await.expect("save");
+
+    rustango::tenancy::expire_generation_for_test();
+    let gone = RegisteredHostResolver
+        .resolve(&parts_for_host("toggle.acme.com"), &pool)
+        .await
+        .expect("resolve");
+    assert!(
+        gone.is_none(),
+        "a deactivation elsewhere must reach this pod — the fingerprint has \
+         to include a timestamp, since count and max(id) do not move"
     );
 }

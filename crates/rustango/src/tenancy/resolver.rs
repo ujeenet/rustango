@@ -192,6 +192,89 @@ fn host_cache_put(host: &str, value: Option<i64>) {
     map.insert(host.to_owned(), (value, std::time::Instant::now()));
 }
 
+/// Last host-table fingerprint this process saw, and when it last looked.
+///
+/// [`invalidate_host_cache`] only clears the process that called it. Behind
+/// a load balancer that is half a solution: the pod handling the admin
+/// request forgets, and every other pod keeps answering from a cache that
+/// is now wrong. Polling a cheap fingerprint closes that gap without a
+/// shared cache, a message bus, or making Redis a dependency of tenant
+/// resolution — the one path that runs before everything else and must not
+/// acquire new ways to fail.
+static HOST_GEN: std::sync::RwLock<Option<((i64, i64), std::time::Instant)>> =
+    std::sync::RwLock::new(None);
+
+/// How often a process re-reads the fingerprint. The bound on how long
+/// another pod can serve a stale answer, and the interval of one small
+/// aggregate query — not one per request.
+const GEN_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Drop the local cache if another process changed the host table.
+///
+/// Cheap to call on every resolve: it does nothing at all until
+/// [`GEN_CHECK_EVERY`] has passed.
+async fn sync_generation(registry: &Pool) {
+    // Read the timestamp and release the lock BEFORE awaiting — holding a
+    // std RwLock across an await parks it on whatever task resumes and can
+    // deadlock the next reader on the same thread.
+    let due = {
+        match HOST_GEN.read() {
+            Ok(g) => g.is_none_or(|(_, at)| at.elapsed() >= GEN_CHECK_EVERY),
+            Err(_) => true,
+        }
+    };
+    if !due {
+        return;
+    }
+    let Ok(current) = super::org_host::generation(registry).await else {
+        // A missing table or a blip: leave the cache alone and try again
+        // next interval. Never fail a request over a cache refresh.
+        return;
+    };
+    let changed = {
+        match HOST_GEN.write() {
+            Ok(mut g) => {
+                let changed = g.is_some_and(|(seen, _)| seen != current);
+                *g = Some((current, std::time::Instant::now()));
+                changed
+            }
+            Err(_) => false,
+        }
+    };
+    if changed {
+        invalidate_host_cache();
+    }
+}
+
+/// Forget the generation state entirely (test hook).
+///
+/// Exposed rather than `#[cfg(test)]` because the behaviour it supports —
+/// one pod noticing another pod's write — can only be exercised from an
+/// integration test, which compiles against the crate as a dependency.
+#[doc(hidden)]
+pub fn reset_generation_for_test() {
+    if let Ok(mut g) = HOST_GEN.write() {
+        *g = None;
+    }
+}
+
+/// Make the next resolve re-read the fingerprint immediately instead of
+/// waiting out [`GEN_CHECK_EVERY`] (test hook), so a cross-pod test does
+/// not have to sleep five seconds to prove a five-second bound.
+#[doc(hidden)]
+pub fn expire_generation_for_test() {
+    if let Ok(mut g) = HOST_GEN.write() {
+        if let Some((seen, _)) = *g {
+            *g = Some((
+                seen,
+                std::time::Instant::now()
+                    .checked_sub(GEN_CHECK_EVERY * 2)
+                    .unwrap_or_else(std::time::Instant::now),
+            ));
+        }
+    }
+}
+
 /// Drop cached resolutions. Called after a host is bound, unbound or
 /// toggled so the admin's next request reflects the change instead of
 /// waiting out the TTL.
@@ -212,6 +295,9 @@ impl OrgResolver for RegisteredHostResolver {
         let Some(host) = host_from_parts(parts) else {
             return Ok(None);
         };
+        // Pick up a host added or toggled by another pod before trusting
+        // anything cached here. Throttled — see `GEN_CHECK_EVERY`.
+        sync_generation(registry).await;
         // Cached, including the miss — see `HOST_CACHE`.
         match host_cache_get(host) {
             Cached::Miss => return Ok(None),
