@@ -105,6 +105,147 @@ impl OrgResolver for SubdomainResolver {
     }
 }
 
+// ---------------- RegisteredHostResolver ----------------
+
+/// Match the `Host` header against an extra hostname registered in
+/// [`rustango_org_hosts`](super::OrgHost), so one tenant can serve several
+/// domains beyond its base `Org.host_pattern`.
+///
+/// Composed AFTER [`SubdomainResolver`] in the standard chain: the base
+/// host keeps resolving exactly as it always did, and this only ever runs
+/// on a host that would otherwise have found nothing. The feature is
+/// purely additive — it cannot change where an existing request lands.
+///
+/// ## Missing table is not an error
+///
+/// The `rustango_org_hosts` table arrives with the generated system
+/// migration chain, so a deployment that upgrades the binary and has not
+/// yet run `migrate` does not have it. Propagating that error would turn
+/// "you haven't migrated yet" into a 500 on **every** request, including
+/// for tenants that never use extra hosts. So a failed lookup is logged
+/// once and treated as "no match", which is the pre-upgrade behaviour to
+/// the byte.
+pub struct RegisteredHostResolver;
+
+/// Ensures the missing-table warning is logged once per process rather
+/// than once per request.
+static HOST_TABLE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// hostname → resolved org id (`None` = known-miss), with an expiry.
+///
+/// Tenant resolution is otherwise uncached — every request already pays one
+/// registry SELECT — so this exists to stop the *extra* lookup this
+/// resolver adds becoming a per-request cost.
+///
+/// Negative entries matter more than positive ones. The chain
+/// short-circuits, so a request to a tenant's base host never reaches this
+/// resolver at all; what does reach it is every request to a host nobody
+/// has registered. Without a negative cache, spraying random `Host` headers
+/// is a free registry query per request.
+///
+/// Bounded on purpose: the keys are attacker-supplied, so an unbounded map
+/// would trade a query amplification for a memory one. At the cap the whole
+/// map is dropped — crude, but O(1) and always correct for a cache.
+///
+/// Keyed by hostname alone, not (registry, hostname): a process serves one
+/// registry. Tests that stand up several must use distinct hostnames.
+type HostCacheMap = std::collections::HashMap<String, (Option<i64>, std::time::Instant)>;
+static HOST_CACHE: std::sync::RwLock<Option<HostCacheMap>> = std::sync::RwLock::new(None);
+const HOST_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+const HOST_CACHE_MAX: usize = 1024;
+
+/// The three states a lookup can be in. Named rather than
+/// `Option<Option<i64>>` because "not cached" and "cached as a miss" lead
+/// to opposite actions — one queries, the other must not.
+enum Cached {
+    /// Nothing usable; go to the registry.
+    Absent,
+    /// Known not to be a registered host.
+    Miss,
+    Hit(i64),
+}
+
+fn host_cache_get(host: &str) -> Cached {
+    let Ok(guard) = HOST_CACHE.read() else {
+        return Cached::Absent;
+    };
+    let Some((value, at)) = guard.as_ref().and_then(|m| m.get(host)) else {
+        return Cached::Absent;
+    };
+    if at.elapsed() > HOST_CACHE_TTL {
+        return Cached::Absent;
+    }
+    match value {
+        Some(id) => Cached::Hit(*id),
+        None => Cached::Miss,
+    }
+}
+
+fn host_cache_put(host: &str, value: Option<i64>) {
+    let Ok(mut guard) = HOST_CACHE.write() else {
+        return;
+    };
+    let map = guard.get_or_insert_with(Default::default);
+    if map.len() >= HOST_CACHE_MAX {
+        map.clear();
+    }
+    map.insert(host.to_owned(), (value, std::time::Instant::now()));
+}
+
+/// Drop cached resolutions. Called after a host is bound, unbound or
+/// toggled so the admin's next request reflects the change instead of
+/// waiting out the TTL.
+///
+/// Clears everything rather than one key: a rename is a remove plus an add,
+/// and the map is small and cheap to refill.
+pub fn invalidate_host_cache() {
+    if let Ok(mut guard) = HOST_CACHE.write() {
+        if let Some(map) = guard.as_mut() {
+            map.clear();
+        }
+    }
+}
+
+#[async_trait]
+impl OrgResolver for RegisteredHostResolver {
+    async fn resolve(&self, parts: &Parts, registry: &Pool) -> Result<Option<Org>, TenancyError> {
+        let Some(host) = host_from_parts(parts) else {
+            return Ok(None);
+        };
+        // Cached, including the miss — see `HOST_CACHE`.
+        match host_cache_get(host) {
+            Cached::Miss => return Ok(None),
+            Cached::Hit(org_id) => return find_active_org_by(registry, Org::id.eq(org_id)).await,
+            Cached::Absent => {}
+        }
+        let rows = match super::OrgHost::objects()
+            .where_(super::OrgHost::hostname.eq(host.to_owned()))
+            .where_(super::OrgHost::enabled.eq(true))
+            .fetch(registry)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                if !HOST_TABLE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        target: "rustango::tenancy::resolver",
+                        error = %e,
+                        "could not read rustango_org_hosts; extra tenant hostnames \
+                         are inactive until `migrate` creates the table"
+                    );
+                }
+                return Ok(None);
+            }
+        };
+        let Some(row) = rows.into_iter().next() else {
+            host_cache_put(host, None);
+            return Ok(None);
+        };
+        host_cache_put(host, Some(row.org_id));
+        find_active_org_by(registry, Org::id.eq(row.org_id)).await
+    }
+}
+
 // ---------------- PathPrefixResolver ----------------
 
 /// Match the request URL's first path segment against
@@ -275,6 +416,11 @@ impl ChainResolver {
     pub fn standard(apex_domain: impl Into<String>) -> Self {
         Self::new()
             .push(SubdomainResolver::new(apex_domain))
+            // After the base host, before the header fallback: an extra
+            // hostname must never outrank a tenant's own `host_pattern`,
+            // and until an operator registers one the table is empty, so
+            // no existing deployment changes behaviour.
+            .push(RegisteredHostResolver)
             .push(HeaderResolver::default())
     }
 }

@@ -92,6 +92,7 @@ pub mod middleware;
 pub mod migrate;
 pub mod operator_console;
 mod org;
+pub mod org_host;
 pub mod password;
 pub mod permissions;
 mod pools;
@@ -166,12 +167,17 @@ pub use migrate::{
     TenantMigrationOutcome, TenantMigrationReport,
 };
 pub use org::{BackendKind, Org, StorageMode};
+pub use org_host::{
+    add_host, list_for_org, normalize_hostname, remove_host, set_host_enabled, HostError, OrgHost,
+    TenantHost,
+};
 pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,
 };
 pub use resolver::{
-    ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, SubdomainResolver,
+    invalidate_host_cache, ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver,
+    PortResolver, RegisteredHostResolver, SubdomainResolver,
 };
 pub use routes::RouteConfig;
 pub use secrets::{
