@@ -41,6 +41,11 @@ fn cache_lock() -> &'static tokio::sync::Mutex<()> {
 /// slow `migrate_framework` — which is the worst kind of flake to chase.
 async fn registry_with_org() -> Pool {
     rustango::testkit::reset_host_generation();
+    // The resolver also fails fast for a window after a registry error.
+    // Nothing here arms it today, but it is the same class of
+    // process-global leak as the fingerprint above, and leaving it to
+    // chance is how the fingerprint one got found in the first place.
+    rustango::testkit::reset_registry_breaker();
     let pool = Pool::Sqlite(
         sqlx::SqlitePool::connect("sqlite::memory:")
             .await

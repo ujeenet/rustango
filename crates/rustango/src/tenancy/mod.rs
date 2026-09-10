@@ -179,13 +179,14 @@ pub use resolver::{
     invalidate_host_cache, ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver,
     PortResolver, RegisteredHostResolver, SubdomainResolver,
 };
-// The host-generation test hooks are deliberately NOT re-exported here —
-// they live in `crate::testkit`, so the name says what they are and they
-// are not permanent public API of `tenancy`. See `resolver::reset_generation`.
+// The resolver's process-global test hooks are deliberately NOT public
+// API of `tenancy` — they live in `crate::testkit`, so the name says
+// what they are and they are not permanent semver surface a caller
+// could use to defeat the fingerprint or the breaker in production.
 // Gated to match `testkit`'s own gate, so a production build neither
 // compiles them in nor warns about an unused re-export.
 #[cfg(any(test, feature = "testkit"))]
-pub(crate) use resolver::{expire_generation, reset_generation};
+pub(crate) use resolver::{expire_generation, reset_generation, reset_registry_breaker};
 pub use routes::RouteConfig;
 pub use secrets::{
     ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,
