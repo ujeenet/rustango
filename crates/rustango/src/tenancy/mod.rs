@@ -161,12 +161,13 @@ pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
 pub use error::TenancyError;
 #[cfg(all(feature = "tenancy", feature = "sso"))]
 pub use member_auth::{member_sso_router, CurrentMember, MemberAuthConfig, MEMBER_COOKIE};
-#[cfg(feature = "postgres")]
-pub use migrate::migrate_tenants;
 pub use migrate::{
-    migrate_registry, migrate_registry_pool, migrate_tenants_db, migrate_tenants_dyn,
+    migrate_registry, migrate_registry_pool, migrate_tenants_db, migrate_tenants_db_with_progress,
+    migrate_tenants_dyn, Chain, TenantMigrationEvent, TenantMigrationObserver,
     TenantMigrationOutcome, TenantMigrationReport,
 };
+#[cfg(feature = "postgres")]
+pub use migrate::{migrate_tenants, migrate_tenants_with_progress};
 /// Fingerprint of `rustango_orgs`, used by the base-host cache to notice
 /// writes made by another process. Public so a deployment can poll it
 /// itself (e.g. to drive a custom cache) and so tests can assert on it.
