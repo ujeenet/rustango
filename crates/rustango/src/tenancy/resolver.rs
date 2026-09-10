@@ -201,79 +201,194 @@ fn host_cache_put(host: &str, value: Option<i64>) {
 /// shared cache, a message bus, or making Redis a dependency of tenant
 /// resolution — the one path that runs before everything else and must not
 /// acquire new ways to fail.
-static HOST_GEN: std::sync::RwLock<Option<((i64, i64), std::time::Instant)>> =
-    std::sync::RwLock::new(None);
+/// `None` = never looked. `Some((gen, at))` carries the last fingerprint
+/// seen and the time of the last *attempt* — successful or not, so a
+/// failing probe is still throttled.
+///
+/// `gen` is itself `Option`: a claimed-but-not-yet-completed check writes
+/// the attempt time with the previous fingerprint, so a probe that fails
+/// leaves the last known-good value in place rather than resetting it.
+type GenState = (Option<super::org_host::Generation>, std::time::Instant);
 
-/// How often a process re-reads the fingerprint. The bound on how long
-/// another pod can serve a stale answer, and the interval of one small
-/// aggregate query — not one per request.
-const GEN_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+static HOST_GEN: std::sync::RwLock<Option<GenState>> = std::sync::RwLock::new(None);
+
+/// Ensures a failing fingerprint probe is logged once per process rather
+/// than once per interval. Without this the mechanism can be dead for a
+/// process's entire lifetime with nothing in the logs to say so.
+static HOST_GEN_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Default interval between fingerprint reads — the bound on how long
+/// another pod can serve a stale answer.
+const GEN_CHECK_EVERY_DEFAULT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Env override for [`GEN_CHECK_EVERY_DEFAULT`], in seconds. `0` disables
+/// cross-process polling entirely.
+///
+/// A hard-coded constant is the wrong shape for this: a single-process
+/// deployment gains nothing from the poll, a cross-region registry wants a
+/// longer interval, and an operator who needs tighter convergence wants a
+/// shorter one. None of them should have to fork the crate, and this runs
+/// on the path that must not acquire new ways to fail.
+const GEN_CHECK_ENV: &str = "RUSTANGO_HOST_GEN_CHECK_SECS";
+
+/// Resolved once — reading and parsing an env var on every resolve would
+/// cost more than the check it is gating.
+fn gen_check_every() -> Option<std::time::Duration> {
+    static CACHED: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var(GEN_CHECK_ENV) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) => Some(std::time::Duration::from_secs(secs)),
+            Err(_) => {
+                tracing::warn!(
+                    target: "rustango::tenancy::resolver",
+                    value = %raw,
+                    "{GEN_CHECK_ENV} is not a whole number of seconds; \
+                     falling back to the default interval"
+                );
+                Some(GEN_CHECK_EVERY_DEFAULT)
+            }
+        },
+        Err(_) => Some(GEN_CHECK_EVERY_DEFAULT),
+    })
+}
 
 /// Drop the local cache if another process changed the host table.
 ///
 /// Cheap to call on every resolve: it does nothing at all until
 /// [`GEN_CHECK_EVERY`] has passed.
 async fn sync_generation(registry: &Pool) {
-    // Read the timestamp and release the lock BEFORE awaiting — holding a
-    // std RwLock across an await parks it on whatever task resumes and can
-    // deadlock the next reader on the same thread.
-    let due = {
-        match HOST_GEN.read() {
-            Ok(g) => g.is_none_or(|(_, at)| at.elapsed() >= GEN_CHECK_EVERY),
-            Err(_) => true,
+    let Some(interval) = gen_check_every() else {
+        return; // polling disabled
+    };
+
+    // CLAIM the check before awaiting, in one write-lock section.
+    //
+    // Two bugs live in the alternative — stamping the time only after a
+    // successful probe. A probe that fails would leave the timestamp
+    // unadvanced, so every subsequent request re-probes forever: a pod
+    // deployed before `migrate` ran, or riding out a registry blip, turns
+    // a 5s poll into a per-request query storm. And under concurrency
+    // every request arriving while a probe is in flight would also see
+    // "due" and fire its own, fanning out exactly when the registry is
+    // already slow.
+    //
+    // Claiming both throttles failures and dedups in-flight checks: the
+    // first caller through takes the slot, everyone else sees a fresh
+    // timestamp and returns immediately.
+    //
+    // The lock is released before the await — holding a std RwLock across
+    // one parks it on whatever task resumes and can deadlock the next
+    // reader on the same thread.
+    let previous = {
+        match HOST_GEN.write() {
+            Ok(mut g) => {
+                let due = g.is_none_or(|(_, at)| at.elapsed() >= interval);
+                if !due {
+                    return;
+                }
+                let previous = g.and_then(|(seen, _)| seen);
+                *g = Some((previous, std::time::Instant::now()));
+                previous
+            }
+            // A poisoned lock means some other thread panicked mid-update.
+            // Skip this round rather than resolving off a torn value.
+            Err(_) => return,
         }
     };
-    if !due {
-        return;
-    }
-    let Ok(current) = super::org_host::generation(registry).await else {
-        // A missing table or a blip: leave the cache alone and try again
-        // next interval. Never fail a request over a cache refresh.
-        return;
+
+    let current = match super::org_host::generation(registry).await {
+        Ok(current) => current,
+        Err(e) => {
+            // Never fail a request over a cache refresh — but do not fail
+            // silently either. Cross-pod invalidation being dead is
+            // invisible from the outside until a host 404s on some pods
+            // and not others, which is near-impossible to correlate after
+            // the fact.
+            if !HOST_GEN_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    target: "rustango::tenancy::resolver",
+                    error = %e,
+                    "could not read the rustango_org_hosts fingerprint; this pod \
+                     will not notice host changes made by other processes until \
+                     its own cache entries expire"
+                );
+            }
+            // The claim above already recorded the attempt, so this backs
+            // off for a full interval instead of retrying every request.
+            return;
+        }
     };
+
     let changed = {
         match HOST_GEN.write() {
             Ok(mut g) => {
-                let changed = g.is_some_and(|(seen, _)| seen != current);
-                *g = Some((current, std::time::Instant::now()));
-                changed
+                *g = Some((Some(current), std::time::Instant::now()));
+                previous.is_some_and(|seen| seen != current)
             }
             Err(_) => false,
         }
     };
     if changed {
+        // Clears negative entries too, and must: a hostname cached as a
+        // known-miss is exactly what an add on another pod invalidates.
+        // The cost is that a registry with a steady write stream keeps
+        // every pod's negative cache short-lived, which is the deliberate
+        // trade — a stale 404 on a real customer domain is worse than a
+        // repeated lookup on a sprayed one, and `HOST_CACHE_MAX` still
+        // bounds the latter.
         invalidate_host_cache();
     }
 }
 
-/// Forget the generation state entirely (test hook).
+/// Forget the generation state entirely.
 ///
-/// Exposed rather than `#[cfg(test)]` because the behaviour it supports —
-/// one pod noticing another pod's write — can only be exercised from an
-/// integration test, which compiles against the crate as a dependency.
-#[doc(hidden)]
-pub fn reset_generation_for_test() {
+/// `pub(crate)` and surfaced through [`crate::testkit`] rather than being
+/// `pub` here: as public API of `rustango::tenancy` these would be
+/// permanent semver surface that any downstream crate could call in
+/// production, silently defeating cross-process invalidation for the life
+/// of the process. `#[doc(hidden)]` hides a name from rustdoc, not from
+/// the compiler.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn reset_generation() {
     if let Ok(mut g) = HOST_GEN.write() {
         *g = None;
     }
 }
 
 /// Make the next resolve re-read the fingerprint immediately instead of
-/// waiting out [`GEN_CHECK_EVERY`] (test hook), so a cross-pod test does
-/// not have to sleep five seconds to prove a five-second bound.
-#[doc(hidden)]
-pub fn expire_generation_for_test() {
+/// waiting out the poll interval, so a cross-pod test proves the bound
+/// without sleeping through it.
+///
+/// Unconditional by design. Guarding this on an existing `Some` made it a
+/// silent no-op in precisely the case a test reaches for it — right after
+/// a reset — so the test read as though it forced a re-check while
+/// actually doing nothing.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn expire_generation() {
     if let Ok(mut g) = HOST_GEN.write() {
-        if let Some((seen, _)) = *g {
-            *g = Some((
-                seen,
-                std::time::Instant::now()
-                    .checked_sub(GEN_CHECK_EVERY * 2)
-                    .unwrap_or_else(std::time::Instant::now),
-            ));
-        }
+        let previous = g.and_then(|(seen, _)| seen);
+        // Back-date past the *effective* interval, not the default one —
+        // with a longer interval configured, subtracting the default
+        // would leave the entry un-due and make this hook a no-op again.
+        let interval = gen_check_every().unwrap_or(GEN_CHECK_EVERY_DEFAULT);
+        // `checked_sub` returns None when the monotonic clock is younger
+        // than the offset — reachable on a freshly booted host. Falling
+        // back to `now()` there would *unexpire* the entry and invert this
+        // function's whole purpose, so fall back to the process's own
+        // epoch instead, which is unambiguously "long ago".
+        let long_ago = std::time::Instant::now()
+            .checked_sub(interval * 2)
+            .unwrap_or(*PROCESS_START);
+        *g = Some((previous, long_ago));
     }
 }
+
+/// Earliest `Instant` this process can name. Used as a saturating floor
+/// by [`expire_generation`].
+#[cfg(any(test, feature = "testkit"))]
+static PROCESS_START: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
 
 /// Drop cached resolutions. Called after a host is bound, unbound or
 /// toggled so the admin's next request reflects the change instead of

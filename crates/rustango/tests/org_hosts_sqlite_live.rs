@@ -9,6 +9,7 @@
 //! hostname, so each test below uses a hostname of its own. Production has
 //! one registry per process, which is why the cache needs no registry key.
 #![cfg(all(feature = "tenancy", feature = "sqlite"))]
+#![allow(irrefutable_let_patterns)] // Pool is single-variant in sqlite-only builds.
 
 use rustango::core::Column as _;
 use rustango::sql::{sqlx, Pool};
@@ -28,7 +29,18 @@ fn cache_lock() -> &'static tokio::sync::Mutex<()> {
 
 /// A registry on an in-memory SQLite DB with one org whose base host is
 /// `acme.example.com`.
+///
+/// Resets **both** pieces of resolver state, not just the resolution
+/// cache. The host-table fingerprint is process-global and keyed by
+/// nothing, so it cannot be side-stepped by giving each test its own
+/// hostnames the way `HOST_CACHE` can: a fingerprint left over from the
+/// previous test's registry gets compared against this brand-new one, and
+/// the mismatch fires a spurious invalidation partway through whichever
+/// test runs next. It only shows up when more than the poll interval
+/// elapses between two tests — a debug CI runner, `--test-threads=1`, a
+/// slow `migrate_framework` — which is the worst kind of flake to chase.
 async fn registry_with_org() -> Pool {
+    rustango::testkit::reset_host_generation();
     let pool = Pool::Sqlite(
         sqlx::SqlitePool::connect("sqlite::memory:")
             .await
@@ -47,7 +59,6 @@ async fn registry_with_org() -> Pool {
         host_pattern: Some("acme.example.com".into()),
         ..rustango::testkit::org()
     };
-    use rustango::sql::FetcherPool as _;
     org.insert_pool(&pool).await.expect("insert org");
     pool
 }
@@ -146,7 +157,6 @@ async fn a_host_matching_another_tenants_base_is_refused() {
 async fn removal_is_scoped_to_the_owning_org() {
     let _guard = cache_lock().lock().await;
     let pool = registry_with_org().await;
-    use rustango::sql::FetcherPool as _;
     let mut other = Org {
         id: rustango::sql::Auto::Unset,
         slug: "globex".into(),
@@ -275,6 +285,120 @@ async fn an_existing_registry_gains_the_table_on_a_plain_migrate() {
     assert_eq!(hosts.len(), 2);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Re-migrating a registry whose `rustango_org_hosts` **already has rows**
+/// must succeed and leave them alone.
+///
+/// The sibling upgrade test above only proves the CREATE path, on a
+/// registry where the table is absent. That is a strictly easier case, and
+/// the gap is not theoretical: an earlier revision of this feature carried
+/// a `NOT NULL` `auto_now` column for the cross-pod fingerprint, which
+/// renders on SQLite as
+///
+/// ```sql
+/// ALTER TABLE "rustango_org_hosts"
+///   ADD COLUMN "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
+/// ```
+///
+/// SQLite rejects that outright — "Cannot add a column with non-constant
+/// default" — but *only* when the table has rows. On an empty table the
+/// identical statement succeeds, so the CREATE-path test stayed green
+/// while every real deployment would have failed to migrate.
+#[tokio::test]
+async fn a_populated_host_table_survives_a_re_migrate() {
+    let _guard = cache_lock().lock().await;
+    let dir = tempdir_unique("org-hosts-remigrate");
+    std::fs::create_dir_all(dir.join("migrations")).expect("migrations dir");
+    let db = dir.join("registry.db");
+    let pool = Pool::Sqlite(
+        sqlx::SqlitePool::connect(&format!("sqlite:{}?mode=rwc", db.display()))
+            .await
+            .expect("sqlite"),
+    );
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("framework tables");
+    let mut org = Org {
+        id: rustango::sql::Auto::Unset,
+        slug: "acme".into(),
+        display_name: "Acme".into(),
+        storage_mode: "database".into(),
+        backend_kind: "sqlite".into(),
+        database_url: Some("sqlite::memory:".into()),
+        host_pattern: Some("acme.example.com".into()),
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(&pool).await.expect("insert org");
+
+    // Real operator data in the table before the upgrade runs.
+    add_host(&pool, "acme", "kept.acme.com").await.expect("add");
+    add_host(&pool, "acme", "also-kept.acme.com")
+        .await
+        .expect("add");
+
+    rustango::tenancy::migrate_registry_pool(&pool, &dir.join("migrations"))
+        .await
+        .expect("migrate must succeed against a POPULATED rustango_org_hosts");
+
+    let hosts = list_for_org(&pool, "acme").await.expect("list");
+    let names: Vec<&str> = hosts.iter().map(|h| h.hostname.as_str()).collect();
+    assert!(
+        names.contains(&"kept.acme.com") && names.contains(&"also-kept.acme.com"),
+        "existing host rows must survive the migrate, got {names:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The fingerprint contract, asserted directly rather than through the
+/// resolver: every mutation this module can perform has to move it.
+///
+/// The toggle is the interesting one — it changes neither the row count
+/// nor the max id, so a `(count, max_id)` fingerprint would miss it
+/// entirely and a disable on one pod would never reach the others.
+#[tokio::test]
+async fn every_mutation_moves_the_fingerprint() {
+    let _guard = cache_lock().lock().await;
+    use rustango::tenancy::org_host::generation;
+    let pool = registry_with_org().await;
+
+    let empty = generation(&pool).await.expect("generation");
+    assert_eq!(
+        (empty.count, empty.enabled, empty.max_id),
+        (0, 0, 0),
+        "an empty table must fingerprint as all-zero, not error"
+    );
+
+    add_host(&pool, "acme", "fp.acme.com").await.expect("add");
+    let after_add = generation(&pool).await.expect("generation");
+    assert_ne!(after_add, empty, "an add must move the fingerprint");
+    assert_eq!((after_add.count, after_add.enabled), (1, 1));
+
+    set_host_enabled(&pool, "acme", "fp.acme.com", false)
+        .await
+        .expect("disable");
+    let after_toggle = generation(&pool).await.expect("generation");
+    assert_ne!(
+        after_toggle, after_add,
+        "a toggle must move the fingerprint — this is the mutation a \
+         count-and-max-id fingerprint misses"
+    );
+    assert_eq!(
+        (after_toggle.count, after_toggle.enabled),
+        (1, 0),
+        "the row is still there, just not enabled"
+    );
+
+    remove_host(&pool, "acme", "fp.acme.com")
+        .await
+        .expect("remove");
+    let after_remove = generation(&pool).await.expect("generation");
+    assert_ne!(
+        after_remove, after_toggle,
+        "a remove must move the fingerprint"
+    );
+    assert_eq!(after_remove.count, 0);
 }
 
 async fn table_exists(pool: &Pool, table: &str) -> bool {
@@ -416,7 +540,6 @@ async fn mutations_invalidate_the_resolution_cache() {
 /// Write straight to the table, the way a **different pod** would: no call
 /// to this process's `invalidate_host_cache`, because that pod has its own.
 async fn insert_host_behind_the_cache(pool: &Pool, org_slug: &str, hostname: &str) {
-    use rustango::sql::FetcherPool as _;
     let org = Org::objects()
         .where_(rustango::tenancy::Org::slug.eq(org_slug.to_owned()))
         .first(pool)
@@ -429,7 +552,6 @@ async fn insert_host_behind_the_cache(pool: &Pool, org_slug: &str, hostname: &st
         hostname: hostname.to_owned(),
         enabled: true,
         created_at: rustango::sql::Auto::Unset,
-        updated_at: rustango::sql::Auto::Unset,
     };
     row.insert_pool(pool).await.expect("insert");
 }
@@ -443,7 +565,7 @@ async fn a_host_added_by_another_pod_is_picked_up() {
     let _guard = cache_lock().lock().await;
     let pool = registry_with_org().await;
     rustango::tenancy::invalidate_host_cache();
-    rustango::tenancy::reset_generation_for_test();
+    rustango::testkit::reset_host_generation();
 
     // This pod caches the miss.
     let miss = RegisteredHostResolver
@@ -456,7 +578,7 @@ async fn a_host_added_by_another_pod_is_picked_up() {
     insert_host_behind_the_cache(&pool, "acme", "otherpod.acme.com").await;
 
     // Without the generation check this stays None until the 30s TTL.
-    rustango::tenancy::expire_generation_for_test();
+    rustango::testkit::expire_host_generation();
     let hit = RegisteredHostResolver
         .resolve(&parts_for_host("otherpod.acme.com"), &pool)
         .await
@@ -469,18 +591,21 @@ async fn a_host_added_by_another_pod_is_picked_up() {
 }
 
 /// A toggle changes neither the row count nor the max id, so it is the
-/// mutation a naive fingerprint misses — hence `max(updated_at)`.
+/// mutation a naive fingerprint misses — hence the `enabled` term.
+///
+/// Swapping the fingerprint back to `(count, max_id)` fails this test and
+/// leaves every other one green, which is the property that makes the
+/// third term worth carrying.
 #[tokio::test]
 async fn a_deactivation_by_another_pod_is_picked_up() {
-    use rustango::sql::FetcherPool as _;
     use rustango::tenancy::{OrgResolver, RegisteredHostResolver};
     let _guard = cache_lock().lock().await;
     let pool = registry_with_org().await;
     rustango::tenancy::invalidate_host_cache();
-    rustango::tenancy::reset_generation_for_test();
+    rustango::testkit::reset_host_generation();
 
     insert_host_behind_the_cache(&pool, "acme", "toggle.acme.com").await;
-    rustango::tenancy::expire_generation_for_test();
+    rustango::testkit::expire_host_generation();
     let hit = RegisteredHostResolver
         .resolve(&parts_for_host("toggle.acme.com"), &pool)
         .await
@@ -497,7 +622,7 @@ async fn a_deactivation_by_another_pod_is_picked_up() {
     row.enabled = false;
     row.save_pool(&pool).await.expect("save");
 
-    rustango::tenancy::expire_generation_for_test();
+    rustango::testkit::expire_host_generation();
     let gone = RegisteredHostResolver
         .resolve(&parts_for_host("toggle.acme.com"), &pool)
         .await

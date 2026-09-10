@@ -51,15 +51,6 @@ pub struct OrgHost {
 
     #[rustango(auto_now_add)]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
-
-    /// Bumped on every write, including an enable/disable toggle.
-    ///
-    /// This is what makes cross-process cache invalidation possible: a
-    /// toggle changes neither the row count nor the max id, so without a
-    /// timestamp another pod has no way to notice it happened. See
-    /// [`generation`].
-    #[rustango(auto_now)]
-    pub updated_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A hostname a tenant answers on, from either source.
@@ -220,7 +211,6 @@ pub async fn add_host(
         hostname: host,
         enabled: true,
         created_at: crate::sql::Auto::Unset,
-        updated_at: crate::sql::Auto::Unset,
     };
     row.insert_pool(registry).await?;
     super::invalidate_host_cache();
@@ -299,6 +289,106 @@ pub async fn set_host_enabled(
     Ok(())
 }
 
+/// A cheap fingerprint of the whole host table, used to detect a change
+/// made by **another process**.
+///
+/// `invalidate_host_cache` only clears the pod that called it. Behind a
+/// load balancer the others would keep serving a stale answer until their
+/// TTL expired — a host added on one pod 404ing on the rest, which is
+/// exactly the kind of thing that gets diagnosed as "DNS hasn't
+/// propagated". Each pod re-reads this fingerprint periodically and drops
+/// its cache when it moves.
+///
+/// ## Why `(count, enabled, max_id)` and not a timestamp
+///
+/// The obvious fingerprint is `max(updated_at)`, and it is wrong here for
+/// two independent reasons.
+///
+/// It is not monotonic across pods. An `auto_now` column takes its value
+/// from the *database* clock on INSERT (the column default) but from the
+/// *writing process* clock on UPDATE. A pod whose clock lags the registry
+/// can disable a host and write a timestamp older than the current max,
+/// leaving the fingerprint unmoved — silently failing at exactly the job
+/// it exists to do.
+///
+/// It also needs a new `NOT NULL` column, and adding one to a populated
+/// table is rejected outright by SQLite: `ALTER TABLE … ADD COLUMN …
+/// DEFAULT CURRENT_TIMESTAMP NOT NULL` fails with `Cannot add a column
+/// with non-constant default`. Every existing registry would be unable to
+/// migrate.
+///
+/// These three counters need no clock and no new column, and cover every
+/// mutation this module can perform:
+///
+/// | mutation           | what moves            |
+/// |--------------------|-----------------------|
+/// | [`add_host`]       | `count`, `max_id`     |
+/// | [`remove_host`]    | `count`               |
+/// | [`set_host_enabled`] | `enabled`           |
+///
+/// **Invariant for future work:** a mutation that edits a row in place
+/// without changing the row count or the enabled count — renaming a
+/// hostname, say — would not move any of these. There is deliberately no
+/// such path today. Add one and this fingerprint must grow a term with
+/// it, or cross-pod invalidation will silently miss it.
+///
+/// # Errors
+/// Driver / query failures.
+pub async fn generation(registry: &Pool) -> Result<Generation, HostError> {
+    use crate::core::aggregates::{count_all, max};
+    use crate::core::{AggregateQuery, Model as _, WhereExpr};
+    use crate::sql::fetch_aggregate_pool;
+
+    // One round trip, three scalars, no rows decoded. The previous
+    // implementation fetched and deserialized the entire table on every
+    // pod every interval, which is the cost this cache exists to avoid.
+    let q = AggregateQuery {
+        model: OrgHost::SCHEMA,
+        joins: Vec::new(),
+        where_clause: WhereExpr::And(Vec::new()),
+        group_by: Vec::new(),
+        aggregates: vec![
+            ("n".into(), count_all().into()),
+            (
+                "n_on".into(),
+                count_all().filter(OrgHost::enabled.eq(true)).into(),
+            ),
+            ("max_id".into(), max("id").into()),
+        ],
+        aliases: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+    };
+    // Every term is NULL-able on an empty table (`MAX` of no rows), so
+    // each decodes as `Option` and folds to 0 — an empty registry has a
+    // stable fingerprint rather than an error.
+    let rows: Vec<(Option<i64>, Option<i64>, Option<i64>)> =
+        fetch_aggregate_pool(registry, &q).await?;
+    let (n, n_on, max_id) = rows.into_iter().next().unwrap_or((None, None, None));
+    Ok(Generation {
+        count: n.unwrap_or(0),
+        enabled: n_on.unwrap_or(0),
+        max_id: max_id.unwrap_or(0),
+    })
+}
+
+/// The fingerprint [`generation`] returns. A plain tuple would work, but
+/// three same-typed `i64`s in a row are trivial to transpose at a call
+/// site and the compiler would not notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Generation {
+    /// Total rows — moves on add and remove.
+    pub count: i64,
+    /// Rows with `enabled = true` — moves on a toggle, which is the
+    /// mutation a count-and-max-id fingerprint would otherwise miss.
+    pub enabled: i64,
+    /// Largest row id — distinguishes an add-plus-remove in the same
+    /// interval, which leaves `count` unchanged.
+    pub max_id: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,32 +452,4 @@ mod tests {
         assert!(base.is_base);
         assert!(base.id.is_none());
     }
-}
-
-/// A cheap fingerprint of the whole host table, used to detect a change
-/// made by **another process**.
-///
-/// `invalidate_host_cache` only clears the pod that called it. Behind a
-/// load balancer the others would keep serving a stale answer until their
-/// TTL expired — a host added on one pod 404ing on the rest, which is
-/// exactly the kind of thing that gets diagnosed as "DNS hasn't
-/// propagated". Each pod re-reads this fingerprint periodically and drops
-/// its cache when it moves.
-///
-/// `(count, max(updated_at))` covers all three mutations with one
-/// aggregate and no extra table: an add moves both, a delete moves the
-/// count, and a toggle moves the timestamp. Deliberately not `max(id)` —
-/// that misses a toggle entirely.
-///
-/// # Errors
-/// Driver / query failures.
-pub async fn generation(registry: &Pool) -> Result<(i64, i64), HostError> {
-    let rows: Vec<OrgHost> = OrgHost::objects().fetch(registry).await?;
-    let count = i64::try_from(rows.len()).unwrap_or(i64::MAX);
-    let newest = rows
-        .iter()
-        .filter_map(|r| r.updated_at.get().map(chrono::DateTime::timestamp_micros))
-        .max()
-        .unwrap_or(0);
-    Ok((count, newest))
 }

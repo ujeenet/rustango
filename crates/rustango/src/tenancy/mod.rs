@@ -176,10 +176,16 @@ pub use pools::{
     TenantPoolsConfig,
 };
 pub use resolver::{
-    expire_generation_for_test, invalidate_host_cache, reset_generation_for_test, ChainResolver,
-    HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, RegisteredHostResolver,
-    SubdomainResolver,
+    invalidate_host_cache, ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver,
+    PortResolver, RegisteredHostResolver, SubdomainResolver,
 };
+// The host-generation test hooks are deliberately NOT re-exported here —
+// they live in `crate::testkit`, so the name says what they are and they
+// are not permanent public API of `tenancy`. See `resolver::reset_generation`.
+// Gated to match `testkit`'s own gate, so a production build neither
+// compiles them in nor warns about an unused re-export.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) use resolver::{expire_generation, reset_generation};
 pub use routes::RouteConfig;
 pub use secrets::{
     ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,
