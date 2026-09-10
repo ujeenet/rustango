@@ -100,6 +100,7 @@ mod pools;
 /// Bearer access token, MCP agent token).
 pub mod principal;
 mod resolver;
+mod resolver_cache;
 pub mod routes;
 mod secrets;
 pub mod session;
