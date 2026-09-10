@@ -323,9 +323,12 @@ async fn suspending_a_tenant_also_clears_the_extra_host_cache() {
         .execute(sq)
         .await
         .expect("suspend");
-    // What a fingerprint bump does on the next poll.
+    // ONLY the org-level invalidation — exactly what `drop-tenant` and
+    // the operator console call. Calling `invalidate_host_cache()` here
+    // as well would make this pass no matter what
+    // `invalidate_org_cache` does, which is how an earlier version of
+    // this test managed to cover nothing.
     rustango::tenancy::invalidate_org_cache();
-    rustango::tenancy::invalidate_host_cache();
 
     assert!(
         RegisteredHostResolver
@@ -333,8 +336,45 @@ async fn suspending_a_tenant_also_clears_the_extra_host_cache() {
             .await
             .expect("resolve")
             .is_none(),
-        "a suspended tenant must stop answering on its extra hosts too"
+        "a suspended tenant must stop answering on its extra hosts too — \
+         `invalidate_org_cache` has to reach HOST_CACHE, which now holds \
+         Org rows"
     );
+}
+
+/// The `Host` header is client-supplied and hostnames are
+/// case-insensitive (RFC 4343), so case variants must not become
+/// distinct cache keys. Otherwise a few thousand spellings of one real
+/// host fill a bounded map and evict every genuine tenant.
+#[tokio::test]
+async fn host_case_variants_share_one_cache_entry() {
+    let _g = lock().lock().await;
+    let (pool, _dir) = registry().await;
+    add_org(&pool, "acme", "acme.app.test").await;
+    rustango::testkit::reset_org_cache();
+
+    assert_eq!(
+        resolve(&pool, "acme.app.test").await.as_deref(),
+        Some("acme")
+    );
+
+    // Suspend behind the cache: a second key would miss the cache, query,
+    // and return None. Sharing the entry returns the cached tenant.
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!("sqlite-only test")
+    };
+    sqlx::query("UPDATE rustango_orgs SET active = 0 WHERE slug = 'acme'")
+        .execute(sq)
+        .await
+        .expect("suspend");
+
+    for variant in ["ACME.APP.TEST", "AcMe.App.Test", "acme.app.test"] {
+        assert_eq!(
+            resolve(&pool, variant).await.as_deref(),
+            Some("acme"),
+            "`{variant}` must hit the same entry as the lowercase host"
+        );
+    }
 }
 
 /// The apex is not a tenant and must short-circuit before the cache, so

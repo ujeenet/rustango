@@ -363,15 +363,19 @@ where
         .set("active", false)
         .execute_pool(&registry)
         .await?;
-    // A suspended tenant must stop resolving. Local invalidation is
-    // instant here; other pods notice within one fingerprint interval
-    // because `active` is one of its terms.
-    super::super::invalidate_org_cache();
     if updated == 0 {
         return Err(TenancyError::Validation(format!(
             "drop-tenant: no row updated for id {id} — race condition?"
         )));
     }
+    // Only once the write is confirmed. Invalidating before the guard
+    // would throw away a healthy cache on a no-op, and the suspension
+    // it is clearing would not have happened.
+    //
+    // Clears the extra-hostname cache as well — that one holds `Org`
+    // rows too, so without it a suspended tenant's base host 404s while
+    // its extra hosts keep serving.
+    super::super::invalidate_org_cache();
     writeln!(
         w,
         "soft-deleted tenant `{slug}` (active=false). Data preserved."
@@ -572,6 +576,10 @@ where
             "purge-tenant: no Org row deleted for id {id} — race condition?"
         )));
     }
+    // The schema or database is already gone by this point, so a cached
+    // resolution would route requests at storage that no longer exists —
+    // a 500 where the tenant should simply be unknown.
+    super::super::invalidate_org_cache();
     writeln!(w, "  removed Org row (id {id})")?;
     Ok(())
 }

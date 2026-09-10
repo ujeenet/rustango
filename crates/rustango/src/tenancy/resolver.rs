@@ -105,16 +105,16 @@ impl OrgResolver for SubdomainResolver {
         // trusting anything cached here. Throttled to one aggregate per
         // interval — see `sync_org_generation`.
         sync_org_generation(registry).await;
-        match org_cache_get(host) {
+        match org_cache_get(&host) {
             CachedOrg::Miss => return Ok(None),
-            CachedOrg::Hit(org) => return Ok(Some(*org)),
+            CachedOrg::Hit(org) => return Ok(Some(org)),
             CachedOrg::Absent => {}
         }
-        let found = find_active_org_by(registry, Org::host_pattern.eq(host.to_owned())).await?;
+        let found = find_active_org_by(registry, Org::host_pattern.eq(host.clone())).await?;
         // Cache the miss too: this resolver runs first for *every*
         // request, so an unregistered host would otherwise be a free
         // registry query per request. See `ORG_CACHE`.
-        org_cache_put(host, found.clone());
+        org_cache_put(&host, found.clone());
         Ok(found)
     }
 }
@@ -245,10 +245,39 @@ const ORG_CACHE_MAX: usize = 1024;
 
 /// Same three-state shape as [`Cached`] — "not cached" and "cached as a
 /// miss" lead to opposite actions, so they cannot share a representation.
+/// Make room for one insert once a cache is at its cap.
+///
+/// Drops a single entry rather than the whole map. Both caches are keyed
+/// on a client-supplied `Host`, so wiping on overflow hands an attacker a
+/// cheap way to evict every real tenant: fill the map with junk and every
+/// legitimate host has to re-query. Evicting one keeps the damage
+/// proportional to the junk actually sent.
+///
+/// Not LRU — that needs a second index and this map is on the request
+/// path. An arbitrary victim is enough: correctness never depends on a
+/// cache retaining anything.
+fn evict_one_if_full<V>(map: &mut std::collections::HashMap<String, V>, cap: usize) {
+    if map.len() < cap {
+        return;
+    }
+    if let Some(victim) = map.keys().next().cloned() {
+        map.remove(&victim);
+    }
+}
+
+#[allow(clippy::large_enum_variant)] // see `Hit`
+#[allow(clippy::large_enum_variant)] // see `Hit`
 enum CachedOrg {
+    /// Nothing usable; go to the registry.
     Absent,
+    /// Known not to resolve to any tenant.
     Miss,
-    Hit(Box<Org>),
+    /// Carries the row by value. Deliberately not boxed: this is the
+    /// hot path the cache exists to make free, and a box would add an
+    /// allocation to every hit. The enum is a short-lived local,
+    /// destructured immediately, so its size costs a stack move rather
+    /// than a heap trip.
+    Hit(Org),
 }
 
 fn org_cache_get(host: &str) -> CachedOrg {
@@ -261,7 +290,7 @@ fn org_cache_get(host: &str) -> CachedOrg {
     match map.get(host) {
         Some((_, at)) if at.elapsed() >= ORG_CACHE_TTL => CachedOrg::Absent,
         Some((None, _)) => CachedOrg::Miss,
-        Some((Some(org), _)) => CachedOrg::Hit(Box::new(org.clone())),
+        Some((Some(org), _)) => CachedOrg::Hit(org.clone()),
         None => CachedOrg::Absent,
     }
 }
@@ -271,36 +300,49 @@ fn org_cache_put(host: &str, org: Option<Org>) {
         return;
     };
     let map = guard.get_or_insert_with(Default::default);
-    if map.len() >= ORG_CACHE_MAX {
-        map.clear();
-    }
+    evict_one_if_full(map, ORG_CACHE_MAX);
     map.insert(host.to_owned(), (org, std::time::Instant::now()));
 }
 
-/// Drop cached base-host resolutions.
+/// Drop every cached resolution that carries `Org` data — **both**
+/// caches.
 ///
-/// Called after any write to `rustango_orgs` so the pod that made the
-/// change sees it immediately rather than waiting out the TTL. Other pods
-/// converge via the registry fingerprint — see [`sync_org_generation`].
+/// Call after any write to `rustango_orgs`, so the pod that made the
+/// change sees it immediately rather than waiting out the TTL. Other
+/// pods converge via the registry fingerprint — see
+/// [`sync_org_generation`].
+///
+/// Clearing `HOST_CACHE` as well is not incidental. It holds whole `Org`
+/// rows now, and it previously re-ran the active-filtered lookup on every
+/// hit — so suspending a tenant used to stop its extra hostnames
+/// *immediately*, per request. Losing that re-check without clearing
+/// here would leave a suspended tenant's extra hosts serving while its
+/// base host correctly 404s, which is worse than either behaviour alone.
+/// One function so a caller cannot get half of it right.
 pub fn invalidate_org_cache() {
     if let Ok(mut guard) = ORG_CACHE.write() {
         if let Some(map) = guard.as_mut() {
             map.clear();
         }
     }
+    invalidate_host_cache();
 }
 
 /// The three states a lookup can be in. Named rather than
 /// `Option<Option<i64>>` because "not cached" and "cached as a miss" lead
 /// to opposite actions — one queries, the other must not.
+#[allow(clippy::large_enum_variant)] // see `CachedOrg::Hit`
 enum Cached {
     /// Nothing usable; go to the registry.
     Absent,
     /// Known not to be a registered host.
     Miss,
-    /// Boxed because an `Org` is far larger than the other variants and
-    /// clippy rightly objects to a lopsided enum.
-    Hit(Box<Org>),
+    /// Carries the row by value. Deliberately not boxed: this is the
+    /// hot path the cache exists to make free, and a box would add an
+    /// allocation to every hit. The enum is a short-lived local that is
+    /// destructured immediately, so its size costs a stack move, not a
+    /// heap trip.
+    Hit(Org),
 }
 
 fn host_cache_get(host: &str) -> Cached {
@@ -310,11 +352,11 @@ fn host_cache_get(host: &str) -> Cached {
     let Some((value, at)) = guard.as_ref().and_then(|m| m.get(host)) else {
         return Cached::Absent;
     };
-    if at.elapsed() > HOST_CACHE_TTL {
+    if at.elapsed() >= HOST_CACHE_TTL {
         return Cached::Absent;
     }
     match value {
-        Some(org) => Cached::Hit(Box::new(org.clone())),
+        Some(org) => Cached::Hit(org.clone()),
         None => Cached::Miss,
     }
 }
@@ -324,9 +366,7 @@ fn host_cache_put(host: &str, value: Option<Org>) {
         return;
     };
     let map = guard.get_or_insert_with(Default::default);
-    if map.len() >= HOST_CACHE_MAX {
-        map.clear();
-    }
+    evict_one_if_full(map, HOST_CACHE_MAX);
     map.insert(host.to_owned(), (value, std::time::Instant::now()));
 }
 
@@ -339,16 +379,11 @@ fn host_cache_put(host: &str, value: Option<Org>) {
 /// shared cache, a message bus, or making Redis a dependency of tenant
 /// resolution — the one path that runs before everything else and must not
 /// acquire new ways to fail.
-/// `None` = never looked. `Some((gen, at))` carries the last fingerprint
-/// seen and the time of the last *attempt* — successful or not, so a
-/// failing probe is still throttled.
-///
-/// `gen` is itself `Option`: a claimed-but-not-yet-completed check writes
-/// the attempt time with the previous fingerprint, so a probe that fails
-/// leaves the last known-good value in place rather than resetting it.
+
 /// Last `rustango_orgs` fingerprint this process saw, and when it last
 /// *attempted* a read — successful or not, so a failing probe is still
-/// throttled. Same shape and same reasoning as [`HOST_GEN`].
+/// throttled. Same shape and same reasoning as [`GenState`], which does
+/// the equivalent job for `rustango_org_hosts`.
 type OrgGenState = (Option<super::org::OrgGeneration>, std::time::Instant);
 static ORG_GEN: std::sync::RwLock<Option<OrgGenState>> = std::sync::RwLock::new(None);
 
@@ -385,9 +420,18 @@ async fn sync_org_generation(registry: &Pool) {
         }
     };
 
+    // Through the breaker, not around it. A direct `org::generation`
+    // call would wait out the pool's acquire timeout on an unreachable
+    // registry — and base-host traffic now reaches this poll on every
+    // request, so that would put the stall #1311 removed straight back
+    // on the hot path.
+    if registry_is_down() {
+        return;
+    }
     let current = match super::org::generation(registry).await {
         Ok(current) => current,
         Err(e) => {
+            mark_registry_down();
             if !ORG_GEN_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 tracing::warn!(
                     target: "rustango::tenancy::resolver",
@@ -431,6 +475,13 @@ pub(crate) fn reset_org_cache() {
     invalidate_org_cache();
 }
 
+/// `None` = never looked. `Some((gen, at))` carries the last fingerprint
+/// seen and the time of the last *attempt* — successful or not, so a
+/// failing probe is still throttled.
+///
+/// `gen` is itself `Option`: a claimed-but-not-yet-completed check writes
+/// the attempt time with the previous fingerprint, so a probe that fails
+/// leaves the last known-good value in place rather than resetting it.
 type GenState = (Option<super::org_host::Generation>, std::time::Instant);
 
 static HOST_GEN: std::sync::RwLock<Option<GenState>> = std::sync::RwLock::new(None);
@@ -643,9 +694,9 @@ impl OrgResolver for RegisteredHostResolver {
         // anything cached here. Throttled — see `GEN_CHECK_EVERY`.
         sync_generation(registry).await;
         // Cached, including the miss — see `HOST_CACHE`.
-        match host_cache_get(host) {
+        match host_cache_get(&host) {
             Cached::Miss => return Ok(None),
-            Cached::Hit(org) => return Ok(Some(*org)),
+            Cached::Hit(org) => return Ok(Some(org)),
             Cached::Absent => {}
         }
         // The table was failing very recently — don't re-ask on every
@@ -657,7 +708,7 @@ impl OrgResolver for RegisteredHostResolver {
             return Ok(None);
         }
         let rows = match super::OrgHost::objects()
-            .where_(super::OrgHost::hostname.eq(host.to_owned()))
+            .where_(super::OrgHost::hostname.eq(host.clone()))
             .where_(super::OrgHost::enabled.eq(true))
             .fetch(registry)
             .await
@@ -680,7 +731,7 @@ impl OrgResolver for RegisteredHostResolver {
             }
         };
         let Some(row) = rows.into_iter().next() else {
-            host_cache_put(host, None);
+            host_cache_put(&host, None);
             return Ok(None);
         };
         // Resolve the row to its Org once, then cache the Org itself.
@@ -688,7 +739,7 @@ impl OrgResolver for RegisteredHostResolver {
         // this same fetch — the 2.00-queries-per-request a cache hit
         // used to cost.
         let found = find_active_org_by(registry, Org::id.eq(row.org_id)).await?;
-        host_cache_put(host, found.clone());
+        host_cache_put(&host, found.clone());
         Ok(found)
     }
 }
@@ -896,14 +947,23 @@ impl OrgResolver for ChainResolver {
 /// Pull the host name (no port, no scheme) from the request. Tries
 /// `Host` header first (universal), falls back to `parts.uri.host()`
 /// for clients that send absolute-form URIs.
-fn host_from_parts(parts: &Parts) -> Option<&str> {
+/// Pull the host name from the request, lowercased and without a port.
+///
+/// Case-folding is not cosmetic: hostnames are case-insensitive per RFC
+/// 4343, but the caches below are keyed on this string, and the string
+/// comes straight from a client-supplied `Host` header. Without folding,
+/// `ACME.app.test` and `AcMe.app.test` are distinct keys for one tenant —
+/// so a few thousand case variants of a real host fill a bounded map with
+/// duplicates, evicting genuine entries and taking a write lock on the
+/// process-global cache each time.
+fn host_from_parts(parts: &Parts) -> Option<String> {
     if let Some(value) = parts.headers.get(http::header::HOST) {
         if let Ok(s) = value.to_str() {
             // `Host` header may include `:port` — strip it.
-            return Some(s.split(':').next().unwrap_or(s));
+            return Some(s.split(':').next().unwrap_or(s).to_ascii_lowercase());
         }
     }
-    parts.uri.host()
+    parts.uri.host().map(str::to_ascii_lowercase)
 }
 
 /// When the registry lookup last failed, if it is currently failing.
@@ -933,6 +993,33 @@ static REGISTRY_DOWN_WARNED: std::sync::atomic::AtomicBool =
 /// within a second of the next request.
 const REGISTRY_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// True when a recent registry lookup failed and the retry window has
+/// not elapsed. Read-locked, so the healthy path pays one uncontended
+/// read.
+fn registry_is_down() -> bool {
+    match REGISTRY_DOWN.read() {
+        Ok(g) => g.is_some_and(|at| at.elapsed() < REGISTRY_RETRY_AFTER),
+        Err(_) => false,
+    }
+}
+
+/// Open the breaker after a failed lookup.
+fn mark_registry_down() {
+    if let Ok(mut g) = REGISTRY_DOWN.write() {
+        *g = Some(std::time::Instant::now());
+    }
+}
+
+/// Close it after a successful one — checked under a read lock first so
+/// the common case never takes the write lock.
+fn mark_registry_up() {
+    if REGISTRY_DOWN.read().is_ok_and(|g| g.is_some()) {
+        if let Ok(mut g) = REGISTRY_DOWN.write() {
+            *g = None;
+        }
+    }
+}
+
 /// The error returned while the breaker is open. Mirrors what the pool
 /// itself produces so callers cannot tell the two apart.
 fn registry_unavailable() -> TenancyError {
@@ -948,11 +1035,7 @@ where
 {
     // A very recent failure means the registry is unreachable; don't
     // queue behind it. See `REGISTRY_DOWN`.
-    let suppressed = match REGISTRY_DOWN.read() {
-        Ok(g) => g.is_some_and(|at| at.elapsed() < REGISTRY_RETRY_AFTER),
-        Err(_) => false,
-    };
-    if suppressed {
+    if registry_is_down() {
         return Err(registry_unavailable());
     }
 
@@ -965,19 +1048,11 @@ where
 
     match result {
         Ok(rows) => {
-            // Clear the breaker, but only if it was set — the healthy
-            // path should not take a write lock on every request.
-            if REGISTRY_DOWN.read().is_ok_and(|g| g.is_some()) {
-                if let Ok(mut g) = REGISTRY_DOWN.write() {
-                    *g = None;
-                }
-            }
+            mark_registry_up();
             Ok(rows.into_iter().next())
         }
         Err(e) => {
-            if let Ok(mut g) = REGISTRY_DOWN.write() {
-                *g = Some(std::time::Instant::now());
-            }
+            mark_registry_down();
             if !REGISTRY_DOWN_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 tracing::warn!(
                     target: "rustango::tenancy::resolver",

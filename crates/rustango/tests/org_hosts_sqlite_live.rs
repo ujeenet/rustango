@@ -46,6 +46,10 @@ async fn registry_with_org() -> Pool {
     // process-global leak as the fingerprint above, and leaving it to
     // chance is how the fingerprint one got found in the first place.
     rustango::testkit::reset_registry_breaker();
+    // `SubdomainResolver` caches hostname -> Org now, and these tests
+    // stand up a fresh registry each time — a leftover entry would be
+    // answered from the previous test's data.
+    rustango::testkit::reset_org_cache();
     let pool = Pool::Sqlite(
         sqlx::SqlitePool::connect("sqlite::memory:")
             .await
