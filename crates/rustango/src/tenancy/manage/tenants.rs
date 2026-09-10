@@ -8,32 +8,26 @@ use std::path::Path;
 use sqlx::Database;
 
 use crate::core::Column as _;
-use crate::sql::{Auto, FetcherPool, UpdaterPool};
+use crate::sql::{FetcherPool, UpdaterPool};
 
 use crate::tenancy::error::TenancyError;
 #[cfg(feature = "postgres")]
 use crate::tenancy::manage::args::quote_ident;
 use crate::tenancy::manage::args::{next_value, reject_leading_flag};
 use crate::tenancy::manage_interactive;
-use crate::tenancy::migrate as tenant_migrate;
 use crate::tenancy::org::{BackendKind, Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
+use crate::tenancy::provision;
 
 // ---------- create-tenant ----------
 
-struct CreateTenantArgs {
-    slug: String,
-    mode: StorageMode,
-    backend: BackendKind,
-    display_name: Option<String>,
-    database_url: Option<String>,
-    schema_name: Option<String>,
-    host_pattern: Option<String>,
-    port: Option<i32>,
-    path_prefix: Option<String>,
-    no_migrate: bool,
-}
-
+/// The verb: turn `argv` into a [`ProvisionRequest`], run the engine,
+/// print what happens.
+///
+/// Everything that is not about a command line lives in
+/// [`crate::tenancy::provision`] — so an HTTP handler, a webhook or a
+/// job can stand up a tenant without faking an `argv` and handing it a
+/// `Vec<u8>` to write into.
 pub(super) async fn create_tenant<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
@@ -44,152 +38,92 @@ pub(super) async fn create_tenant<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let parsed = parse_create_tenant_args(args)?;
+    let request = parse_create_tenant_args(args)?;
 
-    // Reject duplicate slug up front — saves a partial-state mess
-    // when CREATE SCHEMA succeeds and the INSERT then fails.
-    let registry = pools.registry_pool();
-    let existing: Vec<Org> = Org::objects()
-        .where_(Org::slug.eq(parsed.slug.clone()))
-        .fetch(&registry)
-        .await?;
-    if !existing.is_empty() {
-        return Err(TenancyError::Validation(format!(
-            "tenant slug `{}` already exists",
-            parsed.slug
-        )));
-    }
-
-    // Compute defaults that depend on the slug + apex env var.
-    let host_pattern = parsed.host_pattern.clone().or_else(|| {
-        std::env::var("RUSTANGO_APEX_DOMAIN")
-            .ok()
-            .map(|apex| format!("{}.{apex}", parsed.slug))
-    });
-    let display_name = parsed
-        .display_name
-        .clone()
-        .unwrap_or_else(|| parsed.slug.clone());
-    let schema_name = match parsed.mode {
-        StorageMode::Schema => Some(
-            parsed
-                .schema_name
-                .clone()
-                .unwrap_or_else(|| parsed.slug.clone()),
-        ),
-        StorageMode::Database => None,
+    // Steps print as they happen rather than from the outcome, because
+    // "created tenant …" has always appeared *before* the migrations,
+    // and the summary after them.
+    let progress = CreateTenantProgress {
+        out: std::sync::Mutex::new(w),
+        slug: request.slug.clone(),
+        mode: request.mode,
     };
+    let outcome =
+        provision::provision_tenant(pools, registry_url, dir, &request, Some(&progress)).await?;
 
-    if parsed.mode == StorageMode::Database && parsed.database_url.is_none() {
-        return Err(TenancyError::Validation(
-            "create-tenant --mode database requires --database-url".into(),
-        ));
-    }
-
-    // Schema-mode: create the schema before inserting the row so
-    // a failed INSERT doesn't leave an orphan schema. Idempotent
-    // via IF NOT EXISTS.
-    if let StorageMode::Schema = parsed.mode {
-        // Schema mode is PG-only by language — `CREATE SCHEMA` /
-        // `SET search_path` don't exist on sqlite or mysql.
-        #[cfg(feature = "postgres")]
-        {
-            let pg_pools = (pools as &dyn std::any::Any)
-                .downcast_ref::<TenantPools<sqlx::Postgres>>()
-                .ok_or_else(|| {
-                    TenancyError::Validation(
-                        "schema-mode tenants require a Postgres registry — pass --mode database \
-                         on sqlite/mysql"
-                            .into(),
-                    )
-                })?;
-            let schema = schema_name.as_deref().unwrap_or(&parsed.slug);
-            let sql = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema));
-            rustango::sql::sqlx::query(&sql)
-                .execute(pg_pools.registry())
-                .await?;
-        }
-        #[cfg(not(feature = "postgres"))]
-        {
-            return Err(TenancyError::Validation(
-                "schema-mode tenants require the `postgres` feature — pass --mode database \
-                 on sqlite/mysql builds"
-                    .into(),
-            ));
-        }
-    }
-
-    let mut org = Org {
-        id: Auto::default(),
-        slug: parsed.slug.clone(),
-        display_name,
-        storage_mode: parsed.mode.as_str().into(),
-        backend_kind: parsed.backend.as_str().into(),
-        database_url: parsed.database_url.clone(),
-        schema_name,
-        host_pattern,
-        port: parsed.port,
-        path_prefix: parsed.path_prefix.clone(),
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    };
-    org.insert_pool(&registry).await?;
-    // This pod sees the new tenant immediately; others converge on the
-    // registry fingerprint (see `resolver::sync_org_generation`).
-    super::super::invalidate_org_cache();
-    let id = org.id.get().copied().unwrap_or_default();
-    writeln!(
-        w,
-        "created tenant `{}` (id {id}, mode {})",
-        parsed.slug, parsed.mode
-    )?;
-
-    // Run tenant migrations against the freshly-provisioned tenant
-    // unless --no-migrate.
-    if parsed.no_migrate {
-        writeln!(w, "  --no-migrate: skipping tenant migrations")?;
-        return Ok(());
-    }
-    writeln!(w, "  applying tenant migrations…")?;
-    // v0.38 — on PG go through `migrate_tenants` (schema-mode +
-    // database-mode); on sqlite/mysql use `migrate_tenants_db`
-    // (database-mode only).
-    #[cfg(feature = "postgres")]
-    let report = {
-        if let Some(pg_pools) =
-            (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
-        {
-            tenant_migrate::migrate_tenants(pg_pools, dir, registry_url).await?
-        } else {
-            tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?
-        }
-    };
-    #[cfg(not(feature = "postgres"))]
-    let report = tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?;
-    let outcome = report.tenants.iter().find(|t| t.slug == parsed.slug);
-    match outcome {
-        Some(o) => {
-            if let Some(err) = &o.error {
-                writeln!(w, "  migration failed: {err}")?;
-            } else {
-                writeln!(w, "  applied {} migration(s)", o.applied.len())?;
-                for m in &o.applied {
-                    writeln!(w, "    + {}", m.name)?;
-                }
+    let w = progress.into_inner();
+    match &outcome.migrations {
+        // The observer already printed the `--no-migrate` line; the
+        // verb has never followed it with a summary.
+        provision::MigrationsOutcome::Skipped => {}
+        provision::MigrationsOutcome::Failed(err) => writeln!(w, "  migration failed: {err}")?,
+        provision::MigrationsOutcome::Applied(applied) => {
+            writeln!(w, "  applied {} migration(s)", applied.len())?;
+            for m in applied {
+                writeln!(w, "    + {}", m.name)?;
             }
         }
-        None => writeln!(w, "  no migrations matched this tenant")?,
+        provision::MigrationsOutcome::NotMatched => {
+            writeln!(w, "  no migrations matched this tenant")?;
+        }
     }
     Ok(())
 }
 
-fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, TenancyError> {
+/// Renders the engine's step events as the lines `create-tenant` has
+/// always printed.
+///
+/// The `Mutex` bridges an observer's `&self` to the verb's `&mut W`; it
+/// is uncontended, since the engine emits from one task. See
+/// `CliProgress` in `manage::migrations` for the same reasoning about
+/// why writing here does not violate the must-not-block contract.
+struct CreateTenantProgress<'w, W> {
+    out: std::sync::Mutex<&'w mut W>,
+    slug: String,
+    mode: StorageMode,
+}
+
+impl<'w, W: Write + Send> CreateTenantProgress<'w, W> {
+    fn into_inner(self) -> &'w mut W {
+        self.out.into_inner().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl<W: Write + Send> provision::ProvisionObserver for CreateTenantProgress<'_, W> {
+    fn on_event(&self, event: provision::ProvisionEvent) {
+        use provision::{ProvisionEvent as E, ProvisionStep as S, StepStatus};
+
+        let Ok(mut out) = self.out.lock() else {
+            return;
+        };
+        // Progress is cosmetic; a broken pipe must not fail the verb.
+        let _ = match event {
+            E::Registered { org_id } => writeln!(
+                out,
+                "created tenant `{}` (id {org_id}, mode {})",
+                self.slug, self.mode
+            ),
+            E::Step {
+                step: S::Migrate,
+                status: StepStatus::Started,
+            } => writeln!(out, "  applying tenant migrations…"),
+            E::Step {
+                step: S::Migrate,
+                status: StepStatus::Skipped(_),
+            } => writeln!(out, "  --no-migrate: skipping tenant migrations"),
+            // Validation and storage failures come back as `Err` from
+            // the engine and are rendered by the caller; the remaining
+            // steps are detail the CLI has never printed.
+            _ => Ok(()),
+        };
+        let _ = out.flush();
+    }
+}
+
+/// `argv` → [`ProvisionRequest`]. The only place that knows
+/// `--no-migrate` exists: a negative flag is right for a command line
+/// and wrong for a struct field, so it is inverted on the way in.
+fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionRequest, TenancyError> {
     const HELP: &str = "create-tenant <slug> [--mode schema|database] \
         [--backend postgres|mysql|sqlite] [--display-name <s>] \
         [--database-url <url>] [--schema-name <s>] [--host-pattern <s>] \
@@ -205,7 +139,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
                 TenancyError::Validation("create-tenant requires a slug positional argument".into())
             })?,
     };
-    let mut out = CreateTenantArgs {
+    let mut out = provision::ProvisionRequest {
         slug,
         mode: StorageMode::Schema,
         backend: BackendKind::Postgres,
@@ -215,7 +149,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
         host_pattern: None,
         port: None,
         path_prefix: None,
-        no_migrate: false,
+        run_migrations: true,
     };
     while let Some(flag) = iter.next() {
         match flag.as_str() {
@@ -246,7 +180,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
                 })?);
             }
             "--path-prefix" => out.path_prefix = Some(next_value(&mut iter, "--path-prefix")?),
-            "--no-migrate" => out.no_migrate = true,
+            "--no-migrate" => out.run_migrations = false,
             "--help" | "-h" => return Err(TenancyError::Validation(HELP.to_owned())),
             other => {
                 return Err(TenancyError::Validation(format!(
