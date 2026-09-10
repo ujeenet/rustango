@@ -250,6 +250,18 @@ pub fn admin_user() -> crate::admin::AdminUser {
     }
 }
 
+/// Forget this process's "registry is unreachable" breaker.
+///
+/// Tenant resolution fails fast for a short window after a registry
+/// error so an outage cannot pin every worker. That state is
+/// process-global, so a test that pointed the resolver at a dead or
+/// missing registry would otherwise suppress lookups for whichever
+/// test ran next.
+#[cfg(feature = "tenancy")]
+pub fn reset_registry_breaker() {
+    crate::tenancy::reset_registry_breaker();
+}
+
 #[cfg(all(test, feature = "sqlite", feature = "tenancy", feature = "admin"))]
 mod tests {
     use super::*;
