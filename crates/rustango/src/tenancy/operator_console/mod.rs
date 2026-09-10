@@ -1353,6 +1353,14 @@ async fn org_edit_submit(
         return redirect_with_error(&slug, &format!("update failed: {e}"));
     }
 
+    // Drop the cached `Org` before anything else acts on the write.
+    // Resolution serves from that cache now, so without this the pool
+    // is evicted and then immediately rebuilt from the stale row — the
+    // rotation this handler promises would report success while the
+    // next request reconnected with the old credential. `active =
+    // false` has the same shape: the tenant would keep serving.
+    super::invalidate_org_cache();
+
     if database_url_changed {
         pools.invalidate(&slug).await;
     }
@@ -1549,6 +1557,10 @@ async fn org_edit_branding(
     if let Err(e) = crate::sql::update_pool(&state.registry, &update_q).await {
         return redirect_with_error(&slug, &format!("update failed: {e}"));
     }
+    // Branding lives on the `Org` row that resolution caches, so an
+    // upload without this leaves the previous logo rendering until the
+    // entry expires.
+    super::invalidate_org_cache();
 
     // Audit row — branding uploads touch the public-facing surface
     // of a tenant; operators iterating during onboarding leave a
