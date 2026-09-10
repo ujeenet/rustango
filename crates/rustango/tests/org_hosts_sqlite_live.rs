@@ -290,21 +290,21 @@ async fn an_existing_registry_gains_the_table_on_a_plain_migrate() {
 /// Re-migrating a registry whose `rustango_org_hosts` **already has rows**
 /// must succeed and leave them alone.
 ///
-/// The sibling upgrade test above only proves the CREATE path, on a
-/// registry where the table is absent. That is a strictly easier case, and
-/// the gap is not theoretical: an earlier revision of this feature carried
-/// a `NOT NULL` `auto_now` column for the cross-pod fingerprint, which
-/// renders on SQLite as
+/// The sibling upgrade test above only covers the CREATE path, against a
+/// registry where the table is absent. That is the strictly easier case,
+/// and the difference is not academic: adding a `NOT NULL` column with a
+/// non-constant default to this table renders on SQLite as
 ///
 /// ```sql
 /// ALTER TABLE "rustango_org_hosts"
 ///   ADD COLUMN "updated_at" TEXT DEFAULT CURRENT_TIMESTAMP NOT NULL
 /// ```
 ///
-/// SQLite rejects that outright — "Cannot add a column with non-constant
-/// default" — but *only* when the table has rows. On an empty table the
-/// identical statement succeeds, so the CREATE-path test stayed green
-/// while every real deployment would have failed to migrate.
+/// which SQLite rejects — "Cannot add a column with non-constant
+/// default" — but *only* once the table has rows. On an empty table the
+/// identical statement succeeds. A CREATE-path test therefore stays green
+/// while every populated deployment fails to migrate, so any column added
+/// to this model needs the assertion below and not that one.
 #[tokio::test]
 async fn a_populated_host_table_survives_a_re_migrate() {
     let _guard = cache_lock().lock().await;
@@ -444,6 +444,80 @@ async fn compensating_toggles_still_move_the_fingerprint() {
     assert_ne!(
         after, before,
         "a disable+enable pair must still move the fingerprint"
+    );
+}
+
+/// A failing host-table lookup must back off, not re-ask on every request.
+///
+/// The miss path caches; the error path cannot, because an error is not
+/// evidence that the host is unregistered. That left it uncached and
+/// unthrottled — one failing `SELECT` per request, aimed at a registry
+/// that is by definition already unhealthy. Measured against a renamed
+/// table with the backoff removed: 25,987 failing queries for 25,958
+/// requests.
+///
+/// Asserted without counting queries, which SQLite will not tell us:
+/// restore the table *and* clear the resolution cache, then resolve
+/// again. A resolver that queried would find the row and return the
+/// tenant; one that is backed off cannot, so `None` here is positive
+/// proof no query was issued.
+#[tokio::test]
+async fn a_failing_host_lookup_backs_off_instead_of_querying_per_request() {
+    use rustango::tenancy::{OrgResolver, RegisteredHostResolver};
+    let _guard = cache_lock().lock().await;
+    let pool = registry_with_org().await;
+    add_host(&pool, "acme", "backoff.acme.com")
+        .await
+        .expect("add");
+
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!("sqlite-only test")
+    };
+
+    // Take the table away and resolve — fails open, and arms the backoff.
+    sqlx::query("ALTER TABLE rustango_org_hosts RENAME TO hidden_hosts")
+        .execute(sq)
+        .await
+        .expect("rename away");
+    rustango::tenancy::invalidate_host_cache();
+    let during = RegisteredHostResolver
+        .resolve(&parts_for_host("backoff.acme.com"), &pool)
+        .await
+        .expect("a missing table must not error the request");
+    assert!(
+        during.is_none(),
+        "fail-open: a missing table means no match"
+    );
+
+    // Put it back, and clear the cache so the cache cannot explain the
+    // next result. The row is now present and resolvable.
+    sqlx::query("ALTER TABLE hidden_hosts RENAME TO rustango_org_hosts")
+        .execute(sq)
+        .await
+        .expect("rename back");
+    rustango::tenancy::invalidate_host_cache();
+
+    let still_backed_off = RegisteredHostResolver
+        .resolve(&parts_for_host("backoff.acme.com"), &pool)
+        .await
+        .expect("resolve");
+    assert!(
+        still_backed_off.is_none(),
+        "the resolver must still be backed off — returning the tenant here \
+         would mean it queried, which is the per-request storm this guards"
+    );
+
+    // Clearing the backoff (as the interval elapsing would) restores it.
+    rustango::testkit::reset_host_generation();
+    rustango::tenancy::invalidate_host_cache();
+    let recovered = RegisteredHostResolver
+        .resolve(&parts_for_host("backoff.acme.com"), &pool)
+        .await
+        .expect("resolve");
+    assert_eq!(
+        recovered.map(|o| o.slug),
+        Some("acme".to_owned()),
+        "once the backoff lapses the resolver must query again and succeed"
     );
 }
 

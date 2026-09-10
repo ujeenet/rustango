@@ -131,6 +131,50 @@ pub struct RegisteredHostResolver;
 /// than once per request.
 static HOST_TABLE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// When the host-table lookup last failed, if it is currently failing.
+///
+/// The lookup's *miss* path caches (`host_cache_put(host, None)`), but its
+/// *error* path cannot: an error is not evidence that the host is
+/// unregistered, so caching it as a miss would be wrong the moment the
+/// table came back.
+///
+/// Without this backoff the error path is both uncached and unthrottled,
+/// which costs one failing query per request: measured against a renamed
+/// table, 25,987 failing `SELECT`s for 25,958 requests, all aimed at a
+/// registry that is by definition already unhealthy. The condition is
+/// table-wide rather than per-host, so one backoff covers every hostname
+/// at once.
+static HOST_TABLE_DOWN: std::sync::RwLock<Option<std::time::Instant>> =
+    std::sync::RwLock::new(None);
+
+/// True when a recent lookup failed and the backoff has not yet elapsed.
+/// Read-locked, so the hot path pays an uncontended read and nothing else.
+fn host_table_is_down() -> bool {
+    let window = gen_check_every().unwrap_or(GEN_CHECK_EVERY_DEFAULT);
+    match HOST_TABLE_DOWN.read() {
+        Ok(g) => g.is_some_and(|at| at.elapsed() < window),
+        Err(_) => false,
+    }
+}
+
+/// Record that the lookup failed, starting the backoff.
+fn mark_host_table_down() {
+    if let Ok(mut g) = HOST_TABLE_DOWN.write() {
+        *g = Some(std::time::Instant::now());
+    }
+}
+
+/// Clear the backoff after a successful lookup. Checks under a read lock
+/// first so the common case — never having failed — takes no write lock.
+fn mark_host_table_up() {
+    let was_down = HOST_TABLE_DOWN.read().is_ok_and(|g| g.is_some());
+    if was_down {
+        if let Ok(mut g) = HOST_TABLE_DOWN.write() {
+            *g = None;
+        }
+    }
+}
+
 /// hostname → resolved org id (`None` = known-miss), with an expiry.
 ///
 /// Tenant resolution is otherwise uncached — every request already pays one
@@ -354,6 +398,12 @@ pub(crate) fn reset_generation() {
     if let Ok(mut g) = HOST_GEN.write() {
         *g = None;
     }
+    // The missing-table backoff is process-global too, and a test that
+    // exercised an absent table would otherwise suppress the lookup for
+    // the next test's perfectly healthy registry.
+    if let Ok(mut d) = HOST_TABLE_DOWN.write() {
+        *d = None;
+    }
 }
 
 /// Make the next resolve re-read the fingerprint immediately instead of
@@ -419,14 +469,26 @@ impl OrgResolver for RegisteredHostResolver {
             Cached::Hit(org_id) => return find_active_org_by(registry, Org::id.eq(org_id)).await,
             Cached::Absent => {}
         }
+        // The table was failing very recently — don't re-ask on every
+        // request. See `HOST_TABLE_DOWN`. Pre-upgrade behaviour is "no
+        // match", which is what we return anyway, so backing off costs
+        // nothing and stops a per-request storm against a registry that
+        // is already in trouble.
+        if host_table_is_down() {
+            return Ok(None);
+        }
         let rows = match super::OrgHost::objects()
             .where_(super::OrgHost::hostname.eq(host.to_owned()))
             .where_(super::OrgHost::enabled.eq(true))
             .fetch(registry)
             .await
         {
-            Ok(rows) => rows,
+            Ok(rows) => {
+                mark_host_table_up();
+                rows
+            }
             Err(e) => {
+                mark_host_table_down();
                 if !HOST_TABLE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     tracing::warn!(
                         target: "rustango::tenancy::resolver",
