@@ -317,17 +317,37 @@ pub async fn set_host_enabled(
 /// with non-constant default`. Every existing registry would be unable to
 /// migrate.
 ///
-/// These three counters need no clock and no new column, and cover every
+/// These counters need no clock and no new column, and cover every
 /// mutation this module can perform:
 ///
-/// | mutation           | what moves            |
-/// |--------------------|-----------------------|
-/// | [`add_host`]       | `count`, `max_id`     |
-/// | [`remove_host`]    | `count`               |
-/// | [`set_host_enabled`] | `enabled`           |
+/// | mutation             | what moves              |
+/// |----------------------|-------------------------|
+/// | [`add_host`]         | `count`, `max_id`       |
+/// | [`remove_host`]      | `count`                 |
+/// | [`set_host_enabled`] | `enabled`, `enabled_id_sum` |
+///
+/// ## Why `enabled_id_sum` and not just the enabled count
+///
+/// A count cancels. Disable one host and enable another inside the same
+/// poll interval — an operator swapping which domain is live, which is a
+/// perfectly ordinary admin action — and `enabled` goes −1 then +1 while
+/// `count` and `max_id` never move. The fingerprint would sit still and
+/// neither change would reach the other pods.
+///
+/// Summing the ids of the enabled rows distinguishes *which* rows are on,
+/// not just how many, so that swap moves the term. It stays clock-free
+/// and rides in the same query. `SUM` is cast to `bigint` by the
+/// aggregate writer, so it decodes as `i64` on all three backends rather
+/// than Postgres' native `numeric`.
+///
+/// Residual: two disjoint id-sets with equal sums toggled in opposite
+/// directions in one interval still collide. That needs a simultaneous
+/// multi-host swap with arithmetically matching ids, and the 30s
+/// `HOST_CACHE` TTL still backstops it — the cost is 30s convergence
+/// instead of 5s, never permanent staleness.
 ///
 /// **Invariant for future work:** a mutation that edits a row in place
-/// without changing the row count or the enabled count — renaming a
+/// without changing the row count or the enabled set — renaming a
 /// hostname, say — would not move any of these. There is deliberately no
 /// such path today. Add one and this fingerprint must grow a term with
 /// it, or cross-pod invalidation will silently miss it.
@@ -335,11 +355,11 @@ pub async fn set_host_enabled(
 /// # Errors
 /// Driver / query failures.
 pub async fn generation(registry: &Pool) -> Result<Generation, HostError> {
-    use crate::core::aggregates::{count_all, max};
+    use crate::core::aggregates::{count_all, max, sum};
     use crate::core::{AggregateQuery, Model as _, WhereExpr};
     use crate::sql::fetch_aggregate_pool;
 
-    // One round trip, three scalars, no rows decoded. The previous
+    // One round trip, four scalars, no rows decoded. The previous
     // implementation fetched and deserialized the entire table on every
     // pod every interval, which is the cost this cache exists to avoid.
     let q = AggregateQuery {
@@ -354,6 +374,10 @@ pub async fn generation(registry: &Pool) -> Result<Generation, HostError> {
                 count_all().filter(OrgHost::enabled.eq(true)).into(),
             ),
             ("max_id".into(), max("id").into()),
+            (
+                "on_id_sum".into(),
+                sum("id").filter(OrgHost::enabled.eq(true)).into(),
+            ),
         ],
         aliases: Vec::new(),
         having: None,
@@ -361,21 +385,22 @@ pub async fn generation(registry: &Pool) -> Result<Generation, HostError> {
         limit: None,
         offset: None,
     };
-    // Every term is NULL-able on an empty table (`MAX` of no rows), so
-    // each decodes as `Option` and folds to 0 — an empty registry has a
-    // stable fingerprint rather than an error.
-    let rows: Vec<(Option<i64>, Option<i64>, Option<i64>)> =
+    // Every term is NULL-able on an empty table (`MAX` / `SUM` of no
+    // rows), so each decodes as `Option` and folds to 0 — an empty
+    // registry has a stable fingerprint rather than an error.
+    let rows: Vec<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
         fetch_aggregate_pool(registry, &q).await?;
-    let (n, n_on, max_id) = rows.into_iter().next().unwrap_or((None, None, None));
+    let (n, n_on, max_id, on_id_sum) = rows.into_iter().next().unwrap_or((None, None, None, None));
     Ok(Generation {
         count: n.unwrap_or(0),
         enabled: n_on.unwrap_or(0),
         max_id: max_id.unwrap_or(0),
+        enabled_id_sum: on_id_sum.unwrap_or(0),
     })
 }
 
 /// The fingerprint [`generation`] returns. A plain tuple would work, but
-/// three same-typed `i64`s in a row are trivial to transpose at a call
+/// four same-typed `i64`s in a row are trivial to transpose at a call
 /// site and the compiler would not notice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Generation {
@@ -387,6 +412,10 @@ pub struct Generation {
     /// Largest row id — distinguishes an add-plus-remove in the same
     /// interval, which leaves `count` unchanged.
     pub max_id: i64,
+    /// Sum of the ids of the enabled rows — identifies *which* rows are
+    /// on, not just how many, so a disable-one/enable-another swap in a
+    /// single interval still moves the fingerprint. See [`generation`].
+    pub enabled_id_sum: i64,
 }
 
 #[cfg(test)]

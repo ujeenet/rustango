@@ -401,6 +401,52 @@ async fn every_mutation_moves_the_fingerprint() {
     assert_eq!(after_remove.count, 0);
 }
 
+/// Two opposite toggles inside one poll interval must still register.
+///
+/// This is the case a plain enabled-*count* misses: disable one host and
+/// enable another — an operator swapping which domain is live — and the
+/// count goes −1 then +1 while `count` and `max_id` never move. The
+/// fingerprint would sit still and neither change would reach the other
+/// pods until the 30s TTL expired.
+///
+/// `enabled_id_sum` is what catches it, by identifying which rows are on
+/// rather than how many. Dropping that term fails this test and leaves
+/// every other one green.
+#[tokio::test]
+async fn compensating_toggles_still_move_the_fingerprint() {
+    let _guard = cache_lock().lock().await;
+    use rustango::tenancy::org_host::generation;
+    let pool = registry_with_org().await;
+
+    add_host(&pool, "acme", "aaa.acme.com").await.expect("add");
+    add_host(&pool, "acme", "bbb.acme.com").await.expect("add");
+    set_host_enabled(&pool, "acme", "bbb.acme.com", false)
+        .await
+        .expect("disable bbb");
+
+    let before = generation(&pool).await.expect("generation");
+
+    // The swap: aaa off, bbb on, inside one interval.
+    set_host_enabled(&pool, "acme", "aaa.acme.com", false)
+        .await
+        .expect("disable aaa");
+    set_host_enabled(&pool, "acme", "bbb.acme.com", true)
+        .await
+        .expect("enable bbb");
+
+    let after = generation(&pool).await.expect("generation");
+    assert_eq!(
+        (after.count, after.enabled, after.max_id),
+        (before.count, before.enabled, before.max_id),
+        "precondition: count / enabled / max_id are all unchanged by the \
+         swap — that is exactly why the extra term is needed"
+    );
+    assert_ne!(
+        after, before,
+        "a disable+enable pair must still move the fingerprint"
+    );
+}
+
 async fn table_exists(pool: &Pool, table: &str) -> bool {
     let Pool::Sqlite(sq) = pool else {
         unreachable!("sqlite-only test")
