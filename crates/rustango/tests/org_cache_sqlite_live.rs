@@ -1,0 +1,261 @@
+//! Base-host resolution is cached, and the cache is safe.
+//!
+//! `SubdomainResolver` runs first in the standard chain and matches the
+//! base `Org.host_pattern`, so it is on the path of every request.
+//! Uncached it cost exactly one registry `SELECT` per request — measured
+//! against a live Postgres with `log_statement=all`:
+//!
+//! ```text
+//!                        q/req before   q/req after
+//! base host                      1.00          0.00
+//! registered extra host          2.00          1.00
+//! unknown host                   1.00          0.00
+//! ```
+//!
+//! That query was the registry's hot-path SPOF: it is why an unreachable
+//! registry took down tenants whose own databases were perfectly fine.
+//!
+//! The risk a cache introduces is staleness, so most of what follows
+//! pins the *invalidation*, not the hit.
+
+#![cfg(all(feature = "sqlite", feature = "tenancy", feature = "testkit"))]
+#![allow(irrefutable_let_patterns)] // Pool is single-variant in sqlite-only builds.
+
+use http::request::Parts;
+use http::Request;
+use rustango::sql::{sqlx, Pool};
+use rustango::tenancy::{Org, OrgResolver, SubdomainResolver};
+
+/// Both the cache and its fingerprint are process-global.
+fn lock() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn parts_for_host(host: &str) -> Parts {
+    Request::builder()
+        .uri("/")
+        .header("host", host)
+        .body(())
+        .expect("request")
+        .into_parts()
+        .0
+}
+
+/// File-backed so rows can be changed out from under the pool.
+async fn registry() -> (Pool, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("reg.db").display());
+    let pool = Pool::connect(&url).await.expect("sqlite");
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("framework tables");
+    rustango::testkit::reset_org_cache();
+    (pool, dir)
+}
+
+async fn add_org(pool: &Pool, slug: &str, host: &str) {
+    let mut org = Org {
+        id: rustango::sql::Auto::Unset,
+        slug: slug.into(),
+        display_name: slug.into(),
+        storage_mode: "database".into(),
+        backend_kind: "sqlite".into(),
+        database_url: Some("sqlite::memory:".into()),
+        host_pattern: Some(host.into()),
+        ..rustango::testkit::org()
+    };
+    org.insert_pool(pool).await.expect("insert org");
+}
+
+async fn resolve(pool: &Pool, host: &str) -> Option<String> {
+    SubdomainResolver::new("app.test")
+        .resolve(&parts_for_host(host), pool)
+        .await
+        .expect("resolve")
+        .map(|o| o.slug)
+}
+
+/// The hit must not touch the database at all.
+///
+/// Asserted by deleting the row behind the cache's back: a resolver that
+/// queried would find nothing and return `None`, so still getting the
+/// tenant is positive proof no query was issued. That is stronger than
+/// timing, which would be flaky, and than counting queries, which SQLite
+/// will not report.
+#[tokio::test]
+async fn a_cached_base_host_is_served_without_querying() {
+    let _g = lock().lock().await;
+    let (pool, _dir) = registry().await;
+    add_org(&pool, "acme", "acme.app.test").await;
+    rustango::testkit::reset_org_cache();
+
+    assert_eq!(
+        resolve(&pool, "acme.app.test").await.as_deref(),
+        Some("acme")
+    );
+
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!("sqlite-only test")
+    };
+    sqlx::query("DELETE FROM rustango_orgs")
+        .execute(sq)
+        .await
+        .expect("delete");
+
+    assert_eq!(
+        resolve(&pool, "acme.app.test").await.as_deref(),
+        Some("acme"),
+        "the row is gone; still resolving proves the answer came from cache"
+    );
+}
+
+/// The negative entry matters more than the positive one: this resolver
+/// runs first for *every* request, so an unregistered host would be a
+/// free registry query per request — the amplification a sprayed `Host`
+/// header buys. Same proof, inverted: insert the row behind the cache
+/// and confirm it is still a miss.
+#[tokio::test]
+async fn an_unknown_host_is_negatively_cached() {
+    let _g = lock().lock().await;
+    let (pool, _dir) = registry().await;
+    rustango::testkit::reset_org_cache();
+
+    assert!(resolve(&pool, "nobody.app.test").await.is_none());
+
+    add_org(&pool, "late", "nobody.app.test").await;
+    rustango::testkit::reset_registry_breaker();
+
+    assert!(
+        resolve(&pool, "nobody.app.test").await.is_none(),
+        "the row exists now; still missing proves the miss was cached"
+    );
+
+    // …and clearing the cache (as the TTL or a fingerprint bump would)
+    // lets it through.
+    rustango::testkit::reset_org_cache();
+    assert_eq!(
+        resolve(&pool, "nobody.app.test").await.as_deref(),
+        Some("late")
+    );
+}
+
+/// Suspension is the sharpest staleness risk — `manage drop-tenant`
+/// soft-deletes with `active = false`, and a suspended tenant must stop
+/// serving. `active` is a term in the fingerprint precisely so this
+/// converges across pods on the poll interval rather than the TTL.
+#[tokio::test]
+async fn suspending_a_tenant_moves_the_fingerprint() {
+    let _g = lock().lock().await;
+    let (pool, _dir) = registry().await;
+    add_org(&pool, "acme", "acme.app.test").await;
+
+    let before = rustango::tenancy::org_generation(&pool)
+        .await
+        .expect("generation");
+
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!("sqlite-only test")
+    };
+    sqlx::query("UPDATE rustango_orgs SET active = 0 WHERE slug = 'acme'")
+        .execute(sq)
+        .await
+        .expect("suspend");
+
+    let after = rustango::tenancy::org_generation(&pool)
+        .await
+        .expect("generation");
+
+    assert_eq!(
+        (after.count, after.max_id),
+        (before.count, before.max_id),
+        "precondition: a suspend moves neither count nor max_id — that is \
+         why the active terms exist"
+    );
+    assert_ne!(
+        after, before,
+        "a suspend must move the fingerprint, or other pods keep serving \
+         a tenant that has been shut off"
+    );
+}
+
+/// Two opposite toggles in one interval must not cancel: suspend one
+/// tenant and reactivate another and the *count* of active rows is
+/// unchanged. `active_id_sum` is what distinguishes which are live.
+#[tokio::test]
+async fn compensating_suspends_still_move_the_fingerprint() {
+    let _g = lock().lock().await;
+    let (pool, _dir) = registry().await;
+    add_org(&pool, "aaa", "aaa.app.test").await;
+    add_org(&pool, "bbb", "bbb.app.test").await;
+
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!("sqlite-only test")
+    };
+    sqlx::query("UPDATE rustango_orgs SET active = 0 WHERE slug = 'bbb'")
+        .execute(sq)
+        .await
+        .expect("suspend bbb");
+
+    let before = rustango::tenancy::org_generation(&pool)
+        .await
+        .expect("generation");
+
+    // The swap: aaa off, bbb on.
+    sqlx::query("UPDATE rustango_orgs SET active = 0 WHERE slug = 'aaa'")
+        .execute(sq)
+        .await
+        .expect("suspend aaa");
+    sqlx::query("UPDATE rustango_orgs SET active = 1 WHERE slug = 'bbb'")
+        .execute(sq)
+        .await
+        .expect("reactivate bbb");
+
+    let after = rustango::tenancy::org_generation(&pool)
+        .await
+        .expect("generation");
+
+    assert_eq!(
+        (after.count, after.active, after.max_id),
+        (before.count, before.active, before.max_id),
+        "precondition: count / active / max_id are all unchanged by the swap"
+    );
+    assert_ne!(after, before, "active_id_sum must catch the swap");
+}
+
+/// An inactive org must never resolve, cached or not — the cache stores
+/// what the query returned, and the query filters on `active`.
+#[tokio::test]
+async fn an_inactive_org_never_resolves() {
+    let _g = lock().lock().await;
+    let (pool, _dir) = registry().await;
+    add_org(&pool, "acme", "acme.app.test").await;
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!("sqlite-only test")
+    };
+    sqlx::query("UPDATE rustango_orgs SET active = 0 WHERE slug = 'acme'")
+        .execute(sq)
+        .await
+        .expect("suspend");
+    rustango::testkit::reset_org_cache();
+
+    assert!(
+        resolve(&pool, "acme.app.test").await.is_none(),
+        "a suspended tenant must not resolve"
+    );
+}
+
+/// The apex is not a tenant and must short-circuit before the cache, so
+/// it can never occupy an entry or be served one.
+#[tokio::test]
+async fn the_apex_is_never_cached_as_a_tenant() {
+    let _g = lock().lock().await;
+    let (pool, _dir) = registry().await;
+    add_org(&pool, "acme", "app.test").await; // deliberately the apex
+    rustango::testkit::reset_org_cache();
+
+    assert!(
+        resolve(&pool, "app.test").await.is_none(),
+        "the apex hosts the operator console, never a tenant"
+    );
+}

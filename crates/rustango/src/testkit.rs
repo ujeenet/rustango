@@ -290,6 +290,19 @@ pub fn reset_registry_breaker() {
     crate::tenancy::reset_registry_breaker();
 }
 
+/// Forget this process's base-host resolution cache and its
+/// `rustango_orgs` fingerprint.
+///
+/// `SubdomainResolver` caches hostname -> `Org` so the registry is not
+/// queried on every request. Both that cache and the fingerprint that
+/// invalidates it across pods are process-global, so a test that
+/// resolved against one registry would otherwise answer from it while
+/// pointed at the next test's brand-new one.
+#[cfg(feature = "tenancy")]
+pub fn reset_org_cache() {
+    crate::tenancy::reset_org_cache();
+}
+
 #[cfg(all(test, feature = "sqlite", feature = "tenancy", feature = "admin"))]
 mod tests {
     use super::*;

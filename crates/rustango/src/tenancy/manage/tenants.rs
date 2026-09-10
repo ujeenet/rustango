@@ -140,6 +140,9 @@ where
         theme_mode: None,
     };
     org.insert_pool(&registry).await?;
+    // This pod sees the new tenant immediately; others converge on the
+    // registry fingerprint (see `resolver::sync_org_generation`).
+    super::super::invalidate_org_cache();
     let id = org.id.get().copied().unwrap_or_default();
     writeln!(
         w,
@@ -360,6 +363,10 @@ where
         .set("active", false)
         .execute_pool(&registry)
         .await?;
+    // A suspended tenant must stop resolving. Local invalidation is
+    // instant here; other pods notice within one fingerprint interval
+    // because `active` is one of its terms.
+    super::super::invalidate_org_cache();
     if updated == 0 {
         return Err(TenancyError::Validation(format!(
             "drop-tenant: no row updated for id {id} — race condition?"

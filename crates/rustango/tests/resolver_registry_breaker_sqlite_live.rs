@@ -102,6 +102,12 @@ async fn a_failed_registry_lookup_short_circuits_the_next_one() {
         .await
         .expect("rename away");
     rustango::testkit::reset_registry_breaker();
+    // Clear the base-host cache too, or the resolver answers this host
+    // from memory and never reaches the query under test. Worth noting
+    // that behaviour is a *feature* of the cache — a host already seen
+    // keeps resolving straight through a registry outage — it just has
+    // to be stepped around to exercise the breaker.
+    rustango::testkit::reset_org_cache();
     let broken = SubdomainResolver::new("app.test")
         .resolve(&parts_for_host("acme.app.test"), &pool)
         .await;

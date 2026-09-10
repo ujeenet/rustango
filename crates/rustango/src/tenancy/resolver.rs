@@ -101,7 +101,21 @@ impl OrgResolver for SubdomainResolver {
         if host == self.apex_domain {
             return Ok(None);
         }
-        find_active_org_by(registry, Org::host_pattern.eq(host.to_owned())).await
+        // Pick up a tenant created or suspended by another pod before
+        // trusting anything cached here. Throttled to one aggregate per
+        // interval — see `sync_org_generation`.
+        sync_org_generation(registry).await;
+        match org_cache_get(host) {
+            CachedOrg::Miss => return Ok(None),
+            CachedOrg::Hit(org) => return Ok(Some(*org)),
+            CachedOrg::Absent => {}
+        }
+        let found = find_active_org_by(registry, Org::host_pattern.eq(host.to_owned())).await?;
+        // Cache the miss too: this resolver runs first for *every*
+        // request, so an unregistered host would otherwise be a free
+        // registry query per request. See `ORG_CACHE`.
+        org_cache_put(host, found.clone());
+        Ok(found)
     }
 }
 
@@ -198,6 +212,82 @@ static HOST_CACHE: std::sync::RwLock<Option<HostCacheMap>> = std::sync::RwLock::
 const HOST_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 const HOST_CACHE_MAX: usize = 1024;
 
+// ---------------- ORG_CACHE (base host → Org) ----------------
+
+/// `Host` header → the base-host [`Org`] it resolves to (`None` = known
+/// miss), with an expiry.
+///
+/// [`SubdomainResolver`] runs first in the standard chain and matches the
+/// **base** `Org.host_pattern`, so it is on the path of literally every
+/// request. Uncached, that is one registry `SELECT` per request forever —
+/// measured at exactly 1.00 queries/request against a live Postgres, for
+/// base hosts, extra hosts and unknown hosts alike, because the chain
+/// always tries this resolver first.
+///
+/// That single query is the registry's hot-path SPOF: it is what makes an
+/// unreachable registry take down tenants whose own databases are fine.
+///
+/// The whole `Org` is stored, not its id. Caching an id would still cost
+/// a fetch per request — which is exactly why the sibling `HOST_CACHE`
+/// measured 2.00 queries/request for a *cache hit* on a registered extra
+/// host. Storing the row takes a hit to zero queries.
+///
+/// Bounded and negatively-cached for the same reasons as [`HOST_CACHE`]:
+/// the keys are attacker-supplied `Host` headers, so an unbounded map
+/// trades a query amplification for a memory one, and without negative
+/// entries a sprayed host is a free registry query per request.
+type OrgCacheMap = std::collections::HashMap<String, (Option<Org>, std::time::Instant)>;
+static ORG_CACHE: std::sync::RwLock<Option<OrgCacheMap>> = std::sync::RwLock::new(None);
+const ORG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+const ORG_CACHE_MAX: usize = 1024;
+
+/// Same three-state shape as [`Cached`] — "not cached" and "cached as a
+/// miss" lead to opposite actions, so they cannot share a representation.
+enum CachedOrg {
+    Absent,
+    Miss,
+    Hit(Box<Org>),
+}
+
+fn org_cache_get(host: &str) -> CachedOrg {
+    let Ok(guard) = ORG_CACHE.read() else {
+        return CachedOrg::Absent;
+    };
+    let Some(map) = guard.as_ref() else {
+        return CachedOrg::Absent;
+    };
+    match map.get(host) {
+        Some((_, at)) if at.elapsed() >= ORG_CACHE_TTL => CachedOrg::Absent,
+        Some((None, _)) => CachedOrg::Miss,
+        Some((Some(org), _)) => CachedOrg::Hit(Box::new(org.clone())),
+        None => CachedOrg::Absent,
+    }
+}
+
+fn org_cache_put(host: &str, org: Option<Org>) {
+    let Ok(mut guard) = ORG_CACHE.write() else {
+        return;
+    };
+    let map = guard.get_or_insert_with(Default::default);
+    if map.len() >= ORG_CACHE_MAX {
+        map.clear();
+    }
+    map.insert(host.to_owned(), (org, std::time::Instant::now()));
+}
+
+/// Drop cached base-host resolutions.
+///
+/// Called after any write to `rustango_orgs` so the pod that made the
+/// change sees it immediately rather than waiting out the TTL. Other pods
+/// converge via the registry fingerprint — see [`sync_org_generation`].
+pub fn invalidate_org_cache() {
+    if let Ok(mut guard) = ORG_CACHE.write() {
+        if let Some(map) = guard.as_mut() {
+            map.clear();
+        }
+    }
+}
+
 /// The three states a lookup can be in. Named rather than
 /// `Option<Option<i64>>` because "not cached" and "cached as a miss" lead
 /// to opposite actions — one queries, the other must not.
@@ -252,6 +342,85 @@ fn host_cache_put(host: &str, value: Option<i64>) {
 /// `gen` is itself `Option`: a claimed-but-not-yet-completed check writes
 /// the attempt time with the previous fingerprint, so a probe that fails
 /// leaves the last known-good value in place rather than resetting it.
+/// Last `rustango_orgs` fingerprint this process saw, and when it last
+/// *attempted* a read — successful or not, so a failing probe is still
+/// throttled. Same shape and same reasoning as [`HOST_GEN`].
+type OrgGenState = (Option<super::org::OrgGeneration>, std::time::Instant);
+static ORG_GEN: std::sync::RwLock<Option<OrgGenState>> = std::sync::RwLock::new(None);
+
+/// Logged once per process rather than once per interval.
+static ORG_GEN_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Drop the base-host cache if another process changed `rustango_orgs`.
+///
+/// Cheap to call on every resolve: it does nothing at all until the poll
+/// interval has passed. Shares [`gen_check_every`] with the host-table
+/// poll, so one env var tunes both and a deployment that disables
+/// polling disables both.
+async fn sync_org_generation(registry: &Pool) {
+    let Some(interval) = gen_check_every() else {
+        return; // polling disabled
+    };
+
+    // Claim the check BEFORE awaiting, for the same two reasons as
+    // `sync_generation`: stamping only on success turns a failing probe
+    // into a per-request query storm, and without the claim every
+    // request arriving during an in-flight probe fires its own.
+    let previous = {
+        match ORG_GEN.write() {
+            Ok(mut g) => {
+                let due = g.is_none_or(|(_, at)| at.elapsed() >= interval);
+                if !due {
+                    return;
+                }
+                let previous = g.and_then(|(seen, _)| seen);
+                *g = Some((previous, std::time::Instant::now()));
+                previous
+            }
+            Err(_) => return,
+        }
+    };
+
+    let current = match super::org::generation(registry).await {
+        Ok(current) => current,
+        Err(e) => {
+            if !ORG_GEN_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    target: "rustango::tenancy::resolver",
+                    error = %e,
+                    "could not read the rustango_orgs fingerprint; this pod will \
+                     not notice tenants created or suspended by other processes \
+                     until its own cache entries expire"
+                );
+            }
+            return;
+        }
+    };
+
+    let changed = {
+        match ORG_GEN.write() {
+            Ok(mut g) => {
+                *g = Some((Some(current), std::time::Instant::now()));
+                previous.is_some_and(|seen| seen != current)
+            }
+            Err(_) => false,
+        }
+    };
+    if changed {
+        invalidate_org_cache();
+    }
+}
+
+/// Forget the org fingerprint and the base-host cache (test hook — see
+/// [`crate::testkit`]). Both are process-global.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn reset_org_cache() {
+    if let Ok(mut g) = ORG_GEN.write() {
+        *g = None;
+    }
+    invalidate_org_cache();
+}
+
 type GenState = (Option<super::org_host::Generation>, std::time::Instant);
 
 static HOST_GEN: std::sync::RwLock<Option<GenState>> = std::sync::RwLock::new(None);

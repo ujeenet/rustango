@@ -166,7 +166,11 @@ pub use migrate::{
     migrate_registry, migrate_registry_pool, migrate_tenants_db, migrate_tenants_dyn,
     TenantMigrationOutcome, TenantMigrationReport,
 };
-pub use org::{BackendKind, Org, StorageMode};
+/// Fingerprint of `rustango_orgs`, used by the base-host cache to notice
+/// writes made by another process. Public so a deployment can poll it
+/// itself (e.g. to drive a custom cache) and so tests can assert on it.
+pub use org::generation as org_generation;
+pub use org::{BackendKind, Org, OrgGeneration, StorageMode};
 pub use org_host::{
     add_host, list_for_org, normalize_hostname, remove_host, set_host_enabled, HostError, OrgHost,
     TenantHost,
@@ -176,8 +180,8 @@ pub use pools::{
     TenantPoolsConfig,
 };
 pub use resolver::{
-    invalidate_host_cache, ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver,
-    PortResolver, RegisteredHostResolver, SubdomainResolver,
+    invalidate_host_cache, invalidate_org_cache, ChainResolver, HeaderResolver, OrgResolver,
+    PathPrefixResolver, PortResolver, RegisteredHostResolver, SubdomainResolver,
 };
 // The resolver's process-global test hooks are deliberately NOT public
 // API of `tenancy` — they live in `crate::testkit`, so the name says
@@ -186,7 +190,9 @@ pub use resolver::{
 // Gated to match `testkit`'s own gate, so a production build neither
 // compiles them in nor warns about an unused re-export.
 #[cfg(any(test, feature = "testkit"))]
-pub(crate) use resolver::{expire_generation, reset_generation, reset_registry_breaker};
+pub(crate) use resolver::{
+    expire_generation, reset_generation, reset_org_cache, reset_registry_breaker,
+};
 pub use routes::RouteConfig;
 pub use secrets::{
     ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,
