@@ -189,11 +189,13 @@ fn mark_host_table_up() {
     }
 }
 
-/// hostname → resolved org id (`None` = known-miss), with an expiry.
+/// hostname → the [`Org`] it resolves to (`None` = known-miss), with an
+/// expiry.
 ///
-/// Tenant resolution is otherwise uncached — every request already pays one
-/// registry SELECT — so this exists to stop the *extra* lookup this
-/// resolver adds becoming a per-request cost.
+/// Stores the whole row, not its id. An id still costs a fetch per
+/// request to turn back into an `Org`, which measured as 2.00 registry
+/// queries per request for a cache **hit** on a registered extra host.
+/// Holding the row takes that to zero.
 ///
 /// Negative entries matter more than positive ones. The chain
 /// short-circuits, so a request to a tenant's base host never reaches this
@@ -207,7 +209,7 @@ fn mark_host_table_up() {
 ///
 /// Keyed by hostname alone, not (registry, hostname): a process serves one
 /// registry. Tests that stand up several must use distinct hostnames.
-type HostCacheMap = std::collections::HashMap<String, (Option<i64>, std::time::Instant)>;
+type HostCacheMap = std::collections::HashMap<String, (Option<Org>, std::time::Instant)>;
 static HOST_CACHE: std::sync::RwLock<Option<HostCacheMap>> = std::sync::RwLock::new(None);
 const HOST_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 const HOST_CACHE_MAX: usize = 1024;
@@ -296,7 +298,9 @@ enum Cached {
     Absent,
     /// Known not to be a registered host.
     Miss,
-    Hit(i64),
+    /// Boxed because an `Org` is far larger than the other variants and
+    /// clippy rightly objects to a lopsided enum.
+    Hit(Box<Org>),
 }
 
 fn host_cache_get(host: &str) -> Cached {
@@ -310,12 +314,12 @@ fn host_cache_get(host: &str) -> Cached {
         return Cached::Absent;
     }
     match value {
-        Some(id) => Cached::Hit(*id),
+        Some(org) => Cached::Hit(Box::new(org.clone())),
         None => Cached::Miss,
     }
 }
 
-fn host_cache_put(host: &str, value: Option<i64>) {
+fn host_cache_put(host: &str, value: Option<Org>) {
     let Ok(mut guard) = HOST_CACHE.write() else {
         return;
     };
@@ -408,6 +412,12 @@ async fn sync_org_generation(registry: &Pool) {
     };
     if changed {
         invalidate_org_cache();
+        // `HOST_CACHE` holds `Org` rows too, so a change to
+        // `rustango_orgs` staleness-invalidates it just as much — an
+        // extra hostname pointing at a tenant that has since been
+        // suspended must stop resolving on the same bound as its base
+        // host does.
+        invalidate_host_cache();
     }
 }
 
@@ -635,7 +645,7 @@ impl OrgResolver for RegisteredHostResolver {
         // Cached, including the miss — see `HOST_CACHE`.
         match host_cache_get(host) {
             Cached::Miss => return Ok(None),
-            Cached::Hit(org_id) => return find_active_org_by(registry, Org::id.eq(org_id)).await,
+            Cached::Hit(org) => return Ok(Some(*org)),
             Cached::Absent => {}
         }
         // The table was failing very recently — don't re-ask on every
@@ -673,8 +683,13 @@ impl OrgResolver for RegisteredHostResolver {
             host_cache_put(host, None);
             return Ok(None);
         };
-        host_cache_put(host, Some(row.org_id));
-        find_active_org_by(registry, Org::id.eq(row.org_id)).await
+        // Resolve the row to its Org once, then cache the Org itself.
+        // Caching `row.org_id` instead would make every later hit pay
+        // this same fetch — the 2.00-queries-per-request a cache hit
+        // used to cost.
+        let found = find_active_org_by(registry, Org::id.eq(row.org_id)).await?;
+        host_cache_put(host, found.clone());
+        Ok(found)
     }
 }
 

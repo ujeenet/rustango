@@ -245,6 +245,98 @@ async fn an_inactive_org_never_resolves() {
     );
 }
 
+/// A registered *extra* host is served from cache too — and because
+/// that cache now holds the `Org` rather than its id, a hit costs no
+/// query at all.
+///
+/// Same proof as the base-host case: delete the tenant behind the
+/// cache's back and confirm the host still resolves.
+#[tokio::test]
+async fn a_cached_extra_host_is_served_without_querying() {
+    use rustango::tenancy::RegisteredHostResolver;
+    let _g = lock().lock().await;
+    let (pool, _dir) = registry().await;
+    add_org(&pool, "acme", "acme.app.test").await;
+    rustango::tenancy::add_host(&pool, "acme", "extra.example.test")
+        .await
+        .expect("add_host");
+    rustango::testkit::reset_org_cache();
+    rustango::tenancy::invalidate_host_cache();
+
+    let first = RegisteredHostResolver
+        .resolve(&parts_for_host("extra.example.test"), &pool)
+        .await
+        .expect("resolve");
+    assert_eq!(first.map(|o| o.slug).as_deref(), Some("acme"));
+
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!("sqlite-only test")
+    };
+    // Suspend rather than delete: `rustango_org_hosts` has a foreign key
+    // to the org, so the row cannot be removed while a host points at
+    // it. Suspending works just as well as proof — the lookup filters on
+    // `active`, so a resolver that queried would return `None`.
+    sqlx::query("UPDATE rustango_orgs SET active = 0 WHERE slug = 'acme'")
+        .execute(sq)
+        .await
+        .expect("suspend org");
+
+    let second = RegisteredHostResolver
+        .resolve(&parts_for_host("extra.example.test"), &pool)
+        .await
+        .expect("resolve");
+    assert_eq!(
+        second.map(|o| o.slug).as_deref(),
+        Some("acme"),
+        "the org is suspended; still resolving proves the hit needed no \
+         query — caching the id instead would have cost one here, and \
+         returned None"
+    );
+}
+
+/// Because `HOST_CACHE` now holds `Org` rows, a change to
+/// `rustango_orgs` has to invalidate it as well — an extra hostname
+/// pointing at a tenant that has since been suspended must stop
+/// resolving on the same bound as that tenant's base host.
+#[tokio::test]
+async fn suspending_a_tenant_also_clears_the_extra_host_cache() {
+    use rustango::tenancy::RegisteredHostResolver;
+    let _g = lock().lock().await;
+    let (pool, _dir) = registry().await;
+    add_org(&pool, "acme", "acme.app.test").await;
+    rustango::tenancy::add_host(&pool, "acme", "extra2.example.test")
+        .await
+        .expect("add_host");
+    rustango::testkit::reset_org_cache();
+    rustango::tenancy::invalidate_host_cache();
+
+    assert!(RegisteredHostResolver
+        .resolve(&parts_for_host("extra2.example.test"), &pool)
+        .await
+        .expect("resolve")
+        .is_some());
+
+    let Pool::Sqlite(sq) = &pool else {
+        unreachable!("sqlite-only test")
+    };
+    sqlx::query("UPDATE rustango_orgs SET active = 0 WHERE slug = 'acme'")
+        .execute(sq)
+        .await
+        .expect("suspend");
+    // What a fingerprint bump does on the next poll.
+    rustango::tenancy::invalidate_org_cache();
+    rustango::tenancy::invalidate_host_cache();
+
+    assert!(
+        RegisteredHostResolver
+            .resolve(&parts_for_host("extra2.example.test"), &pool)
+            .await
+            .expect("resolve")
+            .is_none(),
+        "a suspended tenant must stop answering on its extra hosts too"
+    );
+}
+
 /// The apex is not a tenant and must short-circuit before the cache, so
 /// it can never occupy an entry or be served one.
 #[tokio::test]
