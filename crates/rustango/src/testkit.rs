@@ -250,6 +250,34 @@ pub fn admin_user() -> crate::admin::AdminUser {
     }
 }
 
+/// Forget this process's cached host-table fingerprint.
+///
+/// `RegisteredHostResolver` polls a fingerprint of `rustango_org_hosts` so
+/// one pod notices another pod's write. That state is process-global and
+/// keyed by nothing, so a test that resolves against one registry leaves a
+/// fingerprint behind that the next test's brand-new registry compares
+/// against — producing a spurious cache invalidation mid-test. Unlike the
+/// resolution cache, it cannot be side-stepped by using distinct hostnames
+/// per test.
+///
+/// Call this in any test that resolves through `RegisteredHostResolver`,
+/// alongside `invalidate_host_cache()`.
+#[cfg(feature = "tenancy")]
+pub fn reset_host_generation() {
+    crate::tenancy::reset_generation();
+}
+
+/// Make the next resolve re-read the host fingerprint immediately rather
+/// than waiting out the poll interval.
+///
+/// Lets a cross-process test prove the convergence bound without sleeping
+/// through it. Unconditional: safe to call whether or not a fingerprint
+/// has been recorded yet.
+#[cfg(feature = "tenancy")]
+pub fn expire_host_generation() {
+    crate::tenancy::expire_generation();
+}
+
 /// Forget this process's "registry is unreachable" breaker.
 ///
 /// Tenant resolution fails fast for a short window after a registry

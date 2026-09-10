@@ -92,6 +92,7 @@ pub mod middleware;
 pub mod migrate;
 pub mod operator_console;
 mod org;
+pub mod org_host;
 pub mod password;
 pub mod permissions;
 mod pools;
@@ -166,18 +167,26 @@ pub use migrate::{
     TenantMigrationOutcome, TenantMigrationReport,
 };
 pub use org::{BackendKind, Org, StorageMode};
+pub use org_host::{
+    add_host, list_for_org, normalize_hostname, remove_host, set_host_enabled, HostError, OrgHost,
+    TenantHost,
+};
 pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,
 };
 pub use resolver::{
-    ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, SubdomainResolver,
+    invalidate_host_cache, ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver,
+    PortResolver, RegisteredHostResolver, SubdomainResolver,
 };
-// Surfaced through `crate::testkit` rather than as public API of
-// `tenancy`, so it is not permanent semver surface a caller could use to
-// defeat the breaker in production. Gated to match testkit's own gate.
+// The resolver's process-global test hooks are deliberately NOT public
+// API of `tenancy` — they live in `crate::testkit`, so the name says
+// what they are and they are not permanent semver surface a caller
+// could use to defeat the fingerprint or the breaker in production.
+// Gated to match `testkit`'s own gate, so a production build neither
+// compiles them in nor warns about an unused re-export.
 #[cfg(any(test, feature = "testkit"))]
-pub(crate) use resolver::reset_registry_breaker;
+pub(crate) use resolver::{expire_generation, reset_generation, reset_registry_breaker};
 pub use routes::RouteConfig;
 pub use secrets::{
     ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,

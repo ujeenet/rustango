@@ -13,7 +13,7 @@ use crate::extractors::TenantContext;
 use crate::sql::sqlx::PgPool;
 use crate::tenancy::{
     admin::TenantAdminBuilder, operator_console, ChainResolver, DefaultTenantDb, HeaderResolver,
-    SubdomainResolver, TenantPools,
+    RegisteredHostResolver, SubdomainResolver, TenantPools,
 };
 
 /// Stateless API router that the user supplies. The Builder injects
@@ -566,6 +566,10 @@ impl<DB: Database> Builder<DB> {
 fn build_resolver(apex: &str) -> ChainResolver {
     ChainResolver::new()
         .push(SubdomainResolver::new(apex.to_owned()))
+        // Extra tenant hostnames (`rustango_org_hosts`). Additive: it only
+        // runs when the base `host_pattern` did not match, and the lookup
+        // fails soft so a not-yet-migrated database behaves as before.
+        .push(RegisteredHostResolver)
         .push(HeaderResolver::default())
 }
 
