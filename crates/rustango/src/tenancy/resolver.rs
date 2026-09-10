@@ -313,6 +313,39 @@ fn host_from_parts(parts: &Parts) -> Option<&str> {
     parts.uri.host()
 }
 
+/// When the registry lookup last failed, if it is currently failing.
+///
+/// Tenant resolution runs before everything else and is uncached, so an
+/// unreachable registry is paid **per request** — each one waiting out
+/// the pool's acquire timeout before erroring. That pins a worker for
+/// the whole timeout, so the server saturates and every tenant goes
+/// down, including tenants whose own databases are perfectly healthy.
+///
+/// Recording the failure lets the requests behind the first one fail
+/// immediately with the same error instead of queueing for the same
+/// doomed connection. Deliberately *not* a behaviour change: the caller
+/// still gets `Err`, and still renders whatever it rendered before —
+/// just in microseconds rather than seconds.
+static REGISTRY_DOWN: std::sync::RwLock<Option<std::time::Instant>> = std::sync::RwLock::new(None);
+
+/// Logged once per process rather than once per failed request.
+static REGISTRY_DOWN_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// How long a recorded failure suppresses further attempts.
+///
+/// Short on purpose. It caps the damage of an outage without meaningfully
+/// delaying recovery: at most one probe per second reaches a registry
+/// that is still down, and a registry that has come back is picked up
+/// within a second of the next request.
+const REGISTRY_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The error returned while the breaker is open. Mirrors what the pool
+/// itself produces so callers cannot tell the two apart.
+fn registry_unavailable() -> TenancyError {
+    TenancyError::Driver(sqlx::Error::PoolTimedOut)
+}
+
 /// Run `Org::objects().where_(filter).where_(active=true)` and
 /// return the first match. Helper extracted because every resolver
 /// shape ends in this same query.
@@ -320,14 +353,61 @@ async fn find_active_org_by<F>(registry: &Pool, filter: F) -> Result<Option<Org>
 where
     F: Into<rustango::core::TypedFilter<Org>>,
 {
+    // A very recent failure means the registry is unreachable; don't
+    // queue behind it. See `REGISTRY_DOWN`.
+    let suppressed = match REGISTRY_DOWN.read() {
+        Ok(g) => g.is_some_and(|at| at.elapsed() < REGISTRY_RETRY_AFTER),
+        Err(_) => false,
+    };
+    if suppressed {
+        return Err(registry_unavailable());
+    }
+
     let typed: rustango::core::TypedFilter<Org> = filter.into();
-    let rows: Vec<Org> = Org::objects()
+    let result: Result<Vec<Org>, _> = Org::objects()
         .where_(typed)
         .where_(Org::active.eq(true))
         .fetch(registry)
-        .await
-        .map_err(|e| TenancyError::Driver(driver_from_exec(e)))?;
-    Ok(rows.into_iter().next())
+        .await;
+
+    match result {
+        Ok(rows) => {
+            // Clear the breaker, but only if it was set — the healthy
+            // path should not take a write lock on every request.
+            if REGISTRY_DOWN.read().is_ok_and(|g| g.is_some()) {
+                if let Ok(mut g) = REGISTRY_DOWN.write() {
+                    *g = None;
+                }
+            }
+            Ok(rows.into_iter().next())
+        }
+        Err(e) => {
+            if let Ok(mut g) = REGISTRY_DOWN.write() {
+                *g = Some(std::time::Instant::now());
+            }
+            if !REGISTRY_DOWN_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    target: "rustango::tenancy::resolver",
+                    error = %e,
+                    "registry lookup failed; tenant resolution is failing fast for \
+                     up to {}s at a time until it recovers",
+                    REGISTRY_RETRY_AFTER.as_secs(),
+                );
+            }
+            Err(TenancyError::Driver(driver_from_exec(e)))
+        }
+    }
+}
+
+/// Forget the registry breaker (test hook — see [`crate::testkit`]).
+///
+/// Process-global, so a test that exercised an unreachable registry
+/// would otherwise suppress lookups for whichever test ran next.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn reset_registry_breaker() {
+    if let Ok(mut g) = REGISTRY_DOWN.write() {
+        *g = None;
+    }
 }
 
 /// Convert an `ExecError` into the `sqlx::Error` shape `TenancyError`

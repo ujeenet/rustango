@@ -173,6 +173,11 @@ pub use pools::{
 pub use resolver::{
     ChainResolver, HeaderResolver, OrgResolver, PathPrefixResolver, PortResolver, SubdomainResolver,
 };
+// Surfaced through `crate::testkit` rather than as public API of
+// `tenancy`, so it is not permanent semver surface a caller could use to
+// defeat the breaker in production. Gated to match testkit's own gate.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) use resolver::reset_registry_breaker;
 pub use routes::RouteConfig;
 pub use secrets::{
     ChainSecretsResolver, EnvSecretsResolver, LiteralSecretsResolver, SecretsError, SecretsResolver,

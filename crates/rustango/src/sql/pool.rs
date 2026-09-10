@@ -132,9 +132,10 @@ impl Pool {
         }
     }
 
-    /// Same as [`Self::connect`] but with a connection timeout.
-    /// Default timeout when callers use [`Self::connect`] is whatever
-    /// `sqlx::PoolOptions` defaults to (currently 30s).
+    /// Same as [`Self::connect`] but with an explicit acquire timeout
+    /// for this one pool. [`Self::connect`] already applies a bounded
+    /// default — see [`ACQUIRE_TIMEOUT_ENV`] — so reach for this only
+    /// when a single pool needs to differ from the rest.
     ///
     /// # Errors
     /// Same set as [`Self::connect`], plus a `Connect` error if `sqlx`
@@ -327,10 +328,13 @@ impl Pool {
     }
 
     // ---- internal connect helpers ----
+    // (see `default_acquire_timeout` below for the timeout they share)
 
     #[cfg(feature = "postgres")]
     async fn connect_postgres_inner(url: &str) -> Result<Self, PoolError> {
-        let pool = sqlx::PgPool::connect(url)
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(default_acquire_timeout())
+            .connect(url)
             .await
             .map_err(|e| PoolError::Connect(e.to_string()))?;
         Ok(Self::Postgres(pool))
@@ -346,7 +350,9 @@ impl Pool {
 
     #[cfg(feature = "mysql")]
     async fn connect_mysql_inner(url: &str) -> Result<Self, PoolError> {
-        let pool = sqlx::MySqlPool::connect(url)
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .acquire_timeout(default_acquire_timeout())
+            .connect(url)
             .await
             .map_err(|e| PoolError::Connect(e.to_string()))?;
         Ok(Self::Mysql(pool))
@@ -380,6 +386,7 @@ impl Pool {
         // enables WAL journal mode for file-backed databases.
         let opts = sqlite_connect_options(url)?;
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .acquire_timeout(default_acquire_timeout())
             .connect_with(opts)
             .await
             .map_err(|e| PoolError::Connect(e.to_string()))?;
@@ -394,6 +401,52 @@ impl Pool {
             feature: "sqlite",
         })
     }
+}
+
+/// Env override for the pool acquire timeout, in seconds.
+pub const ACQUIRE_TIMEOUT_ENV: &str = "RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS";
+
+/// Default seconds a request will wait for a pooled connection.
+///
+/// sqlx defaults this to **30s**, which is a batch-tool number, not a
+/// web-server one. On a request path it means a database that is simply
+/// unreachable pins a worker for half a minute per request — so an
+/// outage of one database saturates the server and takes down surfaces
+/// that never touch it. Five seconds still leaves ample room for a
+/// saturated-but-healthy pool to hand back a connection, while failing
+/// an unreachable one six times sooner.
+const ACQUIRE_TIMEOUT_DEFAULT_SECS: u64 = 5;
+
+/// How long [`Pool::connect`] lets a caller wait for a connection.
+///
+/// Note this bounds **both** dialing a new connection and queueing for a
+/// free one, so it cannot be set arbitrarily low: under a legitimate
+/// traffic spike the queue wait is real work, and too tight a bound
+/// converts a slow moment into errors. Tune with
+/// [`ACQUIRE_TIMEOUT_ENV`] rather than guessing here.
+///
+/// Read once — parsing an env var per connection would be silly, and
+/// the value cannot change without a restart anyway.
+fn default_acquire_timeout() -> Duration {
+    static CACHED: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let secs = match std::env::var(ACQUIRE_TIMEOUT_ENV) {
+            Ok(raw) => match raw.trim().parse::<u64>() {
+                Ok(0) | Err(_) => {
+                    tracing::warn!(
+                        target: "rustango::sql",
+                        value = %raw,
+                        "{ACQUIRE_TIMEOUT_ENV} must be a positive whole number of \
+                         seconds; using the {ACQUIRE_TIMEOUT_DEFAULT_SECS}s default"
+                    );
+                    ACQUIRE_TIMEOUT_DEFAULT_SECS
+                }
+                Ok(n) => n,
+            },
+            Err(_) => ACQUIRE_TIMEOUT_DEFAULT_SECS,
+        };
+        Duration::from_secs(secs)
+    })
 }
 
 /// v0.40 — build a `SqliteConnectOptions` with the pragmas every
