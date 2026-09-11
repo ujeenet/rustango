@@ -132,39 +132,7 @@ fn compiled_backends() -> Vec<&'static str> {
     }
 }
 
-/// Render, or say why not.
-///
-/// The console's older handlers use `.unwrap_or_default()`, which turns
-/// a template error into an empty `200` — a blank page with no clue
-/// anywhere. That cost real time on this very module: a missing key in
-/// a Tera comparison rendered nothing and looked like a routing
-/// problem. A 500 naming the template is worth far more than a page
-/// that lies about having worked.
-fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body> {
-    match state.tera.render(template, ctx) {
-        Ok(html) => Html(html).into_response(),
-        Err(e) => {
-            let mut detail = e.to_string();
-            let mut source = std::error::Error::source(&e);
-            while let Some(s) = source {
-                detail.push_str(": ");
-                detail.push_str(&s.to_string());
-                source = s.source();
-            }
-            tracing::error!(
-                target: "rustango::tenancy::operator_console",
-                template,
-                error = %detail,
-                "operator console template failed to render"
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not render {template}: {detail}"),
-            )
-                .into_response()
-        }
-    }
-}
+use super::render;
 
 /// Turn the submitted form into a request, or say what is wrong with it.
 ///

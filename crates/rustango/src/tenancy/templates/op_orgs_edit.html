@@ -23,6 +23,14 @@
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 {% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
 
+{#- `host_pattern` below is the tenant's *base* host, and it is one
+    field. The extra hostnames it can also answer on are a collection
+    with their own verbs, so they live on their own page — which needs
+    a link from here, or nothing reaches it. -#}
+<p class="page-actions">
+  <a href="/orgs/{{ slug }}/hosts" class="btn btn-secondary">Hostnames →</a>
+</p>
+
 <form method="post" action="/orgs/{{ slug }}/edit" class="edit-form">
 
   <fieldset class="section locked">

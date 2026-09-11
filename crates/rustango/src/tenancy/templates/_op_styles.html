@@ -356,4 +356,18 @@ fieldset.section .brand-asset-preview {
 .status-ok      { color: var(--color-accent); }
 .status-skipped { color: var(--color-fg-muted); }
 .status-failed  { color: #b3261e; font-weight: var(--font-weight-bold); }
+
+/* Hostname rows: several small forms sit in one actions cell, so they
+   have to sit on a line rather than stack as blocks. */
+.inline-form { display: inline; }
+.inline-form + .inline-form { margin-left: var(--space-2); }
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--color-fg-muted);
+}
+.badge-base { border-color: var(--color-accent); color: var(--color-accent); }
 </style>

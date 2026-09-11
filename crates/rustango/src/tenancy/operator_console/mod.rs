@@ -40,6 +40,7 @@
 
 /// Creating a tenant from the console, and watching it happen (#1322).
 /// Mounted only by [`router_with_provisioning`].
+mod hosts;
 mod provisioning;
 
 use crate::core::Column as _;
@@ -483,6 +484,10 @@ fn router_inner(
             include_str!("../templates/op_orgs_edit.html"),
         ),
         (
+            "op_org_hosts.html",
+            include_str!("../templates/op_org_hosts.html"),
+        ),
+        (
             "op_change_password.html",
             include_str!("../templates/op_change_password.html"),
         ),
@@ -555,6 +560,24 @@ fn router_inner(
             .route(
                 "/orgs/{slug}/edit/branding",
                 get(org_post_only_redirect).post(org_edit_branding),
+            )
+            // The extra hostnames a tenant answers on. Behind the same
+            // gate as `/edit`: binding a hostname changes which tenant
+            // serves that traffic, which is an edit in every sense that
+            // matters. The three writes are separate routes rather than
+            // one submit because they act on individual rows.
+            .route("/orgs/{slug}/hosts", get(hosts::org_hosts_view))
+            .route(
+                "/orgs/{slug}/hosts/add",
+                get(org_post_only_redirect).post(hosts::org_hosts_add),
+            )
+            .route(
+                "/orgs/{slug}/hosts/remove",
+                get(org_post_only_redirect).post(hosts::org_hosts_remove),
+            )
+            .route(
+                "/orgs/{slug}/hosts/toggle",
+                get(org_post_only_redirect).post(hosts::org_hosts_toggle),
             );
     }
     if provisioning_enabled {
@@ -601,6 +624,40 @@ fn router_inner(
 /// Stamp the operator-console branding fields onto every render
 /// context. Centralizing the keys keeps op_layout.html and op_login.html
 /// in sync without each handler remembering the four template names.
+/// Render, or say why not.
+///
+/// The console's older handlers use `.unwrap_or_default()`, which turns
+/// a template error into an empty `200` — a blank page with no clue
+/// anywhere. That cost real time: a missing key in a Tera comparison
+/// rendered nothing and looked like a routing problem. A 500 naming the
+/// template is worth far more than a page that lies about having
+/// worked.
+fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body> {
+    match state.tera.render(template, ctx) {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            let mut detail = e.to_string();
+            let mut source = std::error::Error::source(&e);
+            while let Some(s) = source {
+                detail.push_str(": ");
+                detail.push_str(&s.to_string());
+                source = s.source();
+            }
+            tracing::error!(
+                target: "rustango::tenancy::operator_console",
+                template,
+                error = %detail,
+                "operator console template failed to render"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not render {template}: {detail}"),
+            )
+                .into_response()
+        }
+    }
+}
+
 fn inject_op_brand(ctx: &mut Context, brand: &OpBrand) {
     // Show the "Shared SSO" nav entry only when the admin-sso feature is
     // compiled in (its routes exist only then).
