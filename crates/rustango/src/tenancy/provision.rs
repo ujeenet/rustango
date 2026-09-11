@@ -601,11 +601,17 @@ where
             .await;
     }
 
-    if let Err(msg) = validate_slug(&request.slug) {
-        return rep
-            .fail(ProvisionStep::Validate, TenancyError::Validation(msg))
-            .await;
-    }
+    // Every free-text field, not just the slug. Returns the request
+    // back with `host_pattern` normalized — see `validate_fields`.
+    let normalized = match validate_fields(request) {
+        Ok(r) => r,
+        Err(msg) => {
+            return rep
+                .fail(ProvisionStep::Validate, TenancyError::Validation(msg))
+                .await;
+        }
+    };
+    let request = &normalized;
 
     if request.mode == StorageMode::Database && request.database_url.is_none() {
         return rep
@@ -827,6 +833,209 @@ fn validate_slug(slug: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Check every operator-supplied field, and hand back the request with
+/// the one field that is normalized rather than refused.
+///
+/// One function, called from the `Validate` step, so the console, the
+/// webhook and `manage create-tenant` cannot disagree about what a
+/// legal tenant is. They did: the slug rule lived in the webhook alone
+/// until a space in a console slug produced an unreachable tenant, and
+/// these four fields had no rule anywhere at all.
+///
+/// The shared thread is that all four feed a matcher or an identifier
+/// that is *exact*. A value that cannot be produced by the thing it is
+/// compared against is not a configuration choice with an unusual
+/// consequence — it is a tenant that is registered, active, and
+/// unreachable, discovered by whoever eventually wonders why the new
+/// customer 404s.
+fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, String> {
+    validate_slug(&request.slug)?;
+
+    // The effective name, so the slug-derived default is checked by the
+    // same rule as an explicit one.
+    if let Some(schema) = schema_name_for(request) {
+        validate_schema_name(&schema)?;
+    }
+    if let Some(prefix) = &request.path_prefix {
+        validate_path_prefix(prefix)?;
+    }
+    if let Some(port) = request.port {
+        validate_port(port)?;
+    }
+
+    let mut out = request.clone();
+    if let Some(pattern) = &request.host_pattern {
+        out.host_pattern = Some(validate_host_pattern(pattern)?);
+    }
+    Ok(out)
+}
+
+/// The schema a schema-mode tenant is created in.
+///
+/// This reaches `CREATE SCHEMA` and `SET search_path` as an
+/// identifier. [`crate::sql::Dialect::quote_ident`] quotes it, so a
+/// name carrying a quote and a semicolon does **not** execute — that
+/// held when it was tried. What did not hold is everything after:
+/// nothing rejected the name, so
+/// `x"; CREATE TABLE public.pwned(i int); --` became a real schema and
+/// a live, active tenant. An identifier nobody can type again without
+/// quoting is not a tenant anybody can operate.
+///
+/// The rule is the slug's, plus underscores: a schema name is not a
+/// hostname label, so `_` — which Postgres and every naming convention
+/// allow — has no reason to be refused here.
+fn validate_schema_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("a schema name is required".into());
+    }
+    if name.len() > 63 {
+        // Postgres truncates identifiers at NAMEDATALEN-1 silently,
+        // which would make the stored name and the real schema differ.
+        return Err(format!(
+            "schema name `{name}` is {} characters; Postgres allows at most 63",
+            name.len()
+        ));
+    }
+    let legal = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-';
+    if let Some(bad) = name.bytes().find(|b| !legal(*b)) {
+        return Err(format!(
+            "schema name `{name}` contains `{}` — only lowercase letters, digits, underscores \
+             and hyphens are allowed",
+            bad as char
+        ));
+    }
+    // Not "must start with a letter": the *default* schema name is the
+    // slug, and a slug may start with a digit. Only the hyphen is
+    // refused, being the one leading character that reads as a flag.
+    if name.starts_with('-') {
+        return Err(format!("schema name `{name}` may not start with a hyphen"));
+    }
+    // `pg_*` is reserved for system schemas; `CREATE SCHEMA pg_x` is
+    // refused by the server with a message about the reservation, which
+    // would surface here as a failed run rather than a validation error.
+    if name.starts_with("pg_") || name == "information_schema" {
+        return Err(format!(
+            "schema name `{name}` is reserved by Postgres — choose another"
+        ));
+    }
+    Ok(())
+}
+
+/// The `Host` header this tenant answers to.
+///
+/// Matched **exactly**, against a header the resolver has already
+/// lowercased and stripped of its `:port` (see
+/// `resolver::host_from_parts`). Three things therefore produce a
+/// tenant that is registered, active, and unreachable forever:
+/// uppercase, a `:port` suffix, and a wildcard — none of which can ever
+/// equal the normalized header.
+///
+/// Uppercase is normalized rather than refused, because lowercasing it
+/// is exactly what the resolver does and the operator's intent is not
+/// in doubt. The other two are refused: they mean the operator wants
+/// something this matcher does not do, and quietly storing a value that
+/// cannot match would be the worse answer.
+fn validate_host_pattern(pattern: &str) -> Result<String, String> {
+    if pattern.contains(':') {
+        return Err(format!(
+            "host pattern `{pattern}` carries a port — the `Host` header is matched with the \
+             port stripped, so this could never match. Put the port in the port field"
+        ));
+    }
+    if pattern.contains('*') {
+        return Err(format!(
+            "host pattern `{pattern}` uses a wildcard — patterns are matched exactly, so this \
+             could never match. Register one tenant per hostname"
+        ));
+    }
+    if pattern.len() > 253 {
+        return Err(format!(
+            "host pattern `{pattern}` is {} characters; a hostname allows at most 253",
+            pattern.len()
+        ));
+    }
+    let normalized = pattern.to_ascii_lowercase();
+    for label in normalized.split('.') {
+        if label.is_empty() {
+            return Err(format!(
+                "host pattern `{pattern}` has an empty label — check for a doubled or trailing dot"
+            ));
+        }
+        if label.len() > 63 {
+            return Err(format!(
+                "host pattern `{pattern}` has a label longer than the 63 characters a hostname \
+                 allows"
+            ));
+        }
+        let legal = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-';
+        if let Some(bad) = label.bytes().find(|b| !legal(*b)) {
+            return Err(format!(
+                "host pattern `{pattern}` contains `{}` — a hostname allows only letters, \
+                 digits, hyphens and dots",
+                bad as char
+            ));
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err(format!(
+                "host pattern `{pattern}` has a label starting or ending with a hyphen, which a \
+                 hostname cannot"
+            ));
+        }
+    }
+    Ok(normalized)
+}
+
+/// The URL path segment this tenant answers to.
+///
+/// `PathPrefixResolver` takes the **first** path segment and looks up
+/// `"/<segment>"`. So a stored prefix that is not exactly one
+/// leading-slash segment — no slash, a second segment, a trailing slash
+/// — cannot be produced by that lookup and never matches.
+fn validate_path_prefix(prefix: &str) -> Result<(), String> {
+    let Some(segment) = prefix.strip_prefix('/') else {
+        return Err(format!(
+            "path prefix `{prefix}` must start with `/` — the resolver looks up `/<segment>`"
+        ));
+    };
+    if segment.is_empty() {
+        return Err("path prefix `/` is the apex, which resolves to no tenant".into());
+    }
+    if segment.contains('/') {
+        return Err(format!(
+            "path prefix `{prefix}` has more than one segment — only the first segment of the \
+             URL is matched, so this could never match"
+        ));
+    }
+    if segment.bytes().all(|b| b == b'.') {
+        return Err(format!(
+            "path prefix `{prefix}` is a relative-path segment, not a tenant prefix"
+        ));
+    }
+    let legal = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
+    if let Some(bad) = segment.bytes().find(|b| !legal(*b)) {
+        return Err(format!(
+            "path prefix `{prefix}` contains `{}` — a path segment that needs escaping would \
+             not match the decoded path",
+            bad as char
+        ));
+    }
+    Ok(())
+}
+
+/// The TCP port this tenant answers on.
+///
+/// `i32` is the column's type, not the range of a port. `-1` and
+/// `999999` both parsed and both stored, producing a tenant matched
+/// against a port no listener can ever have.
+fn validate_port(port: i32) -> Result<(), String> {
+    if !(1..=65535).contains(&port) {
+        return Err(format!(
+            "port {port} is outside the 1–65535 a TCP port can be"
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse a tenant URL that points at the registry's own database.
 ///
 /// Nothing stopped this, and the consequence is not cosmetic:
@@ -841,7 +1050,7 @@ fn validate_slug(slug: &str) -> Result<(), String> {
 /// Compared on endpoint identity — scheme, host, port, database —
 /// because the *credentials* may legitimately differ while still
 /// naming the same database.
-fn refuse_registry_url(tenant_url: &str, registry_url: &str) -> Result<(), String> {
+pub(crate) fn refuse_registry_url(tenant_url: &str, registry_url: &str) -> Result<(), String> {
     if endpoint_identity(tenant_url) == endpoint_identity(registry_url) {
         return Err(format!(
             "this is the registry's own database ({}). A tenant needs its own — pointing one \
@@ -1242,6 +1451,163 @@ mod validation_tests {
                 "slug `{good}` should be allowed"
             );
         }
+    }
+
+    /// The two schema names that were actually posted through the
+    /// console during QA. Both were accepted, and both became real
+    /// Postgres schemas behind live, active tenants.
+    ///
+    /// `quote_ident` did hold — no `pwned_a` table was created and
+    /// `rustango_operators` was still there — so this is not a fix for
+    /// an injection that worked. It is a fix for the schema name being
+    /// unchecked, which is how an operator ends up with a tenant whose
+    /// identifier they cannot type again.
+    #[test]
+    fn the_schema_names_that_got_through_qa_are_refused() {
+        for injected in [
+            r#"x"; CREATE TABLE public.pwned_a(i int); --"#,
+            r#"y"; DROP TABLE public.rustango_operators; --"#,
+        ] {
+            let err =
+                validate_schema_name(injected).expect_err("an SQL fragment is not a schema name");
+            assert!(err.contains("only lowercase"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_schema_name_is_a_postgres_identifier() {
+        for bad in [
+            "",                   // empty
+            "Acme",               // uppercase would be a *different* schema
+            "ac me",              // space
+            "acme;DROP",          // punctuation
+            "acme.other",         // a dot is schema-qualification
+            "-acme",              // leading hyphen
+            "pg_toast",           // reserved
+            "pg_anything",        // the whole `pg_` namespace is reserved
+            "information_schema", // reserved
+        ] {
+            assert!(
+                validate_schema_name(bad).is_err(),
+                "schema name `{bad}` should have been refused"
+            );
+        }
+        // Underscores are the difference from the slug rule: legal in
+        // an identifier, illegal in a hostname label.
+        for good in ["acme", "acme_corp", "tenant-42", "a", "2acme"] {
+            assert!(
+                validate_schema_name(good).is_ok(),
+                "schema name `{good}` should be allowed"
+            );
+        }
+        assert!(validate_schema_name(&"a".repeat(63)).is_ok());
+        assert!(
+            validate_schema_name(&"a".repeat(64)).is_err(),
+            "Postgres would silently truncate it"
+        );
+    }
+
+    /// The resolver lowercases the `Host` header and strips `:port`
+    /// before comparing. Anything that cannot come out of that
+    /// normalization can never match.
+    #[test]
+    fn a_host_pattern_that_could_never_match_is_refused() {
+        let err = validate_host_pattern("acme.example.com:8080")
+            .expect_err("the port is stripped before matching");
+        assert!(
+            err.contains("port field"),
+            "should say where it goes: {err}"
+        );
+
+        let err = validate_host_pattern("*.example.com").expect_err("patterns are matched exactly");
+        assert!(err.contains("wildcard"), "{err}");
+
+        for bad in [
+            "not a hostname",  // spaces
+            "acme..com",       // empty label
+            "acme.com.",       // trailing dot leaves an empty label
+            "-acme.com",       // leading hyphen in a label
+            "acme-.com",       // trailing hyphen in a label
+            r#"acme";DROP--"#, // punctuation
+        ] {
+            assert!(
+                validate_host_pattern(bad).is_err(),
+                "host pattern `{bad}` should have been refused"
+            );
+        }
+    }
+
+    /// Uppercase is the one case that is normalized instead: the
+    /// resolver lowercases the header anyway, so the operator's intent
+    /// is not in doubt and refusing would be pedantry.
+    #[test]
+    fn an_uppercase_host_pattern_is_lowercased_not_refused() {
+        assert_eq!(
+            validate_host_pattern("Acme.Example.COM").as_deref(),
+            Ok("acme.example.com")
+        );
+    }
+
+    /// `PathPrefixResolver` looks up `"/<first segment>"`. Nothing else
+    /// is ever the lookup key.
+    #[test]
+    fn a_path_prefix_must_be_one_leading_slash_segment() {
+        for bad in [
+            "acme",             // no leading slash
+            "/",                // the apex resolves to no tenant
+            "/acme/",           // trailing slash is a second, empty segment
+            "/acme/dashboard",  // only the first segment is matched
+            "../../etc/passwd", // the traversal string tried in QA
+            "/..",              // a relative segment
+            "/ac me",           // a space would arrive percent-encoded
+        ] {
+            assert!(
+                validate_path_prefix(bad).is_err(),
+                "path prefix `{bad}` should have been refused"
+            );
+        }
+        for good in ["/acme", "/tenant-42", "/a_b", "/v1.0"] {
+            assert!(
+                validate_path_prefix(good).is_ok(),
+                "path prefix `{good}` should be allowed"
+            );
+        }
+    }
+
+    /// `i32` is the column's type, not a port's range. Both of these
+    /// parsed and were stored during QA.
+    #[test]
+    fn a_port_outside_the_tcp_range_is_refused() {
+        assert!(validate_port(-1).is_err());
+        assert!(validate_port(0).is_err());
+        assert!(validate_port(999_999).is_err());
+        assert!(validate_port(1).is_ok());
+        assert!(validate_port(8080).is_ok());
+        assert!(validate_port(65_535).is_ok());
+    }
+
+    /// The rules have to be reachable from the one place every caller
+    /// goes through, or they are only the console's rules again.
+    #[test]
+    fn validate_fields_checks_the_slug_derived_schema_name_too() {
+        // A slug legal as a hostname label is legal as a schema name,
+        // so the default never trips its own rule.
+        let mut req = ProvisionRequest::database("acme-2", "postgres://h/tenant");
+        req.mode = StorageMode::Schema;
+        req.database_url = None;
+        assert!(validate_fields(&req).is_ok());
+
+        // An explicit one is checked by the same rule.
+        req.schema_name = Some(r#"x"; DROP TABLE t; --"#.into());
+        assert!(validate_fields(&req).is_err());
+    }
+
+    #[test]
+    fn validate_fields_hands_back_a_normalized_host_pattern() {
+        let mut req = ProvisionRequest::database("acme", "postgres://h/tenant");
+        req.host_pattern = Some("ACME.Example.com".into());
+        let out = validate_fields(&req).expect("a legal hostname");
+        assert_eq!(out.host_pattern.as_deref(), Some("acme.example.com"));
     }
 
     #[test]

@@ -327,6 +327,23 @@ pub(super) async fn test_connection(
     };
     let url = url.as_str();
 
+    // Answer the same question the submit will, including the one
+    // refusal that has nothing to do with reachability. The registry's
+    // own database is reachable and this role *can* create tables in
+    // it, so the probe used to report "migrations will run" for the
+    // single target provisioning refuses outright — blessing, in its
+    // most confident wording, the mistake that ran the tenant
+    // migration chain over the registry.
+    if let Some(p) = state.provisioner.as_ref() {
+        if let Err(msg) = provision::refuse_registry_url(url, &p.registry_url()) {
+            return Html(format!(
+                "<p class=\"probe probe-bad\">{}</p>",
+                html_escape(&msg)
+            ))
+            .into_response();
+        }
+    }
+
     match preflight::check(url, &Preflight::default()).await {
         Ok(ok) => Html(format!(
             "<p class=\"probe probe-ok\">Reached <code>{}</code>. \

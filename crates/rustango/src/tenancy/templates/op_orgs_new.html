@@ -116,8 +116,16 @@ connection check passes.</p>
       <tr class="mode-schema" hidden>
         <th><label for="schema_name">schema</label></th>
         <td>
+          {#- Same escaped hyphen as the slug, and for the same reason:
+              an unescaped one makes the attribute a syntax error the
+              browser drops silently. Underscores are allowed here and
+              not in the slug — a schema name is an identifier, not a
+              hostname label. -#}
           <input type="text" id="schema_name" name="schema_name"
                  value="{{ prefill.schema_name | default(value='') }}"
+                 pattern="[a-z0-9_][a-z0-9_\-]*"
+                 maxlength="63"
+                 title="Lowercase letters, digits, underscores and hyphens."
                  placeholder="defaults to the slug">
           <div class="field-helper">The tenant lives in the registry's
           own database, isolated by <code>search_path</code>. There is no
@@ -133,23 +141,38 @@ connection check passes.</p>
       <tr>
         <th><label for="host_pattern">host_pattern</label></th>
         <td>
+          {#- Uppercase is allowed through and lowercased by the server,
+              because that is what the resolver does to the `Host`
+              header before comparing. A `:port` or a `*` is not: they
+              can never equal the normalized header. -#}
           <input type="text" id="host_pattern" name="host_pattern"
                  value="{{ prefill.host_pattern | default(value='') }}"
+                 pattern="[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?)*"
+                 maxlength="253"
+                 title="A hostname, matched exactly. No port and no wildcard — put the port in the port field."
                  placeholder="acme.example.com">
-          <div class="field-helper">Blank derives
+          <div class="field-helper">Matched exactly against the
+          <code>Host</code> header. Blank derives
           <code>&lt;slug&gt;.&lt;RUSTANGO_APEX_DOMAIN&gt;</code> when that
           variable is set.</div>
         </td>
       </tr>
       <tr>
         <th><label for="path_prefix">path_prefix</label></th>
-        <td><input type="text" id="path_prefix" name="path_prefix"
-                   value="{{ prefill.path_prefix | default(value='') }}"
-                   placeholder="/acme"></td>
+        <td>
+          <input type="text" id="path_prefix" name="path_prefix"
+                 value="{{ prefill.path_prefix | default(value='') }}"
+                 pattern="/[A-Za-z0-9_.~\-]+"
+                 title="One path segment, with its leading slash."
+                 placeholder="/acme">
+          <div class="field-helper">Only the first path segment is
+          matched, so this is <code>/name</code> — not a deeper path.</div>
+        </td>
       </tr>
       <tr>
         <th><label for="port">port</label></th>
-        <td><input type="text" id="port" name="port" inputmode="numeric"
+        <td><input type="number" id="port" name="port" inputmode="numeric"
+                   min="1" max="65535"
                    value="{{ prefill.port | default(value='') }}"></td>
       </tr>
     </table>

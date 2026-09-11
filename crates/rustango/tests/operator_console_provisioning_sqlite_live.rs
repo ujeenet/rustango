@@ -35,6 +35,7 @@ struct Booted {
     app: axum::Router,
     cookie: String,
     pools: Arc<TenantPools<sqlx::Sqlite>>,
+    registry_url: String,
     _tmp: tempfile::TempDir,
     _migrations: tempfile::TempDir,
 }
@@ -113,6 +114,7 @@ async fn boot() -> Booted {
         app,
         cookie,
         pools,
+        registry_url: url,
         _tmp: tmp,
         _migrations: migrations,
     }
@@ -344,6 +346,53 @@ async fn test_connection_reports_why_and_creates_nothing() {
         .await
         .unwrap();
     assert!(orgs.is_empty(), "a probe must not create a tenant");
+}
+
+/// The probe has to answer the question the submit will answer, and
+/// the registry's own database is the case where reachability and
+/// usability disagree.
+///
+/// It is reachable, and the role *can* create tables in it, so the
+/// probe reported "This role can create tables, so migrations will
+/// run" — its most confident wording — for the one target
+/// provisioning refuses outright. An operator who tests before
+/// submitting was told the mistake was fine.
+#[tokio::test]
+async fn the_probe_refuses_the_registry_instead_of_blessing_it() {
+    let b = boot().await;
+    let registry_url = b.registry_url.clone();
+
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/orgs/test-connection")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "database_url={}",
+                    form_encode(&registry_url)
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = body_of(resp).await;
+    assert!(
+        html.contains("probe-bad"),
+        "the registry's own database must not probe as usable: {html}"
+    );
+    assert!(
+        html.contains("registry"),
+        "should say why it is refused: {html}"
+    );
+    assert!(
+        !html.contains("migrations will run"),
+        "the success wording must not appear: {html}"
+    );
 }
 
 /// The whole path: submit the form, get redirected to the run, and
