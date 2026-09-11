@@ -38,6 +38,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
+use serde::Deserialize;
 use tera::Context;
 
 use super::{inject_op_brand, ConsoleState};
@@ -331,6 +332,104 @@ pub(super) async fn test_connection(
 
 // ------------------------------------------------------------ run view
 
+/// How many runs a page of the index shows.
+const RUNS_PAGE_SIZE: i64 = 50;
+
+#[derive(Deserialize)]
+pub(super) struct RunsQuery {
+    #[serde(default)]
+    page: Option<i64>,
+}
+
+/// Every provisioning run, newest first.
+///
+/// A run was reachable only by its id, which meant only from the
+/// redirect that created it: navigate away and the record survived in
+/// the table but not in anybody's reach. The runs are persisted so they
+/// outlive the request, and this is what makes that worth anything —
+/// including for the runs that failed, which are the ones somebody
+/// comes back to.
+pub(super) async fn provision_runs_index(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+    Query(q): Query<RunsQuery>,
+) -> Response<Body> {
+    // Saturating: a page number large enough to overflow the multiply
+    // parses into an `i64` fine and then panicked the worker. Clamped,
+    // an absurd page is just an empty one.
+    let page = q.page.unwrap_or(1).max(1);
+    let offset = page.saturating_sub(1).saturating_mul(RUNS_PAGE_SIZE);
+
+    // One more than a page, so "is there an older page?" costs no
+    // second query.
+    let mut runs = match store::recent_runs(&state.registry, RUNS_PAGE_SIZE + 1, offset).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not read the run list: {e}"),
+            )
+                .into_response();
+        }
+    };
+    let page_len = usize::try_from(RUNS_PAGE_SIZE).unwrap_or(usize::MAX);
+    let has_next = runs.len() > page_len;
+    runs.truncate(page_len);
+
+    let view: Vec<_> = runs
+        .iter()
+        .map(|r| {
+            let state_str = r.state.clone();
+            serde_json::json!({
+                "id": r.id.get().copied().unwrap_or_default(),
+                "slug": r.slug,
+                "state": state_str,
+                "failed": RunState::parse(&r.state) == RunState::Failed,
+                "running": !RunState::parse(&r.state).is_terminal(),
+                "storage_mode": r.storage_mode,
+                "backend_kind": r.backend_kind,
+                "requested_by": r.requested_by,
+                "error": r.error,
+                "started_at": r.started_at.get()
+                    .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+                // How long it took, rather than a second wide timestamp
+                // column: the finish time on its own says little that
+                // the start time and a duration do not.
+                "took": took(r),
+            })
+        })
+        .collect();
+
+    let mut ctx = Context::new();
+    inject_op_brand(&mut ctx, &state.op_brand);
+    ctx.insert("section", "orgs");
+    ctx.insert("operator_username", &op.username);
+    ctx.insert("runs", &view);
+    ctx.insert("page", &page);
+    ctx.insert("has_next", &has_next);
+    render(&state, "op_provision_runs.html", &ctx)
+}
+
+/// How long a finished run took, or `None` while it is still going.
+fn took(run: &store::ProvisioningRun) -> Option<String> {
+    let started = run.started_at.get()?;
+    let finished = run.finished_at?;
+    let ms = (finished - *started).num_milliseconds();
+    if ms < 0 {
+        // Clocks on two pods can disagree; a negative duration is not
+        // information worth rendering.
+        return None;
+    }
+    // Integer arithmetic rather than a float divide: one decimal place
+    // of a millisecond count needs no `f64`, and `i64 as f64` loses
+    // precision for large values.
+    Some(if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{}.{}s", ms / 1000, (ms % 1000) / 100)
+    })
+}
+
 /// The non-streaming view of a run: what it did, whether it finished.
 ///
 /// Also the page a finished run settles into, and the audit trail
@@ -614,7 +713,7 @@ mod derivation_tests {
 
     /// The default the form *advertises* must be the default the
     /// submit *applies*. It was not: the page said "blank uses
-    /// tenant_globex" and the submit answered "database mode needs a
+    /// `tenant_globex`" and the submit answered "database mode needs a
     /// database URL".
     #[test]
     fn a_blank_database_name_uses_the_advertised_default() {

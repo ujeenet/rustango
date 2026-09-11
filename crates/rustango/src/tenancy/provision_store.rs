@@ -344,6 +344,34 @@ pub async fn events_since(
         .await?)
 }
 
+/// The most recent runs, newest first.
+///
+/// A run is reachable by id and nothing enumerated them, so a console
+/// could show a run only while its redirect was still in the address
+/// bar — navigate away and the record survived in the table but not in
+/// anybody's reach. That is the opposite of why the table is persisted.
+///
+/// `limit` is a page size rather than a promise to return everything:
+/// the table grows with provisioning activity and a console asking for
+/// "recent" wants a screenful.
+///
+/// # Errors
+/// Driver / query failures.
+pub async fn recent_runs(
+    registry: &Pool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<ProvisioningRun>, TenancyError> {
+    Ok(ProvisioningRun::objects()
+        // Descending — the bool is `desc`, and "recent" means the run
+        // somebody just started is the one at the top.
+        .order_by(&[("id", true)])
+        .limit(limit)
+        .offset(offset)
+        .fetch(registry)
+        .await?)
+}
+
 /// Delete finished runs older than `cutoff`, and their events.
 ///
 /// Runs are append-only and one per tenant creation, so the table grows

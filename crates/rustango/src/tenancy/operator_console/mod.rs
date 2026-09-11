@@ -40,6 +40,7 @@
 
 /// Creating a tenant from the console, and watching it happen (#1322).
 /// Mounted only by [`router_with_provisioning`].
+mod audit;
 mod hosts;
 mod operators;
 mod provisioning;
@@ -504,6 +505,11 @@ fn router_inner(
             "op_provision_run.html",
             include_str!("../templates/op_provision_run.html"),
         ),
+        (
+            "op_provision_runs.html",
+            include_str!("../templates/op_provision_runs.html"),
+        ),
+        ("op_audit.html", include_str!("../templates/op_audit.html")),
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
@@ -535,6 +541,11 @@ fn router_inner(
         .route("/", get(welcome))
         .route("/operators", get(operators::operators_list))
         .route("/orgs", get(orgs_list))
+        // Read-only, so it is not behind the edit gate: a read-only
+        // console is exactly where "what happened?" still needs
+        // answering, and every operator can already see everything the
+        // log describes.
+        .route("/audit", get(audit::audit_list))
         .route(
             "/change-password",
             get(change_password_form).post(change_password_submit),
@@ -609,6 +620,10 @@ fn router_inner(
                 get(provisioning::org_new_form).post(provisioning::org_new_submit),
             )
             .route("/orgs/test-connection", post(provisioning::test_connection))
+            // The index has to come before the `{run_id}` route it
+            // shares a prefix with, and be a distinct path: a run id is
+            // numeric, so `/orgs/provision` cannot be confused for one.
+            .route("/orgs/provision", get(provisioning::provision_runs_index))
             .route(
                 "/orgs/provision/{run_id}",
                 get(provisioning::provision_run_view),

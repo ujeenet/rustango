@@ -426,4 +426,44 @@ tr.reset-row:target { display: table-row; }
   border-color: var(--color-accent);
   box-shadow: 0 0 0 2px var(--color-accent-bg-soft);
 }
+
+/* Audit log + run history */
+td.nowrap, th.nowrap { white-space: nowrap; }
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  margin-top: var(--space-4);
+}
+.filter-bar label { color: var(--color-fg-muted); font-size: 13px; }
+.filter-bar input[type="text"] {
+  padding: 0.3rem var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  background: var(--color-bg-input);
+  color: var(--color-fg);
+}
+.filter-bar input[type="text"]:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent-bg-soft);
+}
+/* The JSON is the useful column and the tallest, so it opens on
+   demand rather than making every row several lines high. */
+.audit-changes {
+  margin: var(--space-2) 0 0 0;
+  padding: var(--space-2);
+  background: var(--color-bg-sidebar);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  max-width: 40rem;
+  overflow-x: auto;
+}
+tr.run-error td { border-top: 0; padding-top: 0; font-size: 13px; }
+/* A slug can be 63 characters. Without this it sets the column width
+   for every other row and pushes the table past the viewport. */
+td.wrap-anywhere { overflow-wrap: anywhere; }
 </style>

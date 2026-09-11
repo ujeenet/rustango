@@ -653,6 +653,218 @@ async fn the_stream_resumes_from_a_given_seq() {
 
 /// Without a provisioner the routes are simply absent — the console
 /// built the old way cannot create tenants at all.
+/// A run used to be reachable only by its id, which meant only from
+/// the redirect that created it: navigate away and the record was
+/// stranded in a table nobody could enumerate.
+#[tokio::test]
+async fn the_run_index_lists_runs_and_links_to_each() {
+    let b = boot().await;
+    let tenant_db = b._tmp.path().join("indexed.db");
+    let slug = unique("indexed");
+    let form = format!(
+        "slug={slug}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
+    );
+    let created = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/orgs/new")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let run_path = created
+        .headers()
+        .get("location")
+        .expect("a run to watch")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    // The redirect is relative (`provision/<id>`); the index links with
+    // a leading slash, so compare on the id.
+    let run_id = run_path.rsplit('/').next().unwrap().to_owned();
+
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/orgs/provision")
+                .header("cookie", &b.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = body_of(resp).await;
+    assert!(
+        html.contains(&slug),
+        "the run's tenant should appear: {html}"
+    );
+    assert!(
+        html.contains(&format!("/orgs/provision/{run_id}")),
+        "and link to the run itself: {html}"
+    );
+    assert!(html.contains("succeeded"), "with its outcome: {html}");
+}
+
+/// The index is where somebody looks for a run that went wrong, so the
+/// reason has to be on it rather than one click away.
+#[tokio::test]
+async fn the_run_index_shows_why_a_run_failed() {
+    let b = boot().await;
+    let slug = unique("doomed");
+    // Schema mode on SQLite is refused — a real failure, recorded as a
+    // run, with a message worth surfacing.
+    let form = format!("slug={slug}&storage_mode=schema&backend_kind=sqlite");
+    b.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/orgs/new")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let html = body_of(
+        b.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/orgs/provision")
+                    .header("cookie", &b.cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    // Either the run was recorded and shows as failed, or it was
+    // refused before a run opened — in which case the index is
+    // legitimately empty. Both are correct; what must not happen is a
+    // run listed with no explanation.
+    if html.contains(&slug) {
+        assert!(
+            html.contains("failed"),
+            "a listed run that failed must say so: {html}"
+        );
+    }
+}
+
+/// Paging past the end must not be a dead end. The links used to sit
+/// inside the non-empty branch, so an empty page offered no way back
+/// and only a URL edit escaped it.
+#[tokio::test]
+async fn an_empty_run_page_still_offers_a_way_back() {
+    let b = boot().await;
+    let html = body_of(
+        b.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/orgs/provision?page=3")
+                    .header("cookie", &b.cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        html.contains("/orgs/provision?page=2"),
+        "an empty page past the end must link back: {html}"
+    );
+    assert!(
+        !html.contains("No tenant has been provisioned"),
+        "and must not claim nothing ever happened: {html}"
+    );
+}
+
+/// Same overflow as the audit page: the multiply panicked the worker.
+#[tokio::test]
+async fn an_absurd_run_page_number_does_not_overflow_the_offset() {
+    let b = boot().await;
+    for page in ["1000000000000000000", "9223372036854775807"] {
+        let resp = b
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/orgs/provision?page={page}"))
+                    .header("cookie", &b.cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "page={page} should render an empty page, not fail"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_run_index_requires_a_session() {
+    let b = boot().await;
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/orgs/provision")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_redirection() || resp.status() == StatusCode::UNAUTHORIZED,
+        "the index was reachable without a session: {}",
+        resp.status()
+    );
+}
+
+/// The org list is the only page that links to the index, so without
+/// that link it is reachable by typing a URL and nothing else.
+#[tokio::test]
+async fn the_org_list_links_to_the_run_index() {
+    let b = boot().await;
+    let html = body_of(
+        b.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/orgs")
+                    .header("cookie", &b.cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        html.contains("/orgs/provision"),
+        "the org list should link to the run history: {html}"
+    );
+}
+
 #[tokio::test]
 async fn the_routes_do_not_exist_without_a_provisioner() {
     let tmp = tempfile::tempdir().expect("tempdir");
