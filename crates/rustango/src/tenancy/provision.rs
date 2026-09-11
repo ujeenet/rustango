@@ -601,15 +601,27 @@ where
             .await;
     }
 
+    if let Err(msg) = validate_slug(&request.slug) {
+        return rep
+            .fail(ProvisionStep::Validate, TenancyError::Validation(msg))
+            .await;
+    }
+
     if request.mode == StorageMode::Database && request.database_url.is_none() {
         return rep
             .fail(
                 ProvisionStep::Validate,
-                TenancyError::Validation(
-                    "create-tenant --mode database requires --database-url".into(),
-                ),
+                TenancyError::Validation("database mode needs a database URL".into()),
             )
             .await;
+    }
+
+    if let Some(url) = &request.database_url {
+        if let Err(msg) = refuse_registry_url(url, registry_url) {
+            return rep
+                .fail(ProvisionStep::Validate, TenancyError::Validation(msg))
+                .await;
+        }
     }
     rep.step(ProvisionStep::Validate, StepStatus::Ok).await;
 
@@ -771,6 +783,128 @@ async fn provision_storage<DB: Database>(
     rep.step(ProvisionStep::ProvisionStorage, StepStatus::Ok)
         .await;
     Ok(())
+}
+
+/// A slug becomes three things, and has to be legal in all of them.
+///
+/// It is a **database name**, a **schema name**, and a **hostname
+/// label** (`<slug>.<apex>`). The last is the strictest: RFC 1123
+/// allows only lowercase letters, digits and hyphens, not leading or
+/// trailing.
+///
+/// This lived only in the inbound webhook, so the console — the path a
+/// human uses — was the laxer of the two. `tennant 1`, with a space,
+/// produced a **live tenant** whose `host_pattern` was
+/// `tennant 1.localhost`: a hostname that cannot resolve, so the
+/// tenant could never be reached, discovered only by someone
+/// wondering why their new customer 404s.
+fn validate_slug(slug: &str) -> Result<(), String> {
+    if slug.is_empty() {
+        return Err("a slug is required".into());
+    }
+    if slug.len() > 63 {
+        // The hostname-label limit; the database-name limits are
+        // higher, so this is the binding one.
+        return Err(format!(
+            "slug `{slug}` is {} characters; a hostname label allows at most 63",
+            slug.len()
+        ));
+    }
+    let legal = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-';
+    if let Some(bad) = slug.bytes().find(|b| !legal(*b)) {
+        return Err(format!(
+            "slug `{slug}` contains `{}` — only lowercase letters, digits and hyphens are \
+             allowed, because the slug becomes a database name, a schema name and a \
+             hostname label",
+            bad as char
+        ));
+    }
+    if slug.starts_with('-') || slug.ends_with('-') {
+        return Err(format!(
+            "slug `{slug}` may not start or end with a hyphen — a hostname label cannot"
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a tenant URL that points at the registry's own database.
+///
+/// Nothing stopped this, and the consequence is not cosmetic:
+/// provisioning ran the **tenant** migration chain into the
+/// **registry**, creating `rustango_users`, `rustango_admin_users`,
+/// the media tables and the project's own models there — and writing
+/// `0001_initial` into the registry's project ledger, so a later
+/// legitimate migration run reads a ledger that lies about what has
+/// been applied. A project whose tenant migrations contain any
+/// destructive operation would have had it run against the registry.
+///
+/// Compared on endpoint identity — scheme, host, port, database —
+/// because the *credentials* may legitimately differ while still
+/// naming the same database.
+fn refuse_registry_url(tenant_url: &str, registry_url: &str) -> Result<(), String> {
+    if endpoint_identity(tenant_url) == endpoint_identity(registry_url) {
+        return Err(format!(
+            "this is the registry's own database ({}). A tenant needs its own — pointing one \
+             here would run the tenant migrations over the registry",
+            crate::sql::connect_diagnosis::redact(tenant_url)
+        ));
+    }
+    Ok(())
+}
+
+/// Build a tenant URL on the same server as the registry, naming
+/// `database`.
+///
+/// The overwhelmingly common deployment is "one Postgres, one database
+/// per tenant". Without this, an operator retypes the host, the port
+/// **and the password** into a web form for every tenant — which is
+/// both tedious and the single most likely way for a credential to end
+/// up somewhere it should not be.
+///
+/// Derived server-side on purpose: the caller supplies a database
+/// *name*, never a URL, so the registry password is never rendered into
+/// a page and never travels back in a form post.
+///
+/// Returns `None` when the registry URL has no database segment to
+/// replace — a shape this cannot reason about, where the operator
+/// should supply a URL themselves.
+#[must_use]
+pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Option<String> {
+    // sqlite is a file path, not a server: "same server, other
+    // database" means a sibling file.
+    if let Some(path) = registry_url.strip_prefix("sqlite://") {
+        let path = path.split('?').next().unwrap_or(path);
+        let (dir, _) = path.rsplit_once('/')?;
+        return Some(format!("sqlite://{dir}/{database}.db?mode=rwc"));
+    }
+
+    let (scheme, rest) = registry_url.split_once("://")?;
+    // Keep userinfo and authority; replace only the path segment.
+    let (authority, _old_db) = rest.rsplit_once('/')?;
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{authority}/{database}"))
+}
+
+/// Scheme + host + port + database, lowercased, credentials and query
+/// dropped. Two URLs naming the same database compare equal even when
+/// they authenticate differently.
+fn endpoint_identity(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or_else(|| {
+        // `sqlite:path` has no authority — the whole tail is the file.
+        url.split_once(':').unwrap_or(("", url))
+    });
+    // Drop userinfo (everything before the last `@` of the authority).
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
+    // Drop the query string: `?mode=rwc` does not change which database
+    // this is.
+    let rest = rest.split_once('?').map_or(rest, |(before, _)| before);
+    format!(
+        "{}://{}",
+        scheme.to_ascii_lowercase(),
+        rest.to_ascii_lowercase()
+    )
 }
 
 /// The schema a schema-mode tenant lives in: whatever the request
@@ -969,6 +1103,14 @@ pub trait TenantProvisioner: Send + Sync {
         request: &'a ProvisionRequest,
     ) -> BoxFuture<'a, ProvisionOutcome>;
 
+    /// The registry's own connection URL.
+    ///
+    /// Used to derive a tenant URL on the same server — the common
+    /// case, and the one that otherwise has an operator retyping a
+    /// password into a form field. **Never render this**: it carries
+    /// credentials. Derive, then redact for display.
+    fn registry_url(&self) -> String;
+
     /// The registry pool, so a caller can read runs and events back.
     fn registry(&self) -> crate::sql::Pool;
 }
@@ -1053,7 +1195,107 @@ where
         })
     }
 
+    fn registry_url(&self) -> String {
+        self.registry_url.clone()
+    }
+
     fn registry(&self) -> crate::sql::Pool {
         self.pools.registry_pool()
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    /// The exact input that created a live, unreachable tenant during
+    /// QA: a space in the slug, accepted by the console, producing
+    /// `host_pattern = "tennant 1.localhost"`.
+    #[test]
+    fn a_slug_with_a_space_is_refused() {
+        let err = validate_slug("tennant 1").expect_err("a space is not a hostname character");
+        assert!(err.contains("tennant 1"), "{err}");
+        assert!(err.contains("hostname"), "should say why: {err}");
+    }
+
+    #[test]
+    fn a_slug_is_restricted_to_what_is_legal_in_all_three_uses() {
+        for bad in [
+            "",          // empty
+            "Acme",      // uppercase — not a hostname label
+            "ac me",     // space
+            "acme_corp", // underscore is legal in a DB name, not a hostname
+            "acme.corp", // dot would make it two labels
+            "acme;DROP", // punctuation
+            "../etc",    // traversal
+            "-acme",     // leading hyphen
+            "acme-",     // trailing hyphen
+        ] {
+            assert!(
+                validate_slug(bad).is_err(),
+                "slug `{bad}` should have been refused"
+            );
+        }
+        for good in ["acme", "acme-2", "a", "tenant-42"] {
+            assert!(
+                validate_slug(good).is_ok(),
+                "slug `{good}` should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_over_long_slug_is_refused_at_the_hostname_limit() {
+        assert!(validate_slug(&"a".repeat(63)).is_ok());
+        let err = validate_slug(&"a".repeat(64)).expect_err("too long for a hostname label");
+        assert!(err.contains("63"), "{err}");
+    }
+
+    /// The critical QA finding: a tenant pointed at the registry's own
+    /// database ran the tenant migration chain over the registry.
+    #[test]
+    fn a_tenant_url_naming_the_registry_database_is_refused() {
+        let registry = "postgres://rustango:rustango@localhost:5432/orgdemo_dev";
+        let err = refuse_registry_url(registry, registry).expect_err("same database");
+        assert!(err.contains("registry's own database"), "{err}");
+        // And it must not echo the password while saying so.
+        assert!(!err.contains("rustango:rustango"), "password leaked: {err}");
+    }
+
+    /// Different credentials, same database, is still the same
+    /// database — which is the case a naive string compare misses.
+    #[test]
+    fn different_credentials_for_the_same_database_are_still_refused() {
+        assert!(refuse_registry_url(
+            "postgres://someone_else:other@localhost:5432/orgdemo_dev",
+            "postgres://rustango:rustango@localhost:5432/orgdemo_dev",
+        )
+        .is_err());
+    }
+
+    /// And a query string does not make it a different database —
+    /// sqlite's `?mode=rwc` in particular.
+    #[test]
+    fn a_query_string_does_not_disguise_the_same_database() {
+        assert!(refuse_registry_url(
+            "sqlite:///var/app/reg.db?mode=rwc",
+            "sqlite:///var/app/reg.db",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_genuinely_separate_database_is_allowed() {
+        let registry = "postgres://rustango:rustango@localhost:5432/orgdemo_dev";
+        for ok in [
+            "postgres://rustango:rustango@localhost:5432/acme_tenant", // other db
+            "postgres://rustango:rustango@otherhost:5432/orgdemo_dev", // other host
+            "postgres://rustango:rustango@localhost:5433/orgdemo_dev", // other port
+        ] {
+            assert!(
+                refuse_registry_url(ok, registry).is_ok(),
+                "`{ok}` is a different database and should be allowed"
+            );
+        }
     }
 }

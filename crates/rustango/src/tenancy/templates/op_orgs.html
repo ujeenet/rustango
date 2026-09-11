@@ -2,13 +2,29 @@
 {% block title %}Organizations — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
 <h1>Organizations</h1>
+{% if provisioning_enabled %}
+<p class="page-actions">
+  <a href="/orgs/new" class="btn btn-primary">+ New tenant</a>
+</p>
+<p>Tenants the registry knows about. Create one here, or from the CLI
+with <code>cargo run -- create-tenant</code>; removal is
+<code>cargo run -- drop-tenant</code>.</p>
+{% else %}
 <p>Tenants the registry knows about. Mutations go through
 <code>cargo run -- create-tenant</code> / <code>cargo run -- drop-tenant</code>
 (or whatever your project binary is — runs through
-<code>rustango::manage::Cli</code>).</p>
+<code>rustango::manage::Cli</code>). To create tenants from here, add
+<code>.with_tenant_provisioning("migrations")</code> to the
+<code>Cli</code> builder.</p>
+{% endif %}
 {% if orgs | length == 0 %}
+  {% if provisioning_enabled %}
+  <div class="empty">No tenants yet —
+  <a href="/orgs/new">create the first one</a>.</div>
+  {% else %}
   <div class="empty">No tenants yet — provision one with
   <code>cargo run -- create-tenant &lt;slug&gt;</code>.</div>
+  {% endif %}
 {% else %}
 <table>
   <thead>

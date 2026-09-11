@@ -17,9 +17,15 @@ use tower::ServiceExt;
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
+/// Hyphens, not underscores.
+///
+/// A slug becomes a hostname label, where `_` is illegal — and the
+/// engine now enforces that. This helper produced `acme12345_0`, so
+/// tightening the rule turned every test slug invalid. The rule is
+/// right; the generator was wrong.
 fn unique(prefix: &str) -> String {
     format!(
-        "{prefix}{}_{}",
+        "{prefix}-{}-{}",
         std::process::id(),
         UNIQ.fetch_add(1, Ordering::SeqCst)
     )
@@ -159,6 +165,113 @@ async fn the_create_form_renders_for_an_authenticated_operator() {
     assert!(
         !html.contains("value=\"schema\""),
         "schema mode offered on a sqlite registry"
+    );
+}
+
+/// The tenant list links to the create page.
+///
+/// This shipped without a link first: the route and the template
+/// existed, and the only way to reach them was typing the URL. A page
+/// nothing navigates to is not a feature, so the link is pinned here
+/// rather than left to survive on someone remembering it.
+#[tokio::test]
+async fn the_org_list_links_to_the_create_page() {
+    let b = boot().await;
+    let resp = b
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/orgs")
+                .header("cookie", &b.cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = body_of(resp).await;
+    assert!(
+        html.contains("href=\"/orgs/new\""),
+        "no link to the create page: {html}"
+    );
+    assert!(html.contains("New tenant"), "the link has no label");
+}
+
+/// And it is absent when provisioning is off, so a console that
+/// cannot create tenants does not advertise a 404.
+#[tokio::test]
+async fn the_org_list_hides_the_link_without_a_provisioner() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+    let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+    let pools = Arc::new(TenantPools::<sqlx::Sqlite>::new(pool));
+    let migrations = tempfile::tempdir().expect("migrations dir");
+    let mut buf: Vec<u8> = Vec::new();
+    rustango::tenancy::manage::run_with_writer(
+        pools.as_ref(),
+        &url,
+        migrations.path(),
+        vec!["migrate-registry".to_owned()],
+        &mut buf,
+    )
+    .await
+    .expect("migrate-registry");
+
+    let registry = pools.registry_pool();
+    let username = unique("op");
+    let mut op = rustango::tenancy::Operator {
+        id: Auto::default(),
+        username: username.clone(),
+        password_hash: rustango::tenancy::password::hash("letmein").unwrap(),
+        active: true,
+        created_at: chrono::Utc::now(),
+        password_changed_at: None,
+    };
+    op.insert_pool(&registry).await.expect("seed operator");
+
+    let app = rustango::tenancy::operator_console::router_with_pools(
+        registry.clone(),
+        pools.clone(),
+        SessionSecret::from_env_or_random(),
+    );
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("username={username}&password=letmein")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = login
+        .headers()
+        .get("set-cookie")
+        .expect("cookie")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/orgs")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = body_of(resp).await;
+    assert!(
+        !html.contains("href=\"/orgs/new\""),
+        "a console without a provisioner must not link to a 404"
     );
 }
 
@@ -323,8 +436,11 @@ async fn a_bad_submission_re_renders_the_form_with_the_reason() {
                 .uri("/orgs/new")
                 .header("cookie", &b.cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                // Database mode with no URL.
-                .body(Body::from("slug=nourl&storage_mode=database"))
+                // A slug that is not a legal hostname label. Was
+                // "database mode with no URL", which is no longer an
+                // error — the console derives one from the registry
+                // now, which is the whole point of that change.
+                .body(Body::from("slug=Not_A_Slug&storage_mode=database"))
                 .unwrap(),
         )
         .await
@@ -332,9 +448,12 @@ async fn a_bad_submission_re_renders_the_form_with_the_reason() {
 
     assert_eq!(resp.status(), StatusCode::OK, "re-render, not a redirect");
     let html = body_of(resp).await;
-    assert!(html.contains("--database-url"), "should say what is wrong");
     assert!(
-        html.contains("value=\"nourl\""),
+        html.contains("lowercase letters, digits and hyphens"),
+        "should say what is wrong: {html}"
+    );
+    assert!(
+        html.contains("value=\"Not_A_Slug\""),
         "the operator's input should survive the round-trip"
     );
 
@@ -511,4 +630,114 @@ async fn the_routes_do_not_exist_without_a_provisioner() {
         StatusCode::NOT_FOUND,
         "provisioning must be opt-in"
     );
+}
+
+/// **The test that was missing.**
+///
+/// Everything above drives a router the *test* constructs. That proves
+/// the handlers work and proves nothing about whether the framework
+/// ever builds one — which is exactly how this shipped with
+/// `router_with_provisioning` written, exported, documented, and
+/// called by nobody.
+///
+/// So: go through `server::Builder`, the thing `Cli::tenancy()`
+/// actually uses, and assert the routes exist on *its* output.
+mod through_the_builder {
+    use super::{body_of, unique};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rustango::sql::sqlx;
+    use tower::ServiceExt;
+
+    async fn registry() -> (sqlx::SqlitePool, String, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+        (pool, url, tmp)
+    }
+
+    /// A route that exists answers *something* — 200, a redirect to
+    /// login, whatever. A route that was never mounted 404s. That is
+    /// the whole distinction being pinned, and it needs no session.
+    async fn probes_as_mounted(app: &axum::Router, uri: &str) -> bool {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        resp.status() != StatusCode::NOT_FOUND
+    }
+
+    #[tokio::test]
+    async fn with_tenant_provisioning_mounts_the_create_routes() {
+        let (pool, url, tmp) = registry().await;
+        let migrations = tempfile::tempdir().expect("migrations");
+        let app = rustango::server::Builder::from_pool(pool, url, "localhost")
+            .with_tenant_provisioning(migrations.path())
+            .into_router()
+            .await
+            .expect("assemble");
+
+        assert!(
+            probes_as_mounted(&app, "/orgs/new").await,
+            "`with_tenant_provisioning` did not reach the console"
+        );
+        assert!(probes_as_mounted(&app, "/orgs/provision/1").await);
+        let _ = (tmp, unique("x"));
+    }
+
+    /// And the default really is off — so the opt-in means something.
+    #[tokio::test]
+    async fn without_it_the_create_routes_are_absent() {
+        let (pool, url, tmp) = registry().await;
+        let app = rustango::server::Builder::from_pool(pool, url, "localhost")
+            .into_router()
+            .await
+            .expect("assemble");
+
+        assert!(
+            !probes_as_mounted(&app, "/orgs/new").await,
+            "provisioning must be opt-in, not on by default"
+        );
+        // The console itself is still there — this is about one
+        // capability, not the whole surface.
+        assert!(probes_as_mounted(&app, "/orgs").await);
+        let _ = tmp;
+    }
+
+    /// The link the operator clicks comes from the Builder's console
+    /// too, not just from a hand-built one.
+    #[tokio::test]
+    async fn the_builders_console_links_to_the_create_page() {
+        let (pool, url, tmp) = registry().await;
+        let migrations = tempfile::tempdir().expect("migrations");
+        let app = rustango::server::Builder::from_pool(pool, url, "localhost")
+            .with_tenant_provisioning(migrations.path())
+            .into_router()
+            .await
+            .expect("assemble");
+
+        // Unauthenticated, so this is the login redirect — the point
+        // is only that the route resolves through the Builder's
+        // console. The rendered link is asserted in
+        // `the_org_list_links_to_the_create_page`.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/orgs")
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::NOT_FOUND);
+        let _ = (body_of(resp).await, tmp);
+    }
 }

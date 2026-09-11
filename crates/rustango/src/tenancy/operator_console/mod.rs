@@ -408,6 +408,39 @@ fn default_tenant_handoff_url() -> String {
     super::routes::RouteConfig::default().impersonation_handoff_url
 }
 
+/// Every knob at once.
+///
+/// The named constructors above are thin wrappers over this, each
+/// fixing some arguments — which is fine until a caller wants a
+/// combination none of them covers (the tenancy `Builder` wants
+/// impersonation **and** provisioning). Rather than add a seventh
+/// positional constructor for each new pairing, this is the one that
+/// takes everything and the others stay as the convenient shorthands.
+///
+/// `pools` unlocks the edit routes, `provisioner` the create routes,
+/// `tenant_session_secret` impersonation. `None` for any of them
+/// simply does not mount those routes.
+#[must_use]
+pub fn router_full(
+    registry: impl Into<crate::sql::Pool>,
+    pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
+    provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
+    secret: SessionSecret,
+    brand_storage: BoxedStorage,
+    tenant_session_secret: Option<SessionSecret>,
+    tenant_handoff_url: String,
+) -> Router {
+    router_inner(
+        registry.into(),
+        pools,
+        provisioner,
+        secret,
+        brand_storage,
+        tenant_session_secret,
+        tenant_handoff_url,
+    )
+}
+
 fn router_inner(
     registry: crate::sql::Pool,
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
@@ -1074,6 +1107,10 @@ async fn orgs_list(
     ctx.insert("operator_username", &op.username);
     ctx.insert("orgs", &view);
     ctx.insert("edit_enabled", &state.pools.is_some());
+    // Drives the "New tenant" button. Without this the create page
+    // exists but nothing links to it — which is exactly the state
+    // this shipped in first.
+    ctx.insert("provisioning_enabled", &state.provisioner.is_some());
     Html(state.tera.render("op_orgs.html", &ctx).unwrap_or_default()).into_response()
 }
 

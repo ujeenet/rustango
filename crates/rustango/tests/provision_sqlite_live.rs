@@ -243,7 +243,16 @@ async fn database_mode_without_a_url_is_rejected_before_any_write() {
     .await
     .expect_err("must be rejected");
 
-    assert!(err.to_string().contains("--database-url"), "got: {err}");
+    let msg = err.to_string();
+    assert!(msg.contains("database URL"), "got: {msg}");
+    // The engine is shared by the CLI, the console and the webhook, so
+    // its messages cannot name one caller's flags. This said
+    // "create-tenant --mode database requires --database-url" and was
+    // shown verbatim in a web form that has neither flag.
+    assert!(
+        !msg.contains("--"),
+        "a shared engine message must not name CLI flags: {msg}"
+    );
     assert_eq!(rec.steps(), vec!["Validate:started", "Validate:failed"]);
 
     let orgs = rustango::tenancy::Org::objects()

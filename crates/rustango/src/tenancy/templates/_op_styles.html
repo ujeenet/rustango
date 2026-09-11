@@ -324,4 +324,36 @@ fieldset.section .brand-asset-preview {
 }
 .theme-toggle:hover { border-color: var(--color-accent); color: var(--color-accent); }
 .theme-toggle:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* ---- Tenant provisioning (#1322) ---- */
+
+/* The page-level call to action above the tenant list. */
+.page-actions { margin: 0 0 var(--space-4) 0; }
+
+/* Result of the connection probe, dropped in beside the button. */
+.probe {
+  display: inline-block;
+  margin: var(--space-2) 0 0 0;
+  padding: 0.35rem var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+}
+.probe code { font-size: inherit; }
+.probe-ok {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+.probe-bad {
+  /* The console has no danger token, so borrow the alert's. */
+  border-color: currentColor;
+  color: #b3261e;
+}
+
+/* Per-step status in a provisioning run. `started` stays default —
+   it is the neutral "in flight" state and colouring it would compete
+   with the outcome rows that actually need attention. */
+.status-ok      { color: var(--color-accent); }
+.status-skipped { color: var(--color-fg-muted); }
+.status-failed  { color: #b3261e; font-weight: var(--font-weight-bold); }
 </style>
