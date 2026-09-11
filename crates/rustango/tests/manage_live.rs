@@ -29,6 +29,20 @@ fn unique_migration_name(prefix: &str) -> String {
     format!("{prefix}_{pid}_{n}")
 }
 
+/// The same server and credentials, a different database name.
+///
+/// Keeps userinfo, host and port; replaces only the path segment, so a
+/// tenant lands on the server the test already reached.
+fn sibling_database_url(registry_url: &str, database: &str) -> String {
+    let (scheme, rest) = registry_url
+        .split_once("://")
+        .expect("DATABASE_URL should be a URL");
+    let (authority, _old_db) = rest
+        .rsplit_once('/')
+        .expect("DATABASE_URL should name a database");
+    format!("{scheme}://{authority}/{database}")
+}
+
 use tokio::sync::Mutex;
 
 /// Suite-wide lock. Every test in this file resets the shared PG
@@ -163,9 +177,12 @@ async fn create_tenant_database_mode_requires_database_url() {
         &["create-tenant", &slug, "--mode", "database"],
     )
     .await;
+    // The message no longer names `--database-url`: the check moved
+    // into the provisioning engine, which the console and the webhook
+    // share, and neither of those has a command-line flag to suggest.
     let err = res.unwrap_err();
     assert!(
-        format!("{err}").contains("--database-url"),
+        format!("{err}").contains("database mode needs a database URL"),
         "expected database_url validation error, got: {err}"
     );
 
@@ -303,6 +320,16 @@ async fn list_tenants_prints_all_orgs() {
         .await
         .1
         .unwrap();
+    // A real second database, not `url`. Passing the registry's own
+    // URL here is what provisioning refuses: it would run the tenant
+    // migration chain over the registry. `CREATE DATABASE` has no
+    // `IF NOT EXISTS` in Postgres, so a re-run's "already exists" is
+    // swallowed; a genuine failure surfaces at the connection check.
+    let tenant_db = "rustango_tenant_list_test";
+    let _ = sqlx::query(&format!("CREATE DATABASE {tenant_db}"))
+        .execute(&pool)
+        .await;
+    let tenant_url = sibling_database_url(&url, tenant_db);
     run(
         &pools,
         &url,
@@ -313,7 +340,7 @@ async fn list_tenants_prints_all_orgs() {
             "--mode",
             "database",
             "--database-url",
-            &url,
+            &tenant_url,
             "--no-migrate",
         ],
     )
