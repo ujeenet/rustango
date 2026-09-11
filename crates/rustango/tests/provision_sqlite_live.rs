@@ -97,14 +97,16 @@ async fn the_engine_provisions_without_argv_or_a_writer() {
     assert_eq!(outcome.slug, "acme");
     assert!(outcome.org_id > 0, "org id should come back: {outcome:?}");
 
-    // Every step reports, in order, and the not-yet-built one reports
-    // as skipped rather than silently not existing.
+    // Every step reports, in order. `ProvisionStorage` skips because a
+    // database-mode tenant brings its own database — there is no schema
+    // to create — and says so rather than silently not appearing.
     assert_eq!(
         rec.steps(),
         vec![
             "Validate:started",
             "Validate:ok",
-            "CheckConnection:skipped",
+            "CheckConnection:started",
+            "CheckConnection:ok",
             "ProvisionStorage:skipped",
             "RegisterOrg:started",
             "RegisterOrg:ok",
@@ -317,6 +319,70 @@ async fn provisioning_unobserved_works_the_same() {
         !matches!(outcome.migrations, MigrationsOutcome::Skipped),
         "migrations were requested: {:?}",
         outcome.migrations
+    );
+}
+
+/// The half-provisioned-tenant bug, closed (#1319).
+///
+/// A database URL that cannot be reached must be caught at
+/// `CheckConnection` — before the `Org` row exists. Previously the row
+/// landed first and the failure surfaced at migration time, leaving a
+/// tenant the resolver matches in front of a database with no schema.
+#[tokio::test]
+async fn an_unreachable_database_is_caught_before_the_org_row_is_written() {
+    let (pools, url, _tmp) = registry().await;
+    let migrations = tempfile::tempdir().expect("migrations dir");
+    migrate_registry(&pools, &url, migrations.path()).await;
+
+    // `mode=ro` on a path that does not exist: sqlite will not create
+    // it, so this is genuinely unreachable. (Without a mode, rustango
+    // defaults to `rwc` and would create the file — see
+    // `preflight_live`.)
+    let missing = _tmp.path().join("nowhere").join("tenant.db");
+    let request = ProvisionRequest::database(
+        "unreachable",
+        format!("sqlite://{}?mode=ro", missing.display()),
+    );
+
+    let rec = Recorder::default();
+    let err = provision::provision_tenant(
+        &pools,
+        &url,
+        migrations.path(),
+        &request,
+        Some(&rec.observer()),
+    )
+    .await
+    .expect_err("an unreachable database must stop the run");
+
+    // The message names the endpoint and what to do, not a raw driver
+    // string.
+    let text = err.to_string();
+    assert!(
+        text.contains("tenant.db"),
+        "should name the endpoint: {text}"
+    );
+
+    assert_eq!(
+        rec.steps(),
+        vec![
+            "Validate:started",
+            "Validate:ok",
+            "CheckConnection:started",
+            "CheckConnection:failed",
+        ],
+        "the run must stop at the connection check: {:?}",
+        rec.steps()
+    );
+
+    // The whole point: nothing was registered.
+    let orgs = rustango::tenancy::Org::objects()
+        .fetch(&pools.registry_pool())
+        .await
+        .expect("fetch orgs");
+    assert!(
+        orgs.is_empty(),
+        "a failed connection check must leave no Org row: {orgs:?}"
     );
 }
 

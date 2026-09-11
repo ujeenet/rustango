@@ -120,6 +120,71 @@ impl<W: Write + Send> provision::ProvisionObserver for CreateTenantProgress<'_, 
     }
 }
 
+// ---------- test-tenant-connection ----------
+
+/// Reach a candidate tenant database and report what is wrong with it,
+/// without writing anything to the registry.
+///
+/// Takes no pools: the point is to answer "can I use this URL?" before
+/// there is a tenant, so it is deliberately independent of the registry
+/// the rest of the CLI is holding.
+pub(super) async fn test_tenant_connection<W: Write + Send>(
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError> {
+    const HELP: &str =
+        "test-tenant-connection <database-url> [--no-write-probe] [--timeout <secs>]";
+    reject_leading_flag(args, "test-tenant-connection", "database-url", HELP)?;
+
+    let mut iter = args.iter();
+    let url = iter.next().cloned().ok_or_else(|| {
+        TenancyError::Validation(
+            "test-tenant-connection requires a database URL positional argument".into(),
+        )
+    })?;
+
+    let mut opts = crate::tenancy::preflight::Preflight::default();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--no-write-probe" => opts.probe_writes = false,
+            "--timeout" => {
+                let v = next_value(&mut iter, "--timeout")?;
+                let secs: u64 = v.parse().map_err(|_| {
+                    TenancyError::Validation(format!(
+                        "--timeout must be a whole number of seconds, got `{v}`"
+                    ))
+                })?;
+                opts.timeout = std::time::Duration::from_secs(secs);
+            }
+            "--help" | "-h" => return Err(TenancyError::Validation(HELP.to_owned())),
+            other => {
+                return Err(TenancyError::Validation(format!(
+                    "test-tenant-connection: unknown argument `{other}`"
+                )));
+            }
+        }
+    }
+
+    match crate::tenancy::preflight::check(&url, &opts).await {
+        Ok(ok) => {
+            writeln!(w, "ok: reached {}", ok.endpoint)?;
+            if ok.writes_verified {
+                writeln!(w, "  this role can create tables — migrations will run")?;
+            } else {
+                writeln!(
+                    w,
+                    "  --no-write-probe: did NOT check whether this role can create tables"
+                )?;
+            }
+            Ok(())
+        }
+        // A `Validation` error rather than a driver one: nothing is
+        // broken in rustango, the URL the operator supplied is wrong,
+        // and the diagnosis already says what to change.
+        Err(d) => Err(TenancyError::Validation(d.to_string())),
+    }
+}
+
 /// `argv` → [`ProvisionRequest`]. The only place that knows
 /// `--no-migrate` exists: a negative flag is right for a command line
 /// and wrong for a struct field, so it is inverted on the way in.
@@ -150,6 +215,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionReque
         port: None,
         path_prefix: None,
         run_migrations: true,
+        preflight: crate::tenancy::preflight::Preflight::default(),
     };
     while let Some(flag) = iter.next() {
         match flag.as_str() {

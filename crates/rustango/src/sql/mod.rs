@@ -10,6 +10,9 @@ mod array;
 mod auto;
 mod backend;
 mod compiled;
+/// Turning a driver's connect failure into something an operator can
+/// act on — which host, which cause, what to change.
+pub mod connect_diagnosis;
 mod dialect;
 mod error;
 mod executor;
@@ -36,6 +39,7 @@ pub use backend::{
     AssignAutoPkPool, MyReturningRow, MysqlAutoIdSet, PgReturningRow, SqliteReturningRow,
 };
 pub use compiled::CompiledStatement;
+pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub use dialect::Dialect;
 pub use error::{is_mysql_dup_index_error, ExecError, SqlError};
 pub use geometry::{Point, SRID_WGS84};

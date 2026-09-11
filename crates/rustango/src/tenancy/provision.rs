@@ -15,11 +15,11 @@
 //!
 //! 1. [`Validate`](ProvisionStep::Validate) — slug, mode and backend
 //!    agree with each other and with this build.
-//! 2. [`CheckConnection`](ProvisionStep::CheckConnection) — **not
-//!    implemented yet** (#1319). It reports
-//!    [`Skipped`](StepStatus::Skipped) so the shape is visible in the
-//!    stream from the start, rather than appearing later and changing
-//!    what a watcher has to handle.
+//! 2. [`CheckConnection`](ProvisionStep::CheckConnection) — reach the
+//!    tenant's database and prove this role can create tables in it,
+//!    **before** anything is written. See [`super::preflight`].
+//!    Schema-mode skips it: those tenants live in the registry's own
+//!    database, which is already connected.
 //! 3. [`ProvisionStorage`](ProvisionStep::ProvisionStorage) —
 //!    `CREATE SCHEMA` for schema-mode. Deliberately before the row
 //!    lands, so a failed `INSERT` leaves no orphan schema.
@@ -48,6 +48,7 @@ use super::error::TenancyError;
 use super::migrate as tenant_migrate;
 use super::org::{BackendKind, Org, StorageMode};
 use super::pools::TenantPools;
+use super::preflight;
 
 /// Everything needed to stand up one tenant.
 ///
@@ -76,6 +77,10 @@ pub struct ProvisionRequest {
     pub path_prefix: Option<String>,
     /// Run the tenant's migrations once the row is in place.
     pub run_migrations: bool,
+    /// How hard to check the target database before writing anything.
+    /// Defaults to a full check including the write probe — see
+    /// [`preflight`] for why a bare `SELECT 1` is not enough.
+    pub preflight: preflight::Preflight,
 }
 
 impl ProvisionRequest {
@@ -93,6 +98,7 @@ impl ProvisionRequest {
             port: None,
             path_prefix: None,
             run_migrations: true,
+            preflight: preflight::Preflight::default(),
         }
     }
 }
@@ -102,8 +108,8 @@ impl ProvisionRequest {
 pub enum ProvisionStep {
     /// Slug is free; mode, backend and build agree.
     Validate,
-    /// Reach the target database before writing anything. Not
-    /// implemented yet — see #1319.
+    /// Reach the target database, and prove this role can create
+    /// tables in it, before anything is written.
     CheckConnection,
     /// `CREATE SCHEMA` for schema-mode. Nothing to do in database-mode.
     ProvisionStorage,
@@ -271,15 +277,11 @@ where
 
     // ---- 2. Check the connection ----
     //
-    // The step exists in the stream from day one even though it does
-    // nothing: a watcher written against today's events keeps working
-    // when #1319 fills it in, instead of suddenly meeting a stage it
-    // has never seen.
-    step(
-        observer,
-        ProvisionStep::CheckConnection,
-        StepStatus::Skipped("connection pre-flight is not implemented yet (#1319)".into()),
-    );
+    // Before anything is written. A database-mode URL that is wrong —
+    // typo'd host, wrong password, database not created yet — used to
+    // be discovered *after* the `Org` row landed, leaving a tenant the
+    // resolver matches in front of a database with no schema.
+    check_connection(request, observer).await?;
 
     let schema_name = schema_name_for(request);
 
@@ -350,6 +352,44 @@ where
         mode: request.mode,
         migrations,
     })
+}
+
+/// Reach the tenant's own database before anything is written.
+///
+/// Only database-mode has a separate database to reach; a schema-mode
+/// tenant lives in the registry's, which is already connected.
+async fn check_connection(
+    request: &ProvisionRequest,
+    observer: Option<&dyn ProvisionObserver>,
+) -> Result<(), TenancyError> {
+    let (Some(url), StorageMode::Database) = (&request.database_url, request.mode) else {
+        step(
+            observer,
+            ProvisionStep::CheckConnection,
+            StepStatus::Skipped("schema-mode tenants share the registry's database".into()),
+        );
+        return Ok(());
+    };
+
+    step(
+        observer,
+        ProvisionStep::CheckConnection,
+        StepStatus::Started,
+    );
+    match preflight::check(url, &request.preflight).await {
+        Ok(_) => {
+            step(observer, ProvisionStep::CheckConnection, StepStatus::Ok);
+            Ok(())
+        }
+        // `Validation`, not a driver error: nothing is broken in
+        // rustango, the URL the caller supplied is wrong, and the
+        // diagnosis already says what to change.
+        Err(d) => fail(
+            observer,
+            ProvisionStep::CheckConnection,
+            TenancyError::Validation(d.to_string()),
+        ),
+    }
 }
 
 /// The schema a schema-mode tenant lives in: whatever the request

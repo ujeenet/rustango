@@ -172,6 +172,7 @@ where
         "create-tenant" => {
             tenants::create_tenant(pools, registry_url, dir, &args[1..], writer).await
         }
+        "test-tenant-connection" => tenants::test_tenant_connection(&args[1..], writer).await,
         "drop-tenant" => tenants::drop_tenant(pools, &args[1..], writer).await,
         "purge-tenant" => tenants::purge_tenant(pools, &args[1..], writer).await,
         "list-tenants" => tenants::list_tenants(pools, writer).await,
@@ -348,6 +349,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       [--host-pattern <s>] [--database-url <s>] [--no-migrate]"
+    )?;
+    writeln!(
+        w,
+        "  test-tenant-connection <url> [--no-write-probe] [--timeout <secs>]"
     )?;
     writeln!(
         w,
