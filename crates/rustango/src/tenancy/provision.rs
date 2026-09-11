@@ -24,17 +24,34 @@
 //!    `CREATE SCHEMA` for schema-mode. Deliberately before the row
 //!    lands, so a failed `INSERT` leaves no orphan schema.
 //! 4. [`RegisterOrg`](ProvisionStep::RegisterOrg) — the `rustango_orgs`
-//!    row, after which the tenant resolves.
-//! 5. [`Migrate`](ProvisionStep::Migrate) — the tenant's own schema.
+//!    row, written **inactive**.
+//! 5. [`Migrate`](ProvisionStep::Migrate) — the tenant's own schema,
+//!    through [`tenant_migrate::migrate_one_tenant`]: this tenant, not
+//!    the whole active batch.
+//! 6. [`Activate`](ProvisionStep::Activate) — flip `active`, after
+//!    which the tenant resolves.
 //!
-//! ## What is deliberately still wrong here
+//! ## Inactive until ready, and what a failed run leaves
 //!
-//! Step 5 migrates **every active tenant**, then filters the report down
-//! to the one just created. That is what the verb has always done, and
-//! changing it is not this refactor's business — but it means creating
-//! tenant B does a pass over tenant A, and an unrelated tenant's broken
-//! chain shows up in the middle of an unrelated provisioning run. See
-//! the parent epic.
+//! The row goes in inactive and is activated last. That is the whole
+//! answer to "what does a half-provisioned tenant do": nothing, because
+//! the resolver filters on `active` and it is not set yet. There is no
+//! window in which a tenant resolves to a database with no schema.
+//!
+//! A run that fails at the migrate step therefore leaves an **inactive
+//! `Org` row plus whatever schema landed**. The row stays on purpose:
+//! an operator needs to see what was half-made, and rolling it back is
+//! not always possible once a schema or a database exists. Nothing
+//! routes to it in the meantime.
+//!
+//! This overloads `active`, which until now meant "suspended customer"
+//! and now also means "never finished provisioning". The two are
+//! identical to the resolver — do not serve — and the distinction that
+//! does matter is answerable from
+//! [`super::provision_store`], which is where the detail belongs. A
+//! dedicated `provisioning_state` column would be tidier and would cost
+//! a core-model change rippling through every hand-written test schema,
+//! for a distinction only the console needs.
 
 use std::path::Path;
 
@@ -113,10 +130,15 @@ pub enum ProvisionStep {
     CheckConnection,
     /// `CREATE SCHEMA` for schema-mode. Nothing to do in database-mode.
     ProvisionStorage,
-    /// Insert the `rustango_orgs` row.
+    /// Insert the `rustango_orgs` row — **inactive**, so nothing routes
+    /// to the tenant until its schema is in place.
     RegisterOrg,
     /// Apply the tenant's migrations.
     Migrate,
+    /// Flip `active`, after which the tenant resolves. Last on purpose:
+    /// it is what closes the window where a half-provisioned tenant
+    /// serves requests against a database with no schema.
+    Activate,
 }
 
 /// How a step went.
@@ -194,28 +216,229 @@ pub struct ProvisionOutcome {
     pub migrations: MigrationsOutcome,
 }
 
-fn emit(observer: Option<&dyn ProvisionObserver>, event: impl FnOnce() -> ProvisionEvent) {
-    if let Some(observer) = observer {
-        observer.on_event(event());
+/// Where a run reports: the caller's observer, and optionally the
+/// durable store.
+///
+/// ## Why migration events are buffered and step transitions are not
+///
+/// Step transitions happen between steps, with no lock held, so they
+/// are written as they occur — which is what makes a run readable from
+/// a second pod while it is still going.
+///
+/// Migration events are different: they arrive **synchronously from
+/// inside the migrate lock** (see [`crate::migrate::progress`]), where
+/// an `await` on a registry write would extend a lock every other
+/// migrating pod is queued behind. So they are buffered and flushed
+/// once the migrate step ends.
+///
+/// The cost is that a watcher sees `Migrate: started`, then a pause,
+/// then the whole per-migration log at once — rather than line by line.
+/// The alternative is a bounded channel and a drain task, which trades
+/// that for dropped events when the channel fills, and a `seq` with
+/// holes in it is no use as a replay log. Worth revisiting when the
+/// console (#1322) shows whether the pause actually matters.
+pub(super) struct Reporter<'a> {
+    observer: Option<&'a dyn ProvisionObserver>,
+    store: Option<RunStore<'a>>,
+}
+
+struct RunStore<'a> {
+    registry: &'a crate::sql::Pool,
+    run_id: i64,
+    /// Next `seq`. Dense and per-run, because `Last-Event-ID` counts
+    /// from it.
+    seq: std::sync::atomic::AtomicI64,
+    buffered: std::sync::Mutex<Vec<(String, String, String)>>,
+}
+
+impl<'a> Reporter<'a> {
+    pub(super) fn new(observer: Option<&'a dyn ProvisionObserver>) -> Self {
+        Self {
+            observer,
+            store: None,
+        }
+    }
+
+    /// Also persist to `run_id` in the registry.
+    pub(super) fn persisting(mut self, registry: &'a crate::sql::Pool, run_id: i64) -> Self {
+        self.store = Some(RunStore {
+            registry,
+            run_id,
+            seq: std::sync::atomic::AtomicI64::new(1),
+            buffered: std::sync::Mutex::new(Vec::new()),
+        });
+        self
+    }
+
+    fn notify(&self, event: ProvisionEvent) {
+        if let Some(observer) = self.observer {
+            observer.on_event(event);
+        }
+    }
+
+    /// Write one row now. Failures are logged, never propagated: the
+    /// record of a provisioning run must not be what fails it.
+    async fn write(&self, step: &str, status: &str, message: &str) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let seq = store.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = super::provision_store::append_event(
+            store.registry,
+            store.run_id,
+            seq,
+            step,
+            status,
+            message,
+        )
+        .await
+        {
+            tracing::warn!(
+                target: "rustango::tenancy::provision",
+                run_id = store.run_id,
+                error = %e,
+                "could not record a provisioning event; the run continues"
+            );
+        }
+    }
+
+    /// Queue a migration event for the next [`flush`](Self::flush).
+    fn buffer(&self, step: &str, status: &str, message: &str) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        if let Ok(mut buf) = store.buffered.lock() {
+            buf.push((step.to_owned(), status.to_owned(), message.to_owned()));
+        }
+    }
+
+    /// Write everything buffered, in order.
+    async fn flush(&self) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let pending = match store.buffered.lock() {
+            Ok(mut buf) => std::mem::take(&mut *buf),
+            Err(_) => return,
+        };
+        for (step, status, message) in pending {
+            self.write(&step, &status, &message).await;
+        }
     }
 }
 
-fn step(observer: Option<&dyn ProvisionObserver>, step: ProvisionStep, status: StepStatus) {
-    emit(observer, || ProvisionEvent::Step { step, status });
+impl Reporter<'_> {
+    /// Announce a step transition — to the observer, and to the store.
+    async fn step(&self, step: ProvisionStep, status: StepStatus) {
+        self.write(step.as_str(), status.as_str(), status.detail())
+            .await;
+        self.notify(ProvisionEvent::Step { step, status });
+    }
+
+    /// Report a step's failure, then hand back the error.
+    ///
+    /// Every failure path goes through this rather than a bare `?`, so
+    /// a watcher never sees a step stuck on `Started` with no
+    /// explanation — which is the state the whole event stream exists
+    /// to prevent.
+    async fn fail<T>(&self, at: ProvisionStep, e: TenancyError) -> Result<T, TenancyError> {
+        self.step(at, StepStatus::Failed(e.to_string())).await;
+        Err(e)
+    }
+
+    /// A migration event from the tenant's own run. Buffered rather
+    /// than written — see the type docs.
+    fn migration(&self, event: tenant_migrate::TenantMigrationEvent) {
+        self.buffer("migration", "info", &render_migration(&event));
+        self.notify(ProvisionEvent::Migration(event));
+    }
 }
 
-/// Report a step's failure to the observer, then return the error.
-///
-/// Every failure path goes through this rather than a bare `?`, so a
-/// watcher never sees a step stuck on `Started` with no explanation —
-/// which is the state the whole event stream exists to prevent.
-fn fail<T>(
-    observer: Option<&dyn ProvisionObserver>,
-    at: ProvisionStep,
-    e: TenancyError,
-) -> Result<T, TenancyError> {
-    step(observer, at, StepStatus::Failed(e.to_string()));
-    Err(e)
+impl ProvisionStep {
+    /// Stable wire name, stored in `rustango_provisioning_events.step`
+    /// and matched on by a console. Written out rather than derived
+    /// from `Debug`, which is not a stable format.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Validate => "validate",
+            Self::CheckConnection => "check_connection",
+            Self::ProvisionStorage => "provision_storage",
+            Self::RegisterOrg => "register_org",
+            Self::Migrate => "migrate",
+            Self::Activate => "activate",
+        }
+    }
+}
+
+impl StepStatus {
+    /// Stable wire name.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Ok => "ok",
+            Self::Skipped(_) => "skipped",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    /// The reason carried by `Skipped` / `Failed`, or empty.
+    #[must_use]
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Started | Self::Ok => "",
+            Self::Skipped(why) | Self::Failed(why) => why,
+        }
+    }
+}
+
+/// One line describing a migration event, for the stored log.
+fn render_migration(event: &tenant_migrate::TenantMigrationEvent) -> String {
+    use crate::migrate::{MigrationEvent as M, Outcome};
+    use tenant_migrate::{Chain, TenantMigrationEvent as E};
+
+    let chain_tag = |c: Chain| match c {
+        Chain::System => "system",
+        Chain::Project => "app",
+    };
+    match event {
+        E::Planned { tenants } => format!("migrating {tenants} tenant(s)"),
+        E::TenantStarted { slug, .. } => format!("tenant {slug}"),
+        E::TenantFinished {
+            slug,
+            applied,
+            error,
+            ..
+        } => match error {
+            Some(e) => format!("tenant {slug} failed: {e}"),
+            None => format!("tenant {slug}: {applied} migration(s)"),
+        },
+        E::Migration { chain, event, .. } => match event {
+            M::Planned { total } => format!("{}: {total} pending", chain_tag(*chain)),
+            M::Started { name, .. } => format!("{}/{name} started", chain_tag(*chain)),
+            M::Finished {
+                name,
+                outcome,
+                elapsed,
+                ..
+            } => {
+                let verb = match outcome {
+                    Outcome::Ran => "applied",
+                    Outcome::RanPartial { .. } => "applied (partial)",
+                    Outcome::Faked => "faked",
+                };
+                format!(
+                    "{verb} {}/{name} ({:.1}s)",
+                    chain_tag(*chain),
+                    elapsed.as_secs_f64()
+                )
+            }
+            M::Failed { name, error, .. } => {
+                format!("{}/{name} failed: {error}", chain_tag(*chain))
+            }
+        },
+    }
 }
 
 /// Stand up a tenant: validate, provision its storage, register it, and
@@ -242,8 +465,86 @@ pub async fn provision_tenant<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    let rep = Reporter::new(observer);
+    provision_reported(pools, registry_url, dir, request, &rep).await
+}
+
+/// [`provision_tenant`], with the run persisted to
+/// [`super::provision_store`] as it goes.
+///
+/// The durable half of the same call: step transitions are written as
+/// they happen, so a run started on one pod is readable — and
+/// replayable from the beginning — on another.
+///
+/// # Errors
+/// As [`provision_tenant`]. A failure to *record* the run is logged and
+/// never propagated: the bookkeeping must not be what fails a tenant
+/// creation.
+pub async fn provision_tenant_recorded<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    request: &ProvisionRequest,
+    observer: Option<&dyn ProvisionObserver>,
+    requested_by: Option<&str>,
+    idempotency_key: Option<&str>,
+) -> Result<(super::provision_store::ProvisioningRun, ProvisionOutcome), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use super::provision_store::{self as store, RunState};
+
+    let registry = pools.registry_pool();
+    let run = store::open_run(
+        &registry,
+        &request.slug,
+        request.mode.as_str(),
+        request.backend.as_str(),
+        request.database_url.as_deref(),
+        requested_by,
+        idempotency_key,
+    )
+    .await?;
+    let run_id = run.id.get().copied().unwrap_or_default();
+
+    let rep = Reporter::new(observer).persisting(&registry, run_id);
+    let result = provision_reported(pools, registry_url, dir, request, &rep).await;
+
+    // Whatever happened, close the run — including on the error paths,
+    // where a run left `running` forever is exactly the ambiguity this
+    // table exists to remove.
+    let (state, error) = match &result {
+        Ok(outcome) => match &outcome.migrations {
+            MigrationsOutcome::Failed(e) => (RunState::Failed, Some(e.clone())),
+            _ => (RunState::Succeeded, None),
+        },
+        Err(e) => (RunState::Failed, Some(e.to_string())),
+    };
+    if let Ok(outcome) = &result {
+        if let Err(e) = store::attach_org(&registry, run_id, outcome.org_id).await {
+            tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not attach org id to run");
+        }
+    }
+    if let Err(e) = store::finish_run(&registry, run_id, state, error.as_deref()).await {
+        tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not close provisioning run");
+    }
+
+    let refreshed = store::run_by_id(&registry, run_id).await?.unwrap_or(run);
+    result.map(|outcome| (refreshed, outcome))
+}
+
+async fn provision_reported<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    request: &ProvisionRequest,
+    rep: &Reporter<'_>,
+) -> Result<ProvisionOutcome, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     // ---- 1. Validate ----
-    step(observer, ProvisionStep::Validate, StepStatus::Started);
+    rep.step(ProvisionStep::Validate, StepStatus::Started).await;
     let registry = pools.registry_pool();
 
     // Reject a duplicate slug up front — it saves a partial-state mess
@@ -254,26 +555,28 @@ where
         .await
     {
         Ok(rows) => rows,
-        Err(e) => return fail(observer, ProvisionStep::Validate, e.into()),
+        Err(e) => return rep.fail(ProvisionStep::Validate, e.into()).await,
     };
     if !existing.is_empty() {
-        return fail(
-            observer,
-            ProvisionStep::Validate,
-            TenancyError::Validation(format!("tenant slug `{}` already exists", request.slug)),
-        );
+        return rep
+            .fail(
+                ProvisionStep::Validate,
+                TenancyError::Validation(format!("tenant slug `{}` already exists", request.slug)),
+            )
+            .await;
     }
 
     if request.mode == StorageMode::Database && request.database_url.is_none() {
-        return fail(
-            observer,
-            ProvisionStep::Validate,
-            TenancyError::Validation(
-                "create-tenant --mode database requires --database-url".into(),
-            ),
-        );
+        return rep
+            .fail(
+                ProvisionStep::Validate,
+                TenancyError::Validation(
+                    "create-tenant --mode database requires --database-url".into(),
+                ),
+            )
+            .await;
     }
-    step(observer, ProvisionStep::Validate, StepStatus::Ok);
+    rep.step(ProvisionStep::Validate, StepStatus::Ok).await;
 
     // ---- 2. Check the connection ----
     //
@@ -281,7 +584,7 @@ where
     // typo'd host, wrong password, database not created yet — used to
     // be discovered *after* the `Org` row landed, leaving a tenant the
     // resolver matches in front of a database with no schema.
-    check_connection(request, observer).await?;
+    check_connection(request, rep).await?;
 
     let schema_name = schema_name_for(request);
 
@@ -289,62 +592,73 @@ where
     //
     // Before the row, not after: a failed `INSERT` must not leave an
     // orphan schema behind. Idempotent via `IF NOT EXISTS`.
-    match request.mode {
-        StorageMode::Schema => {
-            step(
-                observer,
-                ProvisionStep::ProvisionStorage,
-                StepStatus::Started,
-            );
-            let schema = schema_name.as_deref().unwrap_or(&request.slug);
-            if let Err(e) = provision_schema(pools, schema).await {
-                return fail(observer, ProvisionStep::ProvisionStorage, e);
-            }
-            step(observer, ProvisionStep::ProvisionStorage, StepStatus::Ok);
-        }
-        StorageMode::Database => step(
-            observer,
-            ProvisionStep::ProvisionStorage,
-            StepStatus::Skipped("database-mode tenants bring their own database".into()),
-        ),
-    }
+    provision_storage(pools, request, schema_name.as_deref(), rep).await?;
 
     // ---- 4. Register the org ----
-    step(observer, ProvisionStep::RegisterOrg, StepStatus::Started);
+    rep.step(ProvisionStep::RegisterOrg, StepStatus::Started)
+        .await;
     let mut org = new_org_row(request, schema_name);
     if let Err(e) = org.insert_pool(&registry).await {
-        return fail(observer, ProvisionStep::RegisterOrg, e.into());
+        return rep.fail(ProvisionStep::RegisterOrg, e.into()).await;
     }
     // This pod sees the new tenant immediately; others converge on the
     // registry fingerprint (see `resolver::sync_org_generation`).
     super::invalidate_org_cache();
     let org_id = org.id.get().copied().unwrap_or_default();
-    step(observer, ProvisionStep::RegisterOrg, StepStatus::Ok);
-    emit(observer, || ProvisionEvent::Registered { org_id });
+    rep.step(ProvisionStep::RegisterOrg, StepStatus::Ok).await;
+    rep.notify(ProvisionEvent::Registered { org_id });
 
     // ---- 5. Migrate ----
     let migrations = if request.run_migrations {
-        step(observer, ProvisionStep::Migrate, StepStatus::Started);
-        let outcome = migrate_new_tenant(pools, registry_url, dir, &request.slug, observer).await?;
+        rep.step(ProvisionStep::Migrate, StepStatus::Started).await;
+        let outcome = migrate_new_tenant(pools, registry_url, dir, &org, rep).await;
+        // The migration events arrived synchronously while the migrate
+        // lock was held, so they were buffered. The lock is released by
+        // now — write them before reporting the step's own outcome, so
+        // the stored log reads in the order things happened.
+        rep.flush().await;
         match &outcome {
             MigrationsOutcome::Failed(e) => {
-                step(
-                    observer,
-                    ProvisionStep::Migrate,
-                    StepStatus::Failed(e.clone()),
-                );
+                rep.step(ProvisionStep::Migrate, StepStatus::Failed(e.clone()))
+                    .await;
             }
-            _ => step(observer, ProvisionStep::Migrate, StepStatus::Ok),
+            _ => rep.step(ProvisionStep::Migrate, StepStatus::Ok).await,
         }
         outcome
     } else {
-        step(
-            observer,
+        rep.step(
             ProvisionStep::Migrate,
             StepStatus::Skipped("caller asked for no migrations".into()),
-        );
+        )
+        .await;
         MigrationsOutcome::Skipped
     };
+
+    // ---- 6. Activate ----
+    //
+    // The row went in inactive (see `new_org_row`), so up to this point
+    // the tenant does not resolve. Flipping it last is what closes the
+    // window where a half-provisioned tenant serves requests against a
+    // database with no schema in it.
+    //
+    // A migration failure leaves it inactive, deliberately. The row
+    // stays — an operator needs to see what was half-made, and rolling
+    // it back is not always possible anyway once a schema or database
+    // exists — but nothing routes to it.
+    if matches!(migrations, MigrationsOutcome::Failed(_)) {
+        rep.step(
+            ProvisionStep::Activate,
+            StepStatus::Skipped("migrations failed; the tenant stays inactive".into()),
+        )
+        .await;
+    } else {
+        rep.step(ProvisionStep::Activate, StepStatus::Started).await;
+        if let Err(e) = activate(&registry, org_id).await {
+            return rep.fail(ProvisionStep::Activate, e).await;
+        }
+        super::invalidate_org_cache();
+        rep.step(ProvisionStep::Activate, StepStatus::Ok).await;
+    }
 
     Ok(ProvisionOutcome {
         org_id,
@@ -360,36 +674,68 @@ where
 /// tenant lives in the registry's, which is already connected.
 async fn check_connection(
     request: &ProvisionRequest,
-    observer: Option<&dyn ProvisionObserver>,
+    rep: &Reporter<'_>,
 ) -> Result<(), TenancyError> {
     let (Some(url), StorageMode::Database) = (&request.database_url, request.mode) else {
-        step(
-            observer,
+        rep.step(
             ProvisionStep::CheckConnection,
             StepStatus::Skipped("schema-mode tenants share the registry's database".into()),
-        );
+        )
+        .await;
         return Ok(());
     };
 
-    step(
-        observer,
-        ProvisionStep::CheckConnection,
-        StepStatus::Started,
-    );
+    rep.step(ProvisionStep::CheckConnection, StepStatus::Started)
+        .await;
     match preflight::check(url, &request.preflight).await {
         Ok(_) => {
-            step(observer, ProvisionStep::CheckConnection, StepStatus::Ok);
+            rep.step(ProvisionStep::CheckConnection, StepStatus::Ok)
+                .await;
             Ok(())
         }
         // `Validation`, not a driver error: nothing is broken in
         // rustango, the URL the caller supplied is wrong, and the
         // diagnosis already says what to change.
-        Err(d) => fail(
-            observer,
-            ProvisionStep::CheckConnection,
-            TenancyError::Validation(d.to_string()),
-        ),
+        Err(d) => {
+            rep.fail(
+                ProvisionStep::CheckConnection,
+                TenancyError::Validation(d.to_string()),
+            )
+            .await
+        }
     }
+}
+
+/// Make the tenant's storage, if it needs making.
+///
+/// Schema-mode gets a `CREATE SCHEMA`; database-mode brings its own
+/// database, already reached by the connection check. Deliberately
+/// before the `Org` row lands, so a failed `INSERT` leaves no orphan
+/// schema.
+async fn provision_storage<DB: Database>(
+    pools: &TenantPools<DB>,
+    request: &ProvisionRequest,
+    schema_name: Option<&str>,
+    rep: &Reporter<'_>,
+) -> Result<(), TenancyError> {
+    if request.mode != StorageMode::Schema {
+        rep.step(
+            ProvisionStep::ProvisionStorage,
+            StepStatus::Skipped("database-mode tenants bring their own database".into()),
+        )
+        .await;
+        return Ok(());
+    }
+
+    rep.step(ProvisionStep::ProvisionStorage, StepStatus::Started)
+        .await;
+    let schema = schema_name.unwrap_or(&request.slug);
+    if let Err(e) = provision_schema(pools, schema).await {
+        return rep.fail(ProvisionStep::ProvisionStorage, e).await;
+    }
+    rep.step(ProvisionStep::ProvisionStorage, StepStatus::Ok)
+        .await;
+    Ok(())
 }
 
 /// The schema a schema-mode tenant lives in: whatever the request
@@ -432,7 +778,11 @@ fn new_org_row(request: &ProvisionRequest, schema_name: Option<String>) -> Org {
         }),
         port: request.port,
         path_prefix: request.path_prefix.clone(),
-        active: true,
+        // Inactive until the schema is in place. The resolver already
+        // filters on this column, so it costs nothing on the hot path
+        // and is the only signal that keeps a half-provisioned tenant
+        // from serving. `ProvisionStep::Activate` flips it.
+        active: false,
         created_at: chrono::Utc::now(),
         brand_name: None,
         brand_tagline: None,
@@ -492,71 +842,57 @@ async fn provision_schema<DB: Database>(
     }
 }
 
-/// Migrate the tenant that was just created.
+/// Flip the tenant live.
+async fn activate(registry: &crate::sql::Pool, org_id: i64) -> Result<(), TenancyError> {
+    use crate::sql::UpdaterPool as _;
+    let updated = Org::objects()
+        .where_(Org::id.eq(org_id))
+        .update()
+        .set("active", true)
+        .execute_pool(registry)
+        .await?;
+    if updated == 0 {
+        return Err(TenancyError::Validation(format!(
+            "activate: no row updated for org {org_id} — was it deleted mid-provision?"
+        )));
+    }
+    Ok(())
+}
+
+/// Migrate the tenant that was just created — and only that one.
 ///
-/// Runs the whole active-tenant batch and then picks this slug out of
-/// the report — see the module docs for why that is more work than it
-/// should be.
+/// Goes through [`tenant_migrate::migrate_one_tenant`] rather than the
+/// batch, for two reasons. The tenant is still inactive at this point,
+/// so the batch (which filters `active = true`) would skip the very
+/// tenant it was called for. And the batch would migrate every *other*
+/// tenant too, so creating tenant B did a pass over tenant A and an
+/// unrelated broken chain surfaced mid-provision.
+///
+/// Never returns `Err`: by this point the `Org` row exists, and an
+/// error return would hide that from the caller. A failure comes back
+/// as [`MigrationsOutcome::Failed`].
 async fn migrate_new_tenant<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
-    slug: &str,
-    observer: Option<&dyn ProvisionObserver>,
-) -> Result<MigrationsOutcome, TenancyError>
+    org: &Org,
+    rep: &Reporter<'_>,
+) -> MigrationsOutcome
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    // Forward every migration event straight through, so a caller
+    // Forward every migration event to the reporter, so a caller
     // watching a provisioning run sees the same per-migration detail
-    // `manage migrate` prints (#1320).
-    let forward = observer.map(|observer| {
-        move |event: tenant_migrate::TenantMigrationEvent| {
-            observer.on_event(ProvisionEvent::Migration(event));
-        }
-    });
-    let forward = forward
-        .as_ref()
-        .map(|f| f as &dyn tenant_migrate::TenantMigrationObserver);
+    // `manage migrate` prints (#1320). The reporter decides what to do
+    // with them — the observer gets them now, the store when the lock
+    // is released.
+    let forward = move |event: tenant_migrate::TenantMigrationEvent| rep.migration(event);
+    let forward: Option<&dyn tenant_migrate::TenantMigrationObserver> = Some(&forward);
 
-    // v0.38 — on PG go through `migrate_tenants` (schema-mode +
-    // database-mode); on sqlite/mysql use `migrate_tenants_db`
-    // (database-mode only).
-    #[cfg(feature = "postgres")]
-    let report = {
-        if let Some(pg_pools) =
-            (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
-        {
-            match forward {
-                Some(o) => {
-                    tenant_migrate::migrate_tenants_with_progress(pg_pools, dir, registry_url, o)
-                        .await?
-                }
-                None => tenant_migrate::migrate_tenants(pg_pools, dir, registry_url).await?,
-            }
-        } else {
-            match forward {
-                Some(o) => {
-                    tenant_migrate::migrate_tenants_db_with_progress(pools, dir, registry_url, o)
-                        .await?
-                }
-                None => tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?,
-            }
-        }
-    };
-    #[cfg(not(feature = "postgres"))]
-    let report = match forward {
-        Some(o) => {
-            tenant_migrate::migrate_tenants_db_with_progress(pools, dir, registry_url, o).await?
-        }
-        None => tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?,
-    };
-
-    Ok(match report.tenants.into_iter().find(|t| t.slug == slug) {
-        Some(o) => match o.error {
-            Some(e) => MigrationsOutcome::Failed(e.to_string()),
-            None => MigrationsOutcome::Applied(o.applied),
-        },
-        None => MigrationsOutcome::NotMatched,
-    })
+    // One call, no backend branch: `migrate_one_tenant` owns the
+    // schema-mode-is-PG-only dispatch that used to be duplicated here.
+    match tenant_migrate::migrate_one_tenant(pools, org, dir, registry_url, forward).await {
+        Ok(applied) => MigrationsOutcome::Applied(applied),
+        Err(e) => MigrationsOutcome::Failed(e.to_string()),
+    }
 }

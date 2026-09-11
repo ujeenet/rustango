@@ -25,27 +25,13 @@ where
     // migrate-tenants` shows each migration as it lands instead of
     // sitting silent for the length of the run.
     let progress = CliProgress::new(w);
-
-    // v0.38 — on PG the legacy `migrate_tenants` handles both schema-
-    // mode and database-mode tenants; on non-PG we route through the
-    // generic `migrate_tenants_db` which is database-mode-only by
-    // design (schema-mode is PG-only by language).
-    #[cfg(feature = "postgres")]
-    let report = {
-        if let Some(pg_pools) =
-            (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
-        {
-            tenant_migrate::migrate_tenants_with_progress(pg_pools, dir, registry_url, &progress)
-                .await?
-        } else {
-            tenant_migrate::migrate_tenants_db_with_progress(pools, dir, registry_url, &progress)
-                .await?
-        }
-    };
-    #[cfg(not(feature = "postgres"))]
-    let report =
-        tenant_migrate::migrate_tenants_db_with_progress(pools, dir, registry_url, &progress)
-            .await?;
+    let report = tenant_migrate::migrate_tenants_dyn_with_progress(
+        pools,
+        dir,
+        registry_url,
+        Some(&progress),
+    )
+    .await?;
     let w = progress.into_inner();
     write_tenant_report(w, &report)
 }
@@ -332,27 +318,17 @@ where
         }
     }
 
-    // Tenant phase. Branch by backend: PG goes through the legacy
-    // `migrate_tenants` (handles schema-mode + database-mode);
-    // sqlite/mysql route through `migrate_tenants_db` (database-mode
-    // only — schema-mode is PG-only by language).
+    // Tenant phase, through the one dispatch seam — see
+    // `migrate_tenants_dyn_with_progress` for why this is not a
+    // backend branch written out here.
     let progress = CliProgress::new(w);
-    #[cfg(feature = "postgres")]
-    let report = {
-        if let Some(pg_pools) =
-            (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
-        {
-            tenant_migrate::migrate_tenants_with_progress(pg_pools, dir, registry_url, &progress)
-                .await?
-        } else {
-            tenant_migrate::migrate_tenants_db_with_progress(pools, dir, registry_url, &progress)
-                .await?
-        }
-    };
-    #[cfg(not(feature = "postgres"))]
-    let report =
-        tenant_migrate::migrate_tenants_db_with_progress(pools, dir, registry_url, &progress)
-            .await?;
+    let report = tenant_migrate::migrate_tenants_dyn_with_progress(
+        pools,
+        dir,
+        registry_url,
+        Some(&progress),
+    )
+    .await?;
     let w = progress.into_inner();
     write_tenant_report(w, &report)?;
     Ok(())
