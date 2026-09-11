@@ -128,9 +128,8 @@ reach every tenant, so this list is the console's access control.</p>
           <input type="password" id="password" name="password"
                  minlength="8" autocomplete="new-password"
                  placeholder="at least 8 characters">
-          <div class="field-helper">Or leave both blank and use
-          <em>Generate one</em> — the password is then shown once, here,
-          and never again.</div>
+          <div class="field-helper">Leave blank to have one generated
+          instead — it is then shown once, here, and never again.</div>
         </td>
       </tr>
       <tr>
@@ -142,9 +141,13 @@ reach every tenant, so this list is the console's access control.</p>
       </tr>
     </table>
   </fieldset>
+  {#- Both buttons submit and both create the operator; they differ
+      only in where the password comes from. The second therefore says
+      "Add", not "Generate one" — that read as a helper that would fill
+      the field in and leave you to press the real button. -#}
   <p class="form-actions">
     <button type="submit" class="btn btn-primary">Add operator</button>
-    <button type="submit" name="generate" value="on" class="btn btn-secondary">Generate one</button>
+    <button type="submit" name="generate" value="on" class="btn btn-secondary">Add with a generated password</button>
   </p>
 </form>
 {% else %}

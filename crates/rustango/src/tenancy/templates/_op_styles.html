@@ -162,6 +162,10 @@ code {
    page (#70). */
 form.edit-form { max-width: 720px; margin-bottom: var(--space-6); }
 form.edit-form + form.edit-form { margin-top: var(--space-6); }
+/* A form directly under a listing. `table` carries a top margin only,
+   and `.edit-form` a bottom one, so the fieldset's border landed flush
+   against the last row and read as another row of it. */
+table + form.edit-form { margin-top: var(--space-6); }
 fieldset.section {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -275,6 +279,7 @@ fieldset.section th {
 }
 th.actions-col, td.actions-col { text-align: right; white-space: nowrap; }
 fieldset.section input[type="text"],
+fieldset.section input[type="password"],
 fieldset.section input[type="number"],
 fieldset.section input[type="date"],
 fieldset.section input[type="datetime-local"],
@@ -291,6 +296,7 @@ fieldset.section select {
   color: var(--color-fg);
 }
 fieldset.section input[type="text"]:focus,
+fieldset.section input[type="password"]:focus,
 fieldset.section input[type="number"]:focus,
 fieldset.section textarea:focus {
   outline: none;
@@ -404,4 +410,20 @@ fieldset.section .brand-asset-preview {
 tr.reset-row { display: none; }
 tr.reset-row:target { display: table-row; }
 .inline-reset { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+/* The row sits outside `fieldset.section`, so it misses the shared
+   input styling and its fields rendered as raw browser defaults next
+   to everything else. */
+.inline-reset input[type="password"] {
+  padding: 0.4rem var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  background: var(--color-bg-input);
+  color: var(--color-fg);
+}
+.inline-reset input[type="password"]:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent-bg-soft);
+}
 </style>
