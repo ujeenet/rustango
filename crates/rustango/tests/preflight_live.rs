@@ -17,6 +17,50 @@ use rustango::tenancy::preflight::{self, Preflight};
 /// A port nothing is on. High and odd enough to be safe in CI.
 const DEAD_PORT: u16 = 59_417;
 
+/// Point a URL at [`DEAD_PORT`], whatever port it currently names.
+///
+/// The obvious version — `url.replace("5457", …)` — hardcodes whatever
+/// port the developer's local container happened to use, so in CI
+/// (where the URL says `:5432`) the replace silently does nothing and
+/// the "unreachable" test connects to a perfectly healthy database.
+/// That is not a test failing loudly; it is a test asserting the
+/// opposite of what it claims, and only the `expect_err` caught it.
+fn at_a_dead_port(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").expect("url has a scheme");
+    // Userinfo may contain `@` and `:`; the authority is what follows
+    // the LAST `@`, and the path starts at the first `/` after that.
+    let (userinfo, authority) = match rest.rsplit_once('@') {
+        Some((u, a)) => (format!("{u}@"), a),
+        None => (String::new(), rest),
+    };
+    let (hostport, tail) = match authority.find('/') {
+        Some(i) => (&authority[..i], &authority[i..]),
+        None => (authority, ""),
+    };
+    let host = hostport.rsplit_once(':').map_or(hostport, |(h, _)| h);
+    format!("{scheme}://{userinfo}{host}:{DEAD_PORT}{tail}")
+}
+
+#[test]
+fn the_dead_port_helper_rewrites_whatever_port_is_there() {
+    assert_eq!(
+        at_a_dead_port("postgres://u:p@localhost:5432/db"),
+        format!("postgres://u:p@localhost:{DEAD_PORT}/db")
+    );
+    // No port at all — one still has to be added, or the test would
+    // hit the backend's default and reach a real server.
+    assert_eq!(
+        at_a_dead_port("mysql://root@127.0.0.1/app"),
+        format!("mysql://root@127.0.0.1:{DEAD_PORT}/app")
+    );
+    // A password containing `@` must not be mistaken for the
+    // authority separator.
+    assert_eq!(
+        at_a_dead_port("postgres://u:p@ss@db.internal:5432/x"),
+        format!("postgres://u:p@ss@db.internal:{DEAD_PORT}/x")
+    );
+}
+
 // ---------------------------------------------------------------- SQLite
 
 #[cfg(feature = "sqlite")]
@@ -134,7 +178,7 @@ mod sqlite {
 
 #[cfg(feature = "postgres")]
 mod pg {
-    use super::{preflight, ConnectFault, Preflight, DEAD_PORT};
+    use super::{preflight, ConnectFault, Preflight};
 
     fn base() -> Option<String> {
         std::env::var("DATABASE_URL").ok()
@@ -178,7 +222,7 @@ mod pg {
             eprintln!("skipping: DATABASE_URL unset");
             return;
         };
-        let dead = url.replace("5457", &DEAD_PORT.to_string());
+        let dead = super::at_a_dead_port(&url);
         let err = preflight::check(&dead, &Preflight::default())
             .await
             .expect_err("nothing is listening there");
@@ -304,7 +348,7 @@ mod pg {
 
 #[cfg(feature = "mysql")]
 mod mysql {
-    use super::{preflight, ConnectFault, Preflight, DEAD_PORT};
+    use super::{preflight, ConnectFault, Preflight};
 
     fn base() -> Option<String> {
         std::env::var("MYSQL_TEST_URL").ok()
@@ -329,7 +373,7 @@ mod mysql {
             eprintln!("skipping: MYSQL_TEST_URL unset");
             return;
         };
-        let dead = url.replace("3408", &DEAD_PORT.to_string());
+        let dead = super::at_a_dead_port(&url);
         let err = preflight::check(&dead, &Preflight::default())
             .await
             .expect_err("nothing is listening there");
