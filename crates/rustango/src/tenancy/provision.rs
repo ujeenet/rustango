@@ -492,7 +492,7 @@ pub async fn provision_tenant_recorded<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    use super::provision_store::{self as store, RunState};
+    use super::provision_store as store;
 
     let registry = pools.registry_pool();
     let run = store::open_run(
@@ -507,6 +507,42 @@ where
     .await?;
     let run_id = run.id.get().copied().unwrap_or_default();
 
+    let outcome = provision_tenant_in_run(pools, registry_url, dir, request, observer, run_id)
+        .await
+        // A pre-row failure still closed the run inside
+        // `provision_tenant_in_run`; propagate the reason unchanged.
+        ?;
+    // Re-read so the caller sees the closed run, not the one that was
+    // handed back at `open_run` time.
+    let refreshed = store::run_by_id(&registry, run_id).await?.unwrap_or(run);
+    Ok((refreshed, outcome))
+}
+
+/// [`provision_tenant_recorded`] against a run somebody else already
+/// opened.
+///
+/// The inbound webhook needs this: it opens the run **synchronously**
+/// so the caller gets an id back and so the `idempotency_key` unique
+/// constraint fires where a response can carry it, then hands the slow
+/// part to a task. Without this entry point that task would open a
+/// *second* run for the same tenant.
+///
+/// # Errors
+/// As [`provision_tenant`]. The run is closed either way.
+pub async fn provision_tenant_in_run<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    request: &ProvisionRequest,
+    observer: Option<&dyn ProvisionObserver>,
+    run_id: i64,
+) -> Result<ProvisionOutcome, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use super::provision_store::{self as store, RunState};
+
+    let registry = pools.registry_pool();
     let rep = Reporter::new(observer).persisting(&registry, run_id);
     let result = provision_reported(pools, registry_url, dir, request, &rep).await;
 
@@ -529,8 +565,7 @@ where
         tracing::warn!(target: "rustango::tenancy::provision", error = %e, "could not close provisioning run");
     }
 
-    let refreshed = store::run_by_id(&registry, run_id).await?.unwrap_or(run);
-    result.map(|outcome| (refreshed, outcome))
+    result
 }
 
 async fn provision_reported<DB: Database>(
@@ -919,21 +954,31 @@ pub trait TenantProvisioner: Send + Sync {
         request: &'a ProvisionRequest,
         requested_by: Option<&'a str>,
         idempotency_key: Option<&'a str>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        (super::provision_store::ProvisioningRun, ProvisionOutcome),
-                        TenancyError,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    >;
+    ) -> BoxFuture<'a, (super::provision_store::ProvisioningRun, ProvisionOutcome)>;
+
+    /// Stand up a tenant into a run the caller already opened.
+    ///
+    /// The inbound webhook opens its run synchronously — so the
+    /// response can carry an id, and so the `idempotency_key` unique
+    /// constraint fires where an HTTP status can report it — and then
+    /// hands the slow part to a task. Without this the task would open
+    /// a *second* run for the same tenant.
+    fn provision_in_run<'a>(
+        &'a self,
+        run_id: i64,
+        request: &'a ProvisionRequest,
+    ) -> BoxFuture<'a, ProvisionOutcome>;
 
     /// The registry pool, so a caller can read runs and events back.
     fn registry(&self) -> crate::sql::Pool;
 }
+
+/// The boxed-future shape an object-safe async method has to return.
+///
+/// Spelled once: written out inline it is four lines of angle brackets
+/// per method, which buries what each one actually does.
+pub type BoxFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, TenancyError>> + Send + 'a>>;
 
 /// A [`TenantProvisioner`] over concrete pools.
 pub struct Provisioner<DB: Database> {
@@ -975,17 +1020,7 @@ where
         request: &'a ProvisionRequest,
         requested_by: Option<&'a str>,
         idempotency_key: Option<&'a str>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        (super::provision_store::ProvisioningRun, ProvisionOutcome),
-                        TenancyError,
-                    >,
-                > + Send
-                + 'a,
-        >,
-    > {
+    ) -> BoxFuture<'a, (super::provision_store::ProvisioningRun, ProvisionOutcome)> {
         Box::pin(async move {
             provision_tenant_recorded(
                 self.pools.as_ref(),
@@ -995,6 +1030,24 @@ where
                 None,
                 requested_by,
                 idempotency_key,
+            )
+            .await
+        })
+    }
+
+    fn provision_in_run<'a>(
+        &'a self,
+        run_id: i64,
+        request: &'a ProvisionRequest,
+    ) -> BoxFuture<'a, ProvisionOutcome> {
+        Box::pin(async move {
+            provision_tenant_in_run(
+                self.pools.as_ref(),
+                &self.registry_url,
+                &self.migrations_dir,
+                request,
+                None,
+                run_id,
             )
             .await
         })

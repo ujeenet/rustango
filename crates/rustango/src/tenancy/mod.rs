@@ -108,6 +108,13 @@ pub mod provision;
 /// Durable record of provisioning runs and their events, so a run
 /// survives a reconnect and is readable from a second pod.
 pub mod provision_store;
+/// Inbound webhook that creates a tenant from a billing event.
+///
+/// Gated on `webhook`, which is where HMAC verification lives: a
+/// tenancy deployment that does not expose this endpoint has no reason
+/// to compile signature machinery for it.
+#[cfg(feature = "webhook")]
+pub mod provision_webhook;
 mod resolver;
 mod resolver_cache;
 pub mod routes;
