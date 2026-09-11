@@ -505,6 +505,17 @@ jobs:
       - run: cargo test -p rustango --all-features --test mysql_live
       - run: cargo test -p rustango --features mysql --test explain_pool_mysql_live
       - run: cargo test -p rustango --features mysql --test bulk_upsert_mysql_live
+      # A second database for tenancy to provision *into*. The service
+      # grants `rustango` rights on `rustango_test` only, so the test
+      # cannot create this itself; and provisioning refuses a tenant
+      # pointed at the registry's own database, which is what the test
+      # used to do.
+      - name: Create the tenant database
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -uroot -prustango -e "
+            CREATE DATABASE IF NOT EXISTS rustango_tenant_test;
+            GRANT ALL PRIVILEGES ON rustango_tenant_test.* TO 'rustango'@'%';
+            FLUSH PRIVILEGES;"
       - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test permissions_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test database_pools_mysql_live

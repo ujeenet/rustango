@@ -12,7 +12,18 @@ use rustango::{core::Column as _, migrate as rmig};
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
+/// Joined with hyphens, because nearly every caller here is naming a
+/// tenant slug — and a slug is a hostname label, where `_` is illegal.
 fn unique(prefix: &str) -> String {
+    let n = UNIQ.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    format!("{prefix}-{pid}-{n}")
+}
+
+/// Underscore-joined, for the one caller naming a *migration* rather
+/// than a tenant: the name becomes a filename and a ledger entry, and
+/// migration names are conventionally `0001_snake_case`.
+fn unique_migration_name(prefix: &str) -> String {
     let n = UNIQ.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
     format!("{prefix}_{pid}_{n}")
@@ -211,7 +222,7 @@ async fn drop_tenant_soft_deletes_with_confirm() {
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
 
-    let slug = unique("drop_me");
+    let slug = unique("drop-me");
     drop_schema(&pool, &slug).await;
     let dir = fresh_dir("drop");
     let pools = TenantPools::new(pool.clone());
@@ -373,7 +384,7 @@ async fn migrate_tenants_runs_against_active_only() {
     .unwrap();
 
     // Ship a tenant migration in dir.
-    let mig_name = unique("0001_thing");
+    let mig_name = unique_migration_name("0001_thing");
     let mig = rmig::Migration {
         name: mig_name.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
