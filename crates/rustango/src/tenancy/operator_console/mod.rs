@@ -41,6 +41,7 @@
 /// Creating a tenant from the console, and watching it happen (#1322).
 /// Mounted only by [`router_with_provisioning`].
 mod hosts;
+mod operators;
 mod provisioning;
 
 use crate::core::Column as _;
@@ -532,7 +533,7 @@ fn router_inner(
     // Authenticated routes: the middleware injects an `Extension<auth::Operator>`.
     let mut private = Router::new()
         .route("/", get(welcome))
-        .route("/operators", get(operators_list))
+        .route("/operators", get(operators::operators_list))
         .route("/orgs", get(orgs_list))
         .route(
             "/change-password",
@@ -549,6 +550,22 @@ fn router_inner(
     }
     if edit_enabled {
         private = private
+            // Who can sign in to this console. Behind the same gate as
+            // the tenant writes: `edit_enabled` is named for its first
+            // use (dropping a cached pool when a `database_url`
+            // rotates) but is in practice the switch between the
+            // read-only `router()` and a console that can change
+            // things, and creating an operator is emphatically the
+            // latter.
+            .route("/operators", post(operators::operator_create))
+            .route(
+                "/operators/{id}/active",
+                get(op_post_only_redirect).post(operators::operator_set_active),
+            )
+            .route(
+                "/operators/{id}/reset-password",
+                get(op_post_only_redirect).post(operators::operator_reset_password),
+            )
             .route(
                 "/orgs/{slug}/edit",
                 get(org_edit_form).post(org_edit_submit),
@@ -736,6 +753,12 @@ async fn org_post_only_redirect(
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> Redirect {
     Redirect::to(&format!("/orgs/{slug}/edit"))
+}
+
+/// The same bounce for the operator routes, which are keyed by id
+/// rather than slug and land back on the one list page.
+async fn op_post_only_redirect() -> Redirect {
+    Redirect::to("/operators")
 }
 
 /// v0.27.10 (#68) — when an unauthenticated non-GET request
@@ -1101,39 +1124,6 @@ async fn welcome(
             .render("op_welcome.html", &ctx)
             .unwrap_or_default(),
     )
-}
-
-async fn operators_list(
-    State(state): State<ConsoleState>,
-    Extension(op): Extension<auth::Operator>,
-) -> Response<Body> {
-    let rows: Vec<auth::Operator> = match auth::Operator::objects().fetch(&state.registry).await {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
-    };
-    let view: Vec<_> = rows
-        .into_iter()
-        .map(|o| {
-            serde_json::json!({
-                "id": o.id.get().copied().unwrap_or_default(),
-                "username": o.username,
-                "active": o.active,
-                "created_at": o.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-            })
-        })
-        .collect();
-    let mut ctx = Context::new();
-    inject_op_brand(&mut ctx, &state.op_brand);
-    ctx.insert("section", "operators");
-    ctx.insert("operator_username", &op.username);
-    ctx.insert("operators", &view);
-    Html(
-        state
-            .tera
-            .render("op_operators.html", &ctx)
-            .unwrap_or_default(),
-    )
-    .into_response()
 }
 
 async fn orgs_list(
@@ -1620,18 +1610,33 @@ async fn emit_op_audit(
     verb: &str,
     extra: serde_json::Map<String, serde_json::Value>,
 ) {
-    let mut changes = serde_json::Map::new();
+    let mut changes = extra;
     changes.insert(
         "tenant_slug".into(),
         serde_json::Value::String(slug.to_owned()),
     );
+    emit_registry_audit(registry, "rustango_orgs", slug, operator_id, verb, changes).await;
+}
+
+/// The same trail for an action whose subject is not a tenant.
+///
+/// `emit_op_audit` above hardcodes `rustango_orgs`, which is right for
+/// everything that acts on a tenant and wrong for everything else —
+/// operator management acts on `rustango_operators`, and recording that
+/// under the orgs table would make the entity column a lie.
+async fn emit_registry_audit(
+    registry: &crate::sql::Pool,
+    entity_table: &'static str,
+    entity_pk: &str,
+    operator_id: i64,
+    verb: &str,
+    extra: serde_json::Map<String, serde_json::Value>,
+) {
+    let mut changes = extra;
     changes.insert("operator_id".into(), serde_json::json!(operator_id));
-    for (k, v) in extra {
-        changes.insert(k, v);
-    }
     let entry = crate::audit::PendingEntry {
-        entity_table: "rustango_orgs",
-        entity_pk: slug.to_owned(),
+        entity_table,
+        entity_pk: entity_pk.to_owned(),
         operation: crate::audit::AuditOp::Action,
         source: crate::audit::AuditSource::Custom(format!("operator:{operator_id}:{verb}")),
         changes: serde_json::Value::Object(changes),
@@ -1640,7 +1645,8 @@ async fn emit_op_audit(
         tracing::warn!(
             target: "rustango::tenancy::operator_console",
             error = %e,
-            slug = slug,
+            entity_table,
+            entity_pk,
             operator_id,
             verb,
             "failed to record operator action in audit log",

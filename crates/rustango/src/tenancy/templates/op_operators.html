@@ -2,28 +2,153 @@
 {% block title %}Operators — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
 <h1>Operators</h1>
-<p>Registry-scoped administrators. Mutations go through
-<code>cargo run -- create-operator &lt;username&gt; --password &lt;p&gt;</code>
-(routed through <code>rustango::manage::Cli</code>; substitute your
-project's binary name if different).</p>
+<p class="lead">Registry-scoped administrators. Every operator can
+reach every tenant, so this list is the console's access control.</p>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert alert-notice">{{ notice }}</div>
+{% endif %}
+
+{#- Shown once, on the response to the POST that made it. It never
+    travels through a redirect, so it stays out of the URL bar, the
+    history and the access logs. -#}
+{% if new_password %}
+<div class="alert alert-secret">
+  <strong>Password for <code>{{ new_username }}</code>:</strong>
+  <code class="secret-value">{{ new_password }}</code>
+  <div class="field-helper">Copy it now — it is not stored in
+  recoverable form and will not be shown again. Send it to
+  <code>{{ new_username }}</code> over something private, and have them
+  change it at <code>/change-password</code>.</div>
+</div>
+{% endif %}
+
 {% if operators | length == 0 %}
-  <div class="empty">No operators yet — create one with
-  <code>cargo run -- create-operator</code>.</div>
+  <div class="empty">No operators yet.</div>
 {% else %}
 <table>
   <thead>
-    <tr><th>ID</th><th>Username</th><th>Active</th><th>Created</th></tr>
+    <tr>
+      <th>ID</th>
+      <th>Username</th>
+      <th>Active</th>
+      <th>Created</th>
+      <th>Password set</th>
+      {% if manage_enabled %}<th class="actions-col">Actions</th>{% endif %}
+    </tr>
   </thead>
   <tbody>
     {% for op in operators %}
     <tr>
       <td>{{ op.id }}</td>
-      <td>{{ op.username }}</td>
-      <td>{% if op.active %}✓{% else %}—{% endif %}</td>
+      <td>
+        <strong>{{ op.username }}</strong>
+        {% if op.is_self %}<span class="badge badge-base">you</span>{% endif %}
+      </td>
+      <td>
+        {% if op.active %}
+        <span class="status-ok">✓</span>
+        {% else %}
+        <span class="status-skipped">—</span>
+        {% endif %}
+      </td>
       <td>{{ op.created_at }}</td>
+      <td>
+        {% if op.password_changed_at %}{{ op.password_changed_at }}
+        {% else %}<span class="empty">never rotated</span>{% endif %}
+      </td>
+      {% if manage_enabled %}
+      <td class="actions-col">
+        {#- Two deactivations are refused by the server, and saying so
+            here beats a button that only ever returns an error: your
+            own account (the next request would log you out) and the
+            last active one (nobody could sign in again). -#}
+        {% if op.active and op.is_self %}
+        <span class="field-helper">that's you</span>
+        {% elif op.active and op.last_active %}
+        <span class="field-helper">last active operator</span>
+        {% else %}
+        <form method="post" action="/operators/{{ op.id }}/active" class="inline-form">
+          {% if op.active %}
+          <button type="submit" class="btn btn-secondary"
+                  onclick="return confirm('Deactivate {{ op.username }}? They are signed out on their next request.');">Deactivate</button>
+          {% else %}
+          <input type="hidden" name="active" value="on">
+          <button type="submit" class="btn btn-secondary">Activate</button>
+          {% endif %}
+        </form>
+        {% endif %}
+        <a class="btn-row-action" href="#reset-{{ op.id }}">Reset password</a>
+      </td>
+      {% endif %}
     </tr>
+    {% if manage_enabled %}
+    <tr id="reset-{{ op.id }}" class="reset-row">
+      <td colspan="6">
+        <form method="post" action="/operators/{{ op.id }}/reset-password" class="inline-reset">
+          <strong>Reset <code>{{ op.username }}</code>:</strong>
+          <input type="password" name="password" placeholder="new password"
+                 minlength="8" autocomplete="new-password">
+          <input type="password" name="confirm_password" placeholder="confirm"
+                 minlength="8" autocomplete="new-password">
+          <button type="submit" class="btn btn-secondary">Set</button>
+          <button type="submit" name="generate" value="on" class="btn btn-secondary">Generate one</button>
+          <span class="field-helper">Signs
+          {% if op.is_self %}you{% else %}<code>{{ op.username }}</code>{% endif %}
+          out everywhere.</span>
+        </form>
+      </td>
+    </tr>
+    {% endif %}
     {% endfor %}
   </tbody>
 </table>
+{% endif %}
+
+{% if manage_enabled %}
+<form method="post" action="/operators" class="edit-form">
+  <fieldset class="section">
+    <legend>Add an operator</legend>
+    <table>
+      <tr>
+        <th><label for="username">username</label></th>
+        <td>
+          <input type="text" id="username" name="username" required
+                 maxlength="64" autocomplete="off" placeholder="jordan">
+          <div class="field-helper">Their login handle, unique across
+          the registry.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="password">password</label></th>
+        <td>
+          <input type="password" id="password" name="password"
+                 minlength="8" autocomplete="new-password"
+                 placeholder="at least 8 characters">
+          <div class="field-helper">Or leave both blank and use
+          <em>Generate one</em> — the password is then shown once, here,
+          and never again.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="confirm_password">confirm</label></th>
+        <td>
+          <input type="password" id="confirm_password" name="confirm_password"
+                 minlength="8" autocomplete="new-password">
+        </td>
+      </tr>
+    </table>
+  </fieldset>
+  <p class="form-actions">
+    <button type="submit" class="btn btn-primary">Add operator</button>
+    <button type="submit" name="generate" value="on" class="btn btn-secondary">Generate one</button>
+  </p>
+</form>
+{% else %}
+<p class="field-helper">This console is read-only, so operators cannot
+be changed here. Use <code>create-operator</code> on the command line.</p>
 {% endif %}
 {% endblock %}

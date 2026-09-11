@@ -385,4 +385,23 @@ fieldset.section .brand-asset-preview {
   color: var(--color-fg-muted);
 }
 .badge-base { border-color: var(--color-accent); color: var(--color-accent); }
+
+/* A one-time secret. Loud on purpose: it is shown once and the reader
+   has to notice before navigating away. */
+.alert-secret {
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent-bg-soft);
+}
+.secret-value {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 2px 8px;
+  font-size: 15px;
+  user-select: all; /* one click selects the whole password */
+}
+/* The per-operator reset form is revealed by its `:target`, so the
+   table is not three rows deep per operator until one is wanted. */
+tr.reset-row { display: none; }
+tr.reset-row:target { display: table-row; }
+.inline-reset { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 </style>
