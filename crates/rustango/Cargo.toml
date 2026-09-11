@@ -449,6 +449,12 @@ tenancy = [
     "storage",
     "uploads",
     "_async_trait",
+    # #1322 — the operator console streams a provisioning run as SSE, and
+    # the handler needs a `Stream` to hand axum. `async-stream` was
+    # already an optional dep pulled by `mcp` for the same reason; the
+    # console ships with tenancy, so tenancy is where it belongs now
+    # rather than being reachable only from an unrelated feature.
+    "dep:async-stream",
     "dep:argon2",
     "dep:cookie",
     # Deliberately the exact pair tenancy carried before #1208, not `_signing`

@@ -38,6 +38,10 @@
 //! let app = axum::Router::new().merge(console);
 //! ```
 
+/// Creating a tenant from the console, and watching it happen (#1322).
+/// Mounted only by [`router_with_provisioning`].
+mod provisioning;
+
 use crate::core::Column as _;
 // v0.34 — operator console no longer imports `PgPool` directly.
 // ConsoleState.registry is `crate::sql::Pool` (the backend-erasing
@@ -85,6 +89,13 @@ struct ConsoleState {
     /// When `None` (the legacy [`router`] entry point), edit routes
     /// aren't mounted and the console stays read-only.
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
+    /// When `Some`, the console can **create** tenants — see
+    /// [`provisioning`]. Separate from `pools` on purpose: creating a
+    /// tenant is strictly more dangerous than editing one (it takes a
+    /// database URL and connects to it), so a deployment opts into it
+    /// explicitly through [`router_with_provisioning`] rather than
+    /// getting it for free with the edit routes.
+    provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
     session_secret: Arc<SessionSecret>,
     tera: Arc<Tera>,
     /// Storage backend for per-tenant brand assets (logo, favicon).
@@ -235,10 +246,59 @@ impl OpBrand {
 /// `./var/brand` or `RUSTANGO_BRAND_STORAGE_DIR`). To plug in S3 /
 /// R2 / B2 / MinIO / a CDN-fronted bucket, use
 /// [`router_with_brand_storage`].
+/// [`router_with_pools`] plus the routes that **create** tenants:
+/// `GET`/`POST /orgs/new`, `POST /orgs/test-connection`, and the
+/// provisioning run view + SSE stream.
+///
+/// Separate constructor rather than a flag on the others, because
+/// creating a tenant is strictly more dangerous than editing one — it
+/// takes a database URL from a form and connects to it. A deployment
+/// says yes to that explicitly.
+///
+/// Build the provisioner with
+/// [`crate::tenancy::provision::Provisioner::new`], which closes over
+/// the pools, the registry URL and the migrations directory:
+///
+/// ```ignore
+/// let provisioner = tenancy::provision::Provisioner::new(
+///     pools.clone(), registry_url.clone(), "migrations",
+/// ).erased();
+/// let console = operator_console::router_with_provisioning(
+///     registry, pools.into_invalidator(), provisioner, secret,
+/// );
+/// ```
+///
+/// ## Authorization
+///
+/// Every authenticated operator who can reach the console can use
+/// these routes. That is not an oversight to work around with a
+/// wrapper — `Operator` has no permission model at all today, so a
+/// single flag for a single route would be half a system. Mounting is
+/// the boundary that currently means something. A real operator
+/// permission model is tracked separately.
+#[must_use]
+pub fn router_with_provisioning(
+    registry: impl Into<crate::sql::Pool>,
+    pools: Arc<dyn crate::tenancy::TenantPoolInvalidator>,
+    provisioner: Arc<dyn crate::tenancy::provision::TenantProvisioner>,
+    secret: SessionSecret,
+) -> Router {
+    router_inner(
+        registry.into(),
+        Some(pools),
+        Some(provisioner),
+        secret,
+        branding::default_brand_storage(),
+        None,
+        default_tenant_handoff_url(),
+    )
+}
+
 #[must_use]
 pub fn router(registry: impl Into<crate::sql::Pool>, secret: SessionSecret) -> Router {
     router_inner(
         registry.into(),
+        None,
         None,
         secret,
         branding::default_brand_storage(),
@@ -261,6 +321,7 @@ pub fn router_with_pools(
     router_inner(
         registry.into(),
         Some(pools),
+        None,
         secret,
         branding::default_brand_storage(),
         None,
@@ -300,6 +361,7 @@ pub fn router_with_impersonation(
     router_inner(
         registry.into(),
         Some(pools),
+        None,
         secret,
         brand_storage,
         Some(tenant_session_secret),
@@ -329,6 +391,7 @@ pub fn router_with_brand_storage(
     router_inner(
         registry.into(),
         pools,
+        None,
         secret,
         brand_storage,
         None,
@@ -348,6 +411,7 @@ fn default_tenant_handoff_url() -> String {
 fn router_inner(
     registry: crate::sql::Pool,
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
+    provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
     secret: SessionSecret,
     brand_storage: BoxedStorage,
     tenant_session_secret: Option<SessionSecret>,
@@ -393,13 +457,23 @@ fn router_inner(
             "op_sso_shared.html",
             include_str!("../templates/op_sso_shared.html"),
         ),
+        (
+            "op_orgs_new.html",
+            include_str!("../templates/op_orgs_new.html"),
+        ),
+        (
+            "op_provision_run.html",
+            include_str!("../templates/op_provision_run.html"),
+        ),
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
     let impersonation_enabled = tenant_session_secret.is_some() && pools.is_some();
+    let provisioning_enabled = provisioner.is_some();
     let state = ConsoleState {
         registry,
         pools,
+        provisioner,
         session_secret: Arc::new(secret),
         tera: Arc::new(tera),
         brand_storage,
@@ -448,6 +522,27 @@ fn router_inner(
             .route(
                 "/orgs/{slug}/edit/branding",
                 get(org_post_only_redirect).post(org_edit_branding),
+            );
+    }
+    if provisioning_enabled {
+        // #1322 — creating a tenant, and watching it happen. Mounted
+        // only when the deployment supplied a provisioner: this is the
+        // console's most dangerous capability (it takes a database URL
+        // and connects to it), so it is opt-in rather than riding on
+        // the edit routes.
+        private = private
+            .route(
+                "/orgs/new",
+                get(provisioning::org_new_form).post(provisioning::org_new_submit),
+            )
+            .route("/orgs/test-connection", post(provisioning::test_connection))
+            .route(
+                "/orgs/provision/{run_id}",
+                get(provisioning::provision_run_view),
+            )
+            .route(
+                "/orgs/provision/{run_id}/stream",
+                get(provisioning::provision_run_stream),
             );
     }
     if impersonation_enabled {
