@@ -170,7 +170,7 @@ n'importe quel montage :
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.44.0" },
+    "serverInfo": { "name": "rustango", "version": "0.57.0" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 
