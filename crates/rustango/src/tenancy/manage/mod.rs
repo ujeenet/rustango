@@ -45,6 +45,7 @@ mod agents;
 mod args;
 mod audit;
 mod hosts;
+mod inspect;
 mod menu;
 #[cfg(feature = "postgres")]
 mod migrate_storage;
@@ -252,6 +253,11 @@ where
         // #1344 — seeing who exists, and turning one off, were console-only.
         "list-operators" => operators::list_operators(pools, writer).await,
         "set-operator-active" => operators::set_operator_active(pools, &args[1..], writer).await,
+        // #1344 — the console renders all three; nothing printed them, so an
+        // incident question needed a browser or a SQL client.
+        "list-runs" => inspect::list_runs(pools, &args[1..], writer).await,
+        "show-run" => inspect::show_run(pools, &args[1..], writer).await,
+        "audit-log" => inspect::audit_log(pools, &args[1..], writer).await,
         "create-user" => users::create_user_cmd(pools, registry_url, &args[1..], writer).await,
         "create-superuser" => {
             users::create_superuser_cmd(pools, registry_url, &args[1..], writer).await
@@ -424,6 +430,28 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "  list-tenants         Print every Org row in the registry."
+    )?;
+    writeln!(w)?;
+    writeln!(w, "INSPECTION (read-only):")?;
+    writeln!(
+        w,
+        "  list-runs [--limit N] [--kind provision|migrate] [--state <s>]"
+    )?;
+    writeln!(
+        w,
+        "                       Recent provisioning and migration runs, newest first."
+    )?;
+    writeln!(
+        w,
+        "  show-run <id>        One run's header and every step it recorded."
+    )?;
+    writeln!(
+        w,
+        "  audit-log [--limit N] [--table <t>] [--pk <v>] [--operation <o>] [--source <s>]"
+    )?;
+    writeln!(
+        w,
+        "                       The registry's audit trail — who changed what, and when."
     )?;
     writeln!(w)?;
     writeln!(w, "HOSTNAMES:")?;
