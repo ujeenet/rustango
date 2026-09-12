@@ -6,12 +6,19 @@
 //! ships everything in one artifact. CI snapshot-tests the generated
 //! output by running `cargo check` on each template.
 
-use super::Template;
+use super::{Backend, Template};
 
 // ---------------- Cargo.toml ----------------
 
-pub fn cargo_toml(name: &str, template: Template, rustango_path: Option<&str>) -> String {
-    let rustango_dep = template.rustango_dep(rustango_path);
+pub fn cargo_toml(
+    name: &str,
+    template: Template,
+    backend: Backend,
+    features: &[String],
+    rustango_path: Option<&str>,
+) -> String {
+    let rustango_dep = template.rustango_dep(rustango_path, features);
+    let default_backend = backend.feature();
     format!(
         r#"[package]
 name = "{name}"
@@ -50,7 +57,7 @@ tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
 # one `cargo run` uses; switch with e.g.
 # `cargo run --no-default-features --features sqlite`.
 [features]
-default = ["postgres"]
+default = ["{default_backend}"]
 postgres = ["rustango/postgres"]
 sqlite = ["rustango/sqlite"]
 mysql = ["rustango/mysql"]
@@ -60,18 +67,28 @@ mysql = ["rustango/mysql"]
 
 // ---------------- .env.example ----------------
 
-pub fn env_example(name: &str) -> String {
+pub fn env_example(name: &str, backend: Backend) -> String {
+    let url = backend.compose_url(name);
+    // SQLite is a file in the bind mount, so there is no host to swap.
+    let host_note = match backend.service() {
+        Some(svc) => format!(
+            "# Defaults are Docker-friendly (`{svc}` host, `0.0.0.0` bind) so
+# `docker compose up -d` boots a working stack without any edits.
+# If you run cargo on the host instead of in the rust container,
+# change `{svc}` -> `localhost` in DATABASE_URL.
+#
+# Database name matches docker-compose.yml ({name}_dev)."
+        ),
+        None => "# SQLite needs no database server — the file lives beside the
+# project and is created on first `cargo run -- migrate`."
+            .to_owned(),
+    };
     format!(
         "# Copy this file to .env and edit the values for your environment.
 # `dotenvy::dotenv()` in src/main.rs picks it up at startup.
 #
-# Defaults are Docker-friendly (`postgres` host, `0.0.0.0` bind) so
-# `docker compose up -d` boots a working stack without any edits.
-# If you run cargo on the host instead of in the rust container,
-# change `postgres` -> `localhost` in DATABASE_URL.
-#
-# Database name matches docker-compose.yml's POSTGRES_DB ({name}_dev).
-DATABASE_URL=postgres://rustango:rustango@postgres:5432/{name}_dev
+{host_note}
+DATABASE_URL={url}
 RUSTANGO_BIND=0.0.0.0:8080
 
 # Tenancy template only — apex domain + signing secret.
@@ -140,10 +157,10 @@ components = [\"rustfmt\", \"clippy\", \"rust-analyzer\"]
 /// Users who prefer running cargo on the host can simply ignore the
 /// `rust` service and run the postgres service standalone with
 /// `docker compose up -d postgres`.
-pub fn docker_compose(name: &str) -> String {
-    format!(
-        r#"services:
-  postgres:
+pub fn docker_compose(name: &str, backend: Backend) -> String {
+    let db_service = match backend {
+        Backend::Postgres => format!(
+            r#"  postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: rustango
@@ -157,17 +174,53 @@ pub fn docker_compose(name: &str) -> String {
       timeout: 2s
       retries: 20
 
-  # Hot-reload Rust dev container. `cargo watch -x run` rebuilds and
-  # restarts the binary on every source edit. Skip this service (run
-  # cargo on the host) by passing `--no-deps postgres` to
-  # `docker compose up`, or remove it entirely if you don't want the
-  # Docker-based dev loop.
+"#
+        ),
+        Backend::Mysql => format!(
+            r#"  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: rustango
+      MYSQL_DATABASE: {name}_dev
+      MYSQL_USER: rustango
+      MYSQL_PASSWORD: rustango
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u rustango -prustango"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+"#
+        ),
+        // A file in the bind mount — nothing to run.
+        Backend::Sqlite => String::new(),
+    };
+    let (skip_hint, depends_on) = match backend.service() {
+        Some(svc) => (
+            format!(
+                "  # Skip it and run cargo on the host with\n  \
+                 # `docker compose up -d --no-deps {svc}`."
+            ),
+            format!("    depends_on:\n      {svc}:\n        condition: service_healthy\n"),
+        ),
+        // Nothing else to boot, so skipping it means not using compose.
+        None => (
+            "  # Skip it by running `cargo run` on the host — with SQLite\n  \
+             # there is nothing else compose needs to start."
+                .to_owned(),
+            String::new(),
+        ),
+    };
+    format!(
+        r#"services:
+{db_service}  # Hot-reload Rust dev container. `cargo watch -x run` rebuilds and
+  # restarts the binary on every source edit.
+{skip_hint}
   rust:
     build: .
-    depends_on:
-      postgres:
-        condition: service_healthy
-    env_file:
+{depends_on}    env_file:
       - .env
     volumes:
       - ./:/app
@@ -210,16 +263,48 @@ pub fn dockerfile() -> &'static str {
 
 // ---------------- README.md ----------------
 
-pub fn readme(name: &str, template: Template) -> String {
+pub fn readme(name: &str, template: Template, backend: Backend) -> String {
     let template_label = match template {
         Template::Api => "api (bare ORM + axum, no admin)",
         Template::Fullstack => "fullstack (ORM + auto-admin)",
         Template::Tenant => "tenant (multi-tenancy + operator console)",
     };
+    let backend_label = backend.feature();
+    let (up_line, host_path) = match backend.service() {
+        Some(svc) => (
+            format!("docker compose up -d                 # boots {svc} + rust + cargo-watch"),
+            format!(
+                r#"### B. Cargo on the host (Docker just for {svc})
+
+```sh
+cp .env.example .env                 # then change `{svc}` -> `localhost` in DATABASE_URL
+docker compose up -d {svc}        # only the DB
+cargo run -- migrate                 # apply pending migrations
+cargo run                            # boot the HTTP server
+cargo run -- --help                  # full verb list (makemigrations, startapp, etc.)
+```"#
+            ),
+        ),
+        None => (
+            "docker compose up -d                 # boots rust + cargo-watch".to_owned(),
+            r#"### B. Cargo on the host (no Docker at all)
+
+SQLite is a file next to the project, so nothing else has to be running.
+
+```sh
+cp .env.example .env
+cargo run -- migrate                 # creates the database file and applies migrations
+cargo run                            # boot the HTTP server
+cargo run -- --help                  # full verb list (makemigrations, startapp, etc.)
+```"#
+                .to_owned(),
+        ),
+    };
     format!(
         r#"# {name}
 
-Generated with `cargo rustango new {name}` — template `{template_label}`.
+Generated with `cargo rustango new {name}` — template `{template_label}`,
+backend `{backend_label}`.
 
 ## Run locally — two paths
 
@@ -227,7 +312,7 @@ Generated with `cargo rustango new {name}` — template `{template_label}`.
 
 ```sh
 cp .env.example .env
-docker compose up -d                 # boots postgres + rust + cargo-watch
+{up_line}
 docker compose run --rm rust cargo run -- migrate
 # server lives at http://localhost:8080 — edits to src/ trigger rebuild
 ```
@@ -237,15 +322,7 @@ source tree. Three named volumes preserve incremental build state
 across container restarts so a fresh `up` doesn't recompile from
 scratch.
 
-### B. Cargo on the host (Docker just for postgres)
-
-```sh
-cp .env.example .env                 # then change `postgres` -> `localhost` in DATABASE_URL
-docker compose up -d postgres        # only the DB
-cargo run -- migrate                 # apply pending migrations
-cargo run                            # boot the HTTP server
-cargo run -- --help                  # full verb list (makemigrations, startapp, etc.)
-```
+{host_path}
 
 Either way: `cargo run` (no args) is `runserver`. Every other
 Django-style verb flows through the same binary via
@@ -554,7 +631,8 @@ pub fn api() -> Router<()> {
 /// `config/default.toml` — shared values that don't depend on tier.
 /// Intentionally sparse — every section is optional and defaults to
 /// the section's `Default` impl. Tier files override here.
-pub fn config_default_toml(name: &str) -> String {
+pub fn config_default_toml(name: &str, backend: Backend) -> String {
+    let example_url = backend.host_url(name);
     format!(
         r##"# {name} — shared defaults across every tier
 # (`config/default.toml` is loaded first; `config/<RUSTANGO_ENV>_settings.toml`
@@ -562,7 +640,7 @@ pub fn config_default_toml(name: &str) -> String {
 # what you need.
 
 # [database]
-# url           = "postgres://localhost/{name}"
+# url           = "{example_url}"
 # pool_min_size = 2
 # pool_max_size = 20
 
@@ -620,19 +698,18 @@ pub fn config_default_toml(name: &str) -> String {
 /// short JWT TTLs (so token-rotation bugs surface early), no HSTS
 /// (so http→https rebinds don't lock the browser), debug-friendly
 /// settings.
-pub fn config_dev_settings_toml(name: &str) -> String {
+pub fn config_dev_settings_toml(name: &str, backend: Backend) -> String {
+    let url = backend.host_url(name);
     format!(
         r##"# {name} — local development tier
 # Loaded when RUSTANGO_ENV=dev (the default when unset).
 
 [database]
-# Matches the credentials in the generated docker-compose.yml and
-# .env.example. These three used to disagree — dev_settings said
-# postgres:postgres@localhost while compose created rustango:rustango, so the
-# first `cargo run -- migrate` failed to authenticate (#1211). Host is
-# `localhost` (not the compose service name) because this tier is for running
-# the app on the host against the containerised database.
-url = "postgres://rustango:rustango@localhost:5432/{name}_dev"
+# Matches docker-compose.yml and .env.example. The three used to
+# disagree and the first `cargo run -- migrate` failed to
+# authenticate (#1211). Host is `localhost`, not the compose service
+# name: this tier runs the app on the host against the container.
+url = "{url}"
 
 [server]
 bind = "127.0.0.1:8080"
@@ -652,7 +729,12 @@ tagline = "(dev)"
 
 /// `config/staging_settings.toml` — production-like but pointed at
 /// a separate database, with shorter retention.
-pub fn config_staging_settings_toml(name: &str) -> String {
+pub fn config_staging_settings_toml(name: &str, backend: Backend) -> String {
+    let staging_url = match backend {
+        Backend::Postgres => format!("postgres://staging-host/{name}_staging"),
+        Backend::Mysql => format!("mysql://staging-host/{name}_staging"),
+        Backend::Sqlite => format!("sqlite://./{name}_staging.db?mode=rwc"),
+    };
     format!(
         r##"# {name} — staging tier
 # Loaded when RUSTANGO_ENV=staging. Production-shape security
@@ -660,7 +742,7 @@ pub fn config_staging_settings_toml(name: &str) -> String {
 # so QA volume doesn't bleed into prod analytics.
 
 # [database]
-# url = "postgres://staging-host/{name}_staging"
+# url = "{staging_url}"
 
 [server]
 bind = "0.0.0.0:8080"
