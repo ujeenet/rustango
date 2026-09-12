@@ -99,6 +99,9 @@ mod pools;
 /// Who a request is acting as, whatever authenticated it (session cookie,
 /// Bearer access token, MCP agent token).
 pub mod principal;
+/// Standing up a tenant — the steps the `create-tenant` verb runs,
+/// callable from anything that is not a terminal.
+pub mod provision;
 mod resolver;
 mod resolver_cache;
 pub mod routes;
