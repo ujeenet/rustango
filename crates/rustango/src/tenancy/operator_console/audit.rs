@@ -32,11 +32,7 @@ use serde::Deserialize;
 use tera::Context;
 
 use super::super::auth;
-use super::{inject_op_brand, render, ConsoleState};
-
-/// A screenful. The table grows with every console action, so the page
-/// pages rather than pretending the history is small.
-const PAGE_SIZE: i64 = 50;
+use super::{inject_op_brand, render, ConsoleState, Paged};
 
 #[derive(Deserialize)]
 pub(super) struct AuditQuery {
@@ -55,17 +51,6 @@ pub(super) async fn audit_list(
     Extension(op): Extension<auth::Operator>,
     Query(q): Query<AuditQuery>,
 ) -> Response<Body> {
-    // 1-based in the URL, 0-based in the query: a `?page=0` or a
-    // negative should read as the first page rather than as an offset
-    // the database has to reject.
-    //
-    // Saturating, not plain arithmetic: `?page=1000000000000000000`
-    // parses into an `i64` happily and then overflows when multiplied,
-    // which panicked the worker in debug and wrapped to a negative
-    // offset in release. Clamped, an absurd page is simply an empty one.
-    let page = q.page.unwrap_or(1).max(1);
-    let offset = page.saturating_sub(1).saturating_mul(PAGE_SIZE);
-
     let filter = crate::audit::AuditFilter {
         entity_table: blank_to_none(q.entity_table.as_deref()),
         entity_pk: blank_to_none(q.entity_pk.as_deref()),
@@ -73,10 +58,22 @@ pub(super) async fn audit_list(
         source: None,
     };
 
-    // One extra row, so "is there a next page?" is answered without a
-    // second COUNT over a table that only grows.
-    let mut entries =
-        match crate::audit::list(&state.registry, &filter, PAGE_SIZE + 1, offset).await {
+    // Counted through the same filter, or page 2 of a filtered view
+    // would be sized by the unfiltered total.
+    let total = match crate::audit::count(&state.registry, &filter).await {
+        Ok(n) => n,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not count the audit log: {e}"),
+            )
+                .into_response();
+        }
+    };
+    let paged = Paged::from_total(total, q.page);
+
+    let entries =
+        match crate::audit::list(&state.registry, &filter, paged.limit, paged.offset).await {
             Ok(e) => e,
             Err(e) => {
                 return (
@@ -86,9 +83,6 @@ pub(super) async fn audit_list(
                     .into_response();
             }
         };
-    let page_len = usize::try_from(PAGE_SIZE).unwrap_or(usize::MAX);
-    let has_next = entries.len() > page_len;
-    entries.truncate(page_len);
 
     let view: Vec<_> = entries
         .iter()
@@ -116,12 +110,10 @@ pub(super) async fn audit_list(
     ctx.insert("section", "audit");
     ctx.insert("operator_username", &op.username);
     ctx.insert("entries", &view);
-    ctx.insert("page", &page);
-    ctx.insert("has_next", &has_next);
     ctx.insert("filter_entity_table", &q.entity_table.unwrap_or_default());
     ctx.insert("filter_entity_pk", &q.entity_pk.unwrap_or_default());
     ctx.insert("filter_operation", &q.operation.unwrap_or_default());
-    ctx.insert("query_suffix", &filter_suffix(&filter));
+    paged.inject(&mut ctx, "/audit", &filter_suffix(&filter));
 
     render(&state, "op_audit.html", &ctx)
 }

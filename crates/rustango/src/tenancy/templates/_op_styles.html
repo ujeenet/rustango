@@ -466,4 +466,33 @@ tr.run-error td { border-top: 0; padding-top: 0; font-size: 13px; }
 /* A slug can be 63 characters. Without this it sets the column width
    for every other row and pushes the table past the viewport. */
 td.wrap-anywhere { overflow-wrap: anywhere; }
+
+/* Shared pager (`_op_pager.html`). */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1, 4px);
+  align-items: center;
+  margin-top: var(--space-4);
+  font-size: 13px;
+}
+.pager-page, .pager-step {
+  padding: 3px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  text-decoration: none;
+}
+.pager-page:hover, .pager-step:hover { border-color: var(--color-accent); }
+.pager-current {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #fff;
+  font-weight: var(--font-weight-bold);
+}
+.pager-disabled { color: var(--color-fg-muted); border-color: transparent; }
+.pager-gap { padding: 3px 2px; color: var(--color-fg-muted); }
+/* Beside the links, not pushed right: the floating theme toggle sits
+   in that corner and covered it. */
+.pager-total { margin-left: var(--space-3); color: var(--color-fg-muted); }
 </style>

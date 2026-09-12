@@ -61,15 +61,5 @@ somebody finishes or removes it.</p>
 </table>
 {% endif %}
 
-{% if page > 1 or has_next %}
-<p class="form-actions">
-  {% if page > 1 %}
-  <a class="btn btn-secondary" href="/orgs/provision?page={{ page - 1 }}">← Newer</a>
-  {% endif %}
-  {% if has_next %}
-  <a class="btn btn-secondary" href="/orgs/provision?page={{ page + 1 }}">Older →</a>
-  {% endif %}
-  <span class="field-helper">page {{ page }}</span>
-</p>
-{% endif %}
+{% include "_op_pager.html" %}
 {% endblock %}

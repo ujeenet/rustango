@@ -764,12 +764,31 @@ async fn the_run_index_shows_why_a_run_failed() {
     }
 }
 
-/// Paging past the end must not be a dead end. The links used to sit
-/// inside the non-empty branch, so an empty page offered no way back
-/// and only a URL edit escaped it.
+/// `Paginator::get_page` clamps, so page 3 of a one-page list renders
+/// page 1 rather than stranding the operator on an empty page.
 #[tokio::test]
-async fn an_empty_run_page_still_offers_a_way_back() {
+async fn a_run_page_past_the_end_clamps_to_real_data() {
     let b = boot().await;
+    let slug = unique("clamped");
+    let tenant_db = b._tmp.path().join("clamped.db");
+    let form = format!(
+        "slug={slug}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
+    );
+    b.app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/orgs/new")
+                .header("cookie", &b.cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
     let html = body_of(
         b.app
             .clone()
@@ -785,8 +804,8 @@ async fn an_empty_run_page_still_offers_a_way_back() {
     )
     .await;
     assert!(
-        html.contains("/orgs/provision?page=2"),
-        "an empty page past the end must link back: {html}"
+        html.contains(&slug),
+        "should clamp to the page that has the run: {html}"
     );
     assert!(
         !html.contains("No tenant has been provisioned"),

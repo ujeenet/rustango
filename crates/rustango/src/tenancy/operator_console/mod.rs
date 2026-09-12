@@ -464,6 +464,10 @@ fn router_inner(
             include_str!("../templates/_op_styles.html"),
         ),
         (
+            "_op_pager.html",
+            include_str!("../templates/_op_pager.html"),
+        ),
+        (
             "_theme_toggle.html",
             include_str!("../../admin/templates/_theme_toggle.html"),
         ),
@@ -656,6 +660,136 @@ fn router_inner(
 /// Stamp the operator-console branding fields onto every render
 /// context. Centralizing the keys keeps op_layout.html and op_login.html
 /// in sync without each handler remembering the four template names.
+/// A screenful, for every list the console renders.
+///
+/// One number rather than one per page, so a deployment with thousands
+/// of tenants and one with three behave the same way and nobody has to
+/// remember which list was the unbounded one.
+pub(super) const PAGE_SIZE: usize = 50;
+
+/// One page of a console list.
+///
+/// A thin adapter over [`crate::pagination::Paginator`] — the
+/// framework's own page-number paginator, which is built for exactly
+/// this (server-rendered list views: `offset()`, `limit()`, and an
+/// elided `1 … 7 8 9 … 42` range). This type only counts the rows,
+/// hands the paginator the number, and flattens the result into
+/// template context.
+///
+/// Shared rather than written per view because the arithmetic has a
+/// trap in it: `?page=<huge>` parses into an `i64` and then overflows a
+/// naive `(page - 1) * size`, which panicked a worker thread in debug
+/// and wrapped to a negative offset in release. `Paginator::get_page`
+/// clamps instead, so no list view can reintroduce that and none can
+/// disagree about what page 1 means.
+pub(super) struct Paged {
+    pub(super) offset: i64,
+    pub(super) limit: i64,
+    number: usize,
+    total: usize,
+    num_pages: usize,
+    has_previous: bool,
+    has_next: bool,
+    marks: Vec<serde_json::Value>,
+}
+
+impl Paged {
+    /// From a total the caller already knows — a filtered count, say.
+    pub(super) fn from_total(total: i64, requested: Option<i64>) -> Self {
+        let total = usize::try_from(total).unwrap_or(0);
+        let paginator = crate::pagination::Paginator::new(total, PAGE_SIZE);
+        // `get_page` clamps rather than erroring: a page number out of
+        // range is a stale link, not something to show a 500 for.
+        let page = paginator.get_page(requested.unwrap_or(1));
+        let marks = paginator
+            .get_elided_page_range(page.number, 3, 2)
+            .into_iter()
+            .map(|mark| match mark {
+                crate::pagination::PageMark::Number(n) => serde_json::json!({"number": n}),
+                crate::pagination::PageMark::Ellipsis => serde_json::json!({"ellipsis": true}),
+            })
+            .collect();
+        Self {
+            offset: i64::try_from(page.offset()).unwrap_or(i64::MAX),
+            limit: i64::try_from(page.limit()).unwrap_or(i64::MAX),
+            number: page.number,
+            total,
+            num_pages: paginator.num_pages(),
+            has_previous: page.has_previous(),
+            has_next: page.has_next(),
+            marks,
+        }
+    }
+
+    /// Counting the model's rows first, for the lists with no filter.
+    pub(super) async fn of_model(
+        pool: &crate::sql::Pool,
+        model: &'static crate::core::ModelSchema,
+        requested: Option<i64>,
+    ) -> Result<Self, crate::sql::ExecError> {
+        let total = count_where(pool, model, crate::core::WhereExpr::default()).await?;
+        Ok(Self::from_total(total, requested))
+    }
+
+    /// What `_op_pager.html` needs.
+    ///
+    /// Key names match `template_views::ListView`'s so one partial
+    /// renders both. `base` is the path the links point at; `suffix`
+    /// carries active filters so paging does not drop them.
+    pub(super) fn inject(&self, ctx: &mut Context, base: &str, suffix: &str) {
+        ctx.insert("page", &self.number);
+        ctx.insert("total_pages", &self.num_pages);
+        ctx.insert("total", &self.total);
+        ctx.insert("has_prev", &self.has_previous);
+        ctx.insert("has_next", &self.has_next);
+        ctx.insert("page_marks", &self.marks);
+        ctx.insert("pager_base", base);
+        ctx.insert("query_suffix", suffix);
+    }
+}
+
+/// Which nav entry to highlight for a path.
+///
+/// Only the generic-view path needs this; the hand-written handlers
+/// set `section` themselves.
+#[cfg(feature = "template_views")]
+fn nav_section(path: &str) -> &'static str {
+    match path.split('/').nth(1).unwrap_or("") {
+        "orgs" => "orgs",
+        "operators" => "operators",
+        "audit" => "audit",
+        "sso-shared" => "sso",
+        "change-password" => "change_password",
+        _ => "home",
+    }
+}
+
+/// `SELECT COUNT(*)` over one model, optionally filtered.
+///
+/// Separate from [`Paged`] because a list view sometimes needs a count
+/// that is *not* its page count — the operator list pages its rows but
+/// still has to know how many operators are active in total, which a
+/// page of rows cannot tell it.
+pub(super) async fn count_where(
+    pool: &crate::sql::Pool,
+    model: &'static crate::core::ModelSchema,
+    where_clause: crate::core::WhereExpr,
+) -> Result<i64, crate::sql::ExecError> {
+    let count = crate::core::CountQuery {
+        model,
+        where_clause,
+        search: None,
+    };
+    crate::sql::count_rows_pool(pool, &count).await
+}
+
+/// The `?page=` parameter, for the list views that take nothing else.
+#[derive(Deserialize)]
+pub(super) struct PageQuery {
+    #[serde(default)]
+    pub(super) page: Option<i64>,
+}
+
 /// Render, or say why not.
 ///
 /// The console's older handlers use `.unwrap_or_default()`, which turns
@@ -748,6 +882,21 @@ async fn require_session(
                 if payload.iat < ts.timestamp() {
                     return redirect_to_login(&safe_next).into_response();
                 }
+            }
+            // The chrome `op_layout.html` needs, for any generic view
+            // an app mounts here: those build their context from the
+            // model and know nothing about this layout. Gated because
+            // `tenancy` does not depend on `template_views`.
+            #[cfg(feature = "template_views")]
+            {
+                let mut chrome = Context::new();
+                inject_op_brand(&mut chrome, &state.op_brand);
+                chrome.insert("operator_username", &op.username);
+                chrome.insert("section", &nav_section(uri.path()));
+                chrome.insert("edit_enabled", &state.pools.is_some());
+                chrome.insert("provisioning_enabled", &state.provisioner.is_some());
+                req.extensions_mut()
+                    .insert(crate::template_views::ExtraContext(chrome));
             }
             req.extensions_mut().insert(op);
             next.run(req).await
@@ -1144,8 +1293,24 @@ async fn welcome(
 async fn orgs_list(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
+    Query(q): Query<PageQuery>,
 ) -> Response<Body> {
-    let rows: Vec<super::Org> = match super::Org::objects().fetch(&state.registry).await {
+    // Paged: this fetched every tenant, which is fine for the three a
+    // demo has and not for the thousands a real registry holds.
+    // Ordered so the page boundaries are stable between requests — an
+    // unordered `LIMIT` may hand back the same row on two pages.
+    use crate::core::Model as _;
+    let paged = match Paged::of_model(&state.registry, super::Org::SCHEMA, q.page).await {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    let rows: Vec<super::Org> = match super::Org::objects()
+        .order_by(&[("slug", false)])
+        .limit(paged.limit)
+        .offset(paged.offset)
+        .fetch(&state.registry)
+        .await
+    {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     };
@@ -1173,7 +1338,8 @@ async fn orgs_list(
     // exists but nothing links to it — which is exactly the state
     // this shipped in first.
     ctx.insert("provisioning_enabled", &state.provisioner.is_some());
-    Html(state.tera.render("op_orgs.html", &ctx).unwrap_or_default()).into_response()
+    paged.inject(&mut ctx, "/orgs", "");
+    render(&state, "op_orgs.html", &ctx)
 }
 
 // ---- Shared SSO providers (registry-wide, `admin-sso`) --------------

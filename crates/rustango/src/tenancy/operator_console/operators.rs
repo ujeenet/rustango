@@ -47,7 +47,7 @@ use tera::Context;
 use super::super::auth;
 use super::super::password;
 use super::{inject_op_brand, render, ConsoleState};
-use crate::core::Column as _;
+use crate::core::{Column as _, Model as _};
 use crate::sql::{Auto, FetcherPool as _};
 
 /// The column's limit. A longer username is truncated by some backends
@@ -65,6 +65,8 @@ pub(super) struct OperatorsQuery {
     error: Option<String>,
     #[serde(default)]
     notice: Option<String>,
+    #[serde(default)]
+    page: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -106,7 +108,15 @@ pub(super) async fn operators_list(
     Extension(op): Extension<auth::Operator>,
     Query(q): Query<OperatorsQuery>,
 ) -> Response<Body> {
-    page(&state, &op, q.error.as_deref(), q.notice.as_deref(), None).await
+    page(
+        &state,
+        &op,
+        q.error.as_deref(),
+        q.notice.as_deref(),
+        None,
+        q.page,
+    )
+    .await
 }
 
 /// Render the list, optionally with a freshly generated password to
@@ -117,13 +127,48 @@ async fn page(
     error: Option<&str>,
     notice: Option<&str>,
     secret: Option<(&str, &str)>,
+    requested_page: Option<i64>,
 ) -> Response<Body> {
-    let rows: Vec<auth::Operator> = match all_operators(state).await {
+    use crate::core::Model as _;
+
+    let paged =
+        match super::Paged::of_model(&state.registry, auth::Operator::SCHEMA, requested_page).await
+        {
+            Ok(p) => p,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+    let rows: Vec<auth::Operator> = match auth::Operator::objects()
+        .order_by(&[("username", false)])
+        .limit(paged.limit)
+        .offset(paged.offset)
+        .fetch(&state.registry)
+        .await
+    {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not read the operator list: {e}"),
+            )
+                .into_response();
+        }
     };
     let me = id_of(op);
-    let active_count = rows.iter().filter(|o| o.active).count();
+
+    // Counted across the whole table, not this page. "Is this the last
+    // active operator?" is a question about the registry, and a page of
+    // rows cannot answer it — on page 2 of a long list every row would
+    // have looked like the last one.
+    let active_count = match super::count_where(
+        &state.registry,
+        auth::Operator::SCHEMA,
+        auth::Operator::active.eq(true).into(),
+    )
+    .await
+    {
+        Ok(n) => usize::try_from(n).unwrap_or(usize::MAX),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
 
     let view: Vec<_> = rows
         .iter()
@@ -150,6 +195,7 @@ async fn page(
     ctx.insert("operator_username", &op.username);
     ctx.insert("operators", &view);
     ctx.insert("manage_enabled", &state.pools.is_some());
+    paged.inject(&mut ctx, "/operators", "");
     ctx.insert("error", &error);
     ctx.insert("notice", &notice);
     if let Some((username, plain)) = secret {
@@ -236,7 +282,7 @@ pub(super) async fn operator_create(
 
     if generated {
         // Rendered here, not redirected to — see the module docs.
-        page(&state, &op, None, None, Some((&username, &plain))).await
+        page(&state, &op, None, None, Some((&username, &plain)), None).await
     } else {
         back_ok(&format!("created operator `{username}`"))
     }
@@ -279,33 +325,31 @@ pub(super) async fn operator_set_active(
             )
             .await;
         }
-        // Everyone active *except* the one being deactivated. Counting
-        // the target too would refuse the last legitimate deactivation
-        // and permit nothing extra.
-        //
-        // With the self-check above, this is unreachable single-handed:
-        // the session owner is active by definition, so deactivating
-        // somebody else always leaves at least them. It is here for two
-        // operators acting at once, where both read "two active" and
-        // both deactivate — the window is narrow rather than closed,
-        // which is the honest description of a check-then-act.
-        match all_operators(&state).await {
-            Ok(rows) => {
-                let others = rows
-                    .iter()
-                    .filter(|o| o.active && o.id.get().copied().unwrap_or_default() != id)
-                    .count();
-                if others == 0 {
-                    return back_err(
-                        &state,
-                        &op,
-                        "This is the last active operator. Deactivating it would lock everyone \
-                         out of the console, and only a shell on the registry could undo it.",
-                    )
-                    .await;
-                }
+        // Everyone active *except* the target. With the self-check
+        // above this is unreachable single-handed; it covers two
+        // operators deactivating each other at once, where both read
+        // "two active". A narrow window, not a closed one.
+        let others = super::count_where(
+            &state.registry,
+            auth::Operator::SCHEMA,
+            auth::Operator::active
+                .eq(true)
+                .and(auth::Operator::id.ne(id))
+                .into(),
+        )
+        .await;
+        match others {
+            Ok(0) => {
+                return back_err(
+                    &state,
+                    &op,
+                    "This is the last active operator. Deactivating it would lock everyone out \
+                     of the console, and only a shell on the registry could undo it.",
+                )
+                .await;
             }
-            Err(e) => return back_err(&state, &op, &e).await,
+            Ok(_) => {}
+            Err(e) => return back_err(&state, &op, &e.to_string()).await,
         }
     }
 
@@ -363,7 +407,7 @@ pub(super) async fn operator_reset_password(
 
     if generated {
         let username = target.username.clone();
-        page(&state, &op, None, None, Some((&username, &plain))).await
+        page(&state, &op, None, None, Some((&username, &plain)), None).await
     } else {
         back_ok(&format!(
             "reset the password for `{}` — they are now signed out everywhere",
@@ -396,13 +440,6 @@ fn chosen_password(generate: bool, typed: &str, confirm: &str) -> Result<String,
     Ok(typed.to_owned())
 }
 
-async fn all_operators(state: &ConsoleState) -> Result<Vec<auth::Operator>, String> {
-    auth::Operator::objects()
-        .fetch(&state.registry)
-        .await
-        .map_err(|e| format!("could not read the operator list: {e}"))
-}
-
 async fn one_operator(state: &ConsoleState, id: i64) -> Result<Option<auth::Operator>, String> {
     auth::Operator::objects()
         .where_(auth::Operator::id.eq(id))
@@ -426,9 +463,9 @@ fn back_ok(notice: &str) -> Response<Body> {
 }
 
 /// Re-render with the reason rather than redirecting, so a long message
-/// does not have to survive a URL.
+/// need not survive a URL.
 async fn back_err(state: &ConsoleState, op: &auth::Operator, msg: &str) -> Response<Body> {
-    page(state, op, Some(msg), None, None).await
+    page(state, op, Some(msg), None, None, None).await
 }
 
 async fn audit(

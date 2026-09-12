@@ -1,0 +1,36 @@
+{#- Shared pager for every list view, fed by `Paged::inject`.
+
+     Deliberately outside whatever `{% if rows %}` block the caller
+     wraps its table in: when the links lived inside the non-empty
+     branch, a page past the end rendered no navigation at all and only
+     a URL edit escaped it.
+
+     `page_marks` is `Paginator::get_elided_page_range`, so a long list
+     renders `1 … 7 8 9 … 42` rather than forty links. -#}
+{% if total_pages > 1 %}
+<nav class="pager" aria-label="Pagination">
+  {% if has_prev %}
+  <a class="pager-step" href="{{ pager_base }}?page={{ page - 1 }}{{ query_suffix }}" rel="prev">← Previous</a>
+  {% else %}
+  <span class="pager-step pager-disabled">← Previous</span>
+  {% endif %}
+
+  {% for mark in page_marks %}
+    {% if mark.ellipsis %}
+    <span class="pager-gap">…</span>
+    {% elif mark.number == page %}
+    <span class="pager-page pager-current" aria-current="page">{{ mark.number }}</span>
+    {% else %}
+    <a class="pager-page" href="{{ pager_base }}?page={{ mark.number }}{{ query_suffix }}">{{ mark.number }}</a>
+    {% endif %}
+  {% endfor %}
+
+  {% if has_next %}
+  <a class="pager-step" href="{{ pager_base }}?page={{ page + 1 }}{{ query_suffix }}" rel="next">Next →</a>
+  {% else %}
+  <span class="pager-step pager-disabled">Next →</span>
+  {% endif %}
+
+  <span class="pager-total">{{ total }} total</span>
+</nav>
+{% endif %}

@@ -236,17 +236,17 @@ async fn blank_filters_are_ignored_rather_than_matched() {
     );
 }
 
-/// The links used to live inside the non-empty branch, so a page past
-/// the end rendered no navigation at all.
+/// `Paginator::get_page` clamps an out-of-range page to the last real
+/// one, so there is no empty page to be stranded on.
 #[tokio::test]
-async fn a_page_past_the_end_is_not_a_dead_end() {
+async fn a_page_past_the_end_clamps_to_real_data() {
     let b = boot().await;
     b.record("rustango_orgs", "acme", "edit", ("k", "v")).await;
 
     let html = body_of(b.get("/audit?page=4").await).await;
     assert!(
-        html.contains("/audit?page=3"),
-        "should link back towards the data: {html}"
+        html.contains("edit"),
+        "should clamp to the page that has the data: {html}"
     );
     assert!(
         !html.contains("Nothing recorded yet"),

@@ -108,6 +108,8 @@ reach every tenant, so this list is the console's access control.</p>
 </table>
 {% endif %}
 
+{% include "_op_pager.html" %}
+
 {% if manage_enabled %}
 <form method="post" action="/operators" class="edit-form">
   <fieldset class="section">

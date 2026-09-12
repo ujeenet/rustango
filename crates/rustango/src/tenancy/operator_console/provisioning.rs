@@ -38,7 +38,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
-use serde::Deserialize;
 use tera::Context;
 
 use super::{inject_op_brand, ConsoleState};
@@ -332,37 +331,30 @@ pub(super) async fn test_connection(
 
 // ------------------------------------------------------------ run view
 
-/// How many runs a page of the index shows.
-const RUNS_PAGE_SIZE: i64 = 50;
-
-#[derive(Deserialize)]
-pub(super) struct RunsQuery {
-    #[serde(default)]
-    page: Option<i64>,
-}
-
 /// Every provisioning run, newest first.
 ///
-/// A run was reachable only by its id, which meant only from the
-/// redirect that created it: navigate away and the record survived in
-/// the table but not in anybody's reach. The runs are persisted so they
-/// outlive the request, and this is what makes that worth anything —
-/// including for the runs that failed, which are the ones somebody
-/// comes back to.
+/// A run was reachable only by its id — in practice only from the
+/// redirect that created it, so navigating away stranded the record.
 pub(super) async fn provision_runs_index(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
-    Query(q): Query<RunsQuery>,
+    Query(q): Query<super::PageQuery>,
 ) -> Response<Body> {
-    // Saturating: a page number large enough to overflow the multiply
-    // parses into an `i64` fine and then panicked the worker. Clamped,
-    // an absurd page is just an empty one.
-    let page = q.page.unwrap_or(1).max(1);
-    let offset = page.saturating_sub(1).saturating_mul(RUNS_PAGE_SIZE);
+    use crate::core::Model as _;
 
-    // One more than a page, so "is there an older page?" costs no
-    // second query.
-    let mut runs = match store::recent_runs(&state.registry, RUNS_PAGE_SIZE + 1, offset).await {
+    let paged =
+        match super::Paged::of_model(&state.registry, store::ProvisioningRun::SCHEMA, q.page).await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("could not count the runs: {e}"),
+                )
+                    .into_response();
+            }
+        };
+    let runs = match store::recent_runs(&state.registry, paged.limit, paged.offset).await {
         Ok(r) => r,
         Err(e) => {
             return (
@@ -372,9 +364,6 @@ pub(super) async fn provision_runs_index(
                 .into_response();
         }
     };
-    let page_len = usize::try_from(RUNS_PAGE_SIZE).unwrap_or(usize::MAX);
-    let has_next = runs.len() > page_len;
-    runs.truncate(page_len);
 
     let view: Vec<_> = runs
         .iter()
@@ -405,8 +394,7 @@ pub(super) async fn provision_runs_index(
     ctx.insert("section", "orgs");
     ctx.insert("operator_username", &op.username);
     ctx.insert("runs", &view);
-    ctx.insert("page", &page);
-    ctx.insert("has_next", &has_next);
+    paged.inject(&mut ctx, "/orgs/provision", "");
     render(&state, "op_provision_runs.html", &ctx)
 }
 
