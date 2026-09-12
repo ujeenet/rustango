@@ -525,14 +525,80 @@ pub trait TenantPoolInvalidator: Send + Sync {
         &'a self,
         slug: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
+    /// The tenant's literal connection URL, secret references resolved.
+    ///
+    /// Resolved here rather than handed to a caller's form: the URL
+    /// carries a password, and the console must be able to act on it
+    /// without it ever reaching a browser.
+    fn resolved_database_url<'a>(
+        &'a self,
+        org: &'a super::org::Org,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<String, super::error::TenancyError>>
+                + Send
+                + 'a,
+        >,
+    >;
+
+    /// Take a tenant out of service — see
+    /// [`crate::tenancy::decommission`].
+    ///
+    /// Here because it is the same erasure and the same capability: a
+    /// surface holding this handle is one allowed to change tenants,
+    /// and decommissioning invalidates the pool anyway.
+    fn decommission<'a>(
+        &'a self,
+        slug: &'a str,
+        action: super::decommission::Action,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<super::decommission::Report, super::error::TenancyError>,
+                > + Send
+                + 'a,
+        >,
+    >;
 }
 
-impl<DB: Database> TenantPoolInvalidator for TenantPools<DB> {
+impl<DB: Database> TenantPoolInvalidator for TenantPools<DB>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     fn invalidate<'a>(
         &'a self,
         slug: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move { TenantPools::<DB>::invalidate(self, slug).await })
+    }
+
+    fn resolved_database_url<'a>(
+        &'a self,
+        org: &'a super::org::Org,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<String, super::error::TenancyError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move { TenantPools::<DB>::resolved_database_url(self, org).await })
+    }
+
+    fn decommission<'a>(
+        &'a self,
+        slug: &'a str,
+        action: super::decommission::Action,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<super::decommission::Report, super::error::TenancyError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move { super::decommission::decommission(self, slug, action).await })
     }
 }
 
@@ -544,7 +610,10 @@ impl<DB: Database> TenantPools<DB> {
     /// rotate config). Avoids cascading `<DB>` generics through
     /// non-query layers.
     #[must_use]
-    pub fn into_invalidator(self: Arc<Self>) -> Arc<dyn TenantPoolInvalidator> {
+    pub fn into_invalidator(self: Arc<Self>) -> Arc<dyn TenantPoolInvalidator>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
         self
     }
 

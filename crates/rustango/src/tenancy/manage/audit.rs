@@ -1,5 +1,10 @@
 //! `audit-cleanup` management verb — runs audit-log retention across
-//! every active tenant (or a single named tenant with `--tenant`).
+//! the registry's own log and every active tenant's.
+//!
+//! The registry keeps an audit log too: every operator action the
+//! console records — tenant edits, hostname changes, operator
+//! management, purges. This verb only ever walked tenants, so nothing
+//! trimmed it and it grew with console use.
 //!
 //! Two retention modes, mutually exclusive:
 //!
@@ -25,6 +30,25 @@ use crate::tenancy::Org;
 
 use super::args::next_value;
 
+/// Whichever retention mode was asked for, against one pool.
+///
+/// The two `cleanup_*_pool` helpers are already tri-dialect; this only
+/// picks between them so the registry and each tenant cannot drift.
+async fn prune(
+    pool: &crate::sql::Pool,
+    days: Option<i64>,
+    keep_last: Option<i64>,
+) -> Result<u64, TenancyError> {
+    if let Some(n) = days {
+        Ok(crate::audit::cleanup_older_than_pool(pool, n).await?)
+    } else if let Some(n) = keep_last {
+        Ok(crate::audit::cleanup_keep_last_n_pool(pool, n).await?)
+    } else {
+        // The caller rejects "neither" before reaching here.
+        Ok(0)
+    }
+}
+
 pub(super) async fn audit_cleanup_cmd<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     args: &[String],
@@ -36,6 +60,7 @@ where
     let mut days: Option<i64> = None;
     let mut keep_last: Option<i64> = None;
     let mut tenant_slug: Option<String> = None;
+    let mut registry_only = false;
 
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
@@ -55,6 +80,7 @@ where
             "--tenant" => {
                 tenant_slug = Some(next_value(&mut iter, "--tenant")?);
             }
+            "--registry" => registry_only = true,
             "--help" | "-h" => {
                 write_verb_help(w)?;
                 return Ok(());
@@ -81,50 +107,72 @@ where
         _ => {}
     }
 
+    if registry_only && tenant_slug.is_some() {
+        return Err(TenancyError::Validation(
+            "--registry and --tenant name different logs — pass one".into(),
+        ));
+    }
+
     let registry = pools.registry_pool();
-    let orgs: Vec<Org> = if let Some(ref slug) = tenant_slug {
+    let mut total_deleted: u64 = 0;
+    let mut swept = 0usize;
+    let mut failed = 0usize;
+
+    // The registry keeps an audit log of its own — every operator
+    // action the console records — and this verb only ever walked
+    // tenants, so nothing trimmed it. Swept unless a single tenant was
+    // named, which asks for that tenant and nothing else.
+    if tenant_slug.is_none() {
+        let deleted = prune(&registry, days, keep_last).await?;
+        writeln!(w, "  registry deleted={deleted}")?;
+        total_deleted += deleted;
+    }
+
+    if let Some(ref slug) = tenant_slug {
         let found: Vec<Org> = Org::objects()
             .where_(Org::slug.eq(slug.as_str()))
             .fetch(&registry)
             .await?;
-        if found.is_empty() {
-            return Err(TenancyError::Validation(format!(
-                "tenant `{slug}` not found"
-            )));
-        }
-        found
-    } else {
-        Org::objects()
-            .where_(Org::active.eq(true))
-            .fetch(&registry)
-            .await?
-    };
-
-    let total_orgs = orgs.len();
-    let mut total_deleted: u64 = 0;
-
-    for org in &orgs {
-        // v0.38 — route through scoped_pool_dyn which yields a
-        // backend-agnostic `crate::sql::Pool` enum: on PG schema-mode
-        // it builds a dedicated pool with `search_path` baked in;
-        // database-mode (any backend) just wraps the cached pool.
-        let scoped = pools.scoped_pool_dyn(org).await?;
-
-        let deleted = if let Some(n) = days {
-            crate::audit::cleanup_older_than_pool(&scoped, n).await?
-        } else if let Some(n) = keep_last {
-            crate::audit::cleanup_keep_last_n_pool(&scoped, n).await?
-        } else {
-            unreachable!()
-        };
-
-        writeln!(w, "  tenant={} deleted={}", org.slug, deleted)?;
+        let org = found
+            .into_iter()
+            .next()
+            .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` not found")))?;
+        // One named tenant: a failure is the answer to what was asked,
+        // so it propagates rather than being collected.
+        let scoped = pools.scoped_pool_dyn(&org).await?;
+        let deleted = prune(&scoped, days, keep_last).await?;
+        writeln!(w, "  tenant={slug} deleted={deleted}")?;
         total_deleted += deleted;
+        swept = 1;
+    } else if !registry_only {
+        // `for_each_tenant` resolves each pool the right way per storage
+        // mode and — the reason for using it here — collects outcomes
+        // instead of aborting. A single tenant whose schema is missing
+        // used to end the sweep with a raw SQL error, leaving every
+        // later tenant untrimmed.
+        let sweep = super::super::sweep::for_each_tenant(pools, |_org, pool| async move {
+            prune(&pool, days, keep_last).await
+        })
+        .await?;
+
+        for outcome in &sweep.outcomes {
+            match &outcome.result {
+                Ok(deleted) => {
+                    writeln!(w, "  tenant={} deleted={}", outcome.slug, deleted)?;
+                    total_deleted += *deleted;
+                    swept += 1;
+                }
+                Err(e) => {
+                    writeln!(w, "  tenant={} FAILED: {e}", outcome.slug)?;
+                    failed += 1;
+                }
+            }
+        }
     }
 
     writeln!(
         w,
-        "audit-cleanup done: tenants={total_orgs} total_deleted={total_deleted}"
+        "audit-cleanup done: tenants={swept} failed={failed} total_deleted={total_deleted}"
     )?;
     Ok(())
 }
@@ -132,7 +180,7 @@ where
 fn write_verb_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
-        "audit-cleanup — remove old entries from each tenant's audit log"
+        "audit-cleanup — remove old entries from the registry's audit log and each tenant's"
     )?;
     writeln!(w)?;
     writeln!(w, "USAGE:")?;
@@ -148,8 +196,9 @@ fn write_verb_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "OPTIONS:")?;
     writeln!(
         w,
-        "  --tenant <slug>   scope to one tenant (default: every active tenant)"
+        "  --tenant <slug>   that tenant's log only (default: the registry and every active tenant)"
     )?;
+    writeln!(w, "  --registry        the registry's own log only")?;
     writeln!(w)?;
     writeln!(w, "EXAMPLES:")?;
     writeln!(w, "  cargo run -- audit-cleanup --days 90")?;

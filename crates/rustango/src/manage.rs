@@ -75,6 +75,10 @@ pub struct Cli {
     /// Default `false` because operators sometimes want their own
     /// health endpoint shape (custom JSON, additional checks).
     health_endpoints: bool,
+    /// Migrations dir handed to the operator console so it can
+    /// create tenants (#1322). `None` = the create routes are not
+    /// mounted. See `Cli::with_tenant_provisioning`.
+    provisioning_dir: Option<std::path::PathBuf>,
     /// `(prefix, root_dir)` pairs registered via [`Cli::with_static`].
     /// Mounted at `runserver` time as
     /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`.
@@ -124,6 +128,7 @@ impl Cli {
             #[cfg(feature = "config")]
             settings_for_layers: None,
             health_endpoints: false,
+            provisioning_dir: None,
             #[cfg(feature = "admin")]
             static_dirs: Vec::new(),
             #[cfg(feature = "csrf")]
@@ -210,6 +215,38 @@ impl Cli {
     #[must_use]
     pub fn with_health(mut self) -> Self {
         self.health_endpoints = true;
+        self
+    }
+
+    /// Let operators create tenants from the console (#1322) —
+    /// `/orgs/new`, the connection probe, and the provisioning run
+    /// view + live stream.
+    ///
+    /// `migrations_dir` is where a new tenant's migrations come from;
+    /// the same directory `migrate` uses, usually `"migrations"`.
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .tenancy()
+    ///     .with_tenant_provisioning("migrations")
+    ///     .run()
+    ///     .await
+    /// ```
+    ///
+    /// **Off by default.** Creating a tenant is the most dangerous
+    /// thing the console can do — it takes a database URL and
+    /// connects to it — and every authenticated operator who can
+    /// reach the console can use these routes, because `Operator` has
+    /// no permission model. Turning it on is the deployment saying
+    /// yes to that.
+    ///
+    /// Tenancy mode only; ignored without `.tenancy()`.
+    #[must_use]
+    pub fn with_tenant_provisioning(
+        mut self,
+        migrations_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.provisioning_dir = Some(migrations_dir.into());
         self
     }
 
@@ -938,6 +975,9 @@ impl Cli {
         if self.health_endpoints {
             builder = builder.with_health();
         }
+        if let Some(dir) = self.provisioning_dir.clone() {
+            builder = builder.with_tenant_provisioning(dir);
+        }
         for (prefix, root) in self.static_dirs {
             builder = builder.with_static(prefix, root);
         }
@@ -998,6 +1038,9 @@ impl Cli {
         .api(api);
         if self.health_endpoints {
             builder = builder.with_health();
+        }
+        if let Some(dir) = self.provisioning_dir.clone() {
+            builder = builder.with_tenant_provisioning(dir);
         }
         for (prefix, root) in self.static_dirs {
             builder = builder.with_static(prefix, root);

@@ -73,6 +73,9 @@ pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;
 pub mod database_pools;
+/// Taking a tenant out of service — the steps `drop-tenant` and
+/// `purge-tenant` run, callable from anything that is not a terminal.
+pub mod decommission;
 mod error;
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
@@ -90,6 +93,8 @@ pub mod member_auth;
 pub(crate) use crate::manage_interactive;
 pub mod middleware;
 pub mod migrate;
+/// Tenant migrations against a recorded, streamable run.
+pub mod migrate_run;
 pub mod operator_console;
 mod org;
 pub mod org_host;
@@ -108,6 +113,13 @@ pub mod provision;
 /// Durable record of provisioning runs and their events, so a run
 /// survives a reconnect and is readable from a second pod.
 pub mod provision_store;
+/// Inbound webhook that creates a tenant from a billing event.
+///
+/// Gated on `webhook`, which is where HMAC verification lives: a
+/// tenancy deployment that does not expose this endpoint has no reason
+/// to compile signature machinery for it.
+#[cfg(feature = "webhook")]
+pub mod provision_webhook;
 mod resolver;
 mod resolver_cache;
 pub mod routes;

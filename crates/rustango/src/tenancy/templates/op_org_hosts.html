@@ -1,0 +1,107 @@
+{% extends "op_layout.html" %}
+{% block title %}Hostnames for {{ slug }} — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/orgs">Organizations</a><span class="sep">/</span><a href="/orgs/{{ slug }}/edit">{{ slug }}</a><span class="sep">/</span>Hostnames</p>
+<h1>Hostnames for <code>{{ slug }}</code></h1>
+<p class="lead">Every hostname this tenant answers on. Each is matched
+exactly against the <code>Host</code> header, so a hostname belongs to
+one tenant only.</p>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert alert-notice">{{ notice }}</div>
+{% endif %}
+
+<table>
+  <thead>
+    <tr>
+      <th>hostname</th>
+      <th>source</th>
+      <th>serving</th>
+      <th class="actions-col">actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for h in hosts %}
+    <tr>
+      <td><code>{{ h.hostname }}</code></td>
+      <td>
+        {% if h.is_base %}
+        <span class="badge badge-base">base</span>
+        {% else %}
+        <span class="badge">extra</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if h.enabled %}
+        <span class="status-ok">yes</span>
+        {% else %}
+        <span class="status-skipped">parked</span>
+        {% endif %}
+      </td>
+      <td class="actions-col">
+        {#- The base host has no row in `rustango_org_hosts`, so there
+            is nothing here to toggle or delete. Saying where it *is*
+            editable beats showing disabled buttons. -#}
+        {% if h.is_base %}
+        <span class="field-helper">set on the <a href="/orgs/{{ slug }}/edit">edit page</a></span>
+        {% else %}
+        <form method="post" action="/orgs/{{ slug }}/hosts/toggle" class="inline-form">
+          <input type="hidden" name="hostname" value="{{ h.hostname }}">
+          {% if h.enabled %}
+          <button type="submit" class="btn btn-secondary">Park</button>
+          {% else %}
+          <input type="hidden" name="enabled" value="on">
+          <button type="submit" class="btn btn-secondary">Serve</button>
+          {% endif %}
+        </form>
+        <form method="post" action="/orgs/{{ slug }}/hosts/remove" class="inline-form"
+              onsubmit="return confirm('Remove {{ h.hostname }}? Traffic to it stops resolving to {{ slug }}.');">
+          <input type="hidden" name="hostname" value="{{ h.hostname }}">
+          <button type="submit" class="btn btn-danger">Remove</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<form method="post" action="/orgs/{{ slug }}/hosts/add" class="edit-form">
+  <fieldset class="section">
+    <legend>Add a hostname</legend>
+    <table>
+      <tr>
+        <th><label for="hostname">hostname</label></th>
+        <td>
+          {#- Uppercase is allowed through and lowercased by the
+              server, because that is what `normalize_hostname` does and
+              refusing here would make the browser stricter than the
+              thing it is previewing.
+
+              The hyphen is escaped on purpose: `[a-z0-9-]` is a syntax
+              error under the `v`-flag regex `pattern` now uses, and a
+              browser that cannot parse the attribute ignores it
+              silently — so the field would have no validation at all
+              while looking like it did. -#}
+          <input type="text" id="hostname" name="hostname" required autofocus
+                 pattern="[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?)*"
+                 maxlength="255"
+                 title="A bare hostname: no scheme, no port, no path."
+                 placeholder="shop.example.com">
+          <div class="field-helper">Lowercase, no <code>https://</code>,
+          no <code>:port</code>, no trailing dot — the value is compared
+          byte-for-byte with the <code>Host</code> header. Added serving;
+          park it afterwards if DNS has not propagated yet.</div>
+        </td>
+      </tr>
+    </table>
+  </fieldset>
+  <p class="form-actions">
+    <button type="submit" class="btn btn-primary">Add hostname</button>
+    <a href="/orgs/{{ slug }}/edit" class="btn-link">Back to tenant</a>
+  </p>
+</form>
+{% endblock %}

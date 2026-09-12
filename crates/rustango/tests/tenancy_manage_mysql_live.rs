@@ -79,6 +79,21 @@ async fn pools_or_skip() -> Option<(TenantPools<sqlx::MySql>, String)> {
     Some((TenantPools::<sqlx::MySql>::new(pool), url))
 }
 
+/// The same server and credentials, a different database name.
+///
+/// Keeps userinfo, host and port; replaces only the path segment, so
+/// the tenant lands on the server the test already reached rather than
+/// one the environment has to describe twice.
+fn sibling_database_url(registry_url: &str, database: &str) -> String {
+    let (scheme, rest) = registry_url
+        .split_once("://")
+        .expect("MYSQL_TEST_URL should be a URL");
+    let (authority, _old_db) = rest
+        .rsplit_once('/')
+        .expect("MYSQL_TEST_URL should name a database");
+    format!("{scheme}://{authority}/{database}")
+}
+
 #[tokio::test]
 async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
     let _g = live_lock().lock().await;
@@ -87,6 +102,21 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
         return;
     };
     let migrations_dir = tempfile::tempdir().expect("migrations tempdir");
+
+    // A second database on the same server for the tenant to live in.
+    //
+    // Created here rather than assumed, so a local run against a root
+    // MySQL needs no setup. In CI the grant is scoped to the registry
+    // database and this `CREATE` is refused — which is why the failure
+    // is swallowed and the workflow creates the database itself. If it
+    // is missing either way, the run fails loudly at `create-tenant`'s
+    // connection check rather than silently skipping.
+    let tenant_url = sibling_database_url(&url, "rustango_tenant_test");
+    if let Ok(admin) = sqlx::MySqlPool::connect(&url).await {
+        let _ = sqlx::query("CREATE DATABASE IF NOT EXISTS `rustango_tenant_test`")
+            .execute(&admin)
+            .await;
+    }
 
     // Step 1: migrate-registry generates the framework's registry-scope
     // `system/migrations/` on demand from the compiled models and applies
@@ -139,9 +169,13 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
             "--mode".to_owned(),
             "database".to_owned(),
             "--database-url".to_owned(),
-            // Reuse the same MySQL server for the tenant DB — point at
-            // a parallel DATABASE name we'll create on the fly.
-            url.clone(),
+            // The same MySQL server, a *different* database. This line
+            // used to pass `url` — the registry's own — which is the
+            // one target provisioning now refuses, because it runs the
+            // tenant migration chain over the registry. The comment
+            // already said "a parallel DATABASE name"; the code did not
+            // do it.
+            tenant_url.clone(),
         ],
         &mut buf,
     )
