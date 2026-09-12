@@ -152,6 +152,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   `.env` said otherwise. The line is commented out with the length requirement
   beside it, and an unusable secret now warns instead of vanishing.
 
+- **A SQLite registry named by a bare filename derived no tenant URL** (#1332).
+  `tenant_url_on_registry_server` found the sibling directory with
+  `rsplit_once('/')`, which a `sqlite://app.db` registry has none of — so the
+  console showed no derived URL and the submit asked the operator to type one,
+  for the one backend where the answer is most obvious. A bare filename is now
+  read as the working directory, an in-memory registry still derives nothing
+  (there is no directory to be a sibling of), and a database already named
+  `acme.db` no longer becomes `acme.db.db`. The derivation now has direct tests
+  on all three dialects, which #1332's acceptance asked for and it never had.
+
 - **Every in-page link in the `de` / `fr` / `es` docs pointed at an English
   anchor** (#1354). The translations translated their headings and kept the
   English `#fragment`s, so 930 links across 94 pages — every table of contents,

@@ -1083,8 +1083,28 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
     // database" means a sibling file.
     if let Some(path) = registry_url.strip_prefix("sqlite://") {
         let path = path.split('?').next().unwrap_or(path);
-        let (dir, _) = path.rsplit_once('/')?;
-        return Some(format!("sqlite://{dir}/{database}.db?mode=rwc"));
+        // An in-memory registry has no directory to put a sibling in.
+        if path.is_empty() || path.starts_with(":memory:") {
+            return None;
+        }
+        // A bare filename is relative to the working directory, which
+        // is exactly where the sibling belongs. `rsplit_once` alone
+        // returned `None` for it, so a `sqlite://app.db` registry
+        // derived nothing at all.
+        let dir = path.rsplit_once('/').map_or(".", |(d, _)| d);
+        // The operator names a database, but a sqlite database is a
+        // file — so `acme` becomes `acme.db` and `acme.db` stays put.
+        // Case-insensitively: `acme.DB` is already the extension, and
+        // on a case-insensitive filesystem it is the very same file.
+        let file = if std::path::Path::new(database)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("db"))
+        {
+            database.to_owned()
+        } else {
+            format!("{database}.db")
+        };
+        return Some(format!("sqlite://{dir}/{file}?mode=rwc"));
     }
 
     let (scheme, rest) = registry_url.split_once("://")?;
@@ -1682,6 +1702,107 @@ mod validation_tests {
             assert!(
                 refuse_registry_url(ok, registry).is_ok(),
                 "`{ok}` is a different database and should be allowed"
+            );
+        }
+    }
+
+    /// #1332 asked for the derivation to be exercised on every dialect,
+    /// because "same server, another database" is a different shape in
+    /// each: a path segment on a server, a sibling file on sqlite.
+    #[test]
+    fn a_server_url_keeps_everything_but_the_database() {
+        assert_eq!(
+            tenant_url_on_registry_server(
+                "postgres://app:pw@db.internal:5432/orgdemo_dev",
+                "tenant_acme"
+            )
+            .as_deref(),
+            Some("postgres://app:pw@db.internal:5432/tenant_acme")
+        );
+        assert_eq!(
+            tenant_url_on_registry_server("mysql://app:pw@db.internal:3306/orgdemo_dev", "t_acme")
+                .as_deref(),
+            Some("mysql://app:pw@db.internal:3306/t_acme")
+        );
+    }
+
+    /// sqlite has no server, so the sibling is a file in the registry
+    /// file's own directory — including the `./` form the scaffolder
+    /// writes into every generated `.env.example`.
+    #[test]
+    fn a_sqlite_url_derives_a_sibling_file() {
+        for (registry, want) in [
+            (
+                "sqlite://./demo_dev.db?mode=rwc",
+                "sqlite://./tenant_acme.db?mode=rwc",
+            ),
+            (
+                "sqlite:///var/app/reg.db",
+                "sqlite:///var/app/tenant_acme.db?mode=rwc",
+            ),
+            // A bare filename is relative to the working directory.
+            // This derived nothing at all before, so a registry
+            // configured that way fell back to "type a URL yourself".
+            ("sqlite://reg.db", "sqlite://./tenant_acme.db?mode=rwc"),
+        ] {
+            assert_eq!(
+                tenant_url_on_registry_server(registry, "tenant_acme").as_deref(),
+                Some(want),
+                "registry `{registry}`"
+            );
+        }
+    }
+
+    /// An operator naming the database `acme.db` means the file
+    /// `acme.db`, not `acme.db.db`.
+    #[test]
+    fn a_sqlite_database_name_is_not_given_two_extensions() {
+        for named in ["acme.db", "acme.DB"] {
+            assert_eq!(
+                tenant_url_on_registry_server("sqlite://./reg.db", named).as_deref(),
+                Some(format!("sqlite://./{named}?mode=rwc")).as_deref(),
+                "database name `{named}`"
+            );
+        }
+        // A dot that is not the extension still gets one.
+        assert_eq!(
+            tenant_url_on_registry_server("sqlite://./reg.db", "acme.v2").as_deref(),
+            Some("sqlite://./acme.v2.db?mode=rwc")
+        );
+    }
+
+    /// Shapes with nowhere to put a tenant. The caller renders the
+    /// "supply a full URL instead" escape hatch for these rather than
+    /// guessing.
+    #[test]
+    fn a_url_with_no_database_to_replace_derives_nothing() {
+        for undrivable in [
+            "sqlite://:memory:",    // no directory to be a sibling of
+            "sqlite://",            // no path at all
+            "postgres://localhost", // no database segment
+            "not a url",            // no scheme
+            "postgres:///orgdemo",  // no authority
+        ] {
+            assert!(
+                tenant_url_on_registry_server(undrivable, "tenant_acme").is_none(),
+                "`{undrivable}` should not derive a URL"
+            );
+        }
+    }
+
+    /// The derivation and the registry-collision guard have to agree:
+    /// a derived URL must never be the one it was derived from.
+    #[test]
+    fn a_derived_url_is_never_the_registry_itself() {
+        for registry in [
+            "postgres://app:pw@db.internal:5432/orgdemo_dev",
+            "sqlite://./demo_dev.db?mode=rwc",
+        ] {
+            let derived =
+                tenant_url_on_registry_server(registry, "tenant_acme").expect("derivable registry");
+            assert!(
+                refuse_registry_url(&derived, registry).is_ok(),
+                "derived `{derived}` collided with registry `{registry}`"
             );
         }
     }
