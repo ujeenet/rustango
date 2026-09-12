@@ -369,9 +369,14 @@ pub(super) async fn provision_runs_index(
         .iter()
         .map(|r| {
             let state_str = r.state.clone();
+            let kind = store::RunKind::parse(&r.kind);
             serde_json::json!({
                 "id": r.id.get().copied().unwrap_or_default(),
-                "slug": r.slug,
+                "kind": kind.as_str(),
+                "is_migrate": kind == store::RunKind::Migrate,
+                // A batch migrate spans every tenant, so it stores no
+                // slug; the events name them as they go.
+                "slug": if r.slug.is_empty() { "all tenants".to_owned() } else { r.slug.clone() },
                 "state": state_str,
                 "failed": RunState::parse(&r.state) == RunState::Failed,
                 "running": !RunState::parse(&r.state).is_terminal(),
@@ -444,7 +449,27 @@ pub(super) async fn provision_run_view(
     ctx.insert("section", "orgs");
     ctx.insert("operator_username", &op.username);
     ctx.insert("run_id", &run_id);
-    ctx.insert("slug", &run.slug);
+    let kind = store::RunKind::parse(&run.kind);
+    let is_migrate = kind == store::RunKind::Migrate;
+    ctx.insert("is_migrate", &is_migrate);
+    // Chosen here rather than in the template: Tera has no ternary, and
+    // the alternative is the same word in four `{% if %}` blocks.
+    ctx.insert(
+        "verb",
+        if is_migrate {
+            "Migrating"
+        } else {
+            "Provisioning"
+        },
+    );
+    ctx.insert(
+        "slug",
+        &if run.slug.is_empty() {
+            "all tenants".to_owned()
+        } else {
+            run.slug.clone()
+        },
+    );
     ctx.insert("state", &state_str);
     ctx.insert("terminal", &parsed.is_terminal());
     ctx.insert("error", &run.error);

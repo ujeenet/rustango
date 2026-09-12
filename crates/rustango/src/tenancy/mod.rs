@@ -90,6 +90,8 @@ pub mod member_auth;
 pub(crate) use crate::manage_interactive;
 pub mod middleware;
 pub mod migrate;
+/// Tenant migrations against a recorded, streamable run.
+pub mod migrate_run;
 pub mod operator_console;
 mod org;
 pub mod org_host;

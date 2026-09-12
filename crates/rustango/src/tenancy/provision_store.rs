@@ -82,6 +82,33 @@ impl RunState {
 }
 
 /// One attempt to stand up a tenant.
+/// What a run was for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunKind {
+    Provision,
+    Migrate,
+}
+
+impl RunKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Provision => "provision",
+            Self::Migrate => "migrate",
+        }
+    }
+
+    /// Unknown values read as `Provision`: every row written before the
+    /// column existed was one.
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "migrate" => Self::Migrate,
+            _ => Self::Provision,
+        }
+    }
+}
+
 #[derive(crate::Model, Debug, Clone, Serialize)]
 #[rustango(
     table = "rustango_provisioning_runs",
@@ -95,6 +122,14 @@ impl RunState {
 pub struct ProvisioningRun {
     #[rustango(primary_key)]
     pub id: crate::sql::Auto<i64>,
+
+    /// What the run was: standing a tenant up, or migrating one.
+    ///
+    /// Both produce the same stream of steps and both are worth keeping,
+    /// so they share a table; without this a migrate run reads as a
+    /// provisioning run that skipped most of its steps.
+    #[rustango(max_length = 16, index, default = "'provision'")]
+    pub kind: String,
 
     /// The tenant this run is for. Not a foreign key: the row is
     /// written *before* the `Org` exists, and must survive the tenant
@@ -207,6 +242,7 @@ pub async fn open_run(
 ) -> Result<ProvisioningRun, TenancyError> {
     let mut run = ProvisioningRun {
         id: Auto::default(),
+        kind: RunKind::Provision.as_str().to_owned(),
         slug: slug.to_owned(),
         org_id: None,
         state: RunState::Running.as_str().to_owned(),
@@ -342,6 +378,39 @@ pub async fn events_since(
         .order_by(&[("seq", false)])
         .fetch(registry)
         .await?)
+}
+
+/// Open a run for a migration.
+///
+/// `slug` names one tenant, or `None` for every active tenant — a batch
+/// stores an empty slug, and the events name each tenant as they go.
+/// The storage/backend columns stay empty for the same reason: a batch
+/// spans tenants that do not agree on either.
+///
+/// # Errors
+/// Driver / insert failures.
+pub async fn open_migrate_run(
+    registry: &Pool,
+    slug: Option<&str>,
+    requested_by: Option<&str>,
+) -> Result<ProvisioningRun, TenancyError> {
+    let mut run = ProvisioningRun {
+        id: Auto::default(),
+        kind: RunKind::Migrate.as_str().to_owned(),
+        slug: slug.unwrap_or_default().to_owned(),
+        org_id: None,
+        state: RunState::Running.as_str().to_owned(),
+        storage_mode: String::new(),
+        backend_kind: String::new(),
+        database_url: None,
+        requested_by: requested_by.map(ToOwned::to_owned),
+        idempotency_key: None,
+        error: None,
+        started_at: Auto::default(),
+        finished_at: None,
+    };
+    run.insert_pool(registry).await?;
+    Ok(run)
 }
 
 /// The most recent runs, newest first.

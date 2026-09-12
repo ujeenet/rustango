@@ -42,6 +42,7 @@
 /// Mounted only by [`router_with_provisioning`].
 mod audit;
 mod hosts;
+mod migrate;
 mod operators;
 mod provisioning;
 
@@ -624,6 +625,16 @@ fn router_inner(
                 get(provisioning::org_new_form).post(provisioning::org_new_submit),
             )
             .route("/orgs/test-connection", post(provisioning::test_connection))
+            // Migrations ride with provisioning: both need the
+            // provisioner's migrations directory and its registry URL.
+            .route(
+                "/orgs/migrate",
+                get(op_post_only_redirect).post(migrate::migrate_all),
+            )
+            .route(
+                "/orgs/{slug}/migrate",
+                get(org_post_only_redirect).post(migrate::migrate_one),
+            )
             // The index has to come before the `{run_id}` route it
             // shares a prefix with, and be a distinct path: a run id is
             // numeric, so `/orgs/provision` cannot be confused for one.
@@ -1588,6 +1599,9 @@ async fn org_edit_form(
     ctx.insert("section", "orgs");
     ctx.insert("operator_username", &op.username);
     ctx.insert("slug", &slug);
+    // Drives the "Run migrations" button: migrations ride with the
+    // provisioner, which owns the migrations directory.
+    ctx.insert("provisioning_enabled", &state.provisioner.is_some());
     ctx.insert("editable_rows", &editable_rows);
     ctx.insert("locked_rows", &locked_rows);
     ctx.insert("logo_url", &logo_url);

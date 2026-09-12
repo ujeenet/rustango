@@ -1,8 +1,8 @@
 {% extends "op_layout.html" %}
-{% block title %}Provisioning {{ slug }} — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
+{% block title %}{{ verb }} {{ slug }} — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
-<p class="breadcrumb"><a href="/orgs">Organizations</a><span class="sep">/</span>Provisioning {{ slug }}</p>
-<h1>Provisioning <code>{{ slug }}</code></h1>
+<p class="breadcrumb"><a href="/orgs">Organizations</a><span class="sep">/</span><a href="/orgs/provision">Runs</a><span class="sep">/</span>{{ verb }} {{ slug }}</p>
+<h1>{{ verb }} <code>{{ slug }}</code></h1>
 
 <p class="lead">
   Run #{{ run_id }} — <strong id="run-state" data-state="{{ state }}">{{ state }}</strong>

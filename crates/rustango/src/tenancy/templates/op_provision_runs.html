@@ -35,7 +35,10 @@ somebody finishes or removes it.</p>
       <td><a class="btn-link" href="/orgs/provision/{{ r.id }}">#{{ r.id }}</a></td>
       {#- A slug may be 63 characters, which would otherwise set the
           column's width for every other row. -#}
-      <td class="wrap-anywhere"><strong>{{ r.slug }}</strong></td>
+      <td class="wrap-anywhere">
+        <strong>{{ r.slug }}</strong>
+        {% if r.is_migrate %}<span class="badge">migrate</span>{% endif %}
+      </td>
       <td>
         {% if r.failed %}
         <span class="status-failed">{{ r.state }}</span>
@@ -46,7 +49,12 @@ somebody finishes or removes it.</p>
         {% endif %}
         {% if r.took %}<span class="field-helper">in {{ r.took }}</span>{% endif %}
       </td>
-      <td class="nowrap"><code>{{ r.storage_mode }}</code> · <code>{{ r.backend_kind }}</code></td>
+      {#- A batch migrate spans tenants that do not agree on either, so
+          it stores neither. -#}
+      <td class="nowrap">
+        {% if r.storage_mode %}<code>{{ r.storage_mode }}</code> · <code>{{ r.backend_kind }}</code>
+        {% else %}<span class="empty">—</span>{% endif %}
+      </td>
       <td>{% if r.requested_by %}{{ r.requested_by }}{% else %}<span class="empty">—</span>{% endif %}</td>
       <td class="nowrap">{% if r.started_at %}{{ r.started_at }}{% else %}—{% endif %}</td>
     </tr>

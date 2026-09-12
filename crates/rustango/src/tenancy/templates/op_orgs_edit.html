@@ -29,6 +29,12 @@
     a link from here, or nothing reaches it. -#}
 <p class="page-actions">
   <a href="/orgs/{{ slug }}/hosts" class="btn btn-secondary">Hostnames →</a>
+  {% if provisioning_enabled %}
+  <form method="post" action="/orgs/{{ slug }}/migrate" class="inline-form"
+        onsubmit="return confirm('Run migrations for {{ slug }}?');">
+    <button type="submit" class="btn btn-secondary">Run migrations</button>
+  </form>
+  {% endif %}
 </p>
 
 <form method="post" action="/orgs/{{ slug }}/edit" class="edit-form">

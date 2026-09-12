@@ -1318,6 +1318,14 @@ pub trait TenantProvisioner: Send + Sync {
     /// case, and the one that otherwise has an operator retyping a
     /// password into a form field. **Never render this**: it carries
     /// credentials. Derive, then redact for display.
+    /// Migrate one tenant (`slug`) or every active one (`None`),
+    /// recording into an already-open run.
+    ///
+    /// Here rather than on a trait of its own because this is the same
+    /// type erasure: the console holds `Arc<dyn TenantProvisioner>` and
+    /// has no `DB` to name.
+    fn migrate_in_run<'a>(&'a self, run_id: i64, slug: Option<&'a str>) -> BoxFuture<'a, ()>;
+
     fn registry_url(&self) -> String;
 
     /// The registry pool, so a caller can read runs and events back.
@@ -1399,6 +1407,19 @@ where
                 request,
                 None,
                 run_id,
+            )
+            .await
+        })
+    }
+
+    fn migrate_in_run<'a>(&'a self, run_id: i64, slug: Option<&'a str>) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            super::migrate_run::migrate_in_run(
+                self.pools.as_ref(),
+                &self.migrations_dir,
+                &self.registry_url,
+                run_id,
+                slug,
             )
             .await
         })
