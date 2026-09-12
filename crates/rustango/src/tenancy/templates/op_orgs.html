@@ -8,15 +8,18 @@
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
 {% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
 
+{#- A div, not a p: `<form>` is not phrasing content, so the HTML parser
+    closes an open `<p>` when it meets one — the actions row split in two
+    and left stray empty paragraphs on the page. -#}
 {% if provisioning_enabled %}
-<p class="page-actions">
+<div class="page-actions">
   <a href="/orgs/new" class="btn btn-primary">+ New tenant</a>
   <a href="/orgs/provision" class="btn btn-secondary">Runs</a>
   <form method="post" action="/orgs/migrate" class="inline-form"
         onsubmit="return confirm('Run migrations for every active tenant?');">
     <button type="submit" class="btn btn-secondary">Migrate all tenants</button>
   </form>
-</p>
+</div>
 <p>Tenants the registry knows about. Create one here, or from the CLI
 with <code>cargo run -- create-tenant</code>; removal is
 <code>cargo run -- drop-tenant</code>.</p>
@@ -27,6 +30,17 @@ with <code>cargo run -- create-tenant</code>; removal is
 <code>rustango::manage::Cli</code>). To create tenants from here, add
 <code>.with_tenant_provisioning("migrations")</code> to the
 <code>Cli</code> builder.</p>
+{% endif %}
+
+{#- Pre-warming needs pools, not a provisioner, so it is its own block:
+    a console wired for edits but not provisioning still gets it. -#}
+{% if edit_enabled %}
+<div class="page-actions">
+  <form method="post" action="/orgs/prewarm" class="inline-form"
+        onsubmit="return confirm('Open a connection for every active database-mode tenant? This can take a moment.');">
+    <button type="submit" class="btn btn-secondary">Pre-warm pools</button>
+  </form>
+</div>
 {% endif %}
 {% if orgs | length == 0 %}
   {% if provisioning_enabled %}

@@ -635,6 +635,15 @@ fn router_inner(
             // things, and creating an operator is emphatically the
             // latter.
             .route("/operators", post(operators::operator_create))
+            // #1341 — opening every tenant's pool up front was CLI-only,
+            // so the one thing worth doing right after a deploy, a
+            // registry restart, or a credential rotation needed shell
+            // access. Gated on pools rather than on the provisioner:
+            // warming them needs no migrations directory.
+            .route(
+                "/orgs/prewarm",
+                get(orgs_post_only_redirect).post(prewarm_pools),
+            )
             .route(
                 "/operators/{id}/active",
                 get(op_post_only_redirect).post(operators::operator_set_active),
@@ -1036,6 +1045,69 @@ async fn org_post_only_redirect(
 /// rather than slug and land back on the one list page.
 async fn op_post_only_redirect() -> Redirect {
     Redirect::to("/operators")
+}
+
+async fn orgs_post_only_redirect() -> Redirect {
+    Redirect::to("/orgs")
+}
+
+/// Open a pool for every active database-mode tenant (#1341).
+///
+/// Worth doing right after a deploy or a registry restart, and after a
+/// credential rotation — it turns "the first request to each tenant pays
+/// the connect" into one deliberate wait, and surfaces an unreachable
+/// tenant before a user finds it.
+///
+/// The report is a notice rather than a page: there is nothing to browse,
+/// and PRG keeps a reload from re-opening every pool.
+async fn prewarm_pools(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+) -> Response<Body> {
+    let Some(pools) = state.pools.as_ref() else {
+        return orgs_notice("pool management is not available on this console", true);
+    };
+    let report = match pools.prewarm().await {
+        Ok(r) => r,
+        Err(e) => return orgs_notice(&format!("pre-warm failed: {e}"), true),
+    };
+
+    let mut detail = serde_json::Map::new();
+    detail.insert("action".into(), serde_json::json!("pools.prewarm"));
+    detail.insert("warmed".into(), serde_json::json!(report.warmed));
+    detail.insert("failed".into(), serde_json::json!(report.failed));
+    emit_registry_audit(
+        &state.registry,
+        "rustango_orgs",
+        "*",
+        op.id.get().copied().unwrap_or(0),
+        "prewarm",
+        detail,
+    )
+    .await;
+
+    // A failure here is per-tenant and already logged by the pool layer;
+    // say how many so the operator knows to go looking.
+    let mut msg = format!(
+        "warmed {} of {} active database-mode tenant(s)",
+        report.warmed, report.total_active
+    );
+    if report.failed > 0 {
+        msg.push_str(&format!(" — {} failed, see the logs", report.failed));
+    }
+    if report.skipped_cap > 0 {
+        msg.push_str(&format!(
+            " — {} skipped, the pool cache is at its cap",
+            report.skipped_cap
+        ));
+    }
+    orgs_notice(&msg, report.failed > 0)
+}
+
+/// PRG back to the tenant list with a message.
+fn orgs_notice(msg: &str, is_error: bool) -> Response<Body> {
+    let key = if is_error { "error" } else { "notice" };
+    Redirect::to(&format!("/orgs?{key}={}", urlencoding_lite(msg))).into_response()
 }
 
 /// v0.27.10 (#68) — when an unauthenticated non-GET request
