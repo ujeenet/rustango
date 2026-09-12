@@ -26,12 +26,12 @@ accepter humains et machines sur les mêmes routes. C'est l'idée
 
 ## Table des matières
 
-- [La chaîne](#the-chain) · [Les backends intégrés](#the-built-in-backends)
-- [Verrouiller les routes : require_auth](#gating-routes-require_auth)
-- [Lire l'utilisateur : CurrentUser](#reading-the-user-currentuser)
-- [Permissions : require_perm](#permissions-require_perm)
-- [Le registre portable](#the-portable-registry)
-- [Voir aussi](#see-also)
+- [La chaîne](#la-chaîne) · [Les backends intégrés](#les-backends-intégrés)
+- [Verrouiller les routes : require_auth](#verrouiller-les-routes--require_auth)
+- [Lire l'utilisateur : CurrentUser](#lire-lutilisateur--currentuser)
+- [Permissions : require_perm](#permissions--require_perm)
+- [Le registre portable](#le-registre-portable)
+- [Voir aussi](#voir-aussi)
 
 ---
 

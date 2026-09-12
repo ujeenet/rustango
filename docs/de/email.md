@@ -24,15 +24,15 @@ in dein Terminal zu echtem SMTP mit einer einzeiligen Änderung — wie Djangos 
 
 ## Inhaltsverzeichnis
 
-- [Schritt 1 — Eine E-Mail bauen](#step-1--build-an-email)
-- [Schritt 2 — Einen Mailer wählen](#step-2--pick-a-mailer)
-- [Schritt 3 — Sie versenden](#step-3--send-it)
-- [Validierung und Schutz vor Header-Injection](#validation-and-header-injection-safety)
-- [E-Mails testen](#testing-email)
+- [Schritt 1 — Eine E-Mail bauen](#schritt-1--eine-e-mail-bauen)
+- [Schritt 2 — Einen Mailer wählen](#schritt-2--einen-mailer-wählen)
+- [Schritt 3 — Sie versenden](#schritt-3--sie-versenden)
+- [Validierung und Schutz vor Header-Injection](#validierung-und-schutz-vor-header-injection)
+- [E-Mails testen](#e-mails-testen)
 - [Templates](#templates)
-- [Sie außerhalb des Requests versenden](#send-it-off-the-request)
-- [Referenz](#reference)
-- [Siehe auch](#see-also)
+- [Sie außerhalb des Requests versenden](#sie-außerhalb-des-requests-versenden)
+- [Referenz](#referenz)
+- [Siehe auch](#siehe-auch)
 
 ---
 

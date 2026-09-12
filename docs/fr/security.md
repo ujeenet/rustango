@@ -6,25 +6,25 @@ Ce guide couvre chaque fonctionnalité de sécurité fournie par **Rustango** et
 
 ## Table des matières
 
-- [La checklist de défense en profondeur](#the-defense-in-depth-checklist)
-- [Définir les en-têtes de sécurité](#setting-security-headers)
-- [Autoriser les requêtes cross-origin (CORS)](#allowing-cross-origin-requests-cors)
-- [Limiter le débit des requêtes](#rate-limiting-requests)
-- [Autoriser ou bloquer des IP](#allowing-or-blocking-ips)
-- [Se protéger contre le CSRF](#protecting-against-csrf)
-- [Prévenir le XSS](#preventing-xss)
-- [Prévenir l'injection SQL](#preventing-sql-injection)
-- [Authentifier les utilisateurs](#authenticating-users)
-- [Hacher et vérifier les mots de passe](#hashing-and-checking-passwords)
-- [Émettre et rafraîchir des JWT](#issuing-and-refreshing-jwts)
-- [S'authentifier avec des clés d'API](#authenticating-with-api-keys)
-- [Ajouter l'authentification à deux facteurs (TOTP)](#adding-two-factor-auth-totp)
-- [Envoyer des URL signées (liens magiques)](#sending-signed-urls-magic-links)
-- [Vérifier les webhooks entrants](#verifying-incoming-webhooks)
-- [Garder les secrets hors de vos journaux](#keeping-secrets-out-of-your-logs)
-- [Tracer les requêtes entre services](#tracing-requests-across-services)
-- [Gérer les secrets](#managing-secrets)
-- [Auditer avant de déployer](#auditing-before-you-deploy)
+- [La checklist de défense en profondeur](#la-checklist-de-défense-en-profondeur)
+- [Définir les en-têtes de sécurité](#définir-les-en-têtes-de-sécurité)
+- [Autoriser les requêtes cross-origin (CORS)](#autoriser-les-requêtes-cross-origin-cors)
+- [Limiter le débit des requêtes](#limiter-le-débit-des-requêtes)
+- [Autoriser ou bloquer des IP](#autoriser-ou-bloquer-des-ip)
+- [Se protéger contre le CSRF](#se-protéger-contre-le-csrf)
+- [Prévenir le XSS](#prévenir-le-xss)
+- [Prévenir l'injection SQL](#prévenir-linjection-sql)
+- [Authentifier les utilisateurs](#authentifier-les-utilisateurs)
+- [Hacher et vérifier les mots de passe](#hacher-et-vérifier-les-mots-de-passe)
+- [Émettre et rafraîchir des JWT](#émettre-et-rafraîchir-des-jwt)
+- [S'authentifier avec des clés d'API](#sauthentifier-avec-des-clés-dapi)
+- [Ajouter l'authentification à deux facteurs (TOTP)](#ajouter-lauthentification-à-deux-facteurs-totp)
+- [Envoyer des URL signées (liens magiques)](#envoyer-des-url-signées-liens-magiques)
+- [Vérifier les webhooks entrants](#vérifier-les-webhooks-entrants)
+- [Garder les secrets hors de vos journaux](#garder-les-secrets-hors-de-vos-journaux)
+- [Tracer les requêtes entre services](#tracer-les-requêtes-entre-services)
+- [Gérer les secrets](#gérer-les-secrets)
+- [Auditer avant de déployer](#auditer-avant-de-déployer)
 
 ---
 
@@ -247,7 +247,7 @@ let safe = html_escape(user_input);
 
 Remplace `&`, `<`, `>`, `"`, `'`. Convient pour le contenu d'éléments HTML + les attributs entre guillemets doubles.
 
-Pour une défense XSS basée sur le CSP, voir [Définir les en-têtes de sécurité](#setting-security-headers).
+Pour une défense XSS basée sur le CSP, voir [Définir les en-têtes de sécurité](#définir-les-en-têtes-de-sécurité).
 
 ---
 
@@ -654,14 +654,14 @@ Pour des vérifications au-delà de ce qui est fourni, étendez avec du code per
 Quelques flux de bout en bout ont encore besoin d'être assemblés à partir des primitives ci-dessous :
 
 - **Réinitialisation de mot de passe + vérification d'email** — les helpers d'émission/vérification de jeton existent (`auth_flows::confirm_password_reset_pool`, plus les allers-retours de vérification d'email) et le pipeline d'email est fourni séparément, mais il n'y a pas de cycle unique préconstruit vue + email + validation câblé pour vous.
-- **Masquage PII du corps de requête / des en-têtes** dans `access_log` — le masquage de journal au niveau des champs existe (voir [Garder les secrets hors de vos journaux](#keeping-secrets-out-of-your-logs)), mais pas le nettoyage automatique du corps de requête ou des en-têtes.
+- **Masquage PII du corps de requête / des en-têtes** dans `access_log` — le masquage de journal au niveau des champs existe (voir [Garder les secrets hors de vos journaux](#garder-les-secrets-hors-de-vos-journaux)), mais pas le nettoyage automatique du corps de requête ou des en-têtes.
 
 Déjà fournis (n'allez pas chercher un contournement) :
 
 - **Connexion sociale OAuth2 / OIDC** — `oauth2::providers` fournit les helpers Google, GitHub, Microsoft, GitLab et Discord (plus `OAuth2Provider::from_discovery` pour tout fournisseur OIDC), et `oauth2::router::oauth2_router` monte les routes de login + callback, crée l'enregistrement utilisateur et définit le cookie de session.
 - **Verrouillage par compte** — `rustango::account_lockout::Lockout` (adossé au cache ; `is_locked` / `record_failure` / `clear`, `max_attempts` + `lockout_duration` configurables).
 - **Endpoint de rapport CSP** — `security_headers::csp_report_router(path)` + `SecurityHeadersLayer::csp_report_uri(uri)`.
-- **Limitation de débit distribuée** — `rate_limit_cache::CacheRateLimitLayer` (voir [Limiter le débit des requêtes](#rate-limiting-requests)).
+- **Limitation de débit distribuée** — `rate_limit_cache::CacheRateLimitLayer` (voir [Limiter le débit des requêtes](#limiter-le-débit-des-requêtes)).
 
 Jusqu'à ce que les flux non fournis arrivent, assemblez-les à partir des primitives ci-dessus (`signed_url::sign` pour les jetons de réinitialisation de mot de passe, le pipeline d'email pour la livraison, etc.).
 

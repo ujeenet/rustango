@@ -29,15 +29,15 @@ Resource-Controllern, die Blade-Views zurückgeben. Sie rendern über [Tera](htt
 
 ## Inhaltsverzeichnis
 
-- [API-Views vs HTML-Views — welche willst du?](#api-views-vs-html-views--which-do-you-want)
-- [Die fünf Modell-Views](#the-five-model-views)
+- [API-Views vs HTML-Views — welche willst du?](#api-views-vs-html-views--welche-willst-du)
+- [Die fünf Modell-Views](#die-fünf-modell-views)
 - [ListView](#listview) · [DetailView](#detailview)
 - [CreateView, UpdateView, DeleteView](#createview-updateview-deleteview)
-- [Der Tera-Kontext](#the-tera-context)
-- [TemplateView und RedirectView](#templateview-and-redirectview)
+- [Der Tera-Kontext](#der-tera-kontext)
+- [TemplateView und RedirectView](#templateview-und-redirectview)
 - [Single-Tenant vs Multi-Tenant](#single-tenant-vs-multi-tenant)
-- [Ein Modell auf beide Arten ausliefern](#serving-one-model-both-ways)
-- [Siehe auch](#see-also)
+- [Ein Modell auf beide Arten ausliefern](#ein-modell-auf-beide-arten-ausliefern)
+- [Siehe auch](#siehe-auch)
 
 ---
 
@@ -58,7 +58,7 @@ darin, *was herauskommt* und *wer aufruft*.
 | Django-Analogon | DRF `ModelViewSet` | generische klassenbasierte Views |
 
 Du musst nicht global wählen — wähle pro Ressource, und du kannst **beide auf demselben Modell**
-einhängen (siehe [unten](#serving-one-model-both-ways)). Faustregeln:
+einhängen (siehe [unten](#ein-modell-auf-beide-arten-ausliefern)). Faustregeln:
 
 - Du baust ein **JSON-Backend** für ein Frontend-Framework oder eine Mobile-App → ViewSet.
 - Du baust eine **serverseitig gerenderte Site** (der Server gibt HTML-Seiten zurück) → HTML-Views.

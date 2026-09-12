@@ -29,13 +29,13 @@ backend clé en main qui stocke les clés et authentifie les requêtes
 
 ## Table des matières
 
-- [Comment fonctionne une clé d'API](#how-an-api-key-works)
-- [L'utilitaire autonome](#the-standalone-helper)
-- [Le backend avec stockage](#the-stored-backend)
-- [Émettre une clé (CLI + code)](#issuing-a-key)
-- [Authentifier les requêtes](#authenticating-requests)
-- [Notes de sécurité](#security-notes)
-- [Voir aussi](#see-also)
+- [Comment fonctionne une clé d'API](#comment-fonctionne-une-clé-dapi)
+- [L'utilitaire autonome](#lutilitaire-autonome)
+- [Le backend avec stockage](#le-backend-avec-stockage)
+- [Émettre une clé (CLI + code)](#émettre-une-clé)
+- [Authentifier les requêtes](#authentifier-les-requêtes)
+- [Notes de sécurité](#notes-de-sécurité)
+- [Voir aussi](#voir-aussi)
 
 ---
 

@@ -29,15 +29,15 @@ Router angehängt.
 
 ## Inhaltsverzeichnis
 
-- [Wie Middleware in Rustango funktioniert](#how-middleware-works-in-rustango)
-- [Die Reihenfolge zählt](#ordering-matters)
-- [Der eingebaute Katalog](#the-built-in-catalog)
-- [Locale-bewusste Middleware](#locale-aware-middleware)
-- [Zeitzonen-bewusste Middleware](#timezone-aware-middleware)
-- [Security-Header](#security-headers)
-- [CSRF-Schutz](#csrf-protection)
-- [Eigene Middleware schreiben](#writing-your-own-middleware)
-- [Siehe auch](#see-also)
+- [Wie Middleware in Rustango funktioniert](#wie-middleware-in-rustango-funktioniert)
+- [Die Reihenfolge zählt](#die-reihenfolge-zählt)
+- [Der eingebaute Katalog](#der-eingebaute-katalog)
+- [Locale-bewusste Middleware](#locale-bewusste-middleware)
+- [Zeitzonen-bewusste Middleware](#zeitzonen-bewusste-middleware)
+- [Security-Header](#security-header)
+- [CSRF-Schutz](#csrf-schutz)
+- [Eigene Middleware schreiben](#eigene-middleware-schreiben)
+- [Siehe auch](#siehe-auch)
 
 ---
 
@@ -77,7 +77,7 @@ Es gibt zwei Formen, und du wirst beide verwenden:
 2. **Eine Funktion über `axum::middleware::from_fn`** — der schnellste Weg, eine
    einmalige zu schreiben. Du erhältst den `Request` und ein `Next`; du rufst
    `next.run(req)` auf, um fortzufahren, und du kannst auf beiden Seiten dieses
-   Aufrufs arbeiten. Das [Zeitzonen-Beispiel](#timezone-aware-middleware) unten
+   Aufrufs arbeiten. Das [Zeitzonen-Beispiel](#zeitzonen-bewusste-middleware) unten
    ist genau das.
 
 Beide lassen sich frei komponieren — eine `from_fn`-Middleware *ist* ein Layer,
@@ -158,7 +158,7 @@ Jeder Eintrag ist ein `tower::Layer` mit einem passenden
 | Page-Caching | `CachePageLayer` | `.layer(..)` |
 | **Lokalisierung** | | |
 | Locale-Aushandlung | `LocaleMiddleware` | `.layer(..)` (+ `ActiveLocale`-Extractor) |
-| Aktive Zeitzone | *(mit `from_fn` komponieren)* | siehe [unten](#timezone-aware-middleware) |
+| Aktive Zeitzone | *(mit `from_fn` komponieren)* | siehe [unten](#zeitzonen-bewusste-middleware) |
 | **Entwicklung** | | |
 | Live-Reload | `LiveReloadLayer` | `.livereload(..)` |
 | Debug-Panel | `DebugPanelLayer` | `.debug_panel(..)` |
@@ -386,7 +386,7 @@ Pfad-Präfix. Der Auto-Admin aktiviert CSRF bei jeder Mutation ohne Opt-out.
 ## Eigene Middleware schreiben
 
 Die schnelle Form hast du schon gesehen — die [Zeitzonen-
-Middleware](#timezone-aware-middleware) ist ein vollständiges
+Middleware](#zeitzonen-bewusste-middleware) ist ein vollständiges
 `from_fn`-Beispiel. Greife zu `from_fn`, wann immer die Logik anwendungs-
 spezifisch ist und du sie nicht konfigurieren musst:
 

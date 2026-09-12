@@ -33,13 +33,13 @@ escrituras *a través* de él.
 ---
 
 ## Tabla de contenidos
-- [Inicio rápido](#quick-start) · [El trait `ModelSerializer`](#the-modelserializer-trait)
-- [Atributos de campo](#field-attributes) — la referencia completa
-- [Campos calculados](#computed-fields) · [Serializadores anidados](#nested-serializers) · [Colecciones](#collections-many) · [Campos slug](#slug-related-fields)
-- [Validación](#validation) · [Validación unique-together](#unique-together-validation)
-- [Salida con hipervínculos](#hyperlinked-output) · [Serializar listas](#serializing-lists)
-- [Usar un serializador con un ViewSet](#using-a-serializer-with-a-viewset) · [Validar en un handler personalizado](#validating-in-a-custom-handler)
-- [OpenAPI](#openapi-schemas) · [Scaffolding](#scaffolding) · [Ajustes y límites](#tweaks-and-current-limits)
+- [Inicio rápido](#inicio-rápido) · [El trait `ModelSerializer`](#el-trait-modelserializer)
+- [Atributos de campo](#atributos-de-campo) — la referencia completa
+- [Campos calculados](#campos-calculados) · [Serializadores anidados](#serializadores-anidados) · [Colecciones](#colecciones-many) · [Campos slug](#campos-slug-relacionados)
+- [Validación](#validación) · [Validación unique-together](#validación-unique-together)
+- [Salida con hipervínculos](#salida-con-hipervínculos) · [Serializar listas](#serializar-listas)
+- [Usar un serializador con un ViewSet](#usar-un-serializador-con-un-viewset) · [Validar en un handler personalizado](#validar-en-un-handler-personalizado)
+- [OpenAPI](#esquemas-openapi) · [Scaffolding](#scaffolding) · [Ajustes y límites](#ajustes-y-límites-actuales)
 
 ---
 
@@ -133,7 +133,7 @@ Todo se controla con `#[serializer(...)]` en cada campo. El conjunto completo:
 **Validadores declarativos.** `max_length = N`, `min_length = N`, `min = N` y
 `max = N` añaden validación en tiempo de escritura a un campo sin cambiar su forma de
 salida (y un campo sin ninguno de ellos hereda los límites del modelo). Consulta
-[Validación](#validation).
+[Validación](#validación).
 
 `write_only` es para datos solo de entrada (una contraseña, un token de un solo uso):
 presente en `writable_fields()`, ausente de la salida. `skip` es la escotilla de
@@ -203,7 +203,7 @@ pub author: AuthorBrief,
 
 Los campos anidados son **de solo lectura** en la forma de salida — los objetos
 anidados escribibles todavía no están soportados (consulta
-[límites](#tweaks-and-current-limits)).
+[límites](#ajustes-y-límites-actuales)).
 
 ---
 
@@ -512,7 +512,7 @@ Unos cuantos filos afilados y escotillas de escape que conviene conocer:
 - **Los validadores integrados son solo de longitud/rango/opción** — `max_length` /
   `min_length` / `min` / `max` (y `choices` heredados) son declarativos; otras reglas
   (`email`, regex, …) son funciones que escribes tú (consulta
-  [Validación](#validation)).
+  [Validación](#validación)).
 - **Un validador por campo por cada campo.** Para varias reglas en un campo,
   combínalas en la función de ese campo, o añade un `validate(&self)` entre campos.
 - **El serializador no persiste.** Mapea → valida → entrega los datos al ORM; no hay

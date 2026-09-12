@@ -25,16 +25,16 @@ siehe das [ORM-Kochbuch](orm.md).
 
 ## Inhaltsverzeichnis
 
-- [Anatomie eines Modells](#anatomy-of-a-model)
-- [Feldtypen](#field-types) · [Nur-PostgreSQL-Typen](#postgresql-only-types)
-- [Primärschlüssel](#primary-keys) — [benutzerdefinierte PKs](#custom-primary-keys) · [zusammengesetzte](#composite-primary-keys)
-- [Beziehungen](#relationships)
-- [Übliche Feldattribute](#common-field-attributes)
-- [Indizes & Constraints](#indexes-and-constraints)
-- [Übliche Modellattribute](#common-model-attributes)
-- [Die generierte API](#the-generated-api) — [save vs insert](#save-vs-insert)
-- [Vollständige Attributreferenz](#full-attribute-reference)
-- [Siehe auch](#see-also)
+- [Anatomie eines Modells](#anatomie-eines-modells)
+- [Feldtypen](#feldtypen) · [Nur-PostgreSQL-Typen](#nur-postgresql-typen)
+- [Primärschlüssel](#primärschlüssel) — [benutzerdefinierte PKs](#benutzerdefinierte-primärschlüssel) · [zusammengesetzte](#zusammengesetzte-primärschlüssel)
+- [Beziehungen](#beziehungen)
+- [Übliche Feldattribute](#übliche-feldattribute)
+- [Indizes & Constraints](#indizes-und-constraints)
+- [Übliche Modellattribute](#übliche-modellattribute)
+- [Die generierte API](#die-generierte-api) — [save vs insert](#save-vs-insert)
+- [Vollständige Attributreferenz](#vollständige-attributreferenz)
+- [Siehe auch](#siehe-auch)
 
 ---
 
@@ -72,7 +72,7 @@ Aus dieser einen Deklaration generiert das Derive:
 - **typisierte Feldkonstanten** (`Post::title`, `Post::author_id`) für
   compilergeprüfte Filter — `Post::objects().where_(Post::author_id.eq(42))`;
 - Zeilenmethoden — **`save`**, **`find`**, **`delete`** und mehr (siehe
-  [die generierte API](#the-generated-api)).
+  [die generierte API](#die-generierte-api)).
 
 Der Tabellenname ist standardmäßig der Modellname, wenn du `table` weglässt;
 Spaltennamen sind standardmäßig der snake_case-Feldname, sofern du nicht `column`

@@ -7,7 +7,7 @@ API-Resource-Controller, falls du diese schon einmal verwendet hast.)
 
 > **Neu bei REST-APIs?** Diese Anleitung setzt voraus, dass du weißt, was ein *Endpunkt*, ein *HTTP-
 > Verb* (GET / POST / …) und eine *JSON-Anfrage und -Antwort* sind. Falls dir davon etwas
-> unklar ist, ist das [Glossar](glossary.md#web-api-basics) eine Fünf-Minuten-Einführung —
+> unklar ist, ist das [Glossar](glossary.md#glossar) eine Fünf-Minuten-Einführung —
 > lies es zuerst und komm dann hierher zurück.
 
 Kombiniere ein ViewSet mit einem [Serializer](serializers.md) — dem Baustein, der dein
@@ -39,14 +39,14 @@ ist eine Referenz für jede Stellschraube.
 
 ## Inhaltsverzeichnis
 - [API-Views vs. HTML-Views](#api-views-vs-html-views) — JSON für Clients oder HTML-Seiten?
-- [Eine REST-Blog-API bauen](#build-a-rest-blog-api) — die vollständige Anleitung
-- [Die Serializer-Ehe: Eingabe + Ausgabe](#the-serializer-marriage-input--output)
-- [Die zwei Wege, ein ViewSet zu definieren](#the-two-ways-to-define-a-viewset)
-- [Die CRUD-Endpunkte](#the-crud-endpoints) · [Auswahl, welche exponiert werden](#choosing-which-operations-to-expose)
-- [`#[viewset(...)]`-Referenz](#viewset-attribute-reference) · [Builder-Referenz](#builder-reference)
-- [Filterung, Suche & Sortierung](#filtering-search-and-ordering) · [Paginierung](#pagination)
-- [Validierung](#validation) · [Berechtigungen & Drosselung](#permissions-and-throttling) · [Eigene Aktionen](#custom-actions-beyond-crud)
-- [Einbinden](#mounting) · [Backends](#backend-support)
+- [Eine REST-Blog-API bauen](#eine-rest-blog-api-bauen) — die vollständige Anleitung
+- [Die Serializer-Ehe: Eingabe + Ausgabe](#die-serializer-ehe-eingabe--ausgabe)
+- [Die zwei Wege, ein ViewSet zu definieren](#die-zwei-wege-ein-viewset-zu-definieren)
+- [Die CRUD-Endpunkte](#die-crud-endpunkte) · [Auswahl, welche exponiert werden](#auswahl-welche-operationen-exponiert-werden)
+- [`#[viewset(...)]`-Referenz](#viewset-attributreferenz) · [Builder-Referenz](#builder-referenz)
+- [Filterung, Suche & Sortierung](#filterung-suche-und-sortierung) · [Paginierung](#paginierung)
+- [Validierung](#validierung) · [Berechtigungen & Drosselung](#berechtigungen-und-drosselung) · [Eigene Aktionen](#eigene-aktionen-jenseits-von-crud)
+- [Einbinden](#einbinden) · [Backends](#backend-unterstützung)
 
 ---
 
@@ -212,7 +212,7 @@ automatisch **die Constraints des Models** — `title` wird gegen die Längenvor
 `max_length = 200` geprüft, und eine `choices`/`min`/`max`-Spalte würde ebenfalls geprüft,
 wobei alle beim Schreiben freundliche `400`er zurückgeben. Füge `max_length` / `min_length` /
 `min` / `max` als Serializer-Attribute hinzu, um die Grenze eines Feldes zu überschreiben. (Siehe die
-[Serializer-Anleitung](serializers.md#validation) für die vollständige Validierungsgeschichte.)
+[Serializer-Anleitung](serializers.md#validierung) für die vollständige Validierungsgeschichte.)
 
 ### Schritt 5 — Das ViewSet gerüsten und den Serializer verdrahten
 
@@ -498,7 +498,7 @@ Das Einbinden unter `/api/posts` verdrahtet alle sechs REST-Operationen:
 
 | Verb | Pfad | Aktion | Erfolg | Body |
 |---|---|---|---|---|
-| `GET` | `/api/posts` | **list** | 200 | paginierter Umschlag (siehe [Paginierung](#pagination)) |
+| `GET` | `/api/posts` | **list** | 200 | paginierter Umschlag (siehe [Paginierung](#paginierung)) |
 | `POST` | `/api/posts` | **create** | 201 | das erstellte Objekt — *oder ein Array bei Bulk-Create* |
 | `GET` | `/api/posts/{pk}` | **retrieve** | 200 | das Objekt |
 | `PUT` | `/api/posts/{pk}` | **update** (vollständig) | 200 | das aktualisierte Objekt |
@@ -523,7 +523,7 @@ ViewSet::for_model(Post::SCHEMA).read_only()   // builder
 
 Es gibt keinen Umschalter pro Verb außer read_only. Für „alles außer Löschen"
 binde das ViewSet ein und überschreibe die eine Route mit deinem eigenen Handler (siehe
-[Eigene Aktionen](#custom-actions-beyond-crud)).
+[Eigene Aktionen](#eigene-aktionen-jenseits-von-crud)).
 
 ---
 
@@ -532,7 +532,7 @@ binde das ViewSet ein und überschreibe die eine Route mit deinem eigenen Handle
 | Schlüssel | Beispiel | Standard | Was er tut |
 |---|---|---|---|
 | `model` | `model = Post` | **erforderlich** | Das Model, auf dem die Ressource aufbaut. |
-| `serializer` | `serializer = path::To::S` | keiner | Einen Serializer für typisierte **Ausgabe + Eingabe** verdrahten (siehe [oben](#the-serializer-marriage-input--output)). |
+| `serializer` | `serializer = path::To::S` | keiner | Einen Serializer für typisierte **Ausgabe + Eingabe** verdrahten (siehe [oben](#die-serializer-ehe-eingabe--ausgabe)). |
 | `fields` | `"id, title, body"` | alle Skalarfelder | Whitelist für die standardmäßige (serializer-freie) Projektion + schreibbare Felder. |
 | `filter_fields` | `"author_id, status"` | keiner | Über `?field=value` filterbare Felder (+ Lookups). |
 | `search_fields` | `"title, body"` | keiner | Felder, die die `?search=`-Box durchsucht (Groß-/Kleinschreibung-unabhängiges ODER). |
@@ -633,8 +633,8 @@ für sehr große Tabellen. `?cursor=<token>&page_size=20`:
 
 Mit einem **verdrahteten Serializer** führt der Create-/Update-Pfad die Validatoren des Serializers
 aus und gibt `400`er in DRF-Form zurück — der empfohlene Weg zu validieren (siehe
-[die Ehe](#the-serializer-marriage-input--output) und die
-[Serializer-Anleitung](serializers.md#validation)). Drei Schichten laufen:
+[die Ehe](#die-serializer-ehe-eingabe--ausgabe) und die
+[Serializer-Anleitung](serializers.md#validierung)). Drei Schichten laufen:
 
 - **Deklarative Constraints** — `max_length` / `min_length` / `min` / `max`, und
   standardmäßig **erbt** das Feld das `max_length` / `min` / `max` /

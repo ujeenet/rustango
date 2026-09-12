@@ -28,18 +28,18 @@ Celery / Laravel-Queues, in Rust.
 
 ## Inhaltsverzeichnis
 
-- [Schritt 1 — Einen Job definieren](#step-1--define-a-job)
-- [Schritt 2 — Eine Queue starten](#step-2--start-a-queue)
-- [Schritt 3 — Aus einem Handler dispatchen](#step-3--dispatch-from-a-handler)
-- [Schritt 4 — In deine App verdrahten](#step-4--wire-it-into-your-app) — das vollständige Beispiel
-- [Die Worker laufen lassen (CLI + Produktion)](#running-the-workers-cli--production)
-- [Retries und Backoff](#retries-and-backoff)
-- [Der Dead-Letter-Handler](#the-dead-letter-handler)
-- [Die persistente Queue (Produktion)](#the-persistent-queue-production)
-- [Jobs unter Multi-Tenancy](#jobs-under-multi-tenancy)
-- [Geplante Sweeps unter Multi-Tenancy](#scheduled-sweeps-under-multi-tenancy)
-- [Referenz](#reference)
-- [Siehe auch](#see-also)
+- [Schritt 1 — Einen Job definieren](#schritt-1--einen-job-definieren)
+- [Schritt 2 — Eine Queue starten](#schritt-2--eine-queue-starten)
+- [Schritt 3 — Aus einem Handler dispatchen](#schritt-3--aus-einem-handler-dispatchen)
+- [Schritt 4 — In deine App verdrahten](#schritt-4--in-deine-app-verdrahten) — das vollständige Beispiel
+- [Die Worker laufen lassen (CLI + Produktion)](#die-worker-laufen-lassen-cli--produktion)
+- [Retries und Backoff](#retries-und-backoff)
+- [Der Dead-Letter-Handler](#der-dead-letter-handler)
+- [Die persistente Queue (Produktion)](#die-persistente-queue-produktion)
+- [Jobs unter Multi-Tenancy](#jobs-unter-multi-tenancy)
+- [Geplante Sweeps unter Multi-Tenancy](#geplante-sweeps-unter-multi-tenancy)
+- [Referenz](#referenz)
+- [Siehe auch](#siehe-auch)
 
 ---
 
@@ -111,7 +111,7 @@ erreichen können.
 > **In-Memory bedeutet In-Memory.** In der Queue stehende oder in Bearbeitung
 > befindliche Jobs gehen **beim Neustart verloren**. Für alles, dessen Verlust
 > du dir nicht leisten kannst, verwende die [persistente
-> Queue](#the-persistent-queue-production).
+> Queue](#die-persistente-queue-produktion).
 
 ---
 
@@ -215,7 +215,7 @@ cargo run -- make:job WelcomeEmail   # scaffold a new job type
 
 Im großen Maßstab willst du die Worker oft **getrennt** von der Web-Ebene — damit
 ein Traffic-Spike keine Jobs aushungern kann und du beide unabhängig skalierst.
-Mit der [persistenten Queue](#the-persistent-queue-production) zieht jeder Prozess
+Mit der [persistenten Queue](#die-persistente-queue-produktion) zieht jeder Prozess
 aus derselben `rustango_jobs`-Tabelle, führe also einfach ein zweites,
 serverloses Binary aus, das die Queue baut, startet und bis zu einem Signal
 blockiert:
@@ -243,7 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Deploye es als eigenen Container/Service und skaliere auf **N Replicas** — sie
 ziehen alle sicher aus der geteilten Tabelle. Der Web-Prozess muss dann nur noch
 `dispatch` (er muss keine Worker `start()`). Kopple den Worker mit einem
-periodischen [`reclaim_stuck_jobs_pool`](#the-persistent-queue-production)-Sweep,
+periodischen [`reclaim_stuck_jobs_pool`](#die-persistente-queue-produktion)-Sweep,
 um Jobs eines abgestürzten Workers zurückzuholen.
 
 ---
@@ -514,5 +514,5 @@ nichts geloggt. Verfolgt in
 - [E-Mail](email.md) — die kanonische „mach es in einem Job"-Workload.
 - [Caching](caching.md) — der andere Weg, Request-Handler schnell zu halten.
 - [Signals](orm.md) — Fire-and-Forget-Hooks, die oft einen Job *dispatchen*.
-- [Tenancy-Befehle](manage.md#tenancy-commands) — das Provisionieren der
+- [Tenancy-Befehle](manage.md#tenancy-befehle) — das Provisionieren der
   Tenants, über die eine Queue pro Tenant fan-out macht.

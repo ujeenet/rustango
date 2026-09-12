@@ -26,15 +26,15 @@ de Django o la fachada `Cache` de Laravel.
 
 ## Tabla de contenidos
 
-- [Paso 1 — Elegir un backend](#step-1--pick-a-backend)
-- [Paso 2 — get / set / delete](#step-2--get--set--delete)
-- [Paso 3 — get_or_set (cache-aside)](#step-3--get_or_set-cache-aside)
-- [Valores JSON tipados](#typed-json-values)
-- [TTL y expiración](#ttl-and-expiry)
-- [Cambiar de backend](#swapping-backends)
-- [Caché con multi-tenancy](#caching-under-multi-tenancy)
-- [Referencia](#reference)
-- [Véase también](#see-also)
+- [Paso 1 — Elegir un backend](#paso-1--elegir-un-backend)
+- [Paso 2 — get / set / delete](#paso-2--get--set--delete)
+- [Paso 3 — get_or_set (cache-aside)](#paso-3--get_or_set-cache-aside)
+- [Valores JSON tipados](#valores-json-tipados)
+- [TTL y expiración](#ttl-y-expiración)
+- [Cambiar de backend](#cambiar-de-backend)
+- [Caché con multi-tenancy](#caché-con-multi-tenancy)
+- [Referencia](#referencia)
+- [Véase también](#véase-también)
 
 ---
 

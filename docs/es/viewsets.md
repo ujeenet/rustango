@@ -8,7 +8,7 @@ alguno de esos.)
 
 > **¿Nuevo en las APIs REST?** Esta guía asume que sabes qué es un *endpoint*, un
 > *verbo HTTP* (GET / POST / …) y una *petición y respuesta JSON*. Si algo de eso
-> te resulta confuso, el [glosario](glossary.md#web-api-basics) es una
+> te resulta confuso, el [glosario](glossary.md#fundamentos-de-las-api-web) es una
 > introducción de cinco minutos — léelo primero y luego vuelve aquí.
 
 Empareja un ViewSet con un [serializador](serializers.md) — la pieza que da forma
@@ -215,7 +215,7 @@ verifica la longitud contra el `max_length = 200` del modelo, y una columna con
 `choices`/`min`/`max` también se verificaría, todo devolviendo `400`s amigables
 en la escritura. Añade los atributos de serializador `max_length` / `min_length` /
 `min` / `max` para sobrescribir el límite de un campo. (Consulta la
-[guía de serializadores](serializers.md#validation) para la historia completa de
+[guía de serializadores](serializers.md#validación) para la historia completa de
 validación.)
 
 ### Step 5 — Scaffold the ViewSet and wire the serializer
@@ -647,7 +647,7 @@ tablas muy grandes. `?cursor=<token>&page_size=20`:
 Con un **serializador conectado**, la ruta de create/update ejecuta los
 validadores del serializador y devuelve `400`s con forma de DRF — la forma
 recomendada de validar (ver [el matrimonio](#the-serializer-marriage-input--output)
-y la [guía de serializadores](serializers.md#validation)). Se ejecutan tres capas:
+y la [guía de serializadores](serializers.md#validación)). Se ejecutan tres capas:
 
 - **Restricciones declarativas** — `max_length` / `min_length` / `min` / `max`, y
   por defecto el campo **hereda del modelo** `max_length` / `min` / `max` /

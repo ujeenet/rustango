@@ -28,10 +28,10 @@ tu página de inicio de sesión (flujo de navegador) o respondidas con 401/403
 ---
 
 ## Tabla de contenidos
-- [Inicio rápido](#quick-start) · [Barreras de navegador vs. API](#browser-vs-api-gates)
-- [La familia de barreras](#the-gate-family) · [Barreras por predicado y por rol](#predicate-and-role-gates)
-- [Barreras de permiso](#permission-gates) · [El viaje de ida y vuelta de `?next=`](#the-next-round-trip)
-- [Notas y límites](#notes-and-limits)
+- [Inicio rápido](#inicio-rápido) · [Barreras de navegador vs. API](#barreras-de-navegador-vs-api)
+- [La familia de barreras](#la-familia-de-barreras) · [Barreras por predicado y por rol](#barreras-por-predicado-y-por-rol)
+- [Barreras de permiso](#barreras-de-permiso) · [El viaje de ida y vuelta de `?next=`](#el-viaje-de-ida-y-vuelta-de-next)
+- [Notas y límites](#notas-y-límites)
 
 ---
 
