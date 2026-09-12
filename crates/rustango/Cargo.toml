@@ -574,6 +574,13 @@ tracing-appender = { workspace = true, optional = true }
 time = { workspace = true }
 
 [dev-dependencies]
+# Self dev-dependency, for `testkit` alone. Integration tests are
+# external crates, so `crate::testkit` is only public API with the
+# feature on — and 36 test files used it without asking for it, so
+# every selective-feature test build failed on a missing module.
+# `default-features = false` matters: without it this would quietly
+# re-enable postgres and make `--no-default-features` meaningless.
+rustango       = { path = ".", default-features = false, features = ["testkit"] }
 tokio          = { workspace = true }
 chrono         = { workspace = true }
 uuid           = { workspace = true }

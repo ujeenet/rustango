@@ -40,6 +40,10 @@ pub struct MySql;
 /// `'static` reference to the singleton [`MySql`] dialect, symmetric
 /// with [`super::postgres::DIALECT`]. Used by [`crate::sql::Pool::dialect`]
 /// to hand back a `&'static dyn Dialect` regardless of pool variant.
+///
+/// Gated where the emitter above is not: every caller is a `Pool` arm
+/// that only exists with the driver linked.
+#[cfg(feature = "mysql")]
 pub static DIALECT: &MySql = &MySql;
 
 impl Dialect for MySql {

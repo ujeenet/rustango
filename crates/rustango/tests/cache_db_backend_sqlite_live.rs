@@ -4,7 +4,7 @@
 //! sqlite hits the `ON CONFLICT` arm; the MySQL `ON DUPLICATE KEY
 //! UPDATE` arm is covered by inspection (see `db_backend.rs::set`).
 
-#![cfg(feature = "sqlite")]
+#![cfg(all(feature = "sqlite", feature = "cache"))]
 
 use std::time::Duration;
 
