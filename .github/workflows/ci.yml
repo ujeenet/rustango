@@ -292,6 +292,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p rustango --no-default-features --features sqlite,tenancy
       - run: cargo clippy -p rustango --no-default-features --features sqlite,tenancy --lib --no-deps
+      # Compile *every* test target, not just the ones enumerated below
+      # (#1363). `check` and `clippy --lib` above both stop at the
+      # library, so for a long time no job compiled a test binary
+      # without Postgres — and the enumeration grew stale silently every
+      # time a test file was added. `--no-run` needs no databases.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_choices
@@ -386,9 +392,11 @@ jobs:
   # service container is needed; tests create per-test files / `:memory:`
   # databases.
   #
-  # Listing `--test` files explicitly prevents the test harness from
-  # compiling PG-typed test binaries that don't compile under
-  # `--no-default-features`.
+  # `--test` files are listed explicitly because this job *runs* them,
+  # and only the sqlite-live ones are worth running here. It is no
+  # longer a workaround for test binaries that would not compile: since
+  # #1363 the whole suite compiles under `--no-default-features`, and
+  # `sqlite_litmus` asserts that with `--no-run`.
   sqlite_live:
     runs-on: ubuntu-latest
     steps:

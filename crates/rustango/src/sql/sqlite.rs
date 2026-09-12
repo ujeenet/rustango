@@ -43,6 +43,10 @@ pub struct Sqlite;
 /// with [`super::postgres::DIALECT`] / [`super::mysql::DIALECT`]. Used
 /// by [`crate::sql::Pool::dialect`] (Phase 2) to hand back a
 /// `&'static dyn Dialect` regardless of pool variant.
+///
+/// Gated where the emitter above is not: every caller is a `Pool` arm
+/// that only exists with the driver linked.
+#[cfg(feature = "sqlite")]
 pub static DIALECT: &Sqlite = &Sqlite;
 
 impl Dialect for Sqlite {

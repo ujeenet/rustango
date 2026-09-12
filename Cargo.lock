@@ -2198,6 +2198,7 @@ dependencies = [
  "reqwest",
  "rpassword",
  "rust_decimal",
+ "rustango",
  "rustango-macros",
  "serde",
  "serde_json",

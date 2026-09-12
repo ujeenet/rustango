@@ -22,12 +22,15 @@ mod hstore;
 pub mod m2m;
 #[doc(hidden)]
 pub mod model_shortcuts;
-#[cfg(feature = "mysql")]
+// The three dialect emitters are pure IR-to-string compilation — no
+// driver, no sqlx. Gating them on their driver feature made a
+// tri-dialect *emission* test impossible to compile unless the binary
+// also linked all three drivers, which is the opposite of the point.
+// `postgres` was always ungated; these two now match it.
 mod mysql;
 mod pool;
 mod postgres;
 mod range;
-#[cfg(feature = "sqlite")]
 mod sqlite;
 mod vector;
 mod writers;
@@ -99,7 +102,6 @@ pub use executor::LoadRelatedMy;
 pub use executor::LoadRelatedSqlite;
 pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
-#[cfg(feature = "mysql")]
 pub use mysql::MySql;
 // Both call sites (`manage::dispatch`) sit inside `tenancy` gates, so the
 // re-export needs `tenancy` too (#1208) — without it, `sqlite,manage` warned
@@ -108,7 +110,6 @@ pub use mysql::MySql;
 pub(crate) use pool::sqlite_connect_options;
 pub use pool::{Pool, PoolError};
 pub use postgres::Postgres;
-#[cfg(feature = "sqlite")]
 pub use sqlite::Sqlite;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without

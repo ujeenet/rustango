@@ -60,6 +60,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   crates. Both files are now packaged into all four published crates.
 
 ### Changed
+- **The MySQL and SQLite dialect emitters are no longer gated on their drivers**
+  (#1363). `sql::MySql` and `sql::Sqlite` are pure `Clause` IR → string
+  compilation — no `sqlx`, no `#[cfg]` — exactly like `sql::Postgres`, which was
+  always ungated. Gating them meant a tri-dialect *emission* test could not
+  compile unless the binary also linked all three database drivers, which is
+  backwards: emission is the part with no driver. Both are now unconditional;
+  only the `DIALECT` statics stay gated, since their callers are `Pool` arms
+  that need the driver. Nothing about a built binary changes — this only widens
+  what a selective-feature build can name.
+
 - **Operator activation rules moved out of the console handler** into
   `tenancy::operators`, which both surfaces now call (#1344). "You cannot
   deactivate yourself" and "you cannot deactivate the last active operator"
@@ -83,6 +93,21 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   every SQLite and MySQL deployment.
 
 ### Fixed
+- **`cargo test --no-default-features --features sqlite,tenancy` did not
+  compile** (#1363). The canonical no-Postgres litmus had been broken for a
+  long time: two emission tests wanted `sql::MySql` (see Changed), 36 files used
+  `rustango::testkit` without asking for the feature, and two used
+  `rustango::cache` the same way. `testkit` is now a self dev-dependency
+  (`default-features = false`, so it cannot smuggle `postgres` back in) rather
+  than 36 edited gates; the cache tests declare `feature = "cache"`.
+
+  CI never caught it because both no-Postgres jobs enumerate test targets by
+  hand — 68 and 60 of the crate's 526 test files — while `cargo check` and
+  `cargo clippy --lib` stop at the library. The enumeration was itself a
+  documented workaround for this defect, so it had been quietly masking a gap
+  that grew with every new test file. `sqlite_litmus` now compiles the whole
+  suite with `--no-run`, which needs no databases.
+
 - **A tenant created from the CLI left no provisioning run** (#1344).
   `create-tenant` called `provision_tenant` rather than
   `provision_tenant_recorded`, so the run history — and the console's run list
