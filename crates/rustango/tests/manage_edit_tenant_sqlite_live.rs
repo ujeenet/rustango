@@ -239,6 +239,48 @@ async fn only_a_real_url_change_evicts_the_pool() {
     );
 }
 
+/// `--activate --deactivate` used to resolve last-wins and take the tenant
+/// **offline** while printing `updated` and exiting 0 (#1355).
+#[tokio::test]
+async fn contradictory_activation_flags_are_refused() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    assert!(b.org("acme").await.active);
+
+    for args in [
+        vec!["edit-tenant", "acme", "--activate", "--deactivate"],
+        vec!["edit-tenant", "acme", "--deactivate", "--activate"],
+    ] {
+        let err = b.run(&args).await.expect_err("contradiction");
+        assert!(err.contains("contradict"), "{args:?}: {err}");
+    }
+
+    assert!(
+        b.org("acme").await.active,
+        "a refused edit must not have changed anything"
+    );
+
+    // Repeating one direction is not a contradiction.
+    b.run(&["edit-tenant", "acme", "--deactivate", "--deactivate"])
+        .await
+        .expect("same direction twice");
+    assert!(!b.org("acme").await.active);
+}
+
+/// `menu` off a terminal used to print 50 lines and exit 0, so a mistyped
+/// command in CI looked like a successful step (#1357).
+#[tokio::test]
+async fn the_menu_refuses_to_run_without_a_terminal() {
+    let b = boot().await;
+    for verb in ["menu", "actions"] {
+        let err = b.run(&[verb]).await.expect_err("no terminal under test");
+        assert!(
+            err.contains("terminal"),
+            "`{verb}` should say why it cannot run: {err}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_edit_with_nothing_to_change_is_refused() {
     let b = boot().await;

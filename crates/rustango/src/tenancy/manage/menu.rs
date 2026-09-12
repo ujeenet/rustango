@@ -17,7 +17,9 @@
 //! Each pick re-enters [`super::dispatch`], so the menu cannot drift from
 //! what the flags do — same code path, different front end.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
+
+use crate::manage_interactive::LineSource;
 use std::path::Path;
 
 use crate::tenancy::error::TenancyError;
@@ -319,7 +321,7 @@ const GROUPS: &[Group] = &[
 ];
 
 /// Loop: show the menu, run one verb, come back. Ends on `q` or EOF.
-pub(super) async fn menu_cmd<R: BufRead, W: Write + Send, DB: sqlx::Database>(
+pub(super) async fn menu_cmd<R: LineSource + ?Sized, W: Write + Send, DB: sqlx::Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
@@ -394,7 +396,7 @@ fn write_menu<W: Write>(w: &mut W, flat: &[&Action]) -> Result<(), TenancyError>
 }
 
 /// Read a choice. `None` means quit (typed `q`, or EOF).
-fn pick<'a, R: BufRead, W: Write>(
+fn pick<'a, R: LineSource + ?Sized, W: Write>(
     reader: &mut R,
     writer: &mut W,
     flat: &[&'a Action],
@@ -403,7 +405,7 @@ fn pick<'a, R: BufRead, W: Write>(
         write!(writer, "\n  > ")?;
         writer.flush()?;
         let mut buf = String::new();
-        if reader.read_line(&mut buf)? == 0 {
+        if reader.read_line_from(&mut buf)? == 0 {
             return Ok(None); // EOF — piped input ran out.
         }
         let raw = buf.trim();
@@ -430,7 +432,7 @@ fn pick<'a, R: BufRead, W: Write>(
 }
 
 /// The argv for `action`, asking only what the verb will not ask itself.
-fn build_argv<R: BufRead, W: Write>(
+fn build_argv<R: LineSource + ?Sized, W: Write>(
     action: &Action,
     reader: &mut R,
     writer: &mut W,
@@ -617,6 +619,67 @@ mod tests {
         assert!(
             !text.contains("list-tenants failed"),
             "the verb should have run cleanly:\n{text}"
+        );
+    }
+
+    /// Control must come back from a verb that reached for stdin itself —
+    /// the menu used to deadlock there (#1360).
+    ///
+    /// A `Cursor` cannot drive the verb's *own* prompt: `manage_interactive`
+    /// reads the process's stdin, which under `cargo test` is not a
+    /// terminal, so the verb gets `None` and errors. That is still the
+    /// assertion worth making here — the verb ran, reached for input,
+    /// returned, and the loop moved on to the next question. Under the old
+    /// held-`StdinLock` design that hung, and nothing after the first
+    /// prompt was ever written.
+    ///
+    /// The full nested-prompt path needs a real terminal; see the pty
+    /// check in the issue.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_verb_that_prompts_for_itself_completes() {
+        use crate::sql::sqlx;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
+        let pools = TenantPools::<sqlx::Sqlite>::new(pool);
+        let migrations = tempfile::tempdir().expect("migrations");
+
+        let mut buf: Vec<u8> = Vec::new();
+        super::super::run_with_writer(
+            &pools,
+            &url,
+            migrations.path(),
+            vec!["migrate-registry".to_owned()],
+            &mut buf,
+        )
+        .await
+        .expect("migrate-registry");
+
+        // Pick drop-tenant — which prompts for a slug — then decline
+        // another action. The `n` must still be consumed by the menu,
+        // proving the loop got control back.
+        let mut out: Vec<u8> = Vec::new();
+        menu_cmd(
+            &pools,
+            &url,
+            migrations.path(),
+            crate::tenancy::bootstrap::init_tenancy,
+            &mut Cursor::new("drop-tenant\nn\n"),
+            &mut out,
+        )
+        .await
+        .expect("menu");
+
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(
+            text.contains("drop-tenant failed"),
+            "the verb should have run and reported:\n{text}"
+        );
+        assert!(
+            text.contains("Another action?"),
+            "the loop must reach the next question rather than hang:\n{text}"
         );
     }
 

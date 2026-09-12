@@ -4,7 +4,97 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+- **`cargo rustango new` picks a backend and extra features** (#1345).
+  `--backend postgres|sqlite|mysql` decides what `cargo run` uses *and* shapes
+  the whole project to match — the `DATABASE_URL` in `.env.example`, the
+  services in `docker-compose.yml`, the `url` in every settings tier, and the
+  README's run instructions. SQLite gets no database service at all. All three
+  forwards stay defined, so the other two remain one flag away.
+
+  `--features` reaches the eleven framework features no template turned on
+  (`tenancy`, `csrf`, `sso`, `admin-sso`, `passkey`, `cache-redis`,
+  `cache-page`, `email-smtp`, `mcp`, `testkit`, `test_utils`). Naming a backend
+  there is refused with a pointer to `--backend`: it would pin
+  `rustango/<backend>` while the project's own feature stayed off, which is the
+  mismatch #1211 fixed.
+
+  A bare `cargo rustango new` on a terminal opens a wizard of numbered menus
+  that prints the equivalent command line before writing anything — it sets the
+  same fields the flags set, so there is one code path deciding what a project
+  contains. Off a terminal it fails with a message rather than blocking on a
+  prompt nobody can answer.
+
+- **`manage menu` — numbered choices over the tenancy verbs** (#1345). Forty-odd
+  verbs are discoverable with `--help` and hard to *run* for the first time.
+  The menu groups them, asks only for the options a verb will not prompt for
+  itself, echoes the command line it is about to run, and re-enters the same
+  dispatcher the flags go through — so it cannot drift from them.
+
+- **The tenancy CLI reaches everything the operator console can do** (#1344).
+  An action available on only one surface cannot be automated, and an action
+  available only in a shell cannot be delegated.
+  - Hostnames: `list-hosts`, `add-host`, `remove-host`, `set-host-enabled`,
+    over the same `tenancy::org_host` engine the console posts to. No
+    `rename-host`: `org_host::generation` fingerprints the table by row count,
+    enabled count, max id and enabled-id sum, and an in-place rename moves none
+    of them, so other pods would keep routing the old name until the TTL
+    expired.
+  - Operators: `list-operators` and `set-operator-active --on|--off`.
+  - Inspection: `list-runs`, `show-run <id>`, `audit-log`, with filters.
+  - `edit-tenant` for display name, host pattern, path prefix, port, database
+    URL and active state. Only named fields are touched; `--clear <field>`
+    empties one without relying on `--x ""`, which some shells and CI runners
+    eat.
+
+- **Pre-warming tenant pools from the operator console** (#1341). `prewarm-pools`
+  was command-line only, so the one thing worth doing right after a deploy, a
+  registry restart or a credential rotation needed shell access. `prewarm` joins
+  `TenantPoolInvalidator` beside `decommission`, and the tenant list gets a
+  button behind the edit gate.
+
+- `LICENSE-MIT` and `LICENSE-APACHE` at the repository root, referenced from the
+  README. Every manifest has always declared `license = "MIT OR Apache-2.0"`,
+  but the texts existed nowhere — GitHub reported no license at all, and the
+  terms an attribution claim would rest on were absent from the published
+  crates. Both files are now packaged into all four published crates.
+
+### Changed
+- **Operator activation rules moved out of the console handler** into
+  `tenancy::operators`, which both surfaces now call (#1344). "You cannot
+  deactivate yourself" and "you cannot deactivate the last active operator"
+  were written inside the HTTP handler, so a CLI verb would have restated them
+  — and the copy that drifted would be the one that locked everybody out of the
+  console, with only a shell on the registry to undo it. The console passes the
+  signed-in operator as the actor; the CLI passes `None`, because a shell has
+  no session to lock itself out of. The last-active rule applies to both.
+
+- **Tenant edits go through `tenancy::org_edit::apply`**, which writes and then
+  drops the cached `Org` (#1344). Resolution serves from that cache, so a
+  caller that skipped the invalidation would report a successful credential
+  rotation while the next request reconnected on the old one — and
+  `active = false` would keep serving. Invisible in testing, because the stale
+  read only appears on *another* request, so it lives in the engine rather than
+  in each caller.
+
+- **The `sqlite,tenancy` CI job now runs the operator console suites.** They had
+  only ever run in the all-features job, which always has Postgres available —
+  so a PG-ism in console or provisioning code would have passed CI and broken
+  every SQLite and MySQL deployment.
+
 ### Fixed
+- **A tenant created from the CLI left no provisioning run** (#1344).
+  `create-tenant` called `provision_tenant` rather than
+  `provision_tenant_recorded`, so the run history — and the console's run list
+  — described only what the console had done, and a CLI provision that died
+  halfway left nothing to find. Now recorded, with `requested_by = cli` so the
+  two sources are distinguishable.
+
+- **`<form>` inside `<p>` split the operator console's action rows.** `<form>`
+  is not phrasing content, so the HTML parser closes an open `<p>` when it meets
+  one: the button rows on the tenant list and the tenant edit page were breaking
+  in two and leaving stray empty paragraphs. Both are `<div>`s now.
+
 - **`makemigrations` re-claimed the framework's own tables, breaking the first
   `migrate` of every new project** (#1271, #1298). `migrate` generates and
   applies a *system* migration chain (`system/migrations/`, ledger
@@ -21,13 +111,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   projects and `makemigrations --app` — never called it. Now shared, so a
   user-app migration only ever claims user tables. `make_migrations_system` is
   deliberately unchanged: there the `rustango_*` tables *are* the subject.
-
-### Added
-- `LICENSE-MIT` and `LICENSE-APACHE` at the repository root, referenced from the
-  README. Every manifest has always declared `license = "MIT OR Apache-2.0"`,
-  but the texts existed nowhere — GitHub reported no license at all, and the
-  terms an attribution claim would rest on were absent from the published
-  crates. Both files are now packaged into all four published crates.
 
 ## [0.56.1] — 2026-09-04
 

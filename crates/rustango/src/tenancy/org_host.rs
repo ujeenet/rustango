@@ -74,6 +74,11 @@ pub enum HostError {
     Taken(String),
     /// Removing the base host, which this table cannot represent.
     IsBaseHost(String),
+    /// No tenant by that slug. Distinct from [`Self::NotFound`], which is
+    /// about a hostname: one `NotFound` for both sent a mistyped slug
+    /// looking at the host table (#1356).
+    NoSuchOrg(String),
+    /// No such hostname on a tenant that does exist.
     NotFound,
     Driver(crate::sql::ExecError),
 }
@@ -86,6 +91,7 @@ impl std::fmt::Display for HostError {
             Self::IsBaseHost(h) => {
                 write!(f, "`{h}` is this tenant's base host and cannot be removed")
             }
+            Self::NoSuchOrg(s) => write!(f, "no tenant named `{s}`"),
             Self::NotFound => write!(f, "no such host"),
             Self::Driver(e) => write!(f, "{e}"),
         }
@@ -142,7 +148,7 @@ pub async fn list_for_org(registry: &Pool, org_slug: &str) -> Result<Vec<TenantH
         .first(registry)
         .await?
     else {
-        return Err(HostError::NotFound);
+        return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
     let org_id = org.id.get().copied().unwrap_or_default();
     let mut out = Vec::new();
@@ -185,7 +191,7 @@ pub async fn add_host(
         .first(registry)
         .await?
     else {
-        return Err(HostError::NotFound);
+        return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
     // Claimed as some tenant's BASE host? The unique index below cannot see
     // `rustango_orgs.host_pattern`, so without this a host could be added
@@ -232,7 +238,7 @@ pub async fn remove_host(registry: &Pool, org_slug: &str, hostname: &str) -> Res
         .first(registry)
         .await?
     else {
-        return Err(HostError::NotFound);
+        return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
     if org.host_pattern.as_deref() == Some(host.as_str()) {
         return Err(HostError::IsBaseHost(host));
@@ -269,7 +275,7 @@ pub async fn set_host_enabled(
         .first(registry)
         .await?
     else {
-        return Err(HostError::NotFound);
+        return Err(HostError::NoSuchOrg(org_slug.to_owned()));
     };
     if org.host_pattern.as_deref() == Some(host.as_str()) {
         return Err(HostError::IsBaseHost(host));

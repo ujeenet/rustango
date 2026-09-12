@@ -27,11 +27,13 @@ fn explain(e: ops::OperatorError) -> TenancyError {
 
 pub(super) async fn list_operators<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
+    args: &[String],
     w: &mut W,
 ) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    super::args::reject_extra_positionals(args, 0, "list-operators")?;
     let rows = ops::list(&pools.registry_pool()).await.map_err(explain)?;
     if rows.is_empty() {
         writeln!(w, "(no operators — create one with `create-operator`)")?;
@@ -73,8 +75,10 @@ where
     let mut active: Option<bool> = None;
     for flag in args {
         match flag.as_str() {
-            "--on" => active = Some(true),
-            "--off" => active = Some(false),
+            // Refused rather than last-wins: guessing revokes or restores
+            // access, and both are wrong to do silently (#1355).
+            "--on" => super::hosts::set_direction(&mut active, true, ("--on", "--off"))?,
+            "--off" => super::hosts::set_direction(&mut active, false, ("--on", "--off"))?,
             other if other.starts_with("--") => {
                 return Err(TenancyError::Validation(format!(
                     "unknown flag `{other}` — set-operator-active takes --on or --off"

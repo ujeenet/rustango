@@ -33,8 +33,20 @@ fn parse_args(args: &[String]) -> Result<(Option<String>, OrgPatch), TenancyErro
             "--path-prefix" => patch.path_prefix = Some(next_value(&mut iter, arg)?),
             "--port" => patch.port = Some(next_value(&mut iter, arg)?),
             "--database-url" => patch.database_url = Some(next_value(&mut iter, arg)?),
-            "--activate" => patch.active = Some(true),
-            "--deactivate" => patch.active = Some(false),
+            // Refused rather than last-wins — `--activate --deactivate`
+            // used to take the tenant offline and report success (#1355).
+            "--activate" => super::hosts::set_direction(
+                &mut patch.active,
+                true,
+                ("--activate", "--deactivate"),
+            )?,
+            "--deactivate" => {
+                super::hosts::set_direction(
+                    &mut patch.active,
+                    false,
+                    ("--activate", "--deactivate"),
+                )?;
+            }
             // An explicit empty value is how you clear an optional column;
             // `--clear <field>` says so without relying on `--x ""`, which
             // some shells and CI runners eat.

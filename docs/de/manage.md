@@ -52,15 +52,15 @@ Nutzungshilfe aus.
 
 ## Inhaltsverzeichnis
 
-- [Migrationen](#migrations)
-- [Datenmigrationen](#data-migrations)
-- [Projekt-/App-Scaffolder](#project--app-scaffolders)
-- [Dateigeneratoren (`make:*`)](#file-generators-make)
-- [Datenbank-Werkzeuge](#database-utilities)
-- [Systembefehle](#system-commands)
-- [Tenancy-Befehle](#tenancy-commands)
-- [Eigene Unterbefehle](#custom-subcommands)
-- [Häufige Arbeitsabläufe](#common-workflows)
+- [Migrationen](#migrationen)
+- [Datenmigrationen](#datenmigrationen)
+- [Projekt-/App-Scaffolder](#projekt-app-scaffolder)
+- [Dateigeneratoren (`make:*`)](#dateigeneratoren-make)
+- [Datenbank-Werkzeuge](#datenbank-werkzeuge)
+- [Systembefehle](#systembefehle)
+- [Tenancy-Befehle](#tenancy-befehle)
+- [Eigene Unterbefehle](#eigene-unterbefehle)
+- [Häufige Arbeitsabläufe](#häufige-arbeitsabläufe)
 
 ---
 
@@ -631,6 +631,53 @@ isolierte Kunden/Orgs bedient). Sie erscheinen nur, wenn das Projekt mit
 `features = ["tenancy"]` gebaut wird UND `Cli::new()` mit `.tenancy()`
 verkettet ist.
 
+Alles, was die Operator-Konsole kann, können diese Befehle auch — damit eine
+Aktion in einem Deploy-Hook, in einem Cron-Job oder auf einer Maschine laufen
+kann, auf der niemand einen Browser öffnen kann.
+
+### `menu` / `actions`
+
+Es gibt über vierzig Tenancy-Verben. `--help` sagt Ihnen, dass sie existieren;
+das Menü hilft Ihnen, eines auszuführen, das Sie noch nie ausgeführt haben.
+
+```bash
+cargo run -- menu
+```
+
+```text
+  rustango manage — pick an action
+
+  TENANTS
+     1) list-tenants             every tenant in the registry
+     2) create-tenant            provision a new tenant
+     3) edit-tenant              change routing and display config
+     …
+  HOSTNAMES
+     7) list-hosts               every hostname a tenant answers on
+     …
+     q  quit
+     ?  every other verb: cargo run -- --help
+```
+
+Wählen Sie eine Nummer (oder tippen Sie das Verb) und es fragt nur nach dem,
+wonach das Verb nicht selbst fragt, gibt die Kommandozeile aus, die es
+gleich ausführt, führt sie aus und kommt für die nächste Aktion zurück. Es
+läuft durch denselben Dispatcher wie die Flags und kann daher nicht von
+ihnen abweichen.
+
+Verwandt, aber anders: [`wizard`](#wizard--init) ist eine einmalige
+Einrichtung; `menu` ist die ständige Liste dessen, was Sie danach tun können.
+
+### `wizard` / `init`
+
+Führt ein frisches Projekt von „gerade generiert" zu einem funktionierenden
+Tenant, einem Operator und einem Tenant-Superuser. Jeder Schritt ist
+optional — drücken Sie `n`, um einen zu überspringen.
+
+```bash
+cargo run -- wizard
+```
+
 ### `init-tenancy`
 
 **No-op — aus Kompatibilitätsgründen beibehalten.** Das Framework liefert keine
@@ -650,7 +697,7 @@ hartkodierte Fluss ist verschwunden. **Zum Bereitstellen führen Sie einfach
 `cargo run -- migrate` aus.** Ein eigenes Benutzermodell
 (`.user_model::<AppUser>()`) fließt durch dieselben generierten
 `system/migrations/` — siehe
-[Eigenes Benutzermodell](#custom-user-model-extra-columns-on-rustango_users).
+[Eigenes Benutzermodell](#eigenes-benutzermodell-zusätzliche-spalten-auf-rustango_users).
 
 ### `migrate-registry`
 
@@ -708,6 +755,52 @@ cargo run -- create-tenant beta --mode database --database-url postgres://...
 | `--host-pattern <pattern>` | Überschreibt das vom `SubdomainResolver` verwendete Host-Muster |
 | `--no-migrate` | Überspringt das Anwenden tenant-scoped Migrationen nach dem Provisioning |
 
+### `edit-tenant <slug> [options]`
+
+Ändert Routing- und Anzeige-Konfiguration eines Tenants — dieselben Felder,
+die die Bearbeitungsseite der Operator-Konsole anbietet.
+
+```bash
+cargo run -- edit-tenant acme --host-pattern shop.example.com
+cargo run -- edit-tenant acme --display-name "ACME Inc" --deactivate
+cargo run -- edit-tenant acme --clear host-pattern
+```
+
+| Flag | Beschreibung |
+|---|---|
+| `--display-name <name>` | Menschenlesbares Label |
+| `--host-pattern <host>` | Nackter Hostname, unter dem der Tenant antwortet |
+| `--path-prefix <path>` | Ein Segment mit führendem Slash, z. B. `/acme` |
+| `--port <n>` | Port, auf dem der Tenant gematcht wird |
+| `--database-url <url>` | Rotiert die Verbindungs-URL des Tenants |
+| `--activate` / `--deactivate` | Tenant in oder außer Betrieb nehmen |
+| `--clear <field>` | Leert `host-pattern`, `path-prefix` oder `port` |
+
+**Nur die Felder, die Sie nennen, werden angefasst.** „In Ruhe lassen" und
+„leeren" sind unterschiedliche Anweisungen — dafür ist `--clear` da. Es
+vermeidet die Abhängigkeit von `--host-pattern ""`, das manche Shells und
+CI-Runner verschlucken.
+
+Werte werden so validiert, wie `create-tenant` sie validiert: ein Host-Muster
+mit Port oder ein Pfad-Präfix, das der Resolver nie erzeugen könnte, wird
+abgelehnt statt gespeichert, um dann stillschweigend nie zu matchen.
+
+Ein Rotieren von `--database-url` verwirft den zwischengespeicherten Pool des
+Tenants, sodass die nächste Anfrage mit der neuen Zugangsinformation
+verbindet; andere Änderungen lassen warme Verbindungen unangetastet.
+
+### `test-tenant-connection <url> [flags]`
+
+Prüft eine Datenbank-URL, bevor Sie sich darauf festlegen — verbindet und
+schreibt standardmäßig testweise mit Rollback, sodass eine
+Nur-Lese-Zugangsinformation hier auffällt statt bei der ersten
+Tenant-Anfrage.
+
+```bash
+cargo run -- test-tenant-connection postgres://user:pw@host/db
+cargo run -- test-tenant-connection "$URL" --no-write-probe --timeout 5
+```
+
 ### `drop-tenant <slug> [--confirm <slug>]`
 
 Deaktiviert einen Tenant, indem `active = false` gesetzt wird. Dies ist die
@@ -742,6 +835,40 @@ Listet jeden Tenant mit seinem Speichermodus und aktiv/inaktiv-Status.
 cargo run -- list-tenants
 ```
 
+### Hostnamen
+
+Ein Tenant ist unter seiner Subdomain erreichbar und optional unter weiteren
+Hostnamen, die Sie an ihn binden. Ein Hostname führt zu genau einem Tenant.
+
+```bash
+cargo run -- list-hosts acme
+cargo run -- add-host acme shop.example.com
+cargo run -- set-host-enabled acme shop.example.com --off   # stilllegen
+cargo run -- remove-host acme shop.example.com
+```
+
+| Verb | Was es tut |
+|---|---|
+| `list-hosts <slug>` | Alle Hostnamen des Tenants, Basis-Host zuerst |
+| `add-host <slug> <hostname>` | Bindet einen. Abgelehnt, wenn ein anderer Tenant ihn bereits beansprucht |
+| `remove-host <slug> <hostname>` | Löst die Bindung |
+| `set-host-enabled <slug> <hostname> --on\|--off` | Ausliefern oder stilllegen |
+
+Stilllegen (`--off`) behält die Zeile und nimmt den Host aus dem Betrieb —
+nützlich, während DNS propagiert, oder beim Ausmustern einer Domain, die Sie
+vielleicht zurückhaben wollen.
+
+Hostnamen werden beim Eingang normalisiert (kleingeschrieben, ohne Schema,
+ohne Port, ohne Pfad), denn der gespeicherte Wert wird Byte für Byte gegen
+den `Host`-Header verglichen. Die Verben geben aus, was **gespeichert** wurde,
+nicht, was Sie getippt haben.
+
+Der **Basis-Host** stammt aus dem `host_pattern` des Tenants und hat keine
+eigene Zeile, kann hier also nicht entfernt werden — ändern Sie ihn mit
+[`edit-tenant --host-pattern`](#edit-tenant-slug-options). Ein `rename-host`
+gibt es bewusst nicht: entfernen und neu hinzufügen, damit die Änderung auch
+andere laufende Pods erreicht.
+
 ### `create-operator <username> --password <pwd>`
 
 Erstellt einen Operator — einen globalen Admin, der jeden Tenant von einer
@@ -750,7 +877,46 @@ gemeinsamen Registry, nicht innerhalb eines einzelnen Tenants.
 
 ```bash
 cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --generate     # stattdessen ein zufälliges ausgeben
 ```
+
+Lassen Sie `--password` auf einem Terminal weg, wird ohne Echo gefragt.
+
+### `list-operators`
+
+Jeder Operator, mit aktiv-Status und Erstellungsdatum, plus eine Zählung, wie
+viele noch aktiv sind.
+
+```bash
+cargo run -- list-operators
+```
+
+### `set-operator-active <username> --on|--off`
+
+Schaltet den Zugang eines Operators ab oder wieder an. Die Zeile bleibt in
+beiden Fällen erhalten, sodass sich „wer war das?" später noch auflösen lässt
+— und die Konsole liest sie bei **jeder** Anfrage neu, sodass eine
+Deaktivierung beim nächsten Klick greift und nicht erst, wenn das Cookie
+abläuft.
+
+```bash
+cargo run -- set-operator-active grace --off   # Offboarding
+cargo run -- set-operator-active grace --on
+```
+
+Zwei Dinge lehnt es ab, aus demselben Grund wie die Konsole:
+
+- **Den letzten aktiven Operator deaktivieren.** Das sperrt alle aus der
+  Konsole aus, und nur eine Shell auf der Registry könnte es rückgängig
+  machen.
+- **Sich selbst deaktivieren**, wenn die Anfrage aus der Konsole kommt. Die
+  CLI hat keine Session, aus der sie sich aussperren könnte, dort gilt also
+  nur die erste Regel.
+
+Die Richtung ist erforderlich — Raten würde entweder Zugang entziehen oder
+gewähren, und beides ist falsch, wenn es stillschweigend geschieht. Den
+bereits vorhandenen Zustand zu setzen wird gemeldet und ist erfolgreich,
+damit ein erneut laufendes Provisioning-Skript nicht rot wird.
 
 ### `create-user <tenant> <username> --password <pwd> [--superuser]`
 
@@ -845,7 +1011,58 @@ nicht ewig wächst. Kürzen Sie nach Alter (`--days`) oder nach Anzahl
 cargo run -- audit-cleanup --days 90                       # delete > 90 days old
 cargo run -- audit-cleanup --keep-last 50                  # keep most recent 50 per row
 cargo run -- audit-cleanup --keep-last 50 --tenant acme    # scoped
+cargo run -- audit-cleanup --registry --days 90            # nur das Log der Registry
 ```
+
+Standardmäßig räumt es das eigene Log der Registry **und** das jedes aktiven
+Tenants auf. Im Registry-Log hält die Operator-Konsole fest, was Operatoren
+getan haben — es wächst also mit der Nutzung der Konsole. Nennen Sie einen
+Tenant (`--tenant`), fragen Sie nach diesem Tenant und lassen die Registry in
+Ruhe. Ein defekter Tenant wird gemeldet und gezählt, statt den Durchlauf zu
+beenden.
+
+### Nachsehen, was passiert ist
+
+Drei Nur-Lese-Verben, die ausgeben, was die Konsole rendert — die Antworten,
+die Sie während eines Vorfalls brauchen, ohne Browser und ohne SQL-Client.
+
+```bash
+cargo run -- list-runs                        # letzte Provisioning- und Migrationsläufe
+cargo run -- list-runs --kind migrate --limit 50
+cargo run -- show-run 42                      # die Schritte eines Laufs
+cargo run -- audit-log                        # wer was wann geändert hat
+cargo run -- audit-log --pk acme --limit 100
+```
+
+| Verb | Flags |
+|---|---|
+| `list-runs` | `--limit <n>`, `--kind provision\|migrate`, `--state <s>` |
+| `show-run <id>` | — |
+| `audit-log` | `--limit <n>`, `--table <t>`, `--pk <v>`, `--operation <o>`, `--source <s>` |
+
+`list-runs` zeigt Neuestes zuerst, und seine Filter laufen in der Abfrage —
+die Suche nach einem `migrate`-Lauf findet also einen, selbst wenn die
+jüngsten Läufe alle Provisionings sind. `show-run` gibt den Kopf des Laufs
+und jeden aufgezeichneten Schritt aus, und das sagt Ihnen, *wo* ein Fehler
+auftrat.
+
+Über die CLI angelegte Tenants werden ebenfalls aufgezeichnet, markiert mit
+`requested_by = cli`, sodass die Historie beide Oberflächen abdeckt.
+
+### `prewarm-pools`
+
+Öffnet im Voraus eine Verbindung für jeden aktiven Tenant im
+database-Modus. Lohnt sich nach einem Deploy, einem Registry-Neustart oder
+einer Rotation von Zugangsdaten: es verwandelt „die erste Anfrage an jeden
+Tenant zahlt den Verbindungsaufbau" in eine einzige bewusste Wartezeit und
+bringt einen nicht erreichbaren Tenant ans Licht, bevor ein Benutzer ihn
+findet.
+
+```bash
+cargo run -- prewarm-pools
+```
+
+Die Operator-Konsole hat dafür ebenfalls einen Button, auf der Tenant-Liste.
 
 ---
 

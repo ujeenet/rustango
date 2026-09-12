@@ -171,6 +171,30 @@ async fn setting_the_state_it_already_has_is_not_an_error() {
     assert!(out.contains("already active"), "{out}");
 }
 
+/// Passing both directions used to resolve last-wins, which is the same
+/// guess the required-direction rule exists to prevent (#1355).
+#[tokio::test]
+async fn contradictory_directions_are_refused() {
+    let b = boot().await;
+    b.operator("ada").await;
+    b.operator("grace").await;
+
+    for args in [
+        vec!["set-operator-active", "grace", "--on", "--off"],
+        vec!["set-operator-active", "grace", "--off", "--on"],
+    ] {
+        let err = b.run(&args).await.expect_err("contradiction");
+        assert!(err.contains("contradict"), "{args:?}: {err}");
+    }
+    assert!(
+        ops::by_username(&b.registry, "grace")
+            .await
+            .expect("read")
+            .active,
+        "a refused command must not have changed anything"
+    );
+}
+
 #[tokio::test]
 async fn a_direction_is_required_and_an_unknown_operator_is_named() {
     let b = boot().await;

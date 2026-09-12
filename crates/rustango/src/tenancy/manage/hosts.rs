@@ -48,6 +48,40 @@ fn positional_or_ask(
     }
 }
 
+/// Record a direction, refusing a second one that disagrees.
+///
+/// Last-wins is a guess, and the guess is exactly what these verbs refuse
+/// to make: `--on --off` used to park a live host and report success
+/// (#1355). Repeating the *same* direction is harmless and allowed.
+pub(super) fn set_direction(
+    slot: &mut Option<bool>,
+    value: bool,
+    pair: (&str, &str),
+) -> Result<(), TenancyError> {
+    match slot {
+        Some(prev) if *prev != value => Err(TenancyError::Validation(format!(
+            "{} and {} contradict each other — pass one",
+            pair.0, pair.1
+        ))),
+        _ => {
+            *slot = Some(value);
+            Ok(())
+        }
+    }
+}
+
+/// A closed set, case-insensitively. Anything else is refused rather than
+/// read as `false`, which is how `--enabled TRUE` used to park a host.
+fn parse_bool(raw: &str) -> Result<bool, TenancyError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        other => Err(TenancyError::Validation(format!(
+            "`{other}` is not a yes/no value — use --on or --off"
+        ))),
+    }
+}
+
 /// The slug and hostname every host verb needs. Flags may sit anywhere.
 fn slug_and_host(args: &[String], verb: &str) -> Result<(String, String), TenancyError> {
     let mut positional = args.iter().filter(|a| !a.starts_with("--"));
@@ -152,11 +186,11 @@ where
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
         match flag.as_str() {
-            "--on" => enabled = Some(true),
-            "--off" => enabled = Some(false),
+            "--on" => set_direction(&mut enabled, true, ("--on", "--off"))?,
+            "--off" => set_direction(&mut enabled, false, ("--on", "--off"))?,
             "--enabled" => {
                 let raw = next_value(&mut iter, "--enabled")?;
-                enabled = Some(matches!(raw.as_str(), "1" | "true" | "yes" | "on"));
+                set_direction(&mut enabled, parse_bool(&raw)?, ("--on", "--off"))?;
             }
             other if other.starts_with("--") => {
                 return Err(TenancyError::Validation(format!(

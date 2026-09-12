@@ -91,10 +91,20 @@ pub fn env_example(name: &str, backend: Backend) -> String {
 DATABASE_URL={url}
 RUSTANGO_BIND=0.0.0.0:8080
 
-# Tenancy template only — apex domain + signing secret.
-# Generate a real secret with: openssl rand -base64 32
+# Apex domain the operator console is served on (tenancy template).
 RUSTANGO_APEX_DOMAIN=localhost
-RUSTANGO_SESSION_SECRET=change-me-base64-encoded-32-bytes-or-more
+
+# Session signing key. Left commented ON PURPOSE: the value has to be 32
+# bytes of base64, and a placeholder that is not gets discarded silently —
+# the framework generates a key into ./var/ and carries on, so a project
+# that looks configured is not (#1359).
+#
+# Leave it commented for development and that generated key is used. For
+# production set a real one, and keep it out of source control:
+#
+#   RUSTANGO_SESSION_SECRET=$(openssl rand -base64 32)
+#
+# RUSTANGO_SESSION_SECRET=
 
 # ---------------- Logging (ujeenet/rustango-cms#305) ----------------
 # `#[rustango::main]` auto-installs a tracing_subscriber::fmt with
