@@ -6,6 +6,56 @@
 //! at the apex (`localhost:8080`); production deployments mount it
 //! the same way.
 //!
+//! ## Logging
+//!
+//! Two streams, both plain `tracing` events, so whatever subscriber the
+//! app installs decides the shape.
+//!
+//! **Actions** — one event per mutation, on target
+//! [`ACTION_TARGET`]:
+//!
+//! ```text
+//! event=operator_action action=host_add operator_id=1
+//!   entity=rustango_orgs entity_id=acme fields=hostname,tenant_slug
+//! ```
+//!
+//! Emitted from the same function that writes the audit row, so the log
+//! stream and the durable trail describe the same set of actions. A
+//! failure to write that row is an `ERROR` with
+//! `event=operator_action_unrecorded` — the action happened and the
+//! record did not, which is the one case worth paging on.
+//!
+//! `fields` carries the *names* of what changed, never the values: an
+//! audit blob is one careless caller away from holding a credential,
+//! and logs travel further than the database does.
+//!
+//! **Requests** — one event per request from [`crate::access_log`]
+//! (method, path, status, duration, IP), with `next` and `token`
+//! redacted out of query strings.
+//!
+//! ### Choosing the shape
+//!
+//! Format is the subscriber's job, not this module's. JSON for a
+//! collector, pretty for a terminal, either driven by settings:
+//!
+//! ```ignore
+//! rustango::logging::Setup::new().json().install();
+//! // or [logging] format = "json" in settings
+//! ```
+//!
+//! Route or silence console activity without touching the rest of
+//! tenancy by filtering on the target:
+//!
+//! ```text
+//! RUST_LOG=warn,rustango::tenancy::operator_console::action=info
+//! ```
+//!
+//! For a different field set or destination — a collector wanting its
+//! own envelope, or events fanned to an external sink — add a
+//! `tracing_subscriber::Layer` and match on the target. The events are
+//! structured fields rather than formatted strings precisely so a layer
+//! can re-shape them without parsing.
+//!
 //! ## What it ships
 //!
 //! * `GET  /login`               — form HTML
@@ -79,6 +129,16 @@ use super::branding::{self, BrandAssetKind};
 use super::pools::TenantPools;
 
 const RUSTANGO_PNG: &[u8] = include_bytes!("../static/rustango.png");
+
+/// Tracing target for operator actions.
+///
+/// Its own target so a deployment can route or silence console activity
+/// without touching the rest of tenancy —
+/// `RUST_LOG=rustango::tenancy::operator_console::action=info`.
+/// Request logging is not here — it comes from
+/// [`crate::access_log`] under its own `rustango::access_log` target,
+/// the same middleware the admin uses.
+pub const ACTION_TARGET: &str = "rustango::tenancy::operator_console::action";
 
 #[derive(Clone)]
 struct ConsoleState {
@@ -683,7 +743,20 @@ fn router_inner(
         require_session,
     ));
 
-    public.merge(private).with_state(state)
+    // One event per request — method, path, status, duration, IP —
+    // from the middleware the admin already uses, rather than a second
+    // one written here. Without it a console 500 left nothing behind
+    // but the operator's screen.
+    //
+    // `next` is redacted because the login bounce carries the whole
+    // attempted URL, and `token` because impersonation handoff puts one
+    // in a query string.
+    use crate::access_log::AccessLogRouterExt as _;
+    public.merge(private).with_state(state).access_log(
+        crate::access_log::AccessLogLayer::new()
+            .redact_additional("next")
+            .redact_additional("token"),
+    )
 }
 
 /// Stamp the operator-console branding fields onto every render
@@ -1860,6 +1933,31 @@ async fn emit_registry_audit(
 ) {
     let mut changes = extra;
     changes.insert("operator_id".into(), serde_json::json!(operator_id));
+
+    // The same action, to the log stream. Emitted here rather than at
+    // each call site so the trail and the logs cannot describe
+    // different sets of actions — every console mutation already comes
+    // through this function.
+    //
+    // Field *names* only, never the blob: today's callers put column
+    // names in `changes` rather than values, and logging it whole would
+    // make the next caller's habit a credential leak.
+    let fields: Vec<&str> = changes
+        .keys()
+        .filter(|k| k.as_str() != "operator_id")
+        .map(String::as_str)
+        .collect();
+    tracing::info!(
+        target: ACTION_TARGET,
+        event = "operator_action",
+        action = verb,
+        operator_id,
+        entity = entity_table,
+        entity_id = entity_pk,
+        fields = fields.join(","),
+        "operator action",
+    );
+
     let entry = crate::audit::PendingEntry {
         entity_table,
         entity_pk: entity_pk.to_owned(),
@@ -1868,14 +1966,18 @@ async fn emit_registry_audit(
         changes: serde_json::Value::Object(changes),
     };
     if let Err(e) = crate::audit::emit_one_pool(registry, &entry).await {
-        tracing::warn!(
-            target: "rustango::tenancy::operator_console",
-            error = %e,
-            entity_table,
-            entity_pk,
+        // The action happened; only its durable record did not. Loud,
+        // because an audit trail with a hole in it is worse than one
+        // that is merely incomplete.
+        tracing::error!(
+            target: ACTION_TARGET,
+            event = "operator_action_unrecorded",
+            action = verb,
             operator_id,
-            verb,
-            "failed to record operator action in audit log",
+            entity = entity_table,
+            entity_id = entity_pk,
+            error = %e,
+            "operator action was NOT written to the audit log",
         );
     }
 }
