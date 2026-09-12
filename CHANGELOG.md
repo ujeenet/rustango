@@ -2,7 +2,7 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
-## [Unreleased]
+## [0.57.0] — 2026-09-12
 
 ### Added
 - **`cargo rustango new` picks a backend and extra features** (#1345).
