@@ -734,14 +734,20 @@ impl Cli {
         // what makes `cargo run -- migrate` work against a sqlite
         // DATABASE_URL without going through the `runserver_tenancy`
         // path.
+        // `redact`, not `url`: this string goes to a terminal and into
+        // whatever log is capturing it, and a DATABASE_URL has a
+        // password in it. The error itself already names the endpoint
+        // it tried (see `sql::connect_diagnosis`), so nothing useful is
+        // lost.
+        let shown = crate::sql::connect_diagnosis::redact(&url);
         let pool = if no_db_verb {
             crate::sql::Pool::connect_lazy(&url)
-                .map_err(|e| format!("connect_lazy({url}): {e}").into())
+                .map_err(|e| format!("connect_lazy({shown}): {e}").into())
                 as Result<_, Box<dyn std::error::Error>>
         } else {
             crate::sql::Pool::connect(&url)
                 .await
-                .map_err(|e| format!("connect({url}): {e}").into())
+                .map_err(|e| format!("connect({shown}): {e}").into())
                 as Result<_, Box<dyn std::error::Error>>
         }?;
         crate::migrate::manage::run(&pool, &self.migrations_dir, args).await?;

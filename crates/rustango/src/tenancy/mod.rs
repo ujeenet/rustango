@@ -98,6 +98,9 @@ pub mod permissions;
 mod pools;
 /// Who a request is acting as, whatever authenticated it (session cookie,
 /// Bearer access token, MCP agent token).
+/// Reaching a tenant's database before anything is written to the
+/// registry, so a bad URL cannot leave a half-provisioned tenant.
+pub mod preflight;
 pub mod principal;
 /// Standing up a tenant — the steps the `create-tenant` verb runs,
 /// callable from anything that is not a terminal.

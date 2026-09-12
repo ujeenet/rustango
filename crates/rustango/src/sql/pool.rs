@@ -58,7 +58,19 @@ use std::time::Duration;
 
 use crate::env::{database_url_from_env, EnvError};
 
+use super::connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 use super::Dialect;
+
+/// Why a connect attempt failed, before it is rendered into whichever
+/// error type the caller asked for.
+///
+/// The two are genuinely different: a driver failure has a host, a
+/// cause and advice; a scheme or missing-feature failure never dialled
+/// anything and wants `PoolError`'s typed variants instead.
+enum ConnectFail {
+    Driver(ConnectDiagnosis),
+    Pool(PoolError),
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PoolError {
@@ -141,6 +153,45 @@ impl Pool {
     /// Same set as [`Self::connect`], plus a `Connect` error if `sqlx`
     /// times out before the database accepts the connection.
     pub async fn connect_with_timeout(url: &str, timeout: Duration) -> Result<Self, PoolError> {
+        Self::connect_inner(url, timeout)
+            .await
+            .map_err(|f| match f {
+                ConnectFail::Driver(d) => PoolError::Connect(d.to_string()),
+                ConnectFail::Pool(e) => e,
+            })
+    }
+
+    /// [`Self::connect_with_timeout`], but a failure comes back as a
+    /// structured [`ConnectDiagnosis`] rather than a rendered string.
+    ///
+    /// `PoolError::Connect` carries a `String`, so the classification
+    /// made during the attempt is gone by the time a caller sees it.
+    /// A caller that needs to *branch* on the fault — the tenant
+    /// pre-flight, an operator console rendering per-fault advice —
+    /// wants the enum, not prose it has to parse back.
+    ///
+    /// # Errors
+    /// A `ConnectDiagnosis` naming the fault, the endpoint tried (with
+    /// the password removed) and the driver's own message.
+    pub async fn connect_diagnosed(url: &str, timeout: Duration) -> Result<Self, ConnectDiagnosis> {
+        Self::connect_inner(url, timeout)
+            .await
+            .map_err(|f| match f {
+                ConnectFail::Driver(d) => d,
+                // A scheme this build cannot speak is not a *connection*
+                // fault — nothing was dialled — but a caller asking for a
+                // diagnosis still needs one, and the message is already
+                // specific about what to add to Cargo.toml.
+                ConnectFail::Pool(e) => {
+                    ConnectDiagnosis::new(ConnectFault::Other, url, e.to_string())
+                }
+            })
+    }
+
+    /// The one place the scheme dispatch lives. Keeps the driver's
+    /// classified failure and a scheme/feature failure distinct, so
+    /// each public wrapper can render whichever shape it promises.
+    async fn connect_inner(url: &str, timeout: Duration) -> Result<Self, ConnectFail> {
         let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
         match scheme.as_str() {
             #[cfg(feature = "postgres")]
@@ -149,44 +200,46 @@ impl Pool {
                     .acquire_timeout(timeout)
                     .connect(url)
                     .await
-                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                    .map_err(|e| ConnectFail::Driver(ConnectDiagnosis::of(url, &e)))?;
                 Ok(Self::Postgres(pool))
             }
             #[cfg(not(feature = "postgres"))]
-            "postgres" | "postgresql" => Err(PoolError::FeatureNotEnabled {
+            "postgres" | "postgresql" => Err(ConnectFail::Pool(PoolError::FeatureNotEnabled {
                 scheme: "postgres",
                 feature: "postgres",
-            }),
+            })),
             #[cfg(feature = "mysql")]
             "mysql" => {
                 let pool = sqlx::mysql::MySqlPoolOptions::new()
                     .acquire_timeout(timeout)
                     .connect(url)
                     .await
-                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                    .map_err(|e| ConnectFail::Driver(ConnectDiagnosis::of(url, &e)))?;
                 Ok(Self::Mysql(pool))
             }
             #[cfg(not(feature = "mysql"))]
-            "mysql" => Err(PoolError::FeatureNotEnabled {
+            "mysql" => Err(ConnectFail::Pool(PoolError::FeatureNotEnabled {
                 scheme: "mysql",
                 feature: "mysql",
-            }),
+            })),
             #[cfg(feature = "sqlite")]
             "sqlite" => {
-                let opts = sqlite_connect_options(url)?;
+                let opts = sqlite_connect_options(url).map_err(ConnectFail::Pool)?;
                 let pool = sqlx::sqlite::SqlitePoolOptions::new()
                     .acquire_timeout(timeout)
                     .connect_with(opts)
                     .await
-                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                    .map_err(|e| ConnectFail::Driver(ConnectDiagnosis::of(url, &e)))?;
                 Ok(Self::Sqlite(pool))
             }
             #[cfg(not(feature = "sqlite"))]
-            "sqlite" => Err(PoolError::FeatureNotEnabled {
+            "sqlite" => Err(ConnectFail::Pool(PoolError::FeatureNotEnabled {
                 scheme: "sqlite",
                 feature: "sqlite",
-            }),
-            _ => Err(PoolError::UnsupportedScheme(url.to_owned())),
+            })),
+            _ => Err(ConnectFail::Pool(PoolError::UnsupportedScheme(
+                url.to_owned(),
+            ))),
         }
     }
 
@@ -220,7 +273,7 @@ impl Pool {
             #[cfg(feature = "postgres")]
             "postgres" | "postgresql" => {
                 let pool = sqlx::PgPool::connect_lazy(url)
-                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                    .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?;
                 Ok(Self::Postgres(pool))
             }
             #[cfg(not(feature = "postgres"))]
@@ -231,7 +284,7 @@ impl Pool {
             #[cfg(feature = "mysql")]
             "mysql" => {
                 let pool = sqlx::MySqlPool::connect_lazy(url)
-                    .map_err(|e| PoolError::Connect(e.to_string()))?;
+                    .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?;
                 Ok(Self::Mysql(pool))
             }
             #[cfg(not(feature = "mysql"))]
@@ -255,6 +308,24 @@ impl Pool {
     }
 
     /// Borrow the dialect for this pool. Stable [`Dialect`] reference
+    /// Close the pool, waiting for its connections to be released.
+    ///
+    /// Dropping a pool schedules the close but does not wait for it, so
+    /// a short-lived pool — a connection probe, a one-shot migration
+    /// against a tenant — can outlive the code that made it and hold a
+    /// socket open. Call this when the pool is finished with and the
+    /// release should have happened by the time you return.
+    pub async fn close(&self) {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Postgres(p) => p.close().await,
+            #[cfg(feature = "mysql")]
+            Self::Mysql(p) => p.close().await,
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(p) => p.close().await,
+        }
+    }
+
     /// usable by callers who need to inspect identifier quoting,
     /// placeholder syntax, etc., without caring which backend the
     /// pool actually wraps.
@@ -336,7 +407,7 @@ impl Pool {
             .acquire_timeout(default_acquire_timeout())
             .connect(url)
             .await
-            .map_err(|e| PoolError::Connect(e.to_string()))?;
+            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?;
         Ok(Self::Postgres(pool))
     }
 
@@ -354,7 +425,7 @@ impl Pool {
             .acquire_timeout(default_acquire_timeout())
             .connect(url)
             .await
-            .map_err(|e| PoolError::Connect(e.to_string()))?;
+            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?;
         Ok(Self::Mysql(pool))
     }
 
@@ -389,7 +460,7 @@ impl Pool {
             .acquire_timeout(default_acquire_timeout())
             .connect_with(opts)
             .await
-            .map_err(|e| PoolError::Connect(e.to_string()))?;
+            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?;
         Ok(Self::Sqlite(pool))
     }
 
@@ -474,7 +545,7 @@ pub(crate) fn sqlite_connect_options(
     use std::str::FromStr;
     let url_with_default = ensure_sqlite_rwc_default(url);
     let mut opts = sqlx::sqlite::SqliteConnectOptions::from_str(&url_with_default)
-        .map_err(|e| PoolError::Connect(e.to_string()))?
+        .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(5));
     if !url_with_default.contains(":memory:") && !url_with_default.contains("mode=memory") {
