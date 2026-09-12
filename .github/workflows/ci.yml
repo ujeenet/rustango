@@ -236,6 +236,10 @@ jobs:
       # The compile test above cannot catch this — it builds with
       # `--rustango-path`, where any new feature exists by definition.
       - run: cargo test -p cargo-rustango --test templates_name_real_features
+      # #1345 — `cargo rustango new` with no arguments opens a wizard on a
+      # terminal. Off one, it must fail with a message rather than block on a
+      # prompt nobody can answer; this job is exactly that caller.
+      - run: cargo test -p cargo-rustango --test wizard_cli
 
   # #1208 — the feature table is a public promise, so check the promise.
   # `sqlite_litmus` below is a single combination, and it happens to be one
