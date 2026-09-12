@@ -560,6 +560,22 @@ pub trait TenantPoolInvalidator: Send + Sync {
                 + 'a,
         >,
     >;
+
+    /// Open a pool for every active database-mode tenant, up front.
+    ///
+    /// Here for the same reason as `decommission`: it is the same
+    /// erasure, and a surface that can invalidate pools is one that can
+    /// warm them. Without it `prewarm-pools` stays command-line only,
+    /// which is the gap #1341 is about.
+    fn prewarm<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<PrewarmReport, super::error::TenancyError>>
+                + Send
+                + 'a,
+        >,
+    >;
 }
 
 impl<DB: Database> TenantPoolInvalidator for TenantPools<DB>
@@ -599,6 +615,18 @@ where
         >,
     > {
         Box::pin(async move { super::decommission::decommission(self, slug, action).await })
+    }
+
+    fn prewarm<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<PrewarmReport, super::error::TenancyError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move { TenantPools::<DB>::prewarm_database_tenants(self).await })
     }
 }
 
