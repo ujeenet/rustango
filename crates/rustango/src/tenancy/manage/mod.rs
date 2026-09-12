@@ -49,6 +49,7 @@ mod menu;
 #[cfg(feature = "postgres")]
 mod migrate_storage;
 mod migrations;
+mod operators;
 mod roles;
 mod scaffold;
 mod server;
@@ -248,6 +249,9 @@ where
                 .into(),
         )),
         "create-operator" => users::create_operator_cmd(pools, &args[1..], writer).await,
+        // #1344 — seeing who exists, and turning one off, were console-only.
+        "list-operators" => operators::list_operators(pools, writer).await,
+        "set-operator-active" => operators::set_operator_active(pools, &args[1..], writer).await,
         "create-user" => users::create_user_cmd(pools, registry_url, &args[1..], writer).await,
         "create-superuser" => {
             users::create_superuser_cmd(pools, registry_url, &args[1..], writer).await
@@ -455,6 +459,20 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "                       Operator-level account; signs into the apex /login."
     )?;
+    writeln!(
+        w,
+        "  list-operators       Every operator, with active state and creation date."
+    )?;
+    writeln!(w, "  set-operator-active <username> --on|--off")?;
+    writeln!(
+        w,
+        "                       Turn an operator's access off or back on. Refuses to"
+    )?;
+    writeln!(
+        w,
+        "                       deactivate the last active one — that would lock"
+    )?;
+    writeln!(w, "                       everyone out of the console.")?;
     writeln!(
         w,
         "  create-user <slug> <username> [--password <p> | --generate] [--superuser]"

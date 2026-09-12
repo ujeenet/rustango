@@ -47,8 +47,9 @@ use tera::Context;
 use super::super::auth;
 use super::super::password;
 use super::{inject_op_brand, render, ConsoleState};
-use crate::core::{Column as _, Model as _};
+use crate::core::Column as _;
 use crate::sql::{Auto, FetcherPool as _};
+use crate::tenancy::operators as ops;
 
 /// The column's limit. A longer username is truncated by some backends
 /// and rejected by others; neither is a good way to find out.
@@ -303,59 +304,19 @@ pub(super) async fn operator_set_active(
         Err(e) => return back_err(&state, &op, &e).await,
     };
 
-    // Before the guards, not after: deactivating an already-inactive
-    // operator changes nothing, and running the lockout check on it
-    // answered "this is the last active operator" about an operator who
-    // was not active at all.
-    if target.active == activate {
-        return back_ok(&format!(
-            "`{}` was already {}",
-            target.username,
-            if activate { "active" } else { "inactive" }
-        ));
-    }
-
-    if !activate {
-        if id == id_of(&op) {
-            return back_err(
-                &state,
-                &op,
-                "You cannot deactivate yourself — your next request would be rejected. Ask \
-                 another operator to do it.",
-            )
-            .await;
+    // The rules — no-op first, then self-deactivation, then last-active —
+    // live in `tenancy::operators` so the CLI enforces the same ones (#1344).
+    // Ordering is load-bearing and documented there.
+    match ops::set_active(&state.registry, &mut target, activate, Some(id_of(&op))).await {
+        Ok(ops::Outcome::AlreadySo) => {
+            return back_ok(&format!(
+                "`{}` was already {}",
+                target.username,
+                if activate { "active" } else { "inactive" }
+            ));
         }
-        // Everyone active *except* the target. With the self-check
-        // above this is unreachable single-handed; it covers two
-        // operators deactivating each other at once, where both read
-        // "two active". A narrow window, not a closed one.
-        let others = super::count_where(
-            &state.registry,
-            auth::Operator::SCHEMA,
-            auth::Operator::active
-                .eq(true)
-                .and(auth::Operator::id.ne(id))
-                .into(),
-        )
-        .await;
-        match others {
-            Ok(0) => {
-                return back_err(
-                    &state,
-                    &op,
-                    "This is the last active operator. Deactivating it would lock everyone out \
-                     of the console, and only a shell on the registry could undo it.",
-                )
-                .await;
-            }
-            Ok(_) => {}
-            Err(e) => return back_err(&state, &op, &e.to_string()).await,
-        }
-    }
-
-    target.active = activate;
-    if let Err(e) = target.save_pool(&state.registry).await {
-        return back_err(&state, &op, &format!("Could not save: {e}")).await;
+        Ok(ops::Outcome::Changed) => {}
+        Err(e) => return back_err(&state, &op, &sentence(&e.to_string())).await,
     }
 
     let verb = if activate {
@@ -451,6 +412,16 @@ async fn one_operator(state: &ConsoleState, id: i64) -> Result<Option<auth::Oper
 
 fn id_of(op: &auth::Operator) -> i64 {
     op.id.get().copied().unwrap_or_default()
+}
+
+/// Capitalize an engine message so it reads as a sentence in the flash bar.
+/// The engine wording is shared with the CLI, which prints it lowercase
+/// after a `error: ` prefix.
+fn sentence(msg: &str) -> String {
+    let mut chars = msg.chars();
+    chars.next().map_or_else(String::new, |c| {
+        c.to_uppercase().to_string() + chars.as_str()
+    })
 }
 
 /// Post/Redirect/Get on success, so a reload does not repeat the write.

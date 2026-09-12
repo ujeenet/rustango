@@ -142,11 +142,25 @@ const GROUPS: &[Group] = &[
         title: "OPERATORS AND USERS",
         actions: &[
             Action {
+                verb: "list-operators",
+                about: "every operator and whether they are active",
+                asks: &[],
+            },
+            Action {
                 verb: "create-operator",
                 about: "an apex-level account for the operator console",
                 asks: &[Ask::Toggle {
                     flag: "--generate",
                     question: "generate a password instead of choosing one?",
+                }],
+            },
+            Action {
+                verb: "set-operator-active",
+                about: "turn an operator's access off or back on",
+                asks: &[Ask::Either {
+                    question: "activate them? (no deactivates)",
+                    yes: "--on",
+                    no: "--off",
                 }],
             },
             Action {

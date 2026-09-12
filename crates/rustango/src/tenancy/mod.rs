@@ -96,6 +96,7 @@ pub mod migrate;
 /// Tenant migrations against a recorded, streamable run.
 pub mod migrate_run;
 pub mod operator_console;
+pub mod operators;
 mod org;
 pub mod org_host;
 pub mod password;
