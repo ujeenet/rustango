@@ -323,6 +323,9 @@ jobs:
       # #1344 — the hostname verbs, and that they write the table the
       # operator console writes rather than a parallel one.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_hosts_sqlite_live
+      # #1344 — and that the CLI enforces the same operator lockout rules the
+      # console does, now that both call one engine.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_operators_sqlite_live
       # The operator console and the provisioning engines under it. These ran
       # only in the all-features job, which always has Postgres available —
       # so a PG-ism in the console (a `::`-cast, an `ON CONFLICT` spelling,
