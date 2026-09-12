@@ -21,13 +21,10 @@
 //!
 //! Provisioning routes are mounted **only** when the deployment builds
 //! the console through [`super::router_with_provisioning`]. That is a
-//! deliberate deployment-level gate rather than a per-operator
-//! permission, because `Operator` has no permission model at all
-//! today — every authenticated operator can already do everything the
-//! console exposes. Adding one flag for one route would be half a
-//! permission system; the gate that actually means something right now
-//! is whether the console can create tenants *at all*. A real operator
-//! permission model is worth its own issue.
+//! deployment-level gate, and it is the only one: operators are
+//! uniformly fully capable by design (#1342), so there is no
+//! per-operator permission to check here and none is coming. What a
+//! console can do is decided when it is assembled, not per request.
 
 use std::collections::HashMap;
 use std::time::Duration;

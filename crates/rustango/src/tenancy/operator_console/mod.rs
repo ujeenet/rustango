@@ -276,11 +276,11 @@ impl OpBrand {
 /// ## Authorization
 ///
 /// Every authenticated operator who can reach the console can use
-/// these routes. That is not an oversight to work around with a
-/// wrapper — `Operator` has no permission model at all today, so a
-/// single flag for a single route would be half a system. Mounting is
-/// the boundary that currently means something. A real operator
-/// permission model is tracked separately.
+/// these routes, by design (#1342): operators are uniformly fully
+/// capable, and there is no per-operator permission model to add one
+/// to. Authorization lives in which router a deployment assembles —
+/// [`router`] is read-only, [`router_with_pools`] can edit, this one
+/// can create tenants.
 #[must_use]
 pub fn router_with_provisioning(
     registry: impl Into<crate::sql::Pool>,
