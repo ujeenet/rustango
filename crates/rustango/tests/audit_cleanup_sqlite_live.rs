@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rustango::audit::AuditLog;
-use rustango::core::Column as _;
 use rustango::sql::{sqlx, Auto, FetcherPool as _, Pool};
 use rustango::tenancy::TenantPools;
 
