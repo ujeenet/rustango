@@ -612,7 +612,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "AUDIT:")?;
     writeln!(
         w,
-        "  audit-cleanup --days <N>     Delete entries older than N days (all active tenants)."
+        "  audit-cleanup --days <N>     Delete entries older than N days (registry + all active tenants)."
     )?;
     writeln!(
         w,
