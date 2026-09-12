@@ -44,6 +44,7 @@
 mod agents;
 mod args;
 mod audit;
+mod menu;
 #[cfg(feature = "postgres")]
 mod migrate_storage;
 mod migrations;
@@ -161,7 +162,30 @@ pub async fn run_with_writer_and_init<W: Write + Send, DB: sqlx::Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let args: Vec<String> = args.into_iter().collect();
+    dispatch(
+        pools,
+        registry_url,
+        dir,
+        args.into_iter().collect(),
+        writer,
+        init_fn,
+    )
+    .await
+}
+
+/// One verb, dispatched. Split out so `menu` can run a chosen verb through
+/// the same match rather than shelling out or duplicating the table.
+pub(super) async fn dispatch<W: Write + Send, DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    args: Vec<String>,
+    writer: &mut W,
+    init_fn: InitTenancyFn,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let cmd = args.first().map_or("", String::as_str);
 
     match cmd {
@@ -246,6 +270,13 @@ where
             let stdin = std::io::stdin();
             let mut reader = stdin.lock();
             wizard::wizard_cmd(pools, registry_url, dir, init_fn, &mut reader, writer).await
+        }
+        // The wizard above is a linear first-run setup; this is the standing
+        // list of everything you can do afterwards (#1345).
+        "menu" | "actions" => {
+            let stdin = std::io::stdin();
+            let mut reader = stdin.lock();
+            menu::menu_cmd(pools, registry_url, dir, init_fn, &mut reader, writer).await
         }
         // Intercepted before fall-through: tenancy ships its own
         // manage.rs template in `--with-manage-bin`, wiring
@@ -456,6 +487,18 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       prompts. Each step is opt-in (press n to skip)."
+    )?;
+    writeln!(
+        w,
+        "  menu | actions       Numbered list of the common verbs. Asks only for what"
+    )?;
+    writeln!(
+        w,
+        "                       the verb won't ask itself, echoes the equivalent"
+    )?;
+    writeln!(
+        w,
+        "                       command line, then runs it and comes back."
     )?;
     writeln!(w)?;
     writeln!(w, "MIGRATIONS:")?;
