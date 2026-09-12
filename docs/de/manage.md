@@ -52,15 +52,15 @@ Nutzungshilfe aus.
 
 ## Inhaltsverzeichnis
 
-- [Migrationen](#migrations)
-- [Datenmigrationen](#data-migrations)
-- [Projekt-/App-Scaffolder](#project--app-scaffolders)
-- [Dateigeneratoren (`make:*`)](#file-generators-make)
-- [Datenbank-Werkzeuge](#database-utilities)
-- [Systembefehle](#system-commands)
-- [Tenancy-Befehle](#tenancy-commands)
-- [Eigene Unterbefehle](#custom-subcommands)
-- [Häufige Arbeitsabläufe](#common-workflows)
+- [Migrationen](#migrationen)
+- [Datenmigrationen](#datenmigrationen)
+- [Projekt-/App-Scaffolder](#projekt-app-scaffolder)
+- [Dateigeneratoren (`make:*`)](#dateigeneratoren-make)
+- [Datenbank-Werkzeuge](#datenbank-werkzeuge)
+- [Systembefehle](#systembefehle)
+- [Tenancy-Befehle](#tenancy-befehle)
+- [Eigene Unterbefehle](#eigene-unterbefehle)
+- [Häufige Arbeitsabläufe](#häufige-arbeitsabläufe)
 
 ---
 
@@ -697,7 +697,7 @@ hartkodierte Fluss ist verschwunden. **Zum Bereitstellen führen Sie einfach
 `cargo run -- migrate` aus.** Ein eigenes Benutzermodell
 (`.user_model::<AppUser>()`) fließt durch dieselben generierten
 `system/migrations/` — siehe
-[Eigenes Benutzermodell](#custom-user-model-extra-columns-on-rustango_users).
+[Eigenes Benutzermodell](#eigenes-benutzermodell-zusätzliche-spalten-auf-rustango_users).
 
 ### `migrate-registry`
 

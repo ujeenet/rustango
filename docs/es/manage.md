@@ -51,15 +51,15 @@ errores de validación o de E/S. Ejecuta `cargo run -- --help` (o
 
 ## Tabla de contenidos
 
-- [Migraciones](#migrations)
-- [Migraciones de datos](#data-migrations)
-- [Generadores de proyecto / app](#project--app-scaffolders)
-- [Generadores de archivos (`make:*`)](#file-generators-make)
-- [Utilidades de base de datos](#database-utilities)
-- [Comandos del sistema](#system-commands)
-- [Comandos de tenancy](#tenancy-commands)
-- [Subcomandos personalizados](#custom-subcommands)
-- [Flujos de trabajo comunes](#common-workflows)
+- [Migraciones](#migraciones)
+- [Migraciones de datos](#migraciones-de-datos)
+- [Generadores de proyecto / app](#generadores-de-proyecto--app)
+- [Generadores de archivos (`make:*`)](#generadores-de-archivos-make)
+- [Utilidades de base de datos](#utilidades-de-base-de-datos)
+- [Comandos del sistema](#comandos-del-sistema)
+- [Comandos de tenancy](#comandos-de-tenancy)
+- [Subcomandos personalizados](#subcomandos-personalizados)
+- [Flujos de trabajo comunes](#flujos-de-trabajo-comunes)
 
 ---
 
@@ -684,7 +684,7 @@ Las versiones más antiguas escribían aquí `0001_rustango_*_initial.json`; ese
 flujo codificado a mano ya no existe. **Para aprovisionar, simplemente ejecuta
 `cargo run -- migrate`.** Un modelo de usuario personalizado
 (`.user_model::<AppUser>()`) fluye por las mismas `system/migrations/` generadas
-— consulta [Modelo de usuario personalizado](#custom-user-model-extra-columns-on-rustango_users).
+— consulta [Modelo de usuario personalizado](#modelo-de-usuario-personalizado-columnas-extra-en-rustango_users).
 
 ### `migrate-registry`
 

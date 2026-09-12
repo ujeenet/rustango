@@ -36,14 +36,24 @@ encaje con tu máquina; todo lo demás es idéntico:
 
 #### SQLite — sin configuración
 
-Los proyectos generados incluyen una feature `sqlite`, así que puedes ejecutar
-uno sin instalar ni arrancar nada:
+Genera el proyecto directamente para SQLite: no hay nada que instalar, nada
+que arrancar y nada que editar después.
+
+```bash
+cargo rustango new myblog --backend sqlite
+```
+
+El `.env.example`, el `docker-compose.yml` y los niveles de configuración
+generados están todos escritos para SQLite, la base de datos es un fichero que
+crea el primer `cargo run -- migrate`, y puedes saltarte
+[el paso 4](#paso-4-arrancar-la-base-de-datos) por completo.
+
+Si ya generaste un proyecto con Postgres y quieres cambiarlo, cada plantilla
+mantiene los tres backends cableados — así que es un flag más una URL:
 
 ```bash
 cargo run --no-default-features --features sqlite
 ```
-
-con una URL basada en fichero en `.env` en lugar de la de Postgres:
 
 ```bash
 DATABASE_URL=sqlite://myblog_dev.db?mode=rwc
@@ -106,6 +116,10 @@ cd ~/projects                                 # wherever you keep code
 cargo rustango new myblog                     # default = fullstack template
 cd myblog
 ```
+
+Ejecuta `cargo rustango new` sin argumento alguno y te pregunta la plantilla,
+el backend y las funcionalidades extra, y luego imprime la línea de comandos
+equivalente antes de crear nada — véase [Andamiaje](scaffolding.md).
 
 Esto es lo que se generó:
 

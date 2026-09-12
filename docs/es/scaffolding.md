@@ -9,12 +9,12 @@
 
 ## Tabla de contenidos
 
-- [Instalar el generador](#install-the-generator)
-- [Crear un proyecto: `cargo rustango new`](#create-a-project-cargo-rustango-new)
-- [Qué se genera](#what-gets-generated)
-- [Añadir un módulo de funcionalidad: `manage startapp`](#add-a-feature-module-manage-startapp)
-- [Generar archivos sueltos: los comandos `make:*`](#generate-single-files-the-make-commands)
-- [Un flujo típico](#a-typical-flow)
+- [Instalar el generador](#instalar-el-generador)
+- [Crear un proyecto: `cargo rustango new`](#crear-un-proyecto-cargo-rustango-new)
+- [Qué se genera](#qué-se-genera)
+- [Añadir un módulo de funcionalidad: `manage startapp`](#añadir-un-módulo-de-funcionalidad-manage-startapp)
+- [Generar archivos sueltos: los comandos `make:*`](#generar-archivos-sueltos-los-comandos-make)
+- [Un flujo típico](#un-flujo-típico)
 
 ---
 

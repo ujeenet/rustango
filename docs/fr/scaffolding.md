@@ -9,12 +9,12 @@
 
 ## Table des matières
 
-- [Installer le générateur](#install-the-generator)
-- [Créer un projet : `cargo rustango new`](#create-a-project-cargo-rustango-new)
-- [Ce qui est généré](#what-gets-generated)
-- [Ajouter un module fonctionnel : `manage startapp`](#add-a-feature-module-manage-startapp)
-- [Générer des fichiers individuels : les commandes `make:*`](#generate-single-files-the-make-commands)
-- [Un flux typique](#a-typical-flow)
+- [Installer le générateur](#installer-le-générateur)
+- [Créer un projet : `cargo rustango new`](#créer-un-projet--cargo-rustango-new)
+- [Ce qui est généré](#ce-qui-est-généré)
+- [Ajouter un module fonctionnel : `manage startapp`](#ajouter-un-module-fonctionnel--manage-startapp)
+- [Générer des fichiers individuels : les commandes `make:*`](#générer-des-fichiers-individuels--les-commandes-make)
+- [Un flux typique](#un-flux-typique)
 
 ---
 

@@ -54,14 +54,14 @@ retour non nul en cas d'erreur de validation ou d'E/S. Exécutez
 ## Table des matières
 
 - [Migrations](#migrations)
-- [Migrations de données](#data-migrations)
-- [Générateurs de projet / d'app](#project--app-scaffolders)
-- [Générateurs de fichiers (`make:*`)](#file-generators-make)
-- [Utilitaires de base de données](#database-utilities)
-- [Commandes système](#system-commands)
-- [Commandes de tenancy](#tenancy-commands)
-- [Sous-commandes personnalisées](#custom-subcommands)
-- [Flux de travail courants](#common-workflows)
+- [Migrations de données](#migrations-de-données)
+- [Générateurs de projet / d'app](#générateurs-de-projet--dapp)
+- [Générateurs de fichiers (`make:*`)](#générateurs-de-fichiers-make)
+- [Utilitaires de base de données](#utilitaires-de-base-de-données)
+- [Commandes système](#commandes-système)
+- [Commandes de tenancy](#commandes-de-tenancy)
+- [Sous-commandes personnalisées](#sous-commandes-personnalisées)
+- [Flux de travail courants](#flux-de-travail-courants)
 
 ---
 
@@ -719,7 +719,7 @@ ce flux figé a disparu. **Pour provisionner, exécutez simplement
 `cargo run -- migrate`.** Un modèle utilisateur personnalisé
 (`.user_model::<AppUser>()`) passe par le même `system/migrations/`
 généré — voir
-[Modèle utilisateur personnalisé](#custom-user-model-extra-columns-on-rustango_users).
+[Modèle utilisateur personnalisé](#modèle-utilisateur-personnalisé-colonnes-supplémentaires-sur-rustango_users).
 
 ### `migrate-registry`
 
