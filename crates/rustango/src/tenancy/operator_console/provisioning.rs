@@ -331,6 +331,69 @@ pub(super) async fn test_connection(
 
 // ------------------------------------------------------------ run view
 
+/// Probe an *existing* tenant's database.
+///
+/// The create form's probe takes a URL from the form, which an existing
+/// tenant cannot use: its URL carries a password and may be a secret
+/// reference. This resolves server-side from the slug, so the URL never
+/// reaches the browser.
+///
+/// Without it, testing a tenant whose database moved meant starting to
+/// create a different tenant and borrowing that button.
+pub(super) async fn test_tenant_connection(
+    State(state): State<ConsoleState>,
+    Extension(_op): Extension<auth::Operator>,
+    Path(slug): Path<String>,
+) -> Response<Body> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+
+    let Some(pools) = state.pools.clone() else {
+        return probe_bad("This console is read-only.");
+    };
+    let rows: Vec<super::super::Org> = match super::super::Org::objects()
+        .where_(super::super::Org::slug.eq(slug.clone()))
+        .fetch(&state.registry)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return probe_bad(&format!("could not read the tenant: {e}")),
+    };
+    let Some(org) = rows.into_iter().next() else {
+        return probe_bad(&format!("No tenant `{slug}`."));
+    };
+
+    if org.database_url.is_none() {
+        return Html(
+            "<p class=\"probe probe-ok\">Schema-mode: this tenant lives in the registry's own \
+             database, which is already connected. There is no separate connection to test.</p>"
+                .to_owned(),
+        )
+        .into_response();
+    }
+
+    let url = match pools.resolved_database_url(&org).await {
+        Ok(u) => u,
+        Err(e) => return probe_bad(&e.to_string()),
+    };
+    match preflight::check(&url, &Preflight::default()).await {
+        Ok(ok) => Html(format!(
+            "<p class=\"probe probe-ok\">Reached <code>{}</code>. This role can create tables.</p>",
+            html_escape(&ok.endpoint)
+        ))
+        .into_response(),
+        Err(d) => probe_bad(&d.to_string()),
+    }
+}
+
+fn probe_bad(message: &str) -> Response<Body> {
+    Html(format!(
+        "<p class=\"probe probe-bad\">{}</p>",
+        html_escape(message)
+    ))
+    .into_response()
+}
+
 /// Every provisioning run, newest first.
 ///
 /// A run was reachable only by its id — in practice only from the

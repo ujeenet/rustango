@@ -611,6 +611,12 @@ fn router_inner(
                 "/orgs/{slug}/purge",
                 get(org_post_only_redirect).post(decommission::purge),
             )
+            // Probing an existing tenant, as opposed to the create
+            // form's probe of a URL being typed.
+            .route(
+                "/orgs/{slug}/test-connection",
+                post(provisioning::test_tenant_connection),
+            )
             .route("/orgs/{slug}/hosts", get(hosts::org_hosts_view))
             .route(
                 "/orgs/{slug}/hosts/add",

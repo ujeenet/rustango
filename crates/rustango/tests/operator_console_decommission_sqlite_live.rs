@@ -367,6 +367,46 @@ async fn the_tenant_page_offers_both_and_explains_the_difference() {
     );
 }
 
+/// The create form's probe takes a URL from the form, which an
+/// existing tenant cannot use — its URL carries a password. Testing a
+/// tenant used to mean starting to create a different one just to
+/// borrow that button.
+#[tokio::test]
+async fn an_existing_tenant_can_have_its_connection_tested() {
+    let b = boot().await;
+    let slug = b.tenant().await;
+
+    let html = body_of(b.post(&format!("/orgs/{slug}/test-connection"), "").await).await;
+    assert!(
+        html.contains("probe-ok"),
+        "a live tenant should pass: {html}"
+    );
+
+    let missing = body_of(b.post("/orgs/ghost/test-connection", "").await).await;
+    assert!(
+        missing.contains("probe-bad") && missing.contains("ghost"),
+        "an unknown tenant should say so: {missing}"
+    );
+}
+
+/// The tenant's URL is resolved server-side, so it must not be rendered
+/// into the page that offers the button.
+#[tokio::test]
+async fn the_probe_does_not_put_the_tenants_url_in_the_page() {
+    let b = boot().await;
+    let slug = b.tenant().await;
+    let html = body_of(b.get(&format!("/orgs/{slug}/edit")).await).await;
+
+    assert!(
+        html.contains(&format!("/orgs/{slug}/test-connection")),
+        "the button should be there: {html}"
+    );
+    assert!(
+        !html.contains("mode=rwc"),
+        "but not the connection URL itself: {html}"
+    );
+}
+
 #[tokio::test]
 async fn the_routes_require_a_session() {
     let b = boot().await;

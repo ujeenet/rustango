@@ -29,6 +29,8 @@
     a link from here, or nothing reaches it. -#}
 <p class="page-actions">
   <a href="/orgs/{{ slug }}/hosts" class="btn btn-secondary">Hostnames →</a>
+  <button type="button" class="btn btn-secondary" id="test-connection">Test connection</button>
+  <span id="probe-result"></span>
   {% if provisioning_enabled %}
   <form method="post" action="/orgs/{{ slug }}/migrate" class="inline-form"
         onsubmit="return confirm('Run migrations for {{ slug }}?');">
@@ -171,4 +173,22 @@
   </form>
 </fieldset>
 
+<script>
+  // Drops the returned fragment in place, so an operator can check a
+  // tenant without losing unsaved edits to a page reload. The URL is
+  // resolved server-side and never sent here — it carries a password.
+  document.getElementById("test-connection").addEventListener("click", async (e) => {
+    const out = document.getElementById("probe-result");
+    e.target.disabled = true;
+    out.textContent = "checking…";
+    try {
+      const res = await fetch("/orgs/{{ slug }}/test-connection", { method: "POST" });
+      out.innerHTML = await res.text();
+    } catch (err) {
+      out.textContent = "could not reach the console: " + err;
+    } finally {
+      e.target.disabled = false;
+    }
+  });
+</script>
 {% endblock %}

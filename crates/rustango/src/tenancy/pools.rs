@@ -526,6 +526,22 @@ pub trait TenantPoolInvalidator: Send + Sync {
         slug: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 
+    /// The tenant's literal connection URL, secret references resolved.
+    ///
+    /// Resolved here rather than handed to a caller's form: the URL
+    /// carries a password, and the console must be able to act on it
+    /// without it ever reaching a browser.
+    fn resolved_database_url<'a>(
+        &'a self,
+        org: &'a super::org::Org,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<String, super::error::TenancyError>>
+                + Send
+                + 'a,
+        >,
+    >;
+
     /// Take a tenant out of service — see
     /// [`crate::tenancy::decommission`].
     ///
@@ -555,6 +571,19 @@ where
         slug: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move { TenantPools::<DB>::invalidate(self, slug).await })
+    }
+
+    fn resolved_database_url<'a>(
+        &'a self,
+        org: &'a super::org::Org,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<String, super::error::TenancyError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move { TenantPools::<DB>::resolved_database_url(self, org).await })
     }
 
     fn decommission<'a>(
