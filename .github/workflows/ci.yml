@@ -318,6 +318,11 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,config,email --test setting_changed_signal
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_ipaddress_field
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_filepath_field
+      # Audit retention now sweeps the registry's own log, not just tenants.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test audit_cleanup_sqlite_live
+      # #1344 — the hostname verbs, and that they write the table the
+      # operator console writes rather than a parallel one.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_hosts_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,serializer --test serializer_cross_validate
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_none
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_exclude_sqlite_live

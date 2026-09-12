@@ -44,6 +44,7 @@
 mod agents;
 mod args;
 mod audit;
+mod hosts;
 mod menu;
 #[cfg(feature = "postgres")]
 mod migrate_storage;
@@ -200,6 +201,12 @@ where
         "drop-tenant" => tenants::drop_tenant(pools, &args[1..], writer).await,
         "purge-tenant" => tenants::purge_tenant(pools, &args[1..], writer).await,
         "list-tenants" => tenants::list_tenants(pools, writer).await,
+        // #1344 — the console has bound extra hostnames since #1318; these
+        // give a deploy hook and a browser-less box the same reach.
+        "list-hosts" => hosts::list_hosts(pools, &args[1..], writer).await,
+        "add-host" => hosts::add_host(pools, &args[1..], writer).await,
+        "remove-host" => hosts::remove_host(pools, &args[1..], writer).await,
+        "set-host-enabled" => hosts::set_host_enabled(pools, &args[1..], writer).await,
         "prewarm-pools" => {
             // v0.27.7 (#60) — eagerly build pools for every active
             // database-mode tenant. Useful as a post-deploy hook
@@ -414,6 +421,30 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "  list-tenants         Print every Org row in the registry."
     )?;
+    writeln!(w)?;
+    writeln!(w, "HOSTNAMES:")?;
+    writeln!(
+        w,
+        "  list-hosts <slug>    Every hostname the tenant answers on, base first."
+    )?;
+    writeln!(w, "  add-host <slug> <hostname>")?;
+    writeln!(
+        w,
+        "                       Bind an extra hostname. Rejected if another tenant"
+    )?;
+    writeln!(w, "                       already claims it.")?;
+    writeln!(w, "  remove-host <slug> <hostname>")?;
+    writeln!(
+        w,
+        "                       Unbind one. The base host cannot be removed here —"
+    )?;
+    writeln!(w, "                       change --host-pattern instead.")?;
+    writeln!(w, "  set-host-enabled <slug> <hostname> --on|--off")?;
+    writeln!(
+        w,
+        "                       Park a host without losing the record (DNS in flight,"
+    )?;
+    writeln!(w, "                       domain being retired).")?;
     writeln!(w)?;
     writeln!(w, "USER / OPERATOR MANAGEMENT:")?;
     writeln!(
