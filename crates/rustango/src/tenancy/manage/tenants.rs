@@ -8,11 +8,9 @@ use std::path::Path;
 use sqlx::Database;
 
 use crate::core::Column as _;
-use crate::sql::{FetcherPool, UpdaterPool};
+use crate::sql::FetcherPool;
 
 use crate::tenancy::error::TenancyError;
-#[cfg(feature = "postgres")]
-use crate::tenancy::manage::args::quote_ident;
 use crate::tenancy::manage::args::{next_value, reject_leading_flag};
 use crate::tenancy::manage_interactive;
 use crate::tenancy::org::{BackendKind, Org, StorageMode};
@@ -336,46 +334,20 @@ where
         )));
     }
 
-    let registry = pools.registry_pool();
-    let existing: Vec<Org> = Org::objects()
-        .where_(Org::slug.eq(slug.clone()))
-        .fetch(&registry)
-        .await?;
-    let Some(org) = existing.into_iter().next() else {
-        return Err(TenancyError::Validation(format!(
-            "drop-tenant: no tenant with slug `{slug}`"
-        )));
-    };
-    if !org.active {
+    // The steps live in `tenancy::decommission` so the console runs
+    // exactly these; this verb keeps what is a CLI's job — argv, the
+    // confirmation prompt, and rendering.
+    let report = super::super::decommission::decommission(
+        pools,
+        &slug,
+        super::super::decommission::Action::Deactivate,
+    )
+    .await
+    .map_err(|e| TenancyError::Validation(format!("drop-tenant: {e}")))?;
+    if report.no_change {
         writeln!(w, "tenant `{slug}` already inactive — no change")?;
         return Ok(());
     }
-
-    // Soft-delete: UPDATE rustango_orgs SET active = false WHERE id = $1.
-    let id = org
-        .id
-        .get()
-        .copied()
-        .ok_or_else(|| TenancyError::Validation("dropped Org row has no PK".into()))?;
-    let updated = Org::objects()
-        .where_(Org::id.eq(id))
-        .update()
-        .set("active", false)
-        .execute_pool(&registry)
-        .await?;
-    if updated == 0 {
-        return Err(TenancyError::Validation(format!(
-            "drop-tenant: no row updated for id {id} — race condition?"
-        )));
-    }
-    // Only once the write is confirmed. Invalidating before the guard
-    // would throw away a healthy cache on a no-op, and the suspension
-    // it is clearing would not have happened.
-    //
-    // Clears the extra-hostname cache as well — that one holds `Org`
-    // rows too, so without it a suspended tenant's base host 404s while
-    // its extra hosts keep serving.
-    super::super::invalidate_org_cache();
     writeln!(
         w,
         "soft-deleted tenant `{slug}` (active=false). Data preserved."
@@ -470,6 +442,13 @@ where
         )));
     }
 
+    // Everything destructive lives in `tenancy::decommission` so the
+    // console runs exactly these steps. This verb keeps argv, the
+    // confirmation prompt, and rendering.
+    //
+    // The flag check is here rather than there because `--purge-database`
+    // is this CLI's vocabulary; the engine enforces the same rule in its
+    // own words for every other caller.
     let registry = pools.registry_pool();
     let existing: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
@@ -480,154 +459,37 @@ where
             "purge-tenant: no tenant with slug `{slug}`"
         )));
     };
-
     let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
         TenancyError::Validation(format!("org `{slug}` has unknown storage_mode `{got}`"))
     })?;
-
-    match mode {
-        StorageMode::Schema => {
-            // Schema mode is PG-only by language. Downcast to grab
-            // the typed `pools.registry()` PgPool accessor.
-            #[cfg(feature = "postgres")]
-            {
-                let pg_pools = (pools as &dyn std::any::Any)
-                    .downcast_ref::<TenantPools<sqlx::Postgres>>()
-                    .ok_or_else(|| {
-                        TenancyError::Validation(
-                            "purge-tenant: schema-mode tenants require a Postgres registry".into(),
-                        )
-                    })?;
-                let schema = org.schema_name.clone().unwrap_or_else(|| slug.clone());
-                let sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(&schema));
-                rustango::sql::sqlx::query(&sql)
-                    .execute(pg_pools.registry())
-                    .await?;
-                writeln!(w, "purged tenant `{slug}` (dropped schema `{schema}`)")?;
-            }
-            #[cfg(not(feature = "postgres"))]
-            {
-                return Err(TenancyError::Validation(
-                    "purge-tenant: schema-mode tenants require the `postgres` feature".into(),
-                ));
-            }
-        }
-        StorageMode::Database => {
-            if !purge_database {
-                return Err(TenancyError::Validation(format!(
-                    "tenant `{slug}` is database-mode — `DROP DATABASE` is unrecoverable. \
-                     Pass `--purge-database` to confirm you want the DB dropped, or use \
-                     `drop-tenant` for soft-delete."
-                )));
-            }
-            // Resolve the URL through the secrets resolver so vault-
-            // backed orgs purge correctly. Then close & drop the
-            // cached pool — DROP DATABASE refuses while connections
-            // are open.
-            let url = pools.resolved_database_url(&org).await?;
-            pools.invalidate(&slug).await;
-            // #560 — branch on the tenant's runtime `backend_kind`,
-            // NOT the cargo feature flag. On a mixed-feature build
-            // (PG + MySQL compiled in), the `cfg(postgres)` arm was
-            // unconditionally taken regardless of the tenant's
-            // actual backend; parsing a `mysql://` URL via
-            // `PgConnectOptions::from_str` then failed at runtime
-            // with a cryptic "invalid URL" error.
-            //
-            // The PG helper stays gated on the `postgres` feature
-            // (`PgConnectOptions` isn't available without it); the
-            // runtime branch decides whether the helper is reachable
-            // for THIS tenant.
-            let is_pg = org.backend_kind == "postgres";
-            #[cfg(feature = "postgres")]
-            let pg_drop_attempted = if is_pg {
-                drop_database_at(&url, w).await?;
-                true
-            } else {
-                false
-            };
-            #[cfg(not(feature = "postgres"))]
-            let pg_drop_attempted = {
-                let _ = is_pg;
-                false
-            };
-            if !pg_drop_attempted {
-                writeln!(
-                    w,
-                    "  purged tenant `{slug}` registry row; manually delete the \
-                     tenant database at `{url}` (DROP DATABASE not wired for \
-                     `{backend}` in v0.42)",
-                    backend = org.backend_kind,
-                )?;
-            }
-            writeln!(w, "purged tenant `{slug}` (dropped dedicated database)")?;
-        }
-    }
-
-    // DELETE the Org row via the ORM's bi-dialect `delete_pool`.
-    let id = org
-        .id
-        .get()
-        .copied()
-        .ok_or_else(|| TenancyError::Validation("purge-tenant: Org row has no PK".into()))?;
-    let rows_deleted = org.delete_pool(&registry).await?;
-    if rows_deleted == 0 {
+    if mode == StorageMode::Database && !purge_database {
         return Err(TenancyError::Validation(format!(
-            "purge-tenant: no Org row deleted for id {id} — race condition?"
+            "tenant `{slug}` is database-mode — `DROP DATABASE` is unrecoverable. \
+             Pass `--purge-database` to confirm you want the DB dropped, or use \
+             `drop-tenant` for soft-delete."
         )));
     }
-    // The schema or database is already gone by this point, so a cached
-    // resolution would route requests at storage that no longer exists —
-    // a 500 where the tenant should simply be unknown.
-    super::super::invalidate_org_cache();
-    writeln!(w, "  removed Org row (id {id})")?;
-    Ok(())
-}
 
-/// Connect to the same Postgres server as `tenant_url` but switch to
-/// the `postgres` admin database (DROP DATABASE can't run from a
-/// connection to the database being dropped). Issue the DROP, then
-/// close the admin connection.
-///
-/// v0.38 — PG-only. SQLite databases live in a single file (delete
-/// the file); MySQL has `DROP DATABASE` but the per-tenant URL
-/// rewrite gymnastics are different enough that lifting this helper
-/// to be tri-dialect is queued separately.
-#[cfg(feature = "postgres")]
-async fn drop_database_at<W: Write + Send>(
-    tenant_url: &str,
-    w: &mut W,
-) -> Result<(), TenancyError> {
-    use crate::sql::sqlx::postgres::PgConnectOptions;
-    use crate::sql::sqlx::ConnectOptions;
-    use std::str::FromStr;
+    let report = super::super::decommission::decommission(
+        pools,
+        &slug,
+        super::super::decommission::Action::Purge { purge_database },
+    )
+    .await
+    .map_err(|e| TenancyError::Validation(format!("purge-tenant: {e}")))?;
 
-    let opts = PgConnectOptions::from_str(tenant_url).map_err(|e| {
-        TenancyError::Validation(format!(
-            "purge-tenant: cannot parse database_url `{tenant_url}`: {e}"
-        ))
-    })?;
-    let dbname = opts.get_database().ok_or_else(|| {
-        TenancyError::Validation(
-            "purge-tenant: database_url is missing the database name — \
-             can't determine what to DROP DATABASE"
-                .into(),
-        )
-    })?;
-    if dbname.eq_ignore_ascii_case("postgres")
-        || dbname.eq_ignore_ascii_case("template0")
-        || dbname.eq_ignore_ascii_case("template1")
-    {
-        return Err(TenancyError::Validation(format!(
-            "purge-tenant: refusing to DROP DATABASE `{dbname}` (Postgres system database)"
-        )));
+    if let Some(schema) = &report.schema_dropped {
+        writeln!(w, "purged tenant `{slug}` (dropped schema `{schema}`)")?;
     }
-    let dbname = dbname.to_owned();
-    let admin_opts = opts.clone().database("postgres");
-    let mut admin = admin_opts.connect().await?;
-    let sql = format!("DROP DATABASE IF EXISTS {}", quote_ident(&dbname));
-    writeln!(w, "  issuing {sql}")?;
-    rustango::sql::sqlx::query(&sql).execute(&mut admin).await?;
+    if report.database_dropped.is_some() {
+        writeln!(w, "purged tenant `{slug}` (dropped dedicated database)")?;
+    }
+    for note in &report.notes {
+        writeln!(w, "  {note}")?;
+    }
+    if report.row_deleted {
+        writeln!(w, "  removed Org row")?;
+    }
     Ok(())
 }
 

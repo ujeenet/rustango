@@ -125,4 +125,50 @@
 </form>
 {% endif %}
 
+{#- Two actions with very different consequences, kept visibly apart.
+    Deactivating is one click and reversible; purging asks for the slug
+    and destroys the storage. No `edit_enabled` guard: this whole page
+    is only mounted on a console that can edit. -#}
+<fieldset class="section danger">
+  <legend>Decommission</legend>
+
+  <form method="post" action="/orgs/{{ slug }}/deactivate" class="inline-form"
+        onsubmit="return confirm('Deactivate {{ slug }}? It stops serving immediately; nothing is destroyed.');">
+    <button type="submit" class="btn btn-secondary">Deactivate</button>
+  </form>
+  <div class="field-helper">Stops serving on the next request. The data
+  stays and the tenant can be switched back on from this page.</div>
+
+  <hr class="danger-rule">
+
+  <form method="post" action="/orgs/{{ slug }}/purge" class="edit-form">
+    <p class="danger-lead"><strong>Purge — permanent.</strong>
+    Drops this tenant's schema or database and removes its registry row.
+    There is no undo and no backup taken.</p>
+    <table>
+      <tr>
+        <th><label for="confirm">type the slug</label></th>
+        <td>
+          <input type="text" id="confirm" name="confirm" autocomplete="off"
+                 placeholder="{{ slug }}">
+          <div class="field-helper">Type <code>{{ slug }}</code> exactly.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="purge_database">drop the database</label></th>
+        <td>
+          <input type="checkbox" id="purge_database" name="purge_database" value="on">
+          <div class="field-helper">Required for a database-mode tenant,
+          where purging means <code>DROP DATABASE</code>. Schema-mode
+          tenants ignore this.</div>
+        </td>
+      </tr>
+    </table>
+    <p class="form-actions">
+      <button type="submit" class="btn btn-danger"
+              onclick="return confirm('Permanently destroy {{ slug }} and all its data?');">Purge {{ slug }}</button>
+    </p>
+  </form>
+</fieldset>
+
 {% endblock %}

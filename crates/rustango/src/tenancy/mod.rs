@@ -73,6 +73,9 @@ pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;
 pub mod database_pools;
+/// Taking a tenant out of service — the steps `drop-tenant` and
+/// `purge-tenant` run, callable from anything that is not a terminal.
+pub mod decommission;
 mod error;
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;

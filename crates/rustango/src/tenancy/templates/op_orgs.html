@@ -2,6 +2,12 @@
 {% block title %}Organizations — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
 {% block content %}
 <h1>Organizations</h1>
+
+{#- Where a decommission reports back: it removes the tenant, so there
+    is no tenant page left to return to. -#}
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+{% if notice %}<div class="alert alert-notice">{{ notice }}</div>{% endif %}
+
 {% if provisioning_enabled %}
 <p class="page-actions">
   <a href="/orgs/new" class="btn btn-primary">+ New tenant</a>

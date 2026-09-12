@@ -41,6 +41,7 @@
 /// Creating a tenant from the console, and watching it happen (#1322).
 /// Mounted only by [`router_with_provisioning`].
 mod audit;
+mod decommission;
 mod hosts;
 mod migrate;
 mod operators;
@@ -599,6 +600,17 @@ fn router_inner(
             // serves that traffic, which is an edit in every sense that
             // matters. The three writes are separate routes rather than
             // one submit because they act on individual rows.
+            // Taking a tenant out of service. Behind the edit gate
+            // like the rest: `purge` is the most destructive thing this
+            // console can do, and a read-only one must not offer it.
+            .route(
+                "/orgs/{slug}/deactivate",
+                get(org_post_only_redirect).post(decommission::deactivate),
+            )
+            .route(
+                "/orgs/{slug}/purge",
+                get(org_post_only_redirect).post(decommission::purge),
+            )
             .route("/orgs/{slug}/hosts", get(hosts::org_hosts_view))
             .route(
                 "/orgs/{slug}/hosts/add",
@@ -799,6 +811,17 @@ pub(super) async fn count_where(
 pub(super) struct PageQuery {
     #[serde(default)]
     pub(super) page: Option<i64>,
+}
+
+/// A page plus the outcome of whatever redirected here.
+#[derive(Deserialize)]
+pub(super) struct ListQuery {
+    #[serde(default)]
+    pub(super) page: Option<i64>,
+    #[serde(default)]
+    pub(super) error: Option<String>,
+    #[serde(default)]
+    pub(super) notice: Option<String>,
 }
 
 /// Render, or say why not.
@@ -1304,7 +1327,7 @@ async fn welcome(
 async fn orgs_list(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
-    Query(q): Query<PageQuery>,
+    Query(q): Query<ListQuery>,
 ) -> Response<Body> {
     // Paged: this fetched every tenant, which is fine for the three a
     // demo has and not for the thousands a real registry holds.
@@ -1349,6 +1372,8 @@ async fn orgs_list(
     // exists but nothing links to it — which is exactly the state
     // this shipped in first.
     ctx.insert("provisioning_enabled", &state.provisioner.is_some());
+    ctx.insert("error", &q.error);
+    ctx.insert("notice", &q.notice);
     paged.inject(&mut ctx, "/orgs", "");
     render(&state, "op_orgs.html", &ctx)
 }
