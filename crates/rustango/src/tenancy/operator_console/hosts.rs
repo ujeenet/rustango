@@ -195,6 +195,9 @@ fn explain(e: &HostError, slug: &str) -> String {
             "`{h}` is `{slug}`'s base host and has no row to remove. Change it on the edit \
              page instead"
         ),
+        HostError::NoSuchOrg(s) => {
+            format!("there is no tenant `{s}` — it may have been purged, or the link is stale")
+        }
         HostError::NotFound => "no such host on this tenant".to_owned(),
         HostError::Driver(d) => format!("the registry rejected the change: {d}"),
     }

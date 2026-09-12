@@ -547,7 +547,21 @@ fn split_features(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Names cargo refuses as a **binary target**, which every template emits.
+///
+/// These pass the identifier check but produce a project whose manifest
+/// cargo will not even load — "the binary target name `build` is forbidden,
+/// it conflicts with cargo's build directory names". Better to refuse before
+/// writing fifteen files the user then has to delete (#1358).
+const RESERVED_TARGET_NAMES: &[&str] = &["build", "deps", "examples", "incremental"];
+
 fn validate_name(name: &str) -> Result<(), String> {
+    if RESERVED_TARGET_NAMES.contains(&name) {
+        return Err(format!(
+            "`{name}` cannot be a project name — cargo forbids it as a binary target \
+             because it conflicts with its own build directory names"
+        ));
+    }
     let valid = !name.is_empty()
         && name
             .chars()
@@ -916,6 +930,45 @@ mod tests {
         );
         // A feature the template already turns on is a harmless no-op.
         assert!(parse(&["app", "--features", "batteries"]).is_ok());
+    }
+
+    /// Four names pass the identifier check and then produce a manifest
+    /// cargo refuses to load — "the binary target name `build` is
+    /// forbidden" (#1358). Refused before anything is written.
+    #[test]
+    fn names_cargo_forbids_as_a_binary_target_are_refused() {
+        for n in ["build", "deps", "examples", "incremental"] {
+            let err = validate_name(n).expect_err(n);
+            assert!(err.contains(n), "should name it: {err}");
+            assert!(
+                err.contains("binary target"),
+                "should say why cargo objects: {err}"
+            );
+        }
+        // Not reserved — these load fine, so they stay accepted.
+        for n in ["myblog", "test", "std", "core", "crate_thing"] {
+            validate_name(n).unwrap_or_else(|e| panic!("{n} should be allowed: {e}"));
+        }
+    }
+
+    /// `.env.example` must not ship a `RUSTANGO_SESSION_SECRET` value: one
+    /// that is not 32 bytes of base64 is discarded silently, so the project
+    /// looks configured and is not (#1359).
+    #[test]
+    fn the_env_template_ships_no_live_session_secret() {
+        let env = templates::env_example("app", Backend::Postgres);
+        for line in env.lines() {
+            let t = line.trim();
+            assert!(
+                !(t.starts_with("RUSTANGO_SESSION_SECRET=")
+                    && t.len() > "RUSTANGO_SESSION_SECRET=".len()),
+                "an uncommented secret with a value would be silently discarded: {t}"
+            );
+        }
+        assert!(
+            env.contains("openssl rand -base64 32"),
+            "it should still say how to make a real one:\n{env}"
+        );
     }
 
     /// The flags shape more than `Cargo.toml`: a project generated for one

@@ -217,6 +217,7 @@ where
             // database-mode tenant. Useful as a post-deploy hook
             // after credential rotation, or to validate that all
             // tenants are reachable before flipping a load balancer.
+            args::reject_extra_positionals(&args[1..], 0, "prewarm-pools")?;
             let report = pools.prewarm_database_tenants().await?;
             writeln!(
                 writer,
@@ -254,7 +255,7 @@ where
         )),
         "create-operator" => users::create_operator_cmd(pools, &args[1..], writer).await,
         // #1344 — seeing who exists, and turning one off, were console-only.
-        "list-operators" => operators::list_operators(pools, writer).await,
+        "list-operators" => operators::list_operators(pools, &args[1..], writer).await,
         "set-operator-active" => operators::set_operator_active(pools, &args[1..], writer).await,
         // #1344 — the console renders all three; nothing printed them, so an
         // incident question needed a browser or a SQL client.
@@ -287,15 +288,25 @@ where
             // Reads from stdin, writes to the same writer the
             // dispatcher uses. `init` is an alias the muscle
             // memory of `cargo init` users will reach for.
-            let stdin = std::io::stdin();
-            let mut reader = stdin.lock();
+            //
+            // `SharedStdin`, not `stdin.lock()`: this calls verbs that
+            // prompt for themselves, and holding the lock across that
+            // deadlocks (#1360).
+            let mut reader = crate::manage_interactive::SharedStdin;
             wizard::wizard_cmd(pools, registry_url, dir, init_fn, &mut reader, writer).await
         }
         // The wizard above is a linear first-run setup; this is the standing
         // list of everything you can do afterwards (#1345).
         "menu" | "actions" => {
-            let stdin = std::io::stdin();
-            let mut reader = stdin.lock();
+            // Off a terminal there is nobody to answer, and rendering the
+            // menu to a log while exiting 0 looks like success (#1357).
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                return Err(TenancyError::Validation(
+                    "`menu` needs a terminal — run a verb directly, or `--help` for the list"
+                        .into(),
+                ));
+            }
+            let mut reader = crate::manage_interactive::SharedStdin;
             menu::menu_cmd(pools, registry_url, dir, init_fn, &mut reader, writer).await
         }
         // Intercepted before fall-through: tenancy ships its own

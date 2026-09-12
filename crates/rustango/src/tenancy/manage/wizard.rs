@@ -42,7 +42,9 @@
 //! verb today; bundling into the wizard is straightforward when
 //! the user asks for it.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
+
+use crate::manage_interactive::LineSource;
 use std::path::Path;
 
 use crate::tenancy::TenantPools;
@@ -60,7 +62,7 @@ use super::InitTenancyFn;
 /// surfaces here. The wizard does NOT swallow errors silently —
 /// a failed step aborts the wizard so the user can retry from
 /// where they were.
-pub(super) async fn wizard_cmd<R: BufRead, W: Write + Send, DB: sqlx::Database>(
+pub(super) async fn wizard_cmd<R: LineSource + ?Sized, W: Write + Send, DB: sqlx::Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
@@ -201,7 +203,7 @@ fn write_outro<W: Write>(w: &mut W) -> std::io::Result<()> {
 ///
 /// Accepts: `y`, `Y`, `yes`, `YES`, `1`, `true` → yes; everything
 /// else → no. (Case-insensitive.)
-pub(super) fn prompt_yes_no<R: BufRead, W: Write>(
+pub(super) fn prompt_yes_no<R: LineSource + ?Sized, W: Write>(
     reader: &mut R,
     writer: &mut W,
     question: &str,
@@ -211,7 +213,7 @@ pub(super) fn prompt_yes_no<R: BufRead, W: Write>(
     write!(writer, "{question} {hint} ")?;
     writer.flush()?;
     let mut buf = String::new();
-    reader.read_line(&mut buf)?;
+    reader.read_line_from(&mut buf)?;
     let trimmed = buf.trim();
     if trimmed.is_empty() {
         return Ok(default_yes);
@@ -229,7 +231,7 @@ pub(super) fn prompt_yes_no<R: BufRead, W: Write>(
 ///
 /// Returns the trimmed input (no leading/trailing whitespace) so
 /// downstream verbs don't see accidental newlines.
-pub(super) fn prompt_value<R: BufRead, W: Write>(
+pub(super) fn prompt_value<R: LineSource + ?Sized, W: Write>(
     reader: &mut R,
     writer: &mut W,
     label: &str,
@@ -241,7 +243,7 @@ pub(super) fn prompt_value<R: BufRead, W: Write>(
     }
     writer.flush()?;
     let mut buf = String::new();
-    reader.read_line(&mut buf)?;
+    reader.read_line_from(&mut buf)?;
     let trimmed = buf.trim();
     if trimmed.is_empty() {
         return Ok(default.unwrap_or("").to_owned());

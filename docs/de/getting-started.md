@@ -179,16 +179,19 @@ Die generierte `.env` ist von Haus aus Docker-freundlich. Da wir `cargo` auf dem
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
 RUSTANGO_BIND=0.0.0.0:8080
 RUSTANGO_APEX_DOMAIN=localhost
-RUSTANGO_SESSION_SECRET=change-me-base64-encoded-32-bytes-or-more
 ```
 
 Die Zugangsdaten, der Port und der Datenbankname (`myblog_dev`) passen bereits zum Postgres-Dienst aus der `docker-compose.yml`, du musst sie also nicht anfassen.
 
-`RUSTANGO_SESSION_SECRET` signiert Sessions und Tokens, also liefere nicht den Platzhalter aus. Generiere ein echtes und füge es ein:
+`RUSTANGO_SESSION_SECRET` signiert Sessions und Tokens. In der generierten `.env.example` ist es **auskommentiert**, und für die Entwicklung kannst du das so lassen: der erste Start erzeugt einen Schlüssel unter `./var/` und verwendet ihn weiter, sodass Neustarts dich nicht ausloggen.
+
+Für die Produktion setze einen echten — 32 Bytes Base64, aus deinem Secret-Manager oder:
 
 ```bash
 openssl rand -base64 32     # paste output as RUSTANGO_SESSION_SECRET value
 ```
+
+Ein Wert, der nicht 32 Bytes Base64 ist, kann nicht verwendet werden. Der Server sagt das beim Start und fällt auf den generierten Schlüssel zurück, statt abzubrechen — achte also auf diese Warnung, wenn du einen gesetzt hast und Sessions sich verhalten, als hättest du es nicht.
 
 ---
 

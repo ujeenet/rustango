@@ -291,6 +291,52 @@ async fn an_empty_trail_reports_rather_than_printing_a_bare_header() {
     assert!(out.contains("(no audit entries)"), "{out}");
 }
 
+/// A typo'd filter used to come back as "(no runs)", which reads as
+/// "there are none" — the wrong answer to "did that migration run?" (#1356).
+#[tokio::test]
+async fn an_invalid_filter_is_refused_not_answered_with_nothing() {
+    let b = boot().await;
+    b.tenant("acme").await;
+
+    let err = b
+        .run(&["list-runs", "--kind", "bogus"])
+        .await
+        .expect_err("bad kind");
+    assert!(err.contains("bogus"), "{err}");
+    assert!(err.contains("provision"), "should list valid kinds: {err}");
+
+    let err = b
+        .run(&["list-runs", "--state", "bogus"])
+        .await
+        .expect_err("bad state");
+    assert!(err.contains("succeeded"), "should list valid states: {err}");
+
+    // Every real value still works, including the ones a run passes
+    // through on its way to finishing.
+    for kind in ["provision", "migrate"] {
+        b.run(&["list-runs", "--kind", kind])
+            .await
+            .unwrap_or_else(|e| panic!("--kind {kind}: {e}"));
+    }
+    for state in ["pending", "running", "succeeded", "failed"] {
+        b.run(&["list-runs", "--state", state])
+            .await
+            .unwrap_or_else(|e| panic!("--state {state}: {e}"));
+    }
+}
+
+/// Silently ignoring an argument means a mistyped command runs the bare
+/// verb and exits 0, so the caller believes it did what they asked.
+#[tokio::test]
+async fn a_verb_that_takes_no_arguments_says_so() {
+    let b = boot().await;
+    let err = b
+        .run(&["list-operators", "acme"])
+        .await
+        .expect_err("stray positional");
+    assert!(err.contains("acme"), "{err}");
+}
+
 #[tokio::test]
 async fn unknown_flags_are_named_with_what_is_accepted() {
     let b = boot().await;

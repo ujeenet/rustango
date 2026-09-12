@@ -255,12 +255,132 @@ async fn the_base_host_cannot_be_removed_here() {
     assert!(err.contains("base host"), "{err}");
 }
 
+/// The error has to name the **tenant**, not the host. One `NotFound` for
+/// both sent a mistyped slug looking at the host table (#1356), and this
+/// test used to assert only that *something* was said, which is how it got
+/// through.
 #[tokio::test]
 async fn an_unknown_tenant_is_named() {
     let b = boot().await;
+    let slug = b.tenant("acme").await;
+    for args in [
+        vec!["list-hosts", "nosuchtenant"],
+        vec!["add-host", "nosuchtenant", "x.test"],
+        vec!["remove-host", "nosuchtenant", "x.test"],
+        vec!["set-host-enabled", "nosuchtenant", "x.test", "--on"],
+    ] {
+        let err = b.run(&args).await.expect_err("unknown tenant");
+        assert!(
+            err.contains("nosuchtenant") && err.contains("tenant"),
+            "{args:?} should name the missing tenant, got: {err}"
+        );
+    }
+
+    // …and a missing *host* on a tenant that exists still says so.
     let err = b
-        .run(&["list-hosts", "nosuchtenant"])
+        .run(&["remove-host", &slug, "nosuch.test"])
         .await
-        .expect_err("unknown tenant");
-    assert!(!err.is_empty(), "should have explained itself");
+        .expect_err("unknown host");
+    assert!(err.contains("host"), "{err}");
+}
+
+/// `--on --off` used to resolve last-wins and park a live host while
+/// reporting success (#1355).
+#[tokio::test]
+async fn contradictory_directions_are_refused() {
+    let b = boot().await;
+    let slug = b.tenant("acme").await;
+    b.run(&["add-host", &slug, "shop.example.com"])
+        .await
+        .expect("add");
+
+    for args in [
+        vec![
+            "set-host-enabled",
+            &slug,
+            "shop.example.com",
+            "--on",
+            "--off",
+        ],
+        vec![
+            "set-host-enabled",
+            &slug,
+            "shop.example.com",
+            "--off",
+            "--on",
+        ],
+    ] {
+        let err = b.run(&args).await.expect_err("contradiction");
+        assert!(err.contains("contradict"), "{args:?}: {err}");
+    }
+
+    // Repeating the *same* direction is harmless.
+    b.run(&[
+        "set-host-enabled",
+        &slug,
+        "shop.example.com",
+        "--off",
+        "--off",
+    ])
+    .await
+    .expect("same direction twice is fine");
+
+    let listed = b.run(&["list-hosts", &slug]).await.expect("list");
+    assert!(listed.contains("false"), "still parked: {listed}");
+}
+
+/// `--enabled TRUE` used to mean *off*: anything outside a lowercase
+/// allow-list fell through to `false` (#1355).
+#[tokio::test]
+async fn enabled_parses_a_closed_set_case_insensitively() {
+    let b = boot().await;
+    let slug = b.tenant("acme").await;
+    b.run(&["add-host", &slug, "shop.example.com"])
+        .await
+        .expect("add");
+
+    for on in ["TRUE", "Yes", "ON", "1"] {
+        b.run(&[
+            "set-host-enabled",
+            &slug,
+            "shop.example.com",
+            "--enabled",
+            on,
+        ])
+        .await
+        .unwrap_or_else(|e| panic!("--enabled {on}: {e}"));
+        let listed = b.run(&["list-hosts", &slug]).await.expect("list");
+        assert!(
+            listed.contains("true"),
+            "--enabled {on} should serve: {listed}"
+        );
+    }
+    for off in ["FALSE", "No", "off", "0"] {
+        b.run(&[
+            "set-host-enabled",
+            &slug,
+            "shop.example.com",
+            "--enabled",
+            off,
+        ])
+        .await
+        .unwrap_or_else(|e| panic!("--enabled {off}: {e}"));
+        let listed = b.run(&["list-hosts", &slug]).await.expect("list");
+        assert!(
+            listed.contains("false"),
+            "--enabled {off} should park: {listed}"
+        );
+    }
+
+    let err = b
+        .run(&[
+            "set-host-enabled",
+            &slug,
+            "shop.example.com",
+            "--enabled",
+            "maybe",
+        ])
+        .await
+        .expect_err("not a yes/no value");
+    assert!(err.contains("maybe"), "{err}");
 }

@@ -21,6 +21,21 @@ use super::args::next_value;
 /// Rows a page-less terminal can still scroll back through.
 const DEFAULT_LIMIT: i64 = 20;
 
+/// What `provision_store` writes into `kind` and `state`.
+const KINDS: &[&str] = &["provision", "migrate"];
+const STATES: &[&str] = &["pending", "running", "succeeded", "failed"];
+
+/// Accept only a value the column can actually hold.
+fn one_of(raw: &str, flag: &str, allowed: &[&str]) -> Result<String, TenancyError> {
+    if allowed.contains(&raw) {
+        return Ok(raw.to_owned());
+    }
+    Err(TenancyError::Validation(format!(
+        "`{raw}` is not a {flag} value — try {}",
+        allowed.join(", ")
+    )))
+}
+
 fn parse_limit<'a, I: Iterator<Item = &'a String>>(
     iter: &mut I,
     flag: &str,
@@ -65,8 +80,17 @@ where
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--limit" => limit = parse_limit(&mut iter, "--limit")?,
-            "--kind" => kind = Some(next_value(&mut iter, "--kind")?),
-            "--state" => state = Some(next_value(&mut iter, "--state")?),
+            // Validated, not passed through: a typo used to come back as
+            // "(no runs)", which reads as "there are none" — the wrong
+            // answer to "did that migration run?" (#1356).
+            "--kind" => kind = Some(one_of(&next_value(&mut iter, "--kind")?, "--kind", KINDS)?),
+            "--state" => {
+                state = Some(one_of(
+                    &next_value(&mut iter, "--state")?,
+                    "--state",
+                    STATES,
+                )?);
+            }
             other => {
                 return Err(TenancyError::Validation(format!(
                     "unknown flag `{other}` — list-runs takes --limit, --kind, --state"
