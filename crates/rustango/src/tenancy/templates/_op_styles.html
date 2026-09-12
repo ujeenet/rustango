@@ -503,4 +503,43 @@ fieldset.section.danger form.edit-form { margin-bottom: 0; }
 /* Beside the links, not pushed right: the floating theme toggle sits
    in that corner and covered it. */
 .pager-total { margin-left: var(--space-3); color: var(--color-fg-muted); }
+
+/* Narrow screens. 720px to match the admin's breakpoint — the two
+   consoles should not disagree about when a sidebar stops being one.
+   The sticky full-height sidebar is undone here: pinned at 100vh it
+   would fill a phone screen before the content started. */
+@media (max-width: 720px) {
+  .shell { flex-direction: column; }
+  aside.sidebar {
+    width: auto;
+    position: static;
+    height: auto;
+    overflow-y: visible;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+    padding-bottom: var(--space-2);
+  }
+  aside .brand { border-bottom: 0; margin-bottom: 0; padding-bottom: var(--space-2); }
+  /* A row of links rather than a column: vertical nav plus brand plus
+     sign-out is most of a phone screen before any content. */
+  aside nav { flex: none; display: flex; flex-wrap: wrap; gap: var(--space-1, 4px); }
+  aside nav a {
+    padding: 0.35rem var(--space-3);
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: var(--radius-sm);
+  }
+  aside nav a.active { border-left-color: transparent; border-bottom-color: var(--color-accent); }
+  /* `.who` and the logout form are flex items of the column above, so
+     they stack whatever their `display` says; only the chrome needs
+     adjusting. */
+  aside .who { border-top: 0; padding-bottom: 0; }
+  aside form.logout button { width: auto; margin: var(--space-2) var(--space-4); }
+  main { padding: var(--space-4); }
+  /* Label-above-field: a two-column form table leaves neither column
+     usable at this width. */
+  fieldset.section th, fieldset.section td { display: block; width: auto; }
+  fieldset.section th { padding-bottom: 0; }
+  .filter-bar, .inline-reset { flex-direction: column; align-items: stretch; }
+}
 </style>
