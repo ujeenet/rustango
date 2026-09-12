@@ -935,7 +935,7 @@ fn validate_schema_name(name: &str) -> Result<(), String> {
 /// in doubt. The other two are refused: they mean the operator wants
 /// something this matcher does not do, and quietly storing a value that
 /// cannot match would be the worse answer.
-fn validate_host_pattern(pattern: &str) -> Result<String, String> {
+pub(crate) fn validate_host_pattern(pattern: &str) -> Result<String, String> {
     if pattern.contains(':') {
         return Err(format!(
             "host pattern `{pattern}` carries a port — the `Host` header is matched with the \
@@ -991,7 +991,7 @@ fn validate_host_pattern(pattern: &str) -> Result<String, String> {
 /// `"/<segment>"`. So a stored prefix that is not exactly one
 /// leading-slash segment — no slash, a second segment, a trailing slash
 /// — cannot be produced by that lookup and never matches.
-fn validate_path_prefix(prefix: &str) -> Result<(), String> {
+pub(crate) fn validate_path_prefix(prefix: &str) -> Result<(), String> {
     let Some(segment) = prefix.strip_prefix('/') else {
         return Err(format!(
             "path prefix `{prefix}` must start with `/` — the resolver looks up `/<segment>`"
@@ -1027,7 +1027,7 @@ fn validate_path_prefix(prefix: &str) -> Result<(), String> {
 /// `i32` is the column's type, not the range of a port. `-1` and
 /// `999999` both parsed and both stored, producing a tenant matched
 /// against a port no listener can ever have.
-fn validate_port(port: i32) -> Result<(), String> {
+pub(crate) fn validate_port(port: i32) -> Result<(), String> {
     if !(1..=65535).contains(&port) {
         return Err(format!(
             "port {port} is outside the 1–65535 a TCP port can be"

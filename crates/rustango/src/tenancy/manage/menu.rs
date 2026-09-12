@@ -90,6 +90,22 @@ const GROUPS: &[Group] = &[
                 ],
             },
             Action {
+                verb: "edit-tenant",
+                about: "change routing and display config",
+                asks: &[
+                    Ask::Value {
+                        flag: "--display-name",
+                        label: "display name (blank to leave alone)",
+                        default: None,
+                    },
+                    Ask::Value {
+                        flag: "--host-pattern",
+                        label: "host pattern (blank to leave alone)",
+                        default: None,
+                    },
+                ],
+            },
+            Action {
                 verb: "drop-tenant",
                 about: "soft-delete a tenant; data preserved",
                 asks: &[],
