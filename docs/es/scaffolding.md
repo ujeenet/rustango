@@ -34,11 +34,50 @@ Eso coloca un binario `cargo-rustango` en tu `PATH`; Cargo lo expone entonces co
 
 ```sh
 cargo rustango new <name> [--template api|fullstack|tenant]
+                          [--backend postgres|sqlite|mysql]
+                          [--features <lista>]
 ```
 
 - **`<name>`** — el nombre del proyecto (y de la crate). Debe ser un nombre de crate de Cargo válido (`[A-Za-z_][A-Za-z0-9_-]*`), y el directorio de destino no debe existir ya.
 - **`--template` / `-t`** — qué plantilla inicial generar (por defecto: **fullstack**).
+- **`--backend` / `-b`** — sobre qué base de datos corre el proyecto (por defecto: **postgres**).
+- **`--features` / `-F`** — funcionalidades extra de **Rustango**, separadas por comas o espacios.
+- **`--interactive` / `-i`** — elegir desde menús en su lugar. Un `cargo rustango new` a secas en un terminal hace lo mismo.
 - **`--help` / `-h`**, **`--version`** — uso y versión.
+
+Ejecutado sin argumentos, pregunta:
+
+```text
+  rustango — new project
+  (enter accepts the default; ctrl-c aborts)
+
+  Project name: shop
+
+  Template
+    1) fullstack  ORM + auto-admin + forms — the usual starting point  (default)
+    2) api        bare ORM + axum, no admin UI — for JSON-only services
+    3) tenant     multi-tenancy: tenant registry + operator console
+  > 3
+
+  Database
+    1) postgres  every feature, including schema-mode tenancy  (default)
+    2) sqlite    a file beside the project — no server to run
+    3) mysql     MySQL 8.0+ / MariaDB
+  > 1
+
+  Extra features  (numbers, e.g. `1 3 4` — enter for none)
+     1) csrf         CSRF protection middleware for form POSTs
+     2) sso          OIDC single sign-on for application users
+     …
+  > 1 2
+
+  Same thing without the wizard:
+    cargo rustango new shop --template tenant --backend postgres --features csrf,sso
+
+  Create it? [Y/n]
+```
+
+El asistente fija exactamente los campos que fijan los flags e imprime la línea de comandos equivalente antes de escribir nada — usarlo una vez te enseña los flags, y hay un solo camino de código que decide qué contiene un proyecto. Sin terminal (un script, un job de CI) falla con un mensaje en lugar de esperar una respuesta que nadie va a dar.
 
 ### Las tres plantillas
 
@@ -55,6 +94,42 @@ cargo rustango new myblog                      # fullstack (the default)
 cargo rustango new api_demo  --template api
 cargo rustango new shop      --template tenant
 ```
+
+### Elegir la base de datos: `--backend`
+
+```sh
+cargo rustango new edge --backend sqlite
+cargo rustango new shop --backend mysql
+```
+
+`--backend` decide qué usa `cargo run`, y da forma a todo el proyecto en consecuencia — la `DATABASE_URL` de `.env.example`, los servicios de `docker-compose.yml`, la `url` de cada nivel de configuración y las instrucciones de arranque del README. Elige `sqlite` y no hay servicio de base de datos alguno: es un fichero junto al proyecto, creado por el primer `cargo run -- migrate`.
+
+Los tres backends siguen cableados en los `[features]` generados, así que los otros dos quedan a un flag de distancia:
+
+```sh
+cargo run --no-default-features --features sqlite
+```
+
+### Encender más del framework: `--features`
+
+```sh
+cargo rustango new saas --template tenant --features csrf,sso,cache-redis
+```
+
+Una plantilla enciende un conjunto razonable; `--features` añade las opciones que ninguna de ellas alcanza:
+
+| Funcionalidad | Qué añade |
+|---|---|
+| `tenancy` | Multi-tenancy: registry de tenants, bases por tenant, consola de operador |
+| `csrf` | Middleware de protección CSRF para POST de formularios |
+| `sso` / `admin-sso` | Inicio de sesión único OIDC, para usuarios de la app / para el sitio de admin |
+| `passkey` | Autenticación WebAuthn / passkey |
+| `cache-redis` / `cache-page` | Backend de caché Redis / caché de páginas completas |
+| `email-smtp` | Transporte SMTP para el framework de email |
+| `mcp` | Servidor Model Context Protocol para agentes de IA |
+| `testkit` / `test_utils` | Constructores de esquema, factorías y constructores solo para tests |
+
+`cargo rustango new --help` imprime esta lista. Los backends **no** son válidos aquí — usa `--backend`. Nombrar uno como funcionalidad se rechaza, porque fijaría el backend del framework mientras la funcionalidad propia del proyecto quedaría apagada, y `#[derive(Model)]` alinea lo que emite con las funcionalidades del proyecto.
 
 ---
 
