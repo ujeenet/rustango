@@ -546,6 +546,65 @@ where
     migrate_tenants_db_opts(pools, dir, registry_url, Some(observer)).await
 }
 
+/// Migrate exactly one tenant, named by its `Org` row.
+///
+/// The batch entry points walk `Org::objects().where_(active = true)`,
+/// which makes them the wrong tool twice over for a tenant that is
+/// being stood up:
+///
+/// * a tenant mid-provision is deliberately **inactive** until its
+///   schema is in place, so the batch would skip the very tenant it was
+///   called for; and
+/// * running the whole batch means creating tenant B does a pass over
+///   tenant A, and an unrelated tenant's broken chain surfaces in the
+///   middle of an unrelated provisioning run.
+///
+/// Takes the `Org` directly and ignores `active` — the caller has
+/// already decided this is the tenant it means.
+///
+/// # Errors
+/// Anything the tenant's own migration run can raise: an unreachable
+/// tenant database, a failing migration, or a storage mode this build
+/// cannot serve.
+pub async fn migrate_one_tenant<DB: Database>(
+    pools: &TenantPools<DB>,
+    org: &Org,
+    dir: &Path,
+    registry_url: &str,
+    observer: Option<&dyn TenantMigrationObserver>,
+) -> Result<Vec<Migration>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let scoped = scoped_subset(dir, MigrationScope::Tenant).await?;
+    let scoped_path = match &scoped {
+        ScopedDir::Owned(temp) => temp.path().to_path_buf(),
+        ScopedDir::Original => dir.to_path_buf(),
+    };
+
+    // Schema-mode is PG-only by language, and only the PG runner knows
+    // how to build a `search_path`-scoped pool for it. Route the same
+    // way the batch does.
+    #[cfg(feature = "postgres")]
+    if matches!(
+        StorageMode::parse(&org.storage_mode),
+        Ok(StorageMode::Schema)
+    ) {
+        let pg_pools = (pools as &dyn std::any::Any)
+            .downcast_ref::<TenantPools<sqlx::Postgres>>()
+            .ok_or_else(|| {
+                TenancyError::Validation(format!(
+                    "org `{}` is schema-mode but the registry is not Postgres",
+                    org.slug
+                ))
+            })?;
+        return run_for_one_tenant(pg_pools, org, &scoped_path, registry_url, observer).await;
+    }
+    let _ = registry_url;
+
+    run_for_one_tenant_db(pools, org, &scoped_path, observer).await
+}
+
 async fn migrate_tenants_db_opts<DB: Database>(
     pools: &TenantPools<DB>,
     dir: &Path,
@@ -713,11 +772,36 @@ pub async fn migrate_tenants_dyn<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    migrate_tenants_dyn_with_progress(pools, dir, registry_url, None).await
+}
+
+/// [`migrate_tenants_dyn`], reporting progress to `observer`.
+///
+/// **This is the seam every caller should use.** The
+/// "downcast to `TenantPools<Postgres>`, else fall back to the generic
+/// runner" dance is easy to write from memory and was written from
+/// memory in four places; each copy is a chance to get the schema-mode
+/// branch subtly wrong on a non-PG build. One dispatch, here.
+///
+/// # Errors
+/// As [`migrate_tenants`] / [`migrate_tenants_db`].
+pub async fn migrate_tenants_dyn_with_progress<DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    registry_url: &str,
+    observer: Option<&dyn TenantMigrationObserver>,
+) -> Result<TenantMigrationReport, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    // On PG the legacy `migrate_tenants` handles schema-mode as well as
+    // database-mode; everywhere else `migrate_tenants_db` is the only
+    // one that applies, because schema-mode is PG-only by language.
     #[cfg(feature = "postgres")]
     if let Some(pg) = (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>() {
-        return migrate_tenants(pg, dir, registry_url).await;
+        return migrate_tenants_opts(pg, dir, registry_url, observer).await;
     }
-    migrate_tenants_db(pools, dir, registry_url).await
+    migrate_tenants_db_opts(pools, dir, registry_url, observer).await
 }
 
 #[cfg(feature = "postgres")]

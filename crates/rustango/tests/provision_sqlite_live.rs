@@ -113,6 +113,9 @@ async fn the_engine_provisions_without_argv_or_a_writer() {
             "registered",
             "Migrate:started",
             "Migrate:ok",
+            // Last, and only now does the tenant resolve (#1321).
+            "Activate:started",
+            "Activate:ok",
         ],
         "{:?}",
         rec.steps()
@@ -390,12 +393,19 @@ async fn an_unreachable_database_is_caught_before_the_org_row_is_written() {
 /// on, so pin the set. Adding one is a breaking change for a watcher.
 #[test]
 fn the_step_list_is_stable() {
+    // The wire names are what a console matches on and what lands in
+    // `rustango_provisioning_events.step`, so they are pinned here
+    // rather than left to `Debug`.
     let all = [
-        ProvisionStep::Validate,
-        ProvisionStep::CheckConnection,
-        ProvisionStep::ProvisionStorage,
-        ProvisionStep::RegisterOrg,
-        ProvisionStep::Migrate,
+        (ProvisionStep::Validate, "validate"),
+        (ProvisionStep::CheckConnection, "check_connection"),
+        (ProvisionStep::ProvisionStorage, "provision_storage"),
+        (ProvisionStep::RegisterOrg, "register_org"),
+        (ProvisionStep::Migrate, "migrate"),
+        (ProvisionStep::Activate, "activate"),
     ];
-    assert_eq!(all.len(), 5);
+    assert_eq!(all.len(), 6);
+    for (step, name) in all {
+        assert_eq!(step.as_str(), name);
+    }
 }
