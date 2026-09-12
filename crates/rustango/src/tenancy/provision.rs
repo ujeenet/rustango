@@ -896,3 +896,111 @@ where
         Err(e) => MigrationsOutcome::Failed(e.to_string()),
     }
 }
+
+/// Provisioning for surfaces that have erased the backend type.
+///
+/// The operator console holds its pools as
+/// `Arc<dyn TenantPoolInvalidator>` — deliberately, so `<DB>` does not
+/// cascade through every handler — while [`provision_tenant`] is
+/// generic over `DB`. This is the bridge, following the same
+/// boxed-future shape [`super::TenantPoolInvalidator`] already uses.
+///
+/// It also closes over the registry URL and migrations directory, which
+/// a request handler has no business carrying around.
+///
+/// Note what is **not** here: an observer. A caller watching a run
+/// reads it back from [`super::provision_store`] instead, which is what
+/// makes a console work when the pod serving the stream is not the pod
+/// doing the work.
+pub trait TenantProvisioner: Send + Sync {
+    /// Stand up a tenant, recording the run.
+    fn provision<'a>(
+        &'a self,
+        request: &'a ProvisionRequest,
+        requested_by: Option<&'a str>,
+        idempotency_key: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        (super::provision_store::ProvisioningRun, ProvisionOutcome),
+                        TenancyError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    >;
+
+    /// The registry pool, so a caller can read runs and events back.
+    fn registry(&self) -> crate::sql::Pool;
+}
+
+/// A [`TenantProvisioner`] over concrete pools.
+pub struct Provisioner<DB: Database> {
+    pools: std::sync::Arc<TenantPools<DB>>,
+    registry_url: String,
+    migrations_dir: std::path::PathBuf,
+}
+
+impl<DB: Database> Provisioner<DB> {
+    pub fn new(
+        pools: std::sync::Arc<TenantPools<DB>>,
+        registry_url: impl Into<String>,
+        migrations_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            pools,
+            registry_url: registry_url.into(),
+            migrations_dir: migrations_dir.into(),
+        }
+    }
+
+    /// Type-erase for the console and anything else that does not want
+    /// `<DB>` in its state.
+    #[must_use]
+    pub fn erased(self) -> std::sync::Arc<dyn TenantProvisioner>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        std::sync::Arc::new(self)
+    }
+}
+
+impl<DB: Database> TenantProvisioner for Provisioner<DB>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    fn provision<'a>(
+        &'a self,
+        request: &'a ProvisionRequest,
+        requested_by: Option<&'a str>,
+        idempotency_key: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        (super::provision_store::ProvisioningRun, ProvisionOutcome),
+                        TenancyError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            provision_tenant_recorded(
+                self.pools.as_ref(),
+                &self.registry_url,
+                &self.migrations_dir,
+                request,
+                None,
+                requested_by,
+                idempotency_key,
+            )
+            .await
+        })
+    }
+
+    fn registry(&self) -> crate::sql::Pool {
+        self.pools.registry_pool()
+    }
+}

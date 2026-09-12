@@ -1,0 +1,76 @@
+{% extends "op_layout.html" %}
+{% block title %}Provisioning {{ slug }} — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
+{% block content %}
+<h1>Provisioning <code>{{ slug }}</code></h1>
+
+<p>
+  Run #{{ run_id }} —
+  <strong id="run-state" data-state="{{ state }}">{{ state }}</strong>
+</p>
+
+{% if error %}
+<div class="empty" style="border-color:var(--danger,#b3261e);color:var(--danger,#b3261e)">
+  {{ error }}
+</div>
+{% endif %}
+
+<table>
+  <thead>
+    <tr><th>#</th><th>Step</th><th>Status</th><th>Detail</th></tr>
+  </thead>
+  <tbody id="events">
+    {% for e in events %}
+    <tr data-seq="{{ e.seq }}">
+      <td>{{ e.seq }}</td>
+      <td><code>{{ e.step }}</code></td>
+      <td>{{ e.status }}</td>
+      <td>{{ e.message }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<p><a href="../../orgs">Back to tenants</a></p>
+
+{% if not terminal %}
+<script>
+  // Resume from the last row already rendered, so a reload does not
+  // replay what is on screen — and a reconnect mid-run picks up
+  // exactly where it stopped. The server honours `Last-Event-ID` too;
+  // this is the explicit form for the first connection.
+  (function () {
+    const tbody = document.getElementById("events");
+    const rows = tbody.querySelectorAll("tr[data-seq]");
+    const last = rows.length ? rows[rows.length - 1].dataset.seq : 0;
+
+    const es = new EventSource("{{ run_id }}/stream?after=" + last);
+
+    es.addEventListener("step", (msg) => {
+      const e = JSON.parse(msg.data);
+      const tr = document.createElement("tr");
+      tr.dataset.seq = e.seq;
+      for (const v of [e.seq, e.step, e.status, e.message]) {
+        const td = document.createElement("td");
+        // textContent, never innerHTML: `message` carries driver text
+        // and hostnames that are not ours.
+        td.textContent = v;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    });
+
+    es.addEventListener("done", () => {
+      es.close();
+      // Re-read rather than guess the final state: the stream says
+      // "finished", the page says what it finished as.
+      window.location.reload();
+    });
+
+    es.addEventListener("error", (msg) => {
+      const state = document.getElementById("run-state");
+      if (msg.data) { state.textContent = state.textContent + " — " + msg.data; }
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}
