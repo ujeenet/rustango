@@ -110,6 +110,34 @@ const GROUPS: &[Group] = &[
         ],
     },
     Group {
+        title: "INSPECTION",
+        actions: &[
+            Action {
+                verb: "list-runs",
+                about: "recent provisioning and migration runs",
+                asks: &[Ask::Value {
+                    flag: "--kind",
+                    label: "kind (provision|migrate, blank for both)",
+                    default: None,
+                }],
+            },
+            Action {
+                verb: "show-run",
+                about: "one run's steps, from the recorded events",
+                asks: &[],
+            },
+            Action {
+                verb: "audit-log",
+                about: "who changed what in the registry, and when",
+                asks: &[Ask::Value {
+                    flag: "--table",
+                    label: "table (blank for all)",
+                    default: None,
+                }],
+            },
+        ],
+    },
+    Group {
         title: "HOSTNAMES",
         actions: &[
             Action {

@@ -46,8 +46,22 @@ where
         slug: request.slug.clone(),
         mode: request.mode,
     };
-    let outcome =
-        provision::provision_tenant(pools, registry_url, dir, &request, Some(&progress)).await?;
+    // Recorded, like the console's provisioning (#1344). A tenant created
+    // from a shell used to leave no run at all, so the run history — and
+    // `list-runs` — described only what the console had done, and a CLI
+    // provision that died halfway left nothing to find. Recording is
+    // best-effort inside `provision_tenant_recorded`: bookkeeping must not
+    // be what fails a tenant creation.
+    let (_run, outcome) = provision::provision_tenant_recorded(
+        pools,
+        registry_url,
+        dir,
+        &request,
+        Some(&progress),
+        Some("cli"),
+        None,
+    )
+    .await?;
 
     let w = progress.into_inner();
     match &outcome.migrations {

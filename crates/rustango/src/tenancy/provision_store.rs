@@ -431,7 +431,33 @@ pub async fn recent_runs(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<ProvisioningRun>, TenancyError> {
-    Ok(ProvisioningRun::objects()
+    recent_runs_filtered(registry, None, None, limit, offset).await
+}
+
+/// As [`recent_runs`], narrowed to one `kind` and/or `state`.
+///
+/// The filter belongs in the query, not in a `.filter()` on the result:
+/// filtering a page of the newest N reports "none" whenever the newest N
+/// happen to be a different kind, which is exactly the answer nobody wants
+/// while looking for the migration run that failed last week.
+///
+/// # Errors
+/// Driver / query failures.
+pub async fn recent_runs_filtered(
+    registry: &Pool,
+    kind: Option<&str>,
+    state: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<ProvisioningRun>, TenancyError> {
+    let mut q = ProvisioningRun::objects();
+    if let Some(k) = kind {
+        q = q.where_(ProvisioningRun::kind.eq(k.to_owned()));
+    }
+    if let Some(s) = state {
+        q = q.where_(ProvisioningRun::state.eq(s.to_owned()));
+    }
+    Ok(q
         // Descending — the bool is `desc`, and "recent" means the run
         // somebody just started is the one at the top.
         .order_by(&[("id", true)])
