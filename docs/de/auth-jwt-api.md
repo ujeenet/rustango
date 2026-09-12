@@ -30,10 +30,10 @@ Refresh und **Widerruf** für das Abmelden. **Rustango** liefert das als
 ---
 
 ## Inhaltsverzeichnis
-- [Der eingebaute Router](#the-built-in-router) · [Die Verdrahtung](#wiring-it-up)
-- [Die Token-Engine](#the-token-engine-jwtlifecycle) · [Refresh & Rotation](#refresh-and-rotation)
-- [Widerruf & der JTI-Speicher](#revocation-and-the-jti-store) · [Benutzerdefinierte Claims](#custom-claims)
-- [Hinweise und Grenzen](#notes-and-limits)
+- [Der eingebaute Router](#der-eingebaute-router) · [Die Verdrahtung](#die-verdrahtung)
+- [Die Token-Engine](#die-token-engine-jwtlifecycle) · [Refresh & Rotation](#refresh-und-rotation)
+- [Widerruf & der JTI-Speicher](#widerruf-und-der-jti-speicher) · [Benutzerdefinierte Claims](#benutzerdefinierte-claims)
+- [Hinweise und Grenzen](#hinweise-und-grenzen)
 
 ---
 
@@ -248,7 +248,7 @@ Benutzerdefinierte Claims überleben `refresh` (werden auf das neue Paar
   [Auth-Backend-Kette](auth-backends.md), um beliebige Routen aus dem
   `Authorization: Bearer`-Header zu authentifizieren.
 - **HS256-Signierung**, 32-Byte-Schlüssel-Untergrenze — derselbe Algorithmus und
-  dieselben Einschränkungen wie beim [eigenständigen JWT](auth-jwt.md#security-model).
+  dieselben Einschränkungen wie beim [eigenständigen JWT](auth-jwt.md#sicherheitsmodell).
 
 
 ---

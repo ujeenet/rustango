@@ -28,16 +28,16 @@ auf Modulebene.
 ---
 
 ## Inhaltsverzeichnis
-- [Einbinden](#mount-it) · [Die Startseite](#the-home-page)
-- [Ein Modell konfigurieren: der `admin(...)`-Block](#configure-a-model-the-admin-block)
-- [Die Listenansicht](#the-list-view) — Spalten, Suche, Filter, Datumshierarchie, Sortierung, Paginierung
-- [Das Änderungsformular](#the-change-form) — Feldgruppen, Widgets, FK-Bearbeitung, vorbefüllte & schreibgeschützte Felder
-- [Inlines](#inlines) · [Massenaktionen](#bulk-actions) · [Prüfpfad](#audit-trail)
-- [Berechnete Spalten & benutzerdefinierte Filter](#computed-columns-and-custom-filters)
-- [Benutzerdefinierte Views, Querysets & Berechtigungen](#custom-views-querysets-and-permissions)
-- [Authentifizierung](#authentication) · [Theming & Branding](#theming-and-branding)
-- [`Builder`-Referenz](#builder-reference) · [Routen-Referenz](#routes-reference)
-- [Die Modellreferenz (`__docs`)](#the-model-reference) · [Das Beispiel ausprobieren](#try-the-example)
+- [Einbinden](#einbinden) · [Die Startseite](#die-startseite)
+- [Ein Modell konfigurieren: der `admin(...)`-Block](#ein-modell-konfigurieren-der-admin-block)
+- [Die Listenansicht](#die-listenansicht) — Spalten, Suche, Filter, Datumshierarchie, Sortierung, Paginierung
+- [Das Änderungsformular](#das-änderungsformular) — Feldgruppen, Widgets, FK-Bearbeitung, vorbefüllte & schreibgeschützte Felder
+- [Inlines](#inlines) · [Massenaktionen](#massenaktionen) · [Prüfpfad](#prüfpfad)
+- [Berechnete Spalten & benutzerdefinierte Filter](#berechnete-spalten-und-benutzerdefinierte-filter)
+- [Benutzerdefinierte Views, Querysets & Berechtigungen](#benutzerdefinierte-views-querysets-und-berechtigungen)
+- [Authentifizierung](#authentifizierung) · [Theming & Branding](#theming-und-branding)
+- [`Builder`-Referenz](#builder-referenz) · [Routen-Referenz](#routen-referenz)
+- [Die Modellreferenz (`__docs`)](#die-modellreferenz) · [Das Beispiel ausprobieren](#das-beispiel-ausprobieren)
 
 ---
 
@@ -46,7 +46,7 @@ auf Modulebene.
 > **Das Admin ist standardmäßig offen.** Es erkennt und liefert *jedes* Modell
 > automatisch — auflisten, erstellen, bearbeiten, löschen — ohne Authentifizierung,
 > bis du sie hinzufügst. Mache es nicht öffentlich zugänglich, bevor du das Login
-> verdrahtet hast: siehe [Authentifizierung](#authentication) weiter unten.
+> verdrahtet hast: siehe [Authentifizierung](#authentifizierung) weiter unten.
 
 Das Admin ist ein `axum::Router`, den du aus einem Datenbank-Pool baust und unter
 einen Pfad einhängst:
@@ -133,13 +133,13 @@ den Listen anderer Modelle, der Breadcrumb, der Titel der Detailseite.
 | `list_per_page` | `10` | Seitengröße (Standard 50). |
 | `date_hierarchy` | `"published_at"` | Aufschlüsselungsleiste Jahr → Monat → Tag über der Liste, auf einer Date-/DateTime-Spalte. |
 | `fieldsets` | `"Content: title, body \| Meta: status"` | Gliedert das Änderungsformular in benannte Abschnitte. Pipe `\|` trennt Abschnitte, Komma trennt Felder; die `Title:`-Legende ist optional. |
-| `actions` | `"publish, archive"` | Massenaktionen, die im Aktionsauswähler der Liste angeboten werden (jede benötigt einen registrierten Handler — siehe [Massenaktionen](#bulk-actions)). |
+| `actions` | `"publish, archive"` | Massenaktionen, die im Aktionsauswähler der Liste angeboten werden (jede benötigt einen registrierten Handler — siehe [Massenaktionen](#massenaktionen)). |
 | `readonly_fields` | `"created_at"` | Felder, die im Änderungsformular als Text (ohne Eingabe) gerendert werden. |
 | `raw_id_fields` | `"author_id"` | FK-Felder, die über eine reine ID-Eingabe + Nachschlage-Link bearbeitet werden (gut für große Zieltabellen). |
 | `autocomplete_fields` | `"author_id"` | FK-Felder, die über eine Ajax-Vervollständigung bearbeitet werden, gestützt auf den `__autocomplete`-Endpunkt des Ziels. |
 | `prepopulated_fields` | `"slug:title"` | Ein Feld automatisch befüllen, indem ein anderes beim Tippen sluggifiziert wird (`target:source`; kombiniere Quellen mit `+`). |
 | `list_select_related` | `"all"` / `"none"` / `"author_id"` | Steuert das automatische JOIN von FK-Spalten in der Listenabfrage. `"all"` (Standard) joint jeden FK; `"none"` deaktiviert; ein CSV beschränkt auf benannte FKs. |
-| `formfield_overrides` | `"status:textarea"` | Überschreibt das Formular-Widget eines Feldes (`field:widget`) — siehe die [Widget-Tabelle](#form-widgets). |
+| `formfield_overrides` | `"status:textarea"` | Überschreibt das Formular-Widget eines Feldes (`field:widget`) — siehe die [Widget-Tabelle](#formular-widgets). |
 | `actions_on_top` | `true` | Rendert die Massenaktionsleiste über der Liste (Standard `true`). |
 | `actions_on_bottom` | `false` | Rendert eine zweite Aktionsleiste unter der Liste (Standard `false`). |
 

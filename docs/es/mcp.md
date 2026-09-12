@@ -28,16 +28,16 @@ por agente y OAuth 2.1 integrados.
 
 ## Tabla de contenidos
 
-- [Qué te aporta MCP](#what-mcp-gives-you)
-- [Paso 1 — Activar el feature](#step-1--enable-the-feature)
-- [Paso 2 — Definir una tool](#step-2--define-a-tool)
-- [Paso 3 — Montar el servidor](#step-3--mount-the-server)
-- [Paso 4 — Autorizar agentes](#step-4--authorize-agents)
-- [El protocolo](#the-protocol)
-- [Ajustes](#settings)
-- [Cómo probar](#how-to-test) — [la suite](#a-the-test-suite) · [curl](#b-curl-the-json-rpc) · [el MCP Inspector visual](#c-test-it-visually-with-the-mcp-inspector) · [un cliente real](#d-connect-a-real-mcp-client)
-- [Build opcional vs. por defecto](#optional-vs-default-build)
-- [Véase también](#see-also)
+- [Qué te aporta MCP](#qué-te-aporta-mcp)
+- [Paso 1 — Activar el feature](#paso-1--activar-el-feature)
+- [Paso 2 — Definir una tool](#paso-2--definir-una-tool)
+- [Paso 3 — Montar el servidor](#paso-3--montar-el-servidor)
+- [Paso 4 — Autorizar agentes](#paso-4--autorizar-agentes)
+- [El protocolo](#el-protocolo)
+- [Ajustes](#ajustes)
+- [Cómo probar](#cómo-probar) — [la suite](#a-la-suite-de-tests) · [curl](#b-curl-al-json-rpc) · [el MCP Inspector visual](#c-pruébalo-visualmente-con-el-mcp-inspector) · [un cliente real](#d-conecta-un-cliente-mcp-real)
+- [Build opcional vs. por defecto](#build-opcional-vs-por-defecto)
+- [Véase también](#véase-también)
 
 ---
 
@@ -71,7 +71,7 @@ rustango = { version = "0.44", features = ["mcp"] }
 Arrastra `tenancy` (agentes/skills), `sse` (el flujo de notificaciones),
 `serializer` + `openapi` (los esquemas de entrada de las tools) y `jwt` (los
 tokens de agente). Un build **sin** el feature no compila nada del módulo MCP —
-consulta [Build opcional vs. por defecto](#optional-vs-default-build).
+consulta [Build opcional vs. por defecto](#build-opcional-vs-por-defecto).
 
 ---
 

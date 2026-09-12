@@ -30,15 +30,15 @@ le kernel HTTP — la même idée, rattachée à votre routeur.
 
 ## Table des matières
 
-- [Comment fonctionne le middleware dans Rustango](#how-middleware-works-in-rustango)
-- [L'ordre compte](#ordering-matters)
-- [Le catalogue intégré](#the-built-in-catalog)
-- [Middleware sensible à la locale](#locale-aware-middleware)
-- [Middleware sensible au fuseau horaire](#timezone-aware-middleware)
-- [En-têtes de sécurité](#security-headers)
-- [Protection CSRF](#csrf-protection)
-- [Écrire votre propre middleware](#writing-your-own-middleware)
-- [Voir aussi](#see-also)
+- [Comment fonctionne le middleware dans Rustango](#comment-fonctionne-le-middleware-dans-rustango)
+- [L'ordre compte](#lordre-compte)
+- [Le catalogue intégré](#le-catalogue-intégré)
+- [Middleware sensible à la locale](#middleware-sensible-à-la-locale)
+- [Middleware sensible au fuseau horaire](#middleware-sensible-au-fuseau-horaire)
+- [En-têtes de sécurité](#en-têtes-de-sécurité)
+- [Protection CSRF](#protection-csrf)
+- [Écrire votre propre middleware](#écrire-votre-propre-middleware)
+- [Voir aussi](#voir-aussi)
 
 ---
 
@@ -78,7 +78,7 @@ Il existe deux formes, et vous utiliserez les deux :
    d'en écrire un ponctuel. Vous recevez la `Request` et un `Next` ; vous
    appelez `next.run(req)` pour continuer, et vous pouvez faire du travail de
    part et d'autre de cet appel. L'[exemple de fuseau
-   horaire](#timezone-aware-middleware) ci-dessous est exactement cela.
+   horaire](#middleware-sensible-au-fuseau-horaire) ci-dessous est exactement cela.
 
 Les deux se composent librement — un middleware `from_fn` *est* un layer, donc
 il s'empile avec les composants intégrés dans la même chaîne `.layer(...)`.
@@ -157,7 +157,7 @@ obtenir la méthode.
 | Mise en cache de page | `CachePageLayer` | `.layer(..)` |
 | **Localisation** | | |
 | Négociation de locale | `LocaleMiddleware` | `.layer(..)` (+ extracteur `ActiveLocale`) |
-| Fuseau horaire actif | *(à composer avec `from_fn`)* | voir [ci-dessous](#timezone-aware-middleware) |
+| Fuseau horaire actif | *(à composer avec `from_fn`)* | voir [ci-dessous](#middleware-sensible-au-fuseau-horaire) |
 | **Développement** | | |
 | Rechargement à chaud | `LiveReloadLayer` | `.livereload(..)` |
 | Panneau de débogage | `DebugPanelLayer` | `.debug_panel(..)` |
@@ -387,7 +387,7 @@ sur chaque mutation, sans possibilité d'opt-out.
 ## Écrire votre propre middleware
 
 Vous avez déjà vu la forme rapide — le [middleware de fuseau
-horaire](#timezone-aware-middleware) est un exemple `from_fn` complet. Utilisez
+horaire](#middleware-sensible-au-fuseau-horaire) est un exemple `from_fn` complet. Utilisez
 `from_fn` chaque fois que la logique est spécifique à l'application et que vous
 n'avez pas besoin de la configurer :
 

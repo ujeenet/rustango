@@ -14,7 +14,7 @@ un runtime más robusto: **Django** sobre **gunicorn** (WSGI) y sobre
 de cada.
 
 Cada número de abajo es **medido y reproducible**, de una ejecución consistente
-de un arnés de un solo comando (ver [Reproducir](#reproduce)). Nada aquí es
+de un arnés de un solo comando (ver [Reproducir](#reproducir)). Nada aquí es
 palabrería.
 
 > **TL;DR.** Sobre hardware idéntico sirviendo páginas HTML renderizadas

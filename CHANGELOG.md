@@ -112,6 +112,55 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   user-app migration only ever claims user tables. `make_migrations_system` is
   deliberately unchanged: there the `rustango_*` tables *are* the subject.
 
+- **`manage menu` hung forever on every verb that prompts for its own values**
+  (#1360). The menu held `io::stdin().lock()` while dispatching, and the verbs
+  it dispatches to call `io::stdin()` themselves — the second lock waited on the
+  first, which the menu would not release until the verb returned. Every
+  interactive verb was unreachable from the menu that exists to reach them.
+  Prompting now goes through a `LineSource`, and `SharedStdin` takes the lock
+  per read rather than for the life of the menu.
+
+- **`manage menu` ran off a terminal** (#1357). Piped or in CI it printed its
+  numbered choices to nobody, read EOF as a selection, executed something, and
+  exited 0. It now refuses a non-TTY with a message naming the flags instead.
+
+- **Contradictory and unrecognized boolean flags silently picked a side**
+  (#1355). `edit-tenant --activate --deactivate` took the tenant *offline* and
+  returned 0 — last flag wins, no warning, on the one pair where guessing wrong
+  is an outage. Both directions given is now an error. Separately,
+  `set-host-enabled --enabled TRUE` parked the host: the allow-list was
+  lowercase-only and anything unmatched fell through to "false". The set is
+  closed and case-insensitive now, and a value outside it is rejected.
+
+- **Errors named the wrong object, and bad filters looked like empty results**
+  (#1356). A single `HostError::NotFound` covered both "no such tenant" and "no
+  such hostname", so a typo'd slug reported a missing *host*. Split into
+  `NoSuchOrg`. Filters on `list-runs` / `audit-log` took any string and returned
+  nothing for a value no row could hold — an unrecognized kind or state is now
+  refused with the valid set.
+
+- **`cargo rustango new` accepted four names that produce an unloadable
+  project** (#1358). `build`, `deps`, `examples` and `incremental` are Cargo's
+  own subdirectories of `target/`, so a crate by those names collides with the
+  build directory it compiles into. Refused up front rather than at the first
+  `cargo run`.
+
+- **The generated `.env.example` shipped a session secret the framework
+  discards** (#1359). It carried a placeholder `RUSTANGO_SESSION_SECRET` short
+  enough to fail the length check, which `from_env_or_disk` handled by silently
+  falling back to a random key — so sessions died on every restart and the
+  `.env` said otherwise. The line is commented out with the length requirement
+  beside it, and an unusable secret now warns instead of vanishing.
+
+- **Every in-page link in the `de` / `fr` / `es` docs pointed at an English
+  anchor** (#1354). The translations translated their headings and kept the
+  English `#fragment`s, so 930 links across 94 pages — every table of contents,
+  plus the cross-page links into `manage.md`, `glossary.md` and `orm.md` — put
+  the reader at the top of the page instead. `docs_links` skipped fragments by
+  design; it now derives each heading's id the way GitHub and the docs site do
+  and asserts every fragment finds one. The rule is validated by the English
+  pages resolving 100% under it.
+
 ## [0.56.1] — 2026-09-04
 
 Documentation fixes. No code changes — the crate is byte-for-byte 0.56.0

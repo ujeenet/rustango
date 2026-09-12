@@ -34,13 +34,13 @@ zu leiten.
 ---
 
 ## Inhaltsverzeichnis
-- [Schnellstart](#quick-start) · [Der `ModelSerializer`-Trait](#the-modelserializer-trait)
-- [Feldattribute](#field-attributes) — die vollständige Referenz
-- [Berechnete Felder](#computed-fields) · [Verschachtelte Serializer](#nested-serializers) · [Sammlungen](#collections-many) · [Slug-Felder](#slug-related-fields)
-- [Validierung](#validation) · [Unique-together-Validierung](#unique-together-validation)
-- [Hyperlink-Ausgabe](#hyperlinked-output) · [Listen serialisieren](#serializing-lists)
-- [Einen Serializer mit einem ViewSet verwenden](#using-a-serializer-with-a-viewset) · [Validierung in einem eigenen Handler](#validating-in-a-custom-handler)
-- [OpenAPI](#openapi-schemas) · [Scaffolding](#scaffolding) · [Feinheiten & Grenzen](#tweaks-and-current-limits)
+- [Schnellstart](#schnellstart) · [Der `ModelSerializer`-Trait](#der-modelserializer-trait)
+- [Feldattribute](#feldattribute) — die vollständige Referenz
+- [Berechnete Felder](#berechnete-felder) · [Verschachtelte Serializer](#verschachtelte-serializer) · [Sammlungen](#sammlungen-many) · [Slug-Felder](#slug-related-felder)
+- [Validierung](#validierung) · [Unique-together-Validierung](#unique-together-validierung)
+- [Hyperlink-Ausgabe](#hyperlink-ausgabe) · [Listen serialisieren](#listen-serialisieren)
+- [Einen Serializer mit einem ViewSet verwenden](#einen-serializer-mit-einem-viewset-verwenden) · [Validierung in einem eigenen Handler](#validierung-in-einem-eigenen-handler)
+- [OpenAPI](#openapi-schemata) · [Scaffolding](#scaffolding) · [Feinheiten & Grenzen](#feinheiten-und-aktuelle-grenzen)
 
 ---
 
@@ -136,7 +136,7 @@ Satz:
 **Deklarative Validatoren.** `max_length = N`, `min_length = N`, `min = N` und
 `max = N` fügen einem Feld Schreibzeit-Validierung hinzu, ohne dessen
 Ausgabeform zu ändern (und ein Feld ohne diese erbt die Grenzen des Modells).
-Siehe [Validierung](#validation).
+Siehe [Validierung](#validierung).
 
 `write_only` ist für rein eingehende Daten (ein Passwort, ein Einmal-Token):
 vorhanden in `writable_fields()`, fehlt in der Ausgabe. `skip` ist das
@@ -208,7 +208,7 @@ pub author: AuthorBrief,
 
 Verschachtelte Felder sind in der Ausgabeform **schreibgeschützt** —
 schreibbare verschachtelte Objekte werden noch nicht unterstützt (siehe
-[Grenzen](#tweaks-and-current-limits)).
+[Grenzen](#feinheiten-und-aktuelle-grenzen)).
 
 ---
 
@@ -411,7 +411,7 @@ ViewSets verpacken eine Seite davon in den Standard-Umschlag:
 ```
 
 (Das ist der Standard-Umschlag mit Seitennummern; siehe
-[Pagination](viewsets.md#pagination) für die Cursor- und
+[Pagination](viewsets.md#paginierung) für die Cursor- und
 Limit/Offset-Formen.)
 
 ---
@@ -439,7 +439,7 @@ pub struct PostViewSet;
 
 Das ViewSet steuert dies über drei `ModelSerializer`-Methoden, die das Derive
 generiert: `validate()`, `writable_source_fields()` und `from_writable_json()`.
-Siehe den [ViewSets-Leitfaden](viewsets.md#the-serializer-marriage-input--output)
+Siehe den [ViewSets-Leitfaden](viewsets.md#die-serializer-ehe-eingabe--ausgabe)
 für das vollständige Verhalten und ein durchgearbeitetes Beispiel.
 
 Du kannst einen Serializer auch **eigenständig** verwenden — bilde eine Zeile ab
@@ -524,7 +524,7 @@ Ein paar scharfe Kanten und Schlupflöcher, die man kennen sollte:
 - **Eingebaute Validatoren sind nur Länge/Bereich/Auswahl** — `max_length` /
   `min_length` / `min` / `max` (und geerbte `choices`) sind deklarativ; andere
   Regeln (`email`, Regex, …) sind Funktionen, die du schreibst (siehe
-  [Validierung](#validation)).
+  [Validierung](#validierung)).
 - **Ein Validator pro Feld je Feld.** Für mehrere Regeln an einem Feld
   kombiniere sie in der Funktion dieses Feldes, oder füge ein feldübergreifendes
   `validate(&self)` hinzu.

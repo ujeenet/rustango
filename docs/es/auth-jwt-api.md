@@ -30,10 +30,10 @@ duración, un token de *refresco* de larga duración, rotación en el refresco, 
 ---
 
 ## Tabla de contenidos
-- [El router integrado](#the-built-in-router) · [El cableado](#wiring-it-up)
-- [El motor de tokens](#the-token-engine-jwtlifecycle) · [Refresco y rotación](#refresh-and-rotation)
-- [Revocación y el almacén de JTI](#revocation-and-the-jti-store) · [Claims personalizados](#custom-claims)
-- [Notas y límites](#notes-and-limits)
+- [El router integrado](#el-router-integrado) · [El cableado](#el-cableado)
+- [El motor de tokens](#el-motor-de-tokens-jwtlifecycle) · [Refresco y rotación](#refresco-y-rotación)
+- [Revocación y el almacén de JTI](#revocación-y-el-almacén-de-jti) · [Claims personalizados](#claims-personalizados)
+- [Notas y límites](#notas-y-límites)
 
 ---
 
@@ -246,7 +246,7 @@ menos que uses `refresh_with`.
   autenticación](auth-backends.md) para autenticar rutas arbitrarias a partir de
   la cabecera `Authorization: Bearer`.
 - **Firma HS256**, suelo de clave de 32 bytes — mismo algoritmo y mismas
-  restricciones que el [JWT independiente](auth-jwt.md#security-model).
+  restricciones que el [JWT independiente](auth-jwt.md#modelo-de-seguridad).
 
 
 ---

@@ -30,10 +30,10 @@ forme de `JwtLifecycle` — et un routeur clé en main qui monte pour vous
 ---
 
 ## Table des matières
-- [Le routeur intégré](#the-built-in-router) · [Le câblage](#wiring-it-up)
-- [Le moteur de tokens](#the-token-engine-jwtlifecycle) · [Rafraîchissement et rotation](#refresh-and-rotation)
-- [Révocation et le magasin de JTI](#revocation-and-the-jti-store) · [Claims personnalisés](#custom-claims)
-- [Notes et limites](#notes-and-limits)
+- [Le routeur intégré](#le-routeur-intégré) · [Le câblage](#le-câblage)
+- [Le moteur de tokens](#le-moteur-de-tokens-jwtlifecycle) · [Rafraîchissement et rotation](#rafraîchissement-et-rotation)
+- [Révocation et le magasin de JTI](#révocation-et-le-magasin-de-jti) · [Claims personnalisés](#claims-personnalisés)
+- [Notes et limites](#notes-et-limites)
 
 ---
 
@@ -249,7 +249,7 @@ sauf si vous utilisez `refresh_with`.
   d'authentification](auth-backends.md) pour authentifier des routes arbitraires
   à partir de l'en-tête `Authorization: Bearer`.
 - **Signature HS256**, plancher de clé de 32 octets — même algorithme et mêmes
-  contraintes que le [JWT autonome](auth-jwt.md#security-model).
+  contraintes que le [JWT autonome](auth-jwt.md#modèle-de-sécurité).
 
 
 ---

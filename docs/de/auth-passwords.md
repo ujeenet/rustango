@@ -27,10 +27,10 @@ oder vergleichen den Klartext niemals.
 ---
 
 ## Inhaltsverzeichnis
-- [Schnellstart](#quick-start) · [Warum argon2id](#why-argon2id)
-- [Hashen bei der Registrierung](#hashing-on-signup) · [Prüfen bei der Anmeldung](#verifying-on-login)
-- [Timing-sichere Anmeldungen](#timing-safe-logins-account-enumeration) · [Stärkeprüfungen](#strength-checks)
-- [Wo der Hash lebt](#where-the-hash-lives) · [Hinweise und Grenzen](#notes-and-limits)
+- [Schnellstart](#schnellstart) · [Warum argon2id](#warum-argon2id)
+- [Hashen bei der Registrierung](#hashen-bei-der-registrierung) · [Prüfen bei der Anmeldung](#prüfen-bei-der-anmeldung)
+- [Timing-sichere Anmeldungen](#timing-sichere-anmeldungen-kontoaufzählung) · [Stärkeprüfungen](#stärkeprüfungen)
+- [Wo der Hash lebt](#wo-der-hash-lebt) · [Hinweise und Grenzen](#hinweise-und-grenzen)
 
 ---
 

@@ -22,13 +22,13 @@ der Server ihren Parametern vertrauen kann, ohne irgendetwas zu speichern.
 
 ## Inhaltsverzeichnis
 
-- [Signierte URLs: das Fundament](#signed-urls-the-substrate)
-- [Passwort-Zurücksetzung](#password-reset)
-- [E-Mail-Verifizierung](#email-verification)
-- [Magic-Link-Anmeldung](#magic-link-login)
-- [Einmal-Tokens](#single-use-tokens)
-- [Was Sie bereitstellen](#what-you-provide)
-- [Siehe auch](#see-also)
+- [Signierte URLs: das Fundament](#signierte-urls-das-fundament)
+- [Passwort-Zurücksetzung](#passwort-zurücksetzung)
+- [E-Mail-Verifizierung](#e-mail-verifizierung)
+- [Magic-Link-Anmeldung](#magic-link-anmeldung)
+- [Einmal-Tokens](#einmal-tokens)
+- [Was Sie bereitstellen](#was-sie-bereitstellen)
+- [Siehe auch](#siehe-auch)
 
 ---
 

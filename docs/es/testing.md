@@ -26,13 +26,13 @@ Rust.
 
 ## Tabla de contenidos
 
-- [Paso 1 — Controla tu aplicación con TestClient](#step-1--drive-your-app-with-testclient)
-- [Paso 2 — Haz aserciones sobre la respuesta](#step-2--assert-on-the-response)
-- [Enviar JSON, cabeceras y cuerpos](#sending-json-headers-and-bodies)
-- [Probar una API real](#testing-a-real-api)
-- [Pruebas de base de datos con reversión](#database-tests-with-rollback)
-- [Ayudantes de aserción de respuesta](#response-assertion-helpers)
-- [Véase también](#see-also)
+- [Paso 1 — Controla tu aplicación con TestClient](#paso-1--controla-tu-aplicación-con-testclient)
+- [Paso 2 — Haz aserciones sobre la respuesta](#paso-2--haz-aserciones-sobre-la-respuesta)
+- [Enviar JSON, cabeceras y cuerpos](#enviar-json-cabeceras-y-cuerpos)
+- [Probar una API real](#probar-una-api-real)
+- [Pruebas de base de datos con reversión](#pruebas-de-base-de-datos-con-reversión)
+- [Ayudantes de aserción de respuesta](#ayudantes-de-aserción-de-respuesta)
+- [Véase también](#véase-también)
 
 ---
 

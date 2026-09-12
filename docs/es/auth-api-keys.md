@@ -28,13 +28,13 @@ las claves y autentica las peticiones `Authorization: Bearer`.
 
 ## Tabla de contenidos
 
-- [Cómo funciona una clave de API](#how-an-api-key-works)
-- [El ayudante autónomo](#the-standalone-helper)
-- [El backend con almacenamiento](#the-stored-backend)
-- [Emitir una clave (CLI + código)](#issuing-a-key)
-- [Autenticar peticiones](#authenticating-requests)
-- [Notas de seguridad](#security-notes)
-- [Véase también](#see-also)
+- [Cómo funciona una clave de API](#cómo-funciona-una-clave-de-api)
+- [El ayudante autónomo](#el-ayudante-autónomo)
+- [El backend con almacenamiento](#el-backend-con-almacenamiento)
+- [Emitir una clave (CLI + código)](#emitir-una-clave)
+- [Autenticar peticiones](#autenticar-peticiones)
+- [Notas de seguridad](#notas-de-seguridad)
+- [Véase también](#véase-también)
 
 ---
 

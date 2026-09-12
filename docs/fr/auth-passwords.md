@@ -27,10 +27,10 @@ jamais le texte en clair.
 ---
 
 ## Table des matières
-- [Démarrage rapide](#quick-start) · [Pourquoi argon2id](#why-argon2id)
-- [Hachage à l'inscription](#hashing-on-signup) · [Vérification à la connexion](#verifying-on-login)
-- [Connexions à temps constant](#timing-safe-logins-account-enumeration) · [Contrôles de robustesse](#strength-checks)
-- [Où vit le hash](#where-the-hash-lives) · [Remarques et limites](#notes-and-limits)
+- [Démarrage rapide](#démarrage-rapide) · [Pourquoi argon2id](#pourquoi-argon2id)
+- [Hachage à l'inscription](#hachage-à-linscription) · [Vérification à la connexion](#vérification-à-la-connexion)
+- [Connexions à temps constant](#connexions-à-temps-constant-énumération-de-comptes) · [Contrôles de robustesse](#contrôles-de-robustesse)
+- [Où vit le hash](#où-vit-le-hash) · [Remarques et limites](#remarques-et-limites)
 
 ---
 

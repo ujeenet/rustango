@@ -8,18 +8,18 @@ Diese Seite erklärt die Muster, denen die API von **Rustango** folgt, damit Sie
 
 ## Inhaltsverzeichnis
 
-- [Naming](#naming)
-- [Constructors](#constructors)
-- [Return types](#return-types)
+- [Naming](#namensgebung)
+- [Constructors](#konstruktoren)
+- [Return types](#rückgabetypen)
 - [Async vs sync](#async-vs-sync)
-- [The pool argument](#the-pool-argument)
-- [Filtering](#filtering)
-- [Errors](#errors)
-- [Module naming](#module-naming)
-- [Builders vs config structs](#builders-vs-config-structs)
+- [The pool argument](#das-pool-argument)
+- [Filtering](#filtern)
+- [Errors](#fehler)
+- [Module naming](#modul-namensgebung)
+- [Builders vs config structs](#builder-vs-config-structs)
 - [Feature flags](#feature-flags)
-- [Macros vs runtime](#macros-vs-runtime)
-- [Contributing](#contributing)
+- [Macros vs runtime](#makros-vs-laufzeit)
+- [Contributing](#mitwirken)
 
 ---
 
@@ -311,7 +311,7 @@ Wenn Sie ein neues Feature hinzufügen, befolgen Sie diese Schritte:
 5. **Platzieren Sie Unit-Tests in derselben Datei**, hinter `#[cfg(test)] mod tests` — keine Datenbank, es sei denn, Sie brauchen wirklich eine.
 6. **Platzieren Sie Integrationstests in `crates/rustango/tests/<name>.rs`** für die End-to-End-Geschichte.
 7. **Fügen Sie keinen neuen Fehlertyp hinzu, es sei denn, die bestehenden passen nicht** — erweitern Sie zuerst eine bestehende Enum.
-8. **Folgen Sie dem [Rückgabetyp-Leitfaden](#return-types)** bei der Wahl zwischen `Result`, `Option` oder `bool`.
+8. **Folgen Sie dem [Rückgabetyp-Leitfaden](#rückgabetypen)** bei der Wahl zwischen `Result`, `Option` oder `bool`.
 9. **Fügen Sie einen `manage`-Unterbefehl hinzu?** Verdrahten Sie ihn in den `match cmd`-Dispatcher und `print_help`, fügen Sie einen Test in `crates/rustango/tests/migrate_manage.rs` hinzu und dokumentieren Sie eine Zeile in `docs/manage.md`.
 10. **Aktualisieren Sie `CHANGELOG.md`** mit einem `Added`-Eintrag unter der nächsten Version.
 

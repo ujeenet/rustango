@@ -20,11 +20,11 @@ les templates avec `{{ url(...) }}`, et dans les redirections avec
 ---
 
 ## Table des matières
-- [Enregistrer une URL nommée](#register-a-named-url)
-- [Reverse en Rust](#reverse-in-rust) · [Reverse dans les templates](#reverse-in-templates)
-- [Rediriger par nom](#redirect-by-name) · [Namespacing](#namespacing)
-- [Inspecter la carte des URL](#inspect-the-url-map) · [Erreurs](#errors)
-- [Motifs regex & chemins typés](#regex--typed-path-patterns) · [Notes & limites](#notes-and-limits)
+- [Enregistrer une URL nommée](#enregistrer-une-url-nommée)
+- [Reverse en Rust](#reverse-en-rust) · [Reverse dans les templates](#reverse-dans-les-templates)
+- [Rediriger par nom](#rediriger-par-nom) · [Namespacing](#namespacing)
+- [Inspecter la carte des URL](#inspecter-la-carte-des-url) · [Erreurs](#erreurs)
+- [Motifs regex & chemins typés](#motifs-regex--chemins-typés) · [Notes & limites](#notes-et-limites)
 
 ---
 
@@ -75,7 +75,7 @@ let url = reverse_owned("post-detail", &owned_params)?;
 
 `reverse` est **strict** : un placeholder manquant, ou une clé `params`
 supplémentaire que le motif n'a pas, est une erreur (pas un décalage silencieux) —
-voir [Erreurs](#errors).
+voir [Erreurs](#erreurs).
 
 ---
 
@@ -285,7 +285,7 @@ une fois et la réutiliser à travers les requêtes.
   déposer dans un header `Location` ou un `href`.
 - **Pas de convertisseurs regex/typés** dans les motifs (le `<int:pk>` de Django) ;
   les placeholders sont de simples `{name}` et les valeurs sont substituées telles
-  quelles (après encodage). Voir [Motifs regex & chemins typés](#regex--typed-path-patterns)
+  quelles (après encodage). Voir [Motifs regex & chemins typés](#motifs-regex--chemins-typés)
   pour le pourquoi, et comment contraindre une route à la place.
 
 
