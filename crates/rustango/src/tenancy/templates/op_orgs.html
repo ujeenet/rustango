@@ -11,15 +11,30 @@
 {#- A div, not a p: `<form>` is not phrasing content, so the HTML parser
     closes an open `<p>` when it meets one — the actions row split in two
     and left stray empty paragraphs on the page. -#}
-{% if provisioning_enabled %}
+{#- One row for every action this console can offer. Pre-warming is gated
+    on pools and the rest on the provisioner, so the two are separate
+    conditions — but they belong in the same row, not stacked with the
+    description between them. -#}
+{% if provisioning_enabled or edit_enabled %}
 <div class="page-actions">
+  {% if provisioning_enabled %}
   <a href="/orgs/new" class="btn btn-primary">+ New tenant</a>
   <a href="/orgs/provision" class="btn btn-secondary">Runs</a>
   <form method="post" action="/orgs/migrate" class="inline-form"
         onsubmit="return confirm('Run migrations for every active tenant?');">
     <button type="submit" class="btn btn-secondary">Migrate all tenants</button>
   </form>
+  {% endif %}
+  {% if edit_enabled %}
+  <form method="post" action="/orgs/prewarm" class="inline-form"
+        onsubmit="return confirm('Open a connection for every active database-mode tenant? This can take a moment.');">
+    <button type="submit" class="btn btn-secondary">Pre-warm pools</button>
+  </form>
+  {% endif %}
 </div>
+{% endif %}
+
+{% if provisioning_enabled %}
 <p>Tenants the registry knows about. Create one here, or from the CLI
 with <code>cargo run -- create-tenant</code>; removal is
 <code>cargo run -- drop-tenant</code>.</p>
@@ -32,16 +47,6 @@ with <code>cargo run -- create-tenant</code>; removal is
 <code>Cli</code> builder.</p>
 {% endif %}
 
-{#- Pre-warming needs pools, not a provisioner, so it is its own block:
-    a console wired for edits but not provisioning still gets it. -#}
-{% if edit_enabled %}
-<div class="page-actions">
-  <form method="post" action="/orgs/prewarm" class="inline-form"
-        onsubmit="return confirm('Open a connection for every active database-mode tenant? This can take a moment.');">
-    <button type="submit" class="btn btn-secondary">Pre-warm pools</button>
-  </form>
-</div>
-{% endif %}
 {% if orgs | length == 0 %}
   {% if provisioning_enabled %}
   <div class="empty">No tenants yet —
