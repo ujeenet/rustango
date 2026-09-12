@@ -98,6 +98,7 @@ pub mod migrate_run;
 pub mod operator_console;
 pub mod operators;
 mod org;
+pub mod org_edit;
 pub mod org_host;
 pub mod password;
 pub mod permissions;

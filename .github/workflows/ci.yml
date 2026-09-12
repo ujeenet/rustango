@@ -329,6 +329,9 @@ jobs:
       # #1344 — run history and the audit trail, printable without a browser,
       # including that a CLI provision is recorded at all.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_inspect_sqlite_live
+      # #1344 — tenant routing config, editable without a browser, and the
+      # cache/pool invalidation that has to follow the write.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_edit_tenant_sqlite_live
       # The operator console and the provisioning engines under it. These ran
       # only in the all-features job, which always has Postgres available —
       # so a PG-ism in the console (a `::`-cast, an `ON CONFLICT` spelling,

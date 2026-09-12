@@ -44,6 +44,7 @@
 mod agents;
 mod args;
 mod audit;
+mod edit;
 mod hosts;
 mod inspect;
 mod menu;
@@ -203,6 +204,8 @@ where
         "drop-tenant" => tenants::drop_tenant(pools, &args[1..], writer).await,
         "purge-tenant" => tenants::purge_tenant(pools, &args[1..], writer).await,
         "list-tenants" => tenants::list_tenants(pools, writer).await,
+        // #1344 — routing and display config were console-only to change.
+        "edit-tenant" => edit::edit_tenant(pools, &args[1..], writer).await,
         // #1344 — the console has bound extra hostnames since #1318; these
         // give a deploy hook and a browser-less box the same reach.
         "list-hosts" => hosts::list_hosts(pools, &args[1..], writer).await,
@@ -431,6 +434,27 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "  list-tenants         Print every Org row in the registry."
     )?;
+    writeln!(
+        w,
+        "  edit-tenant <slug> [--display-name <s>] [--host-pattern <h>]"
+    )?;
+    writeln!(
+        w,
+        "                     [--path-prefix <p>] [--port <n>] [--database-url <u>]"
+    )?;
+    writeln!(
+        w,
+        "                     [--activate | --deactivate] [--clear <field>]"
+    )?;
+    writeln!(
+        w,
+        "                       Change routing and display config. Only the fields you"
+    )?;
+    writeln!(
+        w,
+        "                       name are touched; --clear empties one. Rotating the URL"
+    )?;
+    writeln!(w, "                       evicts the tenant's pool.")?;
     writeln!(w)?;
     writeln!(w, "INSPECTION (read-only):")?;
     writeln!(
