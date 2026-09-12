@@ -39,6 +39,13 @@ enum Ask {
         flag: &'static str,
         question: &'static str,
     },
+    /// One of two flags, always appended — for a verb that refuses to guess
+    /// a direction, where "no answer" is not a valid argv.
+    Either {
+        question: &'static str,
+        yes: &'static str,
+        no: &'static str,
+    },
 }
 
 struct Action {
@@ -99,6 +106,35 @@ const GROUPS: &[Group] = &[
                 verb: "test-tenant-connection",
                 about: "check a database URL before using it",
                 asks: &[],
+            },
+        ],
+    },
+    Group {
+        title: "HOSTNAMES",
+        actions: &[
+            Action {
+                verb: "list-hosts",
+                about: "every hostname a tenant answers on",
+                asks: &[],
+            },
+            Action {
+                verb: "add-host",
+                about: "bind an extra hostname to a tenant",
+                asks: &[],
+            },
+            Action {
+                verb: "remove-host",
+                about: "unbind one",
+                asks: &[],
+            },
+            Action {
+                verb: "set-host-enabled",
+                about: "park or serve a bound hostname",
+                asks: &[Ask::Either {
+                    question: "serve it? (no parks it)",
+                    yes: "--on",
+                    no: "--off",
+                }],
             },
         ],
     },
@@ -362,6 +398,10 @@ fn build_argv<R: BufRead, W: Write>(
                 if prompt_yes_no(reader, writer, &format!("  {question}"), false)? {
                     argv.push((*flag).to_owned());
                 }
+            }
+            Ask::Either { question, yes, no } => {
+                let pick = prompt_yes_no(reader, writer, &format!("  {question}"), true)?;
+                argv.push((*if pick { yes } else { no }).to_owned());
             }
         }
     }
