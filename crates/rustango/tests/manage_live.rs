@@ -400,6 +400,14 @@ async fn migrate_tenants_runs_against_active_only() {
     res.unwrap();
     assert!(out.contains(&slug), "{out}");
     assert!(out.contains("migration"), "{out}");
+    // #1320 — the verb reports each migration as it lands, not just a
+    // summary once the whole run is over. `app/` distinguishes the
+    // project's chain from the framework's `system/` one, which numbers
+    // independently and would otherwise look like a repeat.
+    assert!(
+        out.contains(&format!("applied app/{mig_name}")),
+        "expected per-migration progress for {mig_name}: {out}"
+    );
 
     let exists: bool = sqlx::query_as::<_, (bool,)>(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'thing')",
