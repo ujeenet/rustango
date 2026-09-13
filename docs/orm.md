@@ -14,7 +14,7 @@ Patterns for the **Rustango** ORM beyond the basics. If you come from Django's O
 > **New to a term here?** The [glossary](glossary.md) defines *model*, *queryset*,
 > *pool*, and *migration* in plain language.
 
-A few Rust terms recur throughout. `&pool` is a shared reference to the database connection pool; you pass it to the methods that actually run SQL. `.await` runs an async call and waits for the result. `Option<T>` is a value that may be present (`Some`) or absent (`None`) — Rust's null. `Result` is success-or-error; the trailing `?` on a call returns early on error. `Auto<i64>` is an auto-incrementing primary key that's either `Set` (loaded from the DB) or `Unset` (not yet inserted).
+A few Rust terms recur throughout. `&pool` is a shared reference to a database connection pool — note there are **two** and this page uses both. `rustango::sql::Pool` is the multi-backend enum that `fetch`, `count` and the `_pool` writers take. `sqlx::PgPool` is the driver-specific Postgres pool that the `_on` family and the transaction examples take. `sql::Pool` has no `begin()`; its transaction entry points are `transaction_pool` and `atomic`. `.await` runs an async call and waits for the result. `Option<T>` is a value that may be present (`Some`) or absent (`None`) — Rust's null. `Result` is success-or-error; the trailing `?` on a call returns early on error. `Auto<i64>` is an auto-incrementing primary key that's either `Set` (loaded from the DB) or `Unset` (not yet inserted).
 
 ## Recent additions
 
@@ -285,7 +285,7 @@ Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prio
 | MySQL 8.0.1+ | Supports everything except `NO KEY` — that flag falls back to plain `FOR UPDATE` (the stricter lock). |
 | SQLite | No row-level lock syntax. The writer emits no clause at all; transactions hold an implicit write lock for the whole database. Use a different strategy for SQLite (typically a busy-wait loop on the transaction itself). |
 
-**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. Pair with `pool.begin()` (or `rustango::sql::atomic`).
+**Must run inside a transaction.** `FOR UPDATE` outside a tx is a no-op on PostgreSQL (the implicit single-statement tx releases the lock immediately) and an error on MySQL. On Postgres pair it with `pool.begin()` (a `sqlx::PgPool`); for a backend-agnostic transaction use `rustango::sql::atomic(&pool, …)` or `transaction_pool(&pool)`, which hand you a `PoolTx` to `match` on.
 
 ### Combining queries (union, intersection, difference)
 
@@ -1440,6 +1440,17 @@ Post::bulk_upsert_pool(
 ---
 
 ## Transactions
+
+> **These examples are Postgres.** `pool.begin()` is `sqlx::PgPool::begin` —
+> `rustango::sql::Pool` has no `begin()` at all. And the methods you would run
+> inside a transaction (`fetch_on`, `save_on`, `delete_on`) are themselves
+> `#[cfg(feature = "postgres")]`.
+>
+> The multi-backend entry points are `rustango::sql::transaction_pool(&pool)`
+> and `rustango::sql::atomic(&pool, …)`. Both hand you a `PoolTx` — an enum you
+> `match` on per backend — rather than a driver transaction, so a tri-dialect
+> transaction is written per-arm, not by swapping the pool type.
+
 
 > **Pitfall — don't mix `&pool` calls inside a transaction.** Every call
 > between `pool.begin()` and `commit` must target the transaction handle

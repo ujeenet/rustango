@@ -14,7 +14,7 @@ Muster für das **Rustango**-ORM jenseits der Grundlagen. Wenn du von Djangos OR
 > **Neu bei einem Begriff hier?** Das [Glossar](glossary.md) definiert *model*, *queryset*,
 > *pool* und *migration* in einfacher Sprache.
 
-Ein paar Rust-Begriffe tauchen durchgehend auf. `&pool` ist eine geteilte Referenz auf den Datenbank-Verbindungspool; du übergibst sie an die Methoden, die tatsächlich SQL ausführen. `.await` führt einen asynchronen Aufruf aus und wartet auf das Ergebnis. `Option<T>` ist ein Wert, der vorhanden (`Some`) oder abwesend (`None`) sein kann — Rusts Null. `Result` ist Erfolg-oder-Fehler; das nachgestellte `?` an einem Aufruf kehrt bei einem Fehler früh zurück. `Auto<i64>` ist ein automatisch hochzählender Primärschlüssel, der entweder `Set` (aus der DB geladen) oder `Unset` (noch nicht eingefügt) ist.
+Ein paar Rust-Begriffe tauchen durchgehend auf. `&pool` ist eine geteilte Referenz auf einen Datenbank-Verbindungspool — beachte, dass es **zwei** gibt und diese Seite beide verwendet. `rustango::sql::Pool` ist das Mehr-Backend-Enum, das `fetch`, `count` und die `_pool`-Writer nehmen. `sqlx::PgPool` ist der treiberspezifische Postgres-Pool, den die `_on`-Familie und die Transaktionsbeispiele nehmen. `sql::Pool` hat kein `begin()`; seine Transaktions-Einstiegspunkte sind `transaction_pool` und `atomic`. du übergibst sie an die Methoden, die tatsächlich SQL ausführen. `.await` führt einen asynchronen Aufruf aus und wartet auf das Ergebnis. `Option<T>` ist ein Wert, der vorhanden (`Some`) oder abwesend (`None`) sein kann — Rusts Null. `Result` ist Erfolg-oder-Fehler; das nachgestellte `?` an einem Aufruf kehrt bei einem Fehler früh zurück. `Auto<i64>` ist ein automatisch hochzählender Primärschlüssel, der entweder `Set` (aus der DB geladen) oder `Unset` (noch nicht eingefügt) ist.
 
 ## Neuere Ergänzungen
 
@@ -285,7 +285,7 @@ tx.commit().await?;
 | MySQL 8.0.1+ | Unterstützt alles außer `NO KEY` — dieses Flag fällt auf schlichtes `FOR UPDATE` zurück (die strengere Sperre). |
 | SQLite | Keine Syntax für Sperren auf Zeilenebene. Der Writer emittiert überhaupt keine Klausel; Transaktionen halten eine implizite Schreibsperre für die gesamte Datenbank. Verwende für SQLite eine andere Strategie (typischerweise eine Busy-Wait-Schleife auf der Transaktion selbst). |
 
-**Muss innerhalb einer Transaktion laufen.** `FOR UPDATE` außerhalb einer Transaktion ist auf PostgreSQL eine No-op (die implizite Ein-Statement-Transaktion gibt die Sperre sofort frei) und auf MySQL ein Fehler. Kombiniere mit `pool.begin()` (oder `rustango::sql::atomic`).
+**Muss innerhalb einer Transaktion laufen.** `FOR UPDATE` außerhalb einer Transaktion ist auf PostgreSQL eine No-op (die implizite Ein-Statement-Transaktion gibt die Sperre sofort frei) und auf MySQL ein Fehler. Auf Postgres kombiniere es mit `pool.begin()` (einem `sqlx::PgPool`); für eine backend-agnostische Transaktion nimm `rustango::sql::atomic(&pool, …)` oder `transaction_pool(&pool)`, die dir ein `PoolTx` zum `match`en liefern.
 
 ### Abfragen kombinieren (Vereinigung, Schnitt, Differenz)
 
@@ -1441,6 +1441,18 @@ Post::bulk_upsert_pool(
 ---
 
 ## Transaktionen
+
+> **Diese Beispiele sind Postgres.** `pool.begin()` ist `sqlx::PgPool::begin` —
+> `rustango::sql::Pool` hat überhaupt kein `begin()`. Und die Methoden, die du in
+> einer Transaktion ausführen würdest (`fetch_on`, `save_on`, `delete_on`), sind
+> selbst `#[cfg(feature = "postgres")]`.
+>
+> Die Mehr-Backend-Einstiegspunkte sind `rustango::sql::transaction_pool(&pool)`
+> und `rustango::sql::atomic(&pool, …)`. Beide liefern ein `PoolTx` — ein Enum,
+> auf das du pro Backend `match`st — statt einer Treiber-Transaktion, sodass eine
+> tri-dialektale Transaktion pro Zweig geschrieben wird und nicht durch Tausch des
+> Pool-Typs.
+
 
 > **Fallstrick — mische keine `&pool`-Aufrufe innerhalb einer Transaktion.** Jeder Aufruf
 > zwischen `pool.begin()` und `commit` muss das Transaktions-Handle

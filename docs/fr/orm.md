@@ -14,7 +14,7 @@ Modèles d'utilisation de l'ORM **Rustango** au-delà des bases. Si vous venez d
 > **Un terme vous est inconnu ?** Le [glossaire](glossary.md) définit *model*, *queryset*,
 > *pool* et *migration* en langage simple.
 
-Quelques termes Rust reviennent tout au long du document. `&pool` est une référence partagée vers le pool de connexions à la base de données ; vous le passez aux méthodes qui exécutent réellement du SQL. `.await` lance un appel asynchrone et attend le résultat. `Option<T>` est une valeur qui peut être présente (`Some`) ou absente (`None`) — le null de Rust. `Result` représente un succès ou une erreur ; le `?` en fin d'appel provoque un retour anticipé en cas d'erreur. `Auto<i64>` est une clé primaire à incrémentation automatique qui est soit `Set` (chargée depuis la base) soit `Unset` (pas encore insérée).
+Quelques termes Rust reviennent tout au long du document. `&pool` est une référence partagée vers un pool de connexions — il y en a **deux** et cette page utilise les deux. `rustango::sql::Pool` est l'énumération multi-backends que prennent `fetch`, `count` et les writers `_pool`. `sqlx::PgPool` est le pool Postgres spécifique au pilote que prennent la famille `_on` et les exemples de transaction. `sql::Pool` n'a pas de `begin()` ; ses points d'entrée de transaction sont `transaction_pool` et `atomic`. à la base de données ; vous le passez aux méthodes qui exécutent réellement du SQL. `.await` lance un appel asynchrone et attend le résultat. `Option<T>` est une valeur qui peut être présente (`Some`) ou absente (`None`) — le null de Rust. `Result` représente un succès ou une erreur ; le `?` en fin d'appel provoque un retour anticipé en cas d'erreur. `Auto<i64>` est une clé primaire à incrémentation automatique qui est soit `Set` (chargée depuis la base) soit `Unset` (pas encore insérée).
 
 ## Ajouts récents
 
@@ -285,7 +285,7 @@ Appeler `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` sans un `.sele
 | MySQL 8.0.1+ | Prend tout en charge sauf `NO KEY` — cette option retombe sur un simple `FOR UPDATE` (le verrou plus strict). |
 | SQLite | Aucune syntaxe de verrou au niveau ligne. Le writer n'émet aucune clause ; les transactions détiennent un verrou d'écriture implicite pour toute la base de données. Utilisez une autre stratégie pour SQLite (généralement une boucle d'attente active sur la transaction elle-même). |
 
-**Doit s'exécuter à l'intérieur d'une transaction.** `FOR UPDATE` hors transaction est une opération sans effet sur PostgreSQL (la transaction implicite à instruction unique libère le verrou immédiatement) et une erreur sur MySQL. À combiner avec `pool.begin()` (ou `rustango::sql::atomic`).
+**Doit s'exécuter à l'intérieur d'une transaction.** `FOR UPDATE` hors transaction est une opération sans effet sur PostgreSQL (la transaction implicite à instruction unique libère le verrou immédiatement) et une erreur sur MySQL. Sur Postgres, associez-le à `pool.begin()` (un `sqlx::PgPool`) ; pour une transaction indépendante du backend, utilisez `rustango::sql::atomic(&pool, …)` ou `transaction_pool(&pool)`, qui renvoient un `PoolTx` sur lequel faire un `match`.
 
 ### Combinaison de requêtes (union, intersection, différence)
 
@@ -1440,6 +1440,18 @@ Post::bulk_upsert_pool(
 ---
 
 ## Transactions
+
+> **Ces exemples sont Postgres.** `pool.begin()` est `sqlx::PgPool::begin` —
+> `rustango::sql::Pool` n'a pas de `begin()` du tout. Et les méthodes que vous
+> exécuteriez dans une transaction (`fetch_on`, `save_on`, `delete_on`) sont
+> elles-mêmes `#[cfg(feature = "postgres")]`.
+>
+> Les points d'entrée multi-backends sont `rustango::sql::transaction_pool(&pool)`
+> et `rustango::sql::atomic(&pool, …)`. Tous deux renvoient un `PoolTx` — une
+> énumération sur laquelle vous faites un `match` par backend — plutôt qu'une
+> transaction de pilote : une transaction tri-dialecte s'écrit donc par branche,
+> pas en changeant le type de pool.
+
 
 > **Piège — ne mélangez pas les appels `&pool` à l'intérieur d'une transaction.** Chaque appel
 > entre `pool.begin()` et `commit` doit cibler le handle de la transaction

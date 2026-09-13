@@ -14,7 +14,7 @@ Patrones para el ORM de **Rustango** más allá de lo básico. Si vienes del ORM
 > **¿Nuevo con algún término de aquí?** El [glosario](glossary.md) define *model*, *queryset*,
 > *pool* y *migración* en lenguaje sencillo.
 
-Algunos términos de Rust se repiten a lo largo del documento. `&pool` es una referencia compartida al pool de conexiones de la base de datos; se la pasas a los métodos que realmente ejecutan SQL. `.await` ejecuta una llamada asíncrona y espera el resultado. `Option<T>` es un valor que puede estar presente (`Some`) o ausente (`None`) — el null de Rust. `Result` es éxito-o-error; el `?` al final de una llamada retorna anticipadamente ante un error. `Auto<i64>` es una primary key autoincremental que está o bien `Set` (cargada desde la BD) o bien `Unset` (aún no insertada).
+Algunos términos de Rust se repiten a lo largo del documento. `&pool` es una referencia compartida a un pool de conexiones — hay **dos** y esta página usa ambos. `rustango::sql::Pool` es el enum multi-backend que reciben `fetch`, `count` y los writers `_pool`. `sqlx::PgPool` es el pool de Postgres específico del driver que reciben la familia `_on` y los ejemplos de transacción. `sql::Pool` no tiene `begin()`; sus puntos de entrada de transacción son `transaction_pool` y `atomic`. de la base de datos; se la pasas a los métodos que realmente ejecutan SQL. `.await` ejecuta una llamada asíncrona y espera el resultado. `Option<T>` es un valor que puede estar presente (`Some`) o ausente (`None`) — el null de Rust. `Result` es éxito-o-error; el `?` al final de una llamada retorna anticipadamente ante un error. `Auto<i64>` es una primary key autoincremental que está o bien `Set` (cargada desde la BD) o bien `Unset` (aún no insertada).
 
 ## Novedades recientes
 
@@ -285,7 +285,7 @@ Llamar a `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` sin un `.sele
 | MySQL 8.0.1+ | Soporta todo excepto `NO KEY` — ese flag recae en `FOR UPDATE` simple (el bloqueo más estricto). |
 | SQLite | Sin sintaxis de bloqueo a nivel de fila. El writer no emite ninguna cláusula; las transacciones mantienen un bloqueo de escritura implícito sobre toda la base de datos. Usa una estrategia distinta para SQLite (típicamente un bucle busy-wait sobre la transacción misma). |
 
-**Debe ejecutarse dentro de una transacción.** `FOR UPDATE` fuera de una tx es un no-op en PostgreSQL (la tx implícita de una sola sentencia libera el bloqueo de inmediato) y un error en MySQL. Combínalo con `pool.begin()` (o `rustango::sql::atomic`).
+**Debe ejecutarse dentro de una transacción.** `FOR UPDATE` fuera de una tx es un no-op en PostgreSQL (la tx implícita de una sola sentencia libera el bloqueo de inmediato) y un error en MySQL. En Postgres combínalo con `pool.begin()` (un `sqlx::PgPool`); para una transacción independiente del backend usa `rustango::sql::atomic(&pool, …)` o `transaction_pool(&pool)`, que te devuelven un `PoolTx` sobre el que hacer `match`.
 
 ### Combinar consultas (unión, intersección, diferencia)
 
@@ -1440,6 +1440,17 @@ Post::bulk_upsert_pool(
 ---
 
 ## Transacciones
+
+> **Estos ejemplos son de Postgres.** `pool.begin()` es `sqlx::PgPool::begin` —
+> `rustango::sql::Pool` no tiene `begin()` en absoluto. Y los métodos que
+> ejecutarías dentro de una transacción (`fetch_on`, `save_on`, `delete_on`) son
+> ellos mismos `#[cfg(feature = "postgres")]`.
+>
+> Los puntos de entrada multi-backend son `rustango::sql::transaction_pool(&pool)`
+> y `rustango::sql::atomic(&pool, …)`. Ambos devuelven un `PoolTx` — un enum sobre
+> el que haces `match` por backend — en vez de una transacción del driver, así que
+> una transacción tri-dialecto se escribe por rama, no cambiando el tipo de pool.
+
 
 > **Trampa — no mezcles llamadas `&pool` dentro de una transacción.** Cada llamada
 > entre `pool.begin()` y `commit` debe apuntar al handle de la transacción
