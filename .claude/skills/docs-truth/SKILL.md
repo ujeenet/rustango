@@ -1,13 +1,13 @@
 ---
 name: docs-truth
-description: Verify rustango documentation against the code that implements it, and make a page testable. Use when writing or editing anything under docs/, when a doc claim needs checking, when auditing a page for drift, when paying down the untested-docs backlog in crates/rustango/tests/docs_contract.rs, or when a user reports that a documented API doesn't work. Covers the verification method, the two ways past audits got it wrong, and the severity taxonomy.
+description: Verify rustango documentation against the code that implements it, and make a page testable. Use when writing or editing anything under docs/, when a doc claim needs checking, when auditing a page for drift, when paying down the untested-docs backlog in crates/rustango/tests/docs_contract.rs, or when a user reports that a documented API doesn't work. Covers the verification method, the five traps that have produced wrong findings, how to write the guard, and the severity taxonomy.
 ---
 
 # Verifying rustango docs against the code
 
 Documentation here is checked by execution, not by reading. Reading is exactly the check a confidently-worded wrong sentence passes: `fetch_pool()` sat in the README's headline example for two releases after the rename, and `.execute(&pool)` appears eleven times in `orm.md` and has never existed. Both read fine.
 
-A September 2026 audit found **107 disagreements** between the docs and the code. This skill is the method that found them, plus the two ways it got things wrong.
+A September 2026 audit found **107 disagreements** between the docs and the code. This skill is the method that found them — plus the five ways it got things wrong, which turned out to be the more useful half. Of 19 findings escalated as code defects, two were withdrawn and one was corrected after filing, every one caught by a second reader rather than the original pass.
 
 ## The rule
 
@@ -39,9 +39,9 @@ For every concrete statement — an API name, a default, a flag, a config key, a
 4. **Check the default in code**, never in the doc's own prose. "Defaults to X" claims were wrong for the page-size cap (100, documented 1000), the tenancy pool (16, documented 4), and the retry backoff (2s, documented 1s).
 5. **Run it if the behaviour is reachable.** Say which you did. "Reproduced by execution" and "verified by inspection" are different claims and issues should distinguish them.
 
-## Two traps that have already produced wrong findings
+## Five traps that have already produced wrong findings
 
-Both were caught by a reviewer, not by the original pass. Assume they'll recur.
+Every one was caught by a second reader, not by the pass that made the claim. Assume they'll recur, and assume you won't spot your own.
 
 ### Family generalisation
 
