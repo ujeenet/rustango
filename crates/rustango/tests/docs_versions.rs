@@ -249,6 +249,61 @@ fn published_docs_show_the_version_that_is_shipping() {
     );
 }
 
+/// The README's install snippets must pin a version that exists.
+///
+/// These are the most consequential version strings in the repository
+/// and the transcript check above misses them, because a dependency pin
+/// is `major.minor` — two components, where that check requires three.
+/// The README sat at `rustango = "0.56"` through the whole of 0.57.
+///
+/// Unlike a stale transcript, this one does not merely read wrong:
+/// `cargo add` resolves `^0.56`, so a reader following the front page
+/// gets a release behind without being told.
+#[test]
+fn the_readme_installs_the_shipping_version() {
+    let root = repo_root();
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("read README.md");
+    let expected = major_minor(CURRENT);
+
+    // Scanned here rather than through `versions_in`, which requires
+    // three components on purpose: relaxing it to two would make the
+    // transcript check start flagging `axum = { version = "0.8" }`,
+    // whose label is also `version`. A pin is identified by the line
+    // naming `rustango`, not by the shape of the number.
+    let mut wrong = Vec::new();
+    for (idx, line) in readme.lines().enumerate() {
+        if !names_rustango(line) {
+            continue;
+        }
+        for quoted in line.split('"').skip(1).step_by(2) {
+            let parts: Vec<&str> = quoted.split('.').collect();
+            let two_component = parts.len() == 2
+                && parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+            if two_component && quoted != expected {
+                wrong.push(format!("README.md:{}: pins `{quoted}`", idx + 1));
+            }
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "{} install pin(s) name a version other than the shipping {expected}:\n  {}\n\n\
+         These are executable, not illustrative — `cargo add` resolves them. Update to \
+         \"{expected}\".",
+        wrong.len(),
+        wrong.join("\n  "),
+    );
+}
+
+/// `0.58.0` -> `0.58`. A dependency pin and a docs series both name a
+/// line of releases rather than a point release.
+fn major_minor(v: &str) -> String {
+    v.rsplit_once('.')
+        .map_or_else(|| v.to_owned(), |(mm, _patch)| mm.to_owned())
+}
+
 /// `docs/index.toml`'s `version` is the label the site publishes these
 /// pages **under**: they are served at `/<version>/<section>/<slug>`.
 ///

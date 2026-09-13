@@ -21,16 +21,16 @@ Rustango gives you the productivity of Django or Laravel with the speed and type
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.56"
+rustango = "0.58"
 
 # SQLite — file-backed or in-memory
-rustango = { version = "0.56", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.58", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.56", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.58", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 ```
 
-Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.56" }` needs no extra wiring.
+Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.58" }` needs no extra wiring.
 
 ## An app on SQLite in 30 lines
 
@@ -93,7 +93,7 @@ The **same code** boots on Postgres with `DATABASE_URL=postgres://…` or MySQL 
 - [The `manage` CLI](#the-manage-cli)
 - [Configuration](#configuration)
 - [Testing](#testing)
-- [Comparison](#comparison)
+- [What's in the box](#whats-in-the-box)
 - [Documentation](#documentation)
 
 ---
@@ -294,27 +294,56 @@ A `TestClient` drives the router as a tower service (no socket), a `RequestFacto
 
 ---
 
-## Comparison
+## What's in the box
 
-| | Rustango | Django | Laravel | Rocket | Cot |
-|---|:-:|:-:|:-:|:-:|:-:|
-| ORM | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Auto-migrations | ✅ | ✅ | ✅ | ❌ | ✅ |
-| Auto-admin | ✅ | ✅ | ⚠️ Filament | ❌ | ✅ |
-| Multi-tenancy | ✅ | ⚠️ ext | ⚠️ ext | ❌ | ❌ |
-| JWT lifecycle (refresh + blacklist + custom claims) | ✅ | ⚠️ ext | ⚠️ Sanctum/Passport | ❌ | ❌ |
-| TOTP / 2FA | ✅ | ⚠️ ext | ✅ Fortify | ❌ | ❌ |
-| Signals | ✅ | ✅ | ✅ Events | ❌ | ❌ |
-| Cache backends | ✅ | ✅ | ✅ | ❌ | ⚠️ optional |
-| Email backends | ✅ | ✅ | ✅ | ❌ | ❌ |
-| File storage | ✅ | ⚠️ ext | ✅ Flysystem | ❌ | ❌ |
-| Scheduled tasks | ✅ | ⚠️ Celery beat | ✅ | ❌ | ❌ |
-| Security headers | ✅ | ✅ | ⚠️ middleware | ✅ Shield | ❌ |
-| Test client | ✅ | ✅ | ✅ | ✅ Client | ✅ |
-| Project scaffolder | ✅ `cargo rustango new` | ✅ `startproject` | ✅ installer | ❌ | ✅ `cot new` |
-| File generators | ✅ `make:*` | ⚠️ ext | ✅ artisan | ❌ | ❌ |
+Everything below ships in this repository. Each is a cargo feature, so a
+build takes only what it uses — a JSON-only API binary compiles out the
+admin, templates and tenancy entirely.
 
-✅ shipped · ⚠️ partial / via extension · ❌ not shipped
+**Data**
+- ORM with relations, aggregates, prefetch, bulk insert/update, upsert,
+  soft delete, and an expression DSL (`F`, `Case`/`When`, subqueries,
+  window functions)
+- Postgres, MySQL 8+ and SQLite through the same `&Pool`
+- Auto-generated migrations with schema snapshots, data operations,
+  squash reconciliation, and `--dry-run`
+- ContentTypes, generic foreign keys, and generic M2M
+- Postgres types: arrays, ranges, `hstore`, JSON, geometry, vectors
+
+**HTTP**
+- ViewSets and Serializers (DRF-shaped), with OpenAPI 3.1 auto-derive
+- HTML views, forms with CSRF, and Tera templates
+- Sessions, request timeouts, body limits, CORS, compression, security
+  headers, CSP nonces, rate limiting, and idempotency keys
+- Server-sent events, WebSockets, and the HTTP `QUERY` method
+
+**Auth**
+- Sessions, JWT (refresh, revocation, custom claims), OAuth2/OIDC, HMAC
+  request signing, API keys, TOTP, and passkeys
+- Permissions, groups, object-level checks, and account lockout
+- Single sign-on for the admin and for application users
+
+**Operations**
+- Auto-admin — every `#[derive(Model)]` is administrable with no
+  registration step
+- Multi-tenancy: schema-mode and database-mode, an operator console,
+  provisioning from the console, the CLI or a signed webhook, and
+  per-tenant connection pools
+- Audit log, background jobs (in-memory and Postgres-backed), a
+  scheduler, and distributed locks
+- Caching (in-memory, Redis, database), email (console, file,
+  in-memory, SMTP), file storage (local, in-memory, S3-compatible)
+- Signals, i18n, notifications, webhooks, and an MCP server for AI
+  agents
+
+**Developer experience**
+- `cargo rustango new` project scaffolder, with a wizard
+- `manage` CLI: migrations, `make:*` generators, database utilities,
+  tenancy verbs, and an interactive menu
+- Layered TOML settings with environment overrides
+- Test client, model factories, and schema builders
+
+See the [documentation](#documentation) for the full surface.
 
 ---
 
