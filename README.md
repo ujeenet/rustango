@@ -13,7 +13,7 @@ Rustango gives you the productivity of Django or Laravel with the speed and type
 
 📚 **Docs:** [rustango.com](https://rustango.com) · [in-repo guides](docs/) · [API reference](https://docs.rs/rustango)
 🌍 **Also in:** [Deutsch](docs/de/) · [Español](docs/es/) · [Français](docs/fr/) — every published guide, not a subset.
-🍳 **Cookbook:** [`cookbook_blog/COOKBOOK.md`](crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a runnable, test-backed recipe for every feature below.
+🍳 **Cookbook:** [`cookbook_blog/COOKBOOK.md`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a runnable, test-backed recipe for every feature below.
 
 ---
 
@@ -186,7 +186,7 @@ let stats = Post::objects()
 
 Supported: every field type (ints, floats, `String`, `bool`, `DateTime`/`Date`, `Uuid`, `Json`, `Decimal`, plus PG-only `Array`/`Range`/`HStore`/`Vector`/`Geometry`), nullable `Option<T>`, `Auto<T>` primary keys, `ForeignKey<T>` / one-to-one / many-to-many, generic FKs + composite-key FKs (ContentTypes), soft-delete, `unique_together` / `index_together`, container-level default scopes, subquery/`EXISTS` filters, bulk insert/update, transactions, and raw SQL escape hatches. `EXPLAIN` works on any queryset.
 
-📖 [ORM guide](docs/orm.md) · [models](docs/models.md) · [runnable ORM recipes](crates/rustango/examples/cookbook_blog/COOKBOOK.md)
+📖 [ORM guide](docs/orm.md) · [models](docs/models.md) · [runnable ORM recipes](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md)
 
 ## Migrations
 
@@ -253,7 +253,7 @@ Django-shape class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateV
 
 Database-mode is the default and works identically everywhere; schema-mode is a Postgres-only pool optimization. Set `schema` on MySQL/SQLite and the framework returns a clear error pointing you back to database-mode.
 
-📖 Runnable walkthrough: [cookbook Ch. 5 — Multi-tenancy](crates/rustango/examples/cookbook_blog/COOKBOOK.md#chapter-5--multi-tenancy)
+📖 Runnable walkthrough: [cookbook Ch. 5 — Multi-tenancy](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md#chapter-5--multi-tenancy)
 
 ## Authentication & permissions
 
@@ -325,7 +325,7 @@ A `TestClient` drives the router as a tower service (no socket), a `RequestFacto
 ## Documentation
 
 - **Guides & tutorials**: <https://rustango.com>
-- **Runnable cookbook**: [`cookbook_blog/COOKBOOK.md`](crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a test-backed recipe for every feature, on all three backends.
+- **Runnable cookbook**: [`cookbook_blog/COOKBOOK.md`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a test-backed recipe for every feature, on all three backends.
 - **In-repo guides** ([`docs/`](docs/)): [getting started](docs/getting-started.md) · [models](docs/models.md) · [ORM](docs/orm.md) · [migrations & CLI](docs/manage.md) · [admin](docs/admin.md) · [viewsets](docs/viewsets.md) · [serializers](docs/serializers.md) · [auth](docs/auth-flows.md) · [security](docs/security.md) · [middleware](docs/middleware.md) · [caching](docs/caching.md) · [email](docs/email.md) · [files](docs/files.md) · [jobs](docs/jobs.md) · [i18n](docs/i18n.md) · [MCP](docs/mcp.md) · [testing](docs/testing.md) · [glossary](docs/glossary.md)
 - **API reference**: <https://docs.rs/rustango>
 - **Changelog**: [`CHANGELOG.md`](CHANGELOG.md)

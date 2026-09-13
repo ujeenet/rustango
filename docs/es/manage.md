@@ -1350,7 +1350,7 @@ actives el pre-calentamiento. Los ajustes viven en `TenantPoolsConfig`:
 | Campo | Por defecto | Propósito |
 |---|---|---|
 | `max_cached_database_pools` | 64 | Tope de la caché de pools. Una vez llena, el siguiente tenant no cacheado da error (sin desalojo silencioso). |
-| `database_pool_max_connections` | 4 | `max_connections` por pool. Mantenlo pequeño para que un fan-out de tenants no agote el `max_connections` de PG. |
+| `database_pool_max_connections` | 16 | `max_connections` por pool. Mantenlo pequeño para que un fan-out de tenants no agote el `max_connections` de PG. |
 | `database_pool_min_connections` | 0 | Mantiene N conexiones calientes en todo momento. `≥1` reduce la latencia del primer request al pagar el round-trip de TCP/TLS/auth en el arranque. |
 | `database_pool_acquire_timeout` | 30s | Cuánto espera `pool.acquire()` antes de dar error `PoolTimedOut`. |
 | `database_pool_idle_timeout` | 10 min | Cierra las conexiones inactivas tras esta duración. Se defiende de los cortes por load-balancer / `idle_in_transaction_session_timeout`. |
