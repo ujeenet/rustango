@@ -102,15 +102,26 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     /// Run the job. Return `Ok(())` on success, `Err(Retryable(_))` to
     /// retry with backoff, `Err(Fatal(_))` to dead-letter immediately.
     ///
-    /// **No ambient context reaches here.** Workers are spawned with
-    /// [`tokio::spawn`], which does not inherit `tokio::task_local!`
-    /// state, so every scope the request path sets up is absent: the
-    /// audit source falls back to [`crate::audit::AuditSource::System`],
-    /// the active timezone falls back to the default, and there is no
-    /// admin session. Anything a job needs must travel in its payload
-    /// (#1229). For the audit case a job can re-enter the scope itself
-    /// with [`crate::audit::with_source`]. Tenant scoping is the same
-    /// story and is tracked separately in #1223.
+    /// **Some ambient context reaches here, and which depends on the
+    /// queue.** [`tokio::spawn`] inherits no `tokio::task_local!` state,
+    /// so anything a job sees had to be carried to it deliberately —
+    /// see [`crate::task_context::TaskContext`].
+    ///
+    /// | | [`InMemoryJobQueue`] | `PgJobQueue` |
+    /// |---|---|---|
+    /// | audit source | the enqueuer's | `System` |
+    /// | active timezone | the enqueuer's | the default |
+    ///
+    /// `PgJobQueue` carries neither: its envelope is a `rustango_jobs`
+    /// row, so context needs a column and a migration (#1229).
+    ///
+    /// **Neither queue carries a session or a tenant**, and no job
+    /// should assume one. Anything else a job needs travels in its
+    /// payload. Tenant scoping is tracked separately in #1223.
+    ///
+    /// Do not wrap the body in [`crate::audit::with_source`] to
+    /// re-establish the caller — on `InMemoryJobQueue` that overwrites
+    /// a source already installed for you.
     async fn run(&self) -> Result<(), JobError>;
 }
 
@@ -143,6 +154,13 @@ struct JobEnvelope {
     payload: serde_json::Value,
     attempt: u32,
     max_attempts: u32,
+    /// The caller's ambient context, captured at `dispatch`.
+    ///
+    /// Captured here rather than where the worker spawns, because
+    /// workers are spawned once at `start()` — by then the caller is
+    /// long gone and there is nothing to inherit. The context has to
+    /// travel with the job.
+    context: crate::task_context::TaskContext,
 }
 
 // ------------------------------------------------------------------ Handler registry
@@ -299,6 +317,9 @@ impl JobQueue for InMemoryJobQueue {
             payload: value,
             attempt: 0,
             max_attempts: T::MAX_ATTEMPTS,
+            // Captured here, at the hand-off. A worker is spawned at
+            // boot and has no caller to inherit from.
+            context: crate::task_context::TaskContext::capture(),
         };
         self.pending
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -378,7 +399,10 @@ async fn worker_loop(
         };
 
         let payload = envelope.payload.clone();
-        let result = handler(payload).await;
+        // Run the handler inside the context the caller had at
+        // `dispatch`. Without this the job sees none of it — an audit
+        // row written here would record `system` and lose the actor.
+        let result = envelope.context.clone().install(handler(payload)).await;
 
         match result {
             Ok(()) => {
@@ -494,6 +518,79 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    /// The job records what the enqueuer's context was.
+    ///
+    /// Before this, a job ran with no ambient context at all — an audit
+    /// row written from one recorded `system`, so "who deleted this?"
+    /// was a dead end whenever a job did it.
+    ///
+    #[tokio::test]
+    async fn a_job_sees_the_context_of_whoever_enqueued_it() {
+        use crate::audit::{current_source, with_source, AuditSource};
+
+        static SEEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct RecordSource;
+
+        #[async_trait::async_trait]
+        impl Job for RecordSource {
+            const NAME: &'static str = "record_source";
+            async fn run(&self) -> Result<(), JobError> {
+                *SEEN.lock().unwrap() = Some(current_source().as_token());
+                Ok(())
+            }
+        }
+
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<RecordSource>().await;
+        q.start().await;
+
+        with_source(AuditSource::User { id: "99".into() }, async {
+            q.dispatch(&RecordSource).await.unwrap();
+        })
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        q.shutdown().await;
+
+        assert_eq!(
+            SEEN.lock().unwrap().clone(),
+            Some("user:99".to_owned()),
+            "the job should see who enqueued it"
+        );
+    }
+
+    /// A job enqueued by nobody in particular stays attributable to the
+    /// system — it does not invent an actor.
+    #[tokio::test]
+    async fn a_job_enqueued_outside_any_scope_is_system() {
+        use crate::audit::current_source;
+
+        static SEEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct RecordPlain;
+
+        #[async_trait::async_trait]
+        impl Job for RecordPlain {
+            const NAME: &'static str = "record_plain";
+            async fn run(&self) -> Result<(), JobError> {
+                *SEEN.lock().unwrap() = Some(current_source().as_token());
+                Ok(())
+            }
+        }
+
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<RecordPlain>().await;
+        q.start().await;
+        q.dispatch(&RecordPlain).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        q.shutdown().await;
+
+        assert_eq!(SEEN.lock().unwrap().clone(), Some("system".to_owned()));
     }
 
     #[tokio::test]

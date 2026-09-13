@@ -423,6 +423,11 @@ pub mod databases;
 pub mod migrate;
 pub mod query;
 pub mod sql;
+/// Context that follows work off the request thread — see
+/// [`task_context::TaskContext`]. `tokio::spawn` inherits no
+/// `task_local!`, so deferred work starts with none of its caller's
+/// ambient context unless it is carried deliberately.
+pub mod task_context;
 
 /// Test-support helpers (schema builders from `Model::SCHEMA` + model
 /// factories). Dev-only: `#[cfg(test)]` for this crate's own tests,
@@ -615,7 +620,9 @@ pub mod media;
 pub mod notifications;
 
 /// Background job queue with worker pool — async work outside the request
-/// lifecycle. Currently in-memory only. See [`jobs::JobQueue`].
+/// lifecycle. In-memory, or Postgres-backed behind `jobs-postgres`. See
+/// [`jobs::JobQueue`]; the two carry different amounts of the enqueuer's
+/// context, which [`jobs::Job::run`] documents.
 #[cfg(feature = "jobs")]
 pub mod jobs;
 
