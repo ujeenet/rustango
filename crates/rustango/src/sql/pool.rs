@@ -271,33 +271,21 @@ impl Pool {
         let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
         match scheme.as_str() {
             #[cfg(feature = "postgres")]
-            "postgres" | "postgresql" => {
-                let pool = sqlx::PgPool::connect_lazy(url)
-                    .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?;
-                Ok(Self::Postgres(pool))
-            }
+            "postgres" | "postgresql" => Ok(Self::Postgres(Self::connect_postgres_lazy(url)?)),
             #[cfg(not(feature = "postgres"))]
             "postgres" | "postgresql" => Err(PoolError::FeatureNotEnabled {
                 scheme: "postgres",
                 feature: "postgres",
             }),
             #[cfg(feature = "mysql")]
-            "mysql" => {
-                let pool = sqlx::MySqlPool::connect_lazy(url)
-                    .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?;
-                Ok(Self::Mysql(pool))
-            }
+            "mysql" => Ok(Self::Mysql(Self::connect_mysql_lazy(url)?)),
             #[cfg(not(feature = "mysql"))]
             "mysql" => Err(PoolError::FeatureNotEnabled {
                 scheme: "mysql",
                 feature: "mysql",
             }),
             #[cfg(feature = "sqlite")]
-            "sqlite" => {
-                let opts = sqlite_connect_options(url)?;
-                let pool = sqlx::sqlite::SqlitePoolOptions::new().connect_lazy_with(opts);
-                Ok(Self::Sqlite(pool))
-            }
+            "sqlite" => Ok(Self::Sqlite(Self::connect_sqlite_lazy(url)?)),
             #[cfg(not(feature = "sqlite"))]
             "sqlite" => Err(PoolError::FeatureNotEnabled {
                 scheme: "sqlite",
@@ -398,17 +386,111 @@ impl Pool {
         }
     }
 
+    // ---- typed constructors ----
+    //
+    // These are the **only** places a backend pool is built. Everything
+    // else — `connect`, `connect_lazy`, `connect_inner`, and the
+    // `manage` dispatch paths — routes through them.
+    //
+    // They exist because the callers that need a typed pool
+    // (`TenantPools<DB>` takes `sqlx::Pool<DB>`, not the enum) were
+    // otherwise reaching for `PgPool::connect(&url)` directly, which
+    // skips every option the framework applies. The main `runserver`
+    // pool was one of them.
+
+    /// Connect to Postgres, returning the typed pool.
+    ///
+    /// Prefer [`Self::connect`] unless you need `sqlx::PgPool` itself.
+    /// This applies the same options as `connect` — use it rather than
+    /// `PgPool::connect`, which applies none.
+    ///
+    /// # Errors
+    /// As [`Self::connect`].
+    #[cfg(feature = "postgres")]
+    pub async fn connect_postgres(url: &str) -> Result<sqlx::PgPool, PoolError> {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(default_acquire_timeout())
+            .connect(url)
+            .await
+            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
+    }
+
+    /// [`Self::connect_postgres`] without dialling — the pool connects
+    /// on first use. For verbs that may never touch the database.
+    ///
+    /// # Errors
+    /// As [`Self::connect`].
+    #[cfg(feature = "postgres")]
+    pub fn connect_postgres_lazy(url: &str) -> Result<sqlx::PgPool, PoolError> {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(default_acquire_timeout())
+            .connect_lazy(url)
+            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
+    }
+
+    /// Connect to MySQL, returning the typed pool. See
+    /// [`Self::connect_postgres`].
+    ///
+    /// # Errors
+    /// As [`Self::connect`].
+    #[cfg(feature = "mysql")]
+    pub async fn connect_mysql(url: &str) -> Result<sqlx::MySqlPool, PoolError> {
+        sqlx::mysql::MySqlPoolOptions::new()
+            .acquire_timeout(default_acquire_timeout())
+            .connect(url)
+            .await
+            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
+    }
+
+    /// [`Self::connect_mysql`] without dialling.
+    ///
+    /// # Errors
+    /// As [`Self::connect`].
+    #[cfg(feature = "mysql")]
+    pub fn connect_mysql_lazy(url: &str) -> Result<sqlx::MySqlPool, PoolError> {
+        sqlx::mysql::MySqlPoolOptions::new()
+            .acquire_timeout(default_acquire_timeout())
+            .connect_lazy(url)
+            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
+    }
+
+    /// Connect to SQLite, returning the typed pool.
+    ///
+    /// Unlike the other two this also applies the framework's pragmas
+    /// via [`sqlite_connect_options`] — WAL for file-backed databases,
+    /// and `?mode=rwc` so a missing file is created. Sites that built
+    /// their own `SqlitePoolOptions` were silently getting neither.
+    ///
+    /// # Errors
+    /// As [`Self::connect`].
+    #[cfg(feature = "sqlite")]
+    pub async fn connect_sqlite(url: &str) -> Result<sqlx::SqlitePool, PoolError> {
+        let opts = sqlite_connect_options(url)?;
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .acquire_timeout(default_acquire_timeout())
+            .connect_with(opts)
+            .await
+            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
+    }
+
+    /// [`Self::connect_sqlite`] without dialling.
+    ///
+    /// # Errors
+    /// As [`Self::connect`].
+    #[cfg(feature = "sqlite")]
+    pub fn connect_sqlite_lazy(url: &str) -> Result<sqlx::SqlitePool, PoolError> {
+        let opts = sqlite_connect_options(url)?;
+        Ok(sqlx::sqlite::SqlitePoolOptions::new()
+            .acquire_timeout(default_acquire_timeout())
+            .connect_lazy_with(opts))
+    }
+
     // ---- internal connect helpers ----
     // (see `default_acquire_timeout` below for the timeout they share)
 
     #[cfg(feature = "postgres")]
     async fn connect_postgres_inner(url: &str) -> Result<Self, PoolError> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(default_acquire_timeout())
-            .connect(url)
-            .await
-            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?;
-        Ok(Self::Postgres(pool))
+        Ok(Self::Postgres(Self::connect_postgres(url).await?))
     }
 
     #[cfg(not(feature = "postgres"))]
@@ -421,12 +503,7 @@ impl Pool {
 
     #[cfg(feature = "mysql")]
     async fn connect_mysql_inner(url: &str) -> Result<Self, PoolError> {
-        let pool = sqlx::mysql::MySqlPoolOptions::new()
-            .acquire_timeout(default_acquire_timeout())
-            .connect(url)
-            .await
-            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?;
-        Ok(Self::Mysql(pool))
+        Ok(Self::Mysql(Self::connect_mysql(url).await?))
     }
 
     // Stays async so the call-site `.await` shape matches across
@@ -455,13 +532,7 @@ impl Pool {
         // `sqlite_connect_options`). v0.40: `sqlite_connect_options`
         // also turns on `foreign_keys`, sets `busy_timeout = 5s`, and
         // enables WAL journal mode for file-backed databases.
-        let opts = sqlite_connect_options(url)?;
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .acquire_timeout(default_acquire_timeout())
-            .connect_with(opts)
-            .await
-            .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))?;
-        Ok(Self::Sqlite(pool))
+        Ok(Self::Sqlite(Self::connect_sqlite(url).await?))
     }
 
     #[cfg(not(feature = "sqlite"))]
