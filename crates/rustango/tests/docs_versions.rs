@@ -378,3 +378,100 @@ mod tests {
         assert!(claimed_versions(text).is_empty());
     }
 }
+
+// ------------------------------------------------------------------
+
+/// Install pins — the version strings a reader **runs** rather than reads.
+///
+/// `claimed_versions` above matches three-component transcripts, so a
+/// two-component dependency pin slips past it entirely. Those are the
+/// ones that matter most: `cargo add` resolves them, and a stale one
+/// installs an old rustango while every other page describes the new
+/// one.
+///
+/// Nothing checked them, and they had drifted accordingly — `0.44` on
+/// two pages while 0.57 shipped, thirteen releases (#1407 audit D-22).
+///
+/// Scoped to lines naming `rustango`, so the `axum = "0.8"` and
+/// `serde = "1"` pins beside them are left alone.
+fn install_pins(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if !line.contains("rustango") {
+            continue;
+        }
+        // `rustango = "0.57"` and `rustango = { version = "0.57", … }`,
+        // including the renamed form `orm = { package = "rustango", … }`.
+        let Some(pos) = line.find("version = \"").or_else(|| {
+            line.find("rustango = \"")
+                .map(|p| p + "rustango = ".len() - 1)
+        }) else {
+            continue;
+        };
+        let rest = &line[pos..];
+        let Some(open) = rest.find('"') else { continue };
+        let Some(close) = rest[open + 1..].find('"') else {
+            continue;
+        };
+        let v = &rest[open + 1..open + 1 + close];
+        // Two components only; a three-component string is a transcript
+        // and belongs to `claimed_versions`.
+        let parts: Vec<&str> = v.split('.').collect();
+        if parts.len() == 2
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        {
+            out.push((i + 1, v.to_owned()));
+        }
+    }
+    out
+}
+
+#[test]
+fn every_install_pin_names_the_shipping_series() {
+    let root = repo_root();
+    let published = published_pages(&root);
+    let expected: String = CURRENT
+        .rsplit_once('.')
+        .map_or(CURRENT, |(mm, _)| mm)
+        .to_owned();
+
+    let mut pages: Vec<String> = Vec::new();
+    for locale_dir in ["docs", "docs/de", "docs/es", "docs/fr"] {
+        for page in &published {
+            pages.push(format!("{locale_dir}/{page}"));
+        }
+    }
+    pages.push("README.md".to_owned());
+    pages.push("crates/rustango-renamed-smoke/README.md".to_owned());
+    pages.sort();
+
+    let mut problems = Vec::new();
+    let mut checked = 0usize;
+    for rel in &pages {
+        let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+            continue;
+        };
+        for (lineno, found) in install_pins(&text) {
+            checked += 1;
+            if found != expected {
+                problems.push(format!("{rel}:{lineno}: pins `{found}`"));
+            }
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "found no install pins at all — the matcher stopped working"
+    );
+    assert!(
+        problems.is_empty(),
+        "{} install pin(s) name a series that is not shipping ({expected}):\n  {}\n\n\
+         These are the version strings a reader *runs* — `cargo add` resolves them — so a \
+         stale one installs an old rustango while the surrounding page describes the new \
+         one. Bump them to {expected}.",
+        problems.len(),
+        problems.join("\n  "),
+    );
+}
