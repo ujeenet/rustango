@@ -56,6 +56,12 @@ The same pass claimed "exactly six types implement `tower::Layer`" from one grep
 
 **So:** check two or three members of any family before writing a rule about it, and prefer naming the members over counting them — a count rots and a list can be re-grepped.
 
+**It applies to prose too, which is easier to miss.** Four wrong sentences about one subsystem are not necessarily four instances of *one* wrong sentence, and the fix that clears three can leave the fourth standing.
+
+`jobs.md` carries two different errors about retries. Three sites state the backoff sequence wrongly. A fourth, `jobs.md:79`, calls `MAX_ATTEMPTS` "the retry ceiling" — but the guard is `next_attempt >= max_attempts` with `attempt` starting at 0, so the default 5 gives one initial run plus **four** retries. Correcting the shift does nothing for that line. A finding written as "four sites, one error" would have shipped a fix that left it wrong, and someone setting `MAX_ATTEMPTS = 3` expecting three retries would still get two.
+
+Same file, same subsystem, same feature — and still two findings. Group sites by *the claim they make*, not by where they live.
+
 ### Two reachable paths
 
 A default that differs between the builder and the `Cli` path. Check both, and note that **the `Cli` path is usually the fail-closed one and the one users are actually on**.
@@ -78,7 +84,19 @@ Note the direction: the error propagated *outward* from a comment that was wrong
 
 **So:** when a doc claim is wrong, grep the source comments for the same claim before you edit, and follow it to the innermost one. If they match, fix the whole chain in one commit and say so — otherwise the doc rots back from a source nobody looked at.
 
-Related: a doc can also propagate a bug *into user code*. `jobs.md:226` ships `tokio::signal::ctrl_c().await?;   // block until Ctrl-C / SIGTERM` inside a snippet readers paste into their own `main`. `ctrl_c()` is SIGINT only; the comment is a factual error about tokio's API. Wrong comments in copyable examples are worse than wrong prose.
+### A wrong comment in a copyable snippet ships
+
+Wrong prose misleads a reader who can still go and check the code. A wrong comment inside a snippet people paste lands **in their codebase**, and from then on it is their bug, in their repo, with nothing pointing back here. Different blast radius, so rank it higher.
+
+`jobs.md:226` ships this inside a snippet readers paste into their own `main`:
+
+```rust
+tokio::signal::ctrl_c().await?;   // block until Ctrl-C / SIGTERM
+```
+
+`ctrl_c()` is SIGINT only. The comment is a factual error about tokio's API, and there is no SIGTERM handling anywhere in the crate — so the snippet teaches a reader to believe their worker drains on deploy when it does not.
+
+**So:** treat comments inside examples as code, not commentary. They are the part most likely to be copied verbatim and least likely to be checked.
 
 ### "The help says X" is false under most builds
 
