@@ -535,12 +535,13 @@ The classic counter bug — fetch a row, bump a field, save — loses updates wh
 
 ```rust
 use rustango::core::F;
+use rustango::sql::UpdaterPool as _;
 
 Post::objects()
     .eq("id", post_id)
     .update()
     .set_expr("view_count", F("view_count") + 1_i64)
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 ```
 
 Tri-dialect: emits `views = ("views" + $1)` on PG, ``views = (`views` + ?)`` on MySQL, identical on SQLite. The arithmetic is parenthesized so nested operations stay unambiguous: `F("a") + F("b") * 2`.
@@ -581,13 +582,14 @@ The `*_expr` family — `eq_expr`, `ne_expr`, `lt_expr`, `lte_expr`, `gt_expr`, 
 ```rust
 use rustango::core::funcs::{lower, upper, concat, coalesce, trim, abs, round};
 use rustango::core::F;
+use rustango::sql::UpdaterPool as _;
 
 // Normalize on write.
 User::objects()
     .eq("id", id)
     .update()
     .set_expr("email", lower(trim(F("email"))))
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // Build a derived column from two FKs + a literal.
 User::objects()
@@ -596,7 +598,7 @@ User::objects()
         "display_name",
         concat([F("first").into(), " ".into(), F("last").into()]),
     )
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // First non-NULL fallback.
 User::objects()
@@ -605,7 +607,7 @@ User::objects()
         "label",
         coalesce([F("nickname").into(), F("username").into(), "anonymous".into()]),
     )
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // Function on the WHERE rhs.
 User::objects()
@@ -616,7 +618,7 @@ User::objects()
 Player::objects()
     .update()
     .set_expr("score_int", abs(round(F("score") * 100_f64)))
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 ```
 
 ### Tri-dialect behavior
@@ -664,7 +666,7 @@ Post::objects()
     .eq("id", id)
     .update()
     .set_expr("published_at", now())
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // 2. Extract year / month / weekday into denormalized indexable
 // columns so cohort + day-of-week queries are cheap.
@@ -673,7 +675,7 @@ Signup::objects()
     .set_expr("bucket_year", extract_year(F("created_at")))
     .set_expr("bucket_month", extract_month(F("created_at")))
     .set_expr("weekday", extract_weekday(F("created_at")))
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // 3. Filter on the stored bucket — typed integer comparison, uses
 // the index, portable across all three dialects.
@@ -689,6 +691,7 @@ let friday_signups = Signup::objects()
 // typed literal — works the same on every backend and uses the
 // index on `created_at`:
 use chrono::{Datelike, TimeZone};
+use rustango::sql::UpdaterPool as _;
 let this_year = chrono::Utc::now().year();
 let year_start = chrono::Utc.with_ymd_and_hms(this_year, 1, 1, 0, 0, 0).unwrap();
 
@@ -704,7 +707,7 @@ Order::objects()
     .update()
     .set_expr("day_bucket", trunc_date(F("created_at")))     // DATE column on every backend
     .set_expr("month_bucket", trunc_month(F("created_at")))  // see caveat
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 // `month_bucket` should be `TIMESTAMPTZ` on PG and `VARCHAR(10)` /
 // `TEXT` on MySQL/SQLite — parse client-side when reading if you
 // need a typed `chrono::NaiveDate`.
@@ -740,6 +743,7 @@ Build a SQL `CASE WHEN … THEN … ELSE … END` with the `case()` / `.when()` 
 use rustango::core::case::{case, value};
 use rustango::core::{Column as _, F};
 use rustango::core::funcs::lower;
+use rustango::sql::UpdaterPool as _;
 
 // Custom ordering — published posts first, drafts last.
 Post::objects()
@@ -752,7 +756,7 @@ Post::objects()
             .when(Post::status.eq("draft"), 2_i64)
             .default(99_i64),
     )
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 let ordered = Post::objects()
     .order_by(&[("priority", false), ("id", false)])
@@ -768,7 +772,7 @@ Post::objects()
             .when(Post::status.eq("draft"), lower(F("title")))
             .default(F("title")),
     )
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // AND / OR composition in the WHEN predicate.
 let viral = Post::status.eq("published").and(Post::views.gt(1_000_i64));
@@ -781,7 +785,7 @@ Post::objects()
             .when(Post::status.eq("published"), value("live"))
             .default(value("pending")),
     )
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 ```
 
 **Builder shape:**
