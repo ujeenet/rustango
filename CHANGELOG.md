@@ -2,6 +2,20 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [Unreleased]
+
+### Fixed
+- **`[database]` pool settings are applied.** `pool_max_size` and `pool_min_size` were parsed, type-checked and unit-tested — and reached no pool at all. Setting them did nothing, which is worse than not offering them: a pool sized for production silently ran on sqlx's default of 10, with no error and nothing in the logs to explain it (#1373).
+- **Every pool is built through one constructor.** Construction had spread to ~22 production sites, most calling sqlx directly. The main Postgres `runserver` pool was among them, so it ran on sqlx's 30s acquire timeout — the value this crate elsewhere rejects as "a batch-tool number, not a web-server one". `tests/pool_construction.rs` keeps it from regrowing.
+- **`Pool::connect_lazy` applied no options at all**, not even an acquire timeout.
+- **SQLite pools built by the `manage` dispatch skipped the framework's pragmas**, so they got neither WAL journal mode nor the `?mode=rwc` default that every other SQLite pool gets.
+- **Generated `manage` binaries** (`manage startapp --with-manage-bin`) emitted `PgPool::connect`, so a scaffolded project's own binary bypassed the pool options its settings configured.
+
+### Added
+- `[database]` gains `pool_acquire_timeout_secs`, `pool_idle_timeout_secs` and `pool_max_lifetime_secs`, plus `RUSTANGO_DB_MAX_CONNECTIONS`, `RUSTANGO_DB_MIN_CONNECTIONS`, `RUSTANGO_DB_IDLE_TIMEOUT_SECS` and `RUSTANGO_DB_MAX_LIFETIME_SECS` as environment overrides. Environment wins over TOML, so a deploy can retune a pool without a config push.
+- `Pool::connect_postgres` / `connect_mysql` / `connect_sqlite` (and `_lazy` siblings) for callers that need a typed `sqlx::Pool<DB>` — `TenantPools::<DB>::new`, `migrate` and `health_router` all take one. Use these rather than sqlx's constructors, which apply none of the framework's options.
+- `sql::PoolTuning` and `sql::configure_pools`, called from `Cli::with_settings`.
+
 ## [0.57.0] — 2026-09-12
 
 ### Added

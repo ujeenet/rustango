@@ -114,6 +114,39 @@ pub enum Pool {
     Sqlite(sqlx::SqlitePool),
 }
 
+/// Apply [`tuning`] to a `PoolOptions` of any backend.
+///
+/// A macro rather than a generic function because sqlx's three
+/// `PoolOptions` types share no trait — the builder methods have the
+/// same names on each, but nothing relates them. Defined here because
+/// `macro_rules!` must precede its call sites.
+#[allow(unused_macros)]
+macro_rules! tuned {
+    ($opts:expr) => {{
+        let t = tuning();
+        let mut o = $opts.acquire_timeout(
+            t.acquire_timeout
+                .unwrap_or_else(|| Duration::from_secs(ACQUIRE_TIMEOUT_DEFAULT_SECS)),
+        );
+        if let Some(n) = t.max_connections {
+            o = o.max_connections(n);
+        }
+        if let Some(n) = t.min_connections {
+            o = o.min_connections(n);
+        }
+        // These two already take `Option`, where `None` means "no
+        // bound" — the same thing `None` means in `PoolTuning`, so an
+        // unset knob is left entirely alone rather than set to nothing.
+        if t.idle_timeout.is_some() {
+            o = o.idle_timeout(t.idle_timeout);
+        }
+        if t.max_lifetime.is_some() {
+            o = o.max_lifetime(t.max_lifetime);
+        }
+        o
+    }};
+}
+
 impl Pool {
     /// Connect to a database from a URL. Recognized schemes:
     ///
@@ -192,6 +225,11 @@ impl Pool {
     /// classified failure and a scheme/feature failure distinct, so
     /// each public wrapper can render whichever shape it promises.
     async fn connect_inner(url: &str, timeout: Duration) -> Result<Self, ConnectFail> {
+        // Deliberately *not* tuned beyond the caller's timeout. The only
+        // users of this path are one-shot probes — tenant preflight opens
+        // a pool, asks whether the database answers, and closes it. Giving
+        // a probe the application's sizing would have it eagerly open
+        // `min_connections` connections it is about to throw away.
         let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
         match scheme.as_str() {
             #[cfg(feature = "postgres")]
@@ -388,6 +426,10 @@ impl Pool {
 
     // ---- typed constructors ----
     //
+    // Stage 1 made these the single place a pool is built; the `tuned!`
+    // macro below is what that bought — one edit reaches every pool in
+    // the process, including the ones that used to call sqlx directly.
+    //
     // These are the **only** places a backend pool is built. Everything
     // else — `connect`, `connect_lazy`, `connect_inner`, and the
     // `manage` dispatch paths — routes through them.
@@ -408,8 +450,7 @@ impl Pool {
     /// As [`Self::connect`].
     #[cfg(feature = "postgres")]
     pub async fn connect_postgres(url: &str) -> Result<sqlx::PgPool, PoolError> {
-        sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(default_acquire_timeout())
+        tuned!(sqlx::postgres::PgPoolOptions::new())
             .connect(url)
             .await
             .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
@@ -422,8 +463,7 @@ impl Pool {
     /// As [`Self::connect`].
     #[cfg(feature = "postgres")]
     pub fn connect_postgres_lazy(url: &str) -> Result<sqlx::PgPool, PoolError> {
-        sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(default_acquire_timeout())
+        tuned!(sqlx::postgres::PgPoolOptions::new())
             .connect_lazy(url)
             .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
     }
@@ -435,8 +475,7 @@ impl Pool {
     /// As [`Self::connect`].
     #[cfg(feature = "mysql")]
     pub async fn connect_mysql(url: &str) -> Result<sqlx::MySqlPool, PoolError> {
-        sqlx::mysql::MySqlPoolOptions::new()
-            .acquire_timeout(default_acquire_timeout())
+        tuned!(sqlx::mysql::MySqlPoolOptions::new())
             .connect(url)
             .await
             .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
@@ -448,8 +487,7 @@ impl Pool {
     /// As [`Self::connect`].
     #[cfg(feature = "mysql")]
     pub fn connect_mysql_lazy(url: &str) -> Result<sqlx::MySqlPool, PoolError> {
-        sqlx::mysql::MySqlPoolOptions::new()
-            .acquire_timeout(default_acquire_timeout())
+        tuned!(sqlx::mysql::MySqlPoolOptions::new())
             .connect_lazy(url)
             .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
     }
@@ -466,8 +504,7 @@ impl Pool {
     #[cfg(feature = "sqlite")]
     pub async fn connect_sqlite(url: &str) -> Result<sqlx::SqlitePool, PoolError> {
         let opts = sqlite_connect_options(url)?;
-        sqlx::sqlite::SqlitePoolOptions::new()
-            .acquire_timeout(default_acquire_timeout())
+        tuned!(sqlx::sqlite::SqlitePoolOptions::new())
             .connect_with(opts)
             .await
             .map_err(|e| PoolError::Connect(ConnectDiagnosis::of(url, &e).to_string()))
@@ -480,9 +517,7 @@ impl Pool {
     #[cfg(feature = "sqlite")]
     pub fn connect_sqlite_lazy(url: &str) -> Result<sqlx::SqlitePool, PoolError> {
         let opts = sqlite_connect_options(url)?;
-        Ok(sqlx::sqlite::SqlitePoolOptions::new()
-            .acquire_timeout(default_acquire_timeout())
-            .connect_lazy_with(opts))
+        Ok(tuned!(sqlx::sqlite::SqlitePoolOptions::new()).connect_lazy_with(opts))
     }
 
     // ---- internal connect helpers ----
@@ -559,36 +594,139 @@ pub const ACQUIRE_TIMEOUT_ENV: &str = "RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS";
 /// an unreachable one six times sooner.
 const ACQUIRE_TIMEOUT_DEFAULT_SECS: u64 = 5;
 
-/// How long [`Pool::connect`] lets a caller wait for a connection.
+/// Env overrides for the rest of the pool knobs. Same shape and same
+/// reason as [`ACQUIRE_TIMEOUT_ENV`]: a deploy can retune a pool without
+/// a config push and a restart of the config pipeline.
+pub const MAX_CONNECTIONS_ENV: &str = "RUSTANGO_DB_MAX_CONNECTIONS";
+/// See [`MAX_CONNECTIONS_ENV`].
+pub const MIN_CONNECTIONS_ENV: &str = "RUSTANGO_DB_MIN_CONNECTIONS";
+/// See [`MAX_CONNECTIONS_ENV`].
+pub const IDLE_TIMEOUT_ENV: &str = "RUSTANGO_DB_IDLE_TIMEOUT_SECS";
+/// See [`MAX_CONNECTIONS_ENV`].
+pub const MAX_LIFETIME_ENV: &str = "RUSTANGO_DB_MAX_LIFETIME_SECS";
+
+/// How every pool this process opens is sized and timed.
 ///
-/// Note this bounds **both** dialing a new connection and queueing for a
-/// free one, so it cannot be set arbitrarily low: under a legitimate
-/// traffic spike the queue wait is real work, and too tight a bound
-/// converts a slow moment into errors. Tune with
-/// [`ACQUIRE_TIMEOUT_ENV`] rather than guessing here.
+/// `None` means "leave sqlx's default alone", not "zero" — a knob nobody
+/// set must behave exactly as it did before the knob existed.
 ///
-/// Read once — parsing an env var per connection would be silly, and
-/// the value cannot change without a restart anyway.
-fn default_acquire_timeout() -> Duration {
-    static CACHED: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let secs = match std::env::var(ACQUIRE_TIMEOUT_ENV) {
-            Ok(raw) => match raw.trim().parse::<u64>() {
-                Ok(0) | Err(_) => {
-                    tracing::warn!(
-                        target: "rustango::sql",
-                        value = %raw,
-                        "{ACQUIRE_TIMEOUT_ENV} must be a positive whole number of \
-                         seconds; using the {ACQUIRE_TIMEOUT_DEFAULT_SECS}s default"
-                    );
-                    ACQUIRE_TIMEOUT_DEFAULT_SECS
-                }
-                Ok(n) => n,
-            },
-            Err(_) => ACQUIRE_TIMEOUT_DEFAULT_SECS,
-        };
-        Duration::from_secs(secs)
-    })
+/// Installed once at boot by [`configure_pools`], which
+/// [`crate::manage::Cli::with_settings`] calls from `[database]`. Read by
+/// every constructor on [`Pool`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PoolTuning {
+    /// Upper bound on pooled connections. sqlx defaults to 10, which is
+    /// usually too small for a web server and far too large for SQLite.
+    pub max_connections: Option<u32>,
+    /// Connections kept open even when idle. sqlx defaults to 0, so the
+    /// first request after a quiet period pays the connect round-trip.
+    pub min_connections: Option<u32>,
+    /// How long a caller waits for a connection — both dialling a new
+    /// one and queueing for a free one. See
+    /// [`ACQUIRE_TIMEOUT_DEFAULT_SECS`] for why this one has a rustango
+    /// default rather than sqlx's.
+    pub acquire_timeout: Option<Duration>,
+    /// Close a connection that has sat idle this long. Defends against
+    /// a load balancer or `idle_in_transaction_session_timeout` cutting
+    /// it from the other end, which surfaces as a broken connection on
+    /// the next unlucky request.
+    pub idle_timeout: Option<Duration>,
+    /// Close a connection this old regardless of use. The knob that
+    /// matters behind a failover or a credential rotation: without it a
+    /// pool can hold connections to a server that is no longer the one
+    /// you want, or with credentials that have since been revoked.
+    pub max_lifetime: Option<Duration>,
+}
+
+static TUNING: std::sync::OnceLock<PoolTuning> = std::sync::OnceLock::new();
+
+/// Pools opened before anything called [`configure_pools`].
+///
+/// Counted rather than ignored because those pools silently ran on
+/// env-only tuning, and the operator who configured `[database]` has no
+/// other way to find out.
+static POOLS_BEFORE_CONFIG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Install the pool tuning for this process. **First call wins**, like
+/// the other boot globals, so a library cannot retune an application's
+/// pools out from under it.
+///
+/// Returns `false` if tuning was already set and this call changed
+/// nothing.
+///
+/// Env vars win over the values passed here — the same precedence
+/// `with_settings` uses for `bind`, so a deploy-time override does not
+/// need a config push.
+pub fn configure_pools(from_settings: PoolTuning) -> bool {
+    let installed = TUNING.set(merge_env_over(from_settings)).is_ok();
+    let missed = POOLS_BEFORE_CONFIG.load(std::sync::atomic::Ordering::Relaxed);
+    if installed && missed > 0 {
+        tracing::warn!(
+            target: "rustango::sql",
+            pools = missed,
+            "{missed} database pool(s) were opened before settings were applied \
+             and are running on environment defaults — move `.with_settings(…)` \
+             ahead of any pool construction"
+        );
+    }
+    installed
+}
+
+/// The tuning in force.
+///
+/// **Reading must never seal the cell.** An earlier cut used
+/// `get_or_init`, which meant any pool opened before `with_settings` —
+/// an app connecting in `main()`, a second test in the same binary —
+/// permanently froze env-only tuning for the whole process, silently.
+/// Now a read falls back without writing, and notes that it happened.
+fn tuning() -> PoolTuning {
+    match TUNING.get() {
+        Some(t) => *t,
+        None => {
+            POOLS_BEFORE_CONFIG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            merge_env_over(PoolTuning::default())
+        }
+    }
+}
+
+/// Overlay the env vars onto `base`, warning about values that do not
+/// parse rather than failing a boot over a typo'd knob.
+fn merge_env_over(base: PoolTuning) -> PoolTuning {
+    PoolTuning {
+        max_connections: parse_env(MAX_CONNECTIONS_ENV).or(base.max_connections),
+        min_connections: parse_env(MIN_CONNECTIONS_ENV).or(base.min_connections),
+        // The one knob with a rustango default rather than an sqlx one,
+        // so it is never `None`.
+        acquire_timeout: Some(
+            env_secs(ACQUIRE_TIMEOUT_ENV)
+                .or(base.acquire_timeout)
+                .unwrap_or_else(|| Duration::from_secs(ACQUIRE_TIMEOUT_DEFAULT_SECS)),
+        ),
+        idle_timeout: env_secs(IDLE_TIMEOUT_ENV).or(base.idle_timeout),
+        max_lifetime: env_secs(MAX_LIFETIME_ENV).or(base.max_lifetime),
+    }
+}
+
+fn env_secs(key: &str) -> Option<Duration> {
+    parse_env::<u64>(key).map(Duration::from_secs)
+}
+
+/// Parse a positive whole number from `key`, warning and ignoring
+/// anything else. Zero is rejected: every knob here is a bound, and a
+/// bound of zero is a mistake rather than an instruction.
+fn parse_env<T: std::str::FromStr + PartialEq + Default>(key: &str) -> Option<T> {
+    let raw = std::env::var(key).ok()?;
+    match raw.trim().parse::<T>() {
+        Ok(v) if v != T::default() => Some(v),
+        _ => {
+            tracing::warn!(
+                target: "rustango::sql",
+                value = %raw,
+                "{key} must be a positive whole number; ignoring it"
+            );
+            None
+        }
+    }
 }
 
 /// v0.40 — build a `SqliteConnectOptions` with the pragmas every
@@ -732,6 +870,176 @@ impl From<sqlx::MySqlPool> for Pool {
 impl From<sqlx::SqlitePool> for Pool {
     fn from(p: sqlx::SqlitePool) -> Self {
         Pool::Sqlite(p)
+    }
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::*;
+
+    /// The env knobs are process-global, so these serialize.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn clear() {
+        for k in [
+            MAX_CONNECTIONS_ENV,
+            MIN_CONNECTIONS_ENV,
+            IDLE_TIMEOUT_ENV,
+            MAX_LIFETIME_ENV,
+            ACQUIRE_TIMEOUT_ENV,
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+
+    /// Unconfigured, every knob stays `None` so sqlx keeps its own
+    /// defaults — except the acquire timeout, which rustango
+    /// deliberately tightens from 30s to 5s.
+    #[test]
+    fn an_unconfigured_process_changes_nothing_but_the_acquire_timeout() {
+        let _g = env_lock();
+        clear();
+        let t = merge_env_over(PoolTuning::default());
+        assert_eq!(t.max_connections, None);
+        assert_eq!(t.min_connections, None);
+        assert_eq!(t.idle_timeout, None);
+        assert_eq!(t.max_lifetime, None);
+        assert_eq!(
+            t.acquire_timeout,
+            Some(Duration::from_secs(ACQUIRE_TIMEOUT_DEFAULT_SECS))
+        );
+    }
+
+    #[test]
+    fn settings_are_carried_through_when_no_env_is_set() {
+        let _g = env_lock();
+        clear();
+        let from_toml = PoolTuning {
+            max_connections: Some(50),
+            min_connections: Some(5),
+            acquire_timeout: Some(Duration::from_secs(9)),
+            idle_timeout: Some(Duration::from_secs(600)),
+            max_lifetime: Some(Duration::from_secs(1800)),
+        };
+        assert_eq!(merge_env_over(from_toml), from_toml);
+    }
+
+    /// Same precedence `with_settings` uses for `bind`: a deploy-time
+    /// override must not need a config push and a restart.
+    #[test]
+    fn env_wins_over_settings() {
+        let _g = env_lock();
+        clear();
+        std::env::set_var(MAX_CONNECTIONS_ENV, "99");
+        let t = merge_env_over(PoolTuning {
+            max_connections: Some(50),
+            ..PoolTuning::default()
+        });
+        clear();
+        assert_eq!(t.max_connections, Some(99));
+    }
+
+    /// A typo'd knob must not take a bound to zero or fail the boot.
+    #[test]
+    fn an_unparseable_or_zero_value_is_ignored_not_obeyed() {
+        let _g = env_lock();
+        clear();
+        for bad in ["nonsense", "0", "-1", ""] {
+            std::env::set_var(MAX_CONNECTIONS_ENV, bad);
+            let t = merge_env_over(PoolTuning {
+                max_connections: Some(20),
+                ..PoolTuning::default()
+            });
+            assert_eq!(t.max_connections, Some(20), "{bad:?} should be ignored");
+        }
+        clear();
+    }
+
+    #[test]
+    fn seconds_become_durations() {
+        let _g = env_lock();
+        clear();
+        std::env::set_var(IDLE_TIMEOUT_ENV, "300");
+        let t = merge_env_over(PoolTuning::default());
+        clear();
+        assert_eq!(t.idle_timeout, Some(Duration::from_secs(300)));
+    }
+
+    /// **The assertion nobody wrote the first time.** `pool_max_size`
+    /// was parsed, type-checked and unit-tested for years while
+    /// reaching no pool at all, because every test asserted the
+    /// *parsed value* and none asserted the *effect*.
+    ///
+    /// A lazy pool is enough: `connect_lazy` builds the pool without
+    /// dialling, so the options are observable with no database — but
+    /// sqlx still wants a runtime to hang the pool's reaper on, hence
+    /// `#[tokio::test]`.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_configured_size_reaches_the_pool_itself() {
+        let _g = env_lock();
+        clear();
+        std::env::set_var(MAX_CONNECTIONS_ENV, "37");
+        std::env::set_var(MIN_CONNECTIONS_ENV, "3");
+        std::env::set_var(ACQUIRE_TIMEOUT_ENV, "11");
+
+        // Compare the pool against the tuning actually in force, not
+        // against the env vars just set. Another test in this binary
+        // may have sealed the tuning already — every `with_settings`
+        // test does — and asserting on `37` would then pass or fail by
+        // test order. That `merge_env_over` reads these vars is proved
+        // by the pure tests above; what is proved *here* is that
+        // whatever tuning says reaches the pool.
+        let expect = tuning();
+        let pool = Pool::connect_sqlite_lazy("sqlite::memory:").expect("build a lazy pool");
+        let opts = pool.options();
+
+        if let Some(n) = expect.max_connections {
+            assert_eq!(opts.get_max_connections(), n, "max_connections");
+        }
+        if let Some(n) = expect.min_connections {
+            assert_eq!(opts.get_min_connections(), n, "min_connections");
+        }
+        assert_eq!(
+            opts.get_acquire_timeout(),
+            expect
+                .acquire_timeout
+                .unwrap_or_else(|| Duration::from_secs(ACQUIRE_TIMEOUT_DEFAULT_SECS)),
+            "acquire_timeout"
+        );
+        clear();
+    }
+
+    /// Reading the tuning must not seal it. An earlier cut used
+    /// `get_or_init`, so a pool opened before `with_settings` froze
+    /// env-only tuning for the entire process — silently, and for
+    /// every pool after it.
+    #[test]
+    fn reading_the_tuning_leaves_it_configurable() {
+        let _g = env_lock();
+        // Assert the *property* — a read does not change whether the
+        // cell is set — rather than its absolute state. Another test in
+        // this binary may legitimately have called `configure_pools`
+        // already (any `with_settings` test does), and under some
+        // feature sets it runs first. An assertion on
+        // `TUNING.get().is_none()` passes or fails by test order, which
+        // is a flaky test dressed up as a real one.
+        let set_before = TUNING.get().is_some();
+        let _ = tuning();
+        let _ = tuning();
+        assert_eq!(
+            TUNING.get().is_some(),
+            set_before,
+            "reading the tuning changed whether it was set — with `get_or_init` a read \
+             sealed the cell, so any pool built before `with_settings` silently froze \
+             the whole process on environment defaults"
+        );
     }
 }
 

@@ -413,6 +413,18 @@ impl Cli {
             }
         }
 
+        // Pool sizing + timeouts, applied by every pool this process
+        // opens. Process-wide and first-call-wins, like the cookie
+        // policy below, because the pools it tunes are built later by
+        // verbs that never see `Settings`. Env wins over these values —
+        // the same precedence `bind` uses just above.
+        //
+        // Call this as early as possible: a pool opened before it lands
+        // runs on environment defaults, and `configure_pools` warns when
+        // that has happened rather than leaving it to be discovered
+        // under load (#1373).
+        let _ = crate::sql::configure_pools(s.database.pool_tuning());
+
         // Settings.routes → RouteConfig. Build the right preset
         // (friendly default / legacy v0.28) and apply per-field
         // overrides on top, so the TOML can mix-and-match.
