@@ -158,6 +158,26 @@ The count and the test name are visible without `--nocapture`, which is what a r
 
 This is the same shape as the previous rule: **make the degraded case say so, rather than make the degraded case impossible.** Impossible is usually too strong for the real feature matrix.
 
+### Clean the tree before you land the gate
+
+Every guard worth adding lands on a tree that currently fails it — that is why you are adding
+it. Land it first and you ship a red CI nobody can fix, which teaches people to ignore CI;
+the next real failure then arrives wearing the costume of the one they learned to skip.
+
+The sequence is **fix the tree → confirm the fix is *committed* → widen the gate**, and two
+things masquerade as the middle step:
+
+- **"Fixed" is not "committed."** A verified diff in a working tree is green locally and red
+  everywhere else. Where several sessions share a checkout it can also be carried onto the
+  wrong branch or stranded by someone else's `checkout`. Wait for a commit you can name.
+- **A fix on another branch is not on the tree the gate reads.** An install-pin guard branched
+  off the release tip once failed on sixteen pins that were already corrected — in a different
+  PR. Check where the gate runs, not where the fix lives.
+
+**So:** before adding a check, run it against the branch CI will use, count the failures, and
+land those fixes first. If the backlog is too large to fix at once, record it as an explicit
+allowlist with a budget — the ratchet pattern — rather than shipping a red gate.
+
 ### Prefer a gate that can't drift over one that checks for drift
 
 A test comparing two representations is weaker than a design with only one representation. `docs_contract.rs` exists because prose and code are genuinely separate artifacts — but where a single source can serve both, that beats any checker.
