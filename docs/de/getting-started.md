@@ -1,6 +1,6 @@
 # Erste Schritte: einen Blog mit Rustango bauen
 
-Diese Anleitung führt dich von einem leeren Verzeichnis bis zu einem deployten Blog: Beiträge, eine Admin-Oberfläche, eine JSON-API, JWT-Authentifizierung und Tests. Von Anfang bis Ende. Wenn du schon einmal Django, Laravel oder Rails verwendet hast, werden dir die meisten Schritte vertraut vorkommen; wir weisen unterwegs auf die Parallelen hin.
+Diese Anleitung führt dich von einem leeren Verzeichnis bis zu einem deployten Blog: Beiträge, eine Admin-Oberfläche, eine JSON-API, JWT-Authentifizierung und Tests. Von Anfang bis Ende.
 
 > **Dauer:** ~45 Minuten für die komplette Tour, ~10 Minuten, wenn du es nur laufen sehen willst.
 >
@@ -10,7 +10,29 @@ Diese Anleitung führt dich von einem leeren Verzeichnis bis zu einem deployten 
 
 ---
 
-## Was du zuerst brauchst
+## Was du vorher wissen solltest
+
+Zwei verschiedene Fragen — und die Doku hat bisher nur die zweite beantwortet.
+
+**Rust wird vorausgesetzt.** Kein Experten-Rust, aber du solltest mit Structs,
+Traits, `Result` und `?` vertraut sein und genug `async`/`.await` beherrschen, um
+eine Funktion zu lesen, ohne etwas nachschlagen zu müssen. Wenn das noch nicht auf
+dich zutrifft, kommt zuerst das [Rust Book](https://doc.rust-lang.org/book/);
+diese Anleitung bringt dir die Sprache darunter nicht bei.
+
+**Erfahrung mit Web-Backends wird nicht vorausgesetzt.** Wenn du noch nie eine
+Web-API gebaut hast, fang mit [Grundlagen der Web-APIs](glossary.md#grundlagen-der-web-apis)
+im Glossar an. Das ist eine Fünf-Minuten-Einführung zu Requests, Routen, Handlern
+und Migrationen, und sie ist genau für diese Lücke geschrieben. Komm danach hierher
+zurück.
+
+**Django wird nicht vorausgesetzt** — aber von dort stammt das Design, deshalb
+vergleicht diese Doku ständig damit. Diese Vergleiche sind Nebenbemerkungen, nie
+die Erklärung: Wenn dir eine Django-Parallele nichts sagt, überspring sie — der
+Schritt steht auch für sich. Wo ein Begriff echte Arbeit leistet, erklärt ihn das
+[Glossar](glossary.md) in einfachen Worten.
+
+## Was du installiert haben musst
 
 | Werkzeug | Wofür | Installation |
 |---|---|---|
@@ -33,6 +55,15 @@ davon ab. Wähle die Zeile, die zu deinem Rechner passt; alles Weitere ist ident
 | **Gar keinen Datenbankserver** | Mit SQLite laufen lassen (siehe unten) | Nichts zu installieren. Ideal zum Lernen. |
 | Postgres **ohne** Docker | Postgres nativ installieren, `DATABASE_URL` auf `localhost` zeigen lassen | Siehe [Natives Postgres](#natives-postgres-ohne-docker). |
 | Postgres **mit** Docker | `docker compose up -d` im generierten Projekt | Wovon der Rest dieser Anleitung ausgeht. |
+| MySQL oder MariaDB | Mit `--backend mysql` generieren | Siehe [MySQL](#mysql). |
+
+Was du auch wählst: Das Einzige, was sich ändert, ist `DATABASE_URL`. So sieht sie jeweils aus:
+
+```bash
+DATABASE_URL=postgres://user:password@localhost:5432/myblog_dev
+DATABASE_URL=mysql://user:password@localhost:3306/myblog_dev
+DATABASE_URL=sqlite://myblog_dev.db?mode=rwc
+```
 
 #### SQLite — ohne jede Einrichtung
 
@@ -90,6 +121,40 @@ DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
 > SQLite-Weg oben, um das Framework zu lernen, und komm zu Docker zurück, wenn
 > es ans Deployment geht — dafür ist das Container-Setup eigentlich da.
 
+> **Läuft bei dir schon lokal ein Postgres?** Dann ist Port 5432 belegt, und der
+> Container verliert das Rennen stillschweigend. Deine App verbindet sich mit dem
+> lokalen Server, der keine deiner Tabellen hat. Der Fehler, der zurückkommt, ist
+> nicht lesbar, weil ein nicht englischsprachiger Server seine Meldung in seiner
+> eigenen Kodierung schickt. Stoppe entweder den lokalen Dienst oder leg den
+> Container auf einen anderen Port.
+
+#### MySQL
+
+Generiere mit `--backend mysql`, dann sind die erzeugten `.env.example`, die
+`docker-compose.yml` und die Settings-Stufen alle für MySQL geschrieben:
+
+```bash
+cargo rustango new myblog --backend mysql
+```
+
+Willst du es nativ statt im Container betreiben, brauchst du eine Datenbank und
+einen Benutzer:
+
+```sql
+CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'rustango'@'localhost' IDENTIFIED BY 'rustango';
+GRANT ALL PRIVILEGES ON myblog_dev.* TO 'rustango'@'localhost';
+```
+
+```bash
+DATABASE_URL=mysql://rustango:rustango@localhost:3306/myblog_dev
+```
+
+`utf8mb4` lohnt sich bewusst zu setzen: Das ältere `utf8` von MySQL ist drei Bytes
+breit und kann kein Emoji speichern, was viel später als Schreibvorgang auftaucht,
+der an einer einzigen Zeile scheitert. MariaDB läuft über denselben Treiber und
+dasselbe URL-Schema.
+
 ---
 
 ## Schritt 1: Den Scaffolder installieren
@@ -105,6 +170,8 @@ Das ergänzt den `cargo rustango ...`-Unterbefehl global. Bestätige, dass er vo
 ```bash
 cargo rustango --help
 ```
+
+Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.57.0`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
 
 ---
 

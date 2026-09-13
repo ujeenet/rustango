@@ -1,6 +1,6 @@
 # Primeros pasos: construir un blog con Rustango
 
-Este recorrido te lleva desde un directorio vacío hasta un blog desplegado: publicaciones, una interfaz de administración, una API JSON, autenticación JWT y pruebas. De principio a fin. Si has usado Django, Laravel o Rails, la mayoría de los pasos te resultarán familiares; señalamos los paralelismos sobre la marcha.
+Este recorrido te lleva desde un directorio vacío hasta un blog desplegado: publicaciones, una interfaz de administración, una API JSON, autenticación JWT y pruebas. De principio a fin.
 
 > **Tiempo:** ~45 minutos para el recorrido completo, ~10 minutos si solo quieres verlo funcionar.
 >
@@ -10,7 +10,29 @@ Este recorrido te lleva desde un directorio vacío hasta un blog desplegado: pub
 
 ---
 
-## Qué necesitas primero
+## Qué necesitas saber primero
+
+Dos preguntas distintas, y la documentación solo respondía a la segunda.
+
+**Se da por supuesto Rust.** No hace falta ser experto, pero deberías sentirte
+cómodo con structs, traits, `Result` y `?`, y con el `async`/`.await` suficiente
+para leer una función sin tener que buscar cosas. Si todavía no es tu caso,
+primero está el [Rust Book](https://doc.rust-lang.org/book/); esta guía no va a
+enseñarte el lenguaje que hay debajo.
+
+**No se da por supuesta experiencia en backend web.** Si nunca has construido
+una API web, empieza por [Fundamentos de las API web](glossary.md#fundamentos-de-las-api-web)
+en el glosario. Es una introducción de cinco minutos a peticiones, rutas,
+handlers y migraciones, y está escrita justo para cubrir ese hueco. Vuelve aquí
+después.
+
+**No se da por supuesto Django** — pero es de donde viene el diseño, así que
+esta documentación lo compara con él constantemente. Esas comparaciones son
+apuntes al margen, nunca la explicación: si un paralelismo con Django no te dice
+nada, sáltatelo y el paso se sostiene igual por sí solo. Cuando un término hace
+trabajo de verdad, el [glosario](glossary.md) lo define en lenguaje llano.
+
+## Qué necesitas instalado
 
 | Herramienta | Para qué | Instalación |
 |---|---|---|
@@ -33,6 +55,15 @@ encaje con tu máquina; todo lo demás es idéntico:
 | **Ningún servidor de base de datos** | Ejecutar con SQLite (abajo) | Nada que instalar. Lo mejor para aprender. |
 | Postgres **sin** Docker | Instalar Postgres de forma nativa y apuntar `DATABASE_URL` a `localhost` | Ver [Postgres nativo](#postgres-nativo-sin-docker). |
 | Postgres **con** Docker | `docker compose up -d` en el proyecto generado | Lo que asume el resto de esta guía. |
+| MySQL o MariaDB | Generar el proyecto con `--backend mysql` | Ver [MySQL](#mysql). |
+
+Elijas la que elijas, lo único que cambia es `DATABASE_URL`. Esta es la forma de cada una:
+
+```bash
+DATABASE_URL=postgres://user:password@localhost:5432/myblog_dev
+DATABASE_URL=mysql://user:password@localhost:3306/myblog_dev
+DATABASE_URL=sqlite://myblog_dev.db?mode=rwc
+```
 
 #### SQLite — sin configuración
 
@@ -89,6 +120,41 @@ DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
 > para aprender el framework y vuelve a Docker cuando prepares el despliegue —
 > para eso está realmente la configuración de contenedores.
 
+> **¿Ya tienes Postgres corriendo en local?** Entonces el puerto 5432 está
+> ocupado y el contenedor pierde la carrera en silencio. Tu aplicación se
+> conecta al servidor local, que no tiene ninguna de tus tablas. El error que
+> devuelve no es legible, porque un servidor que no está en inglés manda su
+> mensaje en su propia codificación. O paras el servicio local, o mueves el
+> contenedor a otro puerto.
+
+#### MySQL
+
+Genera el proyecto con `--backend mysql` y el `.env.example`, el
+`docker-compose.yml` y los niveles de configuración generados estarán todos
+escritos para MySQL:
+
+```bash
+cargo rustango new myblog --backend mysql
+```
+
+Ejecutarlo de forma nativa en lugar de en el contenedor requiere una base de
+datos y un usuario:
+
+```sql
+CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'rustango'@'localhost' IDENTIFIED BY 'rustango';
+GRANT ALL PRIVILEGES ON myblog_dev.* TO 'rustango'@'localhost';
+```
+
+```bash
+DATABASE_URL=mysql://rustango:rustango@localhost:3306/myblog_dev
+```
+
+Merece la pena poner `utf8mb4` a propósito: el `utf8` antiguo de MySQL es de
+tres bytes y no puede almacenar un emoji, algo que aparece mucho más tarde como
+una escritura que falla en una sola fila. MariaDB funciona con el mismo driver y
+el mismo esquema de URL.
+
 ---
 
 ## Paso 1: Instalar el generador de andamiaje
@@ -104,6 +170,8 @@ Esto añade el subcomando `cargo rustango ...` de forma global. Confirma que est
 ```bash
 cargo rustango --help
 ```
+
+La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.57.0`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
 
 ---
 
