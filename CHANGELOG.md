@@ -2,6 +2,8 @@
 
 All notable changes to rustango. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project loosely follows [SemVer](https://semver.org/) — with the caveat that nothing pre-1.0 has a stability guarantee.
 
+## [Unreleased]
+
 ## [0.57.0] — 2026-09-12
 
 ### Added
@@ -6512,7 +6514,7 @@ Initial workspace scaffolding through the first usable axe of the framework.
 - **`rustango-admin`** auto-CRUD router over the inventory registry. Zero per-model wiring — every derive shows up.
 - **Postgres DDL writer** in `rustango-sql` + **`migrate::apply_all(&pool)` / `migrate::drop_all(&pool)`** for fresh-DB bootstrap.
 
-[Unreleased]: https://github.com/ujeenet/rustango/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ujeenet/rustango/compare/v0.57.0...HEAD
 [0.5.0]: https://github.com/ujeenet/rustango/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ujeenet/rustango/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ujeenet/rustango/compare/v0.2.0...v0.3.0
