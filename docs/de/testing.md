@@ -166,14 +166,24 @@ gelaufen ist. Gut zu wissen, bevor du ein grünes Ergebnis als Abdeckung liest.
 
 | Variable | Suites | Was sie brauchen |
 |---|---:|---|
-| *(keine)* | 180 | Eine In-Memory-SQLite-Datenbank. Laufen immer, nichts einzurichten. |
-| `DATABASE_URL` | 109 | Ein erreichbarer PostgreSQL-Server. |
-| `MYSQL_TEST_URL` | 30 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
+| *(keine)* | 213 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
+| `DATABASE_URL` | 93 | Ein erreichbarer PostgreSQL-Server. |
+| `MYSQL_TEST_URL` | 20 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
+| `MYSQL_URL` | 1 | Nichts, was du setzen solltest — siehe unten. |
 | `REDIS_TEST_URL` | 2 | Ein erreichbares Redis. |
+
+Eine Suite, die zwei Variablen liest, wird unter beiden gezählt, die Spalte
+summiert sich also nicht auf die Anzahl der Dateien.
+
+`MYSQL_URL` ist ein Bug, keine Option ([#1415](https://github.com/ujeenet/rustango/issues/1415)):
+eine Suite liest sie dort, wo jede andere MySQL-Suite `MYSQL_TEST_URL` liest. Wer
+die dokumentierte Variable setzt, lässt genau diese eine übersprungen — auch in
+CI. Sie steht hier, damit die Lücke sichtbar ist statt erschlossen, und die Zeile
+verschwindet, sobald die Suite korrigiert ist.
 
 MySQL ist das, worüber Leute stolpern: es liest seine eigene Variable, also führt
 eine Shell, in der nur `DATABASE_URL` gesetzt ist, die Postgres-Suites aus und
-überspringt stillschweigend alle dreißig MySQL-Suites.
+überspringt stillschweigend jede MySQL-Suite.
 
 ### Einen Skip von einem Pass unterscheiden
 

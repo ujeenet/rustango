@@ -168,14 +168,24 @@ ejecutado. Conviene saberlo antes de leer un resultado en verde como cobertura.
 
 | Variable | Suites | Qué necesitan |
 |---|---:|---|
-| *(ninguna)* | 180 | Una base de datos SQLite en memoria. Se ejecutan siempre, no hay nada que configurar. |
-| `DATABASE_URL` | 109 | Un servidor PostgreSQL accesible. |
-| `MYSQL_TEST_URL` | 30 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
+| *(ninguna)* | 213 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
+| `DATABASE_URL` | 93 | Un servidor PostgreSQL accesible. |
+| `MYSQL_TEST_URL` | 20 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
+| `MYSQL_URL` | 1 | Nada que debas definir — véase más abajo. |
 | `REDIS_TEST_URL` | 2 | Un Redis accesible. |
+
+Una suite que lee dos variables se cuenta en ambas, así que la columna no suma el
+número de archivos.
+
+`MYSQL_URL` es un error, no una opción ([#1415](https://github.com/ujeenet/rustango/issues/1415)):
+una suite la lee donde todas las demás suites de MySQL leen `MYSQL_TEST_URL`.
+Definir la variable documentada deja esa suite saltándose, también en CI. Aparece
+aquí para que la brecha se vea en lugar de deducirse, y la fila desaparece cuando
+se corrija la suite.
 
 MySQL es la que pilla a la gente: lee su propia variable, así que un shell con
 solo `DATABASE_URL` definida ejecuta las suites de Postgres y se salta en
-silencio las treinta de MySQL.
+silencio todas las de MySQL.
 
 ### Distinguir un salto de un aprobado
 

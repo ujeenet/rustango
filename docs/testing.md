@@ -165,14 +165,24 @@ you read a green result as coverage.
 
 | Variable | Suites | What they need |
 |---|---:|---|
-| *(none)* | 180 | An in-memory SQLite database. Always run, nothing to set up. |
-| `DATABASE_URL` | 109 | A reachable PostgreSQL server. |
-| `MYSQL_TEST_URL` | 30 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
+| *(none)* | 213 | Nothing — an in-memory or temp-file SQLite. Always run. |
+| `DATABASE_URL` | 93 | A reachable PostgreSQL server. |
+| `MYSQL_TEST_URL` | 20 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
+| `MYSQL_URL` | 1 | Nothing you should set — see below. |
 | `REDIS_TEST_URL` | 2 | A reachable Redis. |
 
+A suite reading two variables is counted under both, so the column does not sum
+to the number of files.
+
+`MYSQL_URL` is a bug, not an option ([#1415](https://github.com/ujeenet/rustango/issues/1415)):
+one suite reads it where every other MySQL suite reads `MYSQL_TEST_URL`. Setting
+the documented variable leaves that one skipping, including in CI. It is listed
+here so the gap is visible rather than inferred, and the row disappears when the
+suite is fixed.
+
 MySQL is the one that catches people: it reads its own variable, so a shell with
-only `DATABASE_URL` set runs the Postgres suites and silently skips all thirty
-MySQL ones.
+only `DATABASE_URL` set runs the Postgres suites and silently skips every MySQL
+one.
 
 ### Telling a skip from a pass
 

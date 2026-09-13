@@ -1,0 +1,168 @@
+//! Backing test for `docs/testing.md` — the live-suite table.
+//!
+//! That page tells a reader which `*_live.rs` suites need a server and
+//! which need nothing, as four counts. Counts rot: add a suite and the
+//! table is quietly wrong, with no signal, which is the same defect the
+//! page itself is warning about.
+//!
+//! It rotted before it shipped. The `*(none)*` row said 180, which is
+//! the number of suites using `sqlite::memory:` — but the row's label is
+//! "needs no environment variable", and that is 213. The other 33 use a
+//! temp-file SQLite, so they need nothing either. Two measurements, one
+//! published under the other's name.
+//!
+//! So the table is the assertion now, and this recomputes it. The docs
+//! are the only copy of the numbers; nothing here restates them.
+//!
+//! All four translations are checked, not just the English. They are
+//! four more copies of the same counts, and a table nobody can check is
+//! exactly how the English one came to be wrong.
+
+#![cfg(feature = "sqlite")]
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// Variables a live suite reads to decide whether it can run.
+///
+/// `MYSQL_URL` is one suite reading the wrong name (#1415). It stays on
+/// this list, and in the table, until that is fixed — a reader who sets
+/// `MYSQL_TEST_URL` should be able to see that one suite still will not
+/// run. When #1415 lands, its count goes to zero and the row comes out.
+const GATING_VARS: &[&str] = &[
+    "DATABASE_URL",
+    "MYSQL_TEST_URL",
+    "MYSQL_URL",
+    "REDIS_TEST_URL",
+];
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .expect("resolve repo root")
+}
+
+/// `variable -> suite count`, measured from the test sources. The
+/// no-variable bucket is keyed `(none)` to match the doc's row label.
+fn measured(root: &Path) -> BTreeMap<String, usize> {
+    let dir = root.join("crates/rustango/tests");
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+
+    for entry in std::fs::read_dir(&dir).expect("read tests dir").flatten() {
+        let name = entry.file_name().into_string().unwrap_or_default();
+        if !name.ends_with("_live.rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+
+        // A suite is counted under every gating variable it reads; one
+        // that reads none is counted as needing nothing.
+        let mut gated = false;
+        for var in GATING_VARS {
+            if text.contains(&format!("env::var(\"{var}\")")) {
+                gated = true;
+                // `MYSQL_URL` is counted under its own name rather than
+                // folded into `MYSQL_TEST_URL`. Folding would hide the
+                // fact that setting the documented variable does not run
+                // that suite — which is the whole of #1415. The table
+                // lists it too, so the bug is visible until it is fixed.
+                *counts.entry((*var).to_owned()).or_default() += 1;
+            }
+        }
+        if !gated {
+            *counts.entry("(none)".to_owned()).or_default() += 1;
+        }
+    }
+    counts
+}
+
+/// Every page carrying the table — the English one and its translations.
+const PAGES: &[&str] = &[
+    "docs/testing.md",
+    "docs/de/testing.md",
+    "docs/es/testing.md",
+    "docs/fr/testing.md",
+];
+
+/// `variable -> count`, parsed out of the live-suite table on one page.
+fn documented(root: &Path, page: &str) -> BTreeMap<String, usize> {
+    let text = std::fs::read_to_string(root.join(page)).unwrap_or_else(|_| panic!("read {page}"));
+    let mut out = BTreeMap::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with('|') {
+            continue;
+        }
+        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        if cells.len() < 2 {
+            continue;
+        }
+        let Ok(count) = cells[1].parse::<usize>() else {
+            continue;
+        };
+        // `*(none)*` or `` `DATABASE_URL` `` — strip the markup, keep the name.
+        let var = cells[0].trim_matches(|c| c == '*' || c == '`' || c == ' ');
+        // The no-variable row is written in the page's own language —
+        // `(none)`, `(keine)`, `(ninguna)`, `(aucune)`. Any parenthesised
+        // label is that row; anything else must name a variable we know,
+        // so an unrelated numeric table elsewhere is not mistaken for this one.
+        let key = if var.starts_with('(') {
+            "(none)"
+        } else if GATING_VARS.contains(&var) {
+            var
+        } else {
+            continue;
+        };
+        out.insert(key.to_owned(), count);
+    }
+    out
+}
+
+#[test]
+fn the_live_suite_table_matches_the_test_tree() {
+    let root = repo_root();
+    let measured = measured(&root);
+    let mut problems = Vec::new();
+
+    for page in PAGES {
+        let documented = documented(&root, page);
+
+        assert!(
+            !documented.is_empty(),
+            "parsed no counts out of {page} — the table moved or changed shape, \
+             so this guard is no longer reading what it claims to"
+        );
+
+        for (var, doc_count) in &documented {
+            match measured.get(var) {
+                Some(real) if real == doc_count => {}
+                Some(real) => {
+                    problems.push(format!("{page} — {var}: says {doc_count}, tree has {real}"))
+                }
+                None => problems.push(format!("{page} — {var}: says {doc_count}, tree has none")),
+            }
+        }
+        for var in measured.keys() {
+            if !documented.contains_key(var) {
+                problems.push(format!(
+                    "{page} — {var}: {} suite(s) read it and the table does not list it",
+                    measured[var]
+                ));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "the live-suite table disagrees with the tests:\n  {}\n\n\
+         A reader uses these to decide which servers to start. Update every \
+         translation — these pages are the only copy of the numbers, which is \
+         why they can be checked.",
+        problems.join("\n  "),
+    );
+}
