@@ -7,6 +7,7 @@
 //!   3. The wrapped `Q` works in both `.where_raw(q.into())` (untyped)
 //!      and `.where_(q)` (typed via Into<TypedExpr<T>>).
 
+use rustango::core::Model as _;
 use rustango::query::{QuerySet, Q};
 use rustango::sql::{Dialect, MySql, Postgres, Sqlite};
 

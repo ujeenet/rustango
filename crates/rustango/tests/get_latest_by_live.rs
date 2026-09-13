@@ -6,6 +6,7 @@
 
 #![cfg(feature = "sqlite")]
 
+use rustango::core::Model as _;
 use rustango::sql::{sqlx, Pool};
 use rustango::Model;
 

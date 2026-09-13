@@ -5,6 +5,7 @@
 
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]
 
+use rustango::core::Model as _;
 use rustango::sql::{raw_execute_pool, sqlx, FetcherPool as _, Pool};
 use rustango::Model;
 

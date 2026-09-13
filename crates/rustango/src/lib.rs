@@ -698,11 +698,7 @@ pub mod secrets;
 
 /// HTTP access log middleware — one tracing event per request with
 /// method / path / status / duration / IP. See [`access_log::AccessLogLayer`].
-///
-/// Available to `tenancy` as well as `admin`: it is plain axum +
-/// tracing with no dependency on either, and the operator console needs
-/// request logging for the same reasons the admin does.
-#[cfg(any(feature = "admin", feature = "tenancy"))]
+#[cfg(feature = "admin")]
 pub mod access_log;
 
 /// Test fixture loader — seed a database from JSON files.

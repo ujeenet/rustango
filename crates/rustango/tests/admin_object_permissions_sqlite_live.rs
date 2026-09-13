@@ -7,6 +7,7 @@
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
+use http_body_util::BodyExt;
 use rustango::sql::Pool;
 use rustango::Model;
 use serde_json::Value;
@@ -73,7 +74,7 @@ async fn fresh_pool() -> Pool {
 async fn status_of(method: Method, uri: &str, body: Body) -> StatusCode {
     let pool = fresh_pool().await;
     let app = build_app(pool);
-    let req = Request::builder().method(method).uri(uri);
+    let mut req = Request::builder().method(method).uri(uri);
     let req = req
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(body)
