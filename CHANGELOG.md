@@ -4,6 +4,24 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+- **A job runs with the audit source and timezone of whoever enqueued it.**
+  `tokio::spawn` inherits no `task_local!`, so a job used to run with none of
+  its caller's ambient context — an audit row written from one recorded
+  `system`, making "who deleted this customer?" a dead end whenever a job did
+  the deleting. `task_context::TaskContext` captures the context at *dispatch*
+  (not at worker spawn, which happens once at boot, long before any caller
+  exists) and reinstalls it around the handler. The source is marked as it
+  crosses: `user:42` becomes `job:user:42`, because a job enqueued on Monday
+  and retried on Thursday must not claim that user acted on Thursday. Only the
+  audit source and timezone cross — the transaction callback queue, the signal
+  suppression flag and the request session would each cause bugs if they did,
+  so the list is explicit rather than a loop over every task-local (#1229).
+  **Carried by `InMemoryJobQueue` only**: `PgJobQueue` stores its envelope as a
+  `rustango_jobs` row, so context needs a column and a migration, and the
+  scheduler needs a context assigned rather than captured. Both still run as
+  `System`.
+
 ## [0.57.0] — 2026-09-12
 
 ### Added
