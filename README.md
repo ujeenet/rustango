@@ -59,12 +59,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn list(Extension(pool): Extension<Arc<Pool>>) -> Json<Vec<User>> {
-    Json(User::objects().fetch_pool(&pool).await.unwrap())
+    Json(User::objects().fetch(&pool).await.unwrap())
 }
 ```
 
 ```sh
-DATABASE_URL='sqlite:./var/app.db?mode=rwc' cargo run --features sqlite,runserver
+# Backend selection lives in your Cargo.toml — see Install above.
+# `cargo run --features sqlite` would name a feature of *your* crate, not rustango's.
+DATABASE_URL='sqlite:./var/app.db?mode=rwc' cargo run
 ```
 
 The **same code** boots on Postgres with `DATABASE_URL=postgres://…` or MySQL with `DATABASE_URL=mysql://…` — no changes. Every SQLite connection turns on sensible defaults automatically (`PRAGMA foreign_keys = ON`, `journal_mode = WAL` for file-backed DBs, `busy_timeout = 5s`).
@@ -112,8 +114,9 @@ cargo rustango new shop --template tenant    # multi-tenancy + operator console
 ```bash
 cd myblog
 cp .env.example .env                         # edit DATABASE_URL
-docker compose up -d                         # starts Postgres
-cargo run -- migrate                         # generate + apply migrations
+docker compose up -d postgres                # starts Postgres only
+cargo run -- makemigrations                  # generate migrations from your models
+cargo run -- migrate                         # apply pending migrations
 cargo run                                    # http://localhost:8080
 ```
 
@@ -167,11 +170,11 @@ Full walkthrough: [getting started](docs/getting-started.md) · [scaffolding](do
 ```rust
 // Filter, order, paginate
 let recent = Post::objects()
-    .filter("published_at", Op::Lt, Utc::now())
-    .exclude("status", Op::Eq, "draft")
+    .filter("published_at__lt", Utc::now())
+    .exclude("status", "draft")
     .order_by(&[("published_at", true)])   // true = DESC
     .limit(20)
-    .fetch_pool(&pool).await?;
+    .fetch(&pool).await?;
 
 // Aggregate (scalar): .values(&[]) → one row, no GROUP BY
 let stats = Post::objects()
@@ -187,12 +190,12 @@ Supported: every field type (ints, floats, `String`, `bool`, `DateTime`/`Date`, 
 
 ## Migrations
 
-`makemigrations` diffs your models against the last migration snapshot and emits JSON operations; `migrate` applies pending ones and can `unapply` to roll back. Schema changes (create/alter/drop tables, columns, indexes, constraints, composite FKs) are auto-detected; data migrations are hand-authored with `sql` + `reverse_sql`. `embed_migrations!("migrations")` bakes them into the binary.
+`makemigrations` diffs your models against the last migration snapshot and emits JSON operations; `migrate` applies pending ones, and `downgrade` rolls back. Schema changes (create/alter/drop tables, columns, indexes, constraints, composite FKs) are auto-detected; data migrations are hand-authored with `sql` + `reverse_sql`. `embed_migrations!("migrations")` bakes them into the binary.
 
 ```bash
 cargo run -- makemigrations
 cargo run -- migrate
-cargo run -- migrate --unapply <name>
+cargo run -- downgrade                       # roll back the last migration
 ```
 
 📖 [Adopt an existing schema](docs/manage.md) with `manage inspectdb` — it emits `#[derive(Model)]` source for every table.
@@ -279,13 +282,13 @@ One hardened middleware chain: request IDs, access logging, rate limiting (in-pr
 
 ## The `manage` CLI
 
-`cargo run -- <cmd>` — Django's `manage.py` in Rust. Migrations (`makemigrations` / `migrate` / `inspectdb`), scaffolders (`startapp` / `make:viewset` / `make:serializer`), system commands (`check` / `check --deploy` / `shell`), and — with the `tenancy` feature — operator/tenant/superuser provisioning and recovery verbs.
+`cargo run -- <cmd>` — Django's `manage.py` in Rust. Migrations (`makemigrations` / `migrate` / `inspectdb`), scaffolders (`startapp` / `make:viewset` / `make:serializer`), system commands (`check` / `check --deploy` / `dbshell`), and — with the `tenancy` feature — operator/tenant/superuser provisioning and recovery verbs.
 
 📖 [manage reference](docs/manage.md)
 
 ## Configuration
 
-Layered config: a `<env>_settings.toml` pipeline (base → env → local → environment variables), typed sections, compile-time feature reflection, and a deploy audit. Everything has a sensible default; override only what you need.
+Layered config: a `<env>_settings.toml` pipeline (`default.toml` → `<env>_settings.toml` → `RUSTANGO__*` environment variables), typed sections, compile-time feature reflection, and a deploy audit. Everything has a sensible default; override only what you need.
 
 ## Testing
 

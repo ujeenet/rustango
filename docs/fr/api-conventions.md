@@ -29,9 +29,16 @@ Le nom d'une méthode indique ce qu'elle fait. Une fois ces suffixes assimilés,
 
 ### Fonctions
 
-- **`save_on(executor)`, `delete_on(executor)`** — les méthodes d'écriture prennent un *executor* (un pool, une connexion ou une transaction — la chose qui dialogue avec la base de données). Le suffixe `_on` signifie « exécute ceci contre l'executor que je te fournis ».
-- **`fetch_on(executor)`, `count_on(executor)`** — même suffixe `_on`, pour les lectures.
-- **`save()`, `fetch()`, `count()`** sans `_on` — raccourci qui appelle la version `_on` avec un `&pool` par défaut. Ne fonctionne que là où le queryset ou le modèle détient déjà une référence de pool (rare dans le code applicatif).
+- **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — le nom nu prend un `rustango::sql::Pool` et constitue le chemin ordinaire. Il fonctionne sur Postgres, MySQL et SQLite, en choisissant le dialecte en interne. C'est ce que veut la quasi-totalité du code applicatif.
+- **`fetch_on(executor)`, `count_on(executor)`** — le suffixe `_on` signifie « exécute ceci contre l'*executor* que je te fournis » — une connexion ou une transaction ouverte plutôt que le pool. À utiliser quand il faut plusieurs instructions dans une même transaction. **Les méthodes `_on` sont réservées à Postgres** (`#[cfg(feature = "postgres")]`).
+- **Les écritures inversent cette règle, et c'est le seul endroit où elle ne tient pas.** `save(&pool)`, `insert(&pool)` et `delete(&pool)` prennent un `sqlx::PgPool` spécifique au pilote ; sur un build sans la fonctionnalité `postgres`, elles **n'existent tout simplement pas** — choisir `sqlite` fait disparaître la méthode au lieu d'échouer avec un message qui en nomme la cause. Les versions multi-backends portent le suffixe `_pool` : `save_pool`, `insert_pool`, `delete_pool`, chacune prenant `rustango::sql::Pool`.
+
+  | | nom nu | version multi-backends |
+  |---|---|---|
+  | **Lectures** (`QuerySet`) | `fetch(&pool)` — déjà multi-backends | *est* le nom nu |
+  | **Écritures** (modèle) | `save(&pool)` — **Postgres uniquement** | `save_pool(&pool)` |
+
+  Le nom court est donc le plus étroit pour les écritures et le plus large pour les lectures. Cette inversion est une verrue, pas un choix de conception : elle est suivie dans [#1293](https://github.com/ujeenet/rustango/issues/1293) et sera résolue par un cycle de dépréciation plutôt que par un renommage. En attendant, **si vous n'êtes pas sur Postgres, écrivez `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — convertit DEPUIS une autre valeur (par ex. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — une méthode de builder qui définit une option et retourne l'objet, ce qui permet d'enchaîner les appels (par ex. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — le constructeur minimal. Les arguments qu'il prend sont des dépendances obligatoires (par ex. `RedisCache::new(url)` — vous ne pouvez pas construire le cache sans une URL).

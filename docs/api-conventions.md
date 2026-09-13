@@ -29,9 +29,16 @@ The name of a method tells you what it does. Once you learn these suffixes, you 
 
 ### Functions
 
-- **`save_on(executor)`, `delete_on(executor)`** — write methods take an *executor* (a pool, connection, or transaction — the thing that talks to the database). The `_on` suffix means "run this against the executor I'm handing you."
-- **`fetch_on(executor)`, `count_on(executor)`** — same `_on` suffix, for reads.
-- **`save()`, `fetch()`, `count()`** without `_on` — shorthand that calls the `_on` version with a default `&pool`. Only works where the queryset or model already holds a pool reference (rare in app code).
+- **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — the bare name takes a `rustango::sql::Pool` and is the everyday path. It works on Postgres, MySQL and SQLite, picking the dialect internally. This is what nearly all app code wants.
+- **`fetch_on(executor)`, `count_on(executor)`** — the `_on` suffix means "run this against the *executor* I'm handing you" — a connection or an open transaction rather than the pool. Reach for it when you need several statements inside one transaction. **`_on` methods are Postgres-only** (`#[cfg(feature = "postgres")]`).
+- **Writes invert this, and it is the one place the rule does not hold.** `save(&pool)`, `insert(&pool)` and `delete(&pool)` take a driver-specific `sqlx::PgPool`, so on a build without the `postgres` feature they **do not exist at all** — selecting `sqlite` makes the method vanish rather than fail with anything that names the cause. The multi-backend versions carry the `_pool` suffix: `save_pool`, `insert_pool`, `delete_pool`, each taking `rustango::sql::Pool`.
+
+  | | bare name | multi-backend version |
+  |---|---|---|
+  | **Reads** (`QuerySet`) | `fetch(&pool)` — already multi-backend | *is* the bare name |
+  | **Writes** (model) | `save(&pool)` — **Postgres only** | `save_pool(&pool)` |
+
+  So the short name is the narrow one for writes and the broad one for reads. That inversion is a wart, not a design: it is tracked in [#1293](https://github.com/ujeenet/rustango/issues/1293) and will be resolved with a deprecation cycle rather than a rename. Until then, **if you are not on Postgres, write `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — converts FROM another value (e.g. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — a builder method that sets one option and returns the object, so you can chain calls (e.g. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — the minimal constructor. Any arguments it takes are required dependencies (e.g. `RedisCache::new(url)` — you can't build the cache without a URL).
