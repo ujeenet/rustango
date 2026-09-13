@@ -103,7 +103,7 @@ pub use executor::LoadRelatedSqlite;
 pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
 pub use mysql::MySql;
-pub use pool::{Pool, PoolError};
+pub use pool::{configure_pools, Pool, PoolError, PoolTuning};
 pub use postgres::Postgres;
 pub use sqlite::Sqlite;
 
