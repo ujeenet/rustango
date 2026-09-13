@@ -75,6 +75,18 @@ done
 # ---- docs manifest: major.minor, the URL the site publishes under ----
 perl -pi -e "s/^version = \"[0-9]+\.[0-9]+\"/version = \"$NEW_MM\"/" docs/index.toml
 
+# ---- README install pins ----
+#
+# `major.minor`, and the only version strings here that a reader *runs*
+# rather than reads: `cargo add` resolves them. They sat at 0.56 through
+# the whole of 0.57 because nothing updated or checked them.
+#
+# Scoped to lines naming `rustango`, so the axum / tokio / serde pins in
+# the same code block are left alone.
+OLD_MM="${OLD%.*}" NEW_MM="$NEW_MM" perl -pi -e '
+    if (/rustango/) { s/"\Q$ENV{OLD_MM}\E"/"$ENV{NEW_MM}"/g }
+' README.md
+
 # ---- transcripts, in every locale ----
 #
 # Matched by their label rather than by the bare number, so prose about
