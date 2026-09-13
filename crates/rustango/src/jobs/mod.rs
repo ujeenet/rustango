@@ -102,15 +102,26 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     /// Run the job. Return `Ok(())` on success, `Err(Retryable(_))` to
     /// retry with backoff, `Err(Fatal(_))` to dead-letter immediately.
     ///
-    /// **No ambient context reaches here.** Workers are spawned with
-    /// [`tokio::spawn`], which does not inherit `tokio::task_local!`
-    /// state, so every scope the request path sets up is absent: the
-    /// audit source falls back to [`crate::audit::AuditSource::System`],
-    /// the active timezone falls back to the default, and there is no
-    /// admin session. Anything a job needs must travel in its payload
-    /// (#1229). For the audit case a job can re-enter the scope itself
-    /// with [`crate::audit::with_source`]. Tenant scoping is the same
-    /// story and is tracked separately in #1223.
+    /// **Some ambient context reaches here, and which depends on the
+    /// queue.** [`tokio::spawn`] inherits no `tokio::task_local!` state,
+    /// so anything a job sees had to be carried to it deliberately —
+    /// see [`crate::task_context::TaskContext`].
+    ///
+    /// | | [`InMemoryJobQueue`] | `PgJobQueue` |
+    /// |---|---|---|
+    /// | audit source | the enqueuer's, marked `job:` | `System` |
+    /// | active timezone | the enqueuer's | the default |
+    ///
+    /// `PgJobQueue` carries neither: its envelope is a `rustango_jobs`
+    /// row, so context needs a column and a migration (#1229).
+    ///
+    /// **Neither queue carries a session or a tenant**, and no job
+    /// should assume one. Anything else a job needs travels in its
+    /// payload. Tenant scoping is tracked separately in #1223.
+    ///
+    /// Do not wrap the body in [`crate::audit::with_source`] to
+    /// re-establish the caller — on `InMemoryJobQueue` that overwrites
+    /// a source already installed for you.
     async fn run(&self) -> Result<(), JobError>;
 }
 

@@ -620,7 +620,9 @@ pub mod media;
 pub mod notifications;
 
 /// Background job queue with worker pool — async work outside the request
-/// lifecycle. Currently in-memory only. See [`jobs::JobQueue`].
+/// lifecycle. In-memory, or Postgres-backed behind `jobs-postgres`. See
+/// [`jobs::JobQueue`]; the two carry different amounts of the enqueuer's
+/// context, which [`jobs::Job::run`] documents.
 #[cfg(feature = "jobs")]
 pub mod jobs;
 

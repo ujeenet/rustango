@@ -21,6 +21,23 @@
 //!
 //! So adding to this list is a deliberate act. Declaring a new
 //! `task_local!` elsewhere does not opt it in.
+//!
+//! ## What does not carry this yet
+//!
+//! Only `jobs::InMemoryJobQueue` installs a captured context. Two other
+//! spawn boundaries still drop everything, and a job or task running on
+//! them sees `System` and UTC exactly as before:
+//!
+//! - **`jobs::pg::PgJobQueue`** — its envelope is a `rustango_jobs` row,
+//!   not a struct in memory, so carrying a context needs a column and a
+//!   migration. This is the queue most production deployments run, so
+//!   the gap is the larger half of #1229, not a corner case.
+//! - **`scheduler`** — a tick has no enqueuer to inherit from,
+//!   so it needs a context *assigned* rather than captured.
+//!
+//! Until both land, "who did this?" is answerable for in-memory jobs
+//! only. Treat a `System` source on a job row as "unknown", not as
+//! "the framework".
 
 use crate::audit::AuditSource;
 
@@ -80,26 +97,18 @@ impl TaskContext {
     }
 }
 
-impl Default for TaskContext {
-    /// The context of work nobody triggered — a scheduled task, a boot
-    /// hook. `System`, UTC.
-    fn default() -> Self {
-        Self {
-            source: AuditSource::System,
-            offset: chrono::FixedOffset::east_opt(0).expect("UTC is a valid offset"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audit::{current_source, with_source, AuditSource};
 
+    /// Work nobody triggered — a boot hook, a test — captures as
+    /// `System`/UTC rather than inventing an actor or a locale.
     #[tokio::test]
-    async fn capture_outside_any_scope_is_system() {
+    async fn capture_outside_any_scope_is_system_utc() {
         let ctx = TaskContext::capture();
         assert_eq!(ctx.source().as_token(), "system");
+        assert_eq!(ctx.offset, chrono::FixedOffset::east_opt(0).unwrap());
     }
 
     #[tokio::test]
@@ -157,10 +166,28 @@ mod tests {
         );
     }
 
+    /// A job that enqueues another job compounds the marker, and the
+    /// actor stays on the end: `job:job:user:42`.
+    ///
+    /// Pinned rather than collapsed. The depth is an honest record of
+    /// how far the work drifted from the person who started it, and
+    /// collapsing it would claim user 42's own job did this. The column
+    /// is `max_length = 255`, so a chain would need ~60 hops to
+    /// truncate — well past anything real.
     #[tokio::test]
-    async fn default_is_system_utc() {
-        let ctx = TaskContext::default();
-        assert_eq!(ctx.source().as_token(), "system");
-        assert_eq!(ctx.offset, chrono::FixedOffset::east_opt(0).unwrap());
+    async fn deferring_a_second_time_compounds_the_marker() {
+        let first = with_source(AuditSource::User { id: "42".into() }, async {
+            TaskContext::capture()
+        })
+        .await
+        .deferred();
+
+        // What a handler dispatching its own follow-up job does: it
+        // captures from inside the context the worker installed.
+        let second = first
+            .install(async { TaskContext::capture().deferred() })
+            .await;
+
+        assert_eq!(second.source().as_token(), "job:job:user:42");
     }
 }
