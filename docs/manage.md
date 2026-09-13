@@ -58,6 +58,120 @@ for inline usage.
 - [Tenancy commands](#tenancy-commands)
 - [Custom subcommands](#custom-subcommands)
 - [Common workflows](#common-workflows)
+- [Every verb](#every-verb)
+
+---
+
+## Every verb
+
+The sections below explain the commonly used verbs in depth. This table is
+the **complete** list, taken from the two dispatchers
+(`migrate/manage.rs` and `tenancy/manage/mod.rs`) rather than from the
+prose — so a verb missing from the guide is still findable here. Run
+`<verb> --help` for its flags; the help text is authoritative and this
+page is not.
+
+Verbs marked **T** need the `tenancy` feature and are reached through
+`Cli::tenancy()`.
+
+### Migrations and schema
+
+| Verb | What it does |
+|---|---|
+| `makemigrations [name]` / `--empty <name>` | Generate a migration from the model diff |
+| `migrate [target]` / `--dry-run` / `--squash` | Apply pending migrations |
+| `downgrade [N]` | Roll back the last N migrations |
+| `showmigrations` / `status` | List migrations and their applied state |
+| `sqlmigrate <name>` | Print the SQL a migration would run, without running it |
+| `forget-pending <name>` | Delete an un-applied migration JSON |
+| `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Append a hand-written data operation |
+| `inspectdb [--schema <s>] [--table <t>]` | Read a live schema and emit `#[derive(Model)]` source |
+
+### Data
+
+| Verb | What it does |
+|---|---|
+| `dumpdata` | Export rows as JSON fixtures |
+| `loaddata <fixture.json> [--fail-fast]` | Load JSON fixtures back in |
+| `flush [--yes] [--app <label>] [--model <name>]` | Wipe every model table; the flags limit the set |
+| `prune [--model <name>] [--except <name>] [--pretend]` | Streaming bulk delete; `--pretend` reports without deleting |
+| `db:dump` / `db:restore` / `db:info` | Native dump / restore / inspect |
+| `dbshell` | Exec the native client (`psql` / `mysql` / `sqlite3`). Needs only `DATABASE_URL`, not a working pool — it is handled before the pool is built, so it works when sqlx cannot connect |
+
+### Scaffolders and generators
+
+| Verb | What it does |
+|---|---|
+| `startapp <name>` | Scaffold an app module |
+| `make:viewset` / `make:serializer` / `make:form` | Generate a ViewSet, Serializer or Form |
+| `make:job` / `make:middleware` / `make:notification` / `make:test` | Generate a job, middleware, notification or test |
+| `make:api_routes <app> [--tenant]` | Generate an app's API route module |
+
+### Cache, sessions and mail
+
+| Verb | What it does |
+|---|---|
+| `createcachetable` / `create-cache-table` `[--table <name>]` | Create the cache table (and the session table when sessions go to the DB) |
+| `clear-cache [--table <name>]` / `clearsessions` | Empty it; returns the number of rows deleted |
+| `sendtestemail --to <addr>` | Send a fixed test email through the configured backend |
+
+### Introspection
+
+| Verb | What it does |
+|---|---|
+| `showmodels [--format plain\|json] [--app <label>]` | Every registered model, sorted for deterministic output |
+| `showurls [--format plain\|json]` | Every named route, sorted |
+| `check [--deploy]` | Health checks; `--deploy` adds the production audits |
+| `create-admin` | Bootstrap an `AdminUser` row for projects using `admin::Builder::with_session_auth`. **Not** tenancy-gated — it takes a plain `&Pool` and writes `rustango_admin_users`, creating the table if absent. The only way to get a first admin login on a non-tenancy project |
+| `about` / `version` / `--version` | Build and version information |
+| `docs` | Open the documentation |
+
+### Users and access **T**
+
+| Verb | What it does |
+|---|---|
+| `create-superuser` / `set-superuser` | Create a superuser, or promote an existing user |
+| `create-user` / `create-operator` | Create a tenant user or an operator |
+| `reset-password` / `change-password` | Tenant-user password recovery |
+| `reset-operator-password` / `change-operator-password` | Operator password recovery |
+| `set-operator-active` | Enable or disable an operator |
+| `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
+| `grant-perm` / `revoke-perm` | Permissions by codename |
+| `seed-permissions [--slug <s>]` | Seed the default permission rows |
+| `create-api-key` | Issue an API key |
+
+### Tenants **T**
+
+| Verb | What it does |
+|---|---|
+| `create-tenant` / `edit-tenant` / `list-tenants` | Provision, edit, list |
+| `drop-tenant` / `purge-tenant` | Deactivate (reversible) / destroy (not) |
+| `migrate-tenants` / `migrate-registry` | Apply migrations across tenants, or to the registry |
+| `migrate-tenant-storage <slug> --to schema\|database` | Move a tenant between storage modes |
+| `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host routing |
+| `test-tenant-connection` | Verify a tenant's database is reachable |
+| `prewarm-pools` | Open tenant pools ahead of first request |
+| `run-server` / `runserver` | Run the multi-tenant server |
+| `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup and interactive entry points |
+
+### Audit **T**
+
+| Verb | What it does |
+|---|---|
+| `audit-log` | Read the audit trail |
+| `audit-cleanup` | Trim it |
+
+### MCP **T**
+
+Documented in full in [the MCP guide](mcp.md).
+
+| Verb | What it does |
+|---|---|
+| `create-agent` / `list-agents` / `rotate-agent-secret` | Agents |
+| `create-skill` / `list-skills` / `grant-skill` / `revoke-skill` | Skills |
+| `map-skill-permission` / `unmap-skill-permission` | Bind a skill to a permission |
+| `create-user-key` / `list-user-keys` / `revoke-user-key` | Per-user MCP credentials |
+| `list-runs` / `show-run` | Run history |
 
 ---
 

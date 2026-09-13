@@ -62,6 +62,7 @@ retour non nul en cas d'erreur de validation ou d'E/S. Exécutez
 - [Commandes de tenancy](#commandes-de-tenancy)
 - [Sous-commandes personnalisées](#sous-commandes-personnalisées)
 - [Flux de travail courants](#flux-de-travail-courants)
+- [Tous les verbes](#tous-les-verbes)
 
 ---
 
@@ -1495,3 +1496,115 @@ affiche environ 5s mais tombe à quelques millisecondes avec
 - [ViewSets](viewsets.md)
 - [Serializers](serializers.md)
 - [Guide de sécurité](security.md)
+
+## Tous les verbes
+
+Les sections ci-dessus détaillent les verbes courants. Ce tableau est la liste
+**complète**, tirée des deux dispatchers (`migrate/manage.rs` et
+`tenancy/manage/mod.rs`) plutôt que de la prose — un verbe absent du guide
+reste donc trouvable ici. Lancez `<verb> --help` pour ses drapeaux ; le texte
+d'aide fait foi, pas cette page.
+
+Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
+`Cli::tenancy()`.
+
+### Migrations et schéma
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `makemigrations [name]` / `--empty <name>` | Génère une migration à partir du diff des modèles |
+| `migrate [target]` / `--dry-run` / `--squash` | Applique les migrations en attente |
+| `downgrade [N]` | Annule les N dernières migrations |
+| `showmigrations` / `status` | Liste les migrations et leur état d'application |
+| `sqlmigrate <name>` | Affiche le SQL qu'une migration exécuterait, sans l'exécuter |
+| `forget-pending <name>` | Supprime un JSON de migration non appliquée |
+| `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Ajoute une opération de données écrite à la main |
+| `inspectdb [--schema <s>] [--table <t>]` | Lit un schéma existant et produit du source `#[derive(Model)]` |
+
+### Données
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `dumpdata` | Exporte des lignes en fixtures JSON |
+| `loaddata <fixture.json> [--fail-fast]` | Recharge des fixtures JSON |
+| `flush [--yes] [--app <label>] [--model <name>]` | Vide chaque table de modèle ; les drapeaux restreignent l'ensemble |
+| `prune [--model <name>] [--except <name>] [--pretend]` | Suppression en masse en flux ; `--pretend` signale sans supprimer |
+| `db:dump` / `db:restore` / `db:info` | Dump / restauration / inspection natifs |
+| `dbshell` | Exécute le client natif (`psql` / `mysql` / `sqlite3`). N'a besoin que de `DATABASE_URL`, pas d'un pool fonctionnel — traité avant la construction du pool, il marche donc quand sqlx n'arrive pas à se connecter |
+
+### Scaffolders et générateurs
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `startapp <name>` | Génère un module d'application |
+| `make:viewset` / `make:serializer` / `make:form` | Génère un ViewSet, un Serializer ou un Form |
+| `make:job` / `make:middleware` / `make:notification` / `make:test` | Génère un job, un middleware, une notification ou un test |
+| `make:api_routes <app> [--tenant]` | Génère le module de routes API d'une application |
+
+### Cache, sessions et courriel
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `createcachetable` / `create-cache-table` `[--table <name>]` | Crée la table de cache (et la table de sessions quand les sessions vont en base) |
+| `clear-cache [--table <name>]` / `clearsessions` | La vide ; renvoie le nombre de lignes supprimées |
+| `sendtestemail --to <addr>` | Envoie un courriel de test fixe via le backend configuré |
+
+### Introspection
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `showmodels [--format plain\|json] [--app <label>]` | Chaque modèle enregistré, trié pour une sortie déterministe |
+| `showurls [--format plain\|json]` | Chaque route nommée, triée |
+| `check [--deploy]` | Contrôles de santé ; `--deploy` ajoute les audits de production |
+| `create-admin` | Crée une ligne `AdminUser` pour les projets utilisant `admin::Builder::with_session_auth`. **Pas** conditionné à `tenancy` — prend un simple `&Pool` et écrit dans `rustango_admin_users`, en créant la table si besoin. Le seul moyen d'obtenir un premier login admin sur un projet non-tenancy |
+| `about` / `version` / `--version` | Informations de build et de version |
+| `docs` | Ouvre la documentation |
+
+### Utilisateurs et accès **T**
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `create-superuser` / `set-superuser` | Crée un superutilisateur, ou promeut un utilisateur existant |
+| `create-user` / `create-operator` | Crée un utilisateur de tenant ou un opérateur |
+| `reset-password` / `change-password` | Récupération du mot de passe d'un utilisateur de tenant |
+| `reset-operator-password` / `change-operator-password` | Récupération du mot de passe d'un opérateur |
+| `set-operator-active` | Active ou désactive un opérateur |
+| `create-role` / `assign-role` / `revoke-role` / `list-roles` | Rôles |
+| `grant-perm` / `revoke-perm` | Permissions par codename |
+| `seed-permissions [--slug <s>]` | Initialise les lignes de permission par défaut |
+| `create-api-key` | Émet une clé d'API |
+
+### Tenants **T**
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `create-tenant` / `edit-tenant` / `list-tenants` | Provisionner, éditer, lister |
+| `drop-tenant` / `purge-tenant` | Désactiver (réversible) / détruire (non) |
+| `migrate-tenants` / `migrate-registry` | Applique les migrations à tous les tenants, ou au registre |
+| `migrate-tenant-storage <slug> --to schema\|database` | Déplace un tenant d'un mode de stockage à l'autre |
+| `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Routage par hôte |
+| `test-tenant-connection` | Vérifie que la base d'un tenant est joignable |
+| `prewarm-pools` | Ouvre les pools de tenants avant la première requête |
+| `run-server` / `runserver` | Lance le serveur multi-tenant |
+| `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Points d'entrée de configuration et interactifs |
+
+### Audit **T**
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `audit-log` | Lit la piste d'audit |
+| `audit-cleanup` | L'élague |
+
+### MCP **T**
+
+Documenté intégralement dans [le guide MCP](mcp.md).
+
+| Verbe | Ce qu'il fait |
+|---|---|
+| `create-agent` / `list-agents` / `rotate-agent-secret` | Agents |
+| `create-skill` / `list-skills` / `grant-skill` / `revoke-skill` | Skills |
+| `map-skill-permission` / `unmap-skill-permission` | Lie un skill à une permission |
+| `create-user-key` / `list-user-keys` / `revoke-user-key` | Identifiants MCP par utilisateur |
+| `list-runs` / `show-run` | Historique des exécutions |
+
+---
