@@ -541,14 +541,16 @@ pub fn api() -> Router<()> {
             // getting-started Step 11 has to spell the helper out — see
             // `examples/getting_started_blog/src/urls.rs`, which defines it
             // by hand and is covered by `tests/admin_smoke.rs`.
-            "//! Project URL routing (template: fullstack — ORM + auto-admin).
+            "//! Project URL routing (template: fullstack — ORM + admin).
 //!
 //! `Router::new()` in `api()` is the auto-mount anchor —
 //! `manage startapp` inserts `.merge(crate::<name>::urls::api())`
 //! lines here.
 //!
-//! The auto-admin needs no wiring: `Cli` mounts it at `/admin` when the
-//! `admin` feature is on. Set the prefix with `Cli::admin_prefix(..)`.
+//! The admin is NOT wired up for you. Add an `admin_router(pool)` helper
+//! here and nest it under `/admin` from `main.rs` — getting-started
+//! Step 11 spells it out. Take `rustango::sql::Pool` so the helper names
+//! no driver and the project still builds on all three backends.
 
 use axum::routing::get;
 use axum::Router;

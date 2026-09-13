@@ -136,7 +136,7 @@ myblog/
     ├── main.rs                 # entry point: `Cli::new().api(urls::api()).run()`
     ├── models.rs               # every #[derive(Model)] lives here
     ├── views.rs                # axum request handlers
-    └── urls.rs                 # `pub fn api()` route aggregator + `admin_router(pool)`
+    └── urls.rs                 # `pub fn api()` route aggregator
 ```
 
 Hay un único binario: `cargo run` arranca el servidor HTTP, y cada verbo al estilo de Django (`migrate`, `makemigrations`, `startapp`, `check`, …) pasa por el mismo binario mediante `cargo run -- <verb>`. No hay un binario `manage` aparte.
@@ -382,12 +382,13 @@ mod urls;
 mod views;
 
 use crate::blog::models::Post;
+use rustango::sql::{FetcherPool, Pool};
 use rustango::{Auto, Model};
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 
     // CREATE
     let mut p = Post {
@@ -399,11 +400,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         published_at: Auto::default(),
         deleted_at: None,
     };
-    p.save(&pool).await?;
+    p.save_pool(&pool).await?;
     println!("created post id = {}", p.id.get().copied().unwrap());
 
     // READ
-    let posts = Post::objects().fetch_on(&pool).await?;
+    let posts = Post::objects().fetch(&pool).await?;
     for post in &posts {
         println!("- {}", post.title);
     }
@@ -417,7 +418,9 @@ Qué está pasando aquí, en términos sencillos:
 - `pool` es el pool de conexiones a la base de datos compartido. Le pasas una referencia (`&pool`) a las llamadas de consulta en lugar de abrir una conexión nueva cada vez.
 - Las llamadas a la base de datos son asíncronas, así que cada una termina en `.await` — eso pausa hasta que llega el resultado y luego continúa. El `?` tras un `.await` dice "si esto dio error, detente y devuelve el error".
 - `main` devuelve un `Result`, el tipo éxito-o-error de Rust, que es por lo que funcionan `?` y el `Ok(())` de cierre.
-- Para guardar una fila, llama a `.save(&pool)` sobre ella. Para leer filas, construye una consulta con `Post::objects()` y ejecútala con `.fetch_on(&pool)` — el equivalente aproximado de `Post.objects.all()` de Django. (`.save(&pool)` / `.fetch_on(&pool)` reciben un `sqlx::PgPool`; la variante escueta `.fetch(&pool)` recibe en su lugar un `rustango::sql::Pool` multi-backend — consulta la [guía del ORM](orm.md).)
+- Para guardar una fila, llama a `.save_pool(&pool)` sobre ella. Para leer filas, construye una consulta con `Post::objects()` y ejecútala con `.fetch(&pool)` — el equivalente aproximado de `Post.objects.all()` de Django.
+- `.fetch(…)` viene del trait `FetcherPool`, y por eso los imports lo traen. Sin esa línea el método no existe y el compilador lo dice sin explicar por qué.
+- Estas son las llamadas multi-backend, y todo lo anterior compila sin cambios en las tres bases de datos. También existen `.save(&pool)` y `.fetch_on(&pool)`, que reciben un `sqlx::PgPool` específico del driver y solo existen cuando la característica `postgres` está activada. Prefiere el par multi-backend salvo que quieras deliberadamente una sola base de datos. Consulta la [guía del ORM](orm.md).
 
 Ejecútalo:
 
@@ -431,18 +434,23 @@ Deberías ver el id de tu nueva publicación y las filas leídas de vuelta. Rest
 
 ## Paso 11: Activar el auto-admin
 
-**Rustango** incluye una interfaz de administración generada para tus modelos, igual que el admin de Django. El generador de andamiaje ya te dio un helper `admin_router(pool)` en `src/urls.rs` que construye el auto-admin a partir de un pool — solo tienes que anidarlo bajo `/admin` y pasarlo al `Cli`.
+**Rustango** incluye una interfaz de administración generada para tus modelos, igual que el admin de Django. Construirla son dos pasos pequeños: un helper que convierte un pool en un router de admin, y una sola llamada a `.nest(...)` para montarlo.
 
-Primero, dale un título al admin en `src/urls.rs`. El `admin_prefix` debe coincidir con la ruta bajo la que lo anidarás en el siguiente paso (`/admin`) para que los propios enlaces y las acciones de formulario del admin se resuelvan:
+Añade tú mismo el helper a `src/urls.rs` — el generador de andamiaje no lo genera, porque nada de lo que genera lo llamaría. El `admin_prefix` debe coincidir con la ruta bajo la que lo anidarás en el siguiente paso (`/admin`) para que los propios enlaces y las acciones de formulario del admin se resuelvan:
 
 ```rust
-pub fn admin_router(pool: PgPool) -> Router {
+use rustango::admin;
+use rustango::sql::Pool;
+
+pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
         .title("Myblog Admin")
         .admin_prefix("/admin") // must match the `.nest("/admin", …)` below
         .build()
 }
 ```
+
+`Builder::new` acepta el pool de cualquier backend, así que este helper no nombra ningún driver y funciona en las tres.
 
 Luego conecta un pool en `src/main.rs` y anida el admin en el router de la API antes de entregárselo al `Cli`. Conserva la línea `mod blog;` del Paso 7 — eso es lo que registra tu modelo `Post` con el admin:
 
@@ -455,7 +463,7 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = rustango::sql::Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 
     let api = urls::api().nest("/admin", urls::admin_router(pool));
 

@@ -8,7 +8,7 @@
 use axum::routing::get;
 use axum::Router;
 use rustango::admin;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 
 use crate::views;
 
@@ -19,7 +19,9 @@ pub fn api() -> Router<()> {
         .route("/healthz", get(views::healthz))
 }
 
-pub fn admin_router(pool: PgPool) -> Router {
+// Takes the multi-backend pool, so this file names no driver and
+// compiles on all three (#1272).
+pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
         .title("Myblog Admin")
         .admin_prefix("/admin") // must match the `.nest("/admin", …)` mount path
