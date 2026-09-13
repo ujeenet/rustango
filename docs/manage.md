@@ -546,7 +546,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.44.0
+rustango 0.57.0
 ```
 
 ### `about`
@@ -558,7 +558,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.44.0
+  version:        0.57.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -619,6 +619,52 @@ These commands exist only in multi-tenant projects (one app serving many
 isolated customers/orgs). They show up only when the project is built
 with `features = ["tenancy"]` AND `Cli::new()` is chained with
 `.tenancy()`.
+
+Everything the operator console can do, these can do too — so an action
+can run in a deploy hook, a cron, or on a box where nobody can open a
+browser.
+
+### `menu` / `actions`
+
+There are more than forty tenancy verbs. `--help` tells you they exist;
+the menu helps you run one you have never run before.
+
+```bash
+cargo run -- menu
+```
+
+```text
+  rustango manage — pick an action
+
+  TENANTS
+     1) list-tenants             every tenant in the registry
+     2) create-tenant            provision a new tenant
+     3) edit-tenant              change routing and display config
+     …
+  HOSTNAMES
+     7) list-hosts               every hostname a tenant answers on
+     …
+     q  quit
+     ?  every other verb: cargo run -- --help
+```
+
+Pick a number (or type the verb) and it asks only for what that verb
+will not ask for itself, echoes the command line it is about to run,
+runs it, and comes back for the next action. It re-enters the same
+dispatcher the flags go through, so it cannot drift from them.
+
+Related but different: [`wizard`](#wizard--init) is a one-time setup
+walk-through; `menu` is the standing list of what you can do afterwards.
+
+### `wizard` / `init`
+
+Walks a fresh project from "I just scaffolded this" to a working tenant,
+an operator, and a tenant superuser. Every step is opt-in — press `n` to
+skip one.
+
+```bash
+cargo run -- wizard
+```
 
 ### `init-tenancy`
 
@@ -695,6 +741,50 @@ cargo run -- create-tenant beta --mode database --database-url postgres://...
 | `--host-pattern <pattern>` | Override the host pattern used by `SubdomainResolver` |
 | `--no-migrate` | Skip applying tenant-scoped migrations after provisioning |
 
+### `edit-tenant <slug> [options]`
+
+Changes a tenant's routing and display config — the same fields the
+operator console's edit page offers.
+
+```bash
+cargo run -- edit-tenant acme --host-pattern shop.example.com
+cargo run -- edit-tenant acme --display-name "ACME Inc" --deactivate
+cargo run -- edit-tenant acme --clear host-pattern
+```
+
+| Flag | Description |
+|---|---|
+| `--display-name <name>` | Human-readable label |
+| `--host-pattern <host>` | Bare hostname the tenant answers on |
+| `--path-prefix <path>` | One leading-slash segment, e.g. `/acme` |
+| `--port <n>` | Port the tenant is matched on |
+| `--database-url <url>` | Rotate the tenant's connection URL |
+| `--activate` / `--deactivate` | Put the tenant in or out of service |
+| `--clear <field>` | Empty one of `host-pattern`, `path-prefix`, `port` |
+
+**Only the fields you name are touched.** "Leave alone" and "clear it"
+are different instructions, which is what `--clear` is for — it avoids
+relying on `--host-pattern ""`, which some shells and CI runners eat.
+
+Values are validated the way `create-tenant` validates them, so a host
+pattern carrying a port, or a path prefix the resolver could never
+produce, is refused rather than stored to silently never match.
+
+Rotating `--database-url` evicts the tenant's cached pool, so the next
+request reconnects with the new credential; other edits leave warm
+connections alone.
+
+### `test-tenant-connection <url> [flags]`
+
+Probes a database URL before you commit to it — connects, and by default
+writes and rolls back, so a read-only credential is caught here rather
+than on the first tenant request.
+
+```bash
+cargo run -- test-tenant-connection postgres://user:pw@host/db
+cargo run -- test-tenant-connection "$URL" --no-write-probe --timeout 5
+```
+
 ### `drop-tenant <slug> [--confirm <slug>]`
 
 Deactivates a tenant by setting `active = false`. This is the soft,
@@ -729,6 +819,39 @@ Lists every tenant with its storage mode and active/inactive status.
 cargo run -- list-tenants
 ```
 
+### Hostnames
+
+A tenant is reachable at its subdomain and, optionally, at extra
+hostnames you bind to it. One hostname routes to exactly one tenant.
+
+```bash
+cargo run -- list-hosts acme
+cargo run -- add-host acme shop.example.com
+cargo run -- set-host-enabled acme shop.example.com --off   # park it
+cargo run -- remove-host acme shop.example.com
+```
+
+| Verb | What it does |
+|---|---|
+| `list-hosts <slug>` | Every hostname the tenant answers on, base host first |
+| `add-host <slug> <hostname>` | Bind one. Refused if another tenant already claims it |
+| `remove-host <slug> <hostname>` | Unbind one |
+| `set-host-enabled <slug> <hostname> --on\|--off` | Serve or park it |
+
+Parking (`--off`) keeps the row while taking the host out of service —
+useful while DNS propagates, or when retiring a domain you may want
+back.
+
+Hostnames are normalized on the way in (lowercased, no scheme, no port,
+no path), because the stored value is compared byte-for-byte against the
+`Host` header. The verbs echo what was **stored**, not what you typed.
+
+The **base host** comes from the tenant's `host_pattern` and has no row
+of its own, so it cannot be removed here — change it with
+[`edit-tenant --host-pattern`](#edit-tenant-slug-options). There is
+deliberately no `rename-host`: remove and add instead, so the change
+reaches other running pods.
+
 ### `create-operator <username> --password <pwd>`
 
 Creates an operator — a global admin who can manage every tenant from a
@@ -737,7 +860,44 @@ any one tenant.
 
 ```bash
 cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --generate     # print a random one instead
 ```
+
+Omit `--password` on a terminal and it prompts without echoing.
+
+### `list-operators`
+
+Every operator, with whether they are active and when they were created,
+plus a count of how many are still active.
+
+```bash
+cargo run -- list-operators
+```
+
+### `set-operator-active <username> --on|--off`
+
+Turns an operator's access off or back on. The row stays either way, so
+"who did this?" still resolves later — and the console re-reads it on
+every request, so a deactivation takes effect on their next click rather
+than whenever their cookie expires.
+
+```bash
+cargo run -- set-operator-active grace --off   # offboarding
+cargo run -- set-operator-active grace --on
+```
+
+Two things it refuses, for the same reason the console refuses them:
+
+- **Deactivating the last active operator.** That locks everyone out of
+  the console, and only a shell on the registry could undo it.
+- **Deactivating yourself**, when the request comes from the console.
+  The CLI has no session to lock itself out of, so only the first rule
+  applies there.
+
+The direction is required — guessing would either revoke access or
+restore it, and both are wrong to do silently. Setting the state it
+already has reports that and succeeds, so a re-run provisioning script
+does not go red.
 
 ### `create-user <tenant> <username> --password <pwd> [--superuser]`
 
@@ -830,7 +990,55 @@ and optionally limit it to one tenant.
 cargo run -- audit-cleanup --days 90                       # delete > 90 days old
 cargo run -- audit-cleanup --keep-last 50                  # keep most recent 50 per row
 cargo run -- audit-cleanup --keep-last 50 --tenant acme    # scoped
+cargo run -- audit-cleanup --registry --days 90            # the registry's log only
 ```
+
+By default it sweeps the registry's own log **and** every active
+tenant's. The registry log is where the operator console records what
+operators did, so it grows with console use. Naming one tenant
+(`--tenant`) asks for that tenant and leaves the registry alone. One
+broken tenant is reported and counted rather than ending the sweep.
+
+### Inspecting what happened
+
+Three read-only verbs that print what the console renders — the answers
+you want during an incident, without a browser or a SQL client.
+
+```bash
+cargo run -- list-runs                        # recent provisioning + migration runs
+cargo run -- list-runs --kind migrate --limit 50
+cargo run -- show-run 42                      # one run's steps
+cargo run -- audit-log                        # who changed what, and when
+cargo run -- audit-log --pk acme --limit 100
+```
+
+| Verb | Flags |
+|---|---|
+| `list-runs` | `--limit <n>`, `--kind provision\|migrate`, `--state <s>` |
+| `show-run <id>` | — |
+| `audit-log` | `--limit <n>`, `--table <t>`, `--pk <v>`, `--operation <o>`, `--source <s>` |
+
+`list-runs` is newest-first and its filters run in the query, so asking
+for a `migrate` run finds one even when the most recent runs are all
+provisions. `show-run` prints the run's header and every step it
+recorded, which is what tells you *where* a failure happened.
+
+Tenants created from the CLI are recorded too, tagged `requested_by =
+cli`, so the history covers both surfaces.
+
+### `prewarm-pools`
+
+Opens a connection for every active database-mode tenant, up front.
+Worth running after a deploy, a registry restart, or a credential
+rotation: it turns "the first request to each tenant pays the connect"
+into one deliberate wait, and surfaces an unreachable tenant before a
+user finds it.
+
+```bash
+cargo run -- prewarm-pools
+```
+
+The operator console has a button for this too, on the tenant list.
 
 ---
 

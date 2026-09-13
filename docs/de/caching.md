@@ -27,15 +27,15 @@ oder Laravels `Cache`-Fassade.
 
 ## Inhaltsverzeichnis
 
-- [Schritt 1 — Ein Backend wählen](#step-1--pick-a-backend)
-- [Schritt 2 — get / set / delete](#step-2--get--set--delete)
-- [Schritt 3 — get_or_set (Cache-Aside)](#step-3--get_or_set-cache-aside)
-- [Typisierte JSON-Werte](#typed-json-values)
-- [TTL und Ablauf](#ttl-and-expiry)
-- [Backends tauschen](#swapping-backends)
-- [Caching unter Multi-Tenancy](#caching-under-multi-tenancy)
-- [Referenz](#reference)
-- [Siehe auch](#see-also)
+- [Schritt 1 — Ein Backend wählen](#schritt-1--ein-backend-wählen)
+- [Schritt 2 — get / set / delete](#schritt-2--get--set--delete)
+- [Schritt 3 — get_or_set (Cache-Aside)](#schritt-3--get_or_set-cache-aside)
+- [Typisierte JSON-Werte](#typisierte-json-werte)
+- [TTL und Ablauf](#ttl-und-ablauf)
+- [Backends tauschen](#backends-tauschen)
+- [Caching unter Multi-Tenancy](#caching-unter-multi-tenancy)
+- [Referenz](#referenz)
+- [Siehe auch](#siehe-auch)
 
 ---
 

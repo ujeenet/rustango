@@ -27,10 +27,10 @@ répondues par 401/403 (flux API) — avant même d'atteindre le handler.
 ---
 
 ## Table des matières
-- [Démarrage rapide](#quick-start) · [Verrous navigateur vs API](#browser-vs-api-gates)
-- [La famille de verrous](#the-gate-family) · [Verrous par prédicat et par rôle](#predicate-and-role-gates)
-- [Verrous de permission](#permission-gates) · [L'aller-retour `?next=`](#the-next-round-trip)
-- [Remarques et limites](#notes-and-limits)
+- [Démarrage rapide](#démarrage-rapide) · [Verrous navigateur vs API](#verrous-navigateur-vs-api)
+- [La famille de verrous](#la-famille-de-verrous) · [Verrous par prédicat et par rôle](#verrous-par-prédicat-et-par-rôle)
+- [Verrous de permission](#verrous-de-permission) · [L'aller-retour `?next=`](#laller-retour-next)
+- [Remarques et limites](#remarques-et-limites)
 
 ---
 

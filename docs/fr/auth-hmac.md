@@ -24,13 +24,13 @@ sous la forme d'une seule couche tower.
 
 ## Table des matières
 
-- [Quand l'utiliser](#when-to-use-it)
-- [Ce qui est signé](#what-gets-signed)
-- [Serveur : vérifier avec la couche](#server-verify-with-the-layer)
-- [Client : signer une requête](#client-sign-a-request)
-- [Dérive d'horloge et rejeu](#clock-skew-and-replay)
-- [Limites](#limits)
-- [Voir aussi](#see-also)
+- [Quand l'utiliser](#quand-lutiliser)
+- [Ce qui est signé](#ce-qui-est-signé)
+- [Serveur : vérifier avec la couche](#serveur--vérifier-avec-la-couche)
+- [Client : signer une requête](#client--signer-une-requête)
+- [Dérive d'horloge et rejeu](#dérive-dhorloge-et-rejeu)
+- [Limites](#limites)
+- [Voir aussi](#voir-aussi)
 
 ---
 

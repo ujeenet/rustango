@@ -1,0 +1,88 @@
+{% extends "op_layout.html" %}
+{% block title %}{{ verb }} {{ slug }} — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/orgs">Organizations</a><span class="sep">/</span><a href="/orgs/provision">Runs</a><span class="sep">/</span>{{ verb }} {{ slug }}</p>
+<h1>{{ verb }} <code>{{ slug }}</code></h1>
+
+<p class="lead">
+  Run #{{ run_id }} — <strong id="run-state" data-state="{{ state }}">{{ state }}</strong>
+  {% if not terminal %}<span id="live-note"> · following live</span>{% endif %}
+</p>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<table>
+  <thead>
+    <tr><th>#</th><th>Step</th><th>Status</th><th>Detail</th></tr>
+  </thead>
+  <tbody id="events">
+    {% for e in events %}
+    <tr data-seq="{{ e.seq }}">
+      <td>{{ e.seq }}</td>
+      <td><code>{{ e.step }}</code></td>
+      <td class="status-{{ e.status }}">{{ e.status }}</td>
+      <td>{{ e.message }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<p class="form-actions"><a href="/orgs" class="btn btn-secondary">Back to tenants</a></p>
+
+{% if not terminal %}
+<script>
+  // Resume from the last row already rendered, so a reload does not
+  // replay what is on screen — and a reconnect mid-run picks up
+  // exactly where it stopped. The server honours `Last-Event-ID` too;
+  // this is the explicit form for the first connection.
+  (function () {
+    const tbody = document.getElementById("events");
+    const rows = tbody.querySelectorAll("tr[data-seq]");
+    const last = rows.length ? rows[rows.length - 1].dataset.seq : 0;
+
+    const es = new EventSource("/orgs/provision/{{ run_id }}/stream?after=" + last);
+
+    es.addEventListener("step", (msg) => {
+      const e = JSON.parse(msg.data);
+      const tr = document.createElement("tr");
+      tr.dataset.seq = e.seq;
+      const cells = [
+        [e.seq, null],
+        [e.step, "code"],
+        [e.status, null],
+        [e.message, null],
+      ];
+      cells.forEach(([value, tag], i) => {
+        const td = document.createElement("td");
+        if (i === 2) { td.className = "status-" + e.status; }
+        // textContent, never innerHTML: `message` carries driver text
+        // and hostnames that are not ours.
+        if (tag) {
+          const el = document.createElement(tag);
+          el.textContent = value;
+          td.appendChild(el);
+        } else {
+          td.textContent = value;
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+
+    es.addEventListener("done", () => {
+      es.close();
+      // Re-read rather than guess the final state: the stream says
+      // "finished", the page says what it finished as.
+      window.location.reload();
+    });
+
+    es.addEventListener("error", (msg) => {
+      const note = document.getElementById("live-note");
+      if (note && msg.data) { note.textContent = " · " + msg.data; }
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}

@@ -5,6 +5,135 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ## [Unreleased]
 
 ### Fixed
+- **`[database]` pool settings are applied.** `pool_max_size` and `pool_min_size` were parsed, type-checked and unit-tested — and reached no pool at all. Setting them did nothing, which is worse than not offering them: a pool sized for production silently ran on sqlx's default of 10, with no error and nothing in the logs to explain it (#1373).
+- **Every pool is built through one constructor.** Construction had spread to ~22 production sites, most calling sqlx directly. The main Postgres `runserver` pool was among them, so it ran on sqlx's 30s acquire timeout — the value this crate elsewhere rejects as "a batch-tool number, not a web-server one". `tests/pool_construction.rs` keeps it from regrowing.
+- **`Pool::connect_lazy` applied no options at all**, not even an acquire timeout.
+- **SQLite pools built by the `manage` dispatch skipped the framework's pragmas**, so they got neither WAL journal mode nor the `?mode=rwc` default that every other SQLite pool gets.
+- **Generated `manage` binaries** (`manage startapp --with-manage-bin`) emitted `PgPool::connect`, so a scaffolded project's own binary bypassed the pool options its settings configured.
+
+### Added
+- `[database]` gains `pool_acquire_timeout_secs`, `pool_idle_timeout_secs` and `pool_max_lifetime_secs`, plus `RUSTANGO_DB_MAX_CONNECTIONS`, `RUSTANGO_DB_MIN_CONNECTIONS`, `RUSTANGO_DB_IDLE_TIMEOUT_SECS` and `RUSTANGO_DB_MAX_LIFETIME_SECS` as environment overrides. Environment wins over TOML, so a deploy can retune a pool without a config push.
+- `Pool::connect_postgres` / `connect_mysql` / `connect_sqlite` (and `_lazy` siblings) for callers that need a typed `sqlx::Pool<DB>` — `TenantPools::<DB>::new`, `migrate` and `health_router` all take one. Use these rather than sqlx's constructors, which apply none of the framework's options.
+- `sql::PoolTuning` and `sql::configure_pools`, called from `Cli::with_settings`.
+
+## [0.57.0] — 2026-09-12
+
+### Added
+- **`cargo rustango new` picks a backend and extra features** (#1345).
+  `--backend postgres|sqlite|mysql` decides what `cargo run` uses *and* shapes
+  the whole project to match — the `DATABASE_URL` in `.env.example`, the
+  services in `docker-compose.yml`, the `url` in every settings tier, and the
+  README's run instructions. SQLite gets no database service at all. All three
+  forwards stay defined, so the other two remain one flag away.
+
+  `--features` reaches the eleven framework features no template turned on
+  (`tenancy`, `csrf`, `sso`, `admin-sso`, `passkey`, `cache-redis`,
+  `cache-page`, `email-smtp`, `mcp`, `testkit`, `test_utils`). Naming a backend
+  there is refused with a pointer to `--backend`: it would pin
+  `rustango/<backend>` while the project's own feature stayed off, which is the
+  mismatch #1211 fixed.
+
+  A bare `cargo rustango new` on a terminal opens a wizard of numbered menus
+  that prints the equivalent command line before writing anything — it sets the
+  same fields the flags set, so there is one code path deciding what a project
+  contains. Off a terminal it fails with a message rather than blocking on a
+  prompt nobody can answer.
+
+- **`manage menu` — numbered choices over the tenancy verbs** (#1345). Forty-odd
+  verbs are discoverable with `--help` and hard to *run* for the first time.
+  The menu groups them, asks only for the options a verb will not prompt for
+  itself, echoes the command line it is about to run, and re-enters the same
+  dispatcher the flags go through — so it cannot drift from them.
+
+- **The tenancy CLI reaches everything the operator console can do** (#1344).
+  An action available on only one surface cannot be automated, and an action
+  available only in a shell cannot be delegated.
+  - Hostnames: `list-hosts`, `add-host`, `remove-host`, `set-host-enabled`,
+    over the same `tenancy::org_host` engine the console posts to. No
+    `rename-host`: `org_host::generation` fingerprints the table by row count,
+    enabled count, max id and enabled-id sum, and an in-place rename moves none
+    of them, so other pods would keep routing the old name until the TTL
+    expired.
+  - Operators: `list-operators` and `set-operator-active --on|--off`.
+  - Inspection: `list-runs`, `show-run <id>`, `audit-log`, with filters.
+  - `edit-tenant` for display name, host pattern, path prefix, port, database
+    URL and active state. Only named fields are touched; `--clear <field>`
+    empties one without relying on `--x ""`, which some shells and CI runners
+    eat.
+
+- **Pre-warming tenant pools from the operator console** (#1341). `prewarm-pools`
+  was command-line only, so the one thing worth doing right after a deploy, a
+  registry restart or a credential rotation needed shell access. `prewarm` joins
+  `TenantPoolInvalidator` beside `decommission`, and the tenant list gets a
+  button behind the edit gate.
+
+- `LICENSE-MIT` and `LICENSE-APACHE` at the repository root, referenced from the
+  README. Every manifest has always declared `license = "MIT OR Apache-2.0"`,
+  but the texts existed nowhere — GitHub reported no license at all, and the
+  terms an attribution claim would rest on were absent from the published
+  crates. Both files are now packaged into all four published crates.
+
+### Changed
+- **The MySQL and SQLite dialect emitters are no longer gated on their drivers**
+  (#1363). `sql::MySql` and `sql::Sqlite` are pure `Clause` IR → string
+  compilation — no `sqlx`, no `#[cfg]` — exactly like `sql::Postgres`, which was
+  always ungated. Gating them meant a tri-dialect *emission* test could not
+  compile unless the binary also linked all three database drivers, which is
+  backwards: emission is the part with no driver. Both are now unconditional;
+  only the `DIALECT` statics stay gated, since their callers are `Pool` arms
+  that need the driver. Nothing about a built binary changes — this only widens
+  what a selective-feature build can name.
+
+- **Operator activation rules moved out of the console handler** into
+  `tenancy::operators`, which both surfaces now call (#1344). "You cannot
+  deactivate yourself" and "you cannot deactivate the last active operator"
+  were written inside the HTTP handler, so a CLI verb would have restated them
+  — and the copy that drifted would be the one that locked everybody out of the
+  console, with only a shell on the registry to undo it. The console passes the
+  signed-in operator as the actor; the CLI passes `None`, because a shell has
+  no session to lock itself out of. The last-active rule applies to both.
+
+- **Tenant edits go through `tenancy::org_edit::apply`**, which writes and then
+  drops the cached `Org` (#1344). Resolution serves from that cache, so a
+  caller that skipped the invalidation would report a successful credential
+  rotation while the next request reconnected on the old one — and
+  `active = false` would keep serving. Invisible in testing, because the stale
+  read only appears on *another* request, so it lives in the engine rather than
+  in each caller.
+
+- **The `sqlite,tenancy` CI job now runs the operator console suites.** They had
+  only ever run in the all-features job, which always has Postgres available —
+  so a PG-ism in console or provisioning code would have passed CI and broken
+  every SQLite and MySQL deployment.
+
+### Fixed
+- **`cargo test --no-default-features --features sqlite,tenancy` did not
+  compile** (#1363). The canonical no-Postgres litmus had been broken for a
+  long time: two emission tests wanted `sql::MySql` (see Changed), 36 files used
+  `rustango::testkit` without asking for the feature, and two used
+  `rustango::cache` the same way. `testkit` is now a self dev-dependency
+  (`default-features = false`, so it cannot smuggle `postgres` back in) rather
+  than 36 edited gates; the cache tests declare `feature = "cache"`.
+
+  CI never caught it because both no-Postgres jobs enumerate test targets by
+  hand — 68 and 60 of the crate's 526 test files — while `cargo check` and
+  `cargo clippy --lib` stop at the library. The enumeration was itself a
+  documented workaround for this defect, so it had been quietly masking a gap
+  that grew with every new test file. `sqlite_litmus` now compiles the whole
+  suite with `--no-run`, which needs no databases.
+
+- **A tenant created from the CLI left no provisioning run** (#1344).
+  `create-tenant` called `provision_tenant` rather than
+  `provision_tenant_recorded`, so the run history — and the console's run list
+  — described only what the console had done, and a CLI provision that died
+  halfway left nothing to find. Now recorded, with `requested_by = cli` so the
+  two sources are distinguishable.
+
+- **`<form>` inside `<p>` split the operator console's action rows.** `<form>`
+  is not phrasing content, so the HTML parser closes an open `<p>` when it meets
+  one: the button rows on the tenant list and the tenant edit page were breaking
+  in two and leaving stray empty paragraphs. Both are `<div>`s now.
+
 - **`makemigrations` re-claimed the framework's own tables, breaking the first
   `migrate` of every new project** (#1271, #1298). `migrate` generates and
   applies a *system* migration chain (`system/migrations/`, ledger
@@ -22,12 +151,64 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   user-app migration only ever claims user tables. `make_migrations_system` is
   deliberately unchanged: there the `rustango_*` tables *are* the subject.
 
-### Added
-- `LICENSE-MIT` and `LICENSE-APACHE` at the repository root, referenced from the
-  README. Every manifest has always declared `license = "MIT OR Apache-2.0"`,
-  but the texts existed nowhere — GitHub reported no license at all, and the
-  terms an attribution claim would rest on were absent from the published
-  crates. Both files are now packaged into all four published crates.
+- **`manage menu` hung forever on every verb that prompts for its own values**
+  (#1360). The menu held `io::stdin().lock()` while dispatching, and the verbs
+  it dispatches to call `io::stdin()` themselves — the second lock waited on the
+  first, which the menu would not release until the verb returned. Every
+  interactive verb was unreachable from the menu that exists to reach them.
+  Prompting now goes through a `LineSource`, and `SharedStdin` takes the lock
+  per read rather than for the life of the menu.
+
+- **`manage menu` ran off a terminal** (#1357). Piped or in CI it printed its
+  numbered choices to nobody, read EOF as a selection, executed something, and
+  exited 0. It now refuses a non-TTY with a message naming the flags instead.
+
+- **Contradictory and unrecognized boolean flags silently picked a side**
+  (#1355). `edit-tenant --activate --deactivate` took the tenant *offline* and
+  returned 0 — last flag wins, no warning, on the one pair where guessing wrong
+  is an outage. Both directions given is now an error. Separately,
+  `set-host-enabled --enabled TRUE` parked the host: the allow-list was
+  lowercase-only and anything unmatched fell through to "false". The set is
+  closed and case-insensitive now, and a value outside it is rejected.
+
+- **Errors named the wrong object, and bad filters looked like empty results**
+  (#1356). A single `HostError::NotFound` covered both "no such tenant" and "no
+  such hostname", so a typo'd slug reported a missing *host*. Split into
+  `NoSuchOrg`. Filters on `list-runs` / `audit-log` took any string and returned
+  nothing for a value no row could hold — an unrecognized kind or state is now
+  refused with the valid set.
+
+- **`cargo rustango new` accepted four names that produce an unloadable
+  project** (#1358). `build`, `deps`, `examples` and `incremental` are Cargo's
+  own subdirectories of `target/`, so a crate by those names collides with the
+  build directory it compiles into. Refused up front rather than at the first
+  `cargo run`.
+
+- **The generated `.env.example` shipped a session secret the framework
+  discards** (#1359). It carried a placeholder `RUSTANGO_SESSION_SECRET` short
+  enough to fail the length check, which `from_env_or_disk` handled by silently
+  falling back to a random key — so sessions died on every restart and the
+  `.env` said otherwise. The line is commented out with the length requirement
+  beside it, and an unusable secret now warns instead of vanishing.
+
+- **A SQLite registry named by a bare filename derived no tenant URL** (#1332).
+  `tenant_url_on_registry_server` found the sibling directory with
+  `rsplit_once('/')`, which a `sqlite://app.db` registry has none of — so the
+  console showed no derived URL and the submit asked the operator to type one,
+  for the one backend where the answer is most obvious. A bare filename is now
+  read as the working directory, an in-memory registry still derives nothing
+  (there is no directory to be a sibling of), and a database already named
+  `acme.db` no longer becomes `acme.db.db`. The derivation now has direct tests
+  on all three dialects, which #1332's acceptance asked for and it never had.
+
+- **Every in-page link in the `de` / `fr` / `es` docs pointed at an English
+  anchor** (#1354). The translations translated their headings and kept the
+  English `#fragment`s, so 930 links across 94 pages — every table of contents,
+  plus the cross-page links into `manage.md`, `glossary.md` and `orm.md` — put
+  the reader at the top of the page instead. `docs_links` skipped fragments by
+  design; it now derives each heading's id the way GitHub and the docs site do
+  and asserts every fragment finds one. The rule is validated by the English
+  pages resolving 100% under it.
 
 ## [0.56.1] — 2026-09-04
 

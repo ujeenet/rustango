@@ -25,12 +25,12 @@ abzusichern, und dem `CurrentUser`-Extraktor, um das Ergebnis zu lesen.
 
 ## Inhaltsverzeichnis
 
-- [Die Kette](#the-chain) · [Die eingebauten Backends](#the-built-in-backends)
-- [Routen absichern: require_auth](#gating-routes-require_auth)
-- [Den Benutzer lesen: CurrentUser](#reading-the-user-currentuser)
-- [Berechtigungen: require_perm](#permissions-require_perm)
-- [Die portable Registry](#the-portable-registry)
-- [Siehe auch](#see-also)
+- [Die Kette](#die-kette) · [Die eingebauten Backends](#die-eingebauten-backends)
+- [Routen absichern: require_auth](#routen-absichern-require_auth)
+- [Den Benutzer lesen: CurrentUser](#den-benutzer-lesen-currentuser)
+- [Berechtigungen: require_perm](#berechtigungen-require_perm)
+- [Die portable Registry](#die-portable-registry)
+- [Siehe auch](#siehe-auch)
 
 ---
 

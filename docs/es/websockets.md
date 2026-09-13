@@ -31,14 +31,14 @@ vienes de Django, esto es Channels; de Laravel, Echo/Reverb; de Node,
 
 ## Tabla de contenidos
 
-- [¿SSE o WebSocket — cuál?](#sse-or-websocket--which)
-- [El bus de difusión](#the-broadcast-bus)
+- [¿SSE o WebSocket — cuál?](#sse-o-websocket--cuál)
+- [El bus de difusión](#el-bus-de-difusión)
 - [Server-Sent Events](#server-sent-events)
 - [WebSockets](#websockets)
-- [Enviar desde otro sitio](#sending-from-elsewhere)
-- [Auth y multi-inquilino](#auth--tenancy)
-- [Notas de escalado](#scaling-notes)
-- [Flags de características](#feature-flags)
+- [Enviar desde otro sitio](#enviar-desde-otro-sitio)
+- [Auth y multi-inquilino](#auth-y-multi-inquilino)
+- [Notas de escalado](#notas-de-escalado)
+- [Flags de características](#flags-de-características)
 
 ---
 

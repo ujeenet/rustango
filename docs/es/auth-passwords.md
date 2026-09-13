@@ -27,10 +27,10 @@ plano.
 ---
 
 ## Tabla de contenidos
-- [Inicio rápido](#quick-start) · [Por qué argon2id](#why-argon2id)
-- [Hashear al registrarse](#hashing-on-signup) · [Verificar al iniciar sesión](#verifying-on-login)
-- [Inicios de sesión con tiempos seguros](#timing-safe-logins-account-enumeration) · [Comprobaciones de robustez](#strength-checks)
-- [Dónde vive el hash](#where-the-hash-lives) · [Notas y límites](#notes-and-limits)
+- [Inicio rápido](#inicio-rápido) · [Por qué argon2id](#por-qué-argon2id)
+- [Hashear al registrarse](#hashear-al-registrarse) · [Verificar al iniciar sesión](#verificar-al-iniciar-sesión)
+- [Inicios de sesión con tiempos seguros](#inicios-de-sesión-con-tiempos-seguros-enumeración-de-cuentas) · [Comprobaciones de robustez](#comprobaciones-de-robustez)
+- [Dónde vive el hash](#dónde-vive-el-hash) · [Notas y límites](#notas-y-límites)
 
 ---
 

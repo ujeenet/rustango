@@ -27,14 +27,14 @@ einmal gegen das Trait; wechsle von lokaler Festplatte zu S3 mit einer einzeilig
 
 ## Inhaltsverzeichnis
 
-- [Schritt 1 — Ein Storage-Backend wählen](#step-1--pick-a-storage-backend)
-- [Schritt 2 — Dateien speichern, laden und ausliefern](#step-2--save-load-and-serve-files)
-- [Schritt 3 — Einen Upload annehmen](#step-3--accept-an-upload)
-- [Sichere Dateinamen](#safe-filenames)
-- [Produktion: S3-kompatibler Speicher](#production-s3-compatible-storage)
-- [Die Mediathek](#the-media-library)
-- [Referenz](#reference)
-- [Siehe auch](#see-also)
+- [Schritt 1 — Ein Storage-Backend wählen](#schritt-1--ein-storage-backend-wählen)
+- [Schritt 2 — Dateien speichern, laden und ausliefern](#schritt-2--dateien-speichern-laden-und-ausliefern)
+- [Schritt 3 — Einen Upload annehmen](#schritt-3--einen-upload-annehmen)
+- [Sichere Dateinamen](#sichere-dateinamen)
+- [Produktion: S3-kompatibler Speicher](#produktion-s3-kompatibler-speicher)
+- [Die Mediathek](#die-mediathek)
+- [Referenz](#referenz)
+- [Siehe auch](#siehe-auch)
 
 ---
 

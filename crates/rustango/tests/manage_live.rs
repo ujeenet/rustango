@@ -12,10 +12,35 @@ use rustango::{core::Column as _, migrate as rmig};
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
+/// Joined with hyphens, because nearly every caller here is naming a
+/// tenant slug — and a slug is a hostname label, where `_` is illegal.
 fn unique(prefix: &str) -> String {
     let n = UNIQ.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
+    format!("{prefix}-{pid}-{n}")
+}
+
+/// Underscore-joined, for the one caller naming a *migration* rather
+/// than a tenant: the name becomes a filename and a ledger entry, and
+/// migration names are conventionally `0001_snake_case`.
+fn unique_migration_name(prefix: &str) -> String {
+    let n = UNIQ.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
     format!("{prefix}_{pid}_{n}")
+}
+
+/// The same server and credentials, a different database name.
+///
+/// Keeps userinfo, host and port; replaces only the path segment, so a
+/// tenant lands on the server the test already reached.
+fn sibling_database_url(registry_url: &str, database: &str) -> String {
+    let (scheme, rest) = registry_url
+        .split_once("://")
+        .expect("DATABASE_URL should be a URL");
+    let (authority, _old_db) = rest
+        .rsplit_once('/')
+        .expect("DATABASE_URL should name a database");
+    format!("{scheme}://{authority}/{database}")
 }
 
 use tokio::sync::Mutex;
@@ -152,9 +177,12 @@ async fn create_tenant_database_mode_requires_database_url() {
         &["create-tenant", &slug, "--mode", "database"],
     )
     .await;
+    // The message no longer names `--database-url`: the check moved
+    // into the provisioning engine, which the console and the webhook
+    // share, and neither of those has a command-line flag to suggest.
     let err = res.unwrap_err();
     assert!(
-        format!("{err}").contains("--database-url"),
+        format!("{err}").contains("database mode needs a database URL"),
         "expected database_url validation error, got: {err}"
     );
 
@@ -211,7 +239,7 @@ async fn drop_tenant_soft_deletes_with_confirm() {
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
 
-    let slug = unique("drop_me");
+    let slug = unique("drop-me");
     drop_schema(&pool, &slug).await;
     let dir = fresh_dir("drop");
     let pools = TenantPools::new(pool.clone());
@@ -292,6 +320,16 @@ async fn list_tenants_prints_all_orgs() {
         .await
         .1
         .unwrap();
+    // A real second database, not `url`. Passing the registry's own
+    // URL here is what provisioning refuses: it would run the tenant
+    // migration chain over the registry. `CREATE DATABASE` has no
+    // `IF NOT EXISTS` in Postgres, so a re-run's "already exists" is
+    // swallowed; a genuine failure surfaces at the connection check.
+    let tenant_db = "rustango_tenant_list_test";
+    let _ = sqlx::query(&format!("CREATE DATABASE {tenant_db}"))
+        .execute(&pool)
+        .await;
+    let tenant_url = sibling_database_url(&url, tenant_db);
     run(
         &pools,
         &url,
@@ -302,7 +340,7 @@ async fn list_tenants_prints_all_orgs() {
             "--mode",
             "database",
             "--database-url",
-            &url,
+            &tenant_url,
             "--no-migrate",
         ],
     )
@@ -373,7 +411,7 @@ async fn migrate_tenants_runs_against_active_only() {
     .unwrap();
 
     // Ship a tenant migration in dir.
-    let mig_name = unique("0001_thing");
+    let mig_name = unique_migration_name("0001_thing");
     let mig = rmig::Migration {
         name: mig_name.clone(),
         created_at: "2026-04-28T00:00:00Z".into(),
@@ -400,6 +438,14 @@ async fn migrate_tenants_runs_against_active_only() {
     res.unwrap();
     assert!(out.contains(&slug), "{out}");
     assert!(out.contains("migration"), "{out}");
+    // #1320 — the verb reports each migration as it lands, not just a
+    // summary once the whole run is over. `app/` distinguishes the
+    // project's chain from the framework's `system/` one, which numbers
+    // independently and would otherwise look like a repeat.
+    assert!(
+        out.contains(&format!("applied app/{mig_name}")),
+        "expected per-migration progress for {mig_name}: {out}"
+    );
 
     let exists: bool = sqlx::query_as::<_, (bool,)>(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'thing')",

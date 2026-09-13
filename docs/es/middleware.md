@@ -30,15 +30,15 @@ misma idea, adjunta a tu router.
 
 ## Tabla de contenidos
 
-- [Cómo funciona el middleware en Rustango](#how-middleware-works-in-rustango)
-- [El orden importa](#ordering-matters)
-- [El catálogo integrado](#the-built-in-catalog)
-- [Middleware consciente del locale](#locale-aware-middleware)
-- [Middleware consciente de la zona horaria](#timezone-aware-middleware)
-- [Cabeceras de seguridad](#security-headers)
-- [Protección CSRF](#csrf-protection)
-- [Escribir tu propio middleware](#writing-your-own-middleware)
-- [Véase también](#see-also)
+- [Cómo funciona el middleware en Rustango](#cómo-funciona-el-middleware-en-rustango)
+- [El orden importa](#el-orden-importa)
+- [El catálogo integrado](#el-catálogo-integrado)
+- [Middleware consciente del locale](#middleware-consciente-del-locale)
+- [Middleware consciente de la zona horaria](#middleware-consciente-de-la-zona-horaria)
+- [Cabeceras de seguridad](#cabeceras-de-seguridad)
+- [Protección CSRF](#protección-csrf)
+- [Escribir tu propio middleware](#escribir-tu-propio-middleware)
+- [Véase también](#véase-también)
 
 ---
 
@@ -76,7 +76,7 @@ Hay dos formas, y usarás ambas:
 2. **Una función mediante `axum::middleware::from_fn`** — la forma más rápida de
    escribir uno puntual. Recibes la `Request` y un `Next`; llamas a
    `next.run(req)` para continuar, y puedes hacer trabajo a ambos lados de esa
-   llamada. El [ejemplo de zona horaria](#timezone-aware-middleware) más abajo es
+   llamada. El [ejemplo de zona horaria](#middleware-consciente-de-la-zona-horaria) más abajo es
    exactamente esto.
 
 Ambos se componen libremente — un middleware `from_fn` *es* un layer, así que se
@@ -156,7 +156,7 @@ para obtener el método.
 | Caché de página | `CachePageLayer` | `.layer(..)` |
 | **Localización** | | |
 | Negociación de locale | `LocaleMiddleware` | `.layer(..)` (+ extractor `ActiveLocale`) |
-| Zona horaria activa | *(componer con `from_fn`)* | ver [más abajo](#timezone-aware-middleware) |
+| Zona horaria activa | *(componer con `from_fn`)* | ver [más abajo](#middleware-consciente-de-la-zona-horaria) |
 | **Desarrollo** | | |
 | Recarga en vivo | `LiveReloadLayer` | `.livereload(..)` |
 | Panel de depuración | `DebugPanelLayer` | `.debug_panel(..)` |
@@ -382,7 +382,7 @@ mutación sin opción de desactivarlo.
 ## Escribir tu propio middleware
 
 Ya viste la forma rápida — el [middleware de zona
-horaria](#timezone-aware-middleware) es un ejemplo `from_fn` completo. Recurre a
+horaria](#middleware-consciente-de-la-zona-horaria) es un ejemplo `from_fn` completo. Recurre a
 `from_fn` siempre que la lógica sea específica de la aplicación y no necesites
 configurarla:
 

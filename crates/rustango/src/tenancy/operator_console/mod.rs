@@ -6,6 +6,56 @@
 //! at the apex (`localhost:8080`); production deployments mount it
 //! the same way.
 //!
+//! ## Logging
+//!
+//! Two streams, both plain `tracing` events, so whatever subscriber the
+//! app installs decides the shape.
+//!
+//! **Actions** — one event per mutation, on target
+//! [`ACTION_TARGET`]:
+//!
+//! ```text
+//! event=operator_action action=host_add operator_id=1
+//!   entity=rustango_orgs entity_id=acme fields=hostname,tenant_slug
+//! ```
+//!
+//! Emitted from the same function that writes the audit row, so the log
+//! stream and the durable trail describe the same set of actions. A
+//! failure to write that row is an `ERROR` with
+//! `event=operator_action_unrecorded` — the action happened and the
+//! record did not, which is the one case worth paging on.
+//!
+//! `fields` carries the *names* of what changed, never the values: an
+//! audit blob is one careless caller away from holding a credential,
+//! and logs travel further than the database does.
+//!
+//! **Requests** — one event per request from [`crate::access_log`]
+//! (method, path, status, duration, IP), with `next` and `token`
+//! redacted out of query strings.
+//!
+//! ### Choosing the shape
+//!
+//! Format is the subscriber's job, not this module's. JSON for a
+//! collector, pretty for a terminal, either driven by settings:
+//!
+//! ```ignore
+//! rustango::logging::Setup::new().json().install();
+//! // or [logging] format = "json" in settings
+//! ```
+//!
+//! Route or silence console activity without touching the rest of
+//! tenancy by filtering on the target:
+//!
+//! ```text
+//! RUST_LOG=warn,rustango::tenancy::operator_console::action=info
+//! ```
+//!
+//! For a different field set or destination — a collector wanting its
+//! own envelope, or events fanned to an external sink — add a
+//! `tracing_subscriber::Layer` and match on the target. The events are
+//! structured fields rather than formatted strings precisely so a layer
+//! can re-shape them without parsing.
+//!
 //! ## What it ships
 //!
 //! * `GET  /login`               — form HTML
@@ -37,6 +87,15 @@
 //! );
 //! let app = axum::Router::new().merge(console);
 //! ```
+
+/// Creating a tenant from the console, and watching it happen (#1322).
+/// Mounted only by [`router_with_provisioning`].
+mod audit;
+mod decommission;
+mod hosts;
+mod migrate;
+mod operators;
+mod provisioning;
 
 use crate::core::Column as _;
 // v0.34 — operator console no longer imports `PgPool` directly.
@@ -71,6 +130,16 @@ use super::pools::TenantPools;
 
 const RUSTANGO_PNG: &[u8] = include_bytes!("../static/rustango.png");
 
+/// Tracing target for operator actions.
+///
+/// Its own target so a deployment can route or silence console activity
+/// without touching the rest of tenancy —
+/// `RUST_LOG=rustango::tenancy::operator_console::action=info`.
+/// Request logging is not here — it comes from
+/// [`crate::access_log`] under its own `rustango::access_log` target,
+/// the same middleware the admin uses.
+pub const ACTION_TARGET: &str = "rustango::tenancy::operator_console::action";
+
 #[derive(Clone)]
 struct ConsoleState {
     /// Backend-erasing registry pool. PG / MySQL / SQLite all share
@@ -85,6 +154,13 @@ struct ConsoleState {
     /// When `None` (the legacy [`router`] entry point), edit routes
     /// aren't mounted and the console stays read-only.
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
+    /// When `Some`, the console can **create** tenants — see
+    /// [`provisioning`]. Separate from `pools` on purpose: creating a
+    /// tenant is strictly more dangerous than editing one (it takes a
+    /// database URL and connects to it), so a deployment opts into it
+    /// explicitly through [`router_with_provisioning`] rather than
+    /// getting it for free with the edit routes.
+    provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
     session_secret: Arc<SessionSecret>,
     tera: Arc<Tera>,
     /// Storage backend for per-tenant brand assets (logo, favicon).
@@ -235,10 +311,59 @@ impl OpBrand {
 /// `./var/brand` or `RUSTANGO_BRAND_STORAGE_DIR`). To plug in S3 /
 /// R2 / B2 / MinIO / a CDN-fronted bucket, use
 /// [`router_with_brand_storage`].
+/// [`router_with_pools`] plus the routes that **create** tenants:
+/// `GET`/`POST /orgs/new`, `POST /orgs/test-connection`, and the
+/// provisioning run view + SSE stream.
+///
+/// Separate constructor rather than a flag on the others, because
+/// creating a tenant is strictly more dangerous than editing one — it
+/// takes a database URL from a form and connects to it. A deployment
+/// says yes to that explicitly.
+///
+/// Build the provisioner with
+/// [`crate::tenancy::provision::Provisioner::new`], which closes over
+/// the pools, the registry URL and the migrations directory:
+///
+/// ```ignore
+/// let provisioner = tenancy::provision::Provisioner::new(
+///     pools.clone(), registry_url.clone(), "migrations",
+/// ).erased();
+/// let console = operator_console::router_with_provisioning(
+///     registry, pools.into_invalidator(), provisioner, secret,
+/// );
+/// ```
+///
+/// ## Authorization
+///
+/// Every authenticated operator who can reach the console can use
+/// these routes, by design (#1342): operators are uniformly fully
+/// capable, and there is no per-operator permission model to add one
+/// to. Authorization lives in which router a deployment assembles —
+/// [`router`] is read-only, [`router_with_pools`] can edit, this one
+/// can create tenants.
+#[must_use]
+pub fn router_with_provisioning(
+    registry: impl Into<crate::sql::Pool>,
+    pools: Arc<dyn crate::tenancy::TenantPoolInvalidator>,
+    provisioner: Arc<dyn crate::tenancy::provision::TenantProvisioner>,
+    secret: SessionSecret,
+) -> Router {
+    router_inner(
+        registry.into(),
+        Some(pools),
+        Some(provisioner),
+        secret,
+        branding::default_brand_storage(),
+        None,
+        default_tenant_handoff_url(),
+    )
+}
+
 #[must_use]
 pub fn router(registry: impl Into<crate::sql::Pool>, secret: SessionSecret) -> Router {
     router_inner(
         registry.into(),
+        None,
         None,
         secret,
         branding::default_brand_storage(),
@@ -261,6 +386,7 @@ pub fn router_with_pools(
     router_inner(
         registry.into(),
         Some(pools),
+        None,
         secret,
         branding::default_brand_storage(),
         None,
@@ -300,6 +426,7 @@ pub fn router_with_impersonation(
     router_inner(
         registry.into(),
         Some(pools),
+        None,
         secret,
         brand_storage,
         Some(tenant_session_secret),
@@ -329,6 +456,7 @@ pub fn router_with_brand_storage(
     router_inner(
         registry.into(),
         pools,
+        None,
         secret,
         brand_storage,
         None,
@@ -345,9 +473,43 @@ fn default_tenant_handoff_url() -> String {
     super::routes::RouteConfig::default().impersonation_handoff_url
 }
 
+/// Every knob at once.
+///
+/// The named constructors above are thin wrappers over this, each
+/// fixing some arguments — which is fine until a caller wants a
+/// combination none of them covers (the tenancy `Builder` wants
+/// impersonation **and** provisioning). Rather than add a seventh
+/// positional constructor for each new pairing, this is the one that
+/// takes everything and the others stay as the convenient shorthands.
+///
+/// `pools` unlocks the edit routes, `provisioner` the create routes,
+/// `tenant_session_secret` impersonation. `None` for any of them
+/// simply does not mount those routes.
+#[must_use]
+pub fn router_full(
+    registry: impl Into<crate::sql::Pool>,
+    pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
+    provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
+    secret: SessionSecret,
+    brand_storage: BoxedStorage,
+    tenant_session_secret: Option<SessionSecret>,
+    tenant_handoff_url: String,
+) -> Router {
+    router_inner(
+        registry.into(),
+        pools,
+        provisioner,
+        secret,
+        brand_storage,
+        tenant_session_secret,
+        tenant_handoff_url,
+    )
+}
+
 fn router_inner(
     registry: crate::sql::Pool,
     pools: Option<Arc<dyn crate::tenancy::TenantPoolInvalidator>>,
+    provisioner: Option<Arc<dyn crate::tenancy::provision::TenantProvisioner>>,
     secret: SessionSecret,
     brand_storage: BoxedStorage,
     tenant_session_secret: Option<SessionSecret>,
@@ -362,6 +524,10 @@ fn router_inner(
         (
             "_op_styles.html",
             include_str!("../templates/_op_styles.html"),
+        ),
+        (
+            "_op_pager.html",
+            include_str!("../templates/_op_pager.html"),
         ),
         (
             "_theme_toggle.html",
@@ -386,6 +552,10 @@ fn router_inner(
             include_str!("../templates/op_orgs_edit.html"),
         ),
         (
+            "op_org_hosts.html",
+            include_str!("../templates/op_org_hosts.html"),
+        ),
+        (
             "op_change_password.html",
             include_str!("../templates/op_change_password.html"),
         ),
@@ -393,13 +563,28 @@ fn router_inner(
             "op_sso_shared.html",
             include_str!("../templates/op_sso_shared.html"),
         ),
+        (
+            "op_orgs_new.html",
+            include_str!("../templates/op_orgs_new.html"),
+        ),
+        (
+            "op_provision_run.html",
+            include_str!("../templates/op_provision_run.html"),
+        ),
+        (
+            "op_provision_runs.html",
+            include_str!("../templates/op_provision_runs.html"),
+        ),
+        ("op_audit.html", include_str!("../templates/op_audit.html")),
     ])
     .expect("operator-console templates parse");
     let edit_enabled = pools.is_some();
     let impersonation_enabled = tenant_session_secret.is_some() && pools.is_some();
+    let provisioning_enabled = provisioner.is_some();
     let state = ConsoleState {
         registry,
         pools,
+        provisioner,
         session_secret: Arc::new(secret),
         tera: Arc::new(tera),
         brand_storage,
@@ -420,8 +605,13 @@ fn router_inner(
     // Authenticated routes: the middleware injects an `Extension<auth::Operator>`.
     let mut private = Router::new()
         .route("/", get(welcome))
-        .route("/operators", get(operators_list))
+        .route("/operators", get(operators::operators_list))
         .route("/orgs", get(orgs_list))
+        // Read-only, so it is not behind the edit gate: a read-only
+        // console is exactly where "what happened?" still needs
+        // answering, and every operator can already see everything the
+        // log describes.
+        .route("/audit", get(audit::audit_list))
         .route(
             "/change-password",
             get(change_password_form).post(change_password_submit),
@@ -437,6 +627,31 @@ fn router_inner(
     }
     if edit_enabled {
         private = private
+            // Who can sign in to this console. Behind the same gate as
+            // the tenant writes: `edit_enabled` is named for its first
+            // use (dropping a cached pool when a `database_url`
+            // rotates) but is in practice the switch between the
+            // read-only `router()` and a console that can change
+            // things, and creating an operator is emphatically the
+            // latter.
+            .route("/operators", post(operators::operator_create))
+            // #1341 — opening every tenant's pool up front was CLI-only,
+            // so the one thing worth doing right after a deploy, a
+            // registry restart, or a credential rotation needed shell
+            // access. Gated on pools rather than on the provisioner:
+            // warming them needs no migrations directory.
+            .route(
+                "/orgs/prewarm",
+                get(orgs_post_only_redirect).post(prewarm_pools),
+            )
+            .route(
+                "/operators/{id}/active",
+                get(op_post_only_redirect).post(operators::operator_set_active),
+            )
+            .route(
+                "/operators/{id}/reset-password",
+                get(op_post_only_redirect).post(operators::operator_reset_password),
+            )
             .route(
                 "/orgs/{slug}/edit",
                 get(org_edit_form).post(org_edit_submit),
@@ -448,6 +663,76 @@ fn router_inner(
             .route(
                 "/orgs/{slug}/edit/branding",
                 get(org_post_only_redirect).post(org_edit_branding),
+            )
+            // The extra hostnames a tenant answers on. Behind the same
+            // gate as `/edit`: binding a hostname changes which tenant
+            // serves that traffic, which is an edit in every sense that
+            // matters. The three writes are separate routes rather than
+            // one submit because they act on individual rows.
+            // Taking a tenant out of service. Behind the edit gate
+            // like the rest: `purge` is the most destructive thing this
+            // console can do, and a read-only one must not offer it.
+            .route(
+                "/orgs/{slug}/deactivate",
+                get(org_post_only_redirect).post(decommission::deactivate),
+            )
+            .route(
+                "/orgs/{slug}/purge",
+                get(org_post_only_redirect).post(decommission::purge),
+            )
+            // Probing an existing tenant, as opposed to the create
+            // form's probe of a URL being typed.
+            .route(
+                "/orgs/{slug}/test-connection",
+                post(provisioning::test_tenant_connection),
+            )
+            .route("/orgs/{slug}/hosts", get(hosts::org_hosts_view))
+            .route(
+                "/orgs/{slug}/hosts/add",
+                get(org_post_only_redirect).post(hosts::org_hosts_add),
+            )
+            .route(
+                "/orgs/{slug}/hosts/remove",
+                get(org_post_only_redirect).post(hosts::org_hosts_remove),
+            )
+            .route(
+                "/orgs/{slug}/hosts/toggle",
+                get(org_post_only_redirect).post(hosts::org_hosts_toggle),
+            );
+    }
+    if provisioning_enabled {
+        // #1322 — creating a tenant, and watching it happen. Mounted
+        // only when the deployment supplied a provisioner: this is the
+        // console's most dangerous capability (it takes a database URL
+        // and connects to it), so it is opt-in rather than riding on
+        // the edit routes.
+        private = private
+            .route(
+                "/orgs/new",
+                get(provisioning::org_new_form).post(provisioning::org_new_submit),
+            )
+            .route("/orgs/test-connection", post(provisioning::test_connection))
+            // Migrations ride with provisioning: both need the
+            // provisioner's migrations directory and its registry URL.
+            .route(
+                "/orgs/migrate",
+                get(op_post_only_redirect).post(migrate::migrate_all),
+            )
+            .route(
+                "/orgs/{slug}/migrate",
+                get(org_post_only_redirect).post(migrate::migrate_one),
+            )
+            // The index has to come before the `{run_id}` route it
+            // shares a prefix with, and be a distinct path: a run id is
+            // numeric, so `/orgs/provision` cannot be confused for one.
+            .route("/orgs/provision", get(provisioning::provision_runs_index))
+            .route(
+                "/orgs/provision/{run_id}",
+                get(provisioning::provision_run_view),
+            )
+            .route(
+                "/orgs/provision/{run_id}/stream",
+                get(provisioning::provision_run_stream),
             );
     }
     if impersonation_enabled {
@@ -467,12 +752,200 @@ fn router_inner(
         require_session,
     ));
 
-    public.merge(private).with_state(state)
+    // One event per request — method, path, status, duration, IP —
+    // from the middleware the admin already uses, rather than a second
+    // one written here. Without it a console 500 left nothing behind
+    // but the operator's screen.
+    //
+    // `next` is redacted because the login bounce carries the whole
+    // attempted URL, and `token` because impersonation handoff puts one
+    // in a query string.
+    use crate::access_log::AccessLogRouterExt as _;
+    public.merge(private).with_state(state).access_log(
+        crate::access_log::AccessLogLayer::new()
+            .redact_additional("next")
+            .redact_additional("token"),
+    )
 }
 
 /// Stamp the operator-console branding fields onto every render
 /// context. Centralizing the keys keeps op_layout.html and op_login.html
 /// in sync without each handler remembering the four template names.
+/// A screenful, for every list the console renders.
+///
+/// One number rather than one per page, so a deployment with thousands
+/// of tenants and one with three behave the same way and nobody has to
+/// remember which list was the unbounded one.
+pub(super) const PAGE_SIZE: usize = 50;
+
+/// One page of a console list.
+///
+/// A thin adapter over [`crate::pagination::Paginator`] — the
+/// framework's own page-number paginator, which is built for exactly
+/// this (server-rendered list views: `offset()`, `limit()`, and an
+/// elided `1 … 7 8 9 … 42` range). This type only counts the rows,
+/// hands the paginator the number, and flattens the result into
+/// template context.
+///
+/// Shared rather than written per view because the arithmetic has a
+/// trap in it: `?page=<huge>` parses into an `i64` and then overflows a
+/// naive `(page - 1) * size`, which panicked a worker thread in debug
+/// and wrapped to a negative offset in release. `Paginator::get_page`
+/// clamps instead, so no list view can reintroduce that and none can
+/// disagree about what page 1 means.
+pub(super) struct Paged {
+    pub(super) offset: i64,
+    pub(super) limit: i64,
+    number: usize,
+    total: usize,
+    num_pages: usize,
+    has_previous: bool,
+    has_next: bool,
+    marks: Vec<serde_json::Value>,
+}
+
+impl Paged {
+    /// From a total the caller already knows — a filtered count, say.
+    pub(super) fn from_total(total: i64, requested: Option<i64>) -> Self {
+        let total = usize::try_from(total).unwrap_or(0);
+        let paginator = crate::pagination::Paginator::new(total, PAGE_SIZE);
+        // `get_page` clamps rather than erroring: a page number out of
+        // range is a stale link, not something to show a 500 for.
+        let page = paginator.get_page(requested.unwrap_or(1));
+        let marks = paginator
+            .get_elided_page_range(page.number, 3, 2)
+            .into_iter()
+            .map(|mark| match mark {
+                crate::pagination::PageMark::Number(n) => serde_json::json!({"number": n}),
+                crate::pagination::PageMark::Ellipsis => serde_json::json!({"ellipsis": true}),
+            })
+            .collect();
+        Self {
+            offset: i64::try_from(page.offset()).unwrap_or(i64::MAX),
+            limit: i64::try_from(page.limit()).unwrap_or(i64::MAX),
+            number: page.number,
+            total,
+            num_pages: paginator.num_pages(),
+            has_previous: page.has_previous(),
+            has_next: page.has_next(),
+            marks,
+        }
+    }
+
+    /// Counting the model's rows first, for the lists with no filter.
+    pub(super) async fn of_model(
+        pool: &crate::sql::Pool,
+        model: &'static crate::core::ModelSchema,
+        requested: Option<i64>,
+    ) -> Result<Self, crate::sql::ExecError> {
+        let total = count_where(pool, model, crate::core::WhereExpr::default()).await?;
+        Ok(Self::from_total(total, requested))
+    }
+
+    /// What `_op_pager.html` needs.
+    ///
+    /// Key names match `template_views::ListView`'s so one partial
+    /// renders both. `base` is the path the links point at; `suffix`
+    /// carries active filters so paging does not drop them.
+    pub(super) fn inject(&self, ctx: &mut Context, base: &str, suffix: &str) {
+        ctx.insert("page", &self.number);
+        ctx.insert("total_pages", &self.num_pages);
+        ctx.insert("total", &self.total);
+        ctx.insert("has_prev", &self.has_previous);
+        ctx.insert("has_next", &self.has_next);
+        ctx.insert("page_marks", &self.marks);
+        ctx.insert("pager_base", base);
+        ctx.insert("query_suffix", suffix);
+    }
+}
+
+/// Which nav entry to highlight for a path.
+///
+/// Only the generic-view path needs this; the hand-written handlers
+/// set `section` themselves.
+#[cfg(feature = "template_views")]
+fn nav_section(path: &str) -> &'static str {
+    match path.split('/').nth(1).unwrap_or("") {
+        "orgs" => "orgs",
+        "operators" => "operators",
+        "audit" => "audit",
+        "sso-shared" => "sso",
+        "change-password" => "change_password",
+        _ => "home",
+    }
+}
+
+/// `SELECT COUNT(*)` over one model, optionally filtered.
+///
+/// Separate from [`Paged`] because a list view sometimes needs a count
+/// that is *not* its page count — the operator list pages its rows but
+/// still has to know how many operators are active in total, which a
+/// page of rows cannot tell it.
+pub(super) async fn count_where(
+    pool: &crate::sql::Pool,
+    model: &'static crate::core::ModelSchema,
+    where_clause: crate::core::WhereExpr,
+) -> Result<i64, crate::sql::ExecError> {
+    let count = crate::core::CountQuery {
+        model,
+        where_clause,
+        search: None,
+    };
+    crate::sql::count_rows_pool(pool, &count).await
+}
+
+/// The `?page=` parameter, for the list views that take nothing else.
+#[derive(Deserialize)]
+pub(super) struct PageQuery {
+    #[serde(default)]
+    pub(super) page: Option<i64>,
+}
+
+/// A page plus the outcome of whatever redirected here.
+#[derive(Deserialize)]
+pub(super) struct ListQuery {
+    #[serde(default)]
+    pub(super) page: Option<i64>,
+    #[serde(default)]
+    pub(super) error: Option<String>,
+    #[serde(default)]
+    pub(super) notice: Option<String>,
+}
+
+/// Render, or say why not.
+///
+/// The console's older handlers use `.unwrap_or_default()`, which turns
+/// a template error into an empty `200` — a blank page with no clue
+/// anywhere. That cost real time: a missing key in a Tera comparison
+/// rendered nothing and looked like a routing problem. A 500 naming the
+/// template is worth far more than a page that lies about having
+/// worked.
+fn render(state: &ConsoleState, template: &str, ctx: &Context) -> Response<Body> {
+    match state.tera.render(template, ctx) {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            let mut detail = e.to_string();
+            let mut source = std::error::Error::source(&e);
+            while let Some(s) = source {
+                detail.push_str(": ");
+                detail.push_str(&s.to_string());
+                source = s.source();
+            }
+            tracing::error!(
+                target: "rustango::tenancy::operator_console",
+                template,
+                error = %detail,
+                "operator console template failed to render"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not render {template}: {detail}"),
+            )
+                .into_response()
+        }
+    }
+}
+
 fn inject_op_brand(ctx: &mut Context, brand: &OpBrand) {
     // Show the "Shared SSO" nav entry only when the admin-sso feature is
     // compiled in (its routes exist only then).
@@ -532,6 +1005,21 @@ async fn require_session(
                     return redirect_to_login(&safe_next).into_response();
                 }
             }
+            // The chrome `op_layout.html` needs, for any generic view
+            // an app mounts here: those build their context from the
+            // model and know nothing about this layout. Gated because
+            // `tenancy` does not depend on `template_views`.
+            #[cfg(feature = "template_views")]
+            {
+                let mut chrome = Context::new();
+                inject_op_brand(&mut chrome, &state.op_brand);
+                chrome.insert("operator_username", &op.username);
+                chrome.insert("section", &nav_section(uri.path()));
+                chrome.insert("edit_enabled", &state.pools.is_some());
+                chrome.insert("provisioning_enabled", &state.provisioner.is_some());
+                req.extensions_mut()
+                    .insert(crate::template_views::ExtraContext(chrome));
+            }
             req.extensions_mut().insert(op);
             next.run(req).await
         }
@@ -551,6 +1039,75 @@ async fn org_post_only_redirect(
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> Redirect {
     Redirect::to(&format!("/orgs/{slug}/edit"))
+}
+
+/// The same bounce for the operator routes, which are keyed by id
+/// rather than slug and land back on the one list page.
+async fn op_post_only_redirect() -> Redirect {
+    Redirect::to("/operators")
+}
+
+async fn orgs_post_only_redirect() -> Redirect {
+    Redirect::to("/orgs")
+}
+
+/// Open a pool for every active database-mode tenant (#1341).
+///
+/// Worth doing right after a deploy or a registry restart, and after a
+/// credential rotation — it turns "the first request to each tenant pays
+/// the connect" into one deliberate wait, and surfaces an unreachable
+/// tenant before a user finds it.
+///
+/// The report is a notice rather than a page: there is nothing to browse,
+/// and PRG keeps a reload from re-opening every pool.
+async fn prewarm_pools(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+) -> Response<Body> {
+    let Some(pools) = state.pools.as_ref() else {
+        return orgs_notice("pool management is not available on this console", true);
+    };
+    let report = match pools.prewarm().await {
+        Ok(r) => r,
+        Err(e) => return orgs_notice(&format!("pre-warm failed: {e}"), true),
+    };
+
+    let mut detail = serde_json::Map::new();
+    detail.insert("action".into(), serde_json::json!("pools.prewarm"));
+    detail.insert("warmed".into(), serde_json::json!(report.warmed));
+    detail.insert("failed".into(), serde_json::json!(report.failed));
+    emit_registry_audit(
+        &state.registry,
+        "rustango_orgs",
+        "*",
+        op.id.get().copied().unwrap_or(0),
+        "prewarm",
+        detail,
+    )
+    .await;
+
+    // A failure here is per-tenant and already logged by the pool layer;
+    // say how many so the operator knows to go looking.
+    let mut msg = format!(
+        "warmed {} of {} active database-mode tenant(s)",
+        report.warmed, report.total_active
+    );
+    if report.failed > 0 {
+        msg.push_str(&format!(" — {} failed, see the logs", report.failed));
+    }
+    if report.skipped_cap > 0 {
+        msg.push_str(&format!(
+            " — {} skipped, the pool cache is at its cap",
+            report.skipped_cap
+        ));
+    }
+    orgs_notice(&msg, report.failed > 0)
+}
+
+/// PRG back to the tenant list with a message.
+fn orgs_notice(msg: &str, is_error: bool) -> Response<Body> {
+    let key = if is_error { "error" } else { "notice" };
+    Redirect::to(&format!("/orgs?{key}={}", urlencoding_lite(msg))).into_response()
 }
 
 /// v0.27.10 (#68) — when an unauthenticated non-GET request
@@ -918,44 +1475,27 @@ async fn welcome(
     )
 }
 
-async fn operators_list(
-    State(state): State<ConsoleState>,
-    Extension(op): Extension<auth::Operator>,
-) -> Response<Body> {
-    let rows: Vec<auth::Operator> = match auth::Operator::objects().fetch(&state.registry).await {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
-    };
-    let view: Vec<_> = rows
-        .into_iter()
-        .map(|o| {
-            serde_json::json!({
-                "id": o.id.get().copied().unwrap_or_default(),
-                "username": o.username,
-                "active": o.active,
-                "created_at": o.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-            })
-        })
-        .collect();
-    let mut ctx = Context::new();
-    inject_op_brand(&mut ctx, &state.op_brand);
-    ctx.insert("section", "operators");
-    ctx.insert("operator_username", &op.username);
-    ctx.insert("operators", &view);
-    Html(
-        state
-            .tera
-            .render("op_operators.html", &ctx)
-            .unwrap_or_default(),
-    )
-    .into_response()
-}
-
 async fn orgs_list(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
+    Query(q): Query<ListQuery>,
 ) -> Response<Body> {
-    let rows: Vec<super::Org> = match super::Org::objects().fetch(&state.registry).await {
+    // Paged: this fetched every tenant, which is fine for the three a
+    // demo has and not for the thousands a real registry holds.
+    // Ordered so the page boundaries are stable between requests — an
+    // unordered `LIMIT` may hand back the same row on two pages.
+    use crate::core::Model as _;
+    let paged = match Paged::of_model(&state.registry, super::Org::SCHEMA, q.page).await {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    let rows: Vec<super::Org> = match super::Org::objects()
+        .order_by(&[("slug", false)])
+        .limit(paged.limit)
+        .offset(paged.offset)
+        .fetch(&state.registry)
+        .await
+    {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     };
@@ -979,7 +1519,14 @@ async fn orgs_list(
     ctx.insert("operator_username", &op.username);
     ctx.insert("orgs", &view);
     ctx.insert("edit_enabled", &state.pools.is_some());
-    Html(state.tera.render("op_orgs.html", &ctx).unwrap_or_default()).into_response()
+    // Drives the "New tenant" button. Without this the create page
+    // exists but nothing links to it — which is exactly the state
+    // this shipped in first.
+    ctx.insert("provisioning_enabled", &state.provisioner.is_some());
+    ctx.insert("error", &q.error);
+    ctx.insert("notice", &q.notice);
+    paged.inject(&mut ctx, "/orgs", "");
+    render(&state, "op_orgs.html", &ctx)
 }
 
 // ---- Shared SSO providers (registry-wide, `admin-sso`) --------------
@@ -1228,6 +1775,9 @@ async fn org_edit_form(
     ctx.insert("section", "orgs");
     ctx.insert("operator_username", &op.username);
     ctx.insert("slug", &slug);
+    // Drives the "Run migrations" button: migrations ride with the
+    // provisioner, which owns the migrations directory.
+    ctx.insert("provisioning_enabled", &state.provisioner.is_some());
     ctx.insert("editable_rows", &editable_rows);
     ctx.insert("locked_rows", &locked_rows);
     ctx.insert("logo_url", &logo_url);
@@ -1431,30 +1981,75 @@ async fn emit_op_audit(
     verb: &str,
     extra: serde_json::Map<String, serde_json::Value>,
 ) {
-    let mut changes = serde_json::Map::new();
+    let mut changes = extra;
     changes.insert(
         "tenant_slug".into(),
         serde_json::Value::String(slug.to_owned()),
     );
+    emit_registry_audit(registry, "rustango_orgs", slug, operator_id, verb, changes).await;
+}
+
+/// The same trail for an action whose subject is not a tenant.
+///
+/// `emit_op_audit` above hardcodes `rustango_orgs`, which is right for
+/// everything that acts on a tenant and wrong for everything else —
+/// operator management acts on `rustango_operators`, and recording that
+/// under the orgs table would make the entity column a lie.
+async fn emit_registry_audit(
+    registry: &crate::sql::Pool,
+    entity_table: &'static str,
+    entity_pk: &str,
+    operator_id: i64,
+    verb: &str,
+    extra: serde_json::Map<String, serde_json::Value>,
+) {
+    let mut changes = extra;
     changes.insert("operator_id".into(), serde_json::json!(operator_id));
-    for (k, v) in extra {
-        changes.insert(k, v);
-    }
+
+    // The same action, to the log stream. Emitted here rather than at
+    // each call site so the trail and the logs cannot describe
+    // different sets of actions — every console mutation already comes
+    // through this function.
+    //
+    // Field *names* only, never the blob: today's callers put column
+    // names in `changes` rather than values, and logging it whole would
+    // make the next caller's habit a credential leak.
+    let fields: Vec<&str> = changes
+        .keys()
+        .filter(|k| k.as_str() != "operator_id")
+        .map(String::as_str)
+        .collect();
+    tracing::info!(
+        target: ACTION_TARGET,
+        event = "operator_action",
+        action = verb,
+        operator_id,
+        entity = entity_table,
+        entity_id = entity_pk,
+        fields = fields.join(","),
+        "operator action",
+    );
+
     let entry = crate::audit::PendingEntry {
-        entity_table: "rustango_orgs",
-        entity_pk: slug.to_owned(),
+        entity_table,
+        entity_pk: entity_pk.to_owned(),
         operation: crate::audit::AuditOp::Action,
         source: crate::audit::AuditSource::Custom(format!("operator:{operator_id}:{verb}")),
         changes: serde_json::Value::Object(changes),
     };
     if let Err(e) = crate::audit::emit_one_pool(registry, &entry).await {
-        tracing::warn!(
-            target: "rustango::tenancy::operator_console",
-            error = %e,
-            slug = slug,
+        // The action happened; only its durable record did not. Loud,
+        // because an audit trail with a hole in it is worse than one
+        // that is merely incomplete.
+        tracing::error!(
+            target: ACTION_TARGET,
+            event = "operator_action_unrecorded",
+            action = verb,
             operator_id,
-            verb,
-            "failed to record operator action in audit log",
+            entity = entity_table,
+            entity_id = entity_pk,
+            error = %e,
+            "operator action was NOT written to the audit log",
         );
     }
 }

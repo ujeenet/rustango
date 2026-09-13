@@ -32,14 +32,14 @@ venez de Django, c'est Channels ; de Laravel, Echo/Reverb ; de Node,
 
 ## Table des matières
 
-- [SSE ou WebSocket — lequel ?](#sse-or-websocket--which)
-- [Le bus de diffusion](#the-broadcast-bus)
+- [SSE ou WebSocket — lequel ?](#sse-ou-websocket--lequel-)
+- [Le bus de diffusion](#le-bus-de-diffusion)
 - [Server-Sent Events](#server-sent-events)
 - [WebSockets](#websockets)
-- [Envoyer depuis ailleurs](#sending-from-elsewhere)
-- [Auth & multi-locataire](#auth--tenancy)
-- [Notes de mise à l'échelle](#scaling-notes)
-- [Drapeaux de fonctionnalités](#feature-flags)
+- [Envoyer depuis ailleurs](#envoyer-depuis-ailleurs)
+- [Auth & multi-locataire](#auth--multi-locataire)
+- [Notes de mise à l'échelle](#notes-de-mise-à-léchelle)
+- [Drapeaux de fonctionnalités](#drapeaux-de-fonctionnalités)
 
 ---
 

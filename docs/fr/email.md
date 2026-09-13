@@ -25,15 +25,15 @@ framework d'e-mail de Django.
 
 ## Table des matières
 
-- [Étape 1 — Construire un e-mail](#step-1--build-an-email)
-- [Étape 2 — Choisir un mailer](#step-2--pick-a-mailer)
-- [Étape 3 — L'envoyer](#step-3--send-it)
-- [Validation et protection contre l'injection d'en-têtes](#validation-and-header-injection-safety)
-- [Tester les e-mails](#testing-email)
+- [Étape 1 — Construire un e-mail](#étape-1--construire-un-e-mail)
+- [Étape 2 — Choisir un mailer](#étape-2--choisir-un-mailer)
+- [Étape 3 — L'envoyer](#étape-3--lenvoyer)
+- [Validation et protection contre l'injection d'en-têtes](#validation-et-protection-contre-linjection-den-têtes)
+- [Tester les e-mails](#tester-les-e-mails)
 - [Templates](#templates)
-- [L'envoyer en dehors de la requête](#send-it-off-the-request)
-- [Référence](#reference)
-- [Voir aussi](#see-also)
+- [L'envoyer en dehors de la requête](#lenvoyer-en-dehors-de-la-requête)
+- [Référence](#référence)
+- [Voir aussi](#voir-aussi)
 
 ---
 

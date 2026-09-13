@@ -8,32 +8,24 @@ use std::path::Path;
 use sqlx::Database;
 
 use crate::core::Column as _;
-use crate::sql::{Auto, FetcherPool, UpdaterPool};
+use crate::sql::FetcherPool;
 
 use crate::tenancy::error::TenancyError;
-#[cfg(feature = "postgres")]
-use crate::tenancy::manage::args::quote_ident;
 use crate::tenancy::manage::args::{next_value, reject_leading_flag};
 use crate::tenancy::manage_interactive;
-use crate::tenancy::migrate as tenant_migrate;
 use crate::tenancy::org::{BackendKind, Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
+use crate::tenancy::provision;
 
 // ---------- create-tenant ----------
 
-struct CreateTenantArgs {
-    slug: String,
-    mode: StorageMode,
-    backend: BackendKind,
-    display_name: Option<String>,
-    database_url: Option<String>,
-    schema_name: Option<String>,
-    host_pattern: Option<String>,
-    port: Option<i32>,
-    path_prefix: Option<String>,
-    no_migrate: bool,
-}
-
+/// The verb: turn `argv` into a [`ProvisionRequest`], run the engine,
+/// print what happens.
+///
+/// Everything that is not about a command line lives in
+/// [`crate::tenancy::provision`] — so an HTTP handler, a webhook or a
+/// job can stand up a tenant without faking an `argv` and handing it a
+/// `Vec<u8>` to write into.
 pub(super) async fn create_tenant<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
@@ -44,152 +36,171 @@ pub(super) async fn create_tenant<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let parsed = parse_create_tenant_args(args)?;
+    let request = parse_create_tenant_args(args)?;
 
-    // Reject duplicate slug up front — saves a partial-state mess
-    // when CREATE SCHEMA succeeds and the INSERT then fails.
-    let registry = pools.registry_pool();
-    let existing: Vec<Org> = Org::objects()
-        .where_(Org::slug.eq(parsed.slug.clone()))
-        .fetch(&registry)
-        .await?;
-    if !existing.is_empty() {
-        return Err(TenancyError::Validation(format!(
-            "tenant slug `{}` already exists",
-            parsed.slug
-        )));
-    }
-
-    // Compute defaults that depend on the slug + apex env var.
-    let host_pattern = parsed.host_pattern.clone().or_else(|| {
-        std::env::var("RUSTANGO_APEX_DOMAIN")
-            .ok()
-            .map(|apex| format!("{}.{apex}", parsed.slug))
-    });
-    let display_name = parsed
-        .display_name
-        .clone()
-        .unwrap_or_else(|| parsed.slug.clone());
-    let schema_name = match parsed.mode {
-        StorageMode::Schema => Some(
-            parsed
-                .schema_name
-                .clone()
-                .unwrap_or_else(|| parsed.slug.clone()),
-        ),
-        StorageMode::Database => None,
+    // Steps print as they happen rather than from the outcome, because
+    // "created tenant …" has always appeared *before* the migrations,
+    // and the summary after them.
+    let progress = CreateTenantProgress {
+        out: std::sync::Mutex::new(w),
+        slug: request.slug.clone(),
+        mode: request.mode,
     };
+    // Recorded, like the console's provisioning (#1344). A tenant created
+    // from a shell used to leave no run at all, so the run history — and
+    // `list-runs` — described only what the console had done, and a CLI
+    // provision that died halfway left nothing to find. Recording is
+    // best-effort inside `provision_tenant_recorded`: bookkeeping must not
+    // be what fails a tenant creation.
+    let (_run, outcome) = provision::provision_tenant_recorded(
+        pools,
+        registry_url,
+        dir,
+        &request,
+        Some(&progress),
+        Some("cli"),
+        None,
+    )
+    .await?;
 
-    if parsed.mode == StorageMode::Database && parsed.database_url.is_none() {
-        return Err(TenancyError::Validation(
-            "create-tenant --mode database requires --database-url".into(),
-        ));
-    }
-
-    // Schema-mode: create the schema before inserting the row so
-    // a failed INSERT doesn't leave an orphan schema. Idempotent
-    // via IF NOT EXISTS.
-    if let StorageMode::Schema = parsed.mode {
-        // Schema mode is PG-only by language — `CREATE SCHEMA` /
-        // `SET search_path` don't exist on sqlite or mysql.
-        #[cfg(feature = "postgres")]
-        {
-            let pg_pools = (pools as &dyn std::any::Any)
-                .downcast_ref::<TenantPools<sqlx::Postgres>>()
-                .ok_or_else(|| {
-                    TenancyError::Validation(
-                        "schema-mode tenants require a Postgres registry — pass --mode database \
-                         on sqlite/mysql"
-                            .into(),
-                    )
-                })?;
-            let schema = schema_name.as_deref().unwrap_or(&parsed.slug);
-            let sql = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema));
-            rustango::sql::sqlx::query(&sql)
-                .execute(pg_pools.registry())
-                .await?;
-        }
-        #[cfg(not(feature = "postgres"))]
-        {
-            return Err(TenancyError::Validation(
-                "schema-mode tenants require the `postgres` feature — pass --mode database \
-                 on sqlite/mysql builds"
-                    .into(),
-            ));
-        }
-    }
-
-    let mut org = Org {
-        id: Auto::default(),
-        slug: parsed.slug.clone(),
-        display_name,
-        storage_mode: parsed.mode.as_str().into(),
-        backend_kind: parsed.backend.as_str().into(),
-        database_url: parsed.database_url.clone(),
-        schema_name,
-        host_pattern,
-        port: parsed.port,
-        path_prefix: parsed.path_prefix.clone(),
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    };
-    org.insert_pool(&registry).await?;
-    // This pod sees the new tenant immediately; others converge on the
-    // registry fingerprint (see `resolver::sync_org_generation`).
-    super::super::invalidate_org_cache();
-    let id = org.id.get().copied().unwrap_or_default();
-    writeln!(
-        w,
-        "created tenant `{}` (id {id}, mode {})",
-        parsed.slug, parsed.mode
-    )?;
-
-    // Run tenant migrations against the freshly-provisioned tenant
-    // unless --no-migrate.
-    if parsed.no_migrate {
-        writeln!(w, "  --no-migrate: skipping tenant migrations")?;
-        return Ok(());
-    }
-    writeln!(w, "  applying tenant migrations…")?;
-    // v0.38 — on PG go through `migrate_tenants` (schema-mode +
-    // database-mode); on sqlite/mysql use `migrate_tenants_db`
-    // (database-mode only).
-    #[cfg(feature = "postgres")]
-    let report = {
-        if let Some(pg_pools) =
-            (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
-        {
-            tenant_migrate::migrate_tenants(pg_pools, dir, registry_url).await?
-        } else {
-            tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?
-        }
-    };
-    #[cfg(not(feature = "postgres"))]
-    let report = tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?;
-    let outcome = report.tenants.iter().find(|t| t.slug == parsed.slug);
-    match outcome {
-        Some(o) => {
-            if let Some(err) = &o.error {
-                writeln!(w, "  migration failed: {err}")?;
-            } else {
-                writeln!(w, "  applied {} migration(s)", o.applied.len())?;
-                for m in &o.applied {
-                    writeln!(w, "    + {}", m.name)?;
-                }
+    let w = progress.into_inner();
+    match &outcome.migrations {
+        // The observer already printed the `--no-migrate` line; the
+        // verb has never followed it with a summary.
+        provision::MigrationsOutcome::Skipped => {}
+        provision::MigrationsOutcome::Failed(err) => writeln!(w, "  migration failed: {err}")?,
+        provision::MigrationsOutcome::Applied(applied) => {
+            writeln!(w, "  applied {} migration(s)", applied.len())?;
+            for m in applied {
+                writeln!(w, "    + {}", m.name)?;
             }
         }
-        None => writeln!(w, "  no migrations matched this tenant")?,
+        provision::MigrationsOutcome::NotMatched => {
+            writeln!(w, "  no migrations matched this tenant")?;
+        }
     }
     Ok(())
 }
 
-fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, TenancyError> {
+/// Renders the engine's step events as the lines `create-tenant` has
+/// always printed.
+///
+/// The `Mutex` bridges an observer's `&self` to the verb's `&mut W`; it
+/// is uncontended, since the engine emits from one task. See
+/// `CliProgress` in `manage::migrations` for the same reasoning about
+/// why writing here does not violate the must-not-block contract.
+struct CreateTenantProgress<'w, W> {
+    out: std::sync::Mutex<&'w mut W>,
+    slug: String,
+    mode: StorageMode,
+}
+
+impl<'w, W: Write + Send> CreateTenantProgress<'w, W> {
+    fn into_inner(self) -> &'w mut W {
+        self.out.into_inner().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl<W: Write + Send> provision::ProvisionObserver for CreateTenantProgress<'_, W> {
+    fn on_event(&self, event: provision::ProvisionEvent) {
+        use provision::{ProvisionEvent as E, ProvisionStep as S, StepStatus};
+
+        let Ok(mut out) = self.out.lock() else {
+            return;
+        };
+        // Progress is cosmetic; a broken pipe must not fail the verb.
+        let _ = match event {
+            E::Registered { org_id } => writeln!(
+                out,
+                "created tenant `{}` (id {org_id}, mode {})",
+                self.slug, self.mode
+            ),
+            E::Step {
+                step: S::Migrate,
+                status: StepStatus::Started,
+            } => writeln!(out, "  applying tenant migrations…"),
+            E::Step {
+                step: S::Migrate,
+                status: StepStatus::Skipped(_),
+            } => writeln!(out, "  --no-migrate: skipping tenant migrations"),
+            // Validation and storage failures come back as `Err` from
+            // the engine and are rendered by the caller; the remaining
+            // steps are detail the CLI has never printed.
+            _ => Ok(()),
+        };
+        let _ = out.flush();
+    }
+}
+
+// ---------- test-tenant-connection ----------
+
+/// Reach a candidate tenant database and report what is wrong with it,
+/// without writing anything to the registry.
+///
+/// Takes no pools: the point is to answer "can I use this URL?" before
+/// there is a tenant, so it is deliberately independent of the registry
+/// the rest of the CLI is holding.
+pub(super) async fn test_tenant_connection<W: Write + Send>(
+    args: &[String],
+    w: &mut W,
+) -> Result<(), TenancyError> {
+    const HELP: &str =
+        "test-tenant-connection <database-url> [--no-write-probe] [--timeout <secs>]";
+    reject_leading_flag(args, "test-tenant-connection", "database-url", HELP)?;
+
+    let mut iter = args.iter();
+    let url = iter.next().cloned().ok_or_else(|| {
+        TenancyError::Validation(
+            "test-tenant-connection requires a database URL positional argument".into(),
+        )
+    })?;
+
+    let mut opts = crate::tenancy::preflight::Preflight::default();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--no-write-probe" => opts.probe_writes = false,
+            "--timeout" => {
+                let v = next_value(&mut iter, "--timeout")?;
+                let secs: u64 = v.parse().map_err(|_| {
+                    TenancyError::Validation(format!(
+                        "--timeout must be a whole number of seconds, got `{v}`"
+                    ))
+                })?;
+                opts.timeout = std::time::Duration::from_secs(secs);
+            }
+            "--help" | "-h" => return Err(TenancyError::Validation(HELP.to_owned())),
+            other => {
+                return Err(TenancyError::Validation(format!(
+                    "test-tenant-connection: unknown argument `{other}`"
+                )));
+            }
+        }
+    }
+
+    match crate::tenancy::preflight::check(&url, &opts).await {
+        Ok(ok) => {
+            writeln!(w, "ok: reached {}", ok.endpoint)?;
+            if ok.writes_verified {
+                writeln!(w, "  this role can create tables — migrations will run")?;
+            } else {
+                writeln!(
+                    w,
+                    "  --no-write-probe: did NOT check whether this role can create tables"
+                )?;
+            }
+            Ok(())
+        }
+        // A `Validation` error rather than a driver one: nothing is
+        // broken in rustango, the URL the operator supplied is wrong,
+        // and the diagnosis already says what to change.
+        Err(d) => Err(TenancyError::Validation(d.to_string())),
+    }
+}
+
+/// `argv` → [`ProvisionRequest`]. The only place that knows
+/// `--no-migrate` exists: a negative flag is right for a command line
+/// and wrong for a struct field, so it is inverted on the way in.
+fn parse_create_tenant_args(args: &[String]) -> Result<provision::ProvisionRequest, TenancyError> {
     const HELP: &str = "create-tenant <slug> [--mode schema|database] \
         [--backend postgres|mysql|sqlite] [--display-name <s>] \
         [--database-url <url>] [--schema-name <s>] [--host-pattern <s>] \
@@ -205,7 +216,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
                 TenancyError::Validation("create-tenant requires a slug positional argument".into())
             })?,
     };
-    let mut out = CreateTenantArgs {
+    let mut out = provision::ProvisionRequest {
         slug,
         mode: StorageMode::Schema,
         backend: BackendKind::Postgres,
@@ -215,7 +226,8 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
         host_pattern: None,
         port: None,
         path_prefix: None,
-        no_migrate: false,
+        run_migrations: true,
+        preflight: crate::tenancy::preflight::Preflight::default(),
     };
     while let Some(flag) = iter.next() {
         match flag.as_str() {
@@ -246,7 +258,7 @@ fn parse_create_tenant_args(args: &[String]) -> Result<CreateTenantArgs, Tenancy
                 })?);
             }
             "--path-prefix" => out.path_prefix = Some(next_value(&mut iter, "--path-prefix")?),
-            "--no-migrate" => out.no_migrate = true,
+            "--no-migrate" => out.run_migrations = false,
             "--help" | "-h" => return Err(TenancyError::Validation(HELP.to_owned())),
             other => {
                 return Err(TenancyError::Validation(format!(
@@ -336,46 +348,20 @@ where
         )));
     }
 
-    let registry = pools.registry_pool();
-    let existing: Vec<Org> = Org::objects()
-        .where_(Org::slug.eq(slug.clone()))
-        .fetch(&registry)
-        .await?;
-    let Some(org) = existing.into_iter().next() else {
-        return Err(TenancyError::Validation(format!(
-            "drop-tenant: no tenant with slug `{slug}`"
-        )));
-    };
-    if !org.active {
+    // The steps live in `tenancy::decommission` so the console runs
+    // exactly these; this verb keeps what is a CLI's job — argv, the
+    // confirmation prompt, and rendering.
+    let report = super::super::decommission::decommission(
+        pools,
+        &slug,
+        super::super::decommission::Action::Deactivate,
+    )
+    .await
+    .map_err(|e| TenancyError::Validation(format!("drop-tenant: {e}")))?;
+    if report.no_change {
         writeln!(w, "tenant `{slug}` already inactive — no change")?;
         return Ok(());
     }
-
-    // Soft-delete: UPDATE rustango_orgs SET active = false WHERE id = $1.
-    let id = org
-        .id
-        .get()
-        .copied()
-        .ok_or_else(|| TenancyError::Validation("dropped Org row has no PK".into()))?;
-    let updated = Org::objects()
-        .where_(Org::id.eq(id))
-        .update()
-        .set("active", false)
-        .execute_pool(&registry)
-        .await?;
-    if updated == 0 {
-        return Err(TenancyError::Validation(format!(
-            "drop-tenant: no row updated for id {id} — race condition?"
-        )));
-    }
-    // Only once the write is confirmed. Invalidating before the guard
-    // would throw away a healthy cache on a no-op, and the suspension
-    // it is clearing would not have happened.
-    //
-    // Clears the extra-hostname cache as well — that one holds `Org`
-    // rows too, so without it a suspended tenant's base host 404s while
-    // its extra hosts keep serving.
-    super::super::invalidate_org_cache();
     writeln!(
         w,
         "soft-deleted tenant `{slug}` (active=false). Data preserved."
@@ -470,6 +456,13 @@ where
         )));
     }
 
+    // Everything destructive lives in `tenancy::decommission` so the
+    // console runs exactly these steps. This verb keeps argv, the
+    // confirmation prompt, and rendering.
+    //
+    // The flag check is here rather than there because `--purge-database`
+    // is this CLI's vocabulary; the engine enforces the same rule in its
+    // own words for every other caller.
     let registry = pools.registry_pool();
     let existing: Vec<Org> = Org::objects()
         .where_(Org::slug.eq(slug.clone()))
@@ -480,154 +473,37 @@ where
             "purge-tenant: no tenant with slug `{slug}`"
         )));
     };
-
     let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
         TenancyError::Validation(format!("org `{slug}` has unknown storage_mode `{got}`"))
     })?;
-
-    match mode {
-        StorageMode::Schema => {
-            // Schema mode is PG-only by language. Downcast to grab
-            // the typed `pools.registry()` PgPool accessor.
-            #[cfg(feature = "postgres")]
-            {
-                let pg_pools = (pools as &dyn std::any::Any)
-                    .downcast_ref::<TenantPools<sqlx::Postgres>>()
-                    .ok_or_else(|| {
-                        TenancyError::Validation(
-                            "purge-tenant: schema-mode tenants require a Postgres registry".into(),
-                        )
-                    })?;
-                let schema = org.schema_name.clone().unwrap_or_else(|| slug.clone());
-                let sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(&schema));
-                rustango::sql::sqlx::query(&sql)
-                    .execute(pg_pools.registry())
-                    .await?;
-                writeln!(w, "purged tenant `{slug}` (dropped schema `{schema}`)")?;
-            }
-            #[cfg(not(feature = "postgres"))]
-            {
-                return Err(TenancyError::Validation(
-                    "purge-tenant: schema-mode tenants require the `postgres` feature".into(),
-                ));
-            }
-        }
-        StorageMode::Database => {
-            if !purge_database {
-                return Err(TenancyError::Validation(format!(
-                    "tenant `{slug}` is database-mode — `DROP DATABASE` is unrecoverable. \
-                     Pass `--purge-database` to confirm you want the DB dropped, or use \
-                     `drop-tenant` for soft-delete."
-                )));
-            }
-            // Resolve the URL through the secrets resolver so vault-
-            // backed orgs purge correctly. Then close & drop the
-            // cached pool — DROP DATABASE refuses while connections
-            // are open.
-            let url = pools.resolved_database_url(&org).await?;
-            pools.invalidate(&slug).await;
-            // #560 — branch on the tenant's runtime `backend_kind`,
-            // NOT the cargo feature flag. On a mixed-feature build
-            // (PG + MySQL compiled in), the `cfg(postgres)` arm was
-            // unconditionally taken regardless of the tenant's
-            // actual backend; parsing a `mysql://` URL via
-            // `PgConnectOptions::from_str` then failed at runtime
-            // with a cryptic "invalid URL" error.
-            //
-            // The PG helper stays gated on the `postgres` feature
-            // (`PgConnectOptions` isn't available without it); the
-            // runtime branch decides whether the helper is reachable
-            // for THIS tenant.
-            let is_pg = org.backend_kind == "postgres";
-            #[cfg(feature = "postgres")]
-            let pg_drop_attempted = if is_pg {
-                drop_database_at(&url, w).await?;
-                true
-            } else {
-                false
-            };
-            #[cfg(not(feature = "postgres"))]
-            let pg_drop_attempted = {
-                let _ = is_pg;
-                false
-            };
-            if !pg_drop_attempted {
-                writeln!(
-                    w,
-                    "  purged tenant `{slug}` registry row; manually delete the \
-                     tenant database at `{url}` (DROP DATABASE not wired for \
-                     `{backend}` in v0.42)",
-                    backend = org.backend_kind,
-                )?;
-            }
-            writeln!(w, "purged tenant `{slug}` (dropped dedicated database)")?;
-        }
-    }
-
-    // DELETE the Org row via the ORM's bi-dialect `delete_pool`.
-    let id = org
-        .id
-        .get()
-        .copied()
-        .ok_or_else(|| TenancyError::Validation("purge-tenant: Org row has no PK".into()))?;
-    let rows_deleted = org.delete_pool(&registry).await?;
-    if rows_deleted == 0 {
+    if mode == StorageMode::Database && !purge_database {
         return Err(TenancyError::Validation(format!(
-            "purge-tenant: no Org row deleted for id {id} — race condition?"
+            "tenant `{slug}` is database-mode — `DROP DATABASE` is unrecoverable. \
+             Pass `--purge-database` to confirm you want the DB dropped, or use \
+             `drop-tenant` for soft-delete."
         )));
     }
-    // The schema or database is already gone by this point, so a cached
-    // resolution would route requests at storage that no longer exists —
-    // a 500 where the tenant should simply be unknown.
-    super::super::invalidate_org_cache();
-    writeln!(w, "  removed Org row (id {id})")?;
-    Ok(())
-}
 
-/// Connect to the same Postgres server as `tenant_url` but switch to
-/// the `postgres` admin database (DROP DATABASE can't run from a
-/// connection to the database being dropped). Issue the DROP, then
-/// close the admin connection.
-///
-/// v0.38 — PG-only. SQLite databases live in a single file (delete
-/// the file); MySQL has `DROP DATABASE` but the per-tenant URL
-/// rewrite gymnastics are different enough that lifting this helper
-/// to be tri-dialect is queued separately.
-#[cfg(feature = "postgres")]
-async fn drop_database_at<W: Write + Send>(
-    tenant_url: &str,
-    w: &mut W,
-) -> Result<(), TenancyError> {
-    use crate::sql::sqlx::postgres::PgConnectOptions;
-    use crate::sql::sqlx::ConnectOptions;
-    use std::str::FromStr;
+    let report = super::super::decommission::decommission(
+        pools,
+        &slug,
+        super::super::decommission::Action::Purge { purge_database },
+    )
+    .await
+    .map_err(|e| TenancyError::Validation(format!("purge-tenant: {e}")))?;
 
-    let opts = PgConnectOptions::from_str(tenant_url).map_err(|e| {
-        TenancyError::Validation(format!(
-            "purge-tenant: cannot parse database_url `{tenant_url}`: {e}"
-        ))
-    })?;
-    let dbname = opts.get_database().ok_or_else(|| {
-        TenancyError::Validation(
-            "purge-tenant: database_url is missing the database name — \
-             can't determine what to DROP DATABASE"
-                .into(),
-        )
-    })?;
-    if dbname.eq_ignore_ascii_case("postgres")
-        || dbname.eq_ignore_ascii_case("template0")
-        || dbname.eq_ignore_ascii_case("template1")
-    {
-        return Err(TenancyError::Validation(format!(
-            "purge-tenant: refusing to DROP DATABASE `{dbname}` (Postgres system database)"
-        )));
+    if let Some(schema) = &report.schema_dropped {
+        writeln!(w, "purged tenant `{slug}` (dropped schema `{schema}`)")?;
     }
-    let dbname = dbname.to_owned();
-    let admin_opts = opts.clone().database("postgres");
-    let mut admin = admin_opts.connect().await?;
-    let sql = format!("DROP DATABASE IF EXISTS {}", quote_ident(&dbname));
-    writeln!(w, "  issuing {sql}")?;
-    rustango::sql::sqlx::query(&sql).execute(&mut admin).await?;
+    if report.database_dropped.is_some() {
+        writeln!(w, "purged tenant `{slug}` (dropped dedicated database)")?;
+    }
+    for note in &report.notes {
+        writeln!(w, "  {note}")?;
+    }
+    if report.row_deleted {
+        writeln!(w, "  removed Org row")?;
+    }
     Ok(())
 }
 

@@ -3,8 +3,10 @@
 //! The rules worth pinning are the ones a unit test cannot reach: a host
 //! may be bound and unbound freely, but the tenant's **base** host — the
 //! `Org.host_pattern` written by `create-tenant` — must survive every
-//! removal path, because a tenant with no host is unreachable and there is
-//! no UI to put it back.
+//! removal path, because a tenant with no host is unreachable.
+//!
+//! This file is the engine. The console surface that drives it lives in
+//! `operator_console_hosts_sqlite_live`.
 //! NOTE on isolation: the resolver's cache is process-global and keyed by
 //! hostname, so each test below uses a hostname of its own. Production has
 //! one registry per process, which is why the cache needs no registry key.

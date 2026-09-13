@@ -35,23 +35,23 @@ Le CHANGELOG contient l'index complet des tickets pour chaque version.
 
 ## Table des matières
 
-- [Requêtes](#querying)
-- [Valeurs calculées et fonctions de base de données](#computed-values--database-functions)
-- [Agrégations](#aggregations)
-- [Jointures et préchargement des lignes liées](#joins--preloading-related-rows)
-- [Opérations en masse](#bulk-operations)
-- [Insertion ou mise à jour (upsert)](#insert-or-update-upsert)
+- [Requêtes](#requêtes)
+- [Valeurs calculées et fonctions de base de données](#valeurs-calculées-et-fonctions-de-base-de-données)
+- [Agrégations](#agrégations)
+- [Jointures et préchargement des lignes liées](#jointures-et-préchargement-des-lignes-liées)
+- [Opérations en masse](#opérations-en-masse)
+- [Insertion ou mise à jour (upsert)](#insertion-ou-mise-à-jour-upsert)
 - [Transactions](#transactions)
-- [Plusieurs-à-plusieurs](#many-to-many)
+- [Plusieurs-à-plusieurs](#plusieurs-à-plusieurs)
 - [JSON / JSONB](#json--jsonb)
-- [Suppression logique](#soft-delete)
-- [Journal d'audit](#audit-trail)
-- [Échappatoire vers le SQL brut](#raw-sql-escape-hatch)
-- [Chargement paresseux des clés étrangères](#lazy-fk-loading)
-- [Quatre façons de filtrer](#four-ways-to-filter)
-- [Requêtes limitées au tenant](#tenant-scoped-queries)
-- [Signaux](#signals)
-- [Conseils de performance](#performance-tips)
+- [Suppression logique](#suppression-logique)
+- [Journal d'audit](#journal-daudit)
+- [Échappatoire vers le SQL brut](#échappatoire-vers-le-sql-brut)
+- [Chargement paresseux des clés étrangères](#chargement-paresseux-des-clés-étrangères)
+- [Quatre façons de filtrer](#quatre-façons-de-filtrer)
+- [Requêtes limitées au tenant](#requêtes-limitées-au-tenant)
+- [Signaux](#signaux)
+- [Conseils de performance](#conseils-de-performance)
 
 ---
 
@@ -866,7 +866,7 @@ let featured = Author::objects()
 
 ### Quand passer plutôt au SQL brut
 
-Les builders ci-dessus couvrent les cas courants. Pour ce qu'ils n'expriment pas encore — `Cast`, recherche plein texte, opérateurs de chemin JSON, fonctions de hachage, trigonométrie, fonctions de fenêtrage — voir la section [Échappatoire vers le SQL brut](#raw-sql-escape-hatch) ci-dessous, ou attendez les tickets de suivi qui étendent le même arbre d'expressions.
+Les builders ci-dessus couvrent les cas courants. Pour ce qu'ils n'expriment pas encore — `Cast`, recherche plein texte, opérateurs de chemin JSON, fonctions de hachage, trigonométrie, fonctions de fenêtrage — voir la section [Échappatoire vers le SQL brut](#échappatoire-vers-le-sql-brut) ci-dessous, ou attendez les tickets de suivi qui étendent le même arbre d'expressions.
 
 ---
 

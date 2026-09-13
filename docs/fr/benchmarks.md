@@ -12,7 +12,7 @@ runtime plus robuste : **Django** sur **gunicorn** (WSGI) et sur **Hypercorn**
 et Go sont chacun un unique binaire résident, il n'y en a donc qu'un de chaque.
 
 Chaque chiffre ci-dessous est **mesuré et reproductible**, issu d'une exécution cohérente d'un
-harnais en une seule commande (voir [Reproduce](#reproduce)). Rien ici n'est esquivé à la légère.
+harnais en une seule commande (voir [Reproduce](#reproduire)). Rien ici n'est esquivé à la légère.
 
 > **En bref.** Sur un matériel identique servant des pages HTML rendues identiques, les deux
 > runtimes **compilés et natifs** — **Rustango** et **Go** — laissent les

@@ -12,7 +12,7 @@ que una base de datos preexistente adopte el motor sin colisiones.
 > **¿Nuevo en las migraciones?** Los verbos de la CLI del día a día —
 > `makemigrations`, `migrate`, `migrate --squash`, `migrate --fake`,
 > `downgrade`, `showmigrations` — se tratan comando por comando en la
-> [guía de manage](manage.md#migrations). Esta página es el modelo conceptual
+> [guía de manage](manage.md#migraciones). Esta página es el modelo conceptual
 > que hay detrás de ellos.
 
 > **Fuente:** `rustango::migrate` (`runner`, `make`, `file`, `manage`)
@@ -189,7 +189,7 @@ en lugar de forzarlo.
 
 ## Véase también
 
-- [Guía de `manage`](manage.md#migrations) — cada verbo de la CLI de migración,
+- [Guía de `manage`](manage.md#migraciones) — cada verbo de la CLI de migración,
   con ejemplos.
 - [Scaffolding](scaffolding.md) — de dónde vienen `migrations/` y
   `system/migrations/`.

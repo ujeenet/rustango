@@ -27,11 +27,11 @@ types permettent de construire n'importe quelle spécification à la main.
 ---
 
 ## Table des matières
-- [Démarrage rapide](#quick-start) — générer + servir en un seul écran
-- [Schémas depuis les serializers](#schemas-from-serializers) · [Chemins depuis les ViewSets](#paths-from-viewsets)
-- [Le servir](#serving-the-spec-swagger-ui--redoc) · [Construire une spec à la main](#hand-building-a-spec)
-- [Schémas de sécurité](#security-schemes) · [Le builder `Schema`](#the-schema-builder)
-- [Notes et limites](#notes-and-limits)
+- [Démarrage rapide](#démarrage-rapide) — générer + servir en un seul écran
+- [Schémas depuis les serializers](#schémas-depuis-les-serializers) · [Chemins depuis les ViewSets](#chemins-depuis-les-viewsets)
+- [Le servir](#servir-la-spec-swagger-ui--redoc) · [Construire une spec à la main](#construire-une-spec-à-la-main)
+- [Schémas de sécurité](#schémas-de-sécurité) · [Le builder `Schema`](#le-builder-schema)
+- [Notes et limites](#notes-et-limites)
 
 ---
 
@@ -113,7 +113,7 @@ impl rustango::openapi::OpenApiSchema for Money {
 }
 ```
 
-> Voir le [guide des Serializers](serializers.md#openapi-schemas) pour les
+> Voir le [guide des Serializers](serializers.md#schémas-openapi) pour les
 > attributs de champ qui façonnent la sortie.
 
 ---
@@ -227,7 +227,7 @@ Assistants : `SecurityScheme::bearer(fmt)`, `basic()`, `api_key_header(name)`,
 Sur une `Operation`, `.no_security()` marque un endpoint public et
 `.require_security(scheme, scopes)` surcharge la valeur globale par défaut. Ceux-ci
 s'alignent sur l'authentification propre de **Rustango** (voir le
-[guide de Sécurité](security.md#authenticating-users)) : JWT → `bearer`, clés
+[guide de Sécurité](security.md#authentifier-les-utilisateurs)) : JWT → `bearer`, clés
 d'API → `apiKey`, OAuth2 → `oauth2`.
 
 ---

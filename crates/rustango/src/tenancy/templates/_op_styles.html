@@ -16,6 +16,18 @@ aside.sidebar {
   padding: var(--space-4) 0;
   display: flex;
   flex-direction: column;
+
+  /* Stay in view while the content scrolls. `align-self` is the part
+     that matters: a flex item stretches to the container's full height
+     by default, and an item already as tall as its container has no
+     room to stick, so the nav scrolled away with the page. Pinning it
+     to the top and giving it the viewport's height restores that room.
+     `overflow-y` covers a viewport too short for the nav itself. */
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  overflow-y: auto;
 }
 aside .brand {
   font-weight: var(--font-weight-bold);
@@ -80,6 +92,9 @@ aside form.logout button:hover { background: var(--color-accent-bg-soft); border
 main {
   flex: 1;
   padding: var(--space-5) var(--space-6);
+  /* Also neutralizes the flex `min-width: auto` that would otherwise
+     let a wide table widen the whole shell: the automatic minimum size
+     applies only while overflow is `visible`. */
   overflow-x: auto;
 }
 h1 { margin-top: 0; color: var(--color-accent); }
@@ -147,6 +162,10 @@ code {
    page (#70). */
 form.edit-form { max-width: 720px; margin-bottom: var(--space-6); }
 form.edit-form + form.edit-form { margin-top: var(--space-6); }
+/* A form directly under a listing. `table` carries a top margin only,
+   and `.edit-form` a bottom one, so the fieldset's border landed flush
+   against the last row and read as another row of it. */
+table + form.edit-form { margin-top: var(--space-6); }
 fieldset.section {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -260,6 +279,7 @@ fieldset.section th {
 }
 th.actions-col, td.actions-col { text-align: right; white-space: nowrap; }
 fieldset.section input[type="text"],
+fieldset.section input[type="password"],
 fieldset.section input[type="number"],
 fieldset.section input[type="date"],
 fieldset.section input[type="datetime-local"],
@@ -276,6 +296,7 @@ fieldset.section select {
   color: var(--color-fg);
 }
 fieldset.section input[type="text"]:focus,
+fieldset.section input[type="password"]:focus,
 fieldset.section input[type="number"]:focus,
 fieldset.section textarea:focus {
   outline: none;
@@ -324,4 +345,201 @@ fieldset.section .brand-asset-preview {
 }
 .theme-toggle:hover { border-color: var(--color-accent); color: var(--color-accent); }
 .theme-toggle:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* ---- Tenant provisioning (#1322) ---- */
+
+/* The page-level call to action above the tenant list. */
+.page-actions { margin: 0 0 var(--space-4) 0; }
+
+/* Result of the connection probe, dropped in beside the button. */
+.probe {
+  display: inline-block;
+  margin: var(--space-2) 0 0 0;
+  padding: 0.35rem var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+}
+.probe code { font-size: inherit; }
+.probe-ok {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+.probe-bad {
+  /* The console has no danger token, so borrow the alert's. */
+  border-color: currentColor;
+  color: #b3261e;
+}
+
+/* Per-step status in a provisioning run. `started` stays default —
+   it is the neutral "in flight" state and colouring it would compete
+   with the outcome rows that actually need attention. */
+.status-ok      { color: var(--color-accent); }
+.status-skipped { color: var(--color-fg-muted); }
+.status-failed  { color: #b3261e; font-weight: var(--font-weight-bold); }
+
+/* Hostname rows: several small forms sit in one actions cell, so they
+   have to sit on a line rather than stack as blocks. */
+.inline-form { display: inline; }
+.inline-form + .inline-form { margin-left: var(--space-2); }
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--color-fg-muted);
+}
+.badge-base { border-color: var(--color-accent); color: var(--color-accent); }
+
+/* A one-time secret. Loud on purpose: it is shown once and the reader
+   has to notice before navigating away. */
+.alert-secret {
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent-bg-soft);
+}
+.secret-value {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 2px 8px;
+  font-size: 15px;
+  user-select: all; /* one click selects the whole password */
+}
+/* The per-operator reset form is revealed by its `:target`, so the
+   table is not three rows deep per operator until one is wanted. */
+tr.reset-row { display: none; }
+tr.reset-row:target { display: table-row; }
+.inline-reset { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+/* The row sits outside `fieldset.section`, so it misses the shared
+   input styling and its fields rendered as raw browser defaults next
+   to everything else. */
+.inline-reset input[type="password"] {
+  padding: 0.4rem var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  background: var(--color-bg-input);
+  color: var(--color-fg);
+}
+.inline-reset input[type="password"]:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent-bg-soft);
+}
+
+/* Audit log + run history */
+td.nowrap, th.nowrap { white-space: nowrap; }
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  margin-top: var(--space-4);
+}
+.filter-bar label { color: var(--color-fg-muted); font-size: 13px; }
+.filter-bar input[type="text"] {
+  padding: 0.3rem var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  background: var(--color-bg-input);
+  color: var(--color-fg);
+}
+.filter-bar input[type="text"]:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent-bg-soft);
+}
+/* The JSON is the useful column and the tallest, so it opens on
+   demand rather than making every row several lines high. */
+.audit-changes {
+  margin: var(--space-2) 0 0 0;
+  padding: var(--space-2);
+  background: var(--color-bg-sidebar);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  max-width: 40rem;
+  overflow-x: auto;
+}
+tr.run-error td { border-top: 0; padding-top: 0; font-size: 13px; }
+/* A slug can be 63 characters. Without this it sets the column width
+   for every other row and pushes the table past the viewport. */
+td.wrap-anywhere { overflow-wrap: anywhere; }
+
+/* The destructive section. Tinted rather than shouty: it sits at the
+   bottom of a page an operator uses for ordinary edits. */
+fieldset.section.danger { border-color: #b3261e; }
+fieldset.section.danger > legend { color: #b3261e; }
+.danger-rule { border: 0; border-top: 1px solid var(--color-border); margin: var(--space-4) 0; }
+.danger-lead { font-size: 13px; color: var(--color-fg-muted); margin: 0 0 var(--space-3) 0; }
+fieldset.section.danger form.edit-form { margin-bottom: 0; }
+
+/* Shared pager (`_op_pager.html`). */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1, 4px);
+  align-items: center;
+  margin-top: var(--space-4);
+  font-size: 13px;
+}
+.pager-page, .pager-step {
+  padding: 3px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  text-decoration: none;
+}
+.pager-page:hover, .pager-step:hover { border-color: var(--color-accent); }
+.pager-current {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #fff;
+  font-weight: var(--font-weight-bold);
+}
+.pager-disabled { color: var(--color-fg-muted); border-color: transparent; }
+.pager-gap { padding: 3px 2px; color: var(--color-fg-muted); }
+/* Beside the links, not pushed right: the floating theme toggle sits
+   in that corner and covered it. */
+.pager-total { margin-left: var(--space-3); color: var(--color-fg-muted); }
+
+/* Narrow screens. 720px to match the admin's breakpoint — the two
+   consoles should not disagree about when a sidebar stops being one.
+   The sticky full-height sidebar is undone here: pinned at 100vh it
+   would fill a phone screen before the content started. */
+@media (max-width: 720px) {
+  .shell { flex-direction: column; }
+  aside.sidebar {
+    width: auto;
+    position: static;
+    height: auto;
+    overflow-y: visible;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+    padding-bottom: var(--space-2);
+  }
+  aside .brand { border-bottom: 0; margin-bottom: 0; padding-bottom: var(--space-2); }
+  /* A row of links rather than a column: vertical nav plus brand plus
+     sign-out is most of a phone screen before any content. */
+  aside nav { flex: none; display: flex; flex-wrap: wrap; gap: var(--space-1, 4px); }
+  aside nav a {
+    padding: 0.35rem var(--space-3);
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: var(--radius-sm);
+  }
+  aside nav a.active { border-left-color: transparent; border-bottom-color: var(--color-accent); }
+  /* `.who` and the logout form are flex items of the column above, so
+     they stack whatever their `display` says; only the chrome needs
+     adjusting. */
+  aside .who { border-top: 0; padding-bottom: 0; }
+  aside form.logout button { width: auto; margin: var(--space-2) var(--space-4); }
+  main { padding: var(--space-4); }
+  /* Label-above-field: a two-column form table leaves neither column
+     usable at this width. */
+  fieldset.section th, fieldset.section td { display: block; width: auto; }
+  fieldset.section th { padding-bottom: 0; }
+  .filter-bar, .inline-reset { flex-direction: column; align-items: stretch; }
+}
 </style>

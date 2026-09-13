@@ -73,6 +73,9 @@ pub mod auth_routes;
 pub mod bootstrap;
 pub mod branding;
 pub mod database_pools;
+/// Taking a tenant out of service — the steps `drop-tenant` and
+/// `purge-tenant` run, callable from anything that is not a terminal.
+pub mod decommission;
 mod error;
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
@@ -90,15 +93,35 @@ pub mod member_auth;
 pub(crate) use crate::manage_interactive;
 pub mod middleware;
 pub mod migrate;
+/// Tenant migrations against a recorded, streamable run.
+pub mod migrate_run;
 pub mod operator_console;
+pub mod operators;
 mod org;
+pub mod org_edit;
 pub mod org_host;
 pub mod password;
 pub mod permissions;
 mod pools;
+/// Reaching a tenant's database before anything is written to the
+/// registry, so a bad URL cannot leave a half-provisioned tenant.
+pub mod preflight;
 /// Who a request is acting as, whatever authenticated it (session cookie,
 /// Bearer access token, MCP agent token).
 pub mod principal;
+/// Standing up a tenant — the steps the `create-tenant` verb runs,
+/// callable from anything that is not a terminal.
+pub mod provision;
+/// Durable record of provisioning runs and their events, so a run
+/// survives a reconnect and is readable from a second pod.
+pub mod provision_store;
+/// Inbound webhook that creates a tenant from a billing event.
+///
+/// Gated on `webhook`, which is where HMAC verification lives: a
+/// tenancy deployment that does not expose this endpoint has no reason
+/// to compile signature machinery for it.
+#[cfg(feature = "webhook")]
+pub mod provision_webhook;
 mod resolver;
 mod resolver_cache;
 pub mod routes;
@@ -161,12 +184,14 @@ pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
 pub use error::TenancyError;
 #[cfg(all(feature = "tenancy", feature = "sso"))]
 pub use member_auth::{member_sso_router, CurrentMember, MemberAuthConfig, MEMBER_COOKIE};
-#[cfg(feature = "postgres")]
-pub use migrate::migrate_tenants;
 pub use migrate::{
-    migrate_registry, migrate_registry_pool, migrate_tenants_db, migrate_tenants_dyn,
-    TenantMigrationOutcome, TenantMigrationReport,
+    migrate_one_tenant, migrate_registry, migrate_registry_pool, migrate_tenants_db,
+    migrate_tenants_db_with_progress, migrate_tenants_dyn, migrate_tenants_dyn_with_progress,
+    Chain, TenantMigrationEvent, TenantMigrationObserver, TenantMigrationOutcome,
+    TenantMigrationReport,
 };
+#[cfg(feature = "postgres")]
+pub use migrate::{migrate_tenants, migrate_tenants_with_progress};
 /// Fingerprint of `rustango_orgs`, used by the base-host cache to notice
 /// writes made by another process. Public so a deployment can poll it
 /// itself (e.g. to drive a custom cache) and so tests can assert on it.

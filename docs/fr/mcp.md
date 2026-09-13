@@ -29,16 +29,16 @@ intégrés.
 
 ## Table des matières
 
-- [Ce que MCP vous apporte](#what-mcp-gives-you)
-- [Étape 1 — Activer la feature](#step-1--enable-the-feature)
-- [Étape 2 — Définir un tool](#step-2--define-a-tool)
-- [Étape 3 — Monter le serveur](#step-3--mount-the-server)
-- [Étape 4 — Autoriser les agents](#step-4--authorize-agents)
-- [Le protocole](#the-protocol)
-- [Réglages](#settings)
-- [Comment tester](#how-to-test) — [la suite](#a-the-test-suite) · [curl](#b-curl-the-json-rpc) · [le MCP Inspector visuel](#c-test-it-visually-with-the-mcp-inspector) · [un vrai client](#d-connect-a-real-mcp-client)
-- [Build optionnel vs. par défaut](#optional-vs-default-build)
-- [Voir aussi](#see-also)
+- [Ce que MCP vous apporte](#ce-que-mcp-vous-apporte)
+- [Étape 1 — Activer la feature](#étape-1--activer-la-feature)
+- [Étape 2 — Définir un tool](#étape-2--définir-un-tool)
+- [Étape 3 — Monter le serveur](#étape-3--monter-le-serveur)
+- [Étape 4 — Autoriser les agents](#étape-4--autoriser-les-agents)
+- [Le protocole](#le-protocole)
+- [Réglages](#réglages)
+- [Comment tester](#comment-tester) — [la suite](#a-la-suite-de-tests) · [curl](#b-curl-le-json-rpc) · [le MCP Inspector visuel](#c-testez-le-visuellement-avec-le-mcp-inspector) · [un vrai client](#d-connectez-un-vrai-client-mcp)
+- [Build optionnel vs. par défaut](#build-optionnel-vs-par-défaut)
+- [Voir aussi](#voir-aussi)
 
 ---
 
@@ -72,7 +72,7 @@ rustango = { version = "0.44", features = ["mcp"] }
 Elle tire `tenancy` (agents/skills), `sse` (le flux de notifications),
 `serializer` + `openapi` (les schémas d'entrée des tools) et `jwt` (les tokens
 d'agent). Un build **sans** la feature ne compile aucune partie du module MCP —
-voir [Build optionnel vs. par défaut](#optional-vs-default-build).
+voir [Build optionnel vs. par défaut](#build-optionnel-vs-par-défaut).
 
 ---
 
@@ -170,7 +170,7 @@ n'importe quel montage :
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.44.0" },
+    "serverInfo": { "name": "rustango", "version": "0.57.0" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 

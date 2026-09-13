@@ -28,14 +28,14 @@ d'une ligne.
 
 ## Table des matières
 
-- [Étape 1 — Choisir un backend de stockage](#step-1--pick-a-storage-backend)
-- [Étape 2 — Enregistrer, charger et servir des fichiers](#step-2--save-load-and-serve-files)
-- [Étape 3 — Accepter un téléversement](#step-3--accept-an-upload)
-- [Noms de fichiers sûrs](#safe-filenames)
-- [Production : stockage compatible S3](#production-s3-compatible-storage)
-- [La médiathèque](#the-media-library)
-- [Référence](#reference)
-- [Voir aussi](#see-also)
+- [Étape 1 — Choisir un backend de stockage](#étape-1--choisir-un-backend-de-stockage)
+- [Étape 2 — Enregistrer, charger et servir des fichiers](#étape-2--enregistrer-charger-et-servir-des-fichiers)
+- [Étape 3 — Accepter un téléversement](#étape-3--accepter-un-téléversement)
+- [Noms de fichiers sûrs](#noms-de-fichiers-sûrs)
+- [Production : stockage compatible S3](#production--stockage-compatible-s3)
+- [La médiathèque](#la-médiathèque)
+- [Référence](#référence)
+- [Voir aussi](#voir-aussi)
 
 ---
 

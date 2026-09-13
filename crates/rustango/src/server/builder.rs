@@ -9,8 +9,6 @@ use sqlx::Database;
 use tower::ServiceExt as _;
 
 use crate::extractors::TenantContext;
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::PgPool;
 use crate::tenancy::{
     admin::TenantAdminBuilder, operator_console, ChainResolver, DefaultTenantDb, HeaderResolver,
     RegisteredHostResolver, SubdomainResolver, TenantPools,
@@ -52,6 +50,11 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// `/ready` `SELECT 1` probe). Set via [`Builder::with_health`]
     /// so projects with custom health JSON can opt out.
     health_endpoints: bool,
+    /// Migrations directory to hand a provisioner, set by
+    /// [`Builder::with_tenant_provisioning`]. `None` means the
+    /// operator console cannot create tenants — see that method for
+    /// why this is opt-in rather than on by default.
+    provisioning_dir: Option<std::path::PathBuf>,
     /// `(prefix, root_dir)` pairs registered via [`Builder::with_static`].
     /// Mounted at `serve` time as
     /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`
@@ -83,7 +86,7 @@ impl Builder<sqlx::Postgres> {
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         let registry_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://rustango:rustango@localhost:5432/rustango_test".into());
-        let registry = PgPool::connect(&registry_url).await?;
+        let registry = crate::sql::Pool::connect_postgres(&registry_url).await?;
         Ok(Self::from_pool(registry, registry_url, apex))
     }
 }
@@ -116,6 +119,7 @@ impl<DB: Database> Builder<DB> {
             init_tenancy_fn: crate::tenancy::init_tenancy,
             routes: crate::tenancy::RouteConfig::default(),
             health_endpoints: false,
+            provisioning_dir: None,
             static_dirs: Vec::new(),
             _phantom: PhantomData,
         }
@@ -133,6 +137,29 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn with_health(mut self) -> Self {
         self.health_endpoints = true;
+        self
+    }
+
+    /// Let operators **create** tenants from the console (#1322):
+    /// `GET`/`POST /orgs/new`, the connection probe, and the
+    /// provisioning run view + SSE stream.
+    ///
+    /// `migrations_dir` is where the new tenant's migrations come
+    /// from — the same directory `migrate` uses, usually
+    /// `"migrations"`.
+    ///
+    /// **Off by default, and deliberately.** Creating a tenant is the
+    /// most dangerous thing the console can do: it takes a database
+    /// URL and connects to it. Every authenticated operator who can
+    /// reach the console can use these routes, because `Operator` has
+    /// no permission model — so the meaningful boundary today is
+    /// whether the deployment turns this on at all.
+    #[must_use]
+    pub fn with_tenant_provisioning(
+        mut self,
+        migrations_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.provisioning_dir = Some(migrations_dir.into());
         self
     }
 
@@ -354,7 +381,21 @@ impl<DB: Database> Builder<DB> {
     /// # Errors
     /// `bind` failure, or the underlying `axum::serve` call
     /// returning an error.
-    pub async fn serve(self, addr: &str) -> Result<(), Box<dyn std::error::Error>>
+    /// Assemble the whole application — operator console, tenant
+    /// admin, the user's API, host dispatch — and hand back the
+    /// router, without binding a socket.
+    ///
+    /// Split out of [`Self::serve`] so the assembly is *testable*.
+    /// It was not, and that cost: `with_tenant_provisioning` was
+    /// added, the console constructor existed, and nothing connected
+    /// them — invisible to every test, because the only way to
+    /// exercise this code was to start a real server. A builder whose
+    /// output can only be observed by binding a port is a builder
+    /// nobody checks.
+    ///
+    /// # Errors
+    /// Pre-warm and bootstrap failures surfaced during assembly.
+    pub async fn into_router(self) -> Result<Router, Box<dyn std::error::Error>>
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
@@ -506,12 +547,24 @@ impl<DB: Database> Builder<DB> {
         // admin redeems the token + sets a host-scoped cookie. No
         // cookie is set on the operator-console origin.
         let brand_storage_for_op = crate::tenancy::branding::default_brand_storage();
-        let operator_admin = operator_console::router_with_impersonation(
+        // #1322 — only when the deployment asked for it. See
+        // `with_tenant_provisioning` for why creating tenants is not
+        // on by default.
+        let provisioner = self.provisioning_dir.map(|dir| {
+            crate::tenancy::provision::Provisioner::new(
+                self.pools.clone(),
+                self.registry_url.clone(),
+                dir,
+            )
+            .erased()
+        });
+        let operator_admin = operator_console::router_full(
             self.registry,
-            self.pools.clone().into_invalidator(),
+            Some(self.pools.clone().into_invalidator()),
+            provisioner,
             operator_secret,
             brand_storage_for_op,
-            session_secret_for_tenant.clone(),
+            Some(session_secret_for_tenant.clone()),
             // Handoff URL on the tenant admin where the token
             // gets redeemed (#88). RouteConfig holds the canonical
             // value; default `/_impersonation_handoff`. After
@@ -549,6 +602,18 @@ impl<DB: Database> Builder<DB> {
             }
         }));
 
+        Ok(app)
+    }
+
+    /// Assemble everything and bind.
+    ///
+    /// # Errors
+    /// As [`Self::into_router`], plus a bind failure on `addr`.
+    pub async fn serve(self, addr: &str) -> Result<(), Box<dyn std::error::Error>>
+    where
+        crate::sql::Pool: From<sqlx::Pool<DB>>,
+    {
+        let app = self.into_router().await?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         // v0.30.16 — `into_make_service_with_connect_info` is what
         // populates `ConnectInfo<SocketAddr>` in request extensions.

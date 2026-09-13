@@ -21,23 +21,118 @@ pub(super) async fn migrate_tenants_cmd<W: Write + Send, DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    // v0.38 — on PG the legacy `migrate_tenants` handles both schema-
-    // mode and database-mode tenants; on non-PG we route through the
-    // generic `migrate_tenants_db` which is database-mode-only by
-    // design (schema-mode is PG-only by language).
-    #[cfg(feature = "postgres")]
-    let report = {
-        if let Some(pg_pools) =
-            (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
-        {
-            tenant_migrate::migrate_tenants(pg_pools, dir, registry_url).await?
-        } else {
-            tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?
-        }
-    };
-    #[cfg(not(feature = "postgres"))]
-    let report = tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?;
+    // Progress goes to the same writer the report does, so `manage
+    // migrate-tenants` shows each migration as it lands instead of
+    // sitting silent for the length of the run.
+    let progress = CliProgress::new(w);
+    let report = tenant_migrate::migrate_tenants_dyn_with_progress(
+        pools,
+        dir,
+        registry_url,
+        Some(&progress),
+    )
+    .await?;
+    let w = progress.into_inner();
     write_tenant_report(w, &report)
+}
+
+/// Prints tenant-migration progress to the verb's own writer.
+///
+/// ## Why the `Mutex`
+///
+/// An observer is `&self` and `Sync` — it has to be, because the runner
+/// hands events out from inside an async body — while a verb writes
+/// through `&mut W`. The mutex is what bridges those, and it is
+/// uncontended: the runner emits from one task at a time.
+///
+/// ## On blocking
+///
+/// [`crate::migrate::progress`] says observers must not block, because
+/// events are emitted with the migrate lock held. Writing a line to a
+/// terminal is microseconds, and this is a CLI: one process, one
+/// operator, and if it does stall on a full pipe (`manage migrate |
+/// head -1`) the only migration it delays is the operator's own. That
+/// reasoning does **not** transfer to a server-side observer.
+struct CliProgress<'w, W> {
+    out: std::sync::Mutex<&'w mut W>,
+}
+
+impl<'w, W: Write + Send> CliProgress<'w, W> {
+    fn new(out: &'w mut W) -> Self {
+        Self {
+            out: std::sync::Mutex::new(out),
+        }
+    }
+
+    /// Hand the writer back so the caller can print the final report.
+    fn into_inner(self) -> &'w mut W {
+        // A poisoned lock means an observer call panicked. The docs say
+        // not to panic in one; if it happened anyway, recover the writer
+        // rather than taking the whole verb down over progress output.
+        self.out.into_inner().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl<W: Write + Send> tenant_migrate::TenantMigrationObserver for CliProgress<'_, W> {
+    fn on_event(&self, event: tenant_migrate::TenantMigrationEvent) {
+        use crate::migrate::{MigrationEvent, Outcome};
+        use tenant_migrate::{Chain, TenantMigrationEvent as E};
+
+        let Ok(mut out) = self.out.lock() else {
+            return;
+        };
+        // Progress is cosmetic — a broken pipe or a full disk must not
+        // turn a successful migration into a failed verb, so every write
+        // here is deliberately unchecked.
+        let _ = match event {
+            E::Planned { tenants } if tenants > 0 => {
+                writeln!(out, "migrating {tenants} tenant(s)…")
+            }
+            // Nothing to print for either: a plan of zero tenants, and
+            // the per-tenant summary `write_tenant_report` already
+            // prints once the run is over.
+            E::Planned { .. } | E::TenantFinished { .. } => Ok(()),
+            E::TenantStarted { slug, index, total } => {
+                writeln!(out, "[{index}/{total}] {slug}")
+            }
+            E::Migration { chain, event, .. } => {
+                // The two chains number independently, so `0001_initial`
+                // shows up in both. Tag which one, or it reads as a
+                // migration that ran twice.
+                let tag = match chain {
+                    Chain::System => "system",
+                    Chain::Project => "app",
+                };
+                match event {
+                    MigrationEvent::Finished {
+                        name,
+                        outcome,
+                        elapsed,
+                        ..
+                    } => {
+                        let verb = match outcome {
+                            Outcome::Ran => "applied",
+                            Outcome::RanPartial { .. } => "applied (partial)",
+                            Outcome::Faked => "faked",
+                        };
+                        writeln!(
+                            out,
+                            "        {verb} {tag}/{name} ({:.1}s)",
+                            elapsed.as_secs_f64()
+                        )
+                    }
+                    MigrationEvent::Failed { name, error, .. } => {
+                        writeln!(out, "        ✗ {tag}/{name}: {error}")
+                    }
+                    // `Started` and `Planned` are deliberately quiet:
+                    // one line per migration, printed when it lands and
+                    // carrying its duration, beats two.
+                    _ => Ok(()),
+                }
+            }
+        };
+        let _ = out.flush();
+    }
 }
 
 fn write_tenant_report<W: Write>(
@@ -223,22 +318,18 @@ where
         }
     }
 
-    // Tenant phase. Branch by backend: PG goes through the legacy
-    // `migrate_tenants` (handles schema-mode + database-mode);
-    // sqlite/mysql route through `migrate_tenants_db` (database-mode
-    // only — schema-mode is PG-only by language).
-    #[cfg(feature = "postgres")]
-    let report = {
-        if let Some(pg_pools) =
-            (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
-        {
-            tenant_migrate::migrate_tenants(pg_pools, dir, registry_url).await?
-        } else {
-            tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?
-        }
-    };
-    #[cfg(not(feature = "postgres"))]
-    let report = tenant_migrate::migrate_tenants_db(pools, dir, registry_url).await?;
+    // Tenant phase, through the one dispatch seam — see
+    // `migrate_tenants_dyn_with_progress` for why this is not a
+    // backend branch written out here.
+    let progress = CliProgress::new(w);
+    let report = tenant_migrate::migrate_tenants_dyn_with_progress(
+        pools,
+        dir,
+        registry_url,
+        Some(&progress),
+    )
+    .await?;
+    let w = progress.into_inner();
     write_tenant_report(w, &report)?;
     Ok(())
 }
