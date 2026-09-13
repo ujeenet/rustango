@@ -443,6 +443,18 @@ fn every_install_pin_names_the_shipping_series() {
             pages.push(format!("{locale_dir}/{page}"));
         }
     }
+    // Hand-added: these carry install snippets but are not published
+    // pages, so `docs/index.toml` does not reach them.
+    //
+    // That makes this an allowlist, and an allowlist's defect is that
+    // anything off it is invisible rather than failing — the cookbook
+    // and three crate READMEs each went stale unnoticed for exactly
+    // that reason. The fix is to sweep every tracked `.md` and
+    // deny-list the few that pin legitimately (CHANGELOG.md records
+    // historical pins and must not be rewritten), turning the default
+    // from unchecked to checked. Held back only until the cookbook's
+    // own pins land: widening onto a stale file makes this red on a
+    // tree nobody can fix.
     pages.push("README.md".to_owned());
     pages.push("crates/rustango-renamed-smoke/README.md".to_owned());
     pages.sort();
