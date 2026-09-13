@@ -1,13 +1,13 @@
 ---
 name: docs-truth
-description: Verify rustango documentation against the code that implements it, and make a page testable. Use when writing or editing anything under docs/, when a doc claim needs checking, when auditing a page for drift, when paying down the untested-docs backlog in crates/rustango/tests/docs_contract.rs, or when a user reports that a documented API doesn't work. Covers the verification method, the five traps that have produced wrong findings, how to write the guard, and the severity taxonomy.
+description: Verify rustango documentation against the code that implements it, and make a page testable. Use when writing or editing anything under docs/, when a doc claim needs checking, when auditing a page for drift, when paying down the untested-docs backlog in crates/rustango/tests/docs_contract.rs, or when a user reports that a documented API doesn't work. Covers the verification method, the seven traps that have produced wrong findings, how to write the guard, and the severity taxonomy.
 ---
 
 # Verifying rustango docs against the code
 
 Documentation here is checked by execution, not by reading. Reading is exactly the check a confidently-worded wrong sentence passes: `fetch_pool()` sat in the README's headline example for two releases after the rename, and `.execute(&pool)` appears eleven times in `orm.md` and has never existed. Both read fine.
 
-A September 2026 audit found **107 disagreements** between the docs and the code. This skill is the method that found them — plus the five ways it got things wrong, which turned out to be the more useful half. Of 19 findings escalated as code defects, two were withdrawn and one was corrected after filing, every one caught by a second reader rather than the original pass.
+A September 2026 audit found **107 disagreements** between the docs and the code. This skill is the method that found them — plus the seven ways it got things wrong, which turned out to be the more useful half. Of 19 findings escalated as code defects, two were withdrawn and one was corrected after filing, every one caught by a second reader rather than the original pass.
 
 ## The rule
 
@@ -39,7 +39,7 @@ For every concrete statement — an API name, a default, a flag, a config key, a
 4. **Check the default in code**, never in the doc's own prose. "Defaults to X" claims were wrong for the page-size cap (100, documented 1000), the tenancy pool (16, documented 4), and the retry backoff (2s, documented 1s).
 5. **Run it if the behaviour is reachable.** Say which you did. "Reproduced by execution" and "verified by inspection" are different claims and issues should distinguish them.
 
-## Five traps that have already produced wrong findings
+## Seven traps that have already produced wrong findings
 
 Every one was caught by a second reader, not by the pass that made the claim. Assume they'll recur, and assume you won't spot your own.
 
@@ -61,6 +61,26 @@ The same pass claimed "exactly six types implement `tower::Layer`" from one grep
 `jobs.md` carries two different errors about retries. Three sites state the backoff sequence wrongly. A fourth, `jobs.md:79`, calls `MAX_ATTEMPTS` "the retry ceiling" — but the guard is `next_attempt >= max_attempts` with `attempt` starting at 0, so the default 5 gives one initial run plus **four** retries. Correcting the shift does nothing for that line. A finding written as "four sites, one error" would have shipped a fix that left it wrong, and someone setting `MAX_ATTEMPTS = 3` expecting three retries would still get two.
 
 Same file, same subsystem, same feature — and still two findings. Group sites by *the claim they make*, not by where they live.
+
+### Self-implicating is not the same as verified
+
+Evidence offered against the speaker's own interest reads as credible, and credibility is not correctness. A confession invites agreement rather than checking — nobody wants to be the one doubting it.
+
+`crates/rustango/README.md` was reported as a byte-identical copy of the root README whose links break on crates.io. The supporting evidence was: *"I added one line to the root README myself and the two diverged within hours — root `184a06c0`, crate `88b93484`."* That reads as unusually strong because the reporter is implicating their own change.
+
+It was an artifact. The file is a **symlink** (`git ls-tree` mode `120000`), created deliberately to fix a blank crates.io README. `git show <rev>:<symlink>` prints the *link target*, so the comparison was an 18KB file against the 15-byte string `../../README.md`. A symlink cannot diverge from what it points at. A `shasum` run earlier had correctly reported them identical — and was overridden because the later tool seemed more authoritative.
+
+Two sessions then endorsed it, because the second reader praised the evidence instead of checking it.
+
+**So:** check the file mode before reasoning about duplication — and more generally, when two tools disagree, ask which one is answering the question you asked, not which one ran later. Treat a self-implicating claim like any other: it earns the same check, not less.
+
+### Numbers you narrowed before counting
+
+Three counts in one audit were reported wrong in the same way: "52 relative links" (55), "two COOKBOOK links" (four), and the SHA above. Each came from re-reading the output of a query built for a *different* question.
+
+The four COOKBOOK links are the clearest case: a grep narrowed to ``](crates/rustango/examples/`` found the two obvious ones and missed one inside an ORM-guide line and one in a summary block.
+
+**So:** when you publish a count, re-run the query scoped to the claim you are actually making. A number is a claim, and it will be quoted back with more confidence than you meant.
 
 ### Two reachable paths
 
