@@ -28,6 +28,20 @@ cargo install cargo-rustango
 
 Eso coloca un binario `cargo-rustango` en tu `PATH`; Cargo lo expone entonces como `cargo rustango` (del mismo modo que `django-admin` o el instalador `laravel` te dan un comando global).
 
+### La versión del propio generador es la que obtiene tu proyecto
+
+`cargo rustango new` escribe `rustango = "MAJOR.MINOR"` en el `Cargo.toml` generado, tomada de **la versión del generador**, no de lo más reciente que haya en crates.io. Instala el generador 0.58 y obtienes un proyecto 0.58.
+
+Eso es casi siempre lo que quieres, y por eso el comando de instalación de arriba no lleva versión fijada: el generador más nuevo escribe la fijación más nueva, y los dos no pueden separarse.
+
+Conviene saberlo cuando quieres deliberadamente una versión anterior — para que coincida con un proyecto que ya está en ella, o para reproducir un reporte. Fija el generador, no el proyecto:
+
+```sh
+cargo install cargo-rustango --version 0.57.0
+```
+
+Comprueba cuál tienes con `cargo rustango --version`. Actualizarlo más adelante es el mismo comando con `--force`, y solo afecta a los proyectos que generes después — la fijación de un proyecto existente es una línea en su propio `Cargo.toml`, que editas tú.
+
 ---
 
 ## Crear un proyecto: `cargo rustango new`

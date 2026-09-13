@@ -165,6 +165,8 @@ This adds the `cargo rustango ...` subcommand globally. Confirm it's there:
 cargo rustango --help
 ```
 
+The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.57.0`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
+
 ---
 
 ## Step 2: Create the project
