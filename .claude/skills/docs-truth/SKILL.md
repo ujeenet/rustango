@@ -84,6 +84,8 @@ A default that differs between the builder and the `Cli` path. Check both, and n
 
 Cookie `Secure` was filed as a security defect because `resolve_secure_cookies` falls back to the environment tier rather than the request scheme. True — but `manage.rs:443` passes `secure_cookies.unwrap_or(true)`, so on the documented path `Secure` is on for every tier. The practical default is *stricter* than the doc promises. Real finding, wrong severity.
 
+**So:** before filing a default as wrong, grep for every construction site of the value — `rg '<field_name>' crates/` — and check what each one passes. A default read from the struct definition alone is the library default, not the one users get.
+
 ### The doc written from a comment
 
 A source comment is not the code. When a doc and an inline comment agree and both disagree with the code, the doc was almost certainly written from the comment — and fixing only the doc leaves the next writer the same wrong source.
