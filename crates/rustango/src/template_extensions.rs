@@ -37,7 +37,7 @@
 //!
 //! ```jinja
 //! {{ "hello" | shout }}      {# → HELLO! #}
-//! {{ build_version() }}      {# → 0.42.0 #}
+//! {{ build_version() }}      {# → the running crate's version #}
 //! ```
 //!
 //! Filters + functions register globally — every Tera instance the

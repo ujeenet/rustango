@@ -401,7 +401,18 @@ where
             // the CSRF cookie is set so the next safe-method GET
             // doesn't have to seed it.
             let mut response = inner.call(req).await?;
-            if cookie_value.is_none() {
+            // Seed the cookie only if the request had none *and* the
+            // handler didn't already set one.
+            //
+            // `stamp_into_context` (and `ensure_token` generally) mints a
+            // token, renders it into the form, and appends its own
+            // `Set-Cookie`. Minting a second one here appended a
+            // *different* value, and a browser keeps the last — so on a
+            // visitor's first-ever view of any form the rendered `_csrf`
+            // and the stored cookie disagreed, and their first submit was
+            // a 403. Reloading masked it, which is why it survived: only
+            // brand-new visitors ever saw it.
+            if cookie_value.is_none() && !sets_cookie(&response, &cfg.cookie_name) {
                 let token = mint_token();
                 let cookie_str = format!(
                     "{}={token}; Path=/; SameSite=Lax{}",
@@ -447,6 +458,24 @@ fn is_safe_method(m: &Method) -> bool {
 /// of the `admin`-gated `http_query` module.
 fn method_is_csrf_exempt(m: &Method, cfg: &CsrfConfig) -> bool {
     is_safe_method(m) || (!cfg.require_csrf_on_query && m.as_str() == "QUERY")
+}
+
+/// Does this response already issue `name` as a cookie?
+///
+/// Checked before the layer seeds its own, so a handler that stamped a
+/// token into its template keeps the value it rendered.
+fn sets_cookie<B>(response: &Response<B>, name: &str) -> bool {
+    response
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| {
+            v.split(';')
+                .next()
+                .and_then(|pair| pair.split_once('='))
+                .is_some_and(|(k, _)| k.trim() == name)
+        })
 }
 
 fn read_csrf_cookie(req: &Request<Body>, name: &str) -> Option<String> {
@@ -1034,5 +1063,32 @@ mod tests {
         let mut ctx = tera::Context::new();
         ctx.insert("n", &42_i64);
         assert_eq!(tera.render("_", &ctx).unwrap(), "42");
+    }
+
+    #[test]
+    fn sets_cookie_spots_the_handlers_own_token() {
+        let resp = axum::http::Response::builder()
+            .header(axum::http::header::SET_COOKIE, "rustango_csrf=abc; Path=/")
+            .body(())
+            .unwrap();
+        assert!(sets_cookie(&resp, "rustango_csrf"));
+        assert!(!sets_cookie(&resp, "other_cookie"));
+    }
+
+    #[test]
+    fn sets_cookie_is_false_when_the_response_sets_none() {
+        let resp = axum::http::Response::builder().body(()).unwrap();
+        assert!(!sets_cookie(&resp, "rustango_csrf"));
+    }
+
+    #[test]
+    fn sets_cookie_ignores_a_different_cookie_with_a_similar_prefix() {
+        // `rustango_csrf_other=` must not count as `rustango_csrf`.
+        let resp = axum::http::Response::builder()
+            .header(axum::http::header::SET_COOKIE, "rustango_csrf_other=abc")
+            .header(axum::http::header::SET_COOKIE, "session=xyz; HttpOnly")
+            .body(())
+            .unwrap();
+        assert!(!sets_cookie(&resp, "rustango_csrf"));
     }
 }

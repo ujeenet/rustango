@@ -34,6 +34,9 @@ pub mod make;
 // queries PG-specific `information_schema` and stays
 // `#[cfg(feature = "postgres")]`-gated inside `manage::run_with_writer`.
 pub mod manage;
+/// Watching a migration run while it happens — the observer the
+/// progress-reporting entry points take.
+pub mod progress;
 mod runner;
 pub mod scaffold;
 pub mod snapshot;
@@ -52,9 +55,12 @@ pub use make::{
 };
 #[cfg(feature = "postgres")]
 pub use manage::{append_data_op, make_data_migration};
+pub use progress::{MigrationEvent, MigrationObserver, Outcome};
 pub use runner::ensure_ledger_pool_with_ledger;
 pub use runner::migrate_pool_with_ledger;
 pub use runner::migrate_pool_with_ledger_fake_initial;
+pub use runner::migrate_pool_with_ledger_fake_initial_with_progress;
+pub use runner::migrate_pool_with_progress;
 // Always-on: tri-dialect entry points (work on PG / MySQL / SQLite via
 // the `Pool` enum), plus the inventory + builder surface.
 pub use runner::{
@@ -67,6 +73,6 @@ pub use runner::{
 #[cfg(feature = "postgres")]
 pub use runner::{
     applied_set, apply_all, downgrade, drop_all, ensure_ledger, migrate, migrate_dry_run,
-    migrate_embedded, migrate_to, unapply, unapply_force,
+    migrate_embedded, migrate_to, migrate_with_progress, unapply, unapply_force,
 };
 pub use snapshot::{FieldSnapshot, IndexSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};

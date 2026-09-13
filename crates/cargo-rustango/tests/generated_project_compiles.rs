@@ -55,24 +55,21 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 /// Generate `template` into a fresh directory and return the project root.
-fn generate(template: &str, tag: &str) -> (PathBuf, PathBuf) {
+///
+/// `flags` are extra scaffolder arguments — `--backend`, `--features`.
+fn generate(template: &str, flags: &[&str], tag: &str) -> (PathBuf, PathBuf) {
     let work = scratch(tag);
     let out = Command::new(env!("CARGO_BIN_EXE_cargo-rustango"))
         .current_dir(&work)
-        .args([
-            "rustango",
-            "new",
-            "probe",
-            "--template",
-            template,
-            "--rustango-path",
-        ])
+        .args(["rustango", "new", "probe", "--template", template])
+        .args(flags)
+        .arg("--rustango-path")
         .arg(rustango_crate())
         .output()
         .expect("run the scaffolder");
     assert!(
         out.status.success(),
-        "scaffolding {template} failed:\n{}",
+        "scaffolding {template} {flags:?} failed:\n{}",
         String::from_utf8_lossy(&out.stderr),
     );
     let root = work.join("probe");
@@ -126,11 +123,16 @@ fn check(root: &Path, extra: &[&str]) -> (bool, usize, String) {
 }
 
 fn assert_compiles(template: &str, extra: &[&str], label: &str) {
+    assert_compiles_with(template, &[], extra, label);
+}
+
+/// As [`assert_compiles`], but `scaffold` flags shape the project first.
+fn assert_compiles_with(template: &str, scaffold: &[&str], extra: &[&str], label: &str) {
     if !in_repo() {
         eprintln!("skipping: crates/rustango not alongside — not a repo checkout");
         return;
     }
-    let (work, root) = generate(template, label);
+    let (work, root) = generate(template, scaffold, label);
     let (ok, warnings, log) = check(&root, extra);
     let _ = std::fs::remove_dir_all(&work);
     assert!(ok, "`{template}` {label} did not compile:\n{log}");
@@ -207,5 +209,56 @@ fn tenant_template_compiles_on_sqlite() {
         "tenant",
         &["--no-default-features", "--features", "sqlite"],
         "sqlite",
+    );
+}
+
+// -------------------------------------------------------- `--backend` (#1345)
+//
+// The switch above is what a project can *reach*; these are what it is
+// *generated as*. `--backend sqlite` has to compile with a bare `cargo check`,
+// no flags — otherwise the flag only rewrote a comment.
+
+#[test]
+#[ignore = "compiles rustango; run with --ignored"]
+fn backend_sqlite_compiles_as_generated() {
+    assert_compiles_with("fullstack", &["--backend", "sqlite"], &[], "backend-sqlite");
+}
+
+#[test]
+#[ignore = "compiles rustango; run with --ignored"]
+fn backend_mysql_compiles_as_generated() {
+    assert_compiles_with("fullstack", &["--backend", "mysql"], &[], "backend-mysql");
+}
+
+#[test]
+#[ignore = "compiles rustango; run with --ignored"]
+fn tenant_on_sqlite_backend_compiles_as_generated() {
+    assert_compiles_with("tenant", &["--backend", "sqlite"], &[], "tenant-sqlite");
+}
+
+// ------------------------------------------------------- `--features` (#1345)
+
+/// Opt-ins no template reaches — the reason the flag exists.
+#[test]
+#[ignore = "compiles rustango; run with --ignored"]
+fn selected_features_compile() {
+    assert_compiles_with(
+        "fullstack",
+        &["--features", "csrf,cache-page,testkit"],
+        &[],
+        "features",
+    );
+}
+
+/// `--features tenancy` on a non-tenant template: the feature is additive, so
+/// it must not break a project whose `main.rs` never calls into it.
+#[test]
+#[ignore = "compiles rustango; run with --ignored"]
+fn tenancy_feature_on_fullstack_compiles() {
+    assert_compiles_with(
+        "fullstack",
+        &["--features", "tenancy"],
+        &[],
+        "features-tenancy",
     );
 }

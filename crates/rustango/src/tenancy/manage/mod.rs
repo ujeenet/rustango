@@ -44,9 +44,14 @@
 mod agents;
 mod args;
 mod audit;
+mod edit;
+mod hosts;
+mod inspect;
+mod menu;
 #[cfg(feature = "postgres")]
 mod migrate_storage;
 mod migrations;
+mod operators;
 mod roles;
 mod scaffold;
 mod server;
@@ -161,7 +166,30 @@ pub async fn run_with_writer_and_init<W: Write + Send, DB: sqlx::Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let args: Vec<String> = args.into_iter().collect();
+    dispatch(
+        pools,
+        registry_url,
+        dir,
+        args.into_iter().collect(),
+        writer,
+        init_fn,
+    )
+    .await
+}
+
+/// One verb, dispatched. Split out so `menu` can run a chosen verb through
+/// the same match rather than shelling out or duplicating the table.
+pub(super) async fn dispatch<W: Write + Send, DB: sqlx::Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    args: Vec<String>,
+    writer: &mut W,
+    init_fn: InitTenancyFn,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let cmd = args.first().map_or("", String::as_str);
 
     match cmd {
@@ -172,14 +200,24 @@ where
         "create-tenant" => {
             tenants::create_tenant(pools, registry_url, dir, &args[1..], writer).await
         }
+        "test-tenant-connection" => tenants::test_tenant_connection(&args[1..], writer).await,
         "drop-tenant" => tenants::drop_tenant(pools, &args[1..], writer).await,
         "purge-tenant" => tenants::purge_tenant(pools, &args[1..], writer).await,
         "list-tenants" => tenants::list_tenants(pools, writer).await,
+        // #1344 — routing and display config were console-only to change.
+        "edit-tenant" => edit::edit_tenant(pools, &args[1..], writer).await,
+        // #1344 — the console has bound extra hostnames since #1318; these
+        // give a deploy hook and a browser-less box the same reach.
+        "list-hosts" => hosts::list_hosts(pools, &args[1..], writer).await,
+        "add-host" => hosts::add_host(pools, &args[1..], writer).await,
+        "remove-host" => hosts::remove_host(pools, &args[1..], writer).await,
+        "set-host-enabled" => hosts::set_host_enabled(pools, &args[1..], writer).await,
         "prewarm-pools" => {
             // v0.27.7 (#60) — eagerly build pools for every active
             // database-mode tenant. Useful as a post-deploy hook
             // after credential rotation, or to validate that all
             // tenants are reachable before flipping a load balancer.
+            args::reject_extra_positionals(&args[1..], 0, "prewarm-pools")?;
             let report = pools.prewarm_database_tenants().await?;
             writeln!(
                 writer,
@@ -216,6 +254,14 @@ where
                 .into(),
         )),
         "create-operator" => users::create_operator_cmd(pools, &args[1..], writer).await,
+        // #1344 — seeing who exists, and turning one off, were console-only.
+        "list-operators" => operators::list_operators(pools, &args[1..], writer).await,
+        "set-operator-active" => operators::set_operator_active(pools, &args[1..], writer).await,
+        // #1344 — the console renders all three; nothing printed them, so an
+        // incident question needed a browser or a SQL client.
+        "list-runs" => inspect::list_runs(pools, &args[1..], writer).await,
+        "show-run" => inspect::show_run(pools, &args[1..], writer).await,
+        "audit-log" => inspect::audit_log(pools, &args[1..], writer).await,
         "create-user" => users::create_user_cmd(pools, registry_url, &args[1..], writer).await,
         "create-superuser" => {
             users::create_superuser_cmd(pools, registry_url, &args[1..], writer).await
@@ -242,9 +288,26 @@ where
             // Reads from stdin, writes to the same writer the
             // dispatcher uses. `init` is an alias the muscle
             // memory of `cargo init` users will reach for.
-            let stdin = std::io::stdin();
-            let mut reader = stdin.lock();
+            //
+            // `SharedStdin`, not `stdin.lock()`: this calls verbs that
+            // prompt for themselves, and holding the lock across that
+            // deadlocks (#1360).
+            let mut reader = crate::manage_interactive::SharedStdin;
             wizard::wizard_cmd(pools, registry_url, dir, init_fn, &mut reader, writer).await
+        }
+        // The wizard above is a linear first-run setup; this is the standing
+        // list of everything you can do afterwards (#1345).
+        "menu" | "actions" => {
+            // Off a terminal there is nobody to answer, and rendering the
+            // menu to a log while exiting 0 looks like success (#1357).
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                return Err(TenancyError::Validation(
+                    "`menu` needs a terminal — run a verb directly, or `--help` for the list"
+                        .into(),
+                ));
+            }
+            let mut reader = crate::manage_interactive::SharedStdin;
+            menu::menu_cmd(pools, registry_url, dir, init_fn, &mut reader, writer).await
         }
         // Intercepted before fall-through: tenancy ships its own
         // manage.rs template in `--with-manage-bin`, wiring
@@ -351,6 +414,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
+        "  test-tenant-connection <url> [--no-write-probe] [--timeout <secs>]"
+    )?;
+    writeln!(
+        w,
         "                       Provision a new tenant. Schema mode (default) gives the"
     )?;
     writeln!(
@@ -378,6 +445,73 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "  list-tenants         Print every Org row in the registry."
     )?;
+    writeln!(
+        w,
+        "  edit-tenant <slug> [--display-name <s>] [--host-pattern <h>]"
+    )?;
+    writeln!(
+        w,
+        "                     [--path-prefix <p>] [--port <n>] [--database-url <u>]"
+    )?;
+    writeln!(
+        w,
+        "                     [--activate | --deactivate] [--clear <field>]"
+    )?;
+    writeln!(
+        w,
+        "                       Change routing and display config. Only the fields you"
+    )?;
+    writeln!(
+        w,
+        "                       name are touched; --clear empties one. Rotating the URL"
+    )?;
+    writeln!(w, "                       evicts the tenant's pool.")?;
+    writeln!(w)?;
+    writeln!(w, "INSPECTION (read-only):")?;
+    writeln!(
+        w,
+        "  list-runs [--limit N] [--kind provision|migrate] [--state <s>]"
+    )?;
+    writeln!(
+        w,
+        "                       Recent provisioning and migration runs, newest first."
+    )?;
+    writeln!(
+        w,
+        "  show-run <id>        One run's header and every step it recorded."
+    )?;
+    writeln!(
+        w,
+        "  audit-log [--limit N] [--table <t>] [--pk <v>] [--operation <o>] [--source <s>]"
+    )?;
+    writeln!(
+        w,
+        "                       The registry's audit trail — who changed what, and when."
+    )?;
+    writeln!(w)?;
+    writeln!(w, "HOSTNAMES:")?;
+    writeln!(
+        w,
+        "  list-hosts <slug>    Every hostname the tenant answers on, base first."
+    )?;
+    writeln!(w, "  add-host <slug> <hostname>")?;
+    writeln!(
+        w,
+        "                       Bind an extra hostname. Rejected if another tenant"
+    )?;
+    writeln!(w, "                       already claims it.")?;
+    writeln!(w, "  remove-host <slug> <hostname>")?;
+    writeln!(
+        w,
+        "                       Unbind one. The base host cannot be removed here —"
+    )?;
+    writeln!(w, "                       change --host-pattern instead.")?;
+    writeln!(w, "  set-host-enabled <slug> <hostname> --on|--off")?;
+    writeln!(
+        w,
+        "                       Park a host without losing the record (DNS in flight,"
+    )?;
+    writeln!(w, "                       domain being retired).")?;
     writeln!(w)?;
     writeln!(w, "USER / OPERATOR MANAGEMENT:")?;
     writeln!(
@@ -388,6 +522,20 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "                       Operator-level account; signs into the apex /login."
     )?;
+    writeln!(
+        w,
+        "  list-operators       Every operator, with active state and creation date."
+    )?;
+    writeln!(w, "  set-operator-active <username> --on|--off")?;
+    writeln!(
+        w,
+        "                       Turn an operator's access off or back on. Refuses to"
+    )?;
+    writeln!(
+        w,
+        "                       deactivate the last active one — that would lock"
+    )?;
+    writeln!(w, "                       everyone out of the console.")?;
     writeln!(
         w,
         "  create-user <slug> <username> [--password <p> | --generate] [--superuser]"
@@ -451,6 +599,18 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       prompts. Each step is opt-in (press n to skip)."
+    )?;
+    writeln!(
+        w,
+        "  menu | actions       Numbered list of the common verbs. Asks only for what"
+    )?;
+    writeln!(
+        w,
+        "                       the verb won't ask itself, echoes the equivalent"
+    )?;
+    writeln!(
+        w,
+        "                       command line, then runs it and comes back."
     )?;
     writeln!(w)?;
     writeln!(w, "MIGRATIONS:")?;
@@ -607,7 +767,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "AUDIT:")?;
     writeln!(
         w,
-        "  audit-cleanup --days <N>     Delete entries older than N days (all active tenants)."
+        "  audit-cleanup --days <N>     Delete entries older than N days (registry + all active tenants)."
     )?;
     writeln!(
         w,

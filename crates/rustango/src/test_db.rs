@@ -286,7 +286,10 @@ mod tests {
         let _ = || async {
             // This closure never executes; the test exists to catch
             // macro hygiene regressions.
-            #[allow(unreachable_code, clippy::diverging_sub_expression)]
+            // `unused_variables` for the same reason as `unreachable_code`:
+            // the `unimplemented!()` initialiser diverges, so every use of
+            // `pool` below is unreachable and the binding reads as unused.
+            #[allow(unreachable_code, unused_variables, clippy::diverging_sub_expression)]
             {
                 let pool: &crate::sql::Pool = unimplemented!();
                 let _r: Result<i32, _> =

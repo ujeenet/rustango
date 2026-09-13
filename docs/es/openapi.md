@@ -26,11 +26,11 @@ control total, los mismos tipos te permiten construir a mano cualquier especific
 ---
 
 ## Tabla de contenidos
-- [Inicio rápido](#quick-start) — genera + sirve en una sola pantalla
-- [Esquemas desde serializadores](#schemas-from-serializers) · [Rutas desde ViewSets](#paths-from-viewsets)
-- [Servirlo](#serving-the-spec-swagger-ui--redoc) · [Construir una especificación a mano](#hand-building-a-spec)
-- [Esquemas de seguridad](#security-schemes) · [El builder `Schema`](#the-schema-builder)
-- [Notas y límites](#notes-and-limits)
+- [Inicio rápido](#inicio-rápido) — genera + sirve en una sola pantalla
+- [Esquemas desde serializadores](#esquemas-desde-serializadores) · [Rutas desde ViewSets](#rutas-desde-viewsets)
+- [Servirlo](#servir-la-especificación-swagger-ui--redoc) · [Construir una especificación a mano](#construir-una-especificación-a-mano)
+- [Esquemas de seguridad](#esquemas-de-seguridad) · [El builder `Schema`](#el-builder-schema)
+- [Notas y límites](#notas-y-límites)
 
 ---
 
@@ -112,7 +112,7 @@ impl rustango::openapi::OpenApiSchema for Money {
 }
 ```
 
-> Consulta la [guía de Serializadores](serializers.md#openapi-schemas) para los
+> Consulta la [guía de Serializadores](serializers.md#esquemas-openapi) para los
 > atributos de campo que dan forma a la salida.
 
 ---
@@ -224,7 +224,7 @@ Helpers: `SecurityScheme::bearer(fmt)`, `basic()`, `api_key_header(name)`,
 `Operation`, `.no_security()` marca un endpoint público y
 `.require_security(scheme, scopes)` sobrescribe el valor global por defecto. Estos se
 alinean con la propia autenticación de **Rustango** (consulta la
-[guía de Seguridad](security.md#authenticating-users)): JWT → `bearer`, API keys →
+[guía de Seguridad](security.md#autenticar-usuarios)): JWT → `bearer`, API keys →
 `apiKey`, OAuth2 → `oauth2`.
 
 ---

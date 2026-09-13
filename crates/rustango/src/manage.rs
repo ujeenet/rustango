@@ -31,11 +31,6 @@ use std::pin::Pin;
 
 use axum::Router;
 
-// v0.38 — `PgPool` only used in the non-tenancy `runserver` path
-// (which stays PG-only by signature until v0.39); gated accordingly.
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::PgPool;
-
 /// Boxed seed-hook future. Keeps the public method signature simple
 /// while accepting any `async fn(&Pool) -> Result<…>` closure.
 type SeedFut<'a> =
@@ -75,6 +70,10 @@ pub struct Cli {
     /// Default `false` because operators sometimes want their own
     /// health endpoint shape (custom JSON, additional checks).
     health_endpoints: bool,
+    /// Migrations dir handed to the operator console so it can
+    /// create tenants (#1322). `None` = the create routes are not
+    /// mounted. See `Cli::with_tenant_provisioning`.
+    provisioning_dir: Option<std::path::PathBuf>,
     /// `(prefix, root_dir)` pairs registered via [`Cli::with_static`].
     /// Mounted at `runserver` time as
     /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`.
@@ -124,6 +123,7 @@ impl Cli {
             #[cfg(feature = "config")]
             settings_for_layers: None,
             health_endpoints: false,
+            provisioning_dir: None,
             #[cfg(feature = "admin")]
             static_dirs: Vec::new(),
             #[cfg(feature = "csrf")]
@@ -210,6 +210,38 @@ impl Cli {
     #[must_use]
     pub fn with_health(mut self) -> Self {
         self.health_endpoints = true;
+        self
+    }
+
+    /// Let operators create tenants from the console (#1322) —
+    /// `/orgs/new`, the connection probe, and the provisioning run
+    /// view + live stream.
+    ///
+    /// `migrations_dir` is where a new tenant's migrations come from;
+    /// the same directory `migrate` uses, usually `"migrations"`.
+    ///
+    /// ```ignore
+    /// rustango::manage::Cli::new()
+    ///     .tenancy()
+    ///     .with_tenant_provisioning("migrations")
+    ///     .run()
+    ///     .await
+    /// ```
+    ///
+    /// **Off by default.** Creating a tenant is the most dangerous
+    /// thing the console can do — it takes a database URL and
+    /// connects to it — and every authenticated operator who can
+    /// reach the console can use these routes, because `Operator` has
+    /// no permission model. Turning it on is the deployment saying
+    /// yes to that.
+    ///
+    /// Tenancy mode only; ignored without `.tenancy()`.
+    #[must_use]
+    pub fn with_tenant_provisioning(
+        mut self,
+        migrations_dir: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.provisioning_dir = Some(migrations_dir.into());
         self
     }
 
@@ -380,6 +412,18 @@ impl Cli {
                 self.bind = bind.to_owned();
             }
         }
+
+        // Pool sizing + timeouts, applied by every pool this process
+        // opens. Process-wide and first-call-wins, like the cookie
+        // policy below, because the pools it tunes are built later by
+        // verbs that never see `Settings`. Env wins over these values —
+        // the same precedence `bind` uses just above.
+        //
+        // Call this as early as possible: a pool opened before it lands
+        // runs on environment defaults, and `configure_pools` warns when
+        // that has happened rather than leaving it to be discovered
+        // under load (#1373).
+        let _ = crate::sql::configure_pools(s.database.pool_tuning());
 
         // Settings.routes → RouteConfig. Build the right preset
         // (friendly default / legacy v0.28) and apply per-field
@@ -601,13 +645,10 @@ impl Cli {
             let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
             #[cfg(feature = "sqlite")]
             if scheme == "sqlite" {
-                let opts = crate::sql::sqlite_connect_options(&url)?;
                 let pool = if no_db_verb {
-                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new().connect_lazy_with(opts)
+                    crate::sql::Pool::connect_sqlite_lazy(&url)?
                 } else {
-                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
-                        .connect_with(opts)
-                        .await?
+                    crate::sql::Pool::connect_sqlite(&url).await?
                 };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(pool);
                 crate::tenancy::manage::run_with_init(
@@ -623,9 +664,9 @@ impl Cli {
             #[cfg(feature = "mysql")]
             if scheme == "mysql" {
                 let pool = if no_db_verb {
-                    crate::sql::sqlx::MySqlPool::connect_lazy(&url)?
+                    crate::sql::Pool::connect_mysql_lazy(&url)?
                 } else {
-                    crate::sql::sqlx::MySqlPool::connect(&url).await?
+                    crate::sql::Pool::connect_mysql(&url).await?
                 };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(pool);
                 crate::tenancy::manage::run_with_init(
@@ -650,9 +691,9 @@ impl Cli {
                 .into());
             }
             let pool = if no_db_verb {
-                PgPool::connect_lazy(&url)?
+                crate::sql::Pool::connect_postgres_lazy(&url)?
             } else {
-                PgPool::connect(&url).await?
+                crate::sql::Pool::connect_postgres(&url).await?
             };
             let pools = crate::tenancy::TenantPools::new(pool);
             crate::tenancy::manage::run_with_init(
@@ -674,13 +715,10 @@ impl Cli {
             // the tri-dialect `_pool` family.
             #[cfg(feature = "sqlite")]
             {
-                let opts = crate::sql::sqlite_connect_options(&url)?;
                 let p = if no_db_verb {
-                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new().connect_lazy_with(opts)
+                    crate::sql::Pool::connect_sqlite_lazy(&url)?
                 } else {
-                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
-                        .connect_with(opts)
-                        .await?
+                    crate::sql::Pool::connect_sqlite(&url).await?
                 };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(p);
                 let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
@@ -697,9 +735,9 @@ impl Cli {
             #[cfg(all(not(feature = "sqlite"), feature = "mysql"))]
             {
                 let p = if no_db_verb {
-                    crate::sql::sqlx::MySqlPool::connect_lazy(&url)?
+                    crate::sql::Pool::connect_mysql_lazy(&url)?
                 } else {
-                    crate::sql::sqlx::MySqlPool::connect(&url).await?
+                    crate::sql::Pool::connect_mysql(&url).await?
                 };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(p);
                 let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
@@ -734,14 +772,20 @@ impl Cli {
         // what makes `cargo run -- migrate` work against a sqlite
         // DATABASE_URL without going through the `runserver_tenancy`
         // path.
+        // `redact`, not `url`: this string goes to a terminal and into
+        // whatever log is capturing it, and a DATABASE_URL has a
+        // password in it. The error itself already names the endpoint
+        // it tried (see `sql::connect_diagnosis`), so nothing useful is
+        // lost.
+        let shown = crate::sql::connect_diagnosis::redact(&url);
         let pool = if no_db_verb {
             crate::sql::Pool::connect_lazy(&url)
-                .map_err(|e| format!("connect_lazy({url}): {e}").into())
+                .map_err(|e| format!("connect_lazy({shown}): {e}").into())
                 as Result<_, Box<dyn std::error::Error>>
         } else {
             crate::sql::Pool::connect(&url)
                 .await
-                .map_err(|e| format!("connect({url}): {e}").into())
+                .map_err(|e| format!("connect({shown}): {e}").into())
                 as Result<_, Box<dyn std::error::Error>>
         }?;
         crate::migrate::manage::run(&pool, &self.migrations_dir, args).await?;
@@ -858,7 +902,7 @@ impl Cli {
                 .await?;
                 return Ok(());
             }
-            let pool = PgPool::connect(&url).await?;
+            let pool = crate::sql::Pool::connect_postgres(&url).await?;
             let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
             if let Some(seed) = self.seed {
                 seed(&crate::sql::Pool::from(pool.clone()))
@@ -932,6 +976,9 @@ impl Cli {
         if self.health_endpoints {
             builder = builder.with_health();
         }
+        if let Some(dir) = self.provisioning_dir.clone() {
+            builder = builder.with_tenant_provisioning(dir);
+        }
         for (prefix, root) in self.static_dirs {
             builder = builder.with_static(prefix, root);
         }
@@ -992,6 +1039,9 @@ impl Cli {
         .api(api);
         if self.health_endpoints {
             builder = builder.with_health();
+        }
+        if let Some(dir) = self.provisioning_dir.clone() {
+            builder = builder.with_tenant_provisioning(dir);
         }
         for (prefix, root) in self.static_dirs {
             builder = builder.with_static(prefix, root);

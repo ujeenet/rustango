@@ -656,6 +656,52 @@ fn mount_path(prefix: &str, suffix: &str) -> String {
     format!("{}{}", prefix.trim_end_matches('/'), suffix)
 }
 
+/// The elided page range for a pager, as template-friendly values.
+///
+/// `{"number": n}` or `{"ellipsis": true}` per entry — Tera has no enum
+/// matching, so the shape carries the discriminant as a key.
+fn page_marks(total: i64, page_size: i64, page: i64) -> Vec<serde_json::Value> {
+    let count = usize::try_from(total).unwrap_or(0);
+    let per_page = usize::try_from(page_size).unwrap_or(1).max(1);
+    let paginator = crate::pagination::Paginator::new(count, per_page);
+    let number = usize::try_from(page).unwrap_or(1);
+    paginator
+        .get_elided_page_range(number, 3, 2)
+        .into_iter()
+        .map(|mark| match mark {
+            crate::pagination::PageMark::Number(n) => serde_json::json!({"number": n}),
+            crate::pagination::PageMark::Ellipsis => serde_json::json!({"ellipsis": true}),
+        })
+        .collect()
+}
+
+/// Extra template context, supplied per request through an axum
+/// `Extension`.
+///
+/// A generic view builds its own `Context` from the model, which is
+/// everything a standalone page needs and nothing an app with a shared
+/// base template does: `{% extends "base.html" %}` fails the moment
+/// that layout reads a variable the view never inserts. Middleware puts
+/// one of these on the request — the signed-in user, branding, the
+/// active nav section — and every view here merges it.
+///
+/// Per request rather than a builder argument because the useful
+/// values are per request: who is signed in is not known when the
+/// router is assembled. View-owned keys win on collision, so a stray
+/// `object_list` cannot replace the rows.
+#[derive(Clone, Default)]
+pub struct ExtraContext(pub Context);
+
+impl ExtraContext {
+    /// Merge into `ctx` without letting it clobber what the view set.
+    fn merge_into(parts: Option<&Self>, ctx: &mut Context) {
+        let Some(extra) = parts else { return };
+        let mut merged = extra.0.clone();
+        merged.extend(ctx.clone());
+        *ctx = merged;
+    }
+}
+
 #[derive(Clone)]
 struct ListViewState {
     vs: ListView,
@@ -666,6 +712,7 @@ struct ListViewState {
 async fn handle_list(
     State(state): State<Arc<ListViewState>>,
     headers: axum::http::HeaderMap,
+    extra: Option<axum::Extension<ExtraContext>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let page: i64 = params
@@ -728,6 +775,10 @@ async fn handle_list(
 
     let total_pages = ((total - 1).max(0) / page_size) + 1;
     let mut ctx = Context::new();
+    // `1 … 7 8 9 … 42` rather than one link per page, from the
+    // framework's own paginator. The scalar keys above predate it and
+    // stay as they are; this only adds the range.
+    ctx.insert("page_marks", &page_marks(total, page_size, page));
     ctx.insert("object_list", &object_list);
     // #379 — Django-shape `context_object_name`. Adds a second
     // binding so templates can read `{{ posts }}` instead of
@@ -747,6 +798,7 @@ async fn handle_list(
     insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
     insert_pagination_urls(&mut ctx, page, has_next, has_prev, &params);
     insert_bulk_actions_context(&mut ctx, &state.vs);
+    ExtraContext::merge_into(extra.as_ref().map(|e| &e.0), &mut ctx);
 
     // v0.30.17 — stamp the CSRF token into the context AND set the
     // cookie on the response. ListView's bulk-action POST is gated

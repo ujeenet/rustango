@@ -103,21 +103,13 @@ pub(crate) async fn sse_handler(
     let Some(token) = super::auth::bearer(&headers) else {
         return super::auth::unauthorized(&headers, &uri);
     };
-    let Some(agent) = super::auth::verify_agent_token(jwt, token, &t.org.slug).await else {
-        return super::auth::unauthorized(&headers, &uri);
+    // Same two bearer shapes the JSON-RPC POST accepts, including the raw
+    // `prefix.secret` key — see `auth::authenticate_bearer` for why this
+    // stream must not be stricter than the endpoint beside it.
+    let agent = match super::auth::authenticate_bearer(jwt, t.pool(), &t.org.slug, token).await {
+        Ok(agent) => agent,
+        Err(e) => return e.into_response(&headers, &uri),
     };
-    // Revocation immediacy: re-check the agent (and, for a user-owned key, its
-    // owner) still exists + is active before opening the notification stream.
-    match crate::tenancy::agent_token_still_valid_pool(t.pool(), agent.agent_id, agent.user_id)
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => return super::auth::unauthorized(&headers, &uri),
-        Err(e) => {
-            tracing::warn!(error = %e, "mcp agent liveness re-check failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed").into_response();
-        }
-    }
     let tenant = agent.tenant.clone();
     let agent_id = agent.agent_id;
 

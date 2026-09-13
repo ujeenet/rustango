@@ -12,7 +12,7 @@ robusteren Laufzeit: **Django** auf **gunicorn** (WSGI) und auf **Hypercorn**
 und Go sind jeweils ein einziges residentes Binary, also gibt es von jedem eines.
 
 Jede Zahl unten ist **gemessen und reproduzierbar**, aus einem konsistenten Durchlauf eines
-Ein-Kommando-Harness (siehe [Reproduce](#reproduce)). Nichts hier ist mit Handbewegungen weggeredet.
+Ein-Kommando-Harness (siehe [Reproduce](#reproduzieren)). Nichts hier ist mit Handbewegungen weggeredet.
 
 > **Kurzfassung.** Auf identischer Hardware, die identisch gerenderte HTML-Seiten ausliefert, lassen die beiden
 > **kompilierten, nativen** Laufzeiten — **Rustango** und **Go** — die interpretierten

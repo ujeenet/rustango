@@ -32,10 +32,10 @@ petición.
 ---
 
 ## Tabla de contenidos
-- [Inicio rápido](#quick-start) · [Sesiones vs. JWT](#sessions-vs-jwt)
-- [La bolsa de sesión](#the-session-bag) · [La cookie](#the-cookie)
-- [Elegir un backend](#picking-a-backend) · [Caducidad y renovación deslizante](#expiry-and-sliding-renewal)
-- [Actualizar in situ](#updating-a-session-in-place) · [Notas y límites](#notes-and-limits)
+- [Inicio rápido](#inicio-rápido) · [Sesiones vs. JWT](#sesiones-vs-jwt)
+- [La bolsa de sesión](#la-bolsa-de-sesión) · [La cookie](#la-cookie)
+- [Elegir un backend](#elegir-un-backend) · [Caducidad y renovación deslizante](#caducidad-y-renovación-deslizante)
+- [Actualizar in situ](#actualizar-una-sesión-in-situ) · [Notas y límites](#notas-y-límites)
 
 ---
 
@@ -113,7 +113,7 @@ cookie de sesión necesita:
 
 - **`HttpOnly`** — JavaScript no puede leerla (embota el robo de tokens por XSS).
 - **`SameSite=Lax`** — no se envía en subpeticiones entre sitios (defensa CSRF;
-  combínala con [tokens CSRF](security.md#protecting-against-csrf) para los envíos
+  combínala con [tokens CSRF](security.md#protección-contra-csrf) para los envíos
   de formularios).
 - **`Secure`** — solo HTTPS (omítelo únicamente para el desarrollo HTTP local).
 - **`Path=/`** — visible para toda la aplicación.

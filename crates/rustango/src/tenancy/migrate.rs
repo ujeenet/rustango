@@ -86,6 +86,97 @@ impl TenantMigrationReport {
     }
 }
 
+/// Which of a tenant's two migration chains an event came from.
+///
+/// A tenant migrates twice: the framework's own `system/migrations/`
+/// chain (its tables — users, roles, permissions, api_keys, audit_log,
+/// content_types) into the `__rustango_system_migrations__` ledger, then
+/// the project's own chain into `__rustango_migrations__`. They are
+/// numbered independently, so **`0001_initial` legitimately appears
+/// twice in one tenant's run**. Without this a watcher sees the same
+/// name land twice and concludes something re-ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chain {
+    /// The framework's own tables, applied first — the project's
+    /// migrations may FK into them (#1171).
+    System,
+    /// The project's own migrations.
+    Project,
+}
+
+/// Something that happened while migrating a set of tenants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TenantMigrationEvent {
+    /// The active-tenant set has been read. Emitted once, up front.
+    Planned {
+        /// How many tenants will be migrated.
+        tenants: usize,
+    },
+    /// Starting this tenant.
+    TenantStarted {
+        slug: String,
+        /// 1-based.
+        index: usize,
+        total: usize,
+    },
+    /// A migration-level event from inside one tenant's run.
+    Migration {
+        slug: String,
+        chain: Chain,
+        event: crate::migrate::MigrationEvent,
+    },
+    /// This tenant is done. Unlike the migration runner, a failure here
+    /// is **not** terminal: `migrate_tenants_db` deliberately continues
+    /// with the remaining tenants, so more events follow.
+    TenantFinished {
+        slug: String,
+        index: usize,
+        total: usize,
+        /// Migrations applied across both chains.
+        applied: usize,
+        /// `Some` if this tenant failed; the batch continues regardless.
+        error: Option<String>,
+    },
+}
+
+/// Receives [`TenantMigrationEvent`]s as a tenant batch progresses.
+///
+/// Implemented for any `Fn(TenantMigrationEvent)`, so a closure works
+/// directly. **Must not block** — the inner migration events are emitted
+/// with that tenant's migrate lock held; see
+/// [`crate::migrate::progress`].
+pub trait TenantMigrationObserver: Send + Sync {
+    /// Handle one event. Must return promptly and must not panic.
+    fn on_event(&self, event: TenantMigrationEvent);
+}
+
+impl<F> TenantMigrationObserver for F
+where
+    F: Fn(TenantMigrationEvent) + Send + Sync,
+{
+    fn on_event(&self, event: TenantMigrationEvent) {
+        self(event);
+    }
+}
+
+/// Adapt a tenant observer into a migration observer for one tenant's
+/// one chain, tagging every event with the slug and chain it came from.
+fn chain_observer<'a>(
+    observer: Option<&'a dyn TenantMigrationObserver>,
+    slug: &'a str,
+    chain: Chain,
+) -> Option<impl crate::migrate::MigrationObserver + 'a> {
+    observer.map(move |observer| {
+        move |event: crate::migrate::MigrationEvent| {
+            observer.on_event(TenantMigrationEvent::Migration {
+                slug: slug.to_owned(),
+                chain,
+                event,
+            });
+        }
+    })
+}
+
 /// Per-tenant migration outcome.
 #[derive(Debug)]
 pub struct TenantMigrationOutcome {
@@ -117,6 +208,15 @@ async fn apply_system_migrations(
     dir: &Path,
     scope: crate::core::ModelScope,
 ) -> Result<Vec<Migration>, TenancyError> {
+    apply_system_migrations_opts(pool, dir, scope, None).await
+}
+
+async fn apply_system_migrations_opts(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    scope: crate::core::ModelScope,
+    observer: Option<&dyn crate::migrate::MigrationObserver>,
+) -> Result<Vec<Migration>, TenancyError> {
     // `system/migrations/` is a sibling of the project's `migrations/`
     // dir. When `dir` is literally `<root>/migrations`, the project root
     // is its parent; otherwise (e.g. a bare test dir) keep `system/`
@@ -147,21 +247,37 @@ async fn apply_system_migrations(
     // the plain runner.
     let applied = match scoped_subset(&system_dir, migration_scope).await? {
         ScopedDir::Owned(temp) => {
-            let r = crate::migrate::migrate_pool_with_ledger_fake_initial(
-                pool,
-                temp.path(),
-                SYSTEM_LEDGER,
-            )
-            .await?;
+            let r = apply_system_dir(pool, temp.path(), observer).await?;
             drop(temp);
             r
         }
-        ScopedDir::Original => {
-            crate::migrate::migrate_pool_with_ledger_fake_initial(pool, &system_dir, SYSTEM_LEDGER)
-                .await?
-        }
+        ScopedDir::Original => apply_system_dir(pool, &system_dir, observer).await?,
     };
     Ok(applied)
+}
+
+/// Run the framework's own chain against `dir`, with or without an
+/// observer. Split out only so the two `ScopedDir` arms don't each carry
+/// the observer branch.
+async fn apply_system_dir(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    observer: Option<&dyn crate::migrate::MigrationObserver>,
+) -> Result<Vec<Migration>, TenancyError> {
+    Ok(match observer {
+        Some(observer) => {
+            crate::migrate::migrate_pool_with_ledger_fake_initial_with_progress(
+                pool,
+                dir,
+                SYSTEM_LEDGER,
+                observer,
+            )
+            .await?
+        }
+        None => {
+            crate::migrate::migrate_pool_with_ledger_fake_initial(pool, dir, SYSTEM_LEDGER).await?
+        }
+    })
 }
 
 /// Apply registry-scoped pending migrations to the registry DB.
@@ -259,6 +375,36 @@ pub async fn migrate_tenants(
     dir: &Path,
     registry_url: &str,
 ) -> Result<TenantMigrationReport, TenancyError> {
+    migrate_tenants_opts(pools, dir, registry_url, None).await
+}
+
+/// [`migrate_tenants`], reporting progress to `observer` as it goes.
+///
+/// The Postgres sibling of [`migrate_tenants_db_with_progress`], and the
+/// one the CLI actually reaches on a PG registry — it handles
+/// schema-mode tenants as well as database-mode.
+///
+/// **The observer must not block**; see [`crate::migrate::progress`].
+///
+/// # Errors
+/// As [`migrate_tenants`].
+#[cfg(feature = "postgres")]
+pub async fn migrate_tenants_with_progress(
+    pools: &TenantPools,
+    dir: &Path,
+    registry_url: &str,
+    observer: &dyn TenantMigrationObserver,
+) -> Result<TenantMigrationReport, TenancyError> {
+    migrate_tenants_opts(pools, dir, registry_url, Some(observer)).await
+}
+
+#[cfg(feature = "postgres")]
+async fn migrate_tenants_opts(
+    pools: &TenantPools,
+    dir: &Path,
+    registry_url: &str,
+    observer: Option<&dyn TenantMigrationObserver>,
+) -> Result<TenantMigrationReport, TenancyError> {
     let scoped = scoped_subset(dir, MigrationScope::Tenant).await?;
     let scoped_path = match &scoped {
         ScopedDir::Owned(temp) => temp.path().to_path_buf(),
@@ -294,9 +440,31 @@ pub async fn migrate_tenants(
         );
     }
 
+    let total = orgs.len();
+    if let Some(observer) = observer {
+        observer.on_event(TenantMigrationEvent::Planned { tenants: total });
+    }
+
     let mut report = TenantMigrationReport::default();
-    for org in &orgs {
-        let outcome = run_for_one_tenant(pools, org, &scoped_path, registry_url).await;
+    for (i, org) in orgs.iter().enumerate() {
+        let index = i + 1;
+        if let Some(observer) = observer {
+            observer.on_event(TenantMigrationEvent::TenantStarted {
+                slug: org.slug.clone(),
+                index,
+                total,
+            });
+        }
+        let outcome = run_for_one_tenant(pools, org, &scoped_path, registry_url, observer).await;
+        if let Some(observer) = observer {
+            observer.on_event(TenantMigrationEvent::TenantFinished {
+                slug: org.slug.clone(),
+                index,
+                total,
+                applied: outcome.as_ref().map_or(0, Vec::len),
+                error: outcome.as_ref().err().map(ToString::to_string),
+            });
+        }
         match &outcome {
             Ok(applied) => info!(
                 target: "rustango::tenancy",
@@ -344,7 +512,104 @@ pub async fn migrate_tenants(
 pub async fn migrate_tenants_db<DB: Database>(
     pools: &TenantPools<DB>,
     dir: &Path,
+    registry_url: &str,
+) -> Result<TenantMigrationReport, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    migrate_tenants_db_opts(pools, dir, registry_url, None).await
+}
+
+/// [`migrate_tenants_db`], reporting progress to `observer` as it goes.
+///
+/// The observer sees the tenant count up front, then per tenant a
+/// start, every migration event from both of that tenant's chains (see
+/// [`Chain`]), and a finish carrying that tenant's error if it had one.
+/// A tenant failure does not end the stream — the batch continues, and
+/// so do the events.
+///
+/// **The observer must not block**: migration events are emitted with
+/// the tenant's migrate lock held. See [`crate::migrate::progress`].
+///
+/// # Errors
+/// As [`migrate_tenants_db`]. Per-tenant failures are reported in the
+/// returned [`TenantMigrationReport`], not as an error.
+pub async fn migrate_tenants_db_with_progress<DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    registry_url: &str,
+    observer: &dyn TenantMigrationObserver,
+) -> Result<TenantMigrationReport, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    migrate_tenants_db_opts(pools, dir, registry_url, Some(observer)).await
+}
+
+/// Migrate exactly one tenant, named by its `Org` row.
+///
+/// The batch entry points walk `Org::objects().where_(active = true)`,
+/// which makes them the wrong tool twice over for a tenant that is
+/// being stood up:
+///
+/// * a tenant mid-provision is deliberately **inactive** until its
+///   schema is in place, so the batch would skip the very tenant it was
+///   called for; and
+/// * running the whole batch means creating tenant B does a pass over
+///   tenant A, and an unrelated tenant's broken chain surfaces in the
+///   middle of an unrelated provisioning run.
+///
+/// Takes the `Org` directly and ignores `active` — the caller has
+/// already decided this is the tenant it means.
+///
+/// # Errors
+/// Anything the tenant's own migration run can raise: an unreachable
+/// tenant database, a failing migration, or a storage mode this build
+/// cannot serve.
+pub async fn migrate_one_tenant<DB: Database>(
+    pools: &TenantPools<DB>,
+    org: &Org,
+    dir: &Path,
+    registry_url: &str,
+    observer: Option<&dyn TenantMigrationObserver>,
+) -> Result<Vec<Migration>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let scoped = scoped_subset(dir, MigrationScope::Tenant).await?;
+    let scoped_path = match &scoped {
+        ScopedDir::Owned(temp) => temp.path().to_path_buf(),
+        ScopedDir::Original => dir.to_path_buf(),
+    };
+
+    // Schema-mode is PG-only by language, and only the PG runner knows
+    // how to build a `search_path`-scoped pool for it. Route the same
+    // way the batch does.
+    #[cfg(feature = "postgres")]
+    if matches!(
+        StorageMode::parse(&org.storage_mode),
+        Ok(StorageMode::Schema)
+    ) {
+        let pg_pools = (pools as &dyn std::any::Any)
+            .downcast_ref::<TenantPools<sqlx::Postgres>>()
+            .ok_or_else(|| {
+                TenancyError::Validation(format!(
+                    "org `{}` is schema-mode but the registry is not Postgres",
+                    org.slug
+                ))
+            })?;
+        return run_for_one_tenant(pg_pools, org, &scoped_path, registry_url, observer).await;
+    }
+    let _ = registry_url;
+
+    run_for_one_tenant_db(pools, org, &scoped_path, observer).await
+}
+
+async fn migrate_tenants_db_opts<DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
     _registry_url: &str,
+    observer: Option<&dyn TenantMigrationObserver>,
 ) -> Result<TenantMigrationReport, TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -369,9 +634,31 @@ where
         "applying tenant-scoped migrations (db-mode only)"
     );
 
+    let total = orgs.len();
+    if let Some(observer) = observer {
+        observer.on_event(TenantMigrationEvent::Planned { tenants: total });
+    }
+
     let mut report = TenantMigrationReport::default();
-    for org in &orgs {
-        let outcome = run_for_one_tenant_db(pools, org, &scoped_path).await;
+    for (i, org) in orgs.iter().enumerate() {
+        let index = i + 1;
+        if let Some(observer) = observer {
+            observer.on_event(TenantMigrationEvent::TenantStarted {
+                slug: org.slug.clone(),
+                index,
+                total,
+            });
+        }
+        let outcome = run_for_one_tenant_db(pools, org, &scoped_path, observer).await;
+        if let Some(observer) = observer {
+            observer.on_event(TenantMigrationEvent::TenantFinished {
+                slug: org.slug.clone(),
+                index,
+                total,
+                applied: outcome.as_ref().map_or(0, Vec::len),
+                error: outcome.as_ref().err().map(ToString::to_string),
+            });
+        }
         match &outcome {
             Ok(applied) => info!(
                 target: "rustango::tenancy",
@@ -406,6 +693,7 @@ async fn run_for_one_tenant_db<DB: Database>(
     pools: &TenantPools<DB>,
     org: &Org,
     dir: &Path,
+    observer: Option<&dyn TenantMigrationObserver>,
 ) -> Result<Vec<Migration>, TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
@@ -440,9 +728,20 @@ where
     // audit_log, content_types) come from the makemigrations-generated
     // system-app migrations and MUST be applied BEFORE the tenant's user
     // migrations, which may FK into them (issue #1171).
-    let mut applied =
-        apply_system_migrations(&inner_pool, dir, crate::core::ModelScope::Tenant).await?;
-    applied.extend(migrate::migrate_pool(&inner_pool, dir).await?);
+    let system_progress = chain_observer(observer, &org.slug, Chain::System);
+    let mut applied = apply_system_migrations_opts(
+        &inner_pool,
+        dir,
+        crate::core::ModelScope::Tenant,
+        system_progress
+            .as_ref()
+            .map(|o| o as &dyn crate::migrate::MigrationObserver),
+    )
+    .await?;
+    applied.extend(match chain_observer(observer, &org.slug, Chain::Project) {
+        Some(o) => migrate::migrate_pool_with_progress(&inner_pool, dir, &o).await?,
+        None => migrate::migrate_pool(&inner_pool, dir).await?,
+    });
     // Data seeders (rows, not DDL — kept): the CRUD permission codenames
     // for every registered model (#61) + the content-type catalog (#89).
     if let Err(e) = super::permissions::auto_create_permissions_pool(&inner_pool).await {
@@ -473,11 +772,36 @@ pub async fn migrate_tenants_dyn<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    migrate_tenants_dyn_with_progress(pools, dir, registry_url, None).await
+}
+
+/// [`migrate_tenants_dyn`], reporting progress to `observer`.
+///
+/// **This is the seam every caller should use.** The
+/// "downcast to `TenantPools<Postgres>`, else fall back to the generic
+/// runner" dance is easy to write from memory and was written from
+/// memory in four places; each copy is a chance to get the schema-mode
+/// branch subtly wrong on a non-PG build. One dispatch, here.
+///
+/// # Errors
+/// As [`migrate_tenants`] / [`migrate_tenants_db`].
+pub async fn migrate_tenants_dyn_with_progress<DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    registry_url: &str,
+    observer: Option<&dyn TenantMigrationObserver>,
+) -> Result<TenantMigrationReport, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    // On PG the legacy `migrate_tenants` handles schema-mode as well as
+    // database-mode; everywhere else `migrate_tenants_db` is the only
+    // one that applies, because schema-mode is PG-only by language.
     #[cfg(feature = "postgres")]
     if let Some(pg) = (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>() {
-        return migrate_tenants(pg, dir, registry_url).await;
+        return migrate_tenants_opts(pg, dir, registry_url, observer).await;
     }
-    migrate_tenants_db(pools, dir, registry_url).await
+    migrate_tenants_db_opts(pools, dir, registry_url, observer).await
 }
 
 #[cfg(feature = "postgres")]
@@ -486,7 +810,13 @@ async fn run_for_one_tenant(
     org: &Org,
     dir: &Path,
     registry_url: &str,
+    observer: Option<&dyn TenantMigrationObserver>,
 ) -> Result<Vec<Migration>, TenancyError> {
+    let system_progress = chain_observer(observer, &org.slug, Chain::System);
+    let system_progress = system_progress
+        .as_ref()
+        .map(|o| o as &dyn crate::migrate::MigrationObserver);
+    let project_progress = chain_observer(observer, &org.slug, Chain::Project);
     let mode = StorageMode::parse(&org.storage_mode).map_err(|got| {
         TenancyError::Validation(format!(
             "org `{}` has unknown storage_mode `{got}`",
@@ -503,9 +833,17 @@ async fn run_for_one_tenant(
             // (issue #1171). Applying user migrations first breaks a fresh
             // tenant whose model references e.g. rustango_users.
             let dbpool: crate::sql::Pool = pool.clone().into();
-            let mut applied =
-                apply_system_migrations(&dbpool, dir, crate::core::ModelScope::Tenant).await?;
-            applied.extend(migrate::migrate(&pool, dir).await?);
+            let mut applied = apply_system_migrations_opts(
+                &dbpool,
+                dir,
+                crate::core::ModelScope::Tenant,
+                system_progress,
+            )
+            .await?;
+            applied.extend(match &project_progress {
+                Some(o) => migrate::migrate_with_progress(&pool, dir, o).await?,
+                None => migrate::migrate(&pool, dir).await?,
+            });
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.
@@ -522,9 +860,17 @@ async fn run_for_one_tenant(
             let tenant_pool = pools.pool_for_org(org).await?;
             // System-app migrations before user migrations (issue #1171).
             let dbpool: crate::sql::Pool = tenant_pool.pool().clone().into();
-            let mut applied =
-                apply_system_migrations(&dbpool, dir, crate::core::ModelScope::Tenant).await?;
-            applied.extend(migrate::migrate(tenant_pool.pool(), dir).await?);
+            let mut applied = apply_system_migrations_opts(
+                &dbpool,
+                dir,
+                crate::core::ModelScope::Tenant,
+                system_progress,
+            )
+            .await?;
+            applied.extend(match &project_progress {
+                Some(o) => migrate::migrate_with_progress(tenant_pool.pool(), dir, o).await?,
+                None => migrate::migrate(tenant_pool.pool(), dir).await?,
+            });
             // Data seeders (rows, not DDL — kept): #61 + #89.
             if let Err(e) = super::permissions::auto_create_permissions(tenant_pool.pool()).await {
                 tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "auto_create_permissions failed for database-mode tenant");

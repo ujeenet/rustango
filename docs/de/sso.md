@@ -72,7 +72,7 @@ diese Spalte aus.
    Anmeldeseite zurückgeschickt (Details gehen ins Server-Log, nie in den Browser).
 
 Das Client-**Secret ist im Ruhezustand verschlüsselt** — die `client_secret`-Spalte
-ist ein [`EncryptedString`](#secret-storage)-Cast, erst zur Anmeldezeit im Speicher
+ist ein [`EncryptedString`](#secret-speicherung)-Cast, erst zur Anmeldezeit im Speicher
 entschlüsselt.
 
 ## Anbieter sind Zeilen, verwaltet im Admin

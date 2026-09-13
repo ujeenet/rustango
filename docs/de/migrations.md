@@ -12,7 +12,7 @@ Engine ohne Kollisionen zu übernehmen.
 > **Neu bei Migrationen?** Die alltäglichen CLI-Verben — `makemigrations`,
 > `migrate`, `migrate --squash`, `migrate --fake`, `downgrade`,
 > `showmigrations` — werden Befehl für Befehl im
-> [manage-Leitfaden](manage.md#migrations) behandelt. Diese Seite ist das konzeptionelle
+> [manage-Leitfaden](manage.md#migrationen) behandelt. Diese Seite ist das konzeptionelle
 > Modell dahinter.
 
 > **Quelle:** `rustango::migrate` (`runner`, `make`, `file`, `manage`)
@@ -182,7 +182,7 @@ lösen Sie es mit `migrate --fake` auf, statt zu erzwingen.
 
 ## Siehe auch
 
-- [`manage`-Leitfaden](manage.md#migrations) — jedes Migrations-CLI-Verb, mit
+- [`manage`-Leitfaden](manage.md#migrationen) — jedes Migrations-CLI-Verb, mit
   Beispielen.
 - [Scaffolding](scaffolding.md) — woher `migrations/` und
   `system/migrations/` kommen.

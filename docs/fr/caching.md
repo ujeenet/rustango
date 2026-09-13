@@ -26,15 +26,15 @@ Django ou la façade `Cache` de Laravel.
 
 ## Table des matières
 
-- [Étape 1 — Choisir un backend](#step-1--pick-a-backend)
-- [Étape 2 — get / set / delete](#step-2--get--set--delete)
-- [Étape 3 — get_or_set (cache-aside)](#step-3--get_or_set-cache-aside)
-- [Valeurs JSON typées](#typed-json-values)
-- [TTL et expiration](#ttl-and-expiry)
-- [Changer de backend](#swapping-backends)
-- [La mise en cache en multi-tenancy](#caching-under-multi-tenancy)
-- [Référence](#reference)
-- [Voir aussi](#see-also)
+- [Étape 1 — Choisir un backend](#étape-1--choisir-un-backend)
+- [Étape 2 — get / set / delete](#étape-2--get--set--delete)
+- [Étape 3 — get_or_set (cache-aside)](#étape-3--get_or_set-cache-aside)
+- [Valeurs JSON typées](#valeurs-json-typées)
+- [TTL et expiration](#ttl-et-expiration)
+- [Changer de backend](#changer-de-backend)
+- [La mise en cache en multi-tenancy](#la-mise-en-cache-en-multi-tenancy)
+- [Référence](#référence)
+- [Voir aussi](#voir-aussi)
 
 ---
 

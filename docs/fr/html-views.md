@@ -30,15 +30,15 @@ ressources de Laravel qui renvoient des vues Blade. Elles effectuent leur rendu 
 
 ## Table des matières
 
-- [Vues API vs vues HTML — laquelle vous faut-il ?](#api-views-vs-html-views--which-do-you-want)
-- [Les cinq vues de modèle](#the-five-model-views)
+- [Vues API vs vues HTML — laquelle vous faut-il ?](#vues-api-vs-vues-html--laquelle-vous-faut-il-)
+- [Les cinq vues de modèle](#les-cinq-vues-de-modèle)
 - [ListView](#listview) · [DetailView](#detailview)
 - [CreateView, UpdateView, DeleteView](#createview-updateview-deleteview)
-- [Le contexte Tera](#the-tera-context)
-- [TemplateView et RedirectView](#templateview-and-redirectview)
-- [Mono-locataire vs multi-locataire](#single-tenant-vs-multi-tenant)
-- [Servir un modèle des deux façons](#serving-one-model-both-ways)
-- [Voir aussi](#see-also)
+- [Le contexte Tera](#le-contexte-tera)
+- [TemplateView et RedirectView](#templateview-et-redirectview)
+- [Mono-locataire vs multi-locataire](#mono-locataire-vs-multi-locataire)
+- [Servir un modèle des deux façons](#servir-un-modèle-des-deux-façons)
+- [Voir aussi](#voir-aussi)
 
 ---
 
@@ -59,7 +59,7 @@ C'est la première décision. Les deux transforment un modèle en points d'accè
 | Équivalent Django | DRF `ModelViewSet` | vues génériques basées sur les classes |
 
 Vous n'avez pas à choisir globalement — choisissez par ressource, et vous pouvez monter **les deux
-sur le même modèle** (voir [ci-dessous](#serving-one-model-both-ways)). Règles empiriques :
+sur le même modèle** (voir [ci-dessous](#servir-un-modèle-des-deux-façons)). Règles empiriques :
 
 - Vous construisez un **backend JSON** pour un framework frontend ou une application mobile → ViewSet.
 - Vous construisez un **site rendu côté serveur** (le serveur renvoie des pages HTML) → vues

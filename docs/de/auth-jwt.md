@@ -27,10 +27,10 @@ und Zurücklesen, HS256 unter der Haube.
 ---
 
 ## Inhaltsverzeichnis
-- [Schnellstart](#quick-start) · [Wann einsetzen](#when-to-use-standalone-jwt)
-- [Claims erstellen](#building-claims) · [Verifizieren](#verifying-a-token)
-- [Sicherheitsmodell](#security-model) — unbedingt lesen · [Inspizieren ohne Vertrauen](#inspecting-without-verifying)
-- [Hinweise und Grenzen](#notes-and-limits)
+- [Schnellstart](#schnellstart) · [Wann einsetzen](#wann-ein-eigenständiges-jwt-einsetzen)
+- [Claims erstellen](#claims-erstellen) · [Verifizieren](#einen-token-verifizieren)
+- [Sicherheitsmodell](#sicherheitsmodell) — unbedingt lesen · [Inspizieren ohne Vertrauen](#inspizieren-ohne-verifizieren)
+- [Hinweise und Grenzen](#hinweise-und-grenzen)
 
 ---
 

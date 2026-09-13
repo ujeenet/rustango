@@ -25,13 +25,13 @@ Rust.
 
 ## Inhaltsverzeichnis
 
-- [Schritt 1 — Steuere deine App mit TestClient an](#step-1--drive-your-app-with-testclient)
-- [Schritt 2 — Assertiere auf die Response](#step-2--assert-on-the-response)
-- [JSON, Header und Bodies senden](#sending-json-headers-and-bodies)
-- [Eine echte API testen](#testing-a-real-api)
-- [Datenbanktests mit Rollback](#database-tests-with-rollback)
-- [Response-Assertion-Helper](#response-assertion-helpers)
-- [Siehe auch](#see-also)
+- [Schritt 1 — Steuere deine App mit TestClient an](#schritt-1--steuere-deine-app-mit-testclient-an)
+- [Schritt 2 — Assertiere auf die Response](#schritt-2--assertiere-auf-die-response)
+- [JSON, Header und Bodies senden](#json-header-und-bodies-senden)
+- [Eine echte API testen](#eine-echte-api-testen)
+- [Datenbanktests mit Rollback](#datenbanktests-mit-rollback)
+- [Response-Assertion-Helper](#response-assertion-helper)
+- [Siehe auch](#siehe-auch)
 
 ---
 

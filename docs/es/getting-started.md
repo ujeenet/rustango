@@ -36,14 +36,24 @@ encaje con tu máquina; todo lo demás es idéntico:
 
 #### SQLite — sin configuración
 
-Los proyectos generados incluyen una feature `sqlite`, así que puedes ejecutar
-uno sin instalar ni arrancar nada:
+Genera el proyecto directamente para SQLite: no hay nada que instalar, nada
+que arrancar y nada que editar después.
+
+```bash
+cargo rustango new myblog --backend sqlite
+```
+
+El `.env.example`, el `docker-compose.yml` y los niveles de configuración
+generados están todos escritos para SQLite, la base de datos es un fichero que
+crea el primer `cargo run -- migrate`, y puedes saltarte
+[el paso 4](#paso-4-arrancar-la-base-de-datos) por completo.
+
+Si ya generaste un proyecto con Postgres y quieres cambiarlo, cada plantilla
+mantiene los tres backends cableados — así que es un flag más una URL:
 
 ```bash
 cargo run --no-default-features --features sqlite
 ```
-
-con una URL basada en fichero en `.env` en lugar de la de Postgres:
 
 ```bash
 DATABASE_URL=sqlite://myblog_dev.db?mode=rwc
@@ -107,6 +117,10 @@ cargo rustango new myblog                     # default = fullstack template
 cd myblog
 ```
 
+Ejecuta `cargo rustango new` sin argumento alguno y te pregunta la plantilla,
+el backend y las funcionalidades extra, y luego imprime la línea de comandos
+equivalente antes de crear nada — véase [Andamiaje](scaffolding.md).
+
 Esto es lo que se generó:
 
 ```
@@ -164,16 +178,19 @@ El `.env` generado es compatible con Docker de fábrica. Como vamos a ejecutar `
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
 RUSTANGO_BIND=0.0.0.0:8080
 RUSTANGO_APEX_DOMAIN=localhost
-RUSTANGO_SESSION_SECRET=change-me-base64-encoded-32-bytes-or-more
 ```
 
 Las credenciales, el puerto y el nombre de la base de datos (`myblog_dev`) ya coinciden con el servicio Postgres del `docker-compose.yml`, así que no necesitas tocarlos.
 
-`RUSTANGO_SESSION_SECRET` firma sesiones y tokens, así que no despliegues el marcador de posición. Genera uno real y pégalo:
+`RUSTANGO_SESSION_SECRET` firma sesiones y tokens. En el `.env.example` generado queda **comentado**, y para desarrollo puedes dejarlo así: el primer arranque genera una clave en `./var/` y la reutiliza, de modo que los reinicios no te cierran la sesión.
+
+Para producción pon una real — 32 bytes en base64, desde tu gestor de secretos o:
 
 ```bash
 openssl rand -base64 32     # paste output as RUSTANGO_SESSION_SECRET value
 ```
+
+Un valor que no sean 32 bytes de base64 no se puede usar. El servidor lo avisa al arrancar y recurre a la clave generada en lugar de fallar, así que atento a ese aviso si has puesto una y las sesiones se comportan como si no.
 
 ---
 

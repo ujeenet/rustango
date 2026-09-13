@@ -72,6 +72,100 @@ fn link_targets(text: &str) -> Vec<String> {
     out
 }
 
+/// The id a heading gets, GitHub-style — which is what the docs site and
+/// GitHub both use.
+///
+/// Lowercase, drop punctuation but keep Unicode letters, spaces to
+/// hyphens. A dropped separator leaves its spaces behind, so `Auth &
+/// tenancy` becomes `auth--tenancy` with two hyphens.
+///
+/// Verified against the English pages, which resolve 100% under this rule
+/// (#1354). That is what makes it safe to assert on the translations.
+fn heading_slug(heading: &str) -> String {
+    heading
+        .trim()
+        .to_lowercase()
+        .replace('`', "")
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
+        .collect::<String>()
+        .replace(' ', "-")
+}
+
+/// Every heading id a page offers.
+fn heading_ids(text: &str) -> HashSet<String> {
+    text.lines()
+        .filter_map(|l| {
+            let t = l.trim_end();
+            let rest = t.trim_start_matches('#');
+            // A heading is `#`+ then a space; `#!/bin/sh` inside a fence is not.
+            (t.starts_with('#') && rest.starts_with(' ')).then(|| heading_slug(rest))
+        })
+        .collect()
+}
+
+/// `#fragment` links must resolve too (#1354).
+///
+/// The translations translated their **headings** and kept the **English
+/// anchors**, so every table of contents in `de` / `fr` / `es` pointed at
+/// ids that exist only in the English file — 886 dead links across 91
+/// pages, invisible to the check below because it skips fragments.
+#[test]
+fn every_anchor_resolves_in_every_locale() {
+    let root = repo_root();
+    let published = published_pages(&root);
+    let mut problems = Vec::new();
+
+    for locale_dir in ["docs", "docs/de", "docs/es", "docs/fr"] {
+        for page in &published {
+            let path = root.join(locale_dir).join(page);
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let own = heading_ids(&text);
+            for target in link_targets(&text) {
+                if target.starts_with("http") || target.starts_with("mailto") {
+                    continue;
+                }
+                let (file, anchor) = match target.split_once('#') {
+                    Some((f, a)) if !a.is_empty() => (f, a),
+                    _ => continue,
+                };
+                // Same page, or a heading in a sibling page.
+                let ids = if file.is_empty() {
+                    own.clone()
+                } else {
+                    let sibling = path.parent().expect("parent").join(file);
+                    match std::fs::read_to_string(&sibling) {
+                        Ok(t) => heading_ids(&t),
+                        // A missing file is the other test's business.
+                        Err(_) => continue,
+                    }
+                };
+                if !ids.contains(anchor) {
+                    problems.push(format!(
+                        "{locale_dir}/{page}: `#{anchor}`{} matches no heading",
+                        if file.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" in {file}")
+                        }
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "{} dead anchor(s):\n  {}\n\nThe id is the heading text: lowercased, \
+         punctuation dropped, spaces to hyphens. Translating a heading changes \
+         its id, so the links pointing at it have to move too.",
+        problems.len(),
+        problems.join("\n  "),
+    );
+}
+
 #[test]
 fn every_published_doc_link_resolves_in_every_locale() {
     let root = repo_root();

@@ -22,13 +22,13 @@ de sorte que le serveur peut faire confiance à ses paramètres sans rien stocke
 
 ## Table des matières
 
-- [Les URL signées : le socle](#signed-urls-the-substrate)
-- [Réinitialisation du mot de passe](#password-reset)
-- [Vérification de l'e-mail](#email-verification)
-- [Connexion par lien magique](#magic-link-login)
-- [Tokens à usage unique](#single-use-tokens)
-- [Ce que vous fournissez](#what-you-provide)
-- [Voir aussi](#see-also)
+- [Les URL signées : le socle](#les-url-signées--le-socle)
+- [Réinitialisation du mot de passe](#réinitialisation-du-mot-de-passe)
+- [Vérification de l'e-mail](#vérification-de-le-mail)
+- [Connexion par lien magique](#connexion-par-lien-magique)
+- [Tokens à usage unique](#tokens-à-usage-unique)
+- [Ce que vous fournissez](#ce-que-vous-fournissez)
+- [Voir aussi](#voir-aussi)
 
 ---
 

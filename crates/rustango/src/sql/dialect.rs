@@ -55,7 +55,11 @@ fn write_pg_array_keys(
 /// plus the small bag of per-dialect DDL primitives the migration
 /// runner needs (identifier quoting, placeholder syntax, `SERIAL` /
 /// `AUTOINCREMENT` spelling, etc.).
-pub trait Dialect {
+/// `Send + Sync` because the migration runner holds a
+/// `&'static dyn Dialect` across `await` points, and a future that
+/// does so is only `Send` if the reference is. Free to require: every
+/// implementor is a unit struct with no state to share.
+pub trait Dialect: Send + Sync {
     // ====== Identity ======
 
     /// Short identifier for this dialect — `"postgres"`, `"sqlite"`,

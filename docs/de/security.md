@@ -6,25 +6,25 @@ Dieser Leitfaden behandelt jede Sicherheitsfunktion, die **Rustango** mitbringt,
 
 ## Inhaltsverzeichnis
 
-- [Die Defense-in-Depth-Checkliste](#the-defense-in-depth-checklist)
-- [Security-Header setzen](#setting-security-headers)
-- [Cross-Origin-Anfragen erlauben (CORS)](#allowing-cross-origin-requests-cors)
-- [Anfragen per Rate Limiting drosseln](#rate-limiting-requests)
-- [IPs erlauben oder blockieren](#allowing-or-blocking-ips)
-- [Schutz vor CSRF](#protecting-against-csrf)
-- [XSS verhindern](#preventing-xss)
-- [SQL-Injection verhindern](#preventing-sql-injection)
-- [Benutzer authentifizieren](#authenticating-users)
-- [Passwörter hashen und prüfen](#hashing-and-checking-passwords)
-- [JWTs ausstellen und erneuern](#issuing-and-refreshing-jwts)
-- [Mit API-Keys authentifizieren](#authenticating-with-api-keys)
-- [Zwei-Faktor-Authentifizierung hinzufügen (TOTP)](#adding-two-factor-auth-totp)
-- [Signierte URLs versenden (Magic Links)](#sending-signed-urls-magic-links)
-- [Eingehende Webhooks verifizieren](#verifying-incoming-webhooks)
-- [Secrets aus deinen Logs heraushalten](#keeping-secrets-out-of-your-logs)
-- [Anfragen über Services hinweg nachverfolgen](#tracing-requests-across-services)
-- [Secrets verwalten](#managing-secrets)
-- [Vor dem Deploy auditieren](#auditing-before-you-deploy)
+- [Die Defense-in-Depth-Checkliste](#die-defense-in-depth-checkliste)
+- [Security-Header setzen](#security-header-setzen)
+- [Cross-Origin-Anfragen erlauben (CORS)](#cross-origin-anfragen-erlauben-cors)
+- [Anfragen per Rate Limiting drosseln](#anfragen-per-rate-limiting-drosseln)
+- [IPs erlauben oder blockieren](#ips-erlauben-oder-blockieren)
+- [Schutz vor CSRF](#schutz-vor-csrf)
+- [XSS verhindern](#xss-verhindern)
+- [SQL-Injection verhindern](#sql-injection-verhindern)
+- [Benutzer authentifizieren](#benutzer-authentifizieren)
+- [Passwörter hashen und prüfen](#passwörter-hashen-und-prüfen)
+- [JWTs ausstellen und erneuern](#jwts-ausstellen-und-erneuern)
+- [Mit API-Keys authentifizieren](#mit-api-keys-authentifizieren)
+- [Zwei-Faktor-Authentifizierung hinzufügen (TOTP)](#zwei-faktor-authentifizierung-hinzufügen-totp)
+- [Signierte URLs versenden (Magic Links)](#signierte-urls-versenden-magic-links)
+- [Eingehende Webhooks verifizieren](#eingehende-webhooks-verifizieren)
+- [Secrets aus deinen Logs heraushalten](#secrets-aus-deinen-logs-heraushalten)
+- [Anfragen über Services hinweg nachverfolgen](#anfragen-über-services-hinweg-nachverfolgen)
+- [Secrets verwalten](#secrets-verwalten)
+- [Vor dem Deploy auditieren](#vor-dem-deploy-auditieren)
 
 ---
 
@@ -247,7 +247,7 @@ let safe = html_escape(user_input);
 
 Ersetzt `&`, `<`, `>`, `"`, `'`. Geeignet für HTML-Elementinhalte + doppelt-quotierte Attribute.
 
-Für CSP-basierte XSS-Verteidigung siehe [Security-Header setzen](#setting-security-headers).
+Für CSP-basierte XSS-Verteidigung siehe [Security-Header setzen](#security-header-setzen).
 
 ---
 
@@ -654,14 +654,14 @@ Für Prüfungen jenseits des Mitgelieferten erweitere mit benutzerdefiniertem Co
 Ein paar End-to-End-Flows müssen noch aus den untenstehenden Primitiven zusammengeklebt werden:
 
 - **Passwort-Reset + E-Mail-Verifizierung** — die Token-Issue-/Verify-Helper existieren (`auth_flows::confirm_password_reset_pool`, plus E-Mail-Verifizierungs-Round-Trips) und die E-Mail-Pipeline wird separat mitgeliefert, aber es gibt keinen einzelnen vorgefertigten View- + E-Mail- + Validate-Zyklus, der für dich verdrahtet ist.
-- **PII-Redaktion von Request-Body / Headern** in `access_log` — feldbasierte Log-Redaktion existiert (siehe [Secrets aus deinen Logs heraushalten](#keeping-secrets-out-of-your-logs)), aber keine automatische Bereinigung des Request-Bodys oder der Header.
+- **PII-Redaktion von Request-Body / Headern** in `access_log` — feldbasierte Log-Redaktion existiert (siehe [Secrets aus deinen Logs heraushalten](#secrets-aus-deinen-logs-heraushalten)), aber keine automatische Bereinigung des Request-Bodys oder der Header.
 
 Bereits mitgeliefert (greife nicht zu einem Workaround):
 
 - **OAuth2 / OIDC Social Login** — `oauth2::providers` bringt Google-, GitHub-, Microsoft-, GitLab- und Discord-Helper mit (plus `OAuth2Provider::from_discovery` für jeden OIDC-Provider), und `oauth2::router::oauth2_router` mountet die Login- + Callback-Routen, erstellt den Benutzerdatensatz und setzt das Session-Cookie.
 - **Sperre pro Account** — `rustango::account_lockout::Lockout` (cache-gestützt; `is_locked` / `record_failure` / `clear`, konfigurierbare `max_attempts` + `lockout_duration`).
 - **CSP-Report-Endpunkt** — `security_headers::csp_report_router(path)` + `SecurityHeadersLayer::csp_report_uri(uri)`.
-- **Verteiltes Rate Limiting** — `rate_limit_cache::CacheRateLimitLayer` (siehe [Anfragen per Rate Limiting drosseln](#rate-limiting-requests)).
+- **Verteiltes Rate Limiting** — `rate_limit_cache::CacheRateLimitLayer` (siehe [Anfragen per Rate Limiting drosseln](#anfragen-per-rate-limiting-drosseln)).
 
 Bis die nicht mitgelieferten Flows landen, klebe sie aus den obigen Primitiven zusammen (`signed_url::sign` für Passwort-Reset-Tokens, die E-Mail-Pipeline für die Zustellung usw.).
 

@@ -28,14 +28,14 @@ cambio de una línea.
 
 ## Tabla de contenidos
 
-- [Paso 1 — Elige un backend de almacenamiento](#step-1--pick-a-storage-backend)
-- [Paso 2 — Guarda, carga y sirve archivos](#step-2--save-load-and-serve-files)
-- [Paso 3 — Acepta una subida](#step-3--accept-an-upload)
-- [Nombres de archivo seguros](#safe-filenames)
-- [Producción: almacenamiento compatible con S3](#production-s3-compatible-storage)
-- [La biblioteca de medios](#the-media-library)
-- [Referencia](#reference)
-- [Véase también](#see-also)
+- [Paso 1 — Elige un backend de almacenamiento](#paso-1--elige-un-backend-de-almacenamiento)
+- [Paso 2 — Guarda, carga y sirve archivos](#paso-2--guarda-carga-y-sirve-archivos)
+- [Paso 3 — Acepta una subida](#paso-3--acepta-una-subida)
+- [Nombres de archivo seguros](#nombres-de-archivo-seguros)
+- [Producción: almacenamiento compatible con S3](#producción-almacenamiento-compatible-con-s3)
+- [La biblioteca de medios](#la-biblioteca-de-medios)
+- [Referencia](#referencia)
+- [Véase también](#véase-también)
 
 ---
 

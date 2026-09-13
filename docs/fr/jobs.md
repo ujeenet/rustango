@@ -28,18 +28,18 @@ de Laravel, en Rust.
 
 ## Table des matières
 
-- [Étape 1 — Définir une tâche](#step-1--define-a-job)
-- [Étape 2 — Démarrer une file](#step-2--start-a-queue)
-- [Étape 3 — Dispatcher depuis un handler](#step-3--dispatch-from-a-handler)
-- [Étape 4 — Câbler dans votre application](#step-4--wire-it-into-your-app) — l'exemple complet
-- [Faire tourner les workers (CLI + production)](#running-the-workers-cli--production)
-- [Nouvelles tentatives et backoff](#retries-and-backoff)
-- [Le handler dead-letter](#the-dead-letter-handler)
-- [La file persistante (production)](#the-persistent-queue-production)
-- [Les tâches en multi-tenancy](#jobs-under-multi-tenancy)
-- [Les balayages planifiés en multi-tenancy](#scheduled-sweeps-under-multi-tenancy)
-- [Référence](#reference)
-- [Voir aussi](#see-also)
+- [Étape 1 — Définir une tâche](#étape-1--définir-une-tâche)
+- [Étape 2 — Démarrer une file](#étape-2--démarrer-une-file)
+- [Étape 3 — Dispatcher depuis un handler](#étape-3--dispatcher-depuis-un-handler)
+- [Étape 4 — Câbler dans votre application](#étape-4--câbler-dans-votre-application) — l'exemple complet
+- [Faire tourner les workers (CLI + production)](#faire-tourner-les-workers-cli--production)
+- [Nouvelles tentatives et backoff](#nouvelles-tentatives-et-backoff)
+- [Le handler dead-letter](#le-handler-dead-letter)
+- [La file persistante (production)](#la-file-persistante-production)
+- [Les tâches en multi-tenancy](#les-tâches-en-multi-tenancy)
+- [Les balayages planifiés en multi-tenancy](#les-balayages-planifiés-en-multi-tenancy)
+- [Référence](#référence)
+- [Voir aussi](#voir-aussi)
 
 ---
 
@@ -110,7 +110,7 @@ les handlers puissent l'atteindre.
 
 > **In-memory signifie in-memory.** Les tâches en file ou en cours sont
 > **perdues au redémarrage**. Pour tout ce que vous ne pouvez pas vous permettre
-> de perdre, utilisez la [file persistante](#the-persistent-queue-production).
+> de perdre, utilisez la [file persistante](#la-file-persistante-production).
 
 ---
 
@@ -216,7 +216,7 @@ cargo run -- make:job WelcomeEmail   # scaffold a new job type
 À l'échelle, vous voulez souvent des workers **séparés** de la couche web — pour
 qu'un pic de trafic ne puisse pas affamer les tâches, et que vous mettiez à
 l'échelle chacun indépendamment. Avec la [file
-persistante](#the-persistent-queue-production), chaque processus tire de la même
+persistante](#la-file-persistante-production), chaque processus tire de la même
 table `rustango_jobs`, donc lancez simplement un second binaire, sans serveur,
 qui construit la file, la démarre, et bloque jusqu'à un signal :
 
@@ -244,7 +244,7 @@ Déployez-le comme son propre conteneur/service et mettez-le à l'échelle sur *
 réplicas** — ils tirent tous de la table partagée en toute sécurité. Le
 processus web n'a alors besoin que de `dispatch` (il n'a pas à `start()` de
 workers). Associez le worker à un balayage périodique
-[`reclaim_stuck_jobs_pool`](#the-persistent-queue-production) pour récupérer les
+[`reclaim_stuck_jobs_pool`](#la-file-persistante-production) pour récupérer les
 tâches d'un worker crashé.
 
 ---
@@ -519,5 +519,5 @@ acquire refusé est le résultat attendu, donc rien n'est journalisé. Suivi dan
   requêtes rapides.
 - [Signals](orm.md) — des hooks fire-and-forget qui *dispatchent* souvent une
   tâche.
-- [Commandes de tenancy](manage.md#tenancy-commands) — le provisionnement des
+- [Commandes de tenancy](manage.md#commandes-de-tenancy) — le provisionnement des
   tenants sur lesquels une file par tenant fait son fan-out.

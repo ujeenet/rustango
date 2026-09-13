@@ -220,6 +220,74 @@ pub(crate) async fn agent_token(
     }
 }
 
+/// Why a bearer was refused. Separated from the response so both the
+/// JSON-RPC POST and the SSE GET render it identically.
+pub(crate) enum BearerRejection {
+    /// No shape matched, or the agent is revoked / deactivated.
+    Unauthorized,
+    /// The liveness lookup itself failed — a database problem, not the
+    /// caller's. Never report this as 401: a client reads 401 as "start an
+    /// OAuth flow" and will chase a sign-in that was never the issue.
+    CheckFailed,
+}
+
+impl BearerRejection {
+    pub(crate) fn into_response(self, headers: &HeaderMap, uri: &axum::http::Uri) -> Response {
+        match self {
+            Self::Unauthorized => unauthorized(headers, uri),
+            Self::CheckFailed => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed").into_response()
+            }
+        }
+    }
+}
+
+/// Resolve a Bearer token to a live, tenant-pinned agent.
+///
+/// Two accepted bearer shapes: a minted agent JWT, or the raw
+/// `prefix.secret` credential itself (epic #1013) — the copy-paste key a
+/// member generates in an app's UI works directly in any MCP client without
+/// a token-exchange step. The raw path verifies liveness and resolves grants
+/// per request inside [`verify_raw_agent_credential`], so RBAC changes and
+/// revocation apply immediately (no 15-minute JWT window).
+///
+/// **Every** authenticated MCP surface must go through this, not just the
+/// JSON-RPC POST. The SSE GET used to verify JWTs only, so a raw key
+/// authenticated on POST and 401'd on GET. That split is not a cosmetic
+/// inconsistency: a client opening the Streamable-HTTP notification stream
+/// reads that 401 as "this resource wants OAuth", abandons the bearer it
+/// already had working, and walks the discovery → dynamic-registration path
+/// instead — which fails somewhere else entirely and reports *that* as the
+/// error. The connection is dead and the log points at the wrong thing.
+pub(crate) async fn authenticate_bearer(
+    jwt: &JwtLifecycle,
+    pool: &crate::sql::Pool,
+    slug: &str,
+    token: &str,
+) -> Result<McpAgent, BearerRejection> {
+    match verify_agent_token(jwt, token, slug).await {
+        Some(agent) => {
+            // Revocation immediacy: the JWT is stateless, so re-check at
+            // request time that the agent (and, for a user-owned key, its
+            // owner) still exists and is active. A revoked / deactivated key
+            // is refused straight away rather than lingering until expiry.
+            match crate::tenancy::agent_token_still_valid_pool(pool, agent.agent_id, agent.user_id)
+                .await
+            {
+                Ok(true) => Ok(agent),
+                Ok(false) => Err(BearerRejection::Unauthorized),
+                Err(e) => {
+                    tracing::warn!(error = %e, "mcp agent liveness re-check failed");
+                    Err(BearerRejection::CheckFailed)
+                }
+            }
+        }
+        None => verify_raw_agent_credential(pool, slug, token)
+            .await
+            .ok_or(BearerRejection::Unauthorized),
+    }
+}
+
 /// `POST {prefix}` (authed) — require a tenant-pinned agent JWT, then
 /// dispatch the JSON-RPC message. A token whose `tenant` claim ≠ the
 /// resolved request tenant (or a revoked / expired one) is refused.
@@ -236,38 +304,9 @@ pub(crate) async fn post_authed(
     let Some(token) = bearer(&headers) else {
         return unauthorized(&headers, &uri);
     };
-    // Two accepted bearer shapes: a minted agent JWT, or the raw
-    // `prefix.secret` credential itself (epic #1013) — the copy-paste key a member
-    // generates in an app's UI works directly in any MCP client without a
-    // token-exchange step. The raw path verifies liveness and resolves grants
-    // per request inside [`verify_raw_agent_credential`], so RBAC changes and
-    // revocation apply immediately (no 15-minute JWT window).
-    let agent = match verify_agent_token(jwt, token, &t.org.slug).await {
-        Some(agent) => {
-            // Revocation immediacy: the JWT is stateless, so re-check at
-            // request time that the agent (and, for a user-owned key, its
-            // owner) still exists and is active. A revoked / deactivated key
-            // is refused straight away rather than lingering until expiry.
-            match crate::tenancy::agent_token_still_valid_pool(
-                t.pool(),
-                agent.agent_id,
-                agent.user_id,
-            )
-            .await
-            {
-                Ok(true) => agent,
-                Ok(false) => return unauthorized(&headers, &uri),
-                Err(e) => {
-                    tracing::warn!(error = %e, "mcp agent liveness re-check failed");
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "auth check failed")
-                        .into_response();
-                }
-            }
-        }
-        None => match verify_raw_agent_credential(t.pool(), &t.org.slug, token).await {
-            Some(agent) => agent,
-            None => return unauthorized(&headers, &uri),
-        },
+    let agent = match authenticate_bearer(jwt, t.pool(), &t.org.slug, token).await {
+        Ok(agent) => agent,
+        Err(e) => return e.into_response(&headers, &uri),
     };
     // Agent verified + tenant-pinned: hand the tools layer the resolved
     // tenant pool + principal so `tools/call` runs against the right tenant.

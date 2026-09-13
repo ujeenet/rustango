@@ -17,6 +17,10 @@
 //!
 //! Each backend skips silently when its env var is unset.
 
+// The per-backend tests below carry their own gates; this one is for
+// the `rustango::cache` import they share.
+#![cfg(feature = "cache")]
+
 use std::sync::Arc;
 use std::time::Duration;
 

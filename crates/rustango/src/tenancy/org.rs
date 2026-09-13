@@ -289,6 +289,100 @@ impl core::fmt::Display for BackendKind {
     }
 }
 
+/// A cheap fingerprint of `rustango_orgs`, used to notice a change made
+/// by **another process**.
+///
+/// The base-host resolution cache is per-process, so without this a
+/// tenant created or suspended on one pod would keep resolving the old
+/// way on every other pod until their entries aged out. Each pod re-reads
+/// this periodically and drops its cache when it moves, which bounds
+/// cross-pod convergence at the poll interval instead of the cache TTL.
+///
+/// Clock-free by design, for the same two reasons the sibling
+/// `rustango_org_hosts` fingerprint is: an `auto_now` column takes its
+/// value from the database clock on INSERT but the writing process's
+/// clock on UPDATE, so a lagging pod can write a timestamp older than
+/// the current max and the change never propagates — and adding a
+/// `NOT NULL` column with a non-constant default is rejected outright by
+/// SQLite on any table that already has rows.
+///
+/// | mutation | what moves |
+/// |---|---|
+/// | tenant created | `count`, `max_id`, `active`, `active_id_sum` |
+/// | tenant suspended (`active = false`) | `active`, `active_id_sum` |
+/// | tenant hard-deleted | `count`, `active_id_sum` |
+///
+/// **What it does not catch:** an in-place field edit that changes
+/// neither the row count nor the active set — rotating `database_url`,
+/// renaming `host_pattern`. Those converge on the cache TTL instead.
+/// That is a deliberate trade: the alternative is a per-row checksum on
+/// the hot path, and the events that need to be fast (create, suspend)
+/// are exactly the ones these terms cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrgGeneration {
+    /// Total rows — moves on create and hard-delete.
+    pub count: i64,
+    /// Rows with `active = true` — moves on suspend/reactivate, which
+    /// changes neither `count` nor `max_id`.
+    pub active: i64,
+    /// Largest row id — distinguishes a create-plus-delete inside one
+    /// interval, which leaves `count` unchanged.
+    pub max_id: i64,
+    /// Sum of the ids of the active rows — identifies *which* tenants
+    /// are live, not just how many, so suspending one while
+    /// reactivating another in the same interval still moves it.
+    pub active_id_sum: i64,
+}
+
+/// Read the [`OrgGeneration`] fingerprint — one aggregate query, four
+/// scalars, no rows decoded.
+///
+/// # Errors
+/// Driver / query failures.
+pub async fn generation(
+    registry: &crate::sql::Pool,
+) -> Result<OrgGeneration, crate::sql::ExecError> {
+    use crate::core::aggregates::{count_all, max, sum};
+    use crate::core::{AggregateQuery, Column as _, Model as _, WhereExpr};
+    use crate::sql::fetch_aggregate_pool;
+
+    let q = AggregateQuery {
+        model: Org::SCHEMA,
+        joins: Vec::new(),
+        where_clause: WhereExpr::And(Vec::new()),
+        group_by: Vec::new(),
+        aggregates: vec![
+            ("n".into(), count_all().into()),
+            (
+                "n_on".into(),
+                count_all().filter(Org::active.eq(true)).into(),
+            ),
+            ("max_id".into(), max("id").into()),
+            (
+                "on_id_sum".into(),
+                sum("id").filter(Org::active.eq(true)).into(),
+            ),
+        ],
+        aliases: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+    };
+    // Every term is NULL-able on an empty table (`MAX` / `SUM` of no
+    // rows), so each decodes as `Option` and folds to 0 — an empty
+    // registry fingerprints stably rather than erroring.
+    let rows: Vec<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+        fetch_aggregate_pool(registry, &q).await?;
+    let (n, n_on, max_id, on_id_sum) = rows.into_iter().next().unwrap_or((None, None, None, None));
+    Ok(OrgGeneration {
+        count: n.unwrap_or(0),
+        active: n_on.unwrap_or(0),
+        max_id: max_id.unwrap_or(0),
+        active_id_sum: on_id_sum.unwrap_or(0),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

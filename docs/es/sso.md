@@ -72,7 +72,7 @@ para esa columna.
    error genérico (los detalles van al log del servidor, nunca al navegador).
 
 El **secreto** del cliente está **cifrado en reposo** — la columna `client_secret`
-es un cast [`EncryptedString`](#secret-storage), descifrado en memoria solo en el
+es un cast [`EncryptedString`](#almacenamiento-de-secretos), descifrado en memoria solo en el
 momento del inicio de sesión.
 
 ## Los proveedores son filas, gestionadas en el admin

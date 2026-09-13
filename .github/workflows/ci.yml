@@ -236,6 +236,10 @@ jobs:
       # The compile test above cannot catch this — it builds with
       # `--rustango-path`, where any new feature exists by definition.
       - run: cargo test -p cargo-rustango --test templates_name_real_features
+      # #1345 — `cargo rustango new` with no arguments opens a wizard on a
+      # terminal. Off one, it must fail with a message rather than block on a
+      # prompt nobody can answer; this job is exactly that caller.
+      - run: cargo test -p cargo-rustango --test wizard_cli
 
   # #1208 — the feature table is a public promise, so check the promise.
   # `sqlite_litmus` below is a single combination, and it happens to be one
@@ -288,6 +292,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p rustango --no-default-features --features sqlite,tenancy
       - run: cargo clippy -p rustango --no-default-features --features sqlite,tenancy --lib --no-deps
+      # Compile *every* test target, not just the ones enumerated below
+      # (#1363). `check` and `clippy --lib` above both stop at the
+      # library, so for a long time no job compiled a test binary
+      # without Postgres — and the enumeration grew stale silently every
+      # time a test file was added. `--no-run` needs no databases.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_choices
@@ -314,6 +324,37 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,config,email --test setting_changed_signal
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_ipaddress_field
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_filepath_field
+      # Audit retention now sweeps the registry's own log, not just tenants.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test audit_cleanup_sqlite_live
+      # #1344 — the hostname verbs, and that they write the table the
+      # operator console writes rather than a parallel one.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_hosts_sqlite_live
+      # #1344 — and that the CLI enforces the same operator lockout rules the
+      # console does, now that both call one engine.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_operators_sqlite_live
+      # #1344 — run history and the audit trail, printable without a browser,
+      # including that a CLI provision is recorded at all.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_inspect_sqlite_live
+      # #1344 — tenant routing config, editable without a browser, and the
+      # cache/pool invalidation that has to follow the write.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test manage_edit_tenant_sqlite_live
+      # The operator console and the provisioning engines under it. These ran
+      # only in the all-features job, which always has Postgres available —
+      # so a PG-ism in the console (a `::`-cast, an `ON CONFLICT` spelling,
+      # `SET search_path`) would pass CI and break every SQLite/MySQL
+      # deployment. This job is the one that would have caught it.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_provisioning_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_operators_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_hosts_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_audit_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_migrate_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_decommission_sqlite_live
+      # #1341 — pre-warming pools from the console, which was CLI-only.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test operator_console_prewarm_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test provision_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test provision_store_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,testkit --test org_hosts_sqlite_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,testkit --test tenant_sweep_sqlite_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,serializer --test serializer_cross_validate
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_none
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test queryset_exclude_sqlite_live
@@ -351,9 +392,11 @@ jobs:
   # service container is needed; tests create per-test files / `:memory:`
   # databases.
   #
-  # Listing `--test` files explicitly prevents the test harness from
-  # compiling PG-typed test binaries that don't compile under
-  # `--no-default-features`.
+  # `--test` files are listed explicitly because this job *runs* them,
+  # and only the sqlite-live ones are worth running here. It is no
+  # longer a workaround for test binaries that would not compile: since
+  # #1363 the whole suite compiles under `--no-default-features`, and
+  # `sqlite_litmus` asserts that with `--no-run`.
   sqlite_live:
     runs-on: ubuntu-latest
     steps:
@@ -505,6 +548,17 @@ jobs:
       - run: cargo test -p rustango --all-features --test mysql_live
       - run: cargo test -p rustango --features mysql --test explain_pool_mysql_live
       - run: cargo test -p rustango --features mysql --test bulk_upsert_mysql_live
+      # A second database for tenancy to provision *into*. The service
+      # grants `rustango` rights on `rustango_test` only, so the test
+      # cannot create this itself; and provisioning refuses a tenant
+      # pointed at the registry's own database, which is what the test
+      # used to do.
+      - name: Create the tenant database
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -uroot -prustango -e "
+            CREATE DATABASE IF NOT EXISTS rustango_tenant_test;
+            GRANT ALL PRIVILEGES ON rustango_tenant_test.* TO 'rustango'@'%';
+            FLUSH PRIVILEGES;"
       - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test permissions_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test database_pools_mysql_live

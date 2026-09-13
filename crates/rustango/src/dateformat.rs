@@ -547,6 +547,11 @@ mod tests {
     }
 
     #[test]
+    // Named for the Django format code under test. Those codes are
+    // case-sensitive — `N` (AP-style month) is a different specifier
+    // from `n` (month number) — so lowercasing the suffix would make
+    // the pair indistinguishable.
+    #[allow(non_snake_case)]
     fn format_ap_month_abbr_N() {
         // Django format code `N` — AP-style month abbreviation: short
         // months get trailing period, long-form months (March, April,
@@ -560,6 +565,11 @@ mod tests {
     }
 
     #[test]
+    // Named for the Django format code under test. Those codes are
+    // case-sensitive — `N` (AP-style month) is a different specifier
+    // from `n` (month number) — so lowercasing the suffix would make
+    // the pair indistinguishable.
+    #[allow(non_snake_case)]
     fn format_unix_timestamp_U() {
         let t = dt(2026, 1, 1, 0, 0, 0);
         let expected = t.timestamp().to_string();
@@ -583,6 +593,11 @@ mod tests {
     }
 
     #[test]
+    // Named for the Django format code under test. Those codes are
+    // case-sensitive — `N` (AP-style month) is a different specifier
+    // from `n` (month number) — so lowercasing the suffix would make
+    // the pair indistinguishable.
+    #[allow(non_snake_case)]
     fn format_day_suffix_S() {
         // 1 → st, 2 → nd, 3 → rd, 4 → th, 11 → th, 21 → st.
         assert_eq!(format_datetime(&dt(2026, 1, 1, 0, 0, 0), "S"), "st");
@@ -594,6 +609,11 @@ mod tests {
     }
 
     #[test]
+    // Named for the Django format code under test. Those codes are
+    // case-sensitive — `N` (AP-style month) is a different specifier
+    // from `n` (month number) — so lowercasing the suffix would make
+    // the pair indistinguishable.
+    #[allow(non_snake_case)]
     fn format_leap_year_L() {
         assert_eq!(format_datetime(&dt(2024, 1, 1, 0, 0, 0), "L"), "1"); // leap
         assert_eq!(format_datetime(&dt(2026, 1, 1, 0, 0, 0), "L"), "0"); // not leap

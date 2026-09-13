@@ -39,6 +39,7 @@ use http::HeaderName;
 
 use super::error::TenancyError;
 use super::org::Org;
+use super::resolver_cache::{Breaker, Cached, GenerationPoll, HostTtlCache};
 
 /// Resolve an HTTP request to an [`Org`] from the registry.
 ///
@@ -101,7 +102,379 @@ impl OrgResolver for SubdomainResolver {
         if host == self.apex_domain {
             return Ok(None);
         }
-        find_active_org_by(registry, Org::host_pattern.eq(host.to_owned())).await
+        // Pick up a tenant created or suspended by another pod before
+        // trusting anything cached here. Throttled to one aggregate per
+        // interval — see `sync_org_generation`.
+        sync_org_generation(registry).await;
+        match ORG_CACHE.get(&host) {
+            Cached::Miss => return Ok(None),
+            Cached::Hit(org) => return Ok(Some(org)),
+            Cached::Absent => {}
+        }
+        let found = find_active_org_by(registry, Org::host_pattern.eq(host.clone())).await?;
+        // Cache the miss too: this resolver runs first for *every*
+        // request, so an unregistered host would otherwise be a free
+        // registry query per request. See `ORG_CACHE`.
+        ORG_CACHE.put(&host, found.clone());
+        Ok(found)
+    }
+}
+
+// ---------------- RegisteredHostResolver ----------------
+
+/// Match the `Host` header against an extra hostname registered in
+/// [`rustango_org_hosts`](super::OrgHost), so one tenant can serve several
+/// domains beyond its base `Org.host_pattern`.
+///
+/// Composed AFTER [`SubdomainResolver`] in the standard chain: the base
+/// host keeps resolving exactly as it always did, and this only ever runs
+/// on a host that would otherwise have found nothing. The feature is
+/// purely additive — it cannot change where an existing request lands.
+///
+/// ## Missing table is not an error
+///
+/// The `rustango_org_hosts` table arrives with the generated system
+/// migration chain, so a deployment that upgrades the binary and has not
+/// yet run `migrate` does not have it. Propagating that error would turn
+/// "you haven't migrated yet" into a 500 on **every** request, including
+/// for tenants that never use extra hosts. So a failed lookup is logged
+/// once and treated as "no match", which is the pre-upgrade behaviour to
+/// the byte.
+pub struct RegisteredHostResolver;
+
+/// Backs off when the host-table lookup is failing, and logs the reason
+/// once per process rather than once per request.
+///
+/// The lookup's *miss* path caches (`HOST_CACHE.put(host, None)`), but its
+/// *error* path cannot: an error is not evidence that the host is
+/// unregistered, so caching it as a miss would be wrong the moment the
+/// table came back. Without a breaker the error path is therefore both
+/// uncached and unthrottled. The condition is table-wide rather than
+/// per-host, so one breaker covers every hostname at once.
+static HOST_TABLE_DOWN: Breaker = Breaker::new();
+
+/// How long a failed host-table lookup suppresses further attempts.
+/// Shares the fingerprint poll's interval, so one env var tunes both.
+fn host_table_retry_after() -> std::time::Duration {
+    gen_check_every().unwrap_or(GEN_CHECK_EVERY_DEFAULT)
+}
+
+/// hostname → the [`Org`] it resolves to (`None` = known-miss), with an
+/// expiry.
+///
+/// Stores the whole row, not its id. An id still costs a fetch per
+/// request to turn back into an `Org`, which measured as 2.00 registry
+/// queries per request for a cache **hit** on a registered extra host.
+/// Holding the row takes that to zero.
+///
+/// Negative entries matter more than positive ones. The chain
+/// short-circuits, so a request to a tenant's base host never reaches this
+/// resolver at all; what does reach it is every request to a host nobody
+/// has registered. Without a negative cache, spraying random `Host` headers
+/// is a free registry query per request.
+///
+/// Bounded on purpose: the keys are attacker-supplied, so an unbounded map
+/// would trade a query amplification for a memory one. At the cap the whole
+/// map is dropped — crude, but O(1) and always correct for a cache.
+///
+/// Keyed by hostname alone, not (registry, hostname): a process serves one
+/// registry. Tests that stand up several must use distinct hostnames.
+static HOST_CACHE: HostTtlCache<Org> = HostTtlCache::new(CACHE_TTL, CACHE_MAX);
+
+/// One TTL and one cap for both caches, so they cannot drift apart the
+/// way the two hand-written copies did.
+const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+const CACHE_MAX: usize = 1024;
+
+// ---------------- ORG_CACHE (base host → Org) ----------------
+
+/// `Host` header → the base-host [`Org`] it resolves to (`None` = known
+/// miss), with an expiry.
+///
+/// [`SubdomainResolver`] runs first in the standard chain and matches the
+/// **base** `Org.host_pattern`, so it is on the path of literally every
+/// request. Uncached, that is one registry `SELECT` per request forever —
+/// measured at exactly 1.00 queries/request against a live Postgres, for
+/// base hosts, extra hosts and unknown hosts alike, because the chain
+/// always tries this resolver first.
+///
+/// That single query is the registry's hot-path SPOF: it is what makes an
+/// unreachable registry take down tenants whose own databases are fine.
+///
+/// The whole `Org` is stored, not its id. Caching an id would still cost
+/// a fetch per request — which is exactly why the sibling `HOST_CACHE`
+/// measured 2.00 queries/request for a *cache hit* on a registered extra
+/// host. Storing the row takes a hit to zero queries.
+///
+/// Bounded and negatively-cached for the same reasons as [`HOST_CACHE`]:
+/// the keys are attacker-supplied `Host` headers, so an unbounded map
+/// trades a query amplification for a memory one, and without negative
+/// entries a sprayed host is a free registry query per request.
+static ORG_CACHE: HostTtlCache<Org> = HostTtlCache::new(CACHE_TTL, CACHE_MAX);
+
+/// Drop every cached resolution that carries `Org` data — **both**
+/// caches.
+///
+/// Call after any write to `rustango_orgs`, so the pod that made the
+/// change sees it immediately rather than waiting out the TTL. Other
+/// pods converge via the registry fingerprint — see
+/// [`sync_org_generation`].
+///
+/// Clearing `HOST_CACHE` as well is not incidental. It holds whole `Org`
+/// rows now, and it previously re-ran the active-filtered lookup on every
+/// hit — so suspending a tenant used to stop its extra hostnames
+/// *immediately*, per request. Losing that re-check without clearing
+/// here would leave a suspended tenant's extra hosts serving while its
+/// base host correctly 404s, which is worse than either behaviour alone.
+/// One function so a caller cannot get half of it right.
+pub fn invalidate_org_cache() {
+    ORG_CACHE.clear();
+    invalidate_host_cache();
+}
+
+/// Last `rustango_orgs` fingerprint this process saw.
+///
+/// [`invalidate_org_cache`] only clears the process that called it. Behind
+/// a load balancer that is half a solution: the pod handling the admin
+/// request forgets, and every other pod keeps answering from a cache that
+/// is now wrong. Polling a cheap fingerprint closes that gap without a
+/// shared cache, a message bus, or making Redis a dependency of tenant
+/// resolution — the one path that runs before everything else and must not
+/// acquire new ways to fail.
+static ORG_GEN: GenerationPoll<super::org::OrgGeneration> = GenerationPoll::new();
+
+/// Drop the base-host cache if another process changed `rustango_orgs`.
+///
+/// Cheap to call on every resolve: it does nothing at all until the poll
+/// interval has passed. Shares [`gen_check_every`] with the host-table
+/// poll, so one env var tunes both and a deployment that disables
+/// polling disables both.
+async fn sync_org_generation(registry: &Pool) {
+    ORG_GEN
+        .sync(
+            gen_check_every(),
+            || async {
+                // Through the breaker, not around it. A direct
+                // `org::generation` call would wait out the pool's
+                // acquire timeout on an unreachable registry — and
+                // base-host traffic reaches this poll on every request,
+                // so that would put the stall #1311 removed straight
+                // back on the hot path. Declining is not a failure: the
+                // breaker is already throttling, and the claim has
+                // already backed this poll off for a full interval.
+                if registry_is_down() {
+                    return Ok(None);
+                }
+                super::org::generation(registry).await.map(Some)
+            },
+            |e| {
+                REGISTRY_DOWN.open();
+                ORG_GEN.warn_once(|| {
+                    tracing::warn!(
+                        target: "rustango::tenancy::resolver",
+                        error = %e,
+                        "could not read the rustango_orgs fingerprint; this pod will \
+                         not notice tenants created or suspended by other processes \
+                         until its own cache entries expire"
+                    );
+                });
+            },
+            // `invalidate_org_cache` clears `HOST_CACHE` as well, and
+            // must: it holds whole `Org` rows too, so an extra hostname
+            // pointing at a tenant that has since been suspended has to
+            // stop resolving on the same bound as its base host does.
+            invalidate_org_cache,
+        )
+        .await;
+}
+
+/// Forget the org fingerprint and the base-host cache (test hook — see
+/// [`crate::testkit`]). Both are process-global.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn reset_org_cache() {
+    ORG_GEN.reset();
+    invalidate_org_cache();
+}
+
+/// Last `rustango_org_hosts` fingerprint this process saw. Same shape and
+/// same reasoning as [`ORG_GEN`], for the extra-hostname table.
+static HOST_GEN: GenerationPoll<super::org_host::Generation> = GenerationPoll::new();
+
+/// Default interval between fingerprint reads — the bound on how long
+/// another pod can serve a stale answer.
+const GEN_CHECK_EVERY_DEFAULT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Env override for [`GEN_CHECK_EVERY_DEFAULT`], in seconds. `0` disables
+/// cross-process polling entirely.
+///
+/// A hard-coded constant is the wrong shape for this: a single-process
+/// deployment gains nothing from the poll, a cross-region registry wants a
+/// longer interval, and an operator who needs tighter convergence wants a
+/// shorter one. None of them should have to fork the crate, and this runs
+/// on the path that must not acquire new ways to fail.
+const GEN_CHECK_ENV: &str = "RUSTANGO_HOST_GEN_CHECK_SECS";
+
+/// Resolved once — reading and parsing an env var on every resolve would
+/// cost more than the check it is gating.
+fn gen_check_every() -> Option<std::time::Duration> {
+    static CACHED: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var(GEN_CHECK_ENV) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) => Some(std::time::Duration::from_secs(secs)),
+            Err(_) => {
+                tracing::warn!(
+                    target: "rustango::tenancy::resolver",
+                    value = %raw,
+                    "{GEN_CHECK_ENV} is not a whole number of seconds; \
+                     falling back to the default interval"
+                );
+                Some(GEN_CHECK_EVERY_DEFAULT)
+            }
+        },
+        Err(_) => Some(GEN_CHECK_EVERY_DEFAULT),
+    })
+}
+
+/// Drop the local cache if another process changed the host table.
+///
+/// Cheap to call on every resolve: it does nothing at all until
+/// [`GEN_CHECK_EVERY`] has passed.
+async fn sync_generation(registry: &Pool) {
+    HOST_GEN
+        .sync(
+            gen_check_every(),
+            || async { super::org_host::generation(registry).await.map(Some) },
+            |e| {
+                // Never fail a request over a cache refresh — but do not
+                // fail silently either. Cross-pod invalidation being dead
+                // is invisible from the outside until a host 404s on some
+                // pods and not others, which is near-impossible to
+                // correlate after the fact.
+                HOST_GEN.warn_once(|| {
+                    tracing::warn!(
+                        target: "rustango::tenancy::resolver",
+                        error = %e,
+                        "could not read the rustango_org_hosts fingerprint; this pod \
+                         will not notice host changes made by other processes until \
+                         its own cache entries expire"
+                    );
+                });
+            },
+            // Clears negative entries too, and must: a hostname cached as
+            // a known-miss is exactly what an add on another pod
+            // invalidates. The cost is that a registry with a steady
+            // write stream keeps every pod's negative cache short-lived,
+            // which is the deliberate trade — a stale 404 on a real
+            // customer domain is worse than a repeated lookup on a
+            // sprayed one, and `CACHE_MAX` still bounds the latter.
+            invalidate_host_cache,
+        )
+        .await;
+}
+
+/// Forget the generation state entirely.
+///
+/// `pub(crate)` and surfaced through [`crate::testkit`] rather than being
+/// `pub` here: as public API of `rustango::tenancy` these would be
+/// permanent semver surface that any downstream crate could call in
+/// production, silently defeating cross-process invalidation for the life
+/// of the process. `#[doc(hidden)]` hides a name from rustdoc, not from
+/// the compiler.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn reset_generation() {
+    HOST_GEN.reset();
+    // The missing-table backoff is process-global too, and a test that
+    // exercised an absent table would otherwise suppress the lookup for
+    // the next test's perfectly healthy registry.
+    HOST_TABLE_DOWN.close();
+}
+
+/// Make the next resolve re-read the fingerprint immediately instead of
+/// waiting out the poll interval, so a cross-pod test proves the bound
+/// without sleeping through it.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn expire_generation() {
+    // Back-date past the *effective* interval, not the default one —
+    // with a longer interval configured, subtracting the default would
+    // leave the entry un-due and make this hook a no-op again.
+    let interval = gen_check_every().unwrap_or(GEN_CHECK_EVERY_DEFAULT);
+    HOST_GEN.expire(interval * 2, *PROCESS_START);
+}
+
+/// Earliest `Instant` this process can name. Used as a saturating floor
+/// by [`expire_generation`].
+#[cfg(any(test, feature = "testkit"))]
+static PROCESS_START: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+
+/// Drop cached resolutions. Called after a host is bound, unbound or
+/// toggled so the admin's next request reflects the change instead of
+/// waiting out the TTL.
+///
+/// Clears everything rather than one key: a rename is a remove plus an add,
+/// and the map is small and cheap to refill.
+pub fn invalidate_host_cache() {
+    HOST_CACHE.clear();
+}
+
+#[async_trait]
+impl OrgResolver for RegisteredHostResolver {
+    async fn resolve(&self, parts: &Parts, registry: &Pool) -> Result<Option<Org>, TenancyError> {
+        let Some(host) = host_from_parts(parts) else {
+            return Ok(None);
+        };
+        // Pick up a host added or toggled by another pod before trusting
+        // anything cached here. Throttled — see `GEN_CHECK_EVERY`.
+        sync_generation(registry).await;
+        // Cached, including the miss — see `HOST_CACHE`.
+        match HOST_CACHE.get(&host) {
+            Cached::Miss => return Ok(None),
+            Cached::Hit(org) => return Ok(Some(org)),
+            Cached::Absent => {}
+        }
+        // The table was failing very recently — don't re-ask on every
+        // request. See `HOST_TABLE_DOWN`. Pre-upgrade behaviour is "no
+        // match", which is what we return anyway, so backing off costs
+        // nothing and stops a per-request storm against a registry that
+        // is already in trouble.
+        if HOST_TABLE_DOWN.is_open(host_table_retry_after()) {
+            return Ok(None);
+        }
+        let rows = match super::OrgHost::objects()
+            .where_(super::OrgHost::hostname.eq(host.clone()))
+            .where_(super::OrgHost::enabled.eq(true))
+            .fetch(registry)
+            .await
+        {
+            Ok(rows) => {
+                HOST_TABLE_DOWN.close();
+                rows
+            }
+            Err(e) => {
+                HOST_TABLE_DOWN.open();
+                HOST_TABLE_DOWN.warn_once(|| {
+                    tracing::warn!(
+                        target: "rustango::tenancy::resolver",
+                        error = %e,
+                        "could not read rustango_org_hosts; extra tenant hostnames \
+                         are inactive until `migrate` creates the table"
+                    );
+                });
+                return Ok(None);
+            }
+        };
+        let Some(row) = rows.into_iter().next() else {
+            HOST_CACHE.put(&host, None);
+            return Ok(None);
+        };
+        // Resolve the row to its Org once, then cache the Org itself.
+        // Caching `row.org_id` instead would make every later hit pay
+        // this same fetch — the 2.00-queries-per-request a cache hit
+        // used to cost.
+        let found = find_active_org_by(registry, Org::id.eq(row.org_id)).await?;
+        HOST_CACHE.put(&host, found.clone());
+        Ok(found)
     }
 }
 
@@ -275,6 +648,11 @@ impl ChainResolver {
     pub fn standard(apex_domain: impl Into<String>) -> Self {
         Self::new()
             .push(SubdomainResolver::new(apex_domain))
+            // After the base host, before the header fallback: an extra
+            // hostname must never outrank a tenant's own `host_pattern`,
+            // and until an operator registers one the table is empty, so
+            // no existing deployment changes behaviour.
+            .push(RegisteredHostResolver)
             .push(HeaderResolver::default())
     }
 }
@@ -303,14 +681,52 @@ impl OrgResolver for ChainResolver {
 /// Pull the host name (no port, no scheme) from the request. Tries
 /// `Host` header first (universal), falls back to `parts.uri.host()`
 /// for clients that send absolute-form URIs.
-fn host_from_parts(parts: &Parts) -> Option<&str> {
+/// Pull the host name from the request, lowercased and without a port.
+///
+/// Case-folding is not cosmetic: hostnames are case-insensitive per RFC
+/// 4343, but the caches below are keyed on this string, and the string
+/// comes straight from a client-supplied `Host` header. Without folding,
+/// `ACME.app.test` and `AcMe.app.test` are distinct keys for one tenant —
+/// so a few thousand case variants of a real host fill a bounded map with
+/// duplicates, evicting genuine entries and taking a write lock on the
+/// process-global cache each time.
+fn host_from_parts(parts: &Parts) -> Option<String> {
     if let Some(value) = parts.headers.get(http::header::HOST) {
         if let Ok(s) = value.to_str() {
             // `Host` header may include `:port` — strip it.
-            return Some(s.split(':').next().unwrap_or(s));
+            return Some(s.split(':').next().unwrap_or(s).to_ascii_lowercase());
         }
     }
-    parts.uri.host()
+    parts.uri.host().map(str::to_ascii_lowercase)
+}
+
+/// Fails fast while the registry itself is unreachable.
+///
+/// Tenant resolution runs before everything else, so an unreachable
+/// registry is otherwise paid **per request** — see [`Breaker`] for what
+/// that costs. Deliberately *not* a behaviour change while open: the
+/// caller still gets `Err`, and still renders whatever it rendered
+/// before, just in microseconds rather than seconds.
+static REGISTRY_DOWN: Breaker = Breaker::new();
+
+/// How long a recorded failure suppresses further attempts.
+///
+/// Short on purpose. It caps the damage of an outage without meaningfully
+/// delaying recovery: at most one probe per second reaches a registry
+/// that is still down, and a registry that has come back is picked up
+/// within a second of the next request.
+const REGISTRY_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// True when a recent registry lookup failed and the retry window has
+/// not elapsed.
+fn registry_is_down() -> bool {
+    REGISTRY_DOWN.is_open(REGISTRY_RETRY_AFTER)
+}
+
+/// The error returned while the breaker is open. Mirrors what the pool
+/// itself produces so callers cannot tell the two apart.
+fn registry_unavailable() -> TenancyError {
+    TenancyError::Driver(sqlx::Error::PoolTimedOut)
 }
 
 /// Run `Org::objects().where_(filter).where_(active=true)` and
@@ -320,14 +736,47 @@ async fn find_active_org_by<F>(registry: &Pool, filter: F) -> Result<Option<Org>
 where
     F: Into<rustango::core::TypedFilter<Org>>,
 {
+    // A very recent failure means the registry is unreachable; don't
+    // queue behind it. See `REGISTRY_DOWN`.
+    if registry_is_down() {
+        return Err(registry_unavailable());
+    }
+
     let typed: rustango::core::TypedFilter<Org> = filter.into();
-    let rows: Vec<Org> = Org::objects()
+    let result: Result<Vec<Org>, _> = Org::objects()
         .where_(typed)
         .where_(Org::active.eq(true))
         .fetch(registry)
-        .await
-        .map_err(|e| TenancyError::Driver(driver_from_exec(e)))?;
-    Ok(rows.into_iter().next())
+        .await;
+
+    match result {
+        Ok(rows) => {
+            REGISTRY_DOWN.close();
+            Ok(rows.into_iter().next())
+        }
+        Err(e) => {
+            REGISTRY_DOWN.open();
+            REGISTRY_DOWN.warn_once(|| {
+                tracing::warn!(
+                    target: "rustango::tenancy::resolver",
+                    error = %e,
+                    "registry lookup failed; tenant resolution is failing fast for \
+                     up to {}s at a time until it recovers",
+                    REGISTRY_RETRY_AFTER.as_secs(),
+                );
+            });
+            Err(TenancyError::Driver(driver_from_exec(e)))
+        }
+    }
+}
+
+/// Forget the registry breaker (test hook — see [`crate::testkit`]).
+///
+/// Process-global, so a test that exercised an unreachable registry
+/// would otherwise suppress lookups for whichever test ran next.
+#[cfg(any(test, feature = "testkit"))]
+pub(crate) fn reset_registry_breaker() {
+    REGISTRY_DOWN.close();
 }
 
 /// Convert an `ExecError` into the `sqlx::Error` shape `TenancyError`

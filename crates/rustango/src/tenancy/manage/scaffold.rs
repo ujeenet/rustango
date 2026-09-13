@@ -24,7 +24,6 @@ pub const TENANCY_MANAGE_BIN: &str =
 //! `cargo run -- run-server`, plus everything the
 //! single-tenant dispatcher offers (`migrate`, `makemigrations`, …).
 
-use crate::sql::sqlx::PgPool;
 use crate::tenancy::TenantPools;
 
 #[tokio::main]
@@ -37,7 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // automatically via the `crate::tenancy` crate import.
 
     let registry_url = std::env::var(\"DATABASE_URL\")?;
-    let pool = PgPool::connect(&registry_url).await?;
+    // `Pool::connect_postgres`, not `PgPool::connect`: the framework's
+    // constructor applies the pool options your settings configure.
+    let pool = crate::sql::Pool::connect_postgres(&registry_url).await?;
     let pools = TenantPools::new(pool);
     let dir: &std::path::Path = \"./migrations\".as_ref();
     crate::tenancy::manage::run(&pools, &registry_url, dir, std::env::args().skip(1)).await?;

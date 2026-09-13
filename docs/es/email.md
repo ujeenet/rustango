@@ -24,15 +24,15 @@ en tu terminal a SMTP real con un cambio de una línea — como el framework de 
 
 ## Tabla de contenidos
 
-- [Paso 1 — Construye un correo](#step-1--build-an-email)
-- [Paso 2 — Elige un mailer](#step-2--pick-a-mailer)
-- [Paso 3 — Envíalo](#step-3--send-it)
-- [Validación y protección contra inyección de cabeceras](#validation-and-header-injection-safety)
-- [Probar el correo](#testing-email)
-- [Plantillas](#templates)
-- [Envíalo fuera de la petición](#send-it-off-the-request)
-- [Referencia](#reference)
-- [Véase también](#see-also)
+- [Paso 1 — Construye un correo](#paso-1--construye-un-correo)
+- [Paso 2 — Elige un mailer](#paso-2--elige-un-mailer)
+- [Paso 3 — Envíalo](#paso-3--envíalo)
+- [Validación y protección contra inyección de cabeceras](#validación-y-protección-contra-inyección-de-cabeceras)
+- [Probar el correo](#probar-el-correo)
+- [Plantillas](#plantillas)
+- [Envíalo fuera de la petición](#envíalo-fuera-de-la-petición)
+- [Referencia](#referencia)
+- [Véase también](#véase-también)
 
 ---
 

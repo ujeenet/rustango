@@ -6,25 +6,25 @@ Esta guía cubre todas las funciones de seguridad que incluye **Rustango** y có
 
 ## Tabla de contenidos
 
-- [La lista de comprobación de defensa en profundidad](#the-defense-in-depth-checklist)
-- [Establecer cabeceras de seguridad](#setting-security-headers)
-- [Permitir peticiones de origen cruzado (CORS)](#allowing-cross-origin-requests-cors)
-- [Limitar la tasa de peticiones](#rate-limiting-requests)
-- [Permitir o bloquear IPs](#allowing-or-blocking-ips)
-- [Protección contra CSRF](#protecting-against-csrf)
-- [Prevenir XSS](#preventing-xss)
-- [Prevenir la inyección SQL](#preventing-sql-injection)
-- [Autenticar usuarios](#authenticating-users)
-- [Hashear y verificar contraseñas](#hashing-and-checking-passwords)
-- [Emitir y refrescar JWTs](#issuing-and-refreshing-jwts)
-- [Autenticar con claves de API](#authenticating-with-api-keys)
-- [Añadir autenticación de dos factores (TOTP)](#adding-two-factor-auth-totp)
-- [Enviar URLs firmadas (enlaces mágicos)](#sending-signed-urls-magic-links)
-- [Verificar webhooks entrantes](#verifying-incoming-webhooks)
-- [Mantener los secretos fuera de tus registros](#keeping-secrets-out-of-your-logs)
-- [Rastrear peticiones a través de servicios](#tracing-requests-across-services)
-- [Gestionar secretos](#managing-secrets)
-- [Auditar antes de desplegar](#auditing-before-you-deploy)
+- [La lista de comprobación de defensa en profundidad](#la-lista-de-comprobación-de-defensa-en-profundidad)
+- [Establecer cabeceras de seguridad](#establecer-cabeceras-de-seguridad)
+- [Permitir peticiones de origen cruzado (CORS)](#permitir-peticiones-de-origen-cruzado-cors)
+- [Limitar la tasa de peticiones](#limitar-la-tasa-de-peticiones)
+- [Permitir o bloquear IPs](#permitir-o-bloquear-ips)
+- [Protección contra CSRF](#protección-contra-csrf)
+- [Prevenir XSS](#prevenir-xss)
+- [Prevenir la inyección SQL](#prevenir-la-inyección-sql)
+- [Autenticar usuarios](#autenticar-usuarios)
+- [Hashear y verificar contraseñas](#hashear-y-verificar-contraseñas)
+- [Emitir y refrescar JWTs](#emitir-y-refrescar-jwts)
+- [Autenticar con claves de API](#autenticar-con-claves-de-api)
+- [Añadir autenticación de dos factores (TOTP)](#añadir-autenticación-de-dos-factores-totp)
+- [Enviar URLs firmadas (enlaces mágicos)](#enviar-urls-firmadas-enlaces-mágicos)
+- [Verificar webhooks entrantes](#verificar-webhooks-entrantes)
+- [Mantener los secretos fuera de tus registros](#mantener-los-secretos-fuera-de-tus-registros)
+- [Rastrear peticiones a través de servicios](#rastrear-peticiones-a-través-de-servicios)
+- [Gestionar secretos](#gestionar-secretos)
+- [Auditar antes de desplegar](#auditar-antes-de-desplegar)
 
 ---
 
@@ -247,7 +247,7 @@ let safe = html_escape(user_input);
 
 Reemplaza `&`, `<`, `>`, `"`, `'`. Adecuado para el contenido de elementos HTML + atributos entre comillas dobles.
 
-Para la defensa XSS basada en CSP, consulta [Establecer cabeceras de seguridad](#setting-security-headers).
+Para la defensa XSS basada en CSP, consulta [Establecer cabeceras de seguridad](#establecer-cabeceras-de-seguridad).
 
 ---
 
@@ -655,14 +655,14 @@ Para comprobaciones más allá de las que se incluyen, extiende con código pers
 Un par de flujos de extremo a extremo todavía necesitan ensamblarse a partir de las primitivas de abajo:
 
 - **Restablecimiento de contraseña + verificación de email** — los ayudantes de emisión/verificación de tokens existen (`auth_flows::confirm_password_reset_pool`, además de los viajes de ida y vuelta de verificación de email) y la canalización de email se incluye por separado, pero no hay un único ciclo prefabricado de vista + email + validación conectado para ti.
-- **Redacción de PII del cuerpo / las cabeceras de la petición** en `access_log` — existe la redacción de registros a nivel de campo (consulta [Mantener los secretos fuera de tus registros](#keeping-secrets-out-of-your-logs)), pero no la depuración automática del cuerpo o las cabeceras de la petición.
+- **Redacción de PII del cuerpo / las cabeceras de la petición** en `access_log` — existe la redacción de registros a nivel de campo (consulta [Mantener los secretos fuera de tus registros](#mantener-los-secretos-fuera-de-tus-registros)), pero no la depuración automática del cuerpo o las cabeceras de la petición.
 
 Ya incluido (no recurras a un apaño):
 
 - **Inicio de sesión social OAuth2 / OIDC** — `oauth2::providers` incluye ayudantes para Google, GitHub, Microsoft, GitLab y Discord (además de `OAuth2Provider::from_discovery` para cualquier proveedor OIDC), y `oauth2::router::oauth2_router` monta las rutas de inicio de sesión + callback, crea el registro de usuario y establece la cookie de sesión.
 - **Bloqueo por cuenta** — `rustango::account_lockout::Lockout` (respaldado por caché; `is_locked` / `record_failure` / `clear`, con `max_attempts` + `lockout_duration` configurables).
 - **Endpoint de informe de CSP** — `security_headers::csp_report_router(path)` + `SecurityHeadersLayer::csp_report_uri(uri)`.
-- **Limitación de tasa distribuida** — `rate_limit_cache::CacheRateLimitLayer` (consulta [Limitar la tasa de peticiones](#rate-limiting-requests)).
+- **Limitación de tasa distribuida** — `rate_limit_cache::CacheRateLimitLayer` (consulta [Limitar la tasa de peticiones](#limitar-la-tasa-de-peticiones)).
 
 Hasta que aterricen los flujos no incluidos, ensámblalos a partir de las primitivas de arriba (`signed_url::sign` para los tokens de restablecimiento de contraseña, la canalización de email para la entrega, etc.).
 

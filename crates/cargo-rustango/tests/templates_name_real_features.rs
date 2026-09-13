@@ -102,6 +102,53 @@ fn requested_features(generated: &str) -> Vec<String> {
     out
 }
 
+/// Members of one feature's list — `batteries = ["manage", "admin", …]`.
+fn members_of(manifest: &str, feature: &str) -> Vec<String> {
+    let needle = format!("{feature} = [");
+    for line in manifest.lines() {
+        let t = line.trim_end();
+        let Some(rest) = t.strip_prefix(&needle) else {
+            continue;
+        };
+        let Some(end) = rest.find(']') else { continue };
+        return rest[..end]
+            .split(',')
+            .map(|f| f.trim().trim_matches('"').trim().to_owned())
+            .filter(|f| !f.is_empty())
+            .collect();
+    }
+    Vec::new()
+}
+
+/// The `--features` menu, scraped from `main.rs` rather than imported: this is
+/// a binary crate, so the const is not reachable from an integration test.
+fn optional_features_menu() -> Vec<String> {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("main.rs"),
+    )
+    .expect("read main.rs");
+    let start = src
+        .find("pub const OPTIONAL_FEATURES")
+        .expect("OPTIONAL_FEATURES is gone — update this test with it");
+    let body = &src[start..];
+    let end = body.find("];").expect("unterminated OPTIONAL_FEATURES");
+    // Entries are `("name", "about")`, which rustfmt may split across lines.
+    // The name is the first string after each `(` — the description follows.
+    body[..end]
+        .split_once('[')
+        .expect("OPTIONAL_FEATURES has no list")
+        .1
+        .split('(')
+        .skip(1)
+        .filter_map(|entry| {
+            let rest = entry.split_once('"')?.1;
+            Some(rest.split_once('"')?.0.to_owned())
+        })
+        .collect()
+}
+
 fn generate_manifest(template: &str) -> String {
     let work = std::env::temp_dir().join(format!(
         "rustango-featcheck-{}-{template}-{}",
@@ -160,6 +207,68 @@ fn every_template_names_only_features_the_framework_defines() {
                  Defined features: {defined:?}"
             );
         }
+    }
+}
+
+/// The `--features` menu may only offer features that exist (#1345).
+///
+/// Same trap as the templates above, one flag further out: a typo here fails
+/// at dependency resolution in the user's fresh project, naming the framework
+/// rather than the flag that caused it.
+#[test]
+fn the_features_menu_names_only_real_features() {
+    let manifest_path = rustango_manifest();
+    if !manifest_path.is_file() {
+        return;
+    }
+    let defined = framework_features(&std::fs::read_to_string(&manifest_path).expect("read"));
+    let menu = optional_features_menu();
+    assert!(!menu.is_empty(), "the OPTIONAL_FEATURES scan found nothing");
+    for feat in &menu {
+        assert!(
+            defined.contains(feat),
+            "`--features {feat}` is offered but crates/rustango/Cargo.toml does \
+             not define it.\nDefined: {defined:?}"
+        );
+    }
+}
+
+/// …and must offer every opt-in no template already reaches (#1345).
+///
+/// A feature outside `batteries` that the menu omits is unreachable from the
+/// scaffolder entirely — which is the gap the flag was added to close, so it
+/// should not quietly reopen when a new feature lands.
+#[test]
+fn the_features_menu_covers_every_opt_in() {
+    let manifest_path = rustango_manifest();
+    if !manifest_path.is_file() {
+        return;
+    }
+    let manifest = std::fs::read_to_string(&manifest_path).expect("read");
+    let batteries = members_of(&manifest, "batteries");
+    assert!(
+        batteries.contains(&"admin".to_owned()),
+        "sanity: the `batteries` scan found nothing useful ({batteries:?})"
+    );
+    let menu = optional_features_menu();
+
+    for feat in framework_features(&manifest) {
+        // Internal capability features (#1208) carry a leading underscore;
+        // `runtime` is plumbing `manage` already pulls in; backends have their
+        // own flag; the rest are reached through a template.
+        if feat.starts_with('_')
+            || matches!(feat.as_str(), "default" | "batteries" | "runtime")
+            || ["postgres", "sqlite", "mysql"].contains(&feat.as_str())
+            || batteries.contains(&feat)
+        {
+            continue;
+        }
+        assert!(
+            menu.contains(&feat),
+            "rustango defines `{feat}`, which no template turns on and \
+             `--features` does not offer — so no generated project can reach \
+             it. Add it to OPTIONAL_FEATURES in src/main.rs (#1345)."
+        );
     }
 }
 

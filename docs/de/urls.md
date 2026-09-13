@@ -19,11 +19,11 @@ spiegelt Djangos `reverse()` / `{% url %}` / `resolve_url()` / `redirect()`.
 ---
 
 ## Inhaltsverzeichnis
-- [Eine benannte URL registrieren](#register-a-named-url)
+- [Eine benannte URL registrieren](#eine-benannte-url-registrieren)
 - [Reverse in Rust](#reverse-in-rust) · [Reverse in Templates](#reverse-in-templates)
-- [Redirect per Name](#redirect-by-name) · [Namespacing](#namespacing)
-- [Die URL-Map inspizieren](#inspect-the-url-map) · [Fehler](#errors)
-- [Regex & typisierte Pfadmuster](#regex--typed-path-patterns) · [Hinweise & Grenzen](#notes-and-limits)
+- [Redirect per Name](#redirect-per-name) · [Namespacing](#namespacing)
+- [Die URL-Map inspizieren](#die-url-map-inspizieren) · [Fehler](#fehler)
+- [Regex & typisierte Pfadmuster](#regex--typisierte-pfadmuster) · [Hinweise & Grenzen](#hinweise-und-grenzen)
 
 ---
 
@@ -73,7 +73,7 @@ let url = reverse_owned("post-detail", &owned_params)?;
 
 `reverse` ist **strikt**: ein fehlender Platzhalter oder ein zusätzlicher
 `params`-Schlüssel, den das Muster nicht hat, ist ein Fehler (kein stiller
-Fehlabgleich) — siehe [Fehler](#errors).
+Fehlabgleich) — siehe [Fehler](#fehler).
 
 ---
 
@@ -283,7 +283,7 @@ kompilieren und über Anfragen hinweg wiederverwenden kann.
   `Location`-Header oder ein `href` fallengelassen werden können.
 - **Keine Regex-/typisierten Konverter** in Mustern (Djangos `<int:pk>`);
   Platzhalter sind schlichte `{name}`, und Werte werden unverändert eingesetzt
-  (nach der Kodierung). Siehe [Regex & typisierte Pfadmuster](#regex--typed-path-patterns)
+  (nach der Kodierung). Siehe [Regex & typisierte Pfadmuster](#regex--typisierte-pfadmuster)
   für das Warum und wie man eine Route stattdessen einschränkt.
 
 

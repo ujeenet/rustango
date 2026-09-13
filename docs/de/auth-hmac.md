@@ -25,13 +25,13 @@ Tower-Layer.
 
 ## Inhaltsverzeichnis
 
-- [Wann einsetzen](#when-to-use-it)
-- [Was signiert wird](#what-gets-signed)
-- [Server: mit dem Layer verifizieren](#server-verify-with-the-layer)
-- [Client: eine Anfrage signieren](#client-sign-a-request)
-- [Uhren-Skew und Replay](#clock-skew-and-replay)
-- [Grenzen](#limits)
-- [Siehe auch](#see-also)
+- [Wann einsetzen](#wann-einsetzen)
+- [Was signiert wird](#was-signiert-wird)
+- [Server: mit dem Layer verifizieren](#server-mit-dem-layer-verifizieren)
+- [Client: eine Anfrage signieren](#client-eine-anfrage-signieren)
+- [Uhren-Skew und Replay](#uhren-skew-und-replay)
+- [Grenzen](#grenzen)
+- [Siehe auch](#siehe-auch)
 
 ---
 

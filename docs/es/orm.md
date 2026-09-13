@@ -35,23 +35,23 @@ El CHANGELOG contiene el índice completo de tickets de cada versión.
 
 ## Tabla de contenidos
 
-- [Consultas](#querying)
-- [Valores calculados y funciones de base de datos](#computed-values--database-functions)
-- [Agregaciones](#aggregations)
-- [Joins y precarga de filas relacionadas](#joins--preloading-related-rows)
-- [Operaciones en lote](#bulk-operations)
-- [Insertar o actualizar (upsert)](#insert-or-update-upsert)
-- [Transacciones](#transactions)
-- [Muchos-a-muchos](#many-to-many)
+- [Consultas](#consultas)
+- [Valores calculados y funciones de base de datos](#valores-calculados-y-funciones-de-base-de-datos)
+- [Agregaciones](#agregaciones)
+- [Joins y precarga de filas relacionadas](#joins-y-precarga-de-filas-relacionadas)
+- [Operaciones en lote](#operaciones-en-lote)
+- [Insertar o actualizar (upsert)](#insertar-o-actualizar-upsert)
+- [Transacciones](#transacciones)
+- [Muchos-a-muchos](#muchos-a-muchos)
 - [JSON / JSONB](#json--jsonb)
-- [Borrado lógico (soft delete)](#soft-delete)
-- [Rastro de auditoría](#audit-trail)
-- [Válvula de escape a SQL crudo](#raw-sql-escape-hatch)
-- [Carga perezosa de FK](#lazy-fk-loading)
-- [Cuatro maneras de filtrar](#four-ways-to-filter)
-- [Consultas acotadas por tenant](#tenant-scoped-queries)
-- [Señales](#signals)
-- [Consejos de rendimiento](#performance-tips)
+- [Borrado lógico (soft delete)](#borrado-lógico-soft-delete)
+- [Rastro de auditoría](#rastro-de-auditoría)
+- [Válvula de escape a SQL crudo](#válvula-de-escape-a-sql-crudo)
+- [Carga perezosa de FK](#carga-perezosa-de-fk)
+- [Cuatro maneras de filtrar](#cuatro-maneras-de-filtrar)
+- [Consultas acotadas por tenant](#consultas-acotadas-por-tenant)
+- [Señales](#señales)
+- [Consejos de rendimiento](#consejos-de-rendimiento)
 
 ---
 
@@ -866,7 +866,7 @@ let featured = Author::objects()
 
 ### Cuándo bajar a SQL crudo en su lugar
 
-Los builders de arriba cubren los casos comunes. Para cosas que aún no expresan — `Cast`, búsqueda de texto completo, operadores de path de JSON, funciones de hash, trigonometría, funciones de ventana — ver la sección [Válvula de escape a SQL crudo](#raw-sql-escape-hatch) más abajo, o espera a los issues de seguimiento que extienden el mismo árbol de expresiones.
+Los builders de arriba cubren los casos comunes. Para cosas que aún no expresan — `Cast`, búsqueda de texto completo, operadores de path de JSON, funciones de hash, trigonometría, funciones de ventana — ver la sección [Válvula de escape a SQL crudo](#válvula-de-escape-a-sql-crudo) más abajo, o espera a los issues de seguimiento que extienden el mismo árbol de expresiones.
 
 ---
 

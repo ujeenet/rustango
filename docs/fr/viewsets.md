@@ -7,7 +7,7 @@ contrôleur de ressource d'API Laravel, si vous en avez déjà utilisé.)
 
 > **Nouveau dans les API REST ?** Ce guide suppose que vous savez ce qu'est un *endpoint*, un *verbe
 > HTTP* (GET / POST / …) et une *requête et réponse JSON*. Si l'un de ces concepts
-> est flou, le [glossaire](glossary.md#web-api-basics) en fait un tour d'horizon de cinq minutes —
+> est flou, le [glossaire](glossary.md#les-bases-des-api-web) en fait un tour d'horizon de cinq minutes —
 > lisez-le d'abord, puis revenez ici.
 
 Associez un ViewSet à un [sérialiseur](serializers.md) — la pièce qui façonne votre
@@ -38,15 +38,15 @@ est une référence pour chaque réglage.
 ---
 
 ## Table des matières
-- [Vues API vs vues HTML](#api-views-vs-html-views) — du JSON pour les clients, ou des pages HTML ?
-- [Construire une API REST de blog](#build-a-rest-blog-api) — la présentation complète
-- [Le mariage du sérialiseur : entrée + sortie](#the-serializer-marriage-input--output)
-- [Les deux façons de définir un ViewSet](#the-two-ways-to-define-a-viewset)
-- [Les endpoints CRUD](#the-crud-endpoints) · [Choisir lesquels exposer](#choosing-which-operations-to-expose)
-- [Référence `#[viewset(...)]`](#viewset-attribute-reference) · [Référence du builder](#builder-reference)
-- [Filtrage, recherche & tri](#filtering-search-and-ordering) · [Pagination](#pagination)
-- [Validation](#validation) · [Permissions & throttling](#permissions-and-throttling) · [Actions personnalisées](#custom-actions-beyond-crud)
-- [Montage](#mounting) · [Backends](#backend-support)
+- [Vues API vs vues HTML](#vues-api-vs-vues-html) — du JSON pour les clients, ou des pages HTML ?
+- [Construire une API REST de blog](#construire-une-api-rest-de-blog) — la présentation complète
+- [Le mariage du sérialiseur : entrée + sortie](#le-mariage-du-sérialiseur--entrée--sortie)
+- [Les deux façons de définir un ViewSet](#les-deux-façons-de-définir-un-viewset)
+- [Les endpoints CRUD](#les-endpoints-crud) · [Choisir lesquels exposer](#choisir-quelles-opérations-exposer)
+- [Référence `#[viewset(...)]`](#référence-de-lattribut-viewset) · [Référence du builder](#référence-du-builder)
+- [Filtrage, recherche & tri](#filtrage-recherche-et-tri) · [Pagination](#pagination)
+- [Validation](#validation) · [Permissions & throttling](#permissions-et-throttling) · [Actions personnalisées](#actions-personnalisées-au-delà-du-crud)
+- [Montage](#montage) · [Backends](#prise-en-charge-des-backends)
 
 ---
 
@@ -523,7 +523,7 @@ ViewSet::for_model(Post::SCHEMA).read_only()   // builder
 
 Il n'y a pas de bascule par verbe au-delà de read_only. Pour « tout sauf delete »,
 montez le ViewSet et surchargez la route unique avec votre propre handler (voir
-[Actions personnalisées](#custom-actions-beyond-crud)).
+[Actions personnalisées](#actions-personnalisées-au-delà-du-crud)).
 
 ---
 
@@ -532,7 +532,7 @@ montez le ViewSet et surchargez la route unique avec votre propre handler (voir
 | Clé | Exemple | Défaut | Ce qu'elle fait |
 |---|---|---|---|
 | `model` | `model = Post` | **requis** | Le modèle sur lequel la ressource est construite. |
-| `serializer` | `serializer = path::To::S` | aucun | Brancher un sérialiseur pour une **sortie + entrée** typées (voir [ci-dessus](#the-serializer-marriage-input--output)). |
+| `serializer` | `serializer = path::To::S` | aucun | Brancher un sérialiseur pour une **sortie + entrée** typées (voir [ci-dessus](#le-mariage-du-sérialiseur--entrée--sortie)). |
 | `fields` | `"id, title, body"` | tous les champs scalaires | Liste blanche pour la projection par défaut (non-sérialiseur) + les champs modifiables. |
 | `filter_fields` | `"author_id, status"` | aucun | Champs filtrables via `?field=value` (+ lookups). |
 | `search_fields` | `"title, body"` | aucun | Champs que la boîte `?search=` fait correspondre (OU insensible à la casse). |
@@ -633,7 +633,7 @@ pour les très grandes tables. `?cursor=<token>&page_size=20` :
 
 Avec un **sérialiseur branché**, le chemin create/update exécute les
 validateurs du sérialiseur et renvoie des `400` en forme DRF — la manière recommandée de valider (voir
-[le mariage](#the-serializer-marriage-input--output) et le
+[le mariage](#le-mariage-du-sérialiseur--entrée--sortie) et le
 [guide des sérialiseurs](serializers.md#validation)). Trois couches s'exécutent :
 
 - **Contraintes déclaratives** — `max_length` / `min_length` / `min` / `max`, et

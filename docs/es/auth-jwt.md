@@ -26,10 +26,10 @@ claims, `decode` para verificarlos y volver a leerlos, HS256 por debajo.
 ---
 
 ## Tabla de contenidos
-- [Inicio rápido](#quick-start) · [Cuándo usarlo](#when-to-use-standalone-jwt)
-- [Construir claims](#building-claims) · [Verificar](#verifying-a-token)
-- [Modelo de seguridad](#security-model) — léelo · [Inspeccionar sin confiar](#inspecting-without-verifying)
-- [Notas y límites](#notes-and-limits)
+- [Inicio rápido](#inicio-rápido) · [Cuándo usarlo](#cuándo-usar-un-jwt-independiente)
+- [Construir claims](#construir-claims) · [Verificar](#verificar-un-token)
+- [Modelo de seguridad](#modelo-de-seguridad) — léelo · [Inspeccionar sin confiar](#inspeccionar-sin-verificar)
+- [Notas y límites](#notas-y-límites)
 
 ---
 

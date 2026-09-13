@@ -48,10 +48,13 @@ async fn lookup_org(pool: &sqlx::PgPool, slug: &str) -> Org {
 
 static UNIQ: AtomicU64 = AtomicU64::new(0);
 
+/// Joined with hyphens, not underscores, because some of these names
+/// become tenant slugs — and a slug is a hostname label, where `_` is
+/// illegal. Usernames tolerate either, so one rule serves both.
 fn unique(prefix: &str) -> String {
     let n = UNIQ.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
-    format!("{prefix}_{pid}_{n}")
+    format!("{prefix}-{pid}-{n}")
 }
 
 async fn pool() -> Option<sqlx::PgPool> {
@@ -244,7 +247,7 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
 
-    let slug = unique("acme_hw");
+    let slug = unique("acme-hw");
     drop_schema(&pool, &slug).await;
     sqlx::query(&format!(r#"CREATE SCHEMA "{slug}""#))
         .execute(&pool)
@@ -304,7 +307,7 @@ async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
 
-    let slug = unique("acme_hw2");
+    let slug = unique("acme-hw2");
     drop_schema(&pool, &slug).await;
     sqlx::query(&format!(r#"CREATE SCHEMA "{slug}""#))
         .execute(&pool)

@@ -38,6 +38,10 @@ async fn pool() -> Option<sqlx::PgPool> {
 
 /// Insert three orgs in different routing modes.
 async fn seed_orgs(pool: &sqlx::PgPool) {
+    // `SubdomainResolver` caches hostname -> Org. Every test here
+    // re-seeds the same schema, so a leftover entry from the previous
+    // one would be served instead of the rows just written.
+    rustango::testkit::reset_org_cache();
     let mut acme = Org {
         id: Auto::default(),
         slug: "acme".into(),

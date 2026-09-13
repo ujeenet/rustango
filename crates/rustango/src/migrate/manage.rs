@@ -5691,12 +5691,14 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
-    /// The scaffolder writes
+    /// The scaffolder used to write
     /// `RUSTANGO_SESSION_SECRET=change-me-base64-encoded-32-bytes-or-more`
-    /// to `.env.example`. A user who copied that to `.env` and never
-    /// ran `openssl rand -base64 32` should get a loud error in
-    /// `--deploy` mode rather than silently shipping a known-public
-    /// "secret".
+    /// to `.env.example`; it now ships the line commented out, because the
+    /// value is not 32 bytes of base64 and was discarded silently (#1359).
+    ///
+    /// This check stays regardless: every `.env` copied from an older
+    /// scaffold still carries it, and shipping a known-public "secret" to
+    /// production should be a loud error rather than a quiet fallback.
     #[test]
     fn deploy_audit_placeholder_session_secret_errors() {
         let env = DeployAuditEnv {

@@ -34,13 +34,13 @@ travers* lui.
 ---
 
 ## Table des matières
-- [Démarrage rapide](#quick-start) · [Le trait `ModelSerializer`](#the-modelserializer-trait)
-- [Attributs de champ](#field-attributes) — la référence complète
-- [Champs calculés](#computed-fields) · [Serializers imbriqués](#nested-serializers) · [Collections](#collections-many) · [Champs slug](#slug-related-fields)
-- [Validation](#validation) · [Validation d'unicité combinée](#unique-together-validation)
-- [Sortie hyperliée](#hyperlinked-output) · [Sérialiser des listes](#serializing-lists)
-- [Utiliser un serializer avec un ViewSet](#using-a-serializer-with-a-viewset) · [Valider dans un handler personnalisé](#validating-in-a-custom-handler)
-- [OpenAPI](#openapi-schemas) · [Scaffolding](#scaffolding) · [Ajustements et limites](#tweaks-and-current-limits)
+- [Démarrage rapide](#démarrage-rapide) · [Le trait `ModelSerializer`](#le-trait-modelserializer)
+- [Attributs de champ](#attributs-de-champ) — la référence complète
+- [Champs calculés](#champs-calculés) · [Serializers imbriqués](#serializers-imbriqués) · [Collections](#collections-many) · [Champs slug](#champs-slug)
+- [Validation](#validation) · [Validation d'unicité combinée](#validation-dunicité-combinée)
+- [Sortie hyperliée](#sortie-hyperliée) · [Sérialiser des listes](#sérialiser-des-listes)
+- [Utiliser un serializer avec un ViewSet](#utiliser-un-serializer-avec-un-viewset) · [Valider dans un handler personnalisé](#valider-dans-un-handler-personnalisé)
+- [OpenAPI](#schémas-openapi) · [Scaffolding](#scaffolding) · [Ajustements et limites](#ajustements-et-limites-actuelles)
 
 ---
 
@@ -207,7 +207,7 @@ pub author: AuthorBrief,
 
 Les champs imbriqués sont en **lecture seule** dans la forme de sortie — les
 objets imbriqués accessibles en écriture ne sont pas encore pris en charge (voir
-[limites](#tweaks-and-current-limits)).
+[limites](#ajustements-et-limites-actuelles)).
 
 ---
 
@@ -439,7 +439,7 @@ pub struct PostViewSet;
 
 Le ViewSet pilote cela via trois méthodes `ModelSerializer` que le derive
 génère : `validate()`, `writable_source_fields()` et `from_writable_json()`. Voir
-le [guide des ViewSets](viewsets.md#the-serializer-marriage-input--output) pour le
+le [guide des ViewSets](viewsets.md#le-mariage-du-sérialiseur--entrée--sortie) pour le
 comportement complet et un exemple concret.
 
 On peut aussi utiliser un serializer **de façon autonome** — mettre une ligne en

@@ -31,15 +31,15 @@ recursos de Laravel que devuelven vistas Blade. Renderizan mediante plantillas
 
 ## Tabla de contenidos
 
-- [Vistas de API vs vistas HTML — ¿cuál quieres?](#api-views-vs-html-views--which-do-you-want)
-- [Las cinco vistas de modelo](#the-five-model-views)
+- [Vistas de API vs vistas HTML — ¿cuál quieres?](#vistas-de-api-vs-vistas-html--cuál-quieres)
+- [Las cinco vistas de modelo](#las-cinco-vistas-de-modelo)
 - [ListView](#listview) · [DetailView](#detailview)
 - [CreateView, UpdateView, DeleteView](#createview-updateview-deleteview)
-- [El contexto de Tera](#the-tera-context)
-- [TemplateView y RedirectView](#templateview-and-redirectview)
-- [Mono-inquilino vs multi-inquilino](#single-tenant-vs-multi-tenant)
-- [Servir un modelo de ambas formas](#serving-one-model-both-ways)
-- [Véase también](#see-also)
+- [El contexto de Tera](#el-contexto-de-tera)
+- [TemplateView y RedirectView](#templateview-y-redirectview)
+- [Mono-inquilino vs multi-inquilino](#mono-inquilino-vs-multi-inquilino)
+- [Servir un modelo de ambas formas](#servir-un-modelo-de-ambas-formas)
+- [Véase también](#véase-también)
 
 ---
 
@@ -60,7 +60,7 @@ Esta es la primera decisión. Ambas convierten un modelo en endpoints; difieren 
 | Análogo en Django | DRF `ModelViewSet` | vistas genéricas basadas en clases |
 
 No tienes que elegir globalmente — elige por recurso, y puedes montar **ambas
-sobre el mismo modelo** (ver [abajo](#serving-one-model-both-ways)). Reglas generales:
+sobre el mismo modelo** (ver [abajo](#servir-un-modelo-de-ambas-formas)). Reglas generales:
 
 - Construyes un **backend JSON** para un framework de frontend o app móvil → ViewSet.
 - Construyes un **sitio renderizado en el servidor** (el servidor devuelve páginas HTML) → vistas

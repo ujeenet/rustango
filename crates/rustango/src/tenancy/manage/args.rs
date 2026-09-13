@@ -15,6 +15,29 @@ pub(super) fn next_value<'a, I: Iterator<Item = &'a String>>(
         .ok_or_else(|| TenancyError::Validation(format!("{flag} requires a value")))
 }
 
+/// Refuse arguments a verb does not take.
+///
+/// Silently ignoring them means a typo'd flag (`list-operators -active`) or a
+/// misremembered argument runs the bare verb and exits 0, so the caller thinks
+/// it did what they asked (#1356).
+pub(super) fn reject_extra_positionals(
+    args: &[String],
+    allowed: usize,
+    verb: &str,
+) -> Result<(), TenancyError> {
+    let extra: Vec<&String> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .skip(allowed)
+        .collect();
+    match extra.first() {
+        Some(a) => Err(TenancyError::Validation(format!(
+            "{verb} does not take `{a}`"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// Quote a SQL identifier (table / schema / database name). Doubles
 /// any embedded `"` so the quoted form survives unmodified.
 #[cfg(feature = "postgres")]

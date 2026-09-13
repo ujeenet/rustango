@@ -11,7 +11,6 @@
 
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "passwords"))]
 
-use rustango::core::Model as _;
 use rustango::sql::{sqlx, Pool};
 
 async fn sqlite_pool() -> Pool {

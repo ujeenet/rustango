@@ -20,11 +20,11 @@ Django.
 ---
 
 ## Tabla de contenidos
-- [Registrar una URL con nombre](#register-a-named-url)
-- [Reverse en Rust](#reverse-in-rust) · [Reverse en templates](#reverse-in-templates)
-- [Redirigir por nombre](#redirect-by-name) · [Namespacing](#namespacing)
-- [Inspeccionar el mapa de URLs](#inspect-the-url-map) · [Errores](#errors)
-- [Patrones regex y de ruta tipados](#regex--typed-path-patterns) · [Notas y límites](#notes-and-limits)
+- [Registrar una URL con nombre](#registrar-una-url-con-nombre)
+- [Reverse en Rust](#reverse-en-rust) · [Reverse en templates](#reverse-en-templates)
+- [Redirigir por nombre](#redirigir-por-nombre) · [Namespacing](#namespacing)
+- [Inspeccionar el mapa de URLs](#inspeccionar-el-mapa-de-urls) · [Errores](#errores)
+- [Patrones regex y de ruta tipados](#patrones-regex-y-de-ruta-tipados) · [Notas y límites](#notas-y-límites)
 
 ---
 
@@ -75,7 +75,7 @@ let url = reverse_owned("post-detail", &owned_params)?;
 
 `reverse` es **estricto**: un placeholder faltante, o una clave `params` extra que
 el patrón no tiene, es un error (no un desajuste silencioso) — consulta
-[Errores](#errors).
+[Errores](#errores).
 
 ---
 
@@ -285,7 +285,7 @@ para los lookups `__regex`), así que un extractor validador puede compilar una
   colocar en un header `Location` o un `href`.
 - **Sin convertidores regex/tipados** en los patrones (el `<int:pk>` de Django);
   los placeholders son simples `{name}` y los valores se sustituyen tal cual
-  (después de codificar). Consulta [Patrones regex y de ruta tipados](#regex--typed-path-patterns)
+  (después de codificar). Consulta [Patrones regex y de ruta tipados](#patrones-regex-y-de-ruta-tipados)
   para el porqué, y cómo restringir una ruta en su lugar.
 
 

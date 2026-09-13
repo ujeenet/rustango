@@ -27,11 +27,11 @@ dieselben Typen jede beliebige Spec von Hand bauen.
 ---
 
 ## Inhaltsverzeichnis
-- [Schnellstart](#quick-start) — generieren + ausliefern auf einem Bildschirm
-- [Schemata aus Serializern](#schemas-from-serializers) · [Pfade aus ViewSets](#paths-from-viewsets)
-- [Ausliefern](#serving-the-spec-swagger-ui--redoc) · [Eine Spec von Hand bauen](#hand-building-a-spec)
-- [Security-Schemata](#security-schemes) · [Der `Schema`-Builder](#the-schema-builder)
-- [Anmerkungen & Grenzen](#notes-and-limits)
+- [Schnellstart](#schnellstart) — generieren + ausliefern auf einem Bildschirm
+- [Schemata aus Serializern](#schemata-aus-serializern) · [Pfade aus ViewSets](#pfade-aus-viewsets)
+- [Ausliefern](#die-spec-ausliefern-swagger-ui--redoc) · [Eine Spec von Hand bauen](#eine-spec-von-hand-bauen)
+- [Security-Schemata](#security-schemata) · [Der `Schema`-Builder](#der-schema-builder)
+- [Anmerkungen & Grenzen](#anmerkungen-und-grenzen)
 
 ---
 
@@ -113,7 +113,7 @@ impl rustango::openapi::OpenApiSchema for Money {
 }
 ```
 
-> Siehe den [Serializer-Leitfaden](serializers.md#openapi-schemas) für die
+> Siehe den [Serializer-Leitfaden](serializers.md#openapi-schemata) für die
 > Feldattribute, die die Ausgabe formen.
 
 ---
@@ -227,7 +227,7 @@ Helfer: `SecurityScheme::bearer(fmt)`, `basic()`, `api_key_header(name)`,
 An einer `Operation` markiert `.no_security()` einen öffentlichen Endpunkt und
 `.require_security(scheme, scopes)` überschreibt den globalen Default. Diese
 passen zu **Rustango**s eigener Auth (siehe den
-[Security-Leitfaden](security.md#authenticating-users)): JWT → `bearer`,
+[Security-Leitfaden](security.md#benutzer-authentifizieren)): JWT → `bearer`,
 API-Keys → `apiKey`, OAuth2 → `oauth2`.
 
 ---

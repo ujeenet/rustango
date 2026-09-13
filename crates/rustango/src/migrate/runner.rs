@@ -26,6 +26,7 @@ use crate::sql::sqlx::PgPool;
 use super::diff::render_changes_split;
 use super::file::{self, Migration, Operation};
 use super::invert::invert;
+use super::progress::{emit, MigrationEvent, MigrationObserver, Outcome};
 use super::snapshot::SchemaSnapshot;
 use super::{ddl, MigrateError};
 
@@ -108,7 +109,7 @@ impl Builder {
     /// As [`migrate`].
     #[cfg(feature = "postgres")]
     pub async fn migrate(&self, pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
-        migrate_with_ledger(pool, dir, self.ledger).await
+        migrate_with_ledger(pool, dir, self.ledger, None).await
     }
 
     /// As [`migrate_to`], with this builder's ledger.
@@ -442,11 +443,34 @@ pub async fn migrate(pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, Migrat
     Builder::default().migrate(pool, dir).await
 }
 
+/// [`migrate`], reporting each migration to `observer` as it starts and
+/// finishes.
+///
+/// The PG-typed sibling of [`migrate_pool_with_progress`]. Kept separate
+/// rather than routed through it because this path is not the same code:
+/// it fires the `pre_migrate` / `post_migrate` signals and uses the
+/// PG-typed ledger helpers.
+///
+/// **The observer is called with the migrate lock held**, so it must not
+/// block; see [the module docs](super::progress#observers-must-not-block).
+///
+/// # Errors
+/// As [`migrate`].
+#[cfg(feature = "postgres")]
+pub async fn migrate_with_progress(
+    pool: &PgPool,
+    dir: &Path,
+    observer: &dyn MigrationObserver,
+) -> Result<Vec<Migration>, MigrateError> {
+    migrate_with_ledger(pool, dir, LEDGER_TABLE, Some(observer)).await
+}
+
 #[cfg(feature = "postgres")]
 async fn migrate_with_ledger(
     pool: &PgPool,
     dir: &Path,
     ledger: &str,
+    observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
@@ -460,22 +484,62 @@ async fn migrate_with_ledger(
         let applied = applied_set_for(pool, ledger).await?;
         let pending = pending_migrations(all, &applied);
 
-        let mut newly = Vec::with_capacity(pending.len());
+        let total = pending.len();
+        emit(observer, || MigrationEvent::Planned { total });
+
+        let mut newly = Vec::with_capacity(total);
         // Squash reconciliation applies on this legacy PgPool entry point
         // too — route through the same dialect-agnostic decision used by
         // `migrate_pool` so both runners agree. `fake_initial` stays off
         // here: table-existence faking is opted into only by the
         // framework's system-migration path.
         let enum_pool = crate::sql::Pool::Postgres(pool.clone());
-        for mig in pending {
-            match reconcile(&enum_pool, &mig, &applied, false).await? {
-                ReconcileAction::Fake => fake_apply_pool(&enum_pool, &mig, ledger).await?,
-                // `fake_initial` is off on this path, so `RunPartial` is
-                // unreachable here; treat it as a plain run for totality.
-                ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
-                    apply_one(pool, &mig, ledger).await?
-                }
+        for (i, mig) in pending.into_iter().enumerate() {
+            let index = i + 1;
+            emit(observer, || MigrationEvent::Started {
+                name: mig.name.clone(),
+                index,
+                total,
+            });
+            let began = std::time::Instant::now();
+
+            let step = async {
+                Ok::<_, MigrateError>(match reconcile(&enum_pool, &mig, &applied, false).await? {
+                    ReconcileAction::Fake => {
+                        fake_apply_pool(&enum_pool, &mig, ledger).await?;
+                        Outcome::Faked
+                    }
+                    // `fake_initial` is off on this path, so
+                    // `RunPartial` is unreachable here; treat it as a
+                    // plain run for totality.
+                    ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
+                        apply_one(pool, &mig, ledger).await?;
+                        Outcome::Ran
+                    }
+                })
             }
+            .await;
+
+            let outcome = match step {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    emit(observer, || MigrationEvent::Failed {
+                        name: mig.name.clone(),
+                        index,
+                        total,
+                        error: e.to_string(),
+                    });
+                    return Err(e);
+                }
+            };
+
+            emit(observer, || MigrationEvent::Finished {
+                name: mig.name.clone(),
+                index,
+                total,
+                outcome,
+                elapsed: began.elapsed(),
+            });
             newly.push(mig);
         }
         Ok(newly)
@@ -1431,6 +1495,44 @@ pub async fn migrate_pool(
     migrate_pool_with_ledger(pool, dir, LEDGER_TABLE).await
 }
 
+/// [`migrate_pool`], reporting each migration to `observer` as it starts
+/// and finishes.
+///
+/// The observer sees the pending count up front, then a
+/// [`Started`](MigrationEvent::Started) and a
+/// [`Finished`](MigrationEvent::Finished) per migration — carrying which
+/// of the three apply paths it took and how long it took — or a
+/// [`Failed`](MigrationEvent::Failed) naming the migration that died.
+///
+/// **The observer is called with the migrate lock held**, so it must not
+/// block; see [the module docs](super::progress#observers-must-not-block).
+///
+/// # Errors
+/// As [`migrate_pool`]. The observer never changes the outcome: a run
+/// with an observer applies exactly what the same run without one would.
+pub async fn migrate_pool_with_progress(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    observer: &dyn MigrationObserver,
+) -> Result<Vec<Migration>, MigrateError> {
+    migrate_pool_with_ledger_opts(pool, dir, LEDGER_TABLE, false, Some(observer)).await
+}
+
+/// [`migrate_pool_with_ledger_fake_initial`] with progress reporting —
+/// the framework's own system-migration path, which is where
+/// [`Outcome::Faked`] actually shows up.
+///
+/// # Errors
+/// As [`migrate_pool_with_ledger_fake_initial`].
+pub async fn migrate_pool_with_ledger_fake_initial_with_progress(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    ledger: &str,
+    observer: &dyn MigrationObserver,
+) -> Result<Vec<Migration>, MigrateError> {
+    migrate_pool_with_ledger_opts(pool, dir, ledger, true, Some(observer)).await
+}
+
 /// Apply every pending migration in `dir` against a custom-named
 /// ledger table. Sibling of [`migrate_pool`] with operator-supplied
 /// ledger name (issue #146). Use for multi-tenant / multi-app
@@ -1445,7 +1547,7 @@ pub async fn migrate_pool_with_ledger(
     dir: &Path,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    migrate_pool_with_ledger_opts(pool, dir, ledger, false).await
+    migrate_pool_with_ledger_opts(pool, dir, ledger, false, None).await
 }
 
 /// Like [`migrate_pool_with_ledger`], but with **guarded fake-initial**
@@ -1477,7 +1579,7 @@ pub async fn migrate_pool_with_ledger_fake_initial(
     dir: &Path,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    migrate_pool_with_ledger_opts(pool, dir, ledger, true).await
+    migrate_pool_with_ledger_opts(pool, dir, ledger, true, None).await
 }
 
 async fn migrate_pool_with_ledger_opts(
@@ -1485,6 +1587,7 @@ async fn migrate_pool_with_ledger_opts(
     dir: &Path,
     ledger: &str,
     fake_initial: bool,
+    observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
     ensure_ledger_pool_with_ledger(pool, ledger).await?;
     with_migrate_lock_pool(pool, async {
@@ -1492,29 +1595,85 @@ async fn migrate_pool_with_ledger_opts(
         let applied = applied_set_pool_with_ledger(pool, ledger).await?;
         let pending = pending_migrations(all, &applied);
 
-        let mut newly = Vec::with_capacity(pending.len());
-        for mig in pending {
-            match reconcile(pool, &mig, &applied, fake_initial).await? {
-                ReconcileAction::Fake => fake_apply_pool(pool, &mig, ledger).await?,
-                other => {
-                    let effective = match other {
-                        ReconcileAction::RunPartial(existing) => {
-                            std::borrow::Cow::Owned(without_tables(&mig, &existing))
-                        }
-                        _ => std::borrow::Cow::Borrowed(&mig),
-                    };
-                    if effective.atomic {
-                        apply_atomic_pool(pool, &effective, ledger).await?;
-                    } else {
-                        apply_nonatomic_pool(pool, &effective, ledger).await?;
-                    }
+        let total = pending.len();
+        emit(observer, || MigrationEvent::Planned { total });
+
+        let mut newly = Vec::with_capacity(total);
+        for (i, mig) in pending.into_iter().enumerate() {
+            let index = i + 1;
+            emit(observer, || MigrationEvent::Started {
+                name: mig.name.clone(),
+                index,
+                total,
+            });
+            let began = std::time::Instant::now();
+
+            // The whole apply is wrapped so a failure can be reported to
+            // the observer before it propagates. `?` on its own would
+            // leave a watcher looking at a migration stuck on "started"
+            // forever, which is the state this exists to prevent.
+            let outcome = reconcile_and_apply(pool, &mig, &applied, ledger, fake_initial).await;
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    emit(observer, || MigrationEvent::Failed {
+                        name: mig.name.clone(),
+                        index,
+                        total,
+                        error: e.to_string(),
+                    });
+                    return Err(e);
                 }
-            }
+            };
+
+            emit(observer, || MigrationEvent::Finished {
+                name: mig.name.clone(),
+                index,
+                total,
+                outcome,
+                elapsed: began.elapsed(),
+            });
             newly.push(mig);
         }
         Ok(newly)
     })
     .await
+}
+
+/// Reconcile and apply a single pending migration, reporting which of
+/// the three paths it took.
+///
+/// Split out of the loop so the caller can time it and report a failure
+/// with the migration's name attached — the runner's `?` alone loses
+/// which file died.
+async fn reconcile_and_apply(
+    pool: &crate::sql::Pool,
+    mig: &Migration,
+    applied: &HashSet<String>,
+    ledger: &str,
+    fake_initial: bool,
+) -> Result<Outcome, MigrateError> {
+    match reconcile(pool, mig, applied, fake_initial).await? {
+        ReconcileAction::Fake => {
+            fake_apply_pool(pool, mig, ledger).await?;
+            Ok(Outcome::Faked)
+        }
+        other => {
+            let (effective, outcome) = match other {
+                ReconcileAction::RunPartial(existing) => (
+                    std::borrow::Cow::Owned(without_tables(mig, &existing)),
+                    Outcome::RanPartial { skipped: existing },
+                ),
+                _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
+            };
+            if effective.atomic {
+                apply_atomic_pool(pool, &effective, ledger).await?;
+            } else {
+                apply_nonatomic_pool(pool, &effective, ledger).await?;
+            }
+            Ok(outcome)
+        }
+    }
 }
 
 // ------------------------------------------------------- reconciliation
