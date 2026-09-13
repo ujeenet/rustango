@@ -1,0 +1,272 @@
+{% extends "op_layout.html" %}
+{% block title %}New tenant — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/orgs">Organizations</a><span class="sep">/</span>New tenant</p>
+<h1>New tenant</h1>
+<p class="lead">Reaches the database, registers the tenant, runs its
+migrations, and only then makes it live. Nothing is written until the
+connection check passes.</p>
+
+{% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<form method="post" action="/orgs/new" class="edit-form">
+  <fieldset class="section">
+    <legend>Identity</legend>
+    <table>
+      <tr>
+        <th><label for="slug">slug</label></th>
+        <td>
+          {#- The hyphen is escaped on purpose. `[a-z0-9-]` is a syntax
+              error under the `v`-flag regex the HTML spec now uses for
+              `pattern`, and a browser that cannot parse the attribute
+              ignores it *silently* — so the field had no client-side
+              validation at all, which is how a slug with a space got
+              through to the server. -#}
+          <input type="text" id="slug" name="slug" required autofocus
+                 value="{{ prefill.slug | default(value='') }}"
+                 pattern="[a-z0-9]([a-z0-9\-]*[a-z0-9])?"
+                 maxlength="63"
+                 title="Lowercase letters, digits and hyphens; cannot start or end with a hyphen."
+                 placeholder="acme">
+          <div class="field-helper">Globally unique, lowercase. Also the
+          default schema name, display name and subdomain label.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="display_name">display_name</label></th>
+        <td>
+          <input type="text" id="display_name" name="display_name"
+                 value="{{ prefill.display_name | default(value='') }}"
+                 placeholder="defaults to the slug">
+        </td>
+      </tr>
+    </table>
+  </fieldset>
+
+  <fieldset class="section">
+    <legend>Storage</legend>
+    <table>
+      <tr>
+        <th><label for="storage_mode">storage_mode</label></th>
+        <td>
+          <select id="storage_mode" name="storage_mode">
+            <option value="database" {% if prefill.storage_mode | default(value="database") != "schema" %}selected{% endif %}>database — its own database</option>
+            {% if schema_mode_available %}
+            <option value="schema" {% if prefill.storage_mode | default(value="") == "schema" %}selected{% endif %}>schema — a schema in the registry database</option>
+            {% endif %}
+          </select>
+          {% if not schema_mode_available %}
+          <div class="field-helper">Schema mode needs a Postgres
+          registry — this one is not, so only database mode is offered.</div>
+          {% endif %}
+        </td>
+      </tr>
+      <tr>
+        <th><label for="backend_kind">backend_kind</label></th>
+        <td>
+          {#- Only what this binary was built with. Offering a backend
+              it cannot speak produced an error telling the operator to
+              edit Cargo.toml. -#}
+          <select id="backend_kind" name="backend_kind">
+            {% for b in backends %}
+            <option value="{{ b }}" {% if prefill.backend_kind | default(value=backends[0]) == b %}selected{% endif %}>{{ b }}</option>
+            {% endfor %}
+          </select>
+          {% if backends | length == 1 %}
+          <div class="field-helper">This build supports
+          <code>{{ backends[0] }}</code> only.</div>
+          {% endif %}
+        </td>
+      </tr>
+
+      {# ---- database mode: name the database, do not retype a URL ---- #}
+      <tr class="mode-database">
+        <th><label for="database_name">database</label></th>
+        <td>
+          <input type="text" id="database_name" name="database_name"
+                 value="{{ prefill.database_name | default(value='') }}"
+                 placeholder="tenant_acme">
+          <div class="field-helper">
+            A database on the same server as the registry. Blank uses
+            <code id="database-name-default">tenant_&lt;slug&gt;</code>.
+            {% if derived_url_example %}
+            Becomes <code id="derived-url">{{ derived_url_example }}</code>.
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+      <tr class="mode-database">
+        <th><label for="database_url">or a full URL</label></th>
+        <td>
+          <input type="text" id="database_url" name="database_url"
+                 value="{{ prefill.database_url | default(value='') }}"
+                 placeholder="leave blank unless the tenant lives elsewhere">
+          <div class="field-helper">Only for a tenant on a different
+          server. Overrides the database name above.</div>
+          <p class="form-actions">
+            <button type="button" class="btn btn-secondary" id="test-connection">Test connection</button>
+            <span id="probe-result"></span>
+          </p>
+        </td>
+      </tr>
+
+      {# ---- schema mode: nothing to name but the schema ---- #}
+      <tr class="mode-schema" hidden>
+        <th><label for="schema_name">schema</label></th>
+        <td>
+          {#- Same escaped hyphen as the slug, and for the same reason:
+              an unescaped one makes the attribute a syntax error the
+              browser drops silently. Underscores are allowed here and
+              not in the slug — a schema name is an identifier, not a
+              hostname label. -#}
+          <input type="text" id="schema_name" name="schema_name"
+                 value="{{ prefill.schema_name | default(value='') }}"
+                 pattern="[a-z0-9_][a-z0-9_\-]*"
+                 maxlength="63"
+                 title="Lowercase letters, digits, underscores and hyphens."
+                 placeholder="defaults to the slug">
+          <div class="field-helper">The tenant lives in the registry's
+          own database, isolated by <code>search_path</code>. There is no
+          separate connection to configure.</div>
+        </td>
+      </tr>
+    </table>
+  </fieldset>
+
+  <fieldset class="section">
+    <legend>Routing</legend>
+    <table>
+      <tr>
+        <th><label for="host_pattern">host_pattern</label></th>
+        <td>
+          {#- Uppercase is allowed through and lowercased by the server,
+              because that is what the resolver does to the `Host`
+              header before comparing. A `:port` or a `*` is not: they
+              can never equal the normalized header. -#}
+          <input type="text" id="host_pattern" name="host_pattern"
+                 value="{{ prefill.host_pattern | default(value='') }}"
+                 pattern="[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9\-]*[A-Za-z0-9])?)*"
+                 maxlength="253"
+                 title="A hostname, matched exactly. No port and no wildcard — put the port in the port field."
+                 placeholder="acme.example.com">
+          <div class="field-helper">Matched exactly against the
+          <code>Host</code> header. Blank derives
+          <code>&lt;slug&gt;.&lt;RUSTANGO_APEX_DOMAIN&gt;</code> when that
+          variable is set.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="path_prefix">path_prefix</label></th>
+        <td>
+          <input type="text" id="path_prefix" name="path_prefix"
+                 value="{{ prefill.path_prefix | default(value='') }}"
+                 pattern="/[A-Za-z0-9_.~\-]+"
+                 title="One path segment, with its leading slash."
+                 placeholder="/acme">
+          <div class="field-helper">Only the first path segment is
+          matched, so this is <code>/name</code> — not a deeper path.</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="port">port</label></th>
+        <td><input type="number" id="port" name="port" inputmode="numeric"
+                   min="1" max="65535"
+                   value="{{ prefill.port | default(value='') }}"></td>
+      </tr>
+    </table>
+  </fieldset>
+
+  <fieldset class="section">
+    <legend>Migrations</legend>
+    <table>
+      <tr>
+        <th><label for="no_migrate">skip</label></th>
+        <td>
+          <input type="checkbox" id="no_migrate" name="no_migrate" value="on"
+                 {% if prefill.no_migrate | default(value=false) %}checked{% endif %}>
+          <div class="field-helper">Register the tenant without building
+          its schema. It still goes live; migrate it later.</div>
+        </td>
+      </tr>
+    </table>
+  </fieldset>
+
+  <p class="form-actions">
+    <button type="submit" class="btn btn-primary">Create tenant</button>
+    <a href="/orgs" class="btn-link">Cancel</a>
+  </p>
+</form>
+
+<script>
+  // The form shows only the fields that apply to the chosen storage
+  // mode. Everything here is presentation — the server validates
+  // regardless, so a browser with JS off gets every field and a
+  // correct answer, just a noisier one.
+  (function () {
+    const mode = document.getElementById("storage_mode");
+    const slug = document.getElementById("slug");
+    const dbName = document.getElementById("database_name");
+    const derived = document.getElementById("derived-url");
+    const nameDefault = document.getElementById("database-name-default");
+    // Captured before any edit: the server rendered it with a
+    // `tenant_<slug>` placeholder we substitute as the operator types.
+    const derivedTemplate = derived ? derived.textContent : null;
+
+    function applyMode() {
+      const schema = mode.value === "schema";
+      for (const row of document.querySelectorAll(".mode-database")) {
+        row.hidden = schema;
+      }
+      for (const row of document.querySelectorAll(".mode-schema")) {
+        row.hidden = !schema;
+      }
+    }
+
+    function applySlug() {
+      const s = slug.value.trim() || "<slug>";
+      const name = dbName.value.trim() || "tenant_" + s;
+      if (nameDefault) { nameDefault.textContent = "tenant_" + s; }
+      if (derived && derivedTemplate) {
+        derived.textContent = derivedTemplate.replace("tenant_<slug>", name);
+      }
+    }
+
+    mode.addEventListener("change", applyMode);
+    slug.addEventListener("input", applySlug);
+    dbName.addEventListener("input", applySlug);
+    applyMode();
+    applySlug();
+  })();
+
+  // Posts just the URL to the probe endpoint and drops the returned
+  // fragment in place, so an operator can check a URL without losing
+  // the rest of the form to a page reload.
+  document.getElementById("test-connection").addEventListener("click", async (e) => {
+    const out = document.getElementById("probe-result");
+    e.target.disabled = true;
+    out.textContent = "checking…";
+    try {
+      // Send whatever the operator actually supplied. When it is a
+      // database *name*, the server derives the URL the same way the
+      // submit will — so the probe tests the real target, not a
+      // different one.
+      const res = await fetch("/orgs/test-connection", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          database_url: document.getElementById("database_url").value,
+          database_name: document.getElementById("database_name").value,
+          slug: document.getElementById("slug").value,
+        }),
+      });
+      out.innerHTML = await res.text();
+    } catch (err) {
+      out.textContent = "could not reach the console: " + err;
+    } finally {
+      e.target.disabled = false;
+    }
+  });
+</script>
+{% endblock %}

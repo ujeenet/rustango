@@ -24,13 +24,13 @@ como una única capa tower.
 
 ## Tabla de contenidos
 
-- [Cuándo usarlo](#when-to-use-it)
-- [Qué se firma](#what-gets-signed)
-- [Servidor: verificar con la capa](#server-verify-with-the-layer)
-- [Cliente: firmar una solicitud](#client-sign-a-request)
-- [Desfase de reloj y replay](#clock-skew-and-replay)
-- [Límites](#limits)
-- [Véase también](#see-also)
+- [Cuándo usarlo](#cuándo-usarlo)
+- [Qué se firma](#qué-se-firma)
+- [Servidor: verificar con la capa](#servidor-verificar-con-la-capa)
+- [Cliente: firmar una solicitud](#cliente-firmar-una-solicitud)
+- [Desfase de reloj y replay](#desfase-de-reloj-y-replay)
+- [Límites](#límites)
+- [Véase también](#véase-también)
 
 ---
 

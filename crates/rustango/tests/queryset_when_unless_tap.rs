@@ -4,7 +4,6 @@
 //! a real DB — the goal is to assert the closure ran or didn't
 //! based on the boolean flag.
 
-use rustango::core::Model as _;
 use rustango::sql::Auto;
 use rustango::Model;
 

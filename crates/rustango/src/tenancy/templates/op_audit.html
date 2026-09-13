@@ -1,0 +1,70 @@
+{% extends "op_layout.html" %}
+{% block title %}Audit log — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
+{% block content %}
+<h1>Audit log</h1>
+<p class="lead">Every change made through this console, newest first.
+Registry-scoped — a tenant's own history lives in that tenant's admin.</p>
+
+<form method="get" action="/audit" class="filter-bar">
+  <label for="entity_table">entity</label>
+  <input type="text" id="entity_table" name="entity_table"
+         value="{{ filter_entity_table }}" placeholder="rustango_orgs">
+  <label for="entity_pk">id</label>
+  <input type="text" id="entity_pk" name="entity_pk"
+         value="{{ filter_entity_pk }}" placeholder="acme">
+  <label for="operation">operation</label>
+  <input type="text" id="operation" name="operation"
+         value="{{ filter_operation }}" placeholder="action">
+  <button type="submit" class="btn btn-secondary">Filter</button>
+  <a href="/audit" class="btn-link">Clear</a>
+</form>
+
+{% if entries | length == 0 %}
+  <div class="empty">
+    {#- On a page past the end this must not read as "nothing has ever
+        happened", and it must still offer a way back — the paging
+        links below used to live inside the non-empty branch, so an
+        empty page 2 was a dead end only a URL edit escaped. -#}
+    {% if page > 1 %}Nothing on page {{ page }}.
+    {% else %}Nothing recorded yet{% if query_suffix %} for this filter{% endif %}.
+    {% endif %}
+  </div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>When</th>
+      <th>Who</th>
+      <th>Did</th>
+      <th>To</th>
+      <th>Details</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in entries %}
+    <tr>
+      <td class="nowrap">{{ e.occurred_at }}</td>
+      <td>{{ e.who }}</td>
+      <td><code>{{ e.what }}</code></td>
+      <td>
+        <code>{{ e.entity_table }}</code>
+        <a class="btn-link"
+           href="/audit?entity_table={{ e.entity_table }}&entity_pk={{ e.entity_pk }}"
+           title="Show only this record's history">{{ e.entity_pk }}</a>
+      </td>
+      <td>
+        {#- Collapsed by default: the JSON is the useful part but it is
+            also the tallest, and a page of expanded blobs is unreadable. -#}
+        <details>
+          <summary>changes</summary>
+          <pre class="audit-changes">{{ e.changes }}</pre>
+        </details>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% include "_op_pager.html" %}
+{% endblock %}

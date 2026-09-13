@@ -27,10 +27,10 @@ HS256 en interne.
 ---
 
 ## Table des matières
-- [Démarrage rapide](#quick-start) · [Quand l'utiliser](#when-to-use-standalone-jwt)
-- [Construire des claims](#building-claims) · [Vérifier](#verifying-a-token)
-- [Modèle de sécurité](#security-model) — à lire · [Inspecter sans faire confiance](#inspecting-without-verifying)
-- [Notes et limites](#notes-and-limits)
+- [Démarrage rapide](#démarrage-rapide) · [Quand l'utiliser](#quand-utiliser-un-jwt-autonome)
+- [Construire des claims](#construire-des-claims) · [Vérifier](#vérifier-un-token)
+- [Modèle de sécurité](#modèle-de-sécurité) — à lire · [Inspecter sans faire confiance](#inspecter-sans-vérifier)
+- [Notes et limites](#notes-et-limites)
 
 ---
 

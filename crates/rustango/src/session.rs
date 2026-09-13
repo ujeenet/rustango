@@ -142,14 +142,20 @@ impl SessionSecret {
     #[must_use]
     pub fn from_env_or_disk(disk_path: &std::path::Path) -> Self {
         if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
-            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
-                if bytes.len() >= 32 {
-                    return Self(bytes);
-                }
+            match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
+                Ok(bytes) if bytes.len() >= 32 => return Self(bytes),
+                // Set but unusable. This used to fall through in silence,
+                // and the "generated new session secret … set
+                // RUSTANGO_SESSION_SECRET to override" line that followed
+                // read as though the variable were unset — so a malformed
+                // real secret, or a deliberate rotation, looked applied and
+                // was not (#1359).
+                Ok(bytes) => warn_unusable_secret(&format!(
+                    "it decoded to {} bytes, and 32 are needed",
+                    bytes.len()
+                )),
+                Err(e) => warn_unusable_secret(&format!("it is not valid base64 ({e})")),
             }
-            // Bad env var — fall through to disk/random. The loud
-            // warnings live on `from_env_or_random` for callers that
-            // want them.
         }
         if let Ok(bytes) = std::fs::read(disk_path) {
             if bytes.len() >= 32 {
@@ -344,6 +350,24 @@ fn resolve_secure_cookies(override_flag: Option<bool>, tier: &str) -> bool {
 #[must_use]
 pub fn secure_cookies() -> bool {
     resolve_secure_cookies(SECURE_COOKIES_OVERRIDE.get().copied(), &tier_from_env())
+}
+
+/// Say that `RUSTANGO_SESSION_SECRET` was set and could not be used.
+///
+/// Both surfaces, because the two audiences differ: `tracing` for whoever
+/// reads the deployment's logs, stderr for whoever is watching the boot.
+/// A silent fall-through here makes a failed key rotation look successful
+/// (#1359).
+fn warn_unusable_secret(reason: &str) {
+    tracing::warn!(
+        reason,
+        "RUSTANGO_SESSION_SECRET is set but unusable — falling back to the persisted key",
+    );
+    eprintln!(
+        "\x1b[33;1mwarning:\x1b[0m RUSTANGO_SESSION_SECRET is set but cannot be used: \
+         {reason}. Falling back to the key on disk. Generate a valid one with: \
+         openssl rand -base64 32"
+    );
 }
 
 /// Restrict the persisted session-secret file to 0600 on Unix so

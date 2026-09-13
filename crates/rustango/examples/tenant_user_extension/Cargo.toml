@@ -16,9 +16,23 @@ path = "src/lib.rs"
 name = "tenant_user_extension"
 path = "src/main.rs"
 
+# `#[derive(Model)]` cfg-gates its emissions on the features of the crate
+# it expands in — not on rustango's. Enabling `rustango/postgres` from the
+# dependency line alone therefore left this crate with no `postgres` feature
+# of its own, so the derive skipped every PG `FromRow` / `MaybePgFromRow`
+# impl and the example failed to compile with 57 errors (the #1211 shape).
+# It also produced an `unexpected cfg condition value: postgres` warning for
+# the same reason. Declaring the backend as a real feature here — the shape
+# every other standalone example already uses — fixes both.
+[features]
+default = ["postgres"]
+postgres = ["rustango/postgres"]
+sqlite = ["rustango/sqlite"]
+mysql = ["rustango/mysql"]
+
 [dependencies]
 rustango = { path = "../..", default-features = false, features = [
-    "postgres", "manage", "tenancy", "runtime", "serializer", "forms",
+    "manage", "tenancy", "runtime", "serializer", "forms",
 ] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }

@@ -35,23 +35,23 @@ Das CHANGELOG führt den vollständigen Ticket-Index für jedes Release.
 
 ## Inhaltsverzeichnis
 
-- [Abfragen](#querying)
-- [Berechnete Werte & Datenbankfunktionen](#computed-values--database-functions)
-- [Aggregationen](#aggregations)
-- [Joins & Vorladen verwandter Zeilen](#joins--preloading-related-rows)
-- [Massenoperationen](#bulk-operations)
-- [Einfügen oder aktualisieren (Upsert)](#insert-or-update-upsert)
-- [Transaktionen](#transactions)
+- [Abfragen](#abfragen)
+- [Berechnete Werte & Datenbankfunktionen](#berechnete-werte--datenbankfunktionen)
+- [Aggregationen](#aggregationen)
+- [Joins & Vorladen verwandter Zeilen](#joins--vorladen-verwandter-zeilen)
+- [Massenoperationen](#massenoperationen)
+- [Einfügen oder aktualisieren (Upsert)](#einfügen-oder-aktualisieren-upsert)
+- [Transaktionen](#transaktionen)
 - [Many-to-many](#many-to-many)
 - [JSON / JSONB](#json--jsonb)
 - [Soft Delete](#soft-delete)
 - [Audit-Trail](#audit-trail)
-- [Raw-SQL-Notausstieg](#raw-sql-escape-hatch)
-- [Lazy-FK-Laden](#lazy-fk-loading)
-- [Vier Wege zu filtern](#four-ways-to-filter)
-- [Mandantengebundene Abfragen](#tenant-scoped-queries)
-- [Signale](#signals)
-- [Performance-Tipps](#performance-tips)
+- [Raw-SQL-Notausstieg](#raw-sql-notausstieg)
+- [Lazy-FK-Laden](#lazy-fk-laden)
+- [Vier Wege zu filtern](#vier-wege-zu-filtern)
+- [Mandantengebundene Abfragen](#mandantengebundene-abfragen)
+- [Signale](#signale)
+- [Performance-Tipps](#performance-tipps)
 
 ---
 
@@ -866,7 +866,7 @@ let featured = Author::objects()
 
 ### Wann man stattdessen auf rohes SQL zurückfällt
 
-Die obigen Builder decken die häufigen Fälle ab. Für Dinge, die sie noch nicht ausdrücken — `Cast`, Volltextsuche, JSON-Pfad-Operatoren, Hash-Funktionen, Trigonometrie, Fensterfunktionen — siehe den Abschnitt [Raw-SQL-Notausstieg](#raw-sql-escape-hatch) weiter unten, oder warte auf die Nachfolge-Issues, die denselben Ausdrucksbaum erweitern.
+Die obigen Builder decken die häufigen Fälle ab. Für Dinge, die sie noch nicht ausdrücken — `Cast`, Volltextsuche, JSON-Pfad-Operatoren, Hash-Funktionen, Trigonometrie, Fensterfunktionen — siehe den Abschnitt [Raw-SQL-Notausstieg](#raw-sql-notausstieg) weiter unten, oder warte auf die Nachfolge-Issues, die denselben Ausdrucksbaum erweitern.
 
 ---
 

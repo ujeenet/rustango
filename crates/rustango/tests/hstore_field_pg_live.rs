@@ -10,7 +10,7 @@
 
 use std::sync::OnceLock;
 
-use rustango::sql::{sqlx, Auto, FetcherPool as _, HStore, Pool};
+use rustango::sql::{sqlx, Auto, HStore, Pool};
 use rustango::Model;
 use tokio::sync::Mutex;
 

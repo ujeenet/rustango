@@ -10,6 +10,9 @@ mod array;
 mod auto;
 mod backend;
 mod compiled;
+/// Turning a driver's connect failure into something an operator can
+/// act on — which host, which cause, what to change.
+pub mod connect_diagnosis;
 mod dialect;
 mod error;
 mod executor;
@@ -19,12 +22,15 @@ mod hstore;
 pub mod m2m;
 #[doc(hidden)]
 pub mod model_shortcuts;
-#[cfg(feature = "mysql")]
+// The three dialect emitters are pure IR-to-string compilation — no
+// driver, no sqlx. Gating them on their driver feature made a
+// tri-dialect *emission* test impossible to compile unless the binary
+// also linked all three drivers, which is the opposite of the point.
+// `postgres` was always ungated; these two now match it.
 mod mysql;
 mod pool;
 mod postgres;
 mod range;
-#[cfg(feature = "sqlite")]
 mod sqlite;
 mod vector;
 mod writers;
@@ -36,6 +42,7 @@ pub use backend::{
     AssignAutoPkPool, MyReturningRow, MysqlAutoIdSet, PgReturningRow, SqliteReturningRow,
 };
 pub use compiled::CompiledStatement;
+pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub use dialect::Dialect;
 pub use error::{is_mysql_dup_index_error, ExecError, SqlError};
 pub use geometry::{Point, SRID_WGS84};
@@ -95,16 +102,9 @@ pub use executor::LoadRelatedMy;
 pub use executor::LoadRelatedSqlite;
 pub use foreign_key::ForeignKey;
 pub use m2m::{GenericM2MManager, M2MManager};
-#[cfg(feature = "mysql")]
 pub use mysql::MySql;
-// Both call sites (`manage::dispatch`) sit inside `tenancy` gates, so the
-// re-export needs `tenancy` too (#1208) — without it, `sqlite,manage` warned
-// about an unused import.
-#[cfg(all(feature = "sqlite", feature = "manage", feature = "tenancy"))]
-pub(crate) use pool::sqlite_connect_options;
-pub use pool::{Pool, PoolError};
+pub use pool::{configure_pools, Pool, PoolError, PoolTuning};
 pub use postgres::Postgres;
-#[cfg(feature = "sqlite")]
 pub use sqlite::Sqlite;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without

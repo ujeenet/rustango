@@ -28,13 +28,13 @@ das Schlüssel speichert und `Authorization: Bearer`-Anfragen authentifiziert.
 
 ## Inhaltsverzeichnis
 
-- [Wie ein API-Schlüssel funktioniert](#how-an-api-key-works)
-- [Der eigenständige Helfer](#the-standalone-helper)
-- [Das speichernde Backend](#the-stored-backend)
-- [Einen Schlüssel ausstellen (CLI + Code)](#issuing-a-key)
-- [Anfragen authentifizieren](#authenticating-requests)
-- [Sicherheitshinweise](#security-notes)
-- [Siehe auch](#see-also)
+- [Wie ein API-Schlüssel funktioniert](#wie-ein-api-schlüssel-funktioniert)
+- [Der eigenständige Helfer](#der-eigenständige-helfer)
+- [Das speichernde Backend](#das-speichernde-backend)
+- [Einen Schlüssel ausstellen (CLI + Code)](#einen-schlüssel-ausstellen)
+- [Anfragen authentifizieren](#anfragen-authentifizieren)
+- [Sicherheitshinweise](#sicherheitshinweise)
+- [Siehe auch](#siehe-auch)
 
 ---
 

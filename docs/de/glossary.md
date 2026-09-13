@@ -4,17 +4,17 @@ Eine Referenz in einfacher Sprache für die in dieser Dokumentation verwendeten 
 Begriff in einem Leitfaden unbekannt ist, schlage ihn zuerst hier nach. Die Definitionen sind
 bewusst informell — die vertiefenden Leitfäden liefern die genauen Details.
 
-Wenn du noch nie zuvor eine Web-API gebaut hast, lies [Grundlagen der Web-APIs](#web-api-basics)
+Wenn du noch nie zuvor eine Web-API gebaut hast, lies [Grundlagen der Web-APIs](#grundlagen-der-web-apis)
 von oben bis unten; es ist eine fünfminütige Einführung. Alles andere ist zum Nachschlagen
 gedacht, während du vorankommst.
 
 ## Inhaltsverzeichnis
 
-- [Grundlagen der Web-APIs](#web-api-basics) — was eine API ist, in alltäglichen Worten
-- [Rustango-Bausteine](#rustango-building-blocks) — die Teile, die du zusammensetzt
-- [Daten und die Datenbank](#data-and-the-database)
-- [Ein paar Rust-Wörter](#a-few-rust-words) — damit die Codeblöcke nicht angsteinflößend sind
-- [Frameworks, mit denen wir vergleichen](#frameworks-we-compare-to)
+- [Grundlagen der Web-APIs](#grundlagen-der-web-apis) — was eine API ist, in alltäglichen Worten
+- [Rustango-Bausteine](#rustango-bausteine) — die Teile, die du zusammensetzt
+- [Daten und die Datenbank](#daten-und-die-datenbank)
+- [Ein paar Rust-Wörter](#ein-paar-rust-wörter) — damit die Codeblöcke nicht angsteinflößend sind
+- [Frameworks, mit denen wir vergleichen](#frameworks-mit-denen-wir-vergleichen)
 
 ---
 
@@ -76,7 +76,7 @@ verwendet, um Ergebnisse zu filtern, zu durchsuchen, zu sortieren oder zu pagini
 **Pagination (Seitennummerierung)** — das Aufteilen einer langen Ergebnisliste in Seiten, damit eine Response nicht
 riesig ist. Der **Envelope** ist die Hülle um die Seite, die dir auch die
 Gesamtwerte nennt — z. B. `{"count": 137, "page": 2, "results": [ … ]}`. Siehe
-[Pagination](viewsets.md#pagination).
+[Pagination](viewsets.md#paginierung).
 
 **`curl`** — ein Kommandozeilen-Werkzeug zum manuellen Senden von API-Requests. Die
 `curl ...`-Beispiele in dieser Dokumentation lassen dich einen Endpoint aus einem Terminal ausprobieren,

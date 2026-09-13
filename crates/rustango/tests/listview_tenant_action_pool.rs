@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use rustango::core::{Model as _, SqlValue};
+use rustango::core::SqlValue;
 use rustango::sql::Pool;
 use rustango::template_views::{BulkActionFuture, ListView, TenantBulkActionPoolFn};
 use rustango::Model;

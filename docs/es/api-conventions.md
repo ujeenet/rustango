@@ -8,18 +8,18 @@ Esta página explica los patrones que sigue la API de **Rustango**, para que pue
 
 ## Tabla de contenidos
 
-- [Naming](#naming)
-- [Constructors](#constructors)
-- [Return types](#return-types)
+- [Naming](#nombres)
+- [Constructors](#constructores)
+- [Return types](#tipos-de-retorno)
 - [Async vs sync](#async-vs-sync)
-- [The pool argument](#the-pool-argument)
-- [Filtering](#filtering)
-- [Errors](#errors)
-- [Module naming](#module-naming)
-- [Builders vs config structs](#builders-vs-config-structs)
+- [The pool argument](#el-argumento-pool)
+- [Filtering](#filtrado)
+- [Errors](#errores)
+- [Module naming](#nombres-de-módulos)
+- [Builders vs config structs](#builders-vs-structs-de-configuración)
 - [Feature flags](#feature-flags)
 - [Macros vs runtime](#macros-vs-runtime)
-- [Contributing](#contributing)
+- [Contributing](#contribuir)
 
 ---
 
@@ -311,7 +311,7 @@ Cuando añadas una nueva funcionalidad, sigue estos pasos:
 5. **Pon los tests unitarios en el mismo archivo**, tras `#[cfg(test)] mod tests` — sin base de datos a menos que realmente necesites una.
 6. **Pon los tests de integración en `crates/rustango/tests/<name>.rs`** para la historia de extremo a extremo.
 7. **No añadas un nuevo tipo de error a menos que los existentes no encajen** — extiende primero un enum existente.
-8. **Sigue la [guía de tipos de retorno](#return-types)** al elegir entre `Result`, `Option` o `bool`.
+8. **Sigue la [guía de tipos de retorno](#tipos-de-retorno)** al elegir entre `Result`, `Option` o `bool`.
 9. **¿Añades un subcomando de `manage`?** Conéctalo en el dispatcher `match cmd` y en `print_help`, añade un test en `crates/rustango/tests/migrate_manage.rs`, y documenta una fila en `docs/manage.md`.
 10. **Actualiza `CHANGELOG.md`** con una entrada `Added` bajo la próxima versión.
 

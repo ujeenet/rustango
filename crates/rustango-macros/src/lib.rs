@@ -7599,6 +7599,15 @@ fn inherent_impl_tokens(
                                 );
                             }
                         };
+                        // A model whose only field is the primary key emits no
+                        // non-PK arms, so every arm above diverges and this push
+                        // is genuinely unreachable — correct, since such a model
+                        // has nothing to bulk-update. Scoped to the statement
+                        // rather than the fn so a real unreachability elsewhere
+                        // in this body still warns. Without it every PK-only
+                        // model warns in the *user's* crate, which they cannot
+                        // act on (#1290).
+                        #[allow(unreachable_code)]
                         _update_columns.push(_col);
                     }
                     let mut _rows: ::std::vec::Vec<

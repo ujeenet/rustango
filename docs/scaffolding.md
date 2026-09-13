@@ -34,11 +34,50 @@ That puts a `cargo-rustango` binary on your `PATH`; Cargo then exposes it as `ca
 
 ```sh
 cargo rustango new <name> [--template api|fullstack|tenant]
+                          [--backend postgres|sqlite|mysql]
+                          [--features <list>]
 ```
 
 - **`<name>`** — the project (and crate) name. It must be a valid Cargo crate name (`[A-Za-z_][A-Za-z0-9_-]*`), and the target directory must not already exist.
 - **`--template` / `-t`** — which starter to scaffold (default: **fullstack**).
+- **`--backend` / `-b`** — which database the project runs on (default: **postgres**).
+- **`--features` / `-F`** — extra **Rustango** features, comma- or space-separated.
+- **`--interactive` / `-i`** — pick from menus instead. A bare `cargo rustango new` on a terminal does the same.
 - **`--help` / `-h`**, **`--version`** — usage and version.
+
+Run it with no arguments and it asks:
+
+```text
+  rustango — new project
+  (enter accepts the default; ctrl-c aborts)
+
+  Project name: shop
+
+  Template
+    1) fullstack  ORM + auto-admin + forms — the usual starting point  (default)
+    2) api        bare ORM + axum, no admin UI — for JSON-only services
+    3) tenant     multi-tenancy: tenant registry + operator console
+  > 3
+
+  Database
+    1) postgres  every feature, including schema-mode tenancy  (default)
+    2) sqlite    a file beside the project — no server to run
+    3) mysql     MySQL 8.0+ / MariaDB
+  > 1
+
+  Extra features  (numbers, e.g. `1 3 4` — enter for none)
+     1) csrf         CSRF protection middleware for form POSTs
+     2) sso          OIDC single sign-on for application users
+     …
+  > 1 2
+
+  Same thing without the wizard:
+    cargo rustango new shop --template tenant --backend postgres --features csrf,sso
+
+  Create it? [Y/n]
+```
+
+The wizard sets exactly the fields the flags set and prints the equivalent command line before it writes anything — so using it once teaches the flags, and there is only one code path deciding what a project contains. Off a terminal (a script, a CI job) it fails with a message instead of waiting for an answer nobody is there to give.
 
 ### The three templates
 
@@ -55,6 +94,42 @@ cargo rustango new myblog                      # fullstack (the default)
 cargo rustango new api_demo  --template api
 cargo rustango new shop      --template tenant
 ```
+
+### Choosing a database: `--backend`
+
+```sh
+cargo rustango new edge --backend sqlite
+cargo rustango new shop --backend mysql
+```
+
+`--backend` decides what `cargo run` uses, and shapes the whole project to match — the `DATABASE_URL` in `.env.example`, the services in `docker-compose.yml`, the `url` in each settings tier, and the README's run instructions. Pick `sqlite` and there is no database service at all: it is a file beside the project, created by the first `cargo run -- migrate`.
+
+All three backends stay wired up in the generated `[features]`, so the other two remain one flag away:
+
+```sh
+cargo run --no-default-features --features sqlite
+```
+
+### Turning on more of the framework: `--features`
+
+```sh
+cargo rustango new saas --template tenant --features csrf,sso,cache-redis
+```
+
+A template turns on a sensible set; `--features` adds the opt-ins none of them reach:
+
+| Feature | What it adds |
+|---|---|
+| `tenancy` | Multi-tenancy: tenant registry, per-tenant databases, operator console |
+| `csrf` | CSRF protection middleware for form POSTs |
+| `sso` / `admin-sso` | OIDC single sign-on, for application users / for the admin site |
+| `passkey` | WebAuthn / passkey authentication |
+| `cache-redis` / `cache-page` | Redis cache backend / whole-page response caching |
+| `email-smtp` | SMTP transport for the email framework |
+| `mcp` | Model Context Protocol server for AI agents |
+| `testkit` / `test_utils` | Test-only schema builders, factories, and constructors |
+
+`cargo rustango new --help` prints this list. Backends are **not** valid here — pass `--backend` instead; naming one as a feature is refused, because it would pin the framework's backend while the project's own feature stayed off, and `#[derive(Model)]` gates its emissions on the project's features.
 
 ---
 

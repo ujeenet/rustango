@@ -25,16 +25,16 @@ le [cookbook ORM](orm.md).
 
 ## Table des matières
 
-- [Anatomie d'un modèle](#anatomy-of-a-model)
-- [Types de champs](#field-types) · [Types spécifiques à PostgreSQL](#postgresql-only-types)
-- [Clés primaires](#primary-keys) — [PK personnalisées](#custom-primary-keys) · [composites](#composite-primary-keys)
-- [Relations](#relationships)
-- [Attributs de champ courants](#common-field-attributes)
-- [Index et contraintes](#indexes-and-constraints)
-- [Attributs de modèle courants](#common-model-attributes)
-- [L'API générée](#the-generated-api) — [save vs insert](#save-vs-insert)
-- [Référence complète des attributs](#full-attribute-reference)
-- [Voir aussi](#see-also)
+- [Anatomie d'un modèle](#anatomie-dun-modèle)
+- [Types de champs](#types-de-champs) · [Types spécifiques à PostgreSQL](#types-spécifiques-à-postgresql)
+- [Clés primaires](#clés-primaires) — [PK personnalisées](#clés-primaires-personnalisées) · [composites](#clés-primaires-composites)
+- [Relations](#relations)
+- [Attributs de champ courants](#attributs-de-champ-courants)
+- [Index et contraintes](#index-et-contraintes)
+- [Attributs de modèle courants](#attributs-de-modèle-courants)
+- [L'API générée](#lapi-générée) — [save vs insert](#save-vs-insert)
+- [Référence complète des attributs](#référence-complète-des-attributs)
+- [Voir aussi](#voir-aussi)
 
 ---
 
@@ -71,7 +71,7 @@ pub struct Post {
 - des **constantes de champ typées** (`Post::title`, `Post::author_id`) pour des
   filtres vérifiés à la compilation — `Post::objects().where_(Post::author_id.eq(42))` ;
 - des méthodes de ligne — **`save`**, **`find`**, **`delete`**, et plus (voir
-  [l'API générée](#the-generated-api)).
+  [l'API générée](#lapi-générée)).
 
 Le nom de la table prend par défaut le nom du modèle si vous omettez `table` ; les noms de colonnes
 prennent par défaut le nom du champ en snake_case sauf si vous définissez `column`.
@@ -262,7 +262,7 @@ pub author: ForeignKey<Author>,
 `ForeignKey<T>` prend par défaut `i64` comme type de clé ; si la PK du parent est d'un
 type différent, précisez-le : `ForeignKey<User, String>`. Le un-à-un utilise
 `#[rustango(o2o)]` ; le plusieurs-à-plusieurs est une table séparée — voir
-[cookbook ORM → Plusieurs-à-plusieurs](orm.md#many-to-many). Chargez les lignes liées de manière anticipée avec
+[cookbook ORM → Plusieurs-à-plusieurs](orm.md#plusieurs-à-plusieurs). Chargez les lignes liées de manière anticipée avec
 `select_related` (également dans le guide ORM).
 
 ---

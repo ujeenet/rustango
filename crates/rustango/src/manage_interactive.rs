@@ -13,7 +13,45 @@
 //! input in TTY-gated helpers preserves the API and makes the
 //! interactive UX opt-in via "did stdin come from a terminal?".
 
-use std::io::{self, IsTerminal as _, Write as _};
+use std::io::{self, BufRead, IsTerminal as _, Write as _};
+
+/// One line of input, however the caller obtains it.
+///
+/// The wizard and the menu prompt between verb calls, and the verbs
+/// prompt for themselves through [`ask`]. Holding a `StdinLock` across
+/// that boundary deadlocks: the outer loop owns the lock and the reader's
+/// buffer while the verb tries to read the same stream underneath it
+/// (#1360). So the outer loops take a `LineSource` instead, and the
+/// stdin implementation locks per read — leaving the stream free between
+/// prompts for whatever they call.
+///
+/// A `BufRead` is still a `LineSource`, which is what lets tests drive
+/// both loops with a `Cursor` and no terminal at all.
+pub trait LineSource {
+    /// Read one line, including its newline. `Ok(0)` means EOF.
+    ///
+    /// # Errors
+    /// Whatever the underlying reader returns.
+    fn read_line_from(&mut self, buf: &mut String) -> io::Result<usize>;
+}
+
+impl<R: BufRead> LineSource for R {
+    fn read_line_from(&mut self, buf: &mut String) -> io::Result<usize> {
+        self.read_line(buf)
+    }
+}
+
+/// Reads stdin by locking it for that read only.
+///
+/// The lock is released before the caller does anything else, so a verb
+/// invoked between two prompts can take it itself.
+pub struct SharedStdin;
+
+impl LineSource for SharedStdin {
+    fn read_line_from(&mut self, buf: &mut String) -> io::Result<usize> {
+        io::stdin().read_line(buf)
+    }
+}
 
 /// Read a non-empty trimmed line from stdin. Returns `Ok(None)` if
 /// stdin isn't a TTY, the user typed nothing, or EOF was hit. The

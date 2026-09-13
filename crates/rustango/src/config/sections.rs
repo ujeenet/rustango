@@ -277,11 +277,50 @@ pub struct DatabaseSettings {
     /// an override.
     pub backend: Option<String>,
     /// Maximum number of pooled connections. `None` means use sqlx's
-    /// default.
+    /// default of 10 — usually too small for a web server under load,
+    /// and far more than a SQLite file can use.
     pub pool_max_size: Option<u32>,
     /// Minimum number of pooled connections kept warm. `None` =
-    /// driver default.
+    /// driver default of 0, so the first request after a quiet period
+    /// pays the connect round-trip.
     pub pool_min_size: Option<u32>,
+    /// Seconds a caller waits for a pooled connection before erroring —
+    /// covers both dialling a new connection and queueing for a free
+    /// one. `None` uses rustango's 5s default, deliberately tighter
+    /// than sqlx's 30s: on a request path, 30s means one unreachable
+    /// database pins a worker for half a minute per request and
+    /// saturates the server.
+    pub pool_acquire_timeout_secs: Option<u64>,
+    /// Seconds a connection may sit idle before it is closed. Defends
+    /// against a load balancer or `idle_in_transaction_session_timeout`
+    /// cutting it from the other end. `None` leaves sqlx's default.
+    pub pool_idle_timeout_secs: Option<u64>,
+    /// Seconds a connection may live regardless of use. The knob that
+    /// matters behind a failover or a credential rotation: without it a
+    /// pool can keep connections to a server that is no longer current,
+    /// or with credentials that have since been revoked. `None` leaves
+    /// sqlx's default.
+    pub pool_max_lifetime_secs: Option<u64>,
+}
+
+impl DatabaseSettings {
+    /// This section as pool tuning, for [`crate::sql::configure_pools`].
+    ///
+    /// Lives next to the fields it reads on purpose: adding a knob to
+    /// the section and forgetting to forward it here is exactly how
+    /// `pool_max_size` came to be parsed, tested, and applied to
+    /// nothing at all (#1373).
+    #[must_use]
+    pub fn pool_tuning(&self) -> crate::sql::PoolTuning {
+        use std::time::Duration;
+        crate::sql::PoolTuning {
+            max_connections: self.pool_max_size,
+            min_connections: self.pool_min_size,
+            acquire_timeout: self.pool_acquire_timeout_secs.map(Duration::from_secs),
+            idle_timeout: self.pool_idle_timeout_secs.map(Duration::from_secs),
+            max_lifetime: self.pool_max_lifetime_secs.map(Duration::from_secs),
+        }
+    }
 }
 
 impl DatabaseSettings {

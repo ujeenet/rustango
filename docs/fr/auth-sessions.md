@@ -31,10 +31,10 @@ requête suivante.
 ---
 
 ## Table des matières
-- [Démarrage rapide](#quick-start) · [Sessions vs JWT](#sessions-vs-jwt)
-- [Le sac de session](#the-session-bag) · [Le cookie](#the-cookie)
-- [Choisir un backend](#picking-a-backend) · [Expiration et renouvellement glissant](#expiry-and-sliding-renewal)
-- [Modification en place](#updating-a-session-in-place) · [Remarques et limites](#notes-and-limits)
+- [Démarrage rapide](#démarrage-rapide) · [Sessions vs JWT](#sessions-vs-jwt)
+- [Le sac de session](#le-sac-de-session) · [Le cookie](#le-cookie)
+- [Choisir un backend](#choisir-un-backend) · [Expiration et renouvellement glissant](#expiration-et-renouvellement-glissant)
+- [Modification en place](#modification-dune-session-en-place) · [Remarques et limites](#remarques-et-limites)
 
 ---
 
@@ -113,7 +113,7 @@ dont un cookie de session a besoin :
 - **`HttpOnly`** — JavaScript ne peut pas le lire (émousse le vol de jeton par
   XSS).
 - **`SameSite=Lax`** — non envoyé sur les sous-requêtes intersites (défense CSRF ;
-  associez-le aux [jetons CSRF](security.md#protecting-against-csrf) pour les
+  associez-le aux [jetons CSRF](security.md#se-protéger-contre-le-csrf) pour les
   envois de formulaire).
 - **`Secure`** — HTTPS uniquement (à retirer seulement pour le développement HTTP
   local).

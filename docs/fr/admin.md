@@ -29,16 +29,16 @@ macros d'enregistrement au niveau du module.
 ---
 
 ## Table des matières
-- [Le monter](#mount-it) · [La page d'accueil](#the-home-page)
-- [Configurer un modèle : le bloc `admin(...)`](#configure-a-model-the-admin-block)
-- [La vue liste](#the-list-view) — colonnes, recherche, filtres, hiérarchie de dates, tri, pagination
-- [Le formulaire de modification](#the-change-form) — fieldsets, widgets, édition des FK, champs prépeuplés et en lecture seule
-- [Inlines](#inlines) · [Actions groupées](#bulk-actions) · [Piste d'audit](#audit-trail)
-- [Colonnes calculées et filtres personnalisés](#computed-columns-and-custom-filters)
-- [Vues personnalisées, querysets et permissions](#custom-views-querysets-and-permissions)
-- [Authentification](#authentication) · [Thème et image de marque](#theming-and-branding)
-- [Référence `Builder`](#builder-reference) · [Référence des routes](#routes-reference)
-- [La référence de modèle (`__docs`)](#the-model-reference) · [Essayer l'exemple](#try-the-example)
+- [Le monter](#le-monter) · [La page d'accueil](#la-page-daccueil)
+- [Configurer un modèle : le bloc `admin(...)`](#configurer-un-modèle--le-bloc-admin)
+- [La vue liste](#la-vue-liste) — colonnes, recherche, filtres, hiérarchie de dates, tri, pagination
+- [Le formulaire de modification](#le-formulaire-de-modification) — fieldsets, widgets, édition des FK, champs prépeuplés et en lecture seule
+- [Inlines](#inlines) · [Actions groupées](#actions-groupées) · [Piste d'audit](#piste-daudit)
+- [Colonnes calculées et filtres personnalisés](#colonnes-calculées-et-filtres-personnalisés)
+- [Vues personnalisées, querysets et permissions](#vues-personnalisées-querysets-et-permissions)
+- [Authentification](#authentification) · [Thème et image de marque](#thème-et-image-de-marque)
+- [Référence `Builder`](#référence-builder) · [Référence des routes](#référence-des-routes)
+- [La référence de modèle (`__docs`)](#la-référence-de-modèle) · [Essayer l'exemple](#essayer-lexemple)
 
 ---
 
@@ -48,7 +48,7 @@ macros d'enregistrement au niveau du module.
 > *chaque* modèle — liste, création, édition, suppression — sans
 > authentification jusqu'à ce que vous l'ajoutiez. Ne l'exposez pas
 > publiquement avant d'avoir câblé la connexion : voir
-> [Authentification](#authentication) ci-dessous.
+> [Authentification](#authentification) ci-dessous.
 
 L'admin est un `axum::Router` que vous construisez à partir d'un pool de base
 de données et que vous nichez (« nest ») sous un chemin :
@@ -138,13 +138,13 @@ détail.
 | `list_per_page` | `10` | Taille de page (par défaut 50). |
 | `date_hierarchy` | `"published_at"` | Bandeau de forage année → mois → jour au-dessus de la liste, sur une colonne Date/DateTime. |
 | `fieldsets` | `"Content: title, body \| Meta: status"` | Regroupe le formulaire de modification en sections titrées. La barre `\|` sépare les sections, la virgule sépare les champs ; la légende `Title:` est optionnelle. |
-| `actions` | `"publish, archive"` | Actions groupées proposées dans le sélecteur d'actions de la liste (chacune nécessite un gestionnaire enregistré — voir [Actions groupées](#bulk-actions)). |
+| `actions` | `"publish, archive"` | Actions groupées proposées dans le sélecteur d'actions de la liste (chacune nécessite un gestionnaire enregistré — voir [Actions groupées](#actions-groupées)). |
 | `readonly_fields` | `"created_at"` | Champs affichés en texte (sans saisie) sur le formulaire de modification. |
 | `raw_id_fields` | `"author_id"` | Champs FK édités via une saisie d'id brut + un lien de recherche (bien adapté aux grandes tables cibles). |
 | `autocomplete_fields` | `"author_id"` | Champs FK édités via un typeahead Ajax adossé à l'endpoint `__autocomplete` de la cible. |
 | `prepopulated_fields` | `"slug:title"` | Remplit automatiquement un champ en slugifiant un autre au fur et à mesure de la saisie (`cible:source` ; combinez les sources avec `+`). |
 | `list_select_related` | `"all"` / `"none"` / `"author_id"` | Contrôle la JOIN automatique des colonnes FK dans la requête de liste. `"all"` (par défaut) joint chaque FK ; `"none"` désactive ; une liste CSV restreint aux FK nommées. |
-| `formfield_overrides` | `"status:textarea"` | Remplace le widget de formulaire d'un champ (`champ:widget`) — voir le [tableau des widgets](#form-widgets). |
+| `formfield_overrides` | `"status:textarea"` | Remplace le widget de formulaire d'un champ (`champ:widget`) — voir le [tableau des widgets](#widgets-de-formulaire). |
 | `actions_on_top` | `true` | Affiche la barre d'actions groupées au-dessus de la liste (par défaut `true`). |
 | `actions_on_bottom` | `false` | Affiche une seconde barre d'actions sous la liste (par défaut `false`). |
 

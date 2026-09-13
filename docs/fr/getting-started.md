@@ -36,14 +36,24 @@ Choisissez la ligne qui correspond à votre machine — tout le reste est identi
 
 #### SQLite — zéro installation
 
-Les projets générés embarquent une fonctionnalité `sqlite` : vous pouvez donc en
-lancer un sans rien installer ni démarrer :
+Générez directement le projet pour SQLite : il n'y a rien à installer, rien à
+démarrer et rien à modifier ensuite.
+
+```bash
+cargo rustango new myblog --backend sqlite
+```
+
+Les `.env.example`, `docker-compose.yml` et paliers de configuration générés
+sont tous écrits pour SQLite, la base est un fichier créé par le premier
+`cargo run -- migrate`, et vous pouvez sauter entièrement
+[l'étape 4](#étape-4--démarrer-la-base-de-données).
+
+Si vous avez déjà généré un projet Postgres et voulez en changer, chaque
+template garde les trois backends câblés — c'est donc un flag plus une URL :
 
 ```bash
 cargo run --no-default-features --features sqlite
 ```
-
-avec une URL sur fichier dans `.env` à la place de celle de Postgres :
 
 ```bash
 DATABASE_URL=sqlite://myblog_dev.db?mode=rwc
@@ -107,6 +117,11 @@ cargo rustango new myblog                     # default = fullstack template
 cd myblog
 ```
 
+Lancez `cargo rustango new` sans aucun argument et il demande le template, le
+backend et les fonctionnalités supplémentaires, puis affiche la ligne de
+commande équivalente avant de créer quoi que ce soit — voir
+[Échafaudage](scaffolding.md).
+
 Voici ce qui a été généré :
 
 ```
@@ -164,16 +179,19 @@ Le fichier `.env` généré est prêt à l'emploi avec Docker. Comme nous allons
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
 RUSTANGO_BIND=0.0.0.0:8080
 RUSTANGO_APEX_DOMAIN=localhost
-RUSTANGO_SESSION_SECRET=change-me-base64-encoded-32-bytes-or-more
 ```
 
 Les identifiants, le port et le nom de la base de données (`myblog_dev`) correspondent déjà au service Postgres du `docker-compose.yml`, donc vous n'avez pas besoin d'y toucher.
 
-`RUSTANGO_SESSION_SECRET` signe les sessions et les jetons, donc ne déployez pas la valeur d'exemple. Générez-en une vraie et collez-la :
+`RUSTANGO_SESSION_SECRET` signe les sessions et les jetons. Il est **laissé en commentaire** dans le `.env.example` généré, et pour le développement vous pouvez le laisser ainsi : le premier démarrage génère une clé dans `./var/` et la réutilise, si bien qu'un redémarrage ne vous déconnecte pas.
+
+Pour la production, définissez-en une vraie — 32 octets de base64, depuis votre gestionnaire de secrets ou :
 
 ```bash
 openssl rand -base64 32     # paste output as RUSTANGO_SESSION_SECRET value
 ```
+
+Une valeur qui n'est pas 32 octets de base64 ne peut pas être utilisée. Le serveur le signale au démarrage et se rabat sur la clé générée plutôt que d'échouer — surveillez donc cet avertissement si vous en avez défini une et que les sessions se comportent comme si ce n'était pas le cas.
 
 ---
 

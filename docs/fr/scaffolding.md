@@ -9,12 +9,12 @@
 
 ## Table des matières
 
-- [Installer le générateur](#install-the-generator)
-- [Créer un projet : `cargo rustango new`](#create-a-project-cargo-rustango-new)
-- [Ce qui est généré](#what-gets-generated)
-- [Ajouter un module fonctionnel : `manage startapp`](#add-a-feature-module-manage-startapp)
-- [Générer des fichiers individuels : les commandes `make:*`](#generate-single-files-the-make-commands)
-- [Un flux typique](#a-typical-flow)
+- [Installer le générateur](#installer-le-générateur)
+- [Créer un projet : `cargo rustango new`](#créer-un-projet--cargo-rustango-new)
+- [Ce qui est généré](#ce-qui-est-généré)
+- [Ajouter un module fonctionnel : `manage startapp`](#ajouter-un-module-fonctionnel--manage-startapp)
+- [Générer des fichiers individuels : les commandes `make:*`](#générer-des-fichiers-individuels--les-commandes-make)
+- [Un flux typique](#un-flux-typique)
 
 ---
 
@@ -34,11 +34,50 @@ Cela place un binaire `cargo-rustango` sur votre `PATH` ; Cargo l'expose alors c
 
 ```sh
 cargo rustango new <name> [--template api|fullstack|tenant]
+                          [--backend postgres|sqlite|mysql]
+                          [--features <liste>]
 ```
 
 - **`<name>`** — le nom du projet (et de la crate). Il doit s'agir d'un nom de crate Cargo valide (`[A-Za-z_][A-Za-z0-9_-]*`), et le répertoire cible ne doit pas déjà exister.
 - **`--template` / `-t`** — quel template utiliser pour l'échafaudage (par défaut : **fullstack**).
+- **`--backend` / `-b`** — sur quelle base de données le projet tourne (par défaut : **postgres**).
+- **`--features` / `-F`** — fonctionnalités **Rustango** supplémentaires, séparées par des virgules ou des espaces.
+- **`--interactive` / `-i`** — choisir dans des menus à la place. Un `cargo rustango new` nu sur un terminal fait de même.
 - **`--help` / `-h`**, **`--version`** — usage et version.
+
+Lancé sans argument, il pose les questions :
+
+```text
+  rustango — new project
+  (enter accepts the default; ctrl-c aborts)
+
+  Project name: shop
+
+  Template
+    1) fullstack  ORM + auto-admin + forms — the usual starting point  (default)
+    2) api        bare ORM + axum, no admin UI — for JSON-only services
+    3) tenant     multi-tenancy: tenant registry + operator console
+  > 3
+
+  Database
+    1) postgres  every feature, including schema-mode tenancy  (default)
+    2) sqlite    a file beside the project — no server to run
+    3) mysql     MySQL 8.0+ / MariaDB
+  > 1
+
+  Extra features  (numbers, e.g. `1 3 4` — enter for none)
+     1) csrf         CSRF protection middleware for form POSTs
+     2) sso          OIDC single sign-on for application users
+     …
+  > 1 2
+
+  Same thing without the wizard:
+    cargo rustango new shop --template tenant --backend postgres --features csrf,sso
+
+  Create it? [Y/n]
+```
+
+L'assistant règle exactement les champs que règlent les flags et affiche la ligne de commande équivalente avant d'écrire quoi que ce soit — s'en servir une fois vous apprend les flags, et un seul chemin de code décide de ce que contient un projet. Sans terminal (script, job CI), il échoue avec un message au lieu d'attendre une réponse que personne n'est là pour donner.
 
 ### Les trois templates
 
@@ -55,6 +94,42 @@ cargo rustango new myblog                      # fullstack (the default)
 cargo rustango new api_demo  --template api
 cargo rustango new shop      --template tenant
 ```
+
+### Choisir la base de données : `--backend`
+
+```sh
+cargo rustango new edge --backend sqlite
+cargo rustango new shop --backend mysql
+```
+
+`--backend` décide de ce qu'utilise `cargo run`, et façonne tout le projet en conséquence — la `DATABASE_URL` dans `.env.example`, les services de `docker-compose.yml`, l'`url` de chaque palier de configuration et les instructions de démarrage du README. Choisissez `sqlite` et il n'y a aucun service de base de données : c'est un fichier à côté du projet, créé par le premier `cargo run -- migrate`.
+
+Les trois backends restent câblés dans les `[features]` générées, les deux autres sont donc à un flag :
+
+```sh
+cargo run --no-default-features --features sqlite
+```
+
+### Activer plus du framework : `--features`
+
+```sh
+cargo rustango new saas --template tenant --features csrf,sso,cache-redis
+```
+
+Un template active un ensemble raisonnable ; `--features` ajoute les options qu'aucun d'eux n'atteint :
+
+| Fonctionnalité | Ce qu'elle ajoute |
+|---|---|
+| `tenancy` | Multi-tenancy : registry de tenants, bases par tenant, console opérateur |
+| `csrf` | Middleware de protection CSRF pour les POST de formulaires |
+| `sso` / `admin-sso` | Authentification unique OIDC, pour les utilisateurs / pour le site d'admin |
+| `passkey` | Authentification WebAuthn / passkey |
+| `cache-redis` / `cache-page` | Backend de cache Redis / mise en cache de pages entières |
+| `email-smtp` | Transport SMTP pour le framework e-mail |
+| `mcp` | Serveur Model Context Protocol pour les agents IA |
+| `testkit` / `test_utils` | Constructeurs de schéma, fabriques et constructeurs réservés aux tests |
+
+`cargo rustango new --help` affiche cette liste. Les backends ne sont **pas** valides ici — passez par `--backend`. En nommer un comme fonctionnalité est refusé : cela figerait le backend du framework alors que la fonctionnalité propre au projet resterait éteinte, et `#[derive(Model)]` aligne ses émissions sur les fonctionnalités du projet.
 
 ---
 

@@ -1,0 +1,73 @@
+{% extends "op_layout.html" %}
+{% block title %}Provisioning runs — {{ brand_name | default(value='Rustango Operator Console') }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/orgs">Organizations</a><span class="sep">/</span>Provisioning runs</p>
+<h1>Provisioning runs</h1>
+<p class="lead">Every attempt to stand up a tenant, newest first —
+including the ones that failed, which leave the tenant inactive until
+somebody finishes or removes it.</p>
+
+{% if runs | length == 0 %}
+  <div class="empty">
+    {#- Same reason as the audit page: past the end this must not claim
+        nothing ever happened, and the paging links below sit outside
+        this branch so an empty page still offers a way back. -#}
+    {% if page > 1 %}No runs on page {{ page }}.
+    {% else %}No tenant has been provisioned through this console yet.
+    <a class="btn-link" href="/orgs/new">Create one</a>.
+    {% endif %}
+  </div>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Run</th>
+      <th>Tenant</th>
+      <th>State</th>
+      <th>Storage</th>
+      <th>Requested by</th>
+      <th>Started</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in runs %}
+    <tr>
+      <td><a class="btn-link" href="/orgs/provision/{{ r.id }}">#{{ r.id }}</a></td>
+      {#- A slug may be 63 characters, which would otherwise set the
+          column's width for every other row. -#}
+      <td class="wrap-anywhere">
+        <strong>{{ r.slug }}</strong>
+        {% if r.is_migrate %}<span class="badge">migrate</span>{% endif %}
+      </td>
+      <td>
+        {% if r.failed %}
+        <span class="status-failed">{{ r.state }}</span>
+        {% elif r.running %}
+        <span class="status-skipped">{{ r.state }}</span>
+        {% else %}
+        <span class="status-ok">{{ r.state }}</span>
+        {% endif %}
+        {% if r.took %}<span class="field-helper">in {{ r.took }}</span>{% endif %}
+      </td>
+      {#- A batch migrate spans tenants that do not agree on either, so
+          it stores neither. -#}
+      <td class="nowrap">
+        {% if r.storage_mode %}<code>{{ r.storage_mode }}</code> · <code>{{ r.backend_kind }}</code>
+        {% else %}<span class="empty">—</span>{% endif %}
+      </td>
+      <td>{% if r.requested_by %}{{ r.requested_by }}{% else %}<span class="empty">—</span>{% endif %}</td>
+      <td class="nowrap">{% if r.started_at %}{{ r.started_at }}{% else %}—{% endif %}</td>
+    </tr>
+    {% if r.error %}
+    <tr class="run-error">
+      <td></td>
+      <td colspan="5"><span class="status-failed">{{ r.error }}</span></td>
+    </tr>
+    {% endif %}
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% include "_op_pager.html" %}
+{% endblock %}

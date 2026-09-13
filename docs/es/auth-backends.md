@@ -25,12 +25,12 @@ rutas y el extractor `CurrentUser` para leer el resultado.
 
 ## Tabla de contenidos
 
-- [La cadena](#the-chain) · [Los backends integrados](#the-built-in-backends)
-- [Restringir rutas: require_auth](#gating-routes-require_auth)
-- [Leer el usuario: CurrentUser](#reading-the-user-currentuser)
-- [Permisos: require_perm](#permissions-require_perm)
-- [El registro portable](#the-portable-registry)
-- [Véase también](#see-also)
+- [La cadena](#la-cadena) · [Los backends integrados](#los-backends-integrados)
+- [Restringir rutas: require_auth](#restringir-rutas-require_auth)
+- [Leer el usuario: CurrentUser](#leer-el-usuario-currentuser)
+- [Permisos: require_perm](#permisos-require_perm)
+- [El registro portable](#el-registro-portable)
+- [Véase también](#véase-también)
 
 ---
 

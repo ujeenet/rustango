@@ -4,17 +4,17 @@ Une référence en langage simple des mots utilisés dans cette documentation. S
 terme d'un guide vous est inconnu, cherchez-le ici d'abord. Les définitions sont
 volontairement informelles — les guides approfondis donnent les détails précis.
 
-Si vous n'avez jamais construit d'API web auparavant, lisez [Les bases des API web](#web-api-basics)
+Si vous n'avez jamais construit d'API web auparavant, lisez [Les bases des API web](#les-bases-des-api-web)
 de haut en bas ; c'est une introduction de cinq minutes. Tout le reste est fait pour
 être consulté au fur et à mesure.
 
 ## Table des matières
 
-- [Les bases des API web](#web-api-basics) — ce qu'est une API, en termes de tous les jours
-- [Les briques de Rustango](#rustango-building-blocks) — les pièces que vous assemblez
-- [Les données et la base de données](#data-and-the-database)
-- [Quelques mots de Rust](#a-few-rust-words) — pour que les blocs de code ne fassent pas peur
-- [Frameworks auxquels nous comparons](#frameworks-we-compare-to)
+- [Les bases des API web](#les-bases-des-api-web) — ce qu'est une API, en termes de tous les jours
+- [Les briques de Rustango](#les-briques-de-rustango) — les pièces que vous assemblez
+- [Les données et la base de données](#les-données-et-la-base-de-données)
+- [Quelques mots de Rust](#quelques-mots-de-rust) — pour que les blocs de code ne fassent pas peur
+- [Frameworks auxquels nous comparons](#frameworks-auxquels-nous-comparons)
 
 ---
 

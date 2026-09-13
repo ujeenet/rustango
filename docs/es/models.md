@@ -26,16 +26,16 @@ consulta el [recetario del ORM](orm.md).
 
 ## Tabla de contenidos
 
-- [Anatomía de un modelo](#anatomy-of-a-model)
-- [Tipos de campo](#field-types) · [Tipos exclusivos de PostgreSQL](#postgresql-only-types)
-- [Claves primarias](#primary-keys) — [PKs personalizadas](#custom-primary-keys) · [compuestas](#composite-primary-keys)
-- [Relaciones](#relationships)
-- [Atributos de campo comunes](#common-field-attributes)
-- [Índices y restricciones](#indexes-and-constraints)
-- [Atributos de modelo comunes](#common-model-attributes)
-- [La API generada](#the-generated-api) — [save vs insert](#save-vs-insert)
-- [Referencia completa de atributos](#full-attribute-reference)
-- [Véase también](#see-also)
+- [Anatomía de un modelo](#anatomía-de-un-modelo)
+- [Tipos de campo](#tipos-de-campo) · [Tipos exclusivos de PostgreSQL](#tipos-exclusivos-de-postgresql)
+- [Claves primarias](#claves-primarias) — [PKs personalizadas](#claves-primarias-personalizadas) · [compuestas](#claves-primarias-compuestas)
+- [Relaciones](#relaciones)
+- [Atributos de campo comunes](#atributos-de-campo-comunes)
+- [Índices y restricciones](#índices-y-restricciones)
+- [Atributos de modelo comunes](#atributos-de-modelo-comunes)
+- [La API generada](#la-api-generada) — [save vs insert](#save-vs-insert)
+- [Referencia completa de atributos](#referencia-completa-de-atributos)
+- [Véase también](#véase-también)
 
 ---
 
@@ -73,7 +73,7 @@ A partir de esa única declaración el derive genera:
 - **constantes de campo tipadas** (`Post::title`, `Post::author_id`) para filtros
   verificados en compilación — `Post::objects().where_(Post::author_id.eq(42))`;
 - métodos de fila — **`save`**, **`find`**, **`delete`** y más (consulta
-  [la API generada](#the-generated-api)).
+  [la API generada](#la-api-generada)).
 
 El nombre de la tabla toma por defecto el nombre del modelo si omites `table`; los
 nombres de columna toman por defecto el nombre del campo en snake_case a menos que
@@ -269,7 +269,7 @@ pub author: ForeignKey<Author>,
 `ForeignKey<T>` toma por defecto `i64` como tipo de clave; si la PK del padre es de un
 tipo distinto, nómbralo: `ForeignKey<User, String>`. Uno-a-uno usa `#[rustango(o2o)]`;
 muchos-a-muchos es una tabla separada — consulta
-[Recetario del ORM → Muchos-a-muchos](orm.md#many-to-many). Carga de forma anticipada las
+[Recetario del ORM → Muchos-a-muchos](orm.md#muchos-a-muchos). Carga de forma anticipada las
 filas relacionadas con `select_related` (también en la guía del ORM).
 
 ---

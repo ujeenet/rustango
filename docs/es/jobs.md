@@ -28,18 +28,18 @@ es Django-Q / Celery / las colas de Laravel, en Rust.
 
 ## Tabla de contenidos
 
-- [Paso 1 — Definir un trabajo](#step-1--define-a-job)
-- [Paso 2 — Iniciar una cola](#step-2--start-a-queue)
-- [Paso 3 — Despachar desde un handler](#step-3--dispatch-from-a-handler)
-- [Paso 4 — Cablearlo en tu aplicación](#step-4--wire-it-into-your-app) — el ejemplo completo
-- [Ejecutar los workers (CLI + producción)](#running-the-workers-cli--production)
-- [Reintentos y backoff](#retries-and-backoff)
-- [El handler dead-letter](#the-dead-letter-handler)
-- [La cola persistente (producción)](#the-persistent-queue-production)
-- [Trabajos con multi-tenancy](#jobs-under-multi-tenancy)
-- [Barridos programados con multi-tenancy](#scheduled-sweeps-under-multi-tenancy)
-- [Referencia](#reference)
-- [Véase también](#see-also)
+- [Paso 1 — Definir un trabajo](#paso-1--definir-un-trabajo)
+- [Paso 2 — Iniciar una cola](#paso-2--iniciar-una-cola)
+- [Paso 3 — Despachar desde un handler](#paso-3--despachar-desde-un-handler)
+- [Paso 4 — Cablearlo en tu aplicación](#paso-4--cablearlo-en-tu-aplicación) — el ejemplo completo
+- [Ejecutar los workers (CLI + producción)](#ejecutar-los-workers-cli--producción)
+- [Reintentos y backoff](#reintentos-y-backoff)
+- [El handler dead-letter](#el-handler-dead-letter)
+- [La cola persistente (producción)](#la-cola-persistente-producción)
+- [Trabajos con multi-tenancy](#trabajos-con-multi-tenancy)
+- [Barridos programados con multi-tenancy](#barridos-programados-con-multi-tenancy)
+- [Referencia](#referencia)
+- [Véase también](#véase-también)
 
 ---
 
@@ -109,7 +109,7 @@ handlers puedan alcanzarlo.
 
 > **In-memory significa in-memory.** Los trabajos encolados o en curso se
 > **pierden al reiniciar**. Para todo lo que no puedas permitirte perder, usa la
-> [cola persistente](#the-persistent-queue-production).
+> [cola persistente](#la-cola-persistente-producción).
 
 ---
 
@@ -213,7 +213,7 @@ cargo run -- make:job WelcomeEmail   # scaffold a new job type
 A escala, a menudo quieres los workers **separados** del nivel web — para que un
 pico de tráfico no pueda dejar sin recursos a los trabajos, y para escalar cada
 uno de forma independiente. Con la [cola
-persistente](#the-persistent-queue-production) cada proceso extrae de la misma
+persistente](#la-cola-persistente-producción) cada proceso extrae de la misma
 tabla `rustango_jobs`, así que simplemente ejecuta un segundo binario, sin
 servidor, que construye la cola, la inicia y bloquea hasta una señal:
 
@@ -241,7 +241,7 @@ Despliégalo como su propio contenedor/servicio y escálalo a **N réplicas** �
 todas extraen de la tabla compartida de forma segura. El proceso web entonces
 solo necesita `dispatch` (no tiene que `start()` los workers). Empareja el worker
 con un barrido periódico
-[`reclaim_stuck_jobs_pool`](#the-persistent-queue-production) para recuperar
+[`reclaim_stuck_jobs_pool`](#la-cola-persistente-producción) para recuperar
 trabajos de un worker que se ha caído.
 
 ---
@@ -510,5 +510,5 @@ rechazado es el resultado esperado, así que no se registra nada. Seguimiento en
 - [Caché](caching.md) — la otra manera de mantener rápidos los handlers de
   peticiones.
 - [Signals](orm.md) — hooks fire-and-forget que a menudo *despachan* un trabajo.
-- [Comandos de tenancy](manage.md#tenancy-commands) — el provisionamiento de los
+- [Comandos de tenancy](manage.md#comandos-de-tenancy) — el provisionamiento de los
   tenants sobre los que una cola por tenant hace fan-out.

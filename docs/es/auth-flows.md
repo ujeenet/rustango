@@ -22,13 +22,13 @@ firma HMAC añadida, de modo que el servidor puede confiar en sus parámetros si
 
 ## Tabla de contenidos
 
-- [URL firmadas: el sustrato](#signed-urls-the-substrate)
-- [Restablecimiento de contraseña](#password-reset)
-- [Verificación de correo electrónico](#email-verification)
-- [Inicio de sesión por enlace mágico](#magic-link-login)
-- [Tokens de un solo uso](#single-use-tokens)
-- [Lo que aportas tú](#what-you-provide)
-- [Véase también](#see-also)
+- [URL firmadas: el sustrato](#url-firmadas-el-sustrato)
+- [Restablecimiento de contraseña](#restablecimiento-de-contraseña)
+- [Verificación de correo electrónico](#verificación-de-correo-electrónico)
+- [Inicio de sesión por enlace mágico](#inicio-de-sesión-por-enlace-mágico)
+- [Tokens de un solo uso](#tokens-de-un-solo-uso)
+- [Lo que aportas tú](#lo-que-aportas-tú)
+- [Véase también](#véase-también)
 
 ---
 

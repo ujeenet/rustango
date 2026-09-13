@@ -26,10 +26,10 @@ beantwortet (API-Ablauf) —, bevor sie je den Handler erreichen.
 ---
 
 ## Inhaltsverzeichnis
-- [Schnellstart](#quick-start) · [Browser- vs. API-Gatter](#browser-vs-api-gates)
-- [Die Gatter-Familie](#the-gate-family) · [Prädikat- und Rollen-Gatter](#predicate-and-role-gates)
-- [Berechtigungs-Gatter](#permission-gates) · [Der `?next=`-Umlauf](#the-next-round-trip)
-- [Hinweise und Grenzen](#notes-and-limits)
+- [Schnellstart](#schnellstart) · [Browser- vs. API-Gatter](#browser--vs-api-gatter)
+- [Die Gatter-Familie](#die-gatter-familie) · [Prädikat- und Rollen-Gatter](#prädikat--und-rollen-gatter)
+- [Berechtigungs-Gatter](#berechtigungs-gatter) · [Der `?next=`-Umlauf](#der-next-umlauf)
+- [Hinweise und Grenzen](#hinweise-und-grenzen)
 
 ---
 

@@ -30,10 +30,10 @@ Eintrag, und jede Replik sieht das Abmelden bei der nächsten Anfrage.
 ---
 
 ## Inhaltsverzeichnis
-- [Schnellstart](#quick-start) · [Sessions vs. JWT](#sessions-vs-jwt)
-- [Die Session-Tasche](#the-session-bag) · [Das Cookie](#the-cookie)
-- [Ein Backend wählen](#picking-a-backend) · [Ablauf und gleitende Erneuerung](#expiry-and-sliding-renewal)
-- [An Ort und Stelle aktualisieren](#updating-a-session-in-place) · [Hinweise und Grenzen](#notes-and-limits)
+- [Schnellstart](#schnellstart) · [Sessions vs. JWT](#sessions-vs-jwt)
+- [Die Session-Tasche](#die-session-tasche) · [Das Cookie](#das-cookie)
+- [Ein Backend wählen](#ein-backend-wählen) · [Ablauf und gleitende Erneuerung](#ablauf-und-gleitende-erneuerung)
+- [An Ort und Stelle aktualisieren](#eine-session-an-ort-und-stelle-aktualisieren) · [Hinweise und Grenzen](#hinweise-und-grenzen)
 
 ---
 
@@ -113,7 +113,7 @@ ein Session-Cookie benötigt:
 - **`HttpOnly`** — JavaScript kann es nicht lesen (stumpft Token-Diebstahl per
   XSS ab).
 - **`SameSite=Lax`** — wird bei seitenübergreifenden Unteranfragen nicht gesendet
-  (CSRF-Abwehr; kombinieren Sie es mit [CSRF-Tokens](security.md#protecting-against-csrf)
+  (CSRF-Abwehr; kombinieren Sie es mit [CSRF-Tokens](security.md#schutz-vor-csrf)
   für Formular-Posts).
 - **`Secure`** — nur HTTPS (nur für lokale HTTP-Entwicklung weglassen).
 - **`Path=/`** — für die gesamte Anwendung sichtbar.

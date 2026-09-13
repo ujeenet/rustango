@@ -466,6 +466,12 @@ use axum::response::Html;
 
 /// `GET /<app-prefix>/hello` — placeholder. Wire the actual path
 /// in `urls.rs` once you decide on the app's URL prefix.
+///
+/// `dead_code` is allowed because the matching `.route(...)` line in
+/// `urls.rs` ships commented out on purpose — the stub is there to be
+/// wired up, so until you do, nothing references it. Without this a
+/// freshly generated app warns before you have written a line.
+#[allow(dead_code)]
 pub async fn hello() -> Html<&'static str> {
     Html(\"<h1>hello from your new app</h1>\")
 }
@@ -561,8 +567,6 @@ pub const SINGLE_TENANT_MANAGE_BIN: &str =
 //! defined in `rustango::migrate::manage`; this binary just hands it
 //! the pool and argv.
 
-use rustango::sql::sqlx::PgPool;
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pull your models into this binary so `inventory` registers
@@ -574,7 +578,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   #[allow(unused_imports)]
     //   use super::models::*;
 
-    let pool = PgPool::connect(&std::env::var(\"DATABASE_URL\")?).await?;
+    // `Pool::connect_postgres`, not `PgPool::connect`: the framework's
+    // constructor applies the pool options your settings configure.
+    let pool = rustango::sql::Pool::connect_postgres(&std::env::var(\"DATABASE_URL\")?).await?;
     let dir: &std::path::Path = \"./migrations\".as_ref();
     rustango::migrate::manage::run(&pool, dir, std::env::args().skip(1)).await?;
     Ok(())
