@@ -27,7 +27,7 @@ y luego el resto de la página es una referencia de cada perilla.
 [![Un ViewSet de Rustango conectado a un serializador: un solo bloque #[viewset(serializer = …)] da salida JSON tipada y entrada validada en las seis rutas CRUD](../img/viewsets.png)](../img/viewsets.png)
 
 > **Fuente:** `rustango::viewset` (`ViewSet`, `#[derive(ViewSet)]`, las opciones
-> `#[viewset(...)]` + el builder `for_model`) — siempre compilado.
+> `#[viewset(...)]` + el builder `for_model`) — condicionado a `admin` **o** `tenancy`. Dentro, `.serializer::<S>()` requiere `serializer`, el `router()` del builder requiere `postgres`, `tenant_router()` / `OwnedBy` requieren `tenancy`, y la acción QUERY requiere `admin`.
 >
 > **Versión ejecutable:** el blog construido aquí refleja el ejemplo probado y
 > compilable [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
@@ -516,7 +516,9 @@ Montar en `/api/posts` conecta las seis operaciones REST:
 | `DELETE` | `/api/posts/{pk}` | **destroy** | 204 | vacío |
 
 Una barra final en el prefijo de montaje es opcional. Solo se conectan estos seis
-verbos — sin `HEAD`/`OPTIONS` automáticos. La **creación masiva** viene gratis:
+verbos, más una acción de colección `QUERY` (RFC 10008) cuando la característica
+`admin` está activa. Las rutas se construyen con `axum::routing::get`, así que
+axum responde al `HEAD` desde el handler `GET`; `OPTIONS` no está cableado. La **creación masiva** viene gratis:
 haz `POST` de un *arreglo* JSON y cada elemento se inserta en orden, validado
 atómicamente (un elemento inválido rechaza todo el lote).
 
@@ -547,7 +549,7 @@ eliminar", monta el ViewSet y sobrescribe la única ruta con tu propio handler
 | `filter_fields` | `"author_id, status"` | ninguno | Campos filtrables vía `?field=value` (+ lookups). |
 | `search_fields` | `"title, body"` | ninguno | Campos con los que coincide la caja `?search=` (OR sin distinción de mayúsculas). |
 | `ordering` | `"-published_at, id"` | ninguno | Orden por defecto (`-` = DESC). |
-| `page_size` | `20` | 20 | Filas por página (el `?page_size=` del cliente se limita a 1000). |
+| `page_size` | `20` | 20 | Filas por página (el `?page_size=` del cliente se limita a 100). |
 | `read_only` | *(flag)* | apagado | Expone solo GET (list + retrieve). |
 | `permissions(...)` | `permissions(create = "post.add")` | ninguno | Codenames de permiso por acción. |
 
@@ -565,7 +567,9 @@ Cada método de `ViewSet::for_model(SCHEMA)` (cada uno devuelve `Self`):
 | `search_fields(&["…"])` | Habilita `?search=`. |
 | `ordering(&[("field", desc)])` | Orden de clasificación por defecto. |
 | `ordering_fields(&["…"])` | Lista blanca de qué campos puede usar `?ordering=`. |
-| `page_size(n)` | Tamaño de página por defecto (≤ 1000). |
+| `page_size(n)` | Tamaño de página por defecto (≤ 100). |
+| `max_page_size(n)` | Sube o baja el propio tope del cliente (100 por defecto). |
+| `pk_param(name)` | Renombra el parámetro de ruta de las rutas de detalle. |
 | `read_only()` | Solo GET. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Compuertas de codename por acción (la última sobre tenencia). |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Paginación por keyset (omite `COUNT(*)`). |
@@ -638,7 +642,7 @@ tablas muy grandes. `?cursor=<token>&page_size=20`:
 { "count": 137, "limit": 20, "offset": 40, "results": [ … ] }
 ```
 
-`page_size` / `limit` se limitan a 1000.
+`page_size` / `limit` se limitan a 100.
 
 ---
 
@@ -872,8 +876,9 @@ let api = urls::api()
 
 - **El builder + `router_pool` / `tenant_router`** es **tri-dialecto** —
   PostgreSQL, SQLite y MySQL — y es la ruta recomendada.
-- **El `router(prefix, PgPool)` de la macro derive** captura un `PgPool`
-  (PostgreSQL).
+- **El `router(prefix, pool)` de la macro derive** recibe `impl Into<rustango::sql::Pool>`
+  — un `PgPool`, `MySqlPool`, `SqlitePool` o el enum `Pool`. No es exclusivo de
+  Postgres (#1273).
 - **La entrada + salida del serializador** ahora funciona en **los tres backends**
   (el renderizado por fila es tri-dialecto; la antigua compuerta solo-PG
   desapareció).
