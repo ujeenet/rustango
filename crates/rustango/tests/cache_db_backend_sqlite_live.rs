@@ -379,3 +379,89 @@ async fn concurrent_adds_produce_exactly_one_winner() {
          DistributedLock would have run its guarded body {winners} times"
     );
 }
+
+// ------------------------------------------------------------------ #1245
+
+/// The three backends must agree about what a TTL means.
+///
+/// `DatabaseCache` stored seconds until v0.42, which made a sub-second
+/// TTL truncate to zero — born expired — and a 1-second TTL set at
+/// `T.999` die a millisecond later. That was fixed; the module doc kept
+/// saying "seconds" for another sixteen releases, because the column
+/// type never changed and nothing failed to give it away.
+///
+/// What was still wrong is smaller and easier to miss: `get` treated an
+/// entry as expired at `now == expires`, while `InMemoryCache`,
+/// `FileCache` and this backend's own `purge_expired` all treat it as
+/// expired only once `now` is past it. So a row could read as a miss
+/// while the sweep that exists to delete it still considered it live.
+#[tokio::test]
+async fn a_sub_second_ttl_survives_its_own_duration_on_every_backend() {
+    let pool = fresh_pool().await;
+    let db = DatabaseCache::new(pool, "parity_cache");
+    db.ensure_table().await.expect("ensure_table");
+
+    let mem = rustango::cache::InMemoryCache::new();
+    let dir = std::env::temp_dir().join(format!("rustango-cache-parity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let file = rustango::cache::FileCache::new(&dir);
+
+    let backends: Vec<(&str, &dyn Cache)> =
+        vec![("database", &db), ("memory", &mem), ("file", &file)];
+
+    // 300ms is comfortably sub-second: under the old seconds encoding it
+    // truncated to 0 and the entry was written already expired.
+    for (name, c) in &backends {
+        c.set("k", "v", Some(Duration::from_millis(300)))
+            .await
+            .unwrap_or_else(|e| panic!("{name}: set: {e}"));
+    }
+    for (name, c) in &backends {
+        assert_eq!(
+            c.get("k")
+                .await
+                .unwrap_or_else(|e| panic!("{name}: get: {e}")),
+            Some("v".to_owned()),
+            "{name}: a 300ms entry must be readable immediately after `set`"
+        );
+    }
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    for (name, c) in &backends {
+        assert_eq!(
+            c.get("k")
+                .await
+                .unwrap_or_else(|e| panic!("{name}: get: {e}")),
+            None,
+            "{name}: a 300ms entry must be gone 600ms later"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `get` and `purge_expired` must not disagree about the same row.
+///
+/// With `>=` in `get`, an entry whose `expires` equalled the current
+/// millisecond read as a miss and was deleted, while the sweep's
+/// `expires < now` kept it. One of the two was wrong by a millisecond;
+/// `>` makes them the same rule.
+#[tokio::test]
+async fn a_live_entry_is_not_swept_and_not_missed() {
+    let pool = fresh_pool().await;
+    let cache = DatabaseCache::new(pool, "sweep_cache");
+    cache.ensure_table().await.expect("ensure_table");
+
+    cache
+        .set("live", "v", Some(Duration::from_secs(3600)))
+        .await
+        .expect("set");
+
+    let purged = cache.purge_expired().await.expect("purge");
+    assert_eq!(purged, 0, "a far-future entry must not be swept");
+    assert_eq!(
+        cache.get("live").await.expect("get"),
+        Some("v".to_owned()),
+        "and must still read back"
+    );
+}
