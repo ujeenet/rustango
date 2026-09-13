@@ -56,6 +56,31 @@ if [ "${PREPUSH_SKIP_TESTS:-0}" != "1" ]; then
     yellow "[pre-push] override with: PREPUSH_SKIP_TESTS=1 git push"
     exit 1
   fi
+
+  # ------------------------------------------------------ repo-consistency guards
+  #
+  # The line above is `--lib` only, so integration tests never run here.
+  # These three are the exception worth making: they read files and need
+  # no database, they finish in about a second, and each guards a kind of
+  # drift that is invisible on inspection.
+  #
+  #   docs_versions      — sample output and the docs manifest must name
+  #                        the version actually shipping. A release bump
+  #                        touches 14 places across four locales; this is
+  #                        what notices when one is missed.
+  #   docs_links         — in-page links, including the translated trees.
+  #   pool_construction  — no production site opens a pool behind the
+  #                        framework's back.
+  #
+  # Added after a 0.58.0 bump left the docs at 0.57 and failed CI on
+  # every open PR — including one that touched only the changelog.
+  gray "[pre-push] repo-consistency guards (docs_versions, docs_links, pool_construction)"
+  if ! cargo test -p rustango --no-default-features --features sqlite,tenancy \
+        --test docs_versions --test docs_links --test pool_construction 2>&1 | tail -12; then
+    red "[pre-push] a repo-consistency guard failed"
+    yellow "[pre-push] override with: PREPUSH_SKIP_TESTS=1 git push"
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------- cargo deny (opt-in)
