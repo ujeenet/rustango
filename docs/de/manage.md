@@ -740,7 +740,9 @@ cargo run -- runserver           # explicit
 
 Richtet einen neuen Tenant (Kunde/Org) ein und wendet die Tenant-Migrationen
 darauf an. Der `<slug>` ist sein kurzer Bezeichner. Sicher erneut ausführbar —
-ein erneuter Aufruf auf einem bestehenden Tenant dupliziert nichts.
+ein erneuter Aufruf auf einem
+bestehenden Slug wird vorab mit ``tenant slug `<slug>` already exists``
+abgelehnt (tenancy/provision.rs:599), bevor sonst etwas passiert.
 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"
@@ -754,6 +756,10 @@ cargo run -- create-tenant beta --mode database --database-url postgres://...
 | `--database-url <url>` | Tenant-spezifische DB-URL (erforderlich für den database-Modus) |
 | `--host-pattern <pattern>` | Überschreibt das vom `SubdomainResolver` verwendete Host-Muster |
 | `--no-migrate` | Überspringt das Anwenden tenant-scoped Migrationen nach dem Provisioning |
+| `--backend postgres \| mysql \| sqlite` | Treiber für einen Database-Mode-Tenant (Default: `postgres`). Wird gegen `--mode` validiert |
+| `--schema-name <s>` | Überschreibt den generierten Schemanamen im Schema-Modus |
+| `--port <n>` | Port, unter dem der Tenant erreichbar ist, fürs Routing |
+| `--path-prefix <s>` | Pfad-Präfix, unter dem der Tenant erreichbar ist, fürs Routing |
 
 ### `edit-tenant <slug> [options]`
 
@@ -805,7 +811,9 @@ cargo run -- test-tenant-connection "$URL" --no-write-probe --timeout 5
 
 Deaktiviert einen Tenant, indem `active = false` gesetzt wird. Dies ist die
 weiche, umkehrbare Option — die Daten des Tenants bleiben auf der Platte, und
-ein erneutes Ausführen von `create-tenant` bringt ihn zurück. Wenn Sie nicht
+reaktiviere ihn mit `edit-tenant <slug> --activate`.
+Ein erneutes `create-tenant` funktioniert **nicht**: die `Org`-Zeile existiert
+weiterhin, der Slug gilt also als Duplikat. Wenn Sie nicht
 interaktiv laufen (kein Terminal angehängt), müssen Sie `--confirm <slug>` mit
 dem erneut getippten Slug zur Bestätigung übergeben.
 
@@ -820,7 +828,9 @@ seine Zeile aus `rustango_orgs`, ohne Rückgängig-Machen. Wenn Sie nicht
 interaktiv laufen (kein Terminal angehängt), müssen Sie `--confirm <slug>` mit
 dem erneut getippten Slug übergeben. Bei Tenants im database-Modus bleibt die
 zugrunde liegende Datenbank an Ort und Stelle, es sei denn, Sie übergeben
-zusätzlich `--purge-database`.
+zusätzlich `--purge-database`. Ohne dieses Flag **verweigert** der Befehl bei
+Database-Mode-Tenants komplett — er entfernt nicht die `Org`-Zeile und lässt die
+Datenbank stehen, er tut gar nichts (tenancy/manage/tenants.rs:479).
 
 ```bash
 cargo run -- purge-tenant acme --confirm acme
@@ -1202,7 +1212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("import-csv")) {
         let url = std::env::var("DATABASE_URL")?;
-        let pool = rustango::sql::sqlx::PgPool::connect(&url).await?;
+        let pool = rustango::sql::Pool::connect_postgres(&url).await?;
         return my_csv_importer::run(&pool, &args[1..]).await;
     }
     rustango::manage::Cli::new().api(urls::api()).run().await
@@ -1223,7 +1233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let url = std::env::var("DATABASE_URL")?;
-    let pool = rustango::sql::sqlx::PgPool::connect(&url).await?;
+    let pool = rustango::sql::Pool::connect_postgres(&url).await?;
 
     match args.first().map(String::as_str) {
         Some("import-csv") => my_csv_importer::run(&pool, &args[1..]).await,
