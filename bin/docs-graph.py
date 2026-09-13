@@ -123,7 +123,48 @@ def published_pages() -> list[str]:
     return pages
 
 
-FENCE = re.compile(r"^```(\w*)(.*)$")
+CONTRACT = CRATES / "rustango" / "tests" / "docs_contract.rs"
+
+
+def unbacked_budgets() -> dict[str, int]:
+    """Read the UNBACKED backlog out of the gate itself.
+
+    The backlog has one home. Duplicating it here would make this tool and
+    the test two representations of one fact, which is the thing they would
+    then need a third test to keep in sync.
+    """
+    try:
+        text = CONTRACT.read_text()
+    except OSError:
+        return {}
+    block = re.search(r"UNBACKED:\s*&\[\(&str,\s*usize\)\]\s*=\s*&\[(.*?)\n\];", text, re.S)
+    if not block:
+        return {}
+    return {
+        name: int(budget)
+        for name, budget in re.findall(r'\("([^"]+)",\s*(\d+)\)', block.group(1))
+    }
+
+
+def _fence_lang(line: str) -> str | None:
+    """The language tag if this line opens or closes a fence, else None.
+
+    Must agree exactly with `rust_fences` in
+    `crates/rustango/tests/docs_contract.rs`, which is the gate. An earlier
+    version anchored the pattern at column 0 and so missed indented fences
+    (`docs/orm.md:512` is one), reporting 56 where the gate counted 57 —
+    i.e. reporting headroom that did not exist, on the page a writer is
+    most likely to be adding an example to.
+    """
+    stripped = line.lstrip()
+    if not stripped.startswith("```"):
+        return None
+    rest = stripped[3:]
+    # Rust: rest.split(|c| c == ',' || c.is_whitespace()).next()
+    for i, ch in enumerate(rest):
+        if ch == "," or ch.isspace():
+            return rest[:i]
+    return rest
 
 
 def extract(doc: Path) -> tuple[list[tuple[str, str]], list[str]]:
@@ -133,13 +174,13 @@ def extract(doc: Path) -> tuple[list[tuple[str, str]], list[str]]:
     body_lines: list[str] = []
 
     for line in doc.read_text(errors="ignore").splitlines():
-        m = FENCE.match(line)
-        if m:
+        tag = _fence_lang(line)
+        if tag is not None:
             if inside:
                 fences.append((lang, "\n".join(buf)))
                 buf, inside = [], False
             else:
-                lang, inside = m.group(1), True
+                lang, inside = tag, True
             continue
         (buf if inside else body_lines).append(line)
 
@@ -185,6 +226,7 @@ def main() -> int:
     index, pg_gated = build_symbol_index()
     tests = backing_tests()
     published = set(published_pages())
+    budgets = unbacked_budgets()
 
     graph = {"pages": {}, "stats": {}}
 
@@ -211,6 +253,7 @@ def main() -> int:
             "unresolved": sorted(unresolved),
             "pg_gated_named": sorted(s for s in symbols if s in pg_gated),
             "source_files": sorted(files),
+            "budget": budgets.get(name),
         }
 
     pages = graph["pages"]
@@ -230,14 +273,26 @@ def main() -> int:
         print(f"docs: {s['docs']}  published: {s['published']}  "
               f"with backing test: {s['with_backing_test']}")
         print(f"unresolved symbol mentions: {s['total_unresolved']}\n")
-        print(f"{'page':<32}{'test':>6}{'fences':>8}{'syms':>7}{'unres':>7}{'pg':>5}")
+        drift = [
+            (n, p["rust_fences"], p["budget"])
+            for n, p in pages.items()
+            if p["budget"] is not None and p["rust_fences"] != p["budget"]
+        ]
+        if drift:
+            print("WARNING — this tool and docs_contract.rs disagree:")
+            for n, actual, budget in drift:
+                print(f"    docs/{n}: counted {actual}, budget {budget}")
+            print("  The gate is authoritative. Fix _fence_lang to match rust_fences.\n")
+
+        print(f"{'page':<32}{'test':>6}{'fences':>8}{'budget':>8}{'syms':>7}{'unres':>7}")
         print("-" * 65)
         for n, p in sorted(pages.items(), key=lambda kv: -len(kv[1]["unresolved"])):
             if args.unresolved_only and not p["unresolved"]:
                 continue
+            budget = "-" if p["budget"] is None else str(p["budget"])
             print(f"{n:<32}{'yes' if p['backing_tests'] else '--':>6}"
-                  f"{p['rust_fences']:>8}{p['symbols_named']:>7}"
-                  f"{len(p['unresolved']):>7}{len(p['pg_gated_named']):>5}")
+                  f"{p['rust_fences']:>8}{budget:>8}{p['symbols_named']:>7}"
+                  f"{len(p['unresolved']):>7}")
         print("\npublished with NO backing test:")
         for n in s["published_without_test"]:
             print(f"  {n}")
