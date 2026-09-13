@@ -86,7 +86,8 @@ let api = Router::new().route("/api/me", get(me)).layer(login_required_or_401())
 | `active_required(url)` | `active_required_or_403()` | connecté **et** `active` |
 | `superuser_required(url)` | `superuser_required_or_403()` | `is_superuser && active` |
 | `user_passes_test(url, pred)` | `user_passes_test_or_403(pred)` | prédicat sur le modèle `User` |
-| `permission_required(url, codename)` | `permission_required_or_403(codename)` | détient le codename de permission |
+| `permission_required(url, codename)` † | `permission_required_or_403(codename)` | détient le codename de permission |
+† `permission_required` est la seule barrière de cette colonne qui ne redirige pas systématiquement. Un visiteur **anonyme** obtient le 302 vers `login_url` ; un visiteur connecté mais dépourvu du codename obtient un **403** nu, sans redirection ni corps (`auth_decorators.rs:560`). Les quatre autres redirigent dans tous les cas d'échec.
 
 Ce sont toutes des couches tower — `.layer(...)`-les sur un routeur ou un
 sous-routeur.
