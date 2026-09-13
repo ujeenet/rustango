@@ -66,7 +66,7 @@ MCP est la feature optionnelle `mcp` (désactivée par défaut). Activez-la :
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.44", features = ["mcp"] }
+rustango = { version = "0.57", features = ["mcp"] }
 ```
 
 Elle tire `tenancy` (agents/skills), `sse` (le flux de notifications),

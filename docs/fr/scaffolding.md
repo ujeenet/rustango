@@ -30,7 +30,7 @@ Cela place un binaire `cargo-rustango` sur votre `PATH` ; Cargo l'expose alors c
 
 ### La version du générateur est celle que votre projet obtient
 
-`cargo rustango new` écrit `rustango = "MAJOR.MINOR"` dans le `Cargo.toml` généré, en reprenant **la version du générateur**, et non la plus récente publiée sur crates.io. Installez le générateur 0.58 et vous obtenez un projet 0.58.
+`cargo rustango new` écrit `rustango = "MAJOR.MINOR"` dans le `Cargo.toml` généré, en reprenant **la version du générateur**, et non la plus récente publiée sur crates.io. Quel que soit le générateur que vous installez, c'est la version que votre projet épingle.
 
 C'est presque toujours ce que vous voulez, et c'est pour cela que la commande d'installation ci-dessus n'est pas épinglée : le générateur le plus récent écrit l'épinglage le plus récent, et les deux ne peuvent pas diverger.
 
@@ -199,7 +199,7 @@ Ainsi, `cargo run` démarre le serveur, et `cargo run -- <verb>` exécute les mi
 En quoi les templates diffèrent à l'intérieur de `main.rs` / `urls.rs` :
 
 - **api** — pas d'admin ; `urls::api()` se contente d'agréger vos propres routes.
-- **fullstack** — `urls.rs` expose également `admin_router(pool)` (construit à partir de `admin::Builder::new(pool).build()`) afin que l'admin automatique se monte sur `/admin`.
+- **fullstack** — le même `urls.rs`, plus la fonctionnalité admin compilée dedans. L'admin n'est **pas** câblé pour vous : rien de ce qui est généré ne l'appellerait, donc le générateur n'émet aucun `admin_router`. Ajoutez-en un vous-même et imbriquez-le — [Prise en main, étape 11](getting-started.md#étape-11--activer-ladministration-automatique) l'explique en détail. Prenez un `rustango::sql::Pool` pour que l'assistant ne nomme aucun pilote.
 - **tenant** — `main.rs` ajoute `.tenancy()`, servant la console opérateur sur le domaine apex et chaque tenant sous son propre sous-domaine. Les propres tables du framework sont générées dans un dossier **`system/migrations/`** à partir des modèles compilés (à la manière de Django) lors du premier `cargo run -- migrate` — aucun JSON de bootstrap livré à la main, donc le tout premier migrate fonctionne sans configuration supplémentaire.
 
 ### Configuration en couches
