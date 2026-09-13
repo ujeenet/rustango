@@ -118,6 +118,28 @@ A test asserting "every verb in `--help` has a dispatcher arm" reported 27 missi
 
 **So:** when a guard needs its third exception, stop and ask what it is really measuring. Record the deletion and the reason in the file where it lived, or the next person derives it, fights it, and deletes it again.
 
+### A gated test file needs one ungated test that reports the gate
+
+`cargo test --test tenancy_help_matches_behaviour` printed `ok. 0 passed`. Every test in the file was behind `#[cfg(feature = ...)]`, so on a build without those features nothing ran and the result still read green — on the file you run precisely when you are editing the strings it guards.
+
+**The obvious fix is wrong here.** A `#[cfg(not(...))] #[test] fn { panic!() }` stub looks right until you read the feature graph: `default = ["postgres", "batteries"]` and `batteries` includes `manage` but **not** `tenancy`. So a plain `cargo test -p rustango` — the most common command in the repo — has one and not the other, and the stub would fail on a configuration that is entirely fine. A guard that cries wolf on the default invocation gets deleted, and rightly.
+
+Nor would CI have caught it: `feature_combos` runs `cargo check`, not `cargo test`. The breakage lands on people, not on pipelines.
+
+What works is an always-compiled test that *reports* what ran:
+
+```
+sqlite                      → running 1 test  … 0 assertion(s) active
+sqlite,tenancy,manage       → running 2 tests … 1 assertion(s) active
+sqlite,tenancy,manage,mcp   → running 3 tests … 2 assertion(s) active
+```
+
+The count and the test name are visible without `--nocapture`, which is what a reader actually sees.
+
+**So:** fail only when a feature set is genuinely *required*. When it is merely *sufficient* — the usual case in a crate with real feature combinations, and the distinction is usually unexamined — report instead.
+
+This is the same shape as the previous rule: **make the degraded case say so, rather than make the degraded case impossible.** Impossible is usually too strong for the real feature matrix.
+
 ### Prefer a gate that can't drift over one that checks for drift
 
 A test comparing two representations is weaker than a design with only one representation. `docs_contract.rs` exists because prose and code are genuinely separate artifacts — but where a single source can serve both, that beats any checker.
