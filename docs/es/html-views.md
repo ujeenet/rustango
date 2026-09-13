@@ -176,18 +176,32 @@ let app = CreateView::for_model(Post::SCHEMA)
 ```
 
 La plantilla del formulario (`posts_form.html`) se comparte con UpdateView. `is_update`
-distingue las dos, y `errors` transporta de vuelta cualquier mensaje de validación:
+distingue las dos, y **`form`** transporta tanto los campos como cualquier mensaje de
+validación:
 
 ```html
 <form method="post">
-  <input name="title" value="{{ object.title | default(value='') }}">
-  <textarea name="body">{{ object.body | default(value='') }}</textarea>
-  {% for field, msgs in errors %}
-    <p class="error">{{ field }}: {{ msgs | join(sep=', ') }}</p>
+  {{ csrf_input | safe }}
+  {% for field in form.fields %}
+    <label for="{{ field.name }}">{{ field.name }}</label>
+    <input id="{{ field.name }}" name="{{ field.name }}" value="{{ field.value }}"
+           {% if field.required %}required{% endif %}
+           {% if field.max_length %}maxlength="{{ field.max_length }}"{% endif %}>
+    {% if form.errors[field.name] %}
+      <p class="error">{{ form.errors[field.name] }}</p>
+    {% endif %}
   {% endfor %}
   <button>{% if is_update %}Save{% else %}Create{% endif %}</button>
 </form>
 ```
+
+Aquí hay dos cosas fáciles de equivocar. `form.errors` asocia un nombre de campo a **una
+cadena**, no a una lista — aplicarle `join` es un error. Y no existe una variable `errors` de
+nivel superior; iterar sobre una es un fallo de renderizado de Tera, así que la página
+devuelve 500 en lugar de mostrar el mensaje.
+
+`{{ csrf_input | safe }}` necesita el filtro: Tera autoescapa los `.html`, así que sin él el
+token se renderiza como texto y todo POST es rechazado.
 
 **Validación.** Las reglas del esquema (tipo, `max_length`, NOT NULL…) se aplican
 automáticamente. Añade las tuyas con un validador de closure — ante un `Err`, el formulario
@@ -255,12 +269,22 @@ ellas:
 |---|---|
 | `ListView` | `object_list` (las filas de la página), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
 | `DetailView` | `object` (la fila) |
-| `CreateView` / `UpdateView` | `object` (vacío al crear, rellenado al actualizar), `is_update` (bool), `errors`, `values` |
+| `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **sin `object`** |
+| `UpdateView` | `form` (`.fields`, `.errors`), `object` (la fila), `pk`, `is_create` (false), `is_update` (true) |
 | `DeleteView` | `object` (la fila a confirmar) |
 
 Las filas se exponen como mapas planos indexados por nombre de columna (`{{ post.title }}`), con
 el `NULL` de SQL renderizado como `null`. Usa `.context_object_name("posts" / "post")` para
 añadir un alias más amigable junto a `object_list` / `object`.
+
+Cada entrada de `form.fields` lleva `name`, `column`, `ty`, `required`, `max_length` y
+`value`. `form.errors` está indexado por nombre de campo y contiene un mensaje por campo, no
+una lista. Con la característica `csrf` activada, cada vista estampa además `csrf_token` y
+`csrf_input`.
+
+`CreateView` no estampa ningún `object`, así que `{{ object.title }}` en un formulario de
+creación queda indefinido en lugar de vacío — usa `{{ field.value }}` de `form.fields`, que
+está poblado en ambos casos.
 
 ---
 
