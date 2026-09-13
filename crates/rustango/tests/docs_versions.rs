@@ -249,6 +249,43 @@ fn published_docs_show_the_version_that_is_shipping() {
     );
 }
 
+/// `docs/index.toml`'s `version` is the label the site publishes these
+/// pages **under**: they are served at `/<version>/<section>/<slug>`.
+///
+/// It is checked separately from the prose above because it is a
+/// different kind of claim and a different shape — `major.minor`, no
+/// patch, and the whole file is one line of TOML rather than a
+/// transcript. It had drifted to `0.53` while 0.57.0 was shipping, which
+/// does not read as wrong anywhere: the pages are correct, the nav is
+/// correct, and the current documentation is quietly served under a
+/// four-release-old URL.
+#[test]
+fn the_docs_manifest_publishes_under_the_shipping_version() {
+    let root = repo_root();
+    let toml = std::fs::read_to_string(root.join("docs/index.toml")).expect("read docs/index.toml");
+
+    let declared = toml
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("version"))
+        .and_then(|rest| rest.trim().strip_prefix('='))
+        .map(|rest| rest.trim().trim_matches('"').to_owned())
+        .expect("docs/index.toml declares a `version`");
+
+    // The manifest labels a doc *series*, not a point release, so it
+    // carries major.minor: 0.57.1 still publishes under /0.57.
+    let expected: String = CURRENT.rsplit_once('.').map_or_else(
+        || CURRENT.to_owned(),
+        |(major_minor, _patch)| major_minor.to_owned(),
+    );
+
+    assert_eq!(
+        declared, expected,
+        "docs/index.toml publishes under `/{declared}/` but this build ships {CURRENT}. \
+         Set it to \"{expected}\" — otherwise the current documentation is served at a \
+         stale URL and no page looks wrong."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{claimed_versions, names_rustango, versions_in};

@@ -5,7 +5,12 @@
 # becomes one documentation page, rendered in the order listed here. Files
 # not listed below are not published (e.g. internal audits / inventories).
 
-version = "0.53"
+# The version label the site publishes these pages under: they are served
+# at `/<version>/<section>/<slug>`. `RUSTANGO_DOCS_VERSION` overrides it at
+# deploy time, and "dev" is the fallback if neither is set — so a stale
+# value here silently publishes current docs under an old URL.
+# Guarded by `docs_versions`; keep it at the shipping major.minor.
+version = "0.57"
 
 [[section]]
 title = "Getting started"
