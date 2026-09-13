@@ -63,18 +63,6 @@ const ALLOWED: &[(&str, &str)] = &[
         "src/tenancy/manage/migrate_storage.rs",
         "same `after_connect` search_path scoping",
     ),
-    // These two emit *template text* into generated user projects — the
-    // match is inside a `format!` string literal, not a pool this crate
-    // opens. That the generated code itself uses `PgPool::connect` is a
-    // real question, but it is the scaffolder's to answer.
-    (
-        "src/tenancy/manage/scaffold.rs",
-        "emits template text for generated projects, not a pool",
-    ),
-    (
-        "src/migrate/scaffold.rs",
-        "emits template text for generated projects, not a pool",
-    ),
 ];
 
 fn repo_root() -> PathBuf {

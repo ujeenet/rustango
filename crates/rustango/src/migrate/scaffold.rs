@@ -567,8 +567,6 @@ pub const SINGLE_TENANT_MANAGE_BIN: &str =
 //! defined in `rustango::migrate::manage`; this binary just hands it
 //! the pool and argv.
 
-use rustango::sql::sqlx::PgPool;
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pull your models into this binary so `inventory` registers
@@ -580,7 +578,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   #[allow(unused_imports)]
     //   use super::models::*;
 
-    let pool = PgPool::connect(&std::env::var(\"DATABASE_URL\")?).await?;
+    // `Pool::connect_postgres`, not `PgPool::connect`: the framework's
+    // constructor applies the pool options your settings configure.
+    let pool = rustango::sql::Pool::connect_postgres(&std::env::var(\"DATABASE_URL\")?).await?;
     let dir: &std::path::Path = \"./migrations\".as_ref();
     rustango::migrate::manage::run(&pool, dir, std::env::args().skip(1)).await?;
     Ok(())
