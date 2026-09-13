@@ -31,11 +31,6 @@ use std::pin::Pin;
 
 use axum::Router;
 
-// v0.38 — `PgPool` only used in the non-tenancy `runserver` path
-// (which stays PG-only by signature until v0.39); gated accordingly.
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::PgPool;
-
 /// Boxed seed-hook future. Keeps the public method signature simple
 /// while accepting any `async fn(&Pool) -> Result<…>` closure.
 type SeedFut<'a> =
@@ -638,13 +633,10 @@ impl Cli {
             let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
             #[cfg(feature = "sqlite")]
             if scheme == "sqlite" {
-                let opts = crate::sql::sqlite_connect_options(&url)?;
                 let pool = if no_db_verb {
-                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new().connect_lazy_with(opts)
+                    crate::sql::Pool::connect_sqlite_lazy(&url)?
                 } else {
-                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
-                        .connect_with(opts)
-                        .await?
+                    crate::sql::Pool::connect_sqlite(&url).await?
                 };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(pool);
                 crate::tenancy::manage::run_with_init(
@@ -660,9 +652,9 @@ impl Cli {
             #[cfg(feature = "mysql")]
             if scheme == "mysql" {
                 let pool = if no_db_verb {
-                    crate::sql::sqlx::MySqlPool::connect_lazy(&url)?
+                    crate::sql::Pool::connect_mysql_lazy(&url)?
                 } else {
-                    crate::sql::sqlx::MySqlPool::connect(&url).await?
+                    crate::sql::Pool::connect_mysql(&url).await?
                 };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(pool);
                 crate::tenancy::manage::run_with_init(
@@ -687,9 +679,9 @@ impl Cli {
                 .into());
             }
             let pool = if no_db_verb {
-                PgPool::connect_lazy(&url)?
+                crate::sql::Pool::connect_postgres_lazy(&url)?
             } else {
-                PgPool::connect(&url).await?
+                crate::sql::Pool::connect_postgres(&url).await?
             };
             let pools = crate::tenancy::TenantPools::new(pool);
             crate::tenancy::manage::run_with_init(
@@ -711,13 +703,10 @@ impl Cli {
             // the tri-dialect `_pool` family.
             #[cfg(feature = "sqlite")]
             {
-                let opts = crate::sql::sqlite_connect_options(&url)?;
                 let p = if no_db_verb {
-                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new().connect_lazy_with(opts)
+                    crate::sql::Pool::connect_sqlite_lazy(&url)?
                 } else {
-                    crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
-                        .connect_with(opts)
-                        .await?
+                    crate::sql::Pool::connect_sqlite(&url).await?
                 };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::Sqlite>::new(p);
                 let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
@@ -734,9 +723,9 @@ impl Cli {
             #[cfg(all(not(feature = "sqlite"), feature = "mysql"))]
             {
                 let p = if no_db_verb {
-                    crate::sql::sqlx::MySqlPool::connect_lazy(&url)?
+                    crate::sql::Pool::connect_mysql_lazy(&url)?
                 } else {
-                    crate::sql::sqlx::MySqlPool::connect(&url).await?
+                    crate::sql::Pool::connect_mysql(&url).await?
                 };
                 let pools = crate::tenancy::TenantPools::<crate::sql::sqlx::MySql>::new(p);
                 let init_fn: crate::tenancy::manage::InitTenancyFn = crate::tenancy::init_tenancy;
@@ -901,7 +890,7 @@ impl Cli {
                 .await?;
                 return Ok(());
             }
-            let pool = PgPool::connect(&url).await?;
+            let pool = crate::sql::Pool::connect_postgres(&url).await?;
             let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
             if let Some(seed) = self.seed {
                 seed(&crate::sql::Pool::from(pool.clone()))

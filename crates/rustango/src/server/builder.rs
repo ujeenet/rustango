@@ -9,8 +9,6 @@ use sqlx::Database;
 use tower::ServiceExt as _;
 
 use crate::extractors::TenantContext;
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::PgPool;
 use crate::tenancy::{
     admin::TenantAdminBuilder, operator_console, ChainResolver, DefaultTenantDb, HeaderResolver,
     RegisteredHostResolver, SubdomainResolver, TenantPools,
@@ -88,7 +86,7 @@ impl Builder<sqlx::Postgres> {
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         let registry_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://rustango:rustango@localhost:5432/rustango_test".into());
-        let registry = PgPool::connect(&registry_url).await?;
+        let registry = crate::sql::Pool::connect_postgres(&registry_url).await?;
         Ok(Self::from_pool(registry, registry_url, apex))
     }
 }
