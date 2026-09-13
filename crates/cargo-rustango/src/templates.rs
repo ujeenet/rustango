@@ -156,6 +156,11 @@ pub fn docker_compose(name: &str, backend: Backend) -> String {
       POSTGRES_USER: rustango
       POSTGRES_PASSWORD: rustango
       POSTGRES_DB: {name}_dev
+    # Without this the data lives in the container's writable layer, so
+    # `docker compose down` deletes your development database and `up`
+    # hands back an empty one, with nothing said either way (#1309).
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
@@ -174,6 +179,11 @@ pub fn docker_compose(name: &str, backend: Backend) -> String {
       MYSQL_DATABASE: {name}_dev
       MYSQL_USER: rustango
       MYSQL_PASSWORD: rustango
+    # Without this the data lives in the container's writable layer, so
+    # `docker compose down` deletes your development database and `up`
+    # hands back an empty one, with nothing said either way (#1309).
+    volumes:
+      - mysql-data:/var/lib/mysql
     ports:
       - "3306:3306"
     healthcheck:
@@ -186,6 +196,13 @@ pub fn docker_compose(name: &str, backend: Backend) -> String {
         ),
         // A file in the bind mount — nothing to run.
         Backend::Sqlite => String::new(),
+    };
+    // Declared only when the matching service exists — compose errors on a
+    // volume that nothing mounts, and SQLite has no service at all.
+    let db_volume = match backend {
+        Backend::Postgres => "  postgres-data:\n",
+        Backend::Mysql => "  mysql-data:\n",
+        Backend::Sqlite => "",
     };
     let (skip_hint, depends_on) = match backend.service() {
         Some(svc) => (
@@ -225,7 +242,7 @@ pub fn docker_compose(name: &str, backend: Backend) -> String {
       - "8080:8080"
 
 volumes:
-  cargo-target:
+{db_volume}  cargo-target:
   cargo-registry:
   cargo-git:
 "#
