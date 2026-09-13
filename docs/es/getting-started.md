@@ -574,10 +574,14 @@ pub struct PostSerializer {
     #[serializer(source = "body")]                      // rename in API
     pub content: String,
 
+    pub author_id: i64,                                 // writable: NOT NULL with no default
+
     #[serializer(read_only)]                            // include in GET, ignore in POST/PUT
     pub published_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 ```
+
+Una vez que hay un serializer conectado, **sus campos son toda la superficie de escritura**: cualquier cosa que un cliente envíe y que no esté listada aquí se descarta antes del `INSERT`. Por eso aparece `author_id`. En el modelo es `NOT NULL` y no tiene valor por defecto, así que omitirlo hace que toda creación falle por la restricción not-null. `status` puede quedarse fuera porque el modelo le da `default = "'draft'"`.
 
 El tipo de cada campo del serializer refleja el campo correspondiente del modelo, así que `id` y `published_at` conservan su envoltorio `Auto<…>` del modelo (un `Auto<i64>` sigue serializándose a un entero JSON plano). Luego registra el módulo añadiendo `mod post_serializer;` junto a las otras declaraciones `mod` en `src/main.rs`.
 
@@ -687,11 +691,17 @@ Edita `tests/post_smoke.rs`. Las pruebas de integración viven en una crate sepa
 ```rust
 use rustango::test_client::TestClient;
 use myblog::post_view_set::PostViewSet;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    // Una prueba en `tests/` es una crate aparte y nunca ejecuta `main`, así
+    // que nada ha cargado `.env` por ella. Sin esta línea `DATABASE_URL` no
+    // está definida y ambas pruebas entran en pánico antes de llegar a la
+    // base de datos.
+    let _ = dotenvy::dotenv();
+
+    let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     PostViewSet::router("/api/posts", pool)
 }
 
@@ -708,10 +718,12 @@ async fn list_posts_returns_200() {
 async fn create_post_returns_the_new_object() {
     let client = TestClient::new(app().await);
     let response = client.post("/api/posts")
+        // Envía los campos del serializer. `status` se omite porque el
+        // serializer no lo lista, así que se descartaría igualmente —
+        // el `default = "'draft'"` del modelo lo rellena.
         .json(&json!({
             "title": "Test",
-            "body":  "x",
-            "status": "draft",
+            "content": "x",
             "author_id": 1,
         }))
         .send().await;
@@ -720,6 +732,14 @@ async fn create_post_returns_the_new_object() {
     assert_eq!(v["title"], "Test");
 }
 ```
+
+En ese fragmento hay tres cosas fáciles de equivocar, y cada una produce un fallo distinto:
+
+- **`dotenvy::dotenv()`** — si lo omites fallan *ambas* pruebas, antes de que se haga petición alguna.
+- **`content`, no `body`** — aquí el serializer acepta cualquiera de los dos, ya que `source = "body"` mantiene el nombre del modelo funcionando en la entrada, pero `content` es el nombre que tu API publica realmente.
+- **`author_id`** — si lo omites falla solo la prueba de creación, con una violación de not-null desde la base de datos. La prueba de listado sigue pasando, porque una tabla vacía es una página vacía válida.
+
+`Pool` es el pool multi-backend, y `router` acepta el pool de cualquier backend, así que este archivo compila sin cambios en PostgreSQL, MySQL y SQLite.
 
 > **Atención:** las pruebas de integración en `tests/` solo pueden hacer `use myblog::…` si la crate expone un target de librería. Un andamiaje nuevo es solo binario (`src/main.rs`, sin `src/lib.rs`), así que añade un `src/lib.rs` de una línea que reexporte los módulos que quieras probar — `pub mod models; pub mod post_view_set; pub mod urls;` — y conserva las líneas `mod …;` correspondientes en `src/main.rs`. (Si prefieres no añadir un target de librería, construye el router completamente en línea dentro de la prueba, tal como `make:test` genera su `app()`.)
 

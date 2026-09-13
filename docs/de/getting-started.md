@@ -575,10 +575,14 @@ pub struct PostSerializer {
     #[serializer(source = "body")]                      // rename in API
     pub content: String,
 
+    pub author_id: i64,                                 // writable: NOT NULL with no default
+
     #[serializer(read_only)]                            // include in GET, ignore in POST/PUT
     pub published_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 ```
+
+Sobald ein Serializer angehängt ist, **bilden seine Felder die gesamte Schreiboberfläche**: Alles, was ein Client postet und hier nicht aufgeführt ist, wird vor dem `INSERT` verworfen. Deshalb taucht `author_id` hier auf. Im Modell ist es `NOT NULL` ohne Default — lässt du es weg, scheitert jedes Create an der Not-Null-Beschränkung. `status` darf draußen bleiben, weil das Modell ihm `default = "'draft'"` mitgibt.
 
 Der Typ jedes Serializer-Felds spiegelt das passende Modellfeld wider, sodass `id` und `published_at` ihren `Auto<…>`-Wrapper vom Modell behalten (ein `Auto<i64>` serialisiert weiterhin zu einem schlichten JSON-Integer). Registriere dann das Modul, indem du `mod post_serializer;` zu den anderen `mod`-Deklarationen in `src/main.rs` hinzufügst.
 
@@ -688,11 +692,17 @@ Bearbeite `tests/post_smoke.rs`. Integrationstests leben in einer separaten Crat
 ```rust
 use rustango::test_client::TestClient;
 use myblog::post_view_set::PostViewSet;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    // Ein Test in `tests/` ist eine separate Crate und führt niemals `main`
+    // aus, also hat nichts `.env` für ihn geladen. Ohne diese Zeile ist
+    // `DATABASE_URL` nicht gesetzt und beide Tests panicken, bevor sie die
+    // Datenbank erreichen.
+    let _ = dotenvy::dotenv();
+
+    let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     PostViewSet::router("/api/posts", pool)
 }
 
@@ -709,10 +719,12 @@ async fn list_posts_returns_200() {
 async fn create_post_returns_the_new_object() {
     let client = TestClient::new(app().await);
     let response = client.post("/api/posts")
+        // Poste die Felder des Serializers. `status` wird weggelassen, weil der
+        // Serializer es nicht aufführt und es ohnehin verworfen würde —
+        // das `default = "'draft'"` des Modells trägt es ein.
         .json(&json!({
             "title": "Test",
-            "body":  "x",
-            "status": "draft",
+            "content": "x",
             "author_id": 1,
         }))
         .send().await;
@@ -721,6 +733,14 @@ async fn create_post_returns_the_new_object() {
     assert_eq!(v["title"], "Test");
 }
 ```
+
+Drei Dinge in diesem Ausschnitt macht man leicht falsch, und jedes erzeugt einen anderen Fehlschlag:
+
+- **`dotenvy::dotenv()`** — lässt du es weg, scheitern *beide* Tests, noch bevor eine einzige Anfrage gestellt wird.
+- **`content`, nicht `body`** — der Serializer akzeptiert hier beides, da `source = "body"` den Modellnamen bei der Eingabe weiterhin funktionieren lässt, aber `content` ist der Name, den deine API tatsächlich veröffentlicht.
+- **`author_id`** — lässt du es weg, scheitert allein der Create-Test, mit einer Not-Null-Verletzung aus der Datenbank. Der List-Test geht weiterhin durch, weil eine leere Tabelle eine gültige leere Seite ist.
+
+`Pool` ist der Multi-Backend-Pool, und `router` nimmt den Pool jedes Backends, sodass diese Datei auf PostgreSQL, MySQL und SQLite unverändert kompiliert.
 
 > **Achtung:** Integrationstests in `tests/` können nur dann `use myblog::…`, wenn die Crate ein Library-Target bereitstellt. Ein frisches Gerüst ist reines Binary (`src/main.rs`, kein `src/lib.rs`), also füge eine einzeilige `src/lib.rs` hinzu, die die Module re-exportiert, die du testen willst — `pub mod models; pub mod post_view_set; pub mod urls;` — und behalte die passenden `mod …;`-Zeilen in `src/main.rs`. (Wenn du lieber kein Library-Target hinzufügen möchtest, baue den Router stattdessen vollständig inline im Test, so wie `make:test` sein `app()` scaffoldet.)
 

@@ -576,10 +576,14 @@ pub struct PostSerializer {
     #[serializer(source = "body")]                      // rename in API
     pub content: String,
 
+    pub author_id: i64,                                 // writable: NOT NULL with no default
+
     #[serializer(read_only)]                            // include in GET, ignore in POST/PUT
     pub published_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 ```
+
+Dès qu'un serializer est attaché, **ses champs constituent toute la surface d'écriture** : tout ce qu'un client envoie et qui n'est pas listé ici est écarté avant l'`INSERT`. C'est pourquoi `author_id` y figure. Il est `NOT NULL` et sans valeur par défaut sur le modèle, donc l'omettre fait échouer toute création sur la contrainte NOT NULL. `status` peut rester en dehors, car le modèle lui donne `default = "'draft'"`.
 
 Le type de chaque champ du serializer reflète le champ correspondant du modèle, donc `id` et `published_at` conservent leur enveloppe `Auto<…>` héritée du modèle (un `Auto<i64>` se sérialise toujours en un simple entier JSON). Enregistrez ensuite le module en ajoutant `mod post_serializer;` avec les autres déclarations `mod` dans `src/main.rs`.
 
@@ -693,11 +697,17 @@ Modifiez `tests/post_smoke.rs`. Les tests d'intégration vivent dans une crate s
 ```rust
 use rustango::test_client::TestClient;
 use myblog::post_view_set::PostViewSet;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    // Un test dans `tests/` est une crate séparée et n'exécute jamais
+    // `main`, donc rien n'a chargé `.env` pour lui. Sans cette ligne,
+    // `DATABASE_URL` n'est pas définie et les deux tests paniquent avant
+    // d'atteindre la base de données.
+    let _ = dotenvy::dotenv();
+
+    let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     PostViewSet::router("/api/posts", pool)
 }
 
@@ -714,10 +724,12 @@ async fn list_posts_returns_200() {
 async fn create_post_returns_the_new_object() {
     let client = TestClient::new(app().await);
     let response = client.post("/api/posts")
+        // Envoyez les champs du serializer. `status` est omis parce que le
+        // serializer ne le liste pas : il serait de toute façon écarté —
+        // c'est le `default = "'draft'"` du modèle qui le remplit.
         .json(&json!({
             "title": "Test",
-            "body":  "x",
-            "status": "draft",
+            "content": "x",
             "author_id": 1,
         }))
         .send().await;
@@ -726,6 +738,14 @@ async fn create_post_returns_the_new_object() {
     assert_eq!(v["title"], "Test");
 }
 ```
+
+Trois détails de cet extrait sont faciles à rater, et chacun produit un échec différent :
+
+- **`dotenvy::dotenv()`** — si vous l'omettez, les *deux* tests échouent, avant même qu'une requête ne soit émise.
+- **`content`, et non `body`** — le serializer accepte ici l'un ou l'autre, puisque `source = "body"` laisse le nom du modèle continuer de fonctionner en entrée, mais `content` est le nom que votre API publie réellement.
+- **`author_id`** — si vous l'omettez, seul le test de création échoue, avec une violation de contrainte NOT NULL remontée par la base de données. Le test de liste passe toujours, car une table vide est une page vide valide.
+
+`Pool` est le pool multi-backend, et `router` accepte le pool de n'importe quel backend : ce fichier compile donc tel quel sur PostgreSQL, MySQL et SQLite.
 
 > **Attention :** les tests d'intégration dans `tests/` ne peuvent faire `use myblog::…` que si la crate expose une cible de bibliothèque. Un squelette neuf n'est composé que d'un binaire (`src/main.rs`, sans `src/lib.rs`), donc ajoutez une simple ligne `src/lib.rs` qui réexporte les modules que vous voulez tester — `pub mod models; pub mod post_view_set; pub mod urls;` — et conservez les lignes `mod …;` correspondantes dans `src/main.rs`. (Si vous préférez ne pas ajouter de cible de bibliothèque, construisez plutôt le routeur entièrement en ligne dans le test, de la façon dont `make:test` génère sa fonction `app()`.)
 
