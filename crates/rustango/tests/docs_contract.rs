@@ -82,6 +82,10 @@ const UNBACKED: &[(&str, usize)] = &[
     ("database-tuning.md", 0),
     ("glossary.md", 0),
     ("migrations.md", 0),
+    // Added when #1391 published the page. Pure prose, links and a table —
+    // a zero row rather than a carve-out for fence-less pages, so that a
+    // Rust example added here later is still caught by the budget.
+    ("release-notes.md", 0),
 ];
 
 fn repo_root() -> PathBuf {
