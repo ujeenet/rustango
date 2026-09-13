@@ -1326,6 +1326,50 @@ fn serializer_input_renamed_form(
     Some(out)
 }
 
+/// The name the API publishes for a model field, when a `source` rename
+/// gave it a different one.
+///
+/// The inverse of [`serializer_input_renamed_form`]. Parse errors are
+/// raised against model fields, because that is what the write loop
+/// walks — so without this a `source = "body"` rename tells the client to
+/// supply `body`, a column their schema never mentions (#1386).
+fn serializer_public_field_name(state: &ViewSetState, model_field: &str) -> Option<&'static str> {
+    let bridge = state.vs.serializer.as_ref()?;
+    bridge
+        .writable_field_names()
+        .iter()
+        .zip(bridge.writable_model_fields().iter())
+        .find(|(name, col)| **col == model_field && *name != *col)
+        .map(|(name, _)| *name)
+}
+
+/// Re-render a form error against the names the API publishes.
+///
+/// Only the field name moves; the wording is untouched, so a client that
+/// was matching on the message still matches.
+fn public_form_error(state: &ViewSetState, e: FormError) -> FormError {
+    match e {
+        FormError::Missing { field } => FormError::Missing {
+            field: serializer_public_field_name(state, &field).map_or(field, ToOwned::to_owned),
+        },
+        FormError::Parse {
+            field,
+            ty,
+            value,
+            detail,
+        } => FormError::Parse {
+            field: serializer_public_field_name(state, &field).map_or(field, ToOwned::to_owned),
+            ty,
+            value,
+            detail,
+        },
+        // Names a primary key, which no serializer renames. Matched by
+        // name rather than `_` so a new variant has to be considered
+        // here instead of silently leaking a model column.
+        other @ FormError::UnsupportedPk { .. } => other,
+    }
+}
+
 fn serializer_write_prep(
     state: &ViewSetState,
     json: Option<&Value>,
@@ -2265,7 +2309,15 @@ async fn create_one(
     // model column) so the client can POST the serializer field name.
     let renamed = serializer_input_renamed_form(state, form);
     let form = renamed.as_ref().unwrap_or(form);
-    let collected = or_400!(collect_values(state.vs.schema, form, &all_skip));
+    let collected = match collect_values(state.vs.schema, form, &all_skip) {
+        Ok(v) => v,
+        Err(e) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                &public_form_error(state, e).to_string(),
+            )
+        }
+    };
     let (columns, values): (Vec<_>, Vec<_>) = collected.into_iter().unzip();
     let fields = state.effective_fields();
     match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields).await {
@@ -2311,6 +2363,7 @@ async fn create_many(
         let collected = match collect_values(state.vs.schema, row, &all_skip) {
             Ok(v) => v,
             Err(e) => {
+                let e = public_form_error(state, e);
                 return json_error(StatusCode::BAD_REQUEST, &format!("bulk entry {i}: {e}"));
             }
         };
@@ -2415,7 +2468,12 @@ async fn update_inner(
                 value: v.into(),
             }),
             Err(FormError::Missing { .. }) if partial => continue,
-            Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+            Err(e) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    &public_form_error(&state, e).to_string(),
+                )
+            }
         }
     }
 
