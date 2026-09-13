@@ -70,6 +70,30 @@ A source comment is not the code. When a doc and an inline comment agree and bot
 
 **So:** when a doc claim is wrong, grep the source comments for the same claim before you edit. If they match, fix both, and say so in the commit — otherwise the doc rots back.
 
+### "The help says X" is false under most builds
+
+Help text, error strings and CLI output are often inside `#[cfg(...)]` blocks. A claim about what a command prints is incomplete until it names the feature set that renders the line.
+
+The `create-user-key` help string lives in a `#[cfg(feature = "mcp")]` block; a test pinning it failed as an unconditional assertion because without that feature the line simply isn't emitted.
+
+**So:** when a finding quotes CLI output, record the feature set it was observed under. `cargo run -- --help` on a default build and on `--no-default-features --features sqlite,tenancy` are different documents.
+
+## Writing the guard
+
+These rules are about the tests, not the docs. They cost more to learn than to read.
+
+### A guard that needs exceptions is measuring the wrong thing
+
+If making a check pass requires a growing allowlist, the check has stopped asserting the property and started asserting its own workarounds. Delete it.
+
+A test asserting "every verb in `--help` has a dispatcher arm" reported 27 missing verbs — including `cargo`, `tenant`, `a` and `name` — because the help block mixes verb entries, wrapped prose and `cargo run --` examples at one indent level. No amount of parsing fixes that; the rendered text isn't structured data. The honest fix is making the help block *data* the dispatcher and the printer share, so the two cannot disagree. That's a refactor, not a test.
+
+**So:** when a guard needs its third exception, stop and ask what it is really measuring. Record the deletion and the reason in the file where it lived, or the next person derives it, fights it, and deletes it again.
+
+### Prefer a gate that can't drift over one that checks for drift
+
+A test comparing two representations is weaker than a design with only one representation. `docs_contract.rs` exists because prose and code are genuinely separate artifacts — but where a single source can serve both, that beats any checker.
+
 ## Severity taxonomy
 
 Rank by what it costs a reader, not by how wrong it feels:
