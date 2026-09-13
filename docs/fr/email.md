@@ -71,7 +71,7 @@ tenez un **`BoxedMailer`** (`Arc<dyn Mailer>`) :
 | `NullMailer` | `email` | désactive complètement l'e-mail |
 
 Construisez-le à partir de la configuration afin qu'il diffère selon l'environnement (`ConsoleMailer`
-en local, `SmtpMailer` en prod) via `email::from_settings(&settings.email)`.
+en local, `SmtpMailer` en prod) via `email::from_settings(&settings.mail)`.
 
 ---
 

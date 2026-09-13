@@ -221,7 +221,7 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-`csrf::layer()` construit la couche avec des valeurs par défaut raisonnables ; `csrf::with_config(CsrfConfig)` vous permet de remplacer les noms de cookie/en-tête et le flag `Secure`. Dans les templates, `{{ csrf_token }}` vous donne le jeton brut et `{{ csrf_input }}` vous donne un `<input>` caché prêt à l'emploi — déposez-en un dans chaque formulaire. Il utilise le motif du cookie à double soumission : sur les méthodes non sûres (POST, PUT, PATCH, DELETE), la couche vérifie l'en-tête `X-CSRF-Token` (ou le champ de formulaire `_csrf`) par rapport au cookie `rustango_csrf` ; une discordance renvoie `403 Forbidden`.
+`csrf::layer()` construit la couche avec `secure: true`, donc le cookie est rejeté en HTTP simple — sur `http://localhost`, utilisez `CsrfConfig::allow_insecure_for_dev()` sans quoi la couche semble ne rien faire. `csrf::with_config(CsrfConfig)` remplace les noms de cookie/en-tête et le flag `Secure`, ainsi que `trusted_origins` — vide par défaut, donc la vérification de l'en-tête Origin est **désactivée** tant que vous n'en ajoutez pas. Dans les templates, `{{ csrf_token }}` vous donne le jeton brut et `{{ csrf_input }}` un `<input>` caché prêt à l'emploi — écrivez-le `{{ csrf_input | safe }}`, car Tera échappe automatiquement les templates `.html` : sans le filtre, la page affiche un `<input …>` littéral visible, le formulaire ne porte aucun champ `_csrf` et chaque POST renvoie 403. Les deux variables ne sont dans le contexte que pour les CBV `template_views`, ou après avoir appelé vous-même `forms::csrf::stamp_into_context` — un handler écrit à la main n'a ni l'une ni l'autre. Il utilise le motif du cookie à double soumission : sur les méthodes non sûres (POST, PUT, PATCH, DELETE), la couche vérifie l'en-tête `X-CSRF-Token` (ou le champ de formulaire `_csrf`) par rapport au cookie `rustango_csrf` ; une discordance renvoie `403 Forbidden`.
 
 **Exempter les endpoints collecteurs.** `CsrfConfig::exempt_prefix("/path")` (répétable) ignore l'application du CSRF pour les méthodes non sûres sur les requêtes dont le chemin commence par le préfixe donné. Ceci concerne les endpoints append-only, sans état d'authentification, atteints via `navigator.sendBeacon` — par exemple un collecteur d'analytics — qui ne peuvent pas définir un en-tête `X-CSRF-Token` et, lorsque la page est servie depuis un cache CDN qui supprime `Set-Cookie`, peuvent ne porter aucun cookie CSRF du tout. Gardez les préfixes étroits et n'exemptez jamais quoi que ce soit qui lit ou écrit un état d'authentification.
 
@@ -233,7 +233,7 @@ L'auto-admin active le CSRF sur chaque mutation par défaut, et il n'y a aucun m
 
 Le XSS (cross-site scripting) survient lorsqu'une entrée utilisateur est rendue en HTML et s'exécute comme du code dans le navigateur de quelqu'un d'autre. La solution est d'échapper toute entrée utilisateur avant qu'elle n'atteigne la page. **Rustango** gère cela de deux façons :
 
-**1. Auto-échappement des templates Tera** — Tera est le moteur de templates de **Rustango** (comme les templates Django ou Blade). Chaque `{{ var }}` est automatiquement échappé en HTML. Utilisez `{{ var | safe }}` pour vous en soustraire — rare, et dangereux, donc ne le faites que pour du HTML auquel vous faites entièrement confiance.
+**1. Auto-échappement des templates Tera** — Tera est le moteur de templates de **Rustango** (comme les templates Django ou Blade). Chaque `{{ var }}` est automatiquement échappé en HTML — mais seulement dans les templates que Tera échappe, c'est-à-dire son ensemble par défaut `.html`, `.htm` et `.xml`. Rustango ne définit aucun `autoescape_suffixes`, donc un template `.txt`, `.j2` ou `.tera` n'est **pas** échappé. Utilisez `{{ var | safe }}` pour vous en soustraire — rare, et dangereux, donc ne le faites que pour du HTML auquel vous faites entièrement confiance.
 
 **2. Fonction d'échappement manuelle** — pour quand vous construisez du HTML dans du code Rust au lieu d'un template :
 
@@ -302,12 +302,17 @@ let backends = vec![
     Arc::new(JwtBackend::new(secret)) as _,         // Authorization: Bearer <jwt>
 ];
 
+// `require_auth` / `require_perm` are `Router::layer` calls: each wraps the
+// routes registered BEFORE it. Chaining them on one router would put /me
+// behind post.add. Gate the permission on an inner sub-router instead.
+let posts = Router::new()
+    .route("/posts/new", post(create_post))
+    .require_perm("post.add", pool.clone());        // inner: needs the codename
+
 let app = Router::new()
     .route("/me", get(profile))
-    .require_auth(backends.clone(), pool.clone())   // 401 if no backend recognizes
-    .route("/posts/new", post(create_post))
-    .require_perm("post.add", pool.clone())         // gate by codename
-    .require_auth(backends, pool);
+    .merge(posts)
+    .require_auth(backends, pool);                  // outer: resolves the user first
 ```
 
 Le middleware essaie chaque backend dans l'ordre. Le premier qui réussit l'emporte ; le premier qui renvoie une erreur dure arrête la chaîne.

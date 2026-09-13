@@ -70,7 +70,7 @@ sostén un **`BoxedMailer`** (`Arc<dyn Mailer>`):
 | `NullMailer` | `email` | deshabilitar el correo por completo |
 
 Constrúyelo a partir de la configuración para que difiera por entorno (`ConsoleMailer`
-en local, `SmtpMailer` en prod) mediante `email::from_settings(&settings.email)`.
+en local, `SmtpMailer` en prod) mediante `email::from_settings(&settings.mail)`.
 
 ---
 

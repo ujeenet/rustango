@@ -56,7 +56,7 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 |---|---|---|
 | `InMemoryCache` | `cache` | Dev, Tests, Einzelprozess (HashMap pro Prozess + TTL) |
 | `RedisCache` | `cache-redis` | Produktion; über Replicas geteilt |
-| `DbCache` | `cache` | Produktion ohne Redis; eine `rustango_cache`-Tabelle |
+| `DatabaseCache` | `cache` | Produktion ohne Redis; eine `rustango_cache`-Tabelle |
 | `NullCache` | `cache` | Caching deaktivieren (jeder Read verfehlt) — praktisch in Tests |
 
 ---
@@ -202,11 +202,13 @@ statt etwas neu zu implementieren, sodass native Primitive (Redis `INCRBY`,
 
 **Atomare Zähler und Sperren.** `Cache::incr` steckt hinter
 [Rate-Limiting](middleware.md) und Konto-Sperren; `Cache::add` (set-if-absent)
-steckt hinter `DistributedLock`. Beide sind atomar bei `RedisCache` (natives
-`INCRBY` / `SET NX`) und bei `InMemoryCache` (das seine Sperre über das
-Read-Modify-Write hält); `DatabaseCache` belässt beide beim nicht-atomaren
-Standard — für einen Prozess in Ordnung, aber greife zu Redis, wenn ein Zähler
-oder eine Sperre über Replikate hinweg exakt sein muss.
+steckt hinter `DistributedLock`. `Cache::add` ist bei allen dreien atomar — `RedisCache`
+(`SET NX`), `InMemoryCache` (das seine Sperre über das Read-Modify-Write hält)
+und `DatabaseCache`, das das Test-and-Set unter Zeilensperren ausführt, sodass
+ein Wettlauf genau einen Gewinner hat. `Cache::incr` ist bei den ersten beiden
+atomar, fällt bei `DatabaseCache` aber auf den nicht-atomaren Standard zurück.
+Ein `DistributedLock` ist also auf allen dreien sicher; ein Zähler, der über
+Replikate hinweg exakt sein muss, will Redis.
 
 Zwei Dinge, die man wissen sollte:
 

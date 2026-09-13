@@ -14,7 +14,7 @@ Modèles d'utilisation de l'ORM **Rustango** au-delà des bases. Si vous venez d
 > **Un terme vous est inconnu ?** Le [glossaire](glossary.md) définit *model*, *queryset*,
 > *pool* et *migration* en langage simple.
 
-Quelques termes Rust reviennent tout au long du document. `&pool` est une référence partagée vers le pool de connexions à la base de données ; vous le passez aux méthodes qui exécutent réellement du SQL. `.await` lance un appel asynchrone et attend le résultat. `Option<T>` est une valeur qui peut être présente (`Some`) ou absente (`None`) — le null de Rust. `Result` représente un succès ou une erreur ; le `?` en fin d'appel provoque un retour anticipé en cas d'erreur. `Auto<i64>` est une clé primaire à incrémentation automatique qui est soit `Set` (chargée depuis la base) soit `Unset` (pas encore insérée).
+Quelques termes Rust reviennent tout au long du document. `&pool` est une référence partagée vers un pool de connexions — il y en a **deux** et cette page utilise les deux. `rustango::sql::Pool` est l'énumération multi-backends que prennent `fetch`, `count` et les writers `_pool`. `sqlx::PgPool` est le pool Postgres spécifique au pilote que prennent la famille `_on` et les exemples de transaction. `sql::Pool` n'a pas de `begin()` ; ses points d'entrée de transaction sont `transaction_pool` et `atomic`. à la base de données ; vous le passez aux méthodes qui exécutent réellement du SQL. `.await` lance un appel asynchrone et attend le résultat. `Option<T>` est une valeur qui peut être présente (`Some`) ou absente (`None`) — le null de Rust. `Result` représente un succès ou une erreur ; le `?` en fin d'appel provoque un retour anticipé en cas d'erreur. `Auto<i64>` est une clé primaire à incrémentation automatique qui est soit `Set` (chargée depuis la base) soit `Unset` (pas encore insérée).
 
 ## Ajouts récents
 
@@ -285,7 +285,7 @@ Appeler `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` sans un `.sele
 | MySQL 8.0.1+ | Prend tout en charge sauf `NO KEY` — cette option retombe sur un simple `FOR UPDATE` (le verrou plus strict). |
 | SQLite | Aucune syntaxe de verrou au niveau ligne. Le writer n'émet aucune clause ; les transactions détiennent un verrou d'écriture implicite pour toute la base de données. Utilisez une autre stratégie pour SQLite (généralement une boucle d'attente active sur la transaction elle-même). |
 
-**Doit s'exécuter à l'intérieur d'une transaction.** `FOR UPDATE` hors transaction est une opération sans effet sur PostgreSQL (la transaction implicite à instruction unique libère le verrou immédiatement) et une erreur sur MySQL. À combiner avec `pool.begin()` (ou `rustango::sql::atomic`).
+**Doit s'exécuter à l'intérieur d'une transaction.** `FOR UPDATE` hors transaction est une opération sans effet sur PostgreSQL (la transaction implicite à instruction unique libère le verrou immédiatement) et une erreur sur MySQL. Sur Postgres, associez-le à `pool.begin()` (un `sqlx::PgPool`) ; pour une transaction indépendante du backend, utilisez `rustango::sql::atomic(&pool, …)` ou `transaction_pool(&pool)`, qui renvoient un `PoolTx` sur lequel faire un `match`.
 
 ### Combinaison de requêtes (union, intersection, différence)
 
@@ -535,12 +535,13 @@ Le bug classique du compteur — récupérer une ligne, incrémenter un champ, s
 
 ```rust
 use rustango::core::F;
+use rustango::sql::UpdaterPool as _;
 
 Post::objects()
     .eq("id", post_id)
     .update()
     .set_expr("view_count", F("view_count") + 1_i64)
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 ```
 
 Tri-dialecte : émet `views = ("views" + $1)` sur PG, ``views = (`views` + ?)`` sur MySQL, identique sur SQLite. L'arithmétique est parenthésée afin que les opérations imbriquées restent non ambiguës : `F("a") + F("b") * 2`.
@@ -570,7 +571,7 @@ La famille `*_expr` — `eq_expr`, `ne_expr`, `lt_expr`, `lte_expr`, `gt_expr`, 
 
 ### Fonctions scalaires — texte, maths, gestion des NULL
 
-`rustango::core::funcs` fournit des builders pour les fonctions SQL les plus utilisées. Les 17 disponibles à ce jour :
+`rustango::core::funcs` fournit des builders pour les fonctions SQL les plus utilisées. 72 builders scalaires. Les plus utilisés, par groupe :
 
 | Groupe | Builders |
 |---|---|
@@ -581,13 +582,14 @@ La famille `*_expr` — `eq_expr`, `ne_expr`, `lt_expr`, `lte_expr`, `gt_expr`, 
 ```rust
 use rustango::core::funcs::{lower, upper, concat, coalesce, trim, abs, round};
 use rustango::core::F;
+use rustango::sql::UpdaterPool as _;
 
 // Normalize on write.
 User::objects()
     .eq("id", id)
     .update()
     .set_expr("email", lower(trim(F("email"))))
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // Build a derived column from two FKs + a literal.
 User::objects()
@@ -596,7 +598,7 @@ User::objects()
         "display_name",
         concat([F("first").into(), " ".into(), F("last").into()]),
     )
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // First non-NULL fallback.
 User::objects()
@@ -605,7 +607,7 @@ User::objects()
         "label",
         coalesce([F("nickname").into(), F("username").into(), "anonymous".into()]),
     )
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // Function on the WHERE rhs.
 User::objects()
@@ -616,7 +618,7 @@ User::objects()
 Player::objects()
     .update()
     .set_expr("score_int", abs(round(F("score") * 100_f64)))
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 ```
 
 ### Comportement tri-dialecte
@@ -664,7 +666,7 @@ Post::objects()
     .eq("id", id)
     .update()
     .set_expr("published_at", now())
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // 2. Extract year / month / weekday into denormalized indexable
 // columns so cohort + day-of-week queries are cheap.
@@ -673,7 +675,7 @@ Signup::objects()
     .set_expr("bucket_year", extract_year(F("created_at")))
     .set_expr("bucket_month", extract_month(F("created_at")))
     .set_expr("weekday", extract_weekday(F("created_at")))
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // 3. Filter on the stored bucket — typed integer comparison, uses
 // the index, portable across all three dialects.
@@ -689,6 +691,7 @@ let friday_signups = Signup::objects()
 // typed literal — works the same on every backend and uses the
 // index on `created_at`:
 use chrono::{Datelike, TimeZone};
+use rustango::sql::UpdaterPool as _;
 let this_year = chrono::Utc::now().year();
 let year_start = chrono::Utc.with_ymd_and_hms(this_year, 1, 1, 0, 0, 0).unwrap();
 
@@ -704,7 +707,7 @@ Order::objects()
     .update()
     .set_expr("day_bucket", trunc_date(F("created_at")))     // DATE column on every backend
     .set_expr("month_bucket", trunc_month(F("created_at")))  // see caveat
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 // `month_bucket` should be `TIMESTAMPTZ` on PG and `VARCHAR(10)` /
 // `TEXT` on MySQL/SQLite — parse client-side when reading if you
 // need a typed `chrono::NaiveDate`.
@@ -740,6 +743,7 @@ Construit un `CASE WHEN … THEN … ELSE … END` SQL avec les builders `case()
 use rustango::core::case::{case, value};
 use rustango::core::{Column as _, F};
 use rustango::core::funcs::lower;
+use rustango::sql::UpdaterPool as _;
 
 // Custom ordering — published posts first, drafts last.
 Post::objects()
@@ -752,7 +756,7 @@ Post::objects()
             .when(Post::status.eq("draft"), 2_i64)
             .default(99_i64),
     )
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 let ordered = Post::objects()
     .order_by(&[("priority", false), ("id", false)])
@@ -768,7 +772,7 @@ Post::objects()
             .when(Post::status.eq("draft"), lower(F("title")))
             .default(F("title")),
     )
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 
 // AND / OR composition in the WHEN predicate.
 let viral = Post::status.eq("published").and(Post::views.gt(1_000_i64));
@@ -781,7 +785,7 @@ Post::objects()
             .when(Post::status.eq("published"), value("live"))
             .default(value("pending")),
     )
-    .execute(&pool).await?;
+    .execute_pool(&pool).await?;
 ```
 
 **Forme du builder :**
@@ -866,7 +870,7 @@ let featured = Author::objects()
 
 ### Quand passer plutôt au SQL brut
 
-Les builders ci-dessus couvrent les cas courants. Pour ce qu'ils n'expriment pas encore — `Cast`, recherche plein texte, opérateurs de chemin JSON, fonctions de hachage, trigonométrie, fonctions de fenêtrage — voir la section [Échappatoire vers le SQL brut](#échappatoire-vers-le-sql-brut) ci-dessous, ou attendez les tickets de suivi qui étendent le même arbre d'expressions.
+Le tableau ci-dessus est une sélection, pas l'ensemble complet. `funcs` propose aussi `cast`, la famille plein texte (`to_tsvector`, `plainto_tsquery`, `websearch_to_tsquery`, `ts_rank`, `ts_headline`), les chemins JSON (`json_path`, `json_path_indexed`, `json_array_length`) et les hachages (`md5`, `sha1`, `sha256`). Les fonctions de fenêtrage forment un module distinct, `rustango::core::window`, documenté plus bas. Les fonctions trigonométriques sont le manque notable — pour celles-ci, et pour tout ce que l'arbre d'expressions n'atteint pas, voyez la section [trappe de secours SQL brut](#échappatoire-vers-le-sql-brut) plus bas.
 
 ---
 
@@ -935,7 +939,7 @@ Post::objects()
 //   FROM "post" GROUP BY <every Post column>
 ```
 
-**Mise en garde sur la projection pure.** `.values(cols)` *seul* (sans annotation d'agrégat) n'est **pas** pris en charge en v0.40 — `compile()` renvoie `QueryError::ValuesRequiresAggregate`. La projection pure en dictionnaires nécessite un chemin d'écriture distinct (c'est un SELECT sans GROUP BY, décodé en `Vec<HashMap>`) et est en file d'attente pour un suivi. Pour l'instant, utilisez le `QuerySet::fetch(...)` typé pour lire des lignes entières.
+**Projection pure.** `.values(cols)` *seul* (sans annotation d'agrégat) renvoie `QueryError::ValuesRequiresAggregate` — ce chemin est réservé au GROUP BY, et une annotation de fenêtre ne le satisfait pas davantage, puisqu'une fenêtre n'agrège pas. La projection pure en dictionnaires **est livrée** : utilisez `.values_dict(...)`, `.values_list(...)` ou `.values_list_flat(...)`, décrits plus haut sous *Sélectionner des colonnes précises*. Le message d'erreur les nomme lui-même.
 
 ### Agrégats conditionnels et statistiques
 
@@ -1099,9 +1103,9 @@ last_value("score")
 
 `first_value` n'a pas ce piège — le début de la frame par défaut coïncide avec le début de la partition, donc la réponse intuitive en découle.
 
-**Mise en garde sur annotate (jusqu'à la livraison du ticket #75) :**
+**Annotate et GROUP BY (le ticket #75 est livré) :**
 
-`annotate()` réside sur le builder d'agrégat qui requiert un `GROUP BY` pour projeter des colonnes scalaires par ligne aux côtés des agrégats. Pour projeter aujourd'hui des résultats de fonction de fenêtrage à côté des colonnes de ligne, listez chaque colonne de ligne que vous voulez renvoyer dans des appels `.group_by(...)` et utilisez `annotate("_a", max("id").into())` comme placeholder sans effet pour maintenir stable l'identité de la ligne. Le ticket #75 (inférence automatique du GROUP BY) livre une forme plus propre.
+Un `annotate()` **uniquement fenêtre** sur `.aggregate()` n'émet désormais aucun `GROUP BY` — les fenêtres sont par ligne, il n'y a donc rien à grouper. Projeter des colonnes de ligne *à côté* d'une fenêtre passe toujours par le builder d'agrégat, d'où le fait que les exemples ci-dessous listent chaque colonne dans `.group_by(...)` et ajoutent `annotate("_a", max("id").into())` comme no-op pour garder l'identité de ligne stable. Cette forme fonctionne toujours. À noter : `.values(cols).annotate(window)` ne fonctionne **pas** — une fenêtre n'agrège pas et renvoie `ValuesRequiresAggregate`.
 
 **Clauses de frame :**
 
@@ -1370,6 +1374,15 @@ Se ramène en interne à `save_partial` — même restriction d'audit, même con
 
 ## Opérations en masse
 
+> **Postgres uniquement.** `bulk_insert` / `bulk_insert_on` et `upsert` /
+> `upsert_on` sont émis sous `#[cfg(feature = "postgres")]` et prennent un
+> `&PgPool` ou un executor Postgres — sur un build MySQL ou SQLite ils n'existent
+> pas. Il n'y a pas d'insertion en masse simple tri-dialecte ; les writers de lot
+> multi-backends sont `bulk_upsert_pool` et `bulk_insert_or_ignore_pool`, tous
+> deux avec `&Pool`. Suivi avec le reste de la scission de nommage dans
+> [#1293](https://github.com/ujeenet/rustango/issues/1293).
+
+
 > **Piège — les opérations en masse sautent les hooks par ligne.** `bulk_insert`, le
 > `.update().execute()` sur un queryset et le `.delete()` s'exécutent comme du SQL basé sur des ensembles : ils ne
 > déclenchent **pas** de signaux, n'écrivent pas le journal d'audit, ne passent pas par la suppression logique, et n'exécutent pas
@@ -1428,6 +1441,18 @@ Post::bulk_upsert_pool(
 
 ## Transactions
 
+> **Ces exemples sont Postgres.** `pool.begin()` est `sqlx::PgPool::begin` —
+> `rustango::sql::Pool` n'a pas de `begin()` du tout. Et les méthodes que vous
+> exécuteriez dans une transaction (`fetch_on`, `save_on`, `delete_on`) sont
+> elles-mêmes `#[cfg(feature = "postgres")]`.
+>
+> Les points d'entrée multi-backends sont `rustango::sql::transaction_pool(&pool)`
+> et `rustango::sql::atomic(&pool, …)`. Tous deux renvoient un `PoolTx` — une
+> énumération sur laquelle vous faites un `match` par backend — plutôt qu'une
+> transaction de pilote : une transaction tri-dialecte s'écrit donc par branche,
+> pas en changeant le type de pool.
+
+
 > **Piège — ne mélangez pas les appels `&pool` à l'intérieur d'une transaction.** Chaque appel
 > entre `pool.begin()` et `commit` doit cibler le handle de la transaction
 > (`&mut *tx`). Un `&pool` / `fetch()` / `save_on(&pool)` égaré emprunte une
@@ -1456,7 +1481,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Abandonnez le `tx` sans appeler `commit()` (p. ex. sur un retour anticipé via `?`) et la transaction est annulée. Pour un hook après commit (le `transaction.on_commit` de Django), recourez à l'assistant de style closure `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, qui valide automatiquement en cas de `Ok` et annule automatiquement en cas de `Err`.
+Abandonnez le `tx` sans appeler `commit()` (p. ex. sur un retour anticipé via `?`) et la transaction est annulée. Pour un hook après commit (le `transaction.on_commit` de Django), la portée est `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, qui valide en cas de `Ok` et annule en cas de `Err` — et le hook lui-même est `rustango::sql::on_commit(|| { … })`, appelé **à l'intérieur** de cette closure. `atomic` vide la file une fois le commit passé ; appeler `on_commit` hors d'une portée `atomic` panique au lieu d'abandonner le callback.
 
 ---
 
@@ -1553,7 +1578,7 @@ post.restore_on(&pool).await?;          // sets deleted_at = NULL
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-Le bouton « Delete » de l'admin route automatiquement vers `soft_delete_on` pour tout modèle qui possède la colonne. Le filtre automatique (exclusion par défaut) est sur la feuille de route v0.21.
+Le bouton « Delete » de l'admin route automatiquement vers `soft_delete_on` pour tout modèle qui possède la colonne. Les requêtes par défaut incluent toujours les lignes supprimées en douceur, mais vous n'avez plus à écrire le filtre à la main : `.active()` les exclut, `.only_trashed()` ne renvoie qu'elles et `.with_trashed()` les réintègre. Faire de l'exclusion le comportement par défaut est suivi dans [#820](https://github.com/ujeenet/rustango/issues/820).
 
 ---
 
@@ -1722,7 +1747,16 @@ async fn handler(mut t: Tenant) -> Result<...> {
 }
 ```
 
-`fetch_on` fonctionne avec n'importe quel `sqlx::Executor` ; `fetch` est du sucre pour `fetch_on(&pool)`.
+`fetch_on` est **réservé à Postgres** (`#[cfg(feature = "postgres")]`, borné à
+`Database = sqlx::Postgres`) et accepte n'importe quel executor sqlx *Postgres* —
+`&PgPool`, `&mut PgConnection` ou une `Transaction`. Il existe précisément pour le
+cas ci-dessus : les tenants en mode schéma partagent le pool du registre mais
+dépendent d'un `SET search_path` par checkout, si bien qu'un `&PgPool` toucherait
+silencieusement le mauvais schéma.
+
+`fetch` n'en est **pas** du sucre. C'est une méthode `FetcherPool` distincte qui
+prend `&Pool`, dispatche selon le dialecte et existe sur les trois backends — sur
+un build MySQL ou SQLite, `fetch` est donc le seul des deux à exister.
 
 ---
 

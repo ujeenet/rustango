@@ -366,9 +366,12 @@ es `403 Forbidden`:
 //   X-CSRF-Token:  <t>                 → 200 OK   (double-submit matches)
 ```
 
-En plantillas Tera, `{{ csrf_token }}` da el token en bruto y `{{ csrf_input }}`
+En plantillas Tera, `{{ csrf_token }}` da el token en bruto y `{{ csrf_input | safe }}`
 un `<input name="_csrf">` oculto listo para usar — coloca uno en cada
-formulario. Sobrescribe los nombres de cookie/cabecera o el flag `Secure` con
+formulario. El `| safe` es obligatorio: Tera autoescapa `.html`, y sin él el
+formulario no lleva campo `_csrf` y cada POST devuelve 403. El propio formulario
+de login del admin hace exactamente esto — mira
+`crates/rustango/src/admin/templates/login.html`. Sobrescribe los nombres de cookie/cabecera o el flag `Secure` con
 `csrf::with_config(CsrfConfig)`; para configuraciones SPA, añade
 `.with_trusted_origins([...])` para habilitar la comprobación de defensa en
 profundidad de la cabecera Origin además del token. Para endpoints colectores

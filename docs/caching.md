@@ -54,7 +54,7 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 |---|---|---|
 | `InMemoryCache` | `cache` | dev, tests, single process (per-process HashMap + TTL) |
 | `RedisCache` | `cache-redis` | production; shared across replicas |
-| `DbCache` | `cache` | production without Redis; a `rustango_cache` table |
+| `DatabaseCache` | `cache` | production without Redis; a `rustango_cache` table |
 | `NullCache` | `cache` | disable caching (every read misses) — handy in tests |
 
 ---
@@ -195,10 +195,12 @@ than reimplementing anything, so native primitives (Redis `INCRBY`, `SET NX`,
 
 **Atomic counters and locks.** `Cache::incr` backs [rate limiting](middleware.md)
 and per-account lockout; `Cache::add` (set-if-absent) backs `DistributedLock`.
-Both are atomic on `RedisCache` (native `INCRBY` / `SET NX`) and on
-`InMemoryCache` (which holds its lock across the read-modify-write);
-`DatabaseCache` leaves both at the non-atomic default — fine for one process,
-but reach for Redis when a counter or lock must be exact across replicas.
+`Cache::add` is atomic on all three — `RedisCache` (`SET NX`), `InMemoryCache`
+(which holds its lock across the read-modify-write) and `DatabaseCache`, which
+does the test-and-set under row locks so a race resolves to exactly one winner.
+`Cache::incr` is atomic on the first two but falls back to the non-atomic
+default on `DatabaseCache`. So a `DistributedLock` is safe on any of the three;
+a counter that must be exact across replicas wants Redis.
 
 Two things worth knowing:
 

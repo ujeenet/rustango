@@ -61,6 +61,7 @@ Nutzungshilfe aus.
 - [Tenancy-Befehle](#tenancy-befehle)
 - [Eigene Unterbefehle](#eigene-unterbefehle)
 - [Häufige Arbeitsabläufe](#häufige-arbeitsabläufe)
+- [Alle Verben](#alle-verben)
 
 ---
 
@@ -585,14 +586,18 @@ Djangos `check --deploy` funktioniert.
 **Immer aktive Prüfungen:**
 - ≥ 1 Modell via `inventory` registriert
 - DB erreichbar (`SELECT 1`)
-- Migrationsanzahl vs. Modellanzahl
+- Modelle registriert, aber **keine** Migrationen auf der Platte (es vergleicht keine Zahlen — ein vorhandenes `migrations/`-Verzeichnis wird unabhängig von der Anzahl als Info gemeldet)
 
 **Mit `--deploy`:**
 - `RUSTANGO_ENV` ist `prod` oder `production`
 - `RUSTANGO_SESSION_SECRET` gesetzt und ≥ 32 Byte (der HMAC-Schlüssel für
   Cookies + JWTs; `SECRET_KEY` wird vom Framework nie gelesen)
 - `DATABASE_URL` gesetzt
-- `RUSTANGO_APEX_DOMAIN` gesetzt (Tenancy-Projekte)
+- `RUSTANGO_APEX_DOMAIN` gesetzt — die Warnung erscheint bei **jedem** Projekt, wenn unset oder `localhost`, und sagt das auch; Single-Tenant-Projekte können sie ignorieren
+- `DATABASE_URL` zeigt auf `localhost` / `127.0.0.1` (Warnung — in Produktion meist ein Managed-Hostname)
+- `RUSTANGO_BIND` beginnt mit `127.0.0.1` (Warnung — nur Loopback nimmt keinen externen Traffic an)
+- Ein Settings-Tier-Audit über dein TOML, das Dev-Defaults in einer Prod-Stufe meldet (braucht das Feature `config`)
+- `Meta.required_db_vendor` / `required_db_features` jedes registrierten Models, geprüft gegen den tatsächlich verbundenen Dialekt
 
 ```bash
 $ cargo run -- check --deploy
@@ -740,7 +745,9 @@ cargo run -- runserver           # explicit
 
 Richtet einen neuen Tenant (Kunde/Org) ein und wendet die Tenant-Migrationen
 darauf an. Der `<slug>` ist sein kurzer Bezeichner. Sicher erneut ausführbar —
-ein erneuter Aufruf auf einem bestehenden Tenant dupliziert nichts.
+ein erneuter Aufruf auf einem
+bestehenden Slug wird vorab mit ``tenant slug `<slug>` already exists``
+abgelehnt (tenancy/provision.rs:599), bevor sonst etwas passiert.
 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"
@@ -754,6 +761,10 @@ cargo run -- create-tenant beta --mode database --database-url postgres://...
 | `--database-url <url>` | Tenant-spezifische DB-URL (erforderlich für den database-Modus) |
 | `--host-pattern <pattern>` | Überschreibt das vom `SubdomainResolver` verwendete Host-Muster |
 | `--no-migrate` | Überspringt das Anwenden tenant-scoped Migrationen nach dem Provisioning |
+| `--backend postgres \| mysql \| sqlite` | Treiber für einen Database-Mode-Tenant (Default: `postgres`). Wird gegen `--mode` validiert |
+| `--schema-name <s>` | Überschreibt den generierten Schemanamen im Schema-Modus |
+| `--port <n>` | Port, unter dem der Tenant erreichbar ist, fürs Routing |
+| `--path-prefix <s>` | Pfad-Präfix, unter dem der Tenant erreichbar ist, fürs Routing |
 
 ### `edit-tenant <slug> [options]`
 
@@ -805,7 +816,9 @@ cargo run -- test-tenant-connection "$URL" --no-write-probe --timeout 5
 
 Deaktiviert einen Tenant, indem `active = false` gesetzt wird. Dies ist die
 weiche, umkehrbare Option — die Daten des Tenants bleiben auf der Platte, und
-ein erneutes Ausführen von `create-tenant` bringt ihn zurück. Wenn Sie nicht
+reaktiviere ihn mit `edit-tenant <slug> --activate`.
+Ein erneutes `create-tenant` funktioniert **nicht**: die `Org`-Zeile existiert
+weiterhin, der Slug gilt also als Duplikat. Wenn Sie nicht
 interaktiv laufen (kein Terminal angehängt), müssen Sie `--confirm <slug>` mit
 dem erneut getippten Slug zur Bestätigung übergeben.
 
@@ -820,7 +833,9 @@ seine Zeile aus `rustango_orgs`, ohne Rückgängig-Machen. Wenn Sie nicht
 interaktiv laufen (kein Terminal angehängt), müssen Sie `--confirm <slug>` mit
 dem erneut getippten Slug übergeben. Bei Tenants im database-Modus bleibt die
 zugrunde liegende Datenbank an Ort und Stelle, es sei denn, Sie übergeben
-zusätzlich `--purge-database`.
+zusätzlich `--purge-database`. Ohne dieses Flag **verweigert** der Befehl bei
+Database-Mode-Tenants komplett — er entfernt nicht die `Org`-Zeile und lässt die
+Datenbank stehen, er tut gar nichts (tenancy/manage/tenants.rs:479).
 
 ```bash
 cargo run -- purge-tenant acme --confirm acme
@@ -1202,7 +1217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("import-csv")) {
         let url = std::env::var("DATABASE_URL")?;
-        let pool = rustango::sql::sqlx::PgPool::connect(&url).await?;
+        let pool = rustango::sql::Pool::connect_postgres(&url).await?;
         return my_csv_importer::run(&pool, &args[1..]).await;
     }
     rustango::manage::Cli::new().api(urls::api()).run().await
@@ -1223,7 +1238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let url = std::env::var("DATABASE_URL")?;
-    let pool = rustango::sql::sqlx::PgPool::connect(&url).await?;
+    let pool = rustango::sql::Pool::connect_postgres(&url).await?;
 
     match args.first().map(String::as_str) {
         Some("import-csv") => my_csv_importer::run(&pool, &args[1..]).await,
@@ -1377,7 +1392,7 @@ sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 | Feld | Standard | Zweck |
 |---|---|---|
 | `max_cached_database_pools` | 64 | Obergrenze für den Pool-Cache. Ist er voll, scheitert der nächste nicht-gecachte Tenant (keine stille Verdrängung). |
-| `database_pool_max_connections` | 4 | `max_connections` pro Pool. Halten Sie es klein, damit ein Tenant-Fan-out PGs `max_connections` nicht erschöpft. |
+| `database_pool_max_connections` | 16 | `max_connections` pro Pool. Halten Sie es klein, damit ein Tenant-Fan-out PGs `max_connections` nicht erschöpft. |
 | `database_pool_min_connections` | 0 | Hält jederzeit N Verbindungen warm. `≥1` senkt die Latenz des ersten Requests, indem der TCP/TLS/Auth-Roundtrip beim Boot bezahlt wird. |
 | `database_pool_acquire_timeout` | 30s | Wie lange `pool.acquire()` wartet, bevor es mit `PoolTimedOut` scheitert. |
 | `database_pool_idle_timeout` | 10 min | Schließt untätige Verbindungen nach dieser Dauer. Wehrt Kappungen durch Load-Balancer / `idle_in_transaction_session_timeout` ab. |
@@ -1441,3 +1456,115 @@ Sie auf mDNS.
 - [ViewSets](viewsets.md)
 - [Serializer](serializers.md)
 - [Sicherheitsleitfaden](security.md)
+
+## Alle Verben
+
+Die Abschnitte oben erklären die gängigen Verben im Detail. Diese Tabelle ist
+die **vollständige** Liste, aus den beiden Dispatchern
+(`migrate/manage.rs` und `tenancy/manage/mod.rs`) gezogen statt aus der Prosa —
+ein Verb, das im Leitfaden fehlt, ist hier trotzdem auffindbar. Für die Flags
+`<verb> --help` ausführen; der Hilfetext ist maßgeblich, diese Seite nicht.
+
+Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
+`Cli::tenancy()` erreicht.
+
+### Migrationen und Schema
+
+| Verb | Was es tut |
+|---|---|
+| `makemigrations [name]` / `--empty <name>` | Erzeugt eine Migration aus dem Model-Diff |
+| `migrate [target]` / `--dry-run` / `--squash` | Wendet ausstehende Migrationen an |
+| `downgrade [N]` | Rollt die letzten N Migrationen zurück |
+| `showmigrations` / `status` | Listet Migrationen und ihren Anwendungsstand |
+| `sqlmigrate <name>` | Gibt das SQL einer Migration aus, ohne es auszuführen |
+| `forget-pending <name>` | Löscht eine noch nicht angewendete Migrations-JSON |
+| `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Hängt eine handgeschriebene Datenoperation an |
+| `inspectdb [--schema <s>] [--table <t>]` | Liest ein bestehendes Schema und erzeugt `#[derive(Model)]`-Quellcode |
+
+### Daten
+
+| Verb | Was es tut |
+|---|---|
+| `dumpdata` | Exportiert Zeilen als JSON-Fixtures |
+| `loaddata <fixture.json> [--fail-fast]` | Lädt JSON-Fixtures wieder ein |
+| `flush [--yes] [--app <label>] [--model <name>]` | Leert jede Model-Tabelle; die Flags grenzen die Menge ein |
+| `prune [--model <name>] [--except <name>] [--pretend]` | Streamendes Massenlöschen; `--pretend` meldet nur, ohne zu löschen |
+| `db:dump` / `db:restore` / `db:info` | Natives Dump / Restore / Inspect |
+| `dbshell` | Führt den nativen Client aus (`psql` / `mysql` / `sqlite3`). Braucht nur `DATABASE_URL`, keinen funktionierenden Pool — es wird vor dem Pool-Aufbau behandelt und funktioniert daher auch, wenn sqlx nicht verbinden kann |
+
+### Scaffolder und Generatoren
+
+| Verb | Was es tut |
+|---|---|
+| `startapp <name>` | Legt ein App-Modul an |
+| `make:viewset` / `make:serializer` / `make:form` | Erzeugt ein ViewSet, einen Serializer oder ein Form |
+| `make:job` / `make:middleware` / `make:notification` / `make:test` | Erzeugt einen Job, eine Middleware, eine Notification oder einen Test |
+| `make:api_routes <app> [--tenant]` | Erzeugt das API-Routen-Modul einer App |
+
+### Cache, Sessions und Mail
+
+| Verb | Was es tut |
+|---|---|
+| `createcachetable` / `create-cache-table` `[--table <name>]` | Legt die Cache-Tabelle an (und die Session-Tabelle, wenn Sessions in die DB gehen) |
+| `clear-cache [--table <name>]` / `clearsessions` | Leert ihn; gibt die Anzahl gelöschter Zeilen zurück |
+| `sendtestemail --to <addr>` | Sendet eine feste Test-Mail über das konfigurierte Backend |
+
+### Introspektion
+
+| Verb | Was es tut |
+|---|---|
+| `showmodels [--format plain\|json] [--app <label>]` | Jedes registrierte Model, sortiert für deterministische Ausgabe |
+| `showurls [--format plain\|json]` | Jede benannte Route, sortiert |
+| `check [--deploy]` | Health-Checks; `--deploy` ergänzt die Produktions-Audits |
+| `create-admin` | Legt eine `AdminUser`-Zeile für Projekte mit `admin::Builder::with_session_auth` an. **Nicht** tenancy-gated — nimmt einen einfachen `&Pool` und schreibt `rustango_admin_users`, die Tabelle wird bei Bedarf angelegt. Der einzige Weg zu einem ersten Admin-Login in einem Nicht-Tenancy-Projekt |
+| `about` / `version` / `--version` | Build- und Versionsinformationen |
+| `docs` | Öffnet die Dokumentation |
+
+### Benutzer und Zugriff **T**
+
+| Verb | Was es tut |
+|---|---|
+| `create-superuser` / `set-superuser` | Legt einen Superuser an oder befördert einen bestehenden Benutzer |
+| `create-user` / `create-operator` | Legt einen Tenant-Benutzer oder einen Operator an |
+| `reset-password` / `change-password` | Passwort-Wiederherstellung für Tenant-Benutzer |
+| `reset-operator-password` / `change-operator-password` | Passwort-Wiederherstellung für Operatoren |
+| `set-operator-active` | Aktiviert oder deaktiviert einen Operator |
+| `create-role` / `assign-role` / `revoke-role` / `list-roles` | Rollen |
+| `grant-perm` / `revoke-perm` | Berechtigungen per Codename |
+| `seed-permissions [--slug <s>]` | Legt die Standard-Berechtigungszeilen an |
+| `create-api-key` | Stellt einen API-Key aus |
+
+### Tenants **T**
+
+| Verb | Was es tut |
+|---|---|
+| `create-tenant` / `edit-tenant` / `list-tenants` | Anlegen, bearbeiten, auflisten |
+| `drop-tenant` / `purge-tenant` | Deaktivieren (umkehrbar) / zerstören (nicht) |
+| `migrate-tenants` / `migrate-registry` | Wendet Migrationen über alle Tenants oder auf die Registry an |
+| `migrate-tenant-storage <slug> --to schema\|database` | Verschiebt einen Tenant zwischen Speichermodi |
+| `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host-Routing |
+| `test-tenant-connection` | Prüft, ob die Datenbank eines Tenants erreichbar ist |
+| `prewarm-pools` | Öffnet Tenant-Pools vor dem ersten Request |
+| `run-server` / `runserver` | Startet den Multi-Tenant-Server |
+| `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup und interaktive Einstiegspunkte |
+
+### Audit **T**
+
+| Verb | Was es tut |
+|---|---|
+| `audit-log` | Liest den Audit-Trail |
+| `audit-cleanup` | Kürzt ihn |
+
+### MCP **T**
+
+Vollständig im [MCP-Leitfaden](mcp.md) dokumentiert.
+
+| Verb | Was es tut |
+|---|---|
+| `create-agent` / `list-agents` / `rotate-agent-secret` | Agents |
+| `create-skill` / `list-skills` / `grant-skill` / `revoke-skill` | Skills |
+| `map-skill-permission` / `unmap-skill-permission` | Bindet einen Skill an eine Berechtigung |
+| `create-user-key` / `list-user-keys` / `revoke-user-key` | MCP-Zugangsdaten pro Benutzer |
+| `list-runs` / `show-run` | Lauf-Historie |
+
+---

@@ -221,7 +221,7 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-`csrf::layer()` builds the layer with sensible defaults; `csrf::with_config(CsrfConfig)` lets you override the cookie/header names and the `Secure` flag. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` gives you a ready-made hidden `<input>` — drop one inside every form. It uses the double-submit cookie pattern: on unsafe methods (POST, PUT, PATCH, DELETE) the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
+`csrf::layer()` builds the layer with `secure: true`, so the cookie is rejected over plain HTTP — on `http://localhost` use `CsrfConfig::allow_insecure_for_dev()` or the layer appears to do nothing. `csrf::with_config(CsrfConfig)` overrides the cookie/header names and the `Secure` flag, and `trusted_origins` — empty by default, so the Origin-header check is **off** until you add one. In templates, `{{ csrf_token }}` gives you the raw token and `{{ csrf_input }}` a ready-made hidden `<input>` — write it as `{{ csrf_input | safe }}`, because Tera autoescapes `.html` templates and without the filter the page renders a visible literal `<input …>` and the form carries no `_csrf` field, so every POST 403s. Both variables are only in context for the `template_views` CBVs or after you call `forms::csrf::stamp_into_context` yourself — a hand-rolled handler has neither. It uses the double-submit cookie pattern: on unsafe methods (POST, PUT, PATCH, DELETE) the layer checks the `X-CSRF-Token` header (or the `_csrf` form field) against the `rustango_csrf` cookie; a mismatch returns `403 Forbidden`.
 
 **Exempting collector endpoints.** `CsrfConfig::exempt_prefix("/path")` (repeatable) skips CSRF enforcement for unsafe methods on requests whose path starts with the given prefix. This is for append-only, no-auth-state endpoints hit via `navigator.sendBeacon` — e.g. an analytics collector — which can't set an `X-CSRF-Token` header and, when the page is served from a CDN cache that strips `Set-Cookie`, may carry no CSRF cookie at all. Keep prefixes narrow and never exempt anything that reads or writes auth state.
 
@@ -233,7 +233,7 @@ The auto-admin enables CSRF on every mutation by default, and there is no way to
 
 XSS (cross-site scripting) happens when user input is rendered as HTML and runs as code in someone else's browser. The fix is to escape any user input before it reaches the page. **Rustango** handles this two ways:
 
-**1. Tera template auto-escape** — Tera is **Rustango**'s template engine (like Django templates or Blade). Every `{{ var }}` is HTML-escaped automatically. Use `{{ var | safe }}` to opt out — rare, and dangerous, so only do it for HTML you fully trust.
+**1. Tera template auto-escape** — Tera is **Rustango**'s template engine (like Django templates or Blade). Every `{{ var }}` is HTML-escaped automatically — but only in templates Tera autoescapes, which is its default set of `.html`, `.htm` and `.xml`. Rustango sets no `autoescape_suffixes`, so a `.txt`, `.j2` or `.tera` template is **not** escaped. Use `{{ var | safe }}` to opt out — rare, and dangerous, so only do it for HTML you fully trust.
 
 **2. Manual escape helper** — for when you build HTML in Rust code instead of a template:
 
@@ -302,12 +302,17 @@ let backends = vec![
     Arc::new(JwtBackend::new(secret)) as _,         // Authorization: Bearer <jwt>
 ];
 
+// `require_auth` / `require_perm` are `Router::layer` calls: each wraps the
+// routes registered BEFORE it. Chaining them on one router would put /me
+// behind post.add. Gate the permission on an inner sub-router instead.
+let posts = Router::new()
+    .route("/posts/new", post(create_post))
+    .require_perm("post.add", pool.clone());        // inner: needs the codename
+
 let app = Router::new()
     .route("/me", get(profile))
-    .require_auth(backends.clone(), pool.clone())   // 401 if no backend recognizes
-    .route("/posts/new", post(create_post))
-    .require_perm("post.add", pool.clone())         // gate by codename
-    .require_auth(backends, pool);
+    .merge(posts)
+    .require_auth(backends, pool);                  // outer: resolves the user first
 ```
 
 The middleware tries each backend in order. The first one that succeeds wins; the first one that returns a hard error stops the chain.
