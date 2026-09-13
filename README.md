@@ -12,6 +12,7 @@
 Rustango gives you the productivity of Django or Laravel with the speed and type-safety of Rust: a tri-dialect ORM, auto-migrations, an auto-generated admin, multi-tenancy, first-class auth, and every standard middleware — all shipped, all opt-out via cargo features, and all working on **Postgres, MySQL, and SQLite** out of the box.
 
 📚 **Docs:** [rustango.com](https://rustango.com) · [in-repo guides](docs/) · [API reference](https://docs.rs/rustango)
+🌍 **Also in:** [Deutsch](docs/de/) · [Español](docs/es/) · [Français](docs/fr/) — every published guide, not a subset.
 🍳 **Cookbook:** [`cookbook_blog/COOKBOOK.md`](crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a runnable, test-backed recipe for every feature below.
 
 ---

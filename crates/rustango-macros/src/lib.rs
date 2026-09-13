@@ -6582,6 +6582,16 @@ fn inherent_impl_tokens(
             /// `Auto<T>`. Models with a manually-managed PK must use
             /// `insert` or the QuerySet update builder.
             ///
+            /// **Postgres only — prefer [`Self::save_pool`].** This takes a
+            /// driver-specific `PgPool`, so it does not exist at all on a
+            /// build without the `postgres` feature: selecting `sqlite`
+            /// makes the method vanish rather than fail with anything that
+            /// names the cause.
+            ///
+            /// [`Self::save_pool`] takes `rustango::sql::Pool` and works on
+            /// all three backends. The naming is inverted — the short name
+            /// is the narrow one — and that is tracked in #1293.
+            ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for SQL-writing
             /// or driver failures.
@@ -7010,6 +7020,12 @@ fn inherent_impl_tokens(
             ///
             /// Returns the number of rows affected (0 or 1).
             ///
+            /// **Postgres only — prefer [`Self::delete_pool`].** This takes
+            /// a driver-specific `PgPool`, so it does not exist on a build
+            /// without the `postgres` feature. [`Self::delete_pool`] takes
+            /// `rustango::sql::Pool` and works on all three. The naming is
+            /// inverted; tracked in #1293.
+            ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for SQL-writing or
             /// driver failures.
@@ -7120,6 +7136,12 @@ fn inherent_impl_tokens(
             /// `Auto<T>` value is `Unset` so Postgres' SERIAL/BIGSERIAL
             /// sequence fills them in, then reads each `Auto` column
             /// back via `RETURNING` and stores it on `self`.
+            ///
+            /// **Postgres only — prefer [`Self::insert_pool`].** This takes
+            /// a driver-specific `PgPool`, so it does not exist on a build
+            /// without the `postgres` feature. [`Self::insert_pool`] takes
+            /// `rustango::sql::Pool` and works on all three. The naming is
+            /// inverted; tracked in #1293.
             ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for SQL-writing or

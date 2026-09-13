@@ -28,6 +28,20 @@ cargo install cargo-rustango
 
 Das legt ein `cargo-rustango`-Binary in deinem `PATH` ab; Cargo stellt es dann als `cargo rustango` bereit (auf dieselbe Weise, wie `django-admin` oder der `laravel`-Installer dir einen globalen Befehl geben).
 
+### Die Version des Generators ist die, die dein Projekt bekommt
+
+`cargo rustango new` schreibt `rustango = "MAJOR.MINOR"` in die generierte `Cargo.toml` — übernommen aus **der Version des Generators**, nicht aus dem, was gerade auf crates.io am neuesten ist. Installiere den 0.58-Generator, und du bekommst ein 0.58-Projekt.
+
+Das ist fast immer das, was du willst, und genau deshalb ist der Installationsbefehl oben ungepinnt: Der neueste Generator schreibt den neuesten Pin, und die beiden können nicht auseinanderdriften.
+
+Wissen solltest du es, wenn du bewusst ein älteres Release willst — um zu einem Projekt zu passen, das bereits darauf läuft, oder um einen Fehlerbericht zu reproduzieren. Pinne den Generator, nicht das Projekt:
+
+```sh
+cargo install cargo-rustango --version 0.57.0
+```
+
+Welchen du hast, prüfst du mit `cargo rustango --version`. Später aktualisieren ist derselbe Befehl mit `--force`, und das wirkt sich nur auf Projekte aus, die du danach generierst — der Pin eines bestehenden Projekts ist eine Zeile in dessen eigener `Cargo.toml`, die du selbst änderst.
+
 ---
 
 ## Ein Projekt erstellen: `cargo rustango new`

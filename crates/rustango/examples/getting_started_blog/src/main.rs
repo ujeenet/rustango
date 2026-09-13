@@ -8,7 +8,9 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    // The multi-backend pool: one line that works on all three, instead
+    // of a driver-specific type that only exists under one feature.
+    let pool = rustango::sql::Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 
     let api = urls::api()
         .nest("/admin", urls::admin_router(pool.clone()))

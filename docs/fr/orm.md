@@ -16,7 +16,7 @@ Modèles d'utilisation de l'ORM **Rustango** au-delà des bases. Si vous venez d
 
 Quelques termes Rust reviennent tout au long du document. `&pool` est une référence partagée vers le pool de connexions à la base de données ; vous le passez aux méthodes qui exécutent réellement du SQL. `.await` lance un appel asynchrone et attend le résultat. `Option<T>` est une valeur qui peut être présente (`Some`) ou absente (`None`) — le null de Rust. `Result` représente un succès ou une erreur ; le `?` en fin d'appel provoque un retour anticipé en cas d'erreur. `Auto<i64>` est une clé primaire à incrémentation automatique qui est soit `Set` (chargée depuis la base) soit `Unset` (pas encore insérée).
 
-## Nouveautés (v0.41 / v0.42)
+## Ajouts récents
 
 Les versions récentes ont ajouté un lot de fonctionnalités de parité avec Django qui ne sont pas encore intégrées à toutes les sections ci-dessous. Repères rapides :
 

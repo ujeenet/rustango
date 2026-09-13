@@ -282,6 +282,40 @@ jobs:
       # the gated item it exercises without the library ever noticing.
       - run: cargo test -p rustango --no-default-features --features ${{ matrix.features }} --lib
 
+  # #1285 — the first Windows coverage this repo has had. Every other job
+  # is ubuntu, so a Windows-only bug was structurally uncatchable: #1271
+  # (migration duplication on SQLite/Windows) was reported by a user
+  # because nothing here could have found it.
+  #
+  # Cross-compiling does not substitute. It would have compiled #1271
+  # perfectly — that class of bug is runtime behaviour, so it takes a real
+  # Windows runner. (Nor can a container stand in: Windows containers need
+  # a Windows kernel, so there is no local equivalent on macOS or Linux.)
+  #
+  # SQLite only, and deliberately. GitHub's `services:` containers are
+  # Linux-only, so a Windows job cannot stand up Postgres or MySQL. That
+  # is no loss here: SQLite is the surface the reported bugs live on.
+  #
+  # `continue-on-error` while the surface is unproven — this job has never
+  # run, and a red-on-arrival required check would block every PR for
+  # reasons unrelated to the PR. Drop it once a few runs are green; the
+  # job is useless as a gate until then, but its output is not.
+  windows_test:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p rustango --no-default-features --features sqlite,tenancy
+      - run: cargo test -p rustango --lib --no-default-features --features sqlite,tenancy
+      # Compile every test target before running any, so a Windows-only
+      # build break is reported as itself rather than as a missing test.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
+      # The migration suites are the ones that could have caught #1271.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
+
   sqlite_litmus:
     runs-on: ubuntu-latest
     steps:
@@ -298,6 +332,20 @@ jobs:
       # without Postgres — and the enumeration grew stale silently every
       # time a test file was added. `--no-run` needs no databases.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
+      # The getting-started example is what the guide's snippets are copied
+      # from, and it silently stopped building on SQLite: its manifest let
+      # rustango keep its default `postgres` while the example selected
+      # `sqlite`, so the derive and the trait bounds disagreed (#1272,
+      # #1293). `doc_examples` only ever ran it on Postgres. Compile-only,
+      # so no database is needed.
+      - name: Getting-started example builds without Postgres
+        working-directory: crates/rustango/examples/getting_started_blog
+        run: |
+          cargo build --no-default-features --features sqlite
+          # Every test target, not just one — the admin and middleware
+          # tests were the ones still naming a driver, and a single
+          # named test would not have caught them.
+          cargo test --no-default-features --features sqlite --no-run
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_choices

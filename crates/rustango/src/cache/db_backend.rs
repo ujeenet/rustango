@@ -1,9 +1,9 @@
 //! Database-backed [`Cache`] backend (#409) — Django parity for
 //! `django.core.cache.backends.db.DatabaseCache`. Stores one row per
 //! cache key in a small `cache_key TEXT PRIMARY KEY, value TEXT,
-//! expires BIGINT` table, identical layout across PG / MySQL /
-//! SQLite. Expired rows are pruned lazily on read (no background
-//! reaper).
+//! expires BIGINT` table (epoch milliseconds), identical layout across
+//! PG / MySQL / SQLite. Expired rows are pruned lazily on read (no
+//! background reaper).
 //!
 //! ## Quick start
 //!
@@ -26,9 +26,16 @@
 //! - MySQL:    `cache_key VARCHAR(255) PRIMARY KEY, value LONGTEXT NOT NULL, expires BIGINT NOT NULL DEFAULT 0`
 //! - SQLite:   `cache_key TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL DEFAULT 0`
 //!
-//! `expires` is a Unix-seconds timestamp; `0` means "never expires".
-//! Lazy GC: any `get`/`exists` call that lands on an expired row
-//! deletes the row before returning `None`.
+//! `expires` is a Unix-**milliseconds** timestamp; `0` means "never
+//! expires". It carried seconds until v0.42, and this line still said so
+//! long after the code stopped doing it (#1245) — the column type never
+//! changed, so nothing failed to give it away.
+//!
+//! An entry is expired once *now is past* `expires`, not once it reaches
+//! it, which is what [`super::InMemoryCache`] and [`super::FileCache`] do
+//! and what `purge_expired` here has always done. Lazy GC: any
+//! `get`/`exists` call that lands on an expired row deletes the row
+//! before returning `None`.
 //!
 //! ## Why not a migration?
 //!
@@ -194,7 +201,11 @@ impl Cache for DatabaseCache {
         let Some((value, expires)) = rows.into_iter().next() else {
             return Ok(None);
         };
-        if expires != 0 && Self::now_unix_ms() >= expires {
+        // `>`, not `>=`: an entry lives its full stated duration. The
+        // other two backends both use `>`, and so does `purge_expired`
+        // below — so `>=` here meant a row could read as a miss while
+        // the backend's own sweep still considered it live (#1245).
+        if expires != 0 && Self::now_unix_ms() > expires {
             // Lazy GC — purge expired before reporting miss.
             let _ = self.delete(key).await;
             return Ok(None);
