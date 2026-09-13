@@ -284,7 +284,7 @@ default = [
 Para adelgazar un binario que no necesita todo, desactiva los valores por defecto y lista solo lo que uses:
 
 ```toml
-rustango = { version = "0.44", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.57", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---
