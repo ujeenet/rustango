@@ -131,6 +131,31 @@ pub fn validate_key(key: &str) -> Result<(), StorageError> {
     if key.contains('\0') {
         return Err(StorageError::InvalidPath(format!("key contains null byte")));
     }
+    // Windows-shaped absolute keys (#1285). `Path::join` **discards the
+    // root** when the argument is absolute, so `C:\secrets` or `\Windows`
+    // lands outside the storage directory instead of under it.
+    //
+    // Checked structurally rather than with `Path::is_absolute`, which
+    // answers per-platform: on Unix it calls both of those relative, so a
+    // Unix-only guard would accept a key that escapes the moment the same
+    // service runs on Windows. The same key is rejected everywhere.
+    if key.starts_with('\\') {
+        // `\dir\file`, and UNC `\\server\share`.
+        return Err(StorageError::InvalidPath(format!(
+            "key must be relative: {key}"
+        )));
+    }
+    let mut chars = key.chars();
+    if matches!(
+        (chars.next(), chars.next()),
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic()
+    ) {
+        // `C:\file` is absolute; bare `C:file` is drive-relative, which
+        // resolves against that drive's working directory — also not ours.
+        return Err(StorageError::InvalidPath(format!(
+            "key names a drive: {key}"
+        )));
+    }
     Ok(())
 }
 
@@ -316,6 +341,37 @@ mod tests {
     fn validate_accepts_normal_keys() {
         assert!(validate_key("avatars/alice.png").is_ok());
         assert!(validate_key("file.txt").is_ok());
+    }
+
+    /// #1285 — `Path::join` drops the root when the key is absolute, so
+    /// on Windows these land outside the storage directory rather than
+    /// under it.
+    ///
+    /// Asserted on every platform on purpose. `Path::is_absolute` calls
+    /// all of these relative on Unix, so a platform-gated guard would
+    /// pass here and leave the hole open on the one OS where it bites.
+    #[test]
+    fn validate_rejects_windows_absolute_keys() {
+        for key in [
+            r"C:\Windows\System32\config\SAM",
+            r"c:\lower\drive",
+            r"C:relative-to-drive-cwd",
+            r"\Windows\System32",
+            r"\\server\share\file",
+        ] {
+            assert!(
+                matches!(validate_key(key), Err(StorageError::InvalidPath(_))),
+                "`{key}` escapes the storage root on Windows and must be rejected"
+            );
+        }
+    }
+
+    /// A colon or backslash that is not a path prefix stays legal — the
+    /// guard targets the escape, not the characters.
+    #[test]
+    fn validate_still_accepts_keys_that_merely_contain_those_characters() {
+        assert!(validate_key("logs/2026-09-13T12:00:00Z.json").is_ok());
+        assert!(validate_key("odd/name\\with-backslash.txt").is_ok());
     }
 
     #[tokio::test]
