@@ -469,7 +469,14 @@ mod tests {
     #[test]
     fn a_generated_password_needs_no_typing_and_refuses_both() {
         let p = chosen_password(true, "", "").expect("generate");
-        assert!(p.chars().count() >= 20, "should be long: {p}");
+        // Report the length, not the password: when the assertion is
+        // about length that is the useful half, and a generated
+        // credential has no business in a failure message.
+        assert!(
+            p.chars().count() >= 20,
+            "generated password should be at least 20 chars, got {}",
+            p.chars().count()
+        );
         assert!(
             chosen_password(true, "typed", "typed").is_err(),
             "supplying both is ambiguous and should be refused"
