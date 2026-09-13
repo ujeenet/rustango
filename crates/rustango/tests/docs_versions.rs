@@ -394,6 +394,18 @@ mod tests {
 ///
 /// Scoped to lines naming `rustango`, so the `axum = "0.8"` and
 /// `serde = "1"` pins beside them are left alone.
+/// Crates this workspace publishes, longest name first so
+/// `rustango-orm-macros` is tried before `rustango`.
+///
+/// `rustango-renamed-smoke` is absent on purpose — it is `publish =
+/// false`, so no reader ever pins it.
+const PUBLISHED_CRATES: &[&str] = &[
+    "rustango-orm-macros",
+    "rustango-macros",
+    "cargo-rustango",
+    "rustango",
+];
+
 fn install_pins(text: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -402,9 +414,18 @@ fn install_pins(text: &str) -> Vec<(usize, String)> {
         }
         // `rustango = "0.57"` and `rustango = { version = "0.57", … }`,
         // including the renamed form `orm = { package = "rustango", … }`.
+        //
+        // The bare form is matched for every crate this workspace
+        // publishes, not just `rustango`. They all take
+        // `version.workspace = true`, so a pin naming any of them names
+        // this version — and `rustango-orm-macros = "0.42"` sat in its
+        // own README for fifteen releases because only `rustango = "`
+        // was looked for.
         let Some(pos) = line.find("version = \"").or_else(|| {
-            line.find("rustango = \"")
-                .map(|p| p + "rustango = ".len() - 1)
+            PUBLISHED_CRATES.iter().find_map(|c| {
+                let needle = format!("{c} = \"");
+                line.find(&needle).map(|p| p + needle.len() - 1)
+            })
         }) else {
             continue;
         };
@@ -428,36 +449,67 @@ fn install_pins(text: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// Files whose pins are history and must not be bumped.
+///
+/// A changelog entry recording "scaffolder bumped to `rustango = 0.29`"
+/// is a true statement about 0.29. Rewriting it to say 0.57 would make
+/// it false, so this is the one place a stale-looking pin is correct.
+const PINS_ARE_HISTORY: &[&str] = &["CHANGELOG.md"];
+
+/// Every tracked `.md` in the repo, minus the ones above.
+///
+/// This began as an allowlist — the published pages plus two READMEs
+/// named by hand — and an allowlist has the defect that anything off it
+/// is invisible rather than failing. Four files went stale unnoticed
+/// for exactly that reason: the cookbook's four pins at 0.29/0.38/0.43,
+/// and the `rustango-orm-macros`, `admin_demo` and
+/// `getting_started_blog` READMEs at 0.42/0.43. None of them is a
+/// published page, so nothing reached them.
+///
+/// Sweeping instead and naming the exceptions trades a list for a list,
+/// but not an equivalent one: an allowlist fails silent and a denylist
+/// fails loud. A new page with an install snippet is now checked by
+/// default rather than forgotten by default, and the entries that remain
+/// are about historical record rather than about coverage.
+///
+/// Tracked files only, via `git ls-files` — a working tree shared
+/// between several checkouts collects untracked notes and drafts, and
+/// those are nobody's install instructions.
+fn files_that_may_carry_pins(root: &Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "*.md"])
+        .output()
+        .expect("run git ls-files");
+    assert!(
+        out.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut files: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && !PINS_ARE_HISTORY.contains(p))
+        .map(str::to_owned)
+        .collect();
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "git ls-files returned no markdown — this guard is checking nothing"
+    );
+    files
+}
+
 #[test]
 fn every_install_pin_names_the_shipping_series() {
     let root = repo_root();
-    let published = published_pages(&root);
     let expected: String = CURRENT
         .rsplit_once('.')
         .map_or(CURRENT, |(mm, _)| mm)
         .to_owned();
-
-    let mut pages: Vec<String> = Vec::new();
-    for locale_dir in ["docs", "docs/de", "docs/es", "docs/fr"] {
-        for page in &published {
-            pages.push(format!("{locale_dir}/{page}"));
-        }
-    }
-    // Hand-added: these carry install snippets but are not published
-    // pages, so `docs/index.toml` does not reach them.
-    //
-    // That makes this an allowlist, and an allowlist's defect is that
-    // anything off it is invisible rather than failing — the cookbook
-    // and three crate READMEs each went stale unnoticed for exactly
-    // that reason. The fix is to sweep every tracked `.md` and
-    // deny-list the few that pin legitimately (CHANGELOG.md records
-    // historical pins and must not be rewritten), turning the default
-    // from unchecked to checked. Held back only until the cookbook's
-    // own pins land: widening onto a stale file makes this red on a
-    // tree nobody can fix.
-    pages.push("README.md".to_owned());
-    pages.push("crates/rustango-renamed-smoke/README.md".to_owned());
-    pages.sort();
+    let pages = files_that_may_carry_pins(&root);
 
     let mut problems = Vec::new();
     let mut checked = 0usize;
