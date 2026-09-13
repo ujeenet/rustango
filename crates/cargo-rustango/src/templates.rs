@@ -72,53 +72,33 @@ pub fn env_example(name: &str, backend: Backend) -> String {
     // SQLite is a file in the bind mount, so there is no host to swap.
     let host_note = match backend.service() {
         Some(svc) => format!(
-            "# Defaults are Docker-friendly (`{svc}` host, `0.0.0.0` bind) so
-# `docker compose up -d` boots a working stack without any edits.
-# If you run cargo on the host instead of in the rust container,
-# change `{svc}` -> `localhost` in DATABASE_URL.
-#
-# Database name matches docker-compose.yml ({name}_dev)."
+            "# Defaults suit `docker compose up -d`; the database name matches
+# docker-compose.yml. Running cargo on the host instead of in the rust
+# container? Change `{svc}` -> `localhost` below."
         ),
         None => "# SQLite needs no database server — the file lives beside the
 # project and is created on first `cargo run -- migrate`."
             .to_owned(),
     };
     format!(
-        "# Copy this file to .env and edit the values for your environment.
-# `dotenvy::dotenv()` in src/main.rs picks it up at startup.
-#
+        "# Copy to .env and edit for your environment; src/main.rs loads it at startup.
 {host_note}
 DATABASE_URL={url}
 RUSTANGO_BIND=0.0.0.0:8080
 
-# Apex domain the operator console is served on (tenancy template).
+# Apex domain the operator console is served on.
 RUSTANGO_APEX_DOMAIN=localhost
 
-# Session signing key. Left commented ON PURPOSE: the value has to be 32
-# bytes of base64, and a placeholder that is not gets discarded silently —
-# the framework generates a key into ./var/ and carries on, so a project
-# that looks configured is not (#1359).
-#
-# Leave it commented for development and that generated key is used. For
-# production set a real one, and keep it out of source control:
-#
+# Session signing key — 32 bytes of base64. Anything else is discarded
+# silently and a key is generated into ./var/ instead, so a project that
+# looks configured is not. Leave it commented in development; set a real
+# one in production and keep it out of source control:
 #   RUSTANGO_SESSION_SECRET=$(openssl rand -base64 32)
-#
 # RUSTANGO_SESSION_SECRET=
 
-# ---------------- Logging (ujeenet/rustango-cms#305) ----------------
-# `#[rustango::main]` auto-installs a tracing_subscriber::fmt with
-# env-filter; the default is `info,sqlx=warn`. Uncomment to turn on
-# more verbose output without code changes. Standard `RUST_LOG`
-# syntax — per-target filtering is the easiest knob.
-#
-#   `debug` — everything DEBUG+ across every crate (very noisy)
-#   `info,my_app=debug` — INFO globally, DEBUG for one module
-#   `info,sqlx=warn,hyper=warn` — quiet down noisy upstreams
-#
-# Production deployments override this in the orchestrator (k8s env,
-# systemd unit, etc.) rather than editing this file.
-# RUST_LOG=info,sqlx=warn,hyper=warn
+# Log filter, standard RUST_LOG syntax. Default is `info,sqlx=warn`.
+# Production sets this in the orchestrator rather than here.
+# RUST_LOG=info,my_app=debug
 "
     )
 }
@@ -471,11 +451,9 @@ pub fn models_rs(template: Template) -> String {
 use rustango::sql::Auto;
 use rustango::Model;
 
-// `#[derive(Model)]` registers this struct through `inventory` at *runtime* —
-// the admin, migrations and the ORM all reach it that way. rustc cannot see
-// runtime registration, so a model whose fields only the framework reads trips
-// `dead_code` and a fresh project could not be built with `-D warnings`
-// (#1210). Delete this line once your own code reads the fields.
+// `#[derive(Model)]` registers this struct at *runtime* through `inventory`,
+// which rustc cannot see — so fields only the framework reads look dead to it.
+// Delete this line once your own code reads them.
 #[allow(dead_code)]
 #[derive(Model, Debug, Clone)]
 #[rustango(table = \"item\", display = \"name\")]
@@ -715,10 +693,9 @@ pub fn config_dev_settings_toml(name: &str, backend: Backend) -> String {
 # Loaded when RUSTANGO_ENV=dev (the default when unset).
 
 [database]
-# Matches docker-compose.yml and .env.example. The three used to
-# disagree and the first `cargo run -- migrate` failed to
-# authenticate (#1211). Host is `localhost`, not the compose service
-# name: this tier runs the app on the host against the container.
+# Matches docker-compose.yml and .env.example. Host is `localhost`, not
+# the compose service name: this tier runs the app on the host against
+# the container.
 url = "{url}"
 
 [server]
@@ -782,12 +759,10 @@ pub fn config_prod_settings_toml(name: &str) -> String {
 # (database url, secret key) come from RUSTANGO__* env vars or your
 # secrets manager — leaving them out of source control.
 
-# The whole section is commented out — the URL comes from
-# RUSTANGO__DATABASE__URL or your secrets manager. Uncomment the header
-# together with the keys if you want to pin pool sizes here: leaving
-# `pool_min_size` uncommented under a commented-out `[database]` puts it at
-# the TOML document root, where `Settings` silently ignores it — the tier
-# looks like it sizes the pool and doesn't (#1211).
+# Commented out because the URL comes from RUSTANGO__DATABASE__URL or your
+# secrets manager. To pin pool sizes here, uncomment the header *with* the
+# keys: a key left uncommented under a commented-out `[database]` lands at
+# the TOML root, where it is silently ignored.
 # [database]
 # url           = "set via RUSTANGO__DATABASE__URL or your secrets manager"
 # pool_min_size = 5
