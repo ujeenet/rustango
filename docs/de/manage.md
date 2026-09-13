@@ -585,14 +585,18 @@ Djangos `check --deploy` funktioniert.
 **Immer aktive Prüfungen:**
 - ≥ 1 Modell via `inventory` registriert
 - DB erreichbar (`SELECT 1`)
-- Migrationsanzahl vs. Modellanzahl
+- Modelle registriert, aber **keine** Migrationen auf der Platte (es vergleicht keine Zahlen — ein vorhandenes `migrations/`-Verzeichnis wird unabhängig von der Anzahl als Info gemeldet)
 
 **Mit `--deploy`:**
 - `RUSTANGO_ENV` ist `prod` oder `production`
 - `RUSTANGO_SESSION_SECRET` gesetzt und ≥ 32 Byte (der HMAC-Schlüssel für
   Cookies + JWTs; `SECRET_KEY` wird vom Framework nie gelesen)
 - `DATABASE_URL` gesetzt
-- `RUSTANGO_APEX_DOMAIN` gesetzt (Tenancy-Projekte)
+- `RUSTANGO_APEX_DOMAIN` gesetzt — die Warnung erscheint bei **jedem** Projekt, wenn unset oder `localhost`, und sagt das auch; Single-Tenant-Projekte können sie ignorieren
+- `DATABASE_URL` zeigt auf `localhost` / `127.0.0.1` (Warnung — in Produktion meist ein Managed-Hostname)
+- `RUSTANGO_BIND` beginnt mit `127.0.0.1` (Warnung — nur Loopback nimmt keinen externen Traffic an)
+- Ein Settings-Tier-Audit über dein TOML, das Dev-Defaults in einer Prod-Stufe meldet (braucht das Feature `config`)
+- `Meta.required_db_vendor` / `required_db_features` jedes registrierten Models, geprüft gegen den tatsächlich verbundenen Dialekt
 
 ```bash
 $ cargo run -- check --deploy

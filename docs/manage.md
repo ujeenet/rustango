@@ -575,14 +575,18 @@ Django's `check --deploy` works.
 **Always-on checks:**
 - ≥ 1 model registered via `inventory`
 - DB reachable (`SELECT 1`)
-- Migration count vs model count
+- Models registered but **no** migrations on disk (it does not compare counts — an existing `migrations/` directory is reported as info, whatever the number)
 
 **With `--deploy`:**
 - `RUSTANGO_ENV` is `prod` or `production`
 - `RUSTANGO_SESSION_SECRET` set and ≥ 32 bytes (the HMAC key for
   cookies + JWTs; `SECRET_KEY` is never read by the framework)
 - `DATABASE_URL` set
-- `RUSTANGO_APEX_DOMAIN` set (tenancy projects)
+- `RUSTANGO_APEX_DOMAIN` set — the warning fires for **every** project when unset or `localhost`, and says so; single-tenant projects can ignore it
+- `DATABASE_URL` pointing at `localhost` / `127.0.0.1` (warning — usually a managed hostname in production)
+- `RUSTANGO_BIND` starting `127.0.0.1` (warning — loopback-only won't accept external traffic)
+- A settings-tier audit over your TOML, flagging dev defaults left in a prod tier (needs the `config` feature)
+- `Meta.required_db_vendor` / `required_db_features` on every registered model, checked against the dialect you are actually connected to
 
 ```bash
 $ cargo run -- check --deploy

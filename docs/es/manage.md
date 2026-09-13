@@ -575,14 +575,18 @@ producción, del mismo modo que funciona el `check --deploy` de Django.
 **Comprobaciones siempre activas:**
 - ≥ 1 modelo registrado vía `inventory`
 - BD accesible (`SELECT 1`)
-- Recuento de migraciones vs. recuento de modelos
+- Modelos registrados pero **ninguna** migración en disco (no compara recuentos — un directorio `migrations/` existente se reporta como info, sea cual sea el número)
 
 **Con `--deploy`:**
 - `RUSTANGO_ENV` es `prod` o `production`
 - `RUSTANGO_SESSION_SECRET` establecido y ≥ 32 bytes (la clave HMAC para
   cookies + JWTs; el framework nunca lee `SECRET_KEY`)
 - `DATABASE_URL` establecido
-- `RUSTANGO_APEX_DOMAIN` establecido (proyectos de tenancy)
+- `RUSTANGO_APEX_DOMAIN` establecido — el aviso salta en **todos** los proyectos cuando falta o es `localhost`, y así lo dice; los proyectos de un solo tenant pueden ignorarlo
+- `DATABASE_URL` apuntando a `localhost` / `127.0.0.1` (aviso — en producción suele ser un host gestionado)
+- `RUSTANGO_BIND` empezando por `127.0.0.1` (aviso — solo loopback no acepta tráfico externo)
+- Una auditoría del nivel de settings sobre tu TOML, señalando valores de desarrollo dejados en un nivel de producción (requiere la característica `config`)
+- `Meta.required_db_vendor` / `required_db_features` de cada modelo registrado, comprobados contra el dialecto realmente conectado
 
 ```bash
 $ cargo run -- check --deploy

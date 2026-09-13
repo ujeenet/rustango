@@ -602,14 +602,18 @@ préparation à la production, de la même façon que fonctionne
 **Vérifications toujours actives :**
 - ≥ 1 modèle enregistré via `inventory`
 - Base de données accessible (`SELECT 1`)
-- Nombre de migrations vs nombre de modèles
+- Des modèles enregistrés mais **aucune** migration sur le disque (il ne compare pas les nombres — un répertoire `migrations/` existant est signalé en info, quel que soit son contenu)
 
 **Avec `--deploy` :**
 - `RUSTANGO_ENV` vaut `prod` ou `production`
 - `RUSTANGO_SESSION_SECRET` défini et ≥ 32 octets (la clé HMAC pour les
   cookies + JWT ; `SECRET_KEY` n'est jamais lu par le framework)
 - `DATABASE_URL` défini
-- `RUSTANGO_APEX_DOMAIN` défini (projets de tenancy)
+- `RUSTANGO_APEX_DOMAIN` défini — l'avertissement se déclenche pour **tout** projet lorsqu'il est absent ou `localhost`, et le dit ; les projets mono-tenant peuvent l'ignorer
+- `DATABASE_URL` pointant vers `localhost` / `127.0.0.1` (avertissement — en production, généralement un hôte managé)
+- `RUSTANGO_BIND` commençant par `127.0.0.1` (avertissement — en loopback seul, aucun trafic externe n'est accepté)
+- Un audit du palier de configuration sur votre TOML, signalant les valeurs de dev laissées dans un palier prod (nécessite la fonctionnalité `config`)
+- `Meta.required_db_vendor` / `required_db_features` de chaque modèle enregistré, vérifiés contre le dialecte réellement connecté
 
 ```bash
 $ cargo run -- check --deploy
