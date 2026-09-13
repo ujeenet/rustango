@@ -571,7 +571,7 @@ La familia `*_expr` — `eq_expr`, `ne_expr`, `lt_expr`, `lte_expr`, `gt_expr`, 
 
 ### Funciones escalares — texto, matemáticas, manejo de NULL
 
-`rustango::core::funcs` incluye builders para las funciones SQL más usadas. Las 17 disponibles hasta ahora:
+`rustango::core::funcs` incluye builders para las funciones SQL más usadas. 72 builders escalares. Los más usados, agrupados:
 
 | Grupo | Builders |
 |---|---|
@@ -870,7 +870,7 @@ let featured = Author::objects()
 
 ### Cuándo bajar a SQL crudo en su lugar
 
-Los builders de arriba cubren los casos comunes. Para cosas que aún no expresan — `Cast`, búsqueda de texto completo, operadores de path de JSON, funciones de hash, trigonometría, funciones de ventana — ver la sección [Válvula de escape a SQL crudo](#válvula-de-escape-a-sql-crudo) más abajo, o espera a los issues de seguimiento que extienden el mismo árbol de expresiones.
+La tabla de arriba es una selección, no el conjunto completo. `funcs` también trae `cast`, la familia de texto completo (`to_tsvector`, `plainto_tsquery`, `websearch_to_tsquery`, `ts_rank`, `ts_headline`), rutas JSON (`json_path`, `json_path_indexed`, `json_array_length`) y hashes (`md5`, `sha1`, `sha256`). Las funciones de ventana son un módulo aparte, `rustango::core::window`, documentado más abajo. Las funciones trigonométricas son el hueco notable — para esas, y para lo que el árbol de expresiones no alcance, mira la sección [válvula de escape de SQL en crudo](#válvula-de-escape-a-sql-crudo) más abajo.
 
 ---
 

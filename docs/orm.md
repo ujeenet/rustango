@@ -571,7 +571,7 @@ The `*_expr` family — `eq_expr`, `ne_expr`, `lt_expr`, `lte_expr`, `gt_expr`, 
 
 ### Scalar functions — text, math, NULL handling
 
-`rustango::core::funcs` ships builders for the most-used SQL functions. The 17 available so far:
+`rustango::core::funcs` ships 72 scalar builders. The most-used ones, grouped:
 
 | Group | Builders |
 |---|---|
@@ -870,7 +870,7 @@ let featured = Author::objects()
 
 ### When to drop to raw SQL instead
 
-The builders above cover the common cases. For things they don't yet express — `Cast`, full-text search, JSON path operators, hash functions, trig, window functions — see the [Raw SQL escape hatch](#raw-sql-escape-hatch) section below, or wait on the follow-up issues that extend the same expression tree.
+The table above is a selection, not the whole set. `funcs` also has `cast`, the full-text family (`to_tsvector`, `plainto_tsquery`, `websearch_to_tsquery`, `ts_rank`, `ts_headline`), JSON path (`json_path`, `json_path_indexed`, `json_array_length`) and hashes (`md5`, `sha1`, `sha256`). Window functions are a separate module, `rustango::core::window`, documented below. Trigonometric functions are the notable gap — for those, and anything else the expression tree doesn't reach, see the [Raw SQL escape hatch](#raw-sql-escape-hatch).
 
 ---
 

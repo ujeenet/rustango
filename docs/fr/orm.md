@@ -571,7 +571,7 @@ La famille `*_expr` — `eq_expr`, `ne_expr`, `lt_expr`, `lte_expr`, `gt_expr`, 
 
 ### Fonctions scalaires — texte, maths, gestion des NULL
 
-`rustango::core::funcs` fournit des builders pour les fonctions SQL les plus utilisées. Les 17 disponibles à ce jour :
+`rustango::core::funcs` fournit des builders pour les fonctions SQL les plus utilisées. 72 builders scalaires. Les plus utilisés, par groupe :
 
 | Groupe | Builders |
 |---|---|
@@ -870,7 +870,7 @@ let featured = Author::objects()
 
 ### Quand passer plutôt au SQL brut
 
-Les builders ci-dessus couvrent les cas courants. Pour ce qu'ils n'expriment pas encore — `Cast`, recherche plein texte, opérateurs de chemin JSON, fonctions de hachage, trigonométrie, fonctions de fenêtrage — voir la section [Échappatoire vers le SQL brut](#échappatoire-vers-le-sql-brut) ci-dessous, ou attendez les tickets de suivi qui étendent le même arbre d'expressions.
+Le tableau ci-dessus est une sélection, pas l'ensemble complet. `funcs` propose aussi `cast`, la famille plein texte (`to_tsvector`, `plainto_tsquery`, `websearch_to_tsquery`, `ts_rank`, `ts_headline`), les chemins JSON (`json_path`, `json_path_indexed`, `json_array_length`) et les hachages (`md5`, `sha1`, `sha256`). Les fonctions de fenêtrage forment un module distinct, `rustango::core::window`, documenté plus bas. Les fonctions trigonométriques sont le manque notable — pour celles-ci, et pour tout ce que l'arbre d'expressions n'atteint pas, voyez la section [trappe de secours SQL brut](#échappatoire-vers-le-sql-brut) plus bas.
 
 ---
 

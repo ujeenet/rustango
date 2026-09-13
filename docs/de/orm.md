@@ -571,7 +571,7 @@ Die `*_expr`-Familie — `eq_expr`, `ne_expr`, `lt_expr`, `lte_expr`, `gt_expr`,
 
 ### Skalare Funktionen — Text, Mathematik, NULL-Behandlung
 
-`rustango::core::funcs` liefert Builder für die meistgenutzten SQL-Funktionen. Die 17 bisher verfügbaren:
+`rustango::core::funcs` liefert Builder für die meistgenutzten SQL-Funktionen. 72 skalare Builder. Die meistgenutzten, gruppiert:
 
 | Gruppe | Builder |
 |---|---|
@@ -870,7 +870,7 @@ let featured = Author::objects()
 
 ### Wann man stattdessen auf rohes SQL zurückfällt
 
-Die obigen Builder decken die häufigen Fälle ab. Für Dinge, die sie noch nicht ausdrücken — `Cast`, Volltextsuche, JSON-Pfad-Operatoren, Hash-Funktionen, Trigonometrie, Fensterfunktionen — siehe den Abschnitt [Raw-SQL-Notausstieg](#raw-sql-notausstieg) weiter unten, oder warte auf die Nachfolge-Issues, die denselben Ausdrucksbaum erweitern.
+Die Tabelle oben ist eine Auswahl, nicht der ganze Satz. `funcs` hat außerdem `cast`, die Volltext-Familie (`to_tsvector`, `plainto_tsquery`, `websearch_to_tsquery`, `ts_rank`, `ts_headline`), JSON-Pfade (`json_path`, `json_path_indexed`, `json_array_length`) und Hashes (`md5`, `sha1`, `sha256`). Fensterfunktionen sind ein eigenes Modul, `rustango::core::window`, unten dokumentiert. Trigonometrische Funktionen sind die auffällige Lücke — dafür und für alles andere, was der Ausdrucksbaum nicht erreicht, siehe den Abschnitt [Raw-SQL-Notausgang](#raw-sql-notausstieg) weiter unten.
 
 ---
 
