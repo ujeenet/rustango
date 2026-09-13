@@ -939,7 +939,7 @@ Post::objects()
 //   FROM "post" GROUP BY <every Post column>
 ```
 
-**Vorbehalt zur reinen Projektion.** `.values(cols)` *allein* (keine Aggregat-Annotation) wird in v0.40 **nicht** unterstützt — `compile()` gibt `QueryError::ValuesRequiresAggregate` zurück. Reine Projektion-als-Dicts braucht einen separaten Writer-Pfad (es ist ein SELECT ohne GROUP BY, dekodiert in `Vec<HashMap>`) und ist für eine Nachfolge vorgemerkt. Verwende vorerst das typisierte `QuerySet::fetch(...)`, um ganze Zeilen zu lesen.
+**Reine Projektion.** `.values(cols)` *allein* (ohne Aggregat-Annotation) gibt `QueryError::ValuesRequiresAggregate` zurück — dieser Pfad ist für GROUP BY reserviert, und eine Fenster-Annotation erfüllt ihn ebenfalls nicht, da ein Fenster nicht aggregiert. Reine Projektion als Dicts **ist ausgeliefert**: verwende `.values_dict(...)`, `.values_list(...)` oder `.values_list_flat(...)`, oben unter *Bestimmte Spalten auswählen* beschrieben. Die Fehlermeldung selbst nennt sie.
 
 ### Bedingte & statistische Aggregate
 
@@ -1103,9 +1103,9 @@ last_value("score")
 
 `first_value` hat diese Falle nicht — der Start des Default-Frames stimmt mit dem Partitionsstart überein, sodass die intuitive Antwort herausfällt.
 
-**Annotate-Vorbehalt (bis Issue #75 landet):**
+**Annotate und GROUP BY (Issue #75 ist ausgeliefert):**
 
-`annotate()` lebt auf dem Aggregat-Builder, der `GROUP BY` erfordert, um pro-Zeile-Skalarspalten neben Aggregaten zu projizieren. Um Fensterfunktions-Ergebnisse heute neben Zeilenspalten zu projizieren, liste jede Zeilenspalte, die du zurückgeben willst, in `.group_by(...)`-Aufrufen auf und `annotate("_a", max("id").into())` als No-op-Platzhalter, um die Zeilenidentität stabil zu halten. Issue #75 (GROUP-BY-Auto-Inferenz) bringt eine sauberere Form.
+Ein **reines Fenster**-`annotate()` auf `.aggregate()` erzeugt inzwischen gar kein `GROUP BY` mehr — Fenster sind pro Zeile, es muss also nichts gruppiert werden. Zeilenspalten *neben* einem Fenster zu projizieren läuft weiterhin über den Aggregat-Builder; deshalb listen die Beispiele unten jede Zeilenspalte in `.group_by(...)` und ergänzen `annotate("_a", max("id").into())` als No-op, um die Zeilenidentität stabil zu halten. Diese Form funktioniert weiterhin. Beachte: `.values(cols).annotate(window)` funktioniert **nicht** — ein Fenster aggregiert nicht und liefert `ValuesRequiresAggregate`.
 
 **Frame-Klauseln:**
 
@@ -1470,7 +1470,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Verwirf die `tx`, ohne `commit()` aufzurufen (z. B. bei einem frühen `?`-Return), und die Transaktion rollt zurück. Für einen Nach-Commit-Hook (Djangos `transaction.on_commit`) greif zum closure-artigen `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`-Helper, der bei `Ok` automatisch committet und bei `Err` automatisch zurückrollt.
+Verwirf die `tx`, ohne `commit()` aufzurufen (z. B. bei einem frühen `?`-Return), und die Transaktion rollt zurück. Für einen Nach-Commit-Hook (Djangos `transaction.on_commit`) ist der Scope `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, der bei `Ok` automatisch committet und bei `Err` zurückrollt — der Hook selbst ist `rustango::sql::on_commit(|| { … })` und wird **innerhalb** dieser Closure aufgerufen. `atomic` leert die Queue, nachdem der Commit durch ist; ein `on_commit` außerhalb eines `atomic`-Scopes paniert, statt den Callback zu verwerfen.
 
 ---
 
@@ -1567,7 +1567,7 @@ post.restore_on(&pool).await?;          // sets deleted_at = NULL
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-Der "Löschen"-Button des Admins routet automatisch zu `soft_delete_on` für jedes Model, das die Spalte hat. Der Auto-Filter (Default-Ausschluss) steht auf der v0.21-Roadmap.
+Der "Löschen"-Button des Admins routet automatisch zu `soft_delete_on` für jedes Model, das die Spalte hat. Standardabfragen enthalten weiterhin soft-gelöschte Zeilen, aber du musst den Filter nicht mehr selbst schreiben: `.active()` schließt sie aus, `.only_trashed()` liefert nur sie, `.with_trashed()` nimmt sie wieder auf. Den Ausschluss zum Default zu machen wird in [#820](https://github.com/ujeenet/rustango/issues/820) verfolgt.
 
 ---
 

@@ -939,7 +939,7 @@ Post::objects()
 //   FROM "post" GROUP BY <every Post column>
 ```
 
-**Salvedad de proyección pura.** `.values(cols)` *por sí solo* (sin anotación de agregado) **no** está soportado en v0.40 — `compile()` devuelve `QueryError::ValuesRequiresAggregate`. La proyección pura como dicts necesita un camino de writer separado (es un SELECT sin GROUP BY, decodificado en `Vec<HashMap>`) y está en cola para un seguimiento. Por ahora, usa el `QuerySet::fetch(...)` tipado para leer filas completas.
+**Proyección pura.** `.values(cols)` *por sí solo* (sin anotación de agregado) devuelve `QueryError::ValuesRequiresAggregate` — esa vía está reservada para GROUP BY, y una anotación de ventana tampoco la satisface, porque una ventana no agrega. La proyección pura como diccionarios **ya está disponible**: usa `.values_dict(...)`, `.values_list(...)` o `.values_list_flat(...)`, descritos más arriba en *Seleccionar columnas concretas*. El propio mensaje de error los nombra.
 
 ### Agregados condicionales y estadísticos
 
@@ -1103,9 +1103,9 @@ last_value("score")
 
 `first_value` no tiene esta trampa — el inicio del frame predeterminado coincide con el inicio de la partición, así que la respuesta intuitiva sale sola.
 
-**Salvedad de annotate (hasta que llegue el issue #75):**
+**Annotate y GROUP BY (el issue #75 ya está disponible):**
 
-`annotate()` vive en el aggregate-builder que requiere `GROUP BY` para proyectar columnas escalares por fila junto a los agregados. Para proyectar resultados de función de ventana junto a columnas de fila hoy, lista cada columna de fila que quieras devolver en llamadas `.group_by(...)` y `annotate("_a", max("id").into())` como un placeholder no-op para mantener estable la identidad de la fila. El issue #75 (auto-inferencia de GROUP BY) trae una forma más limpia.
+Un `annotate()` **solo de ventana** sobre `.aggregate()` ya no emite ningún `GROUP BY` — las ventanas son por fila, así que no hay nada que agrupar. Proyectar columnas de fila *junto a* una ventana sigue pasando por el aggregate-builder, y por eso los ejemplos de abajo listan cada columna en `.group_by(...)` y añaden `annotate("_a", max("id").into())` como no-op para mantener estable la identidad de fila. Esa forma sigue funcionando. Ojo: `.values(cols).annotate(window)` **no** funciona — una ventana no agrega y devuelve `ValuesRequiresAggregate`.
 
 **Cláusulas de frame:**
 
@@ -1469,7 +1469,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Descarta la `tx` sin llamar a `commit()` (p. ej. en un retorno anticipado con `?`) y la transacción hace rollback. Para un hook post-commit (el `transaction.on_commit` de Django) recurre al helper de estilo closure `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, que auto-confirma en `Ok` y auto-hace-rollback en `Err`.
+Descarta la `tx` sin llamar a `commit()` (p. ej. en un retorno anticipado con `?`) y la transacción hace rollback. Para un hook post-commit (el `transaction.on_commit` de Django) el ámbito es `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, que auto-confirma en `Ok` y hace rollback en `Err` — y el hook en sí es `rustango::sql::on_commit(|| { … })`, llamado **dentro** de esa closure. `atomic` vacía la cola una vez confirmado el commit; llamar a `on_commit` fuera de un ámbito `atomic` hace panic en vez de descartar el callback.
 
 ---
 
@@ -1566,7 +1566,7 @@ post.restore_on(&pool).await?;          // sets deleted_at = NULL
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-El botón "Delete" del admin encamina automáticamente a `soft_delete_on` para cualquier modelo que tenga la columna. El auto-filtro (exclusión predeterminada) está en la hoja de ruta de la v0.21.
+El botón "Delete" del admin encamina automáticamente a `soft_delete_on` para cualquier modelo que tenga la columna. Las consultas por defecto siguen incluyendo filas borradas en suave, pero ya no hace falta escribir el filtro a mano: `.active()` las excluye, `.only_trashed()` devuelve solo esas y `.with_trashed()` vuelve a incluirlas. Hacer que la exclusión sea el comportamiento por defecto se rastrea en [#820](https://github.com/ujeenet/rustango/issues/820).
 
 ---
 

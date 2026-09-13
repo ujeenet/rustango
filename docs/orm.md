@@ -939,7 +939,7 @@ Post::objects()
 //   FROM "post" GROUP BY <every Post column>
 ```
 
-**Pure projection caveat.** `.values(cols)` *alone* (no aggregate annotation) is **not** supported in v0.40 — `compile()` returns `QueryError::ValuesRequiresAggregate`. Pure projection-as-dicts needs a separate writer path (it's a SELECT without GROUP BY, decoded into `Vec<HashMap>`) and is queued for a follow-up. For now, use the typed `QuerySet::fetch(...)` to read whole rows.
+**Pure projection.** `.values(cols)` *alone* (no aggregate annotation) returns `QueryError::ValuesRequiresAggregate` — that path is reserved for GROUP BY, and a window annotation does not satisfy it either, since a window does not aggregate. Pure projection-as-dicts **has shipped**: use `.values_dict(...)`, `.values_list(...)` or `.values_list_flat(...)`, described above under *Selecting specific columns*. The error's own message names them.
 
 ### Conditional & statistical aggregates
 
@@ -1103,9 +1103,9 @@ last_value("score")
 
 `first_value` doesn't have this trap — the default frame's start matches the partition start, so the intuitive answer falls out.
 
-**Annotate caveat (until issue #75 ships):**
+**Annotate and GROUP BY (issue #75 has shipped):**
 
-`annotate()` lives on the aggregate-builder which requires `GROUP BY` to project per-row scalar columns alongside aggregates. To project window-function results next to row columns today, list every row column you want to return in `.group_by(...)` calls and `annotate("_a", max("id").into())` as a no-op placeholder to keep the row identity stable. Issue #75 (GROUP BY auto-inference) lands a cleaner shape.
+A **window-only** `annotate()` on `.aggregate()` now emits no `GROUP BY` at all — windows are per-row, so nothing needs grouping. Projecting row columns *alongside* a window still goes through the aggregate builder, which is why the examples below list each row column in `.group_by(...)` and add `annotate("_a", max("id").into())` as a no-op to keep the row identity stable. That shape still works. Note that `.values(cols).annotate(window)` does **not** — a window does not aggregate, so it returns `ValuesRequiresAggregate`.
 
 **Frame clauses:**
 
@@ -1469,7 +1469,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Drop the `tx` without calling `commit()` (e.g. on an early `?` return) and the transaction rolls back. For an after-commit hook (Django's `transaction.on_commit`) reach for the closure-style `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))` helper, which auto-commits on `Ok` and auto-rolls-back on `Err`.
+Drop the `tx` without calling `commit()` (e.g. on an early `?` return) and the transaction rolls back. For an after-commit hook (Django's `transaction.on_commit`) the scope is `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, which auto-commits on `Ok` and auto-rolls-back on `Err` — and the hook itself is `rustango::sql::on_commit(|| { … })`, called **inside** that closure. `atomic` drains the queue after the commit lands; calling `on_commit` outside an `atomic` scope panics rather than dropping the callback.
 
 ---
 
@@ -1566,7 +1566,7 @@ post.restore_on(&pool).await?;          // sets deleted_at = NULL
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-The admin's "Delete" button auto-routes to `soft_delete_on` for any model that has the column. The auto-filter (default exclusion) is on the v0.21 roadmap.
+The admin's "Delete" button auto-routes to `soft_delete_on` for any model that has the column. Default queries still include soft-deleted rows, but you no longer need to hand-roll the filter: `.active()` excludes them, `.only_trashed()` returns just them, and `.with_trashed()` opts back in. Making exclusion the default is tracked in [#820](https://github.com/ujeenet/rustango/issues/820).
 
 ---
 

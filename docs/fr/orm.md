@@ -939,7 +939,7 @@ Post::objects()
 //   FROM "post" GROUP BY <every Post column>
 ```
 
-**Mise en garde sur la projection pure.** `.values(cols)` *seul* (sans annotation d'agrégat) n'est **pas** pris en charge en v0.40 — `compile()` renvoie `QueryError::ValuesRequiresAggregate`. La projection pure en dictionnaires nécessite un chemin d'écriture distinct (c'est un SELECT sans GROUP BY, décodé en `Vec<HashMap>`) et est en file d'attente pour un suivi. Pour l'instant, utilisez le `QuerySet::fetch(...)` typé pour lire des lignes entières.
+**Projection pure.** `.values(cols)` *seul* (sans annotation d'agrégat) renvoie `QueryError::ValuesRequiresAggregate` — ce chemin est réservé au GROUP BY, et une annotation de fenêtre ne le satisfait pas davantage, puisqu'une fenêtre n'agrège pas. La projection pure en dictionnaires **est livrée** : utilisez `.values_dict(...)`, `.values_list(...)` ou `.values_list_flat(...)`, décrits plus haut sous *Sélectionner des colonnes précises*. Le message d'erreur les nomme lui-même.
 
 ### Agrégats conditionnels et statistiques
 
@@ -1103,9 +1103,9 @@ last_value("score")
 
 `first_value` n'a pas ce piège — le début de la frame par défaut coïncide avec le début de la partition, donc la réponse intuitive en découle.
 
-**Mise en garde sur annotate (jusqu'à la livraison du ticket #75) :**
+**Annotate et GROUP BY (le ticket #75 est livré) :**
 
-`annotate()` réside sur le builder d'agrégat qui requiert un `GROUP BY` pour projeter des colonnes scalaires par ligne aux côtés des agrégats. Pour projeter aujourd'hui des résultats de fonction de fenêtrage à côté des colonnes de ligne, listez chaque colonne de ligne que vous voulez renvoyer dans des appels `.group_by(...)` et utilisez `annotate("_a", max("id").into())` comme placeholder sans effet pour maintenir stable l'identité de la ligne. Le ticket #75 (inférence automatique du GROUP BY) livre une forme plus propre.
+Un `annotate()` **uniquement fenêtre** sur `.aggregate()` n'émet désormais aucun `GROUP BY` — les fenêtres sont par ligne, il n'y a donc rien à grouper. Projeter des colonnes de ligne *à côté* d'une fenêtre passe toujours par le builder d'agrégat, d'où le fait que les exemples ci-dessous listent chaque colonne dans `.group_by(...)` et ajoutent `annotate("_a", max("id").into())` comme no-op pour garder l'identité de ligne stable. Cette forme fonctionne toujours. À noter : `.values(cols).annotate(window)` ne fonctionne **pas** — une fenêtre n'agrège pas et renvoie `ValuesRequiresAggregate`.
 
 **Clauses de frame :**
 
@@ -1469,7 +1469,7 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Abandonnez le `tx` sans appeler `commit()` (p. ex. sur un retour anticipé via `?`) et la transaction est annulée. Pour un hook après commit (le `transaction.on_commit` de Django), recourez à l'assistant de style closure `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, qui valide automatiquement en cas de `Ok` et annule automatiquement en cas de `Err`.
+Abandonnez le `tx` sans appeler `commit()` (p. ex. sur un retour anticipé via `?`) et la transaction est annulée. Pour un hook après commit (le `transaction.on_commit` de Django), la portée est `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, qui valide en cas de `Ok` et annule en cas de `Err` — et le hook lui-même est `rustango::sql::on_commit(|| { … })`, appelé **à l'intérieur** de cette closure. `atomic` vide la file une fois le commit passé ; appeler `on_commit` hors d'une portée `atomic` panique au lieu d'abandonner le callback.
 
 ---
 
@@ -1566,7 +1566,7 @@ post.restore_on(&pool).await?;          // sets deleted_at = NULL
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-Le bouton « Delete » de l'admin route automatiquement vers `soft_delete_on` pour tout modèle qui possède la colonne. Le filtre automatique (exclusion par défaut) est sur la feuille de route v0.21.
+Le bouton « Delete » de l'admin route automatiquement vers `soft_delete_on` pour tout modèle qui possède la colonne. Les requêtes par défaut incluent toujours les lignes supprimées en douceur, mais vous n'avez plus à écrire le filtre à la main : `.active()` les exclut, `.only_trashed()` ne renvoie qu'elles et `.with_trashed()` les réintègre. Faire de l'exclusion le comportement par défaut est suivi dans [#820](https://github.com/ujeenet/rustango/issues/820).
 
 ---
 
