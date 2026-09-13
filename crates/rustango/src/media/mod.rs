@@ -1333,10 +1333,19 @@ fn build_key(prefix: &str, original_filename: &str) -> String {
     }
 }
 
+// Kept in step with `crate::uploads::sanitize_filename`, which is
+// identical. They live behind different feature gates (`media` vs
+// `uploads`), so neither can call the other without one implying the
+// other — change both or neither.
 fn sanitize_filename(name: &str) -> String {
-    let base = std::path::Path::new(name)
-        .file_name()
-        .and_then(|s| s.to_str())
+    // Split on both separators rather than `Path::file_name`, which
+    // answers per-platform: `\` is a separator on Windows and an ordinary
+    // character everywhere else, so the same upload was stored under a
+    // different name depending on the server's OS (#1285).
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
         .unwrap_or(name);
     let mut out = String::with_capacity(base.len());
     for c in base.chars() {
@@ -1406,6 +1415,10 @@ mod tests {
         assert_eq!(sanitize_filename("My File.png"), "My_File.png");
         assert_eq!(sanitize_filename("évil.jpg"), "_vil.jpg");
         assert_eq!(sanitize_filename(""), "upload");
+        // Windows separators, asserted on every platform — this copy had
+        // the same gap as `uploads` and no test covering it (#1285).
+        assert_eq!(sanitize_filename("C:\\windows\\evil.exe"), "evil.exe");
+        assert_eq!(sanitize_filename("C:/Users/me/photo.jpg"), "photo.jpg");
     }
 
     #[test]
