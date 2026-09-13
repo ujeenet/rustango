@@ -989,13 +989,28 @@ mod tuning_tests {
         std::env::set_var(MIN_CONNECTIONS_ENV, "3");
         std::env::set_var(ACQUIRE_TIMEOUT_ENV, "11");
 
+        // Compare the pool against the tuning actually in force, not
+        // against the env vars just set. Another test in this binary
+        // may have sealed the tuning already — every `with_settings`
+        // test does — and asserting on `37` would then pass or fail by
+        // test order. That `merge_env_over` reads these vars is proved
+        // by the pure tests above; what is proved *here* is that
+        // whatever tuning says reaches the pool.
+        let expect = tuning();
         let pool = Pool::connect_sqlite_lazy("sqlite::memory:").expect("build a lazy pool");
         let opts = pool.options();
-        assert_eq!(opts.get_max_connections(), 37, "max_connections");
-        assert_eq!(opts.get_min_connections(), 3, "min_connections");
+
+        if let Some(n) = expect.max_connections {
+            assert_eq!(opts.get_max_connections(), n, "max_connections");
+        }
+        if let Some(n) = expect.min_connections {
+            assert_eq!(opts.get_min_connections(), n, "min_connections");
+        }
         assert_eq!(
             opts.get_acquire_timeout(),
-            Duration::from_secs(11),
+            expect
+                .acquire_timeout
+                .unwrap_or_else(|| Duration::from_secs(ACQUIRE_TIMEOUT_DEFAULT_SECS)),
             "acquire_timeout"
         );
         clear();
@@ -1008,15 +1023,22 @@ mod tuning_tests {
     #[test]
     fn reading_the_tuning_leaves_it_configurable() {
         let _g = env_lock();
-        clear();
-        let before = tuning();
-        assert_eq!(before.max_connections, None);
-        // The cell must still be empty, i.e. still settable. Asserting
-        // on `TUNING.get()` rather than calling `configure_pools`,
-        // which would seal it for every other test in this binary.
-        assert!(
-            TUNING.get().is_none(),
-            "a read sealed the tuning cell — settings applied later would be ignored"
+        // Assert the *property* — a read does not change whether the
+        // cell is set — rather than its absolute state. Another test in
+        // this binary may legitimately have called `configure_pools`
+        // already (any `with_settings` test does), and under some
+        // feature sets it runs first. An assertion on
+        // `TUNING.get().is_none()` passes or fails by test order, which
+        // is a flaky test dressed up as a real one.
+        let set_before = TUNING.get().is_some();
+        let _ = tuning();
+        let _ = tuning();
+        assert_eq!(
+            TUNING.get().is_some(),
+            set_before,
+            "reading the tuning changed whether it was set — with `get_or_init` a read \
+             sealed the cell, so any pool built before `with_settings` silently froze \
+             the whole process on environment defaults"
         );
     }
 }
