@@ -352,8 +352,11 @@ method (POST/PUT/PATCH/DELETE) must echo that cookie's value back, either in the
 //   X-CSRF-Token:  <t>                 → 200 OK   (double-submit matches)
 ```
 
-In Tera templates, `{{ csrf_token }}` gives the raw token and `{{ csrf_input }}`
-a ready-made hidden `<input name="_csrf">` — drop one in every form. Override
+In Tera templates, `{{ csrf_token }}` gives the raw token and `{{ csrf_input | safe }}`
+a ready-made hidden `<input name="_csrf">` — drop one in every form. The `| safe`
+is required: Tera autoescapes `.html`, so without it the form carries no `_csrf`
+field and every POST 403s. The admin's own login form does exactly this — see
+`crates/rustango/src/admin/templates/login.html`. Override
 the cookie/header names or the `Secure` flag with `csrf::with_config(CsrfConfig)`;
 for SPA setups, add `.with_trusted_origins([...])` to enable the Origin-header
 defense-in-depth check on top of the token. For append-only collector endpoints

@@ -372,8 +372,11 @@ non-concordance donne un `403 Forbidden` :
 ```
 
 Dans les templates Tera, `{{ csrf_token }}` donne le jeton brut et
-`{{ csrf_input }}` un `<input name="_csrf">` caché prêt à l'emploi — déposez-en
-un dans chaque formulaire. Surchargez les noms de cookie/en-tête ou le flag
+`{{ csrf_input | safe }}` un `<input name="_csrf">` caché prêt à l'emploi — déposez-en
+un dans chaque formulaire. Le `| safe` est obligatoire : Tera échappe `.html`
+automatiquement, sans quoi le formulaire ne porte aucun champ `_csrf` et chaque
+POST renvoie 403. Le formulaire de connexion de l'admin fait exactement cela —
+voir `crates/rustango/src/admin/templates/login.html`. Surchargez les noms de cookie/en-tête ou le flag
 `Secure` avec `csrf::with_config(CsrfConfig)` ; pour des configurations SPA,
 ajoutez `.with_trusted_origins([...])` pour activer la vérification de
 défense en profondeur de l'en-tête Origin en plus du jeton. Pour des endpoints

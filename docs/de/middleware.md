@@ -371,8 +371,11 @@ Abweichung ergibt `403 Forbidden`:
 ```
 
 In Tera-Templates liefert `{{ csrf_token }}` das rohe Token und
-`{{ csrf_input }}` ein fertiges verstecktes `<input name="_csrf">` — leg eines in
-jedes Formular. Überschreibe die Cookie-/Header-Namen oder das `Secure`-Flag mit
+`{{ csrf_input | safe }}` ein fertiges verstecktes `<input name="_csrf">` — leg eines in
+jedes Formular. Das `| safe` ist Pflicht: Tera escapt `.html` automatisch, ohne
+es trägt das Formular kein `_csrf`-Feld und jedes POST endet in 403. Das
+Login-Formular des Admins macht genau das — siehe
+`crates/rustango/src/admin/templates/login.html`. Überschreibe die Cookie-/Header-Namen oder das `Secure`-Flag mit
 `csrf::with_config(CsrfConfig)`; für SPA-Setups füge
 `.with_trusted_origins([...])` hinzu, um die Defense-in-Depth-Prüfung des
 Origin-Headers zusätzlich zum Token zu aktivieren. Für Append-only-Collector-
