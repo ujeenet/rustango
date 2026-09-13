@@ -109,7 +109,7 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     ///
     /// | | [`InMemoryJobQueue`] | `PgJobQueue` |
     /// |---|---|---|
-    /// | audit source | the enqueuer's, marked `job:` | `System` |
+    /// | audit source | the enqueuer's | `System` |
     /// | active timezone | the enqueuer's | the default |
     ///
     /// `PgJobQueue` carries neither: its envelope is a `rustango_jobs`
@@ -317,10 +317,9 @@ impl JobQueue for InMemoryJobQueue {
             payload: value,
             attempt: 0,
             max_attempts: T::MAX_ATTEMPTS,
-            // `deferred()` marks the boundary: a job enqueued by user 42
-            // records `job:user:42`, not `user:42`. A retry days later
-            // must not claim that user acted at that moment.
-            context: crate::task_context::TaskContext::capture().deferred(),
+            // Captured here, at the hand-off. A worker is spawned at
+            // boot and has no caller to inherit from.
+            context: crate::task_context::TaskContext::capture(),
         };
         self.pending
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -527,9 +526,6 @@ mod tests {
     /// row written from one recorded `system`, so "who deleted this?"
     /// was a dead end whenever a job did it.
     ///
-    /// `job:user:99`, not `user:99`: the marker says a job did the work
-    /// on that user's behalf. A retry three days later must not claim
-    /// the user acted then.
     #[tokio::test]
     async fn a_job_sees_the_context_of_whoever_enqueued_it() {
         use crate::audit::{current_source, with_source, AuditSource};
@@ -562,8 +558,8 @@ mod tests {
 
         assert_eq!(
             SEEN.lock().unwrap().clone(),
-            Some("job:user:99".to_owned()),
-            "the job should see who enqueued it, marked as deferred work"
+            Some("user:99".to_owned()),
+            "the job should see who enqueued it"
         );
     }
 
@@ -594,7 +590,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(80)).await;
         q.shutdown().await;
 
-        assert_eq!(SEEN.lock().unwrap().clone(), Some("job:system".to_owned()));
+        assert_eq!(SEEN.lock().unwrap().clone(), Some("system".to_owned()));
     }
 
     #[tokio::test]

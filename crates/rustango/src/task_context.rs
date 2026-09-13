@@ -38,6 +38,13 @@
 //! Until both land, "who did this?" is answerable for in-memory jobs
 //! only. Treat a `System` source on a job row as "unknown", not as
 //! "the framework".
+//!
+//! ## What the source does not tell you
+//!
+//! A job's audit row names the enqueuer and nothing else, so it reads
+//! identically to one written on the request itself. Recording *that*
+//! it ran deferred needs its own column rather than a prefix on the
+//! token, which would break the exact-match filters that read it: #1385.
 
 use crate::audit::AuditSource;
 
@@ -58,25 +65,6 @@ impl TaskContext {
         Self {
             source: crate::audit::current_source(),
             offset: crate::i18n::timezone::current_offset(),
-        }
-    }
-
-    /// Mark the source as having crossed into deferred work.
-    ///
-    /// `user:42` becomes `job:user:42`. The distinction is not
-    /// decoration: a job enqueued on Monday and retried on Thursday
-    /// would otherwise record that user 42 acted on Thursday, when they
-    /// were not there. Attribution and presence are different claims,
-    /// and a confidently wrong audit row is worse than a blank one.
-    ///
-    /// Uses the existing `Custom` variant, so `AuditSource` keeps its
-    /// shape and nothing downstream has to match a new one.
-    #[must_use]
-    pub fn deferred(self) -> Self {
-        let token = self.source.as_token();
-        Self {
-            source: AuditSource::Custom(format!("job:{token}")),
-            ..self
         }
     }
 
@@ -148,46 +136,17 @@ mod tests {
         assert_eq!(token, "system", "bare spawn should NOT inherit");
     }
 
+    /// A job dispatched from inside a job keeps the original actor, with
+    /// no marker accumulating between the hops.
     #[tokio::test]
-    async fn deferred_marks_the_boundary_without_losing_the_actor() {
-        let ctx = with_source(AuditSource::User { id: "42".into() }, async {
-            TaskContext::capture()
-        })
-        .await
-        .deferred();
-        assert_eq!(ctx.source().as_token(), "job:user:42");
-    }
-
-    #[tokio::test]
-    async fn deferred_system_stays_readable() {
-        assert_eq!(
-            TaskContext::capture().deferred().source().as_token(),
-            "job:system"
-        );
-    }
-
-    /// A job that enqueues another job compounds the marker, and the
-    /// actor stays on the end: `job:job:user:42`.
-    ///
-    /// Pinned rather than collapsed. The depth is an honest record of
-    /// how far the work drifted from the person who started it, and
-    /// collapsing it would claim user 42's own job did this. The column
-    /// is `max_length = 255`, so a chain would need ~60 hops to
-    /// truncate — well past anything real.
-    #[tokio::test]
-    async fn deferring_a_second_time_compounds_the_marker() {
+    async fn chaining_jobs_keeps_the_original_actor() {
         let first = with_source(AuditSource::User { id: "42".into() }, async {
             TaskContext::capture()
         })
-        .await
-        .deferred();
+        .await;
 
-        // What a handler dispatching its own follow-up job does: it
-        // captures from inside the context the worker installed.
-        let second = first
-            .install(async { TaskContext::capture().deferred() })
-            .await;
+        let second = first.install(async { TaskContext::capture() }).await;
 
-        assert_eq!(second.source().as_token(), "job:job:user:42");
+        assert_eq!(second.source().as_token(), "user:42");
     }
 }
