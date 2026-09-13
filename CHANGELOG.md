@@ -4,18 +4,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Fixed
-- **`[database]` pool settings are applied.** `pool_max_size` and `pool_min_size` were parsed, type-checked and unit-tested — and reached no pool at all. Setting them did nothing, which is worse than not offering them: a pool sized for production silently ran on sqlx's default of 10, with no error and nothing in the logs to explain it (#1373).
-- **Every pool is built through one constructor.** Construction had spread to ~22 production sites, most calling sqlx directly. The main Postgres `runserver` pool was among them, so it ran on sqlx's 30s acquire timeout — the value this crate elsewhere rejects as "a batch-tool number, not a web-server one". `tests/pool_construction.rs` keeps it from regrowing.
-- **`Pool::connect_lazy` applied no options at all**, not even an acquire timeout.
-- **SQLite pools built by the `manage` dispatch skipped the framework's pragmas**, so they got neither WAL journal mode nor the `?mode=rwc` default that every other SQLite pool gets.
-- **Generated `manage` binaries** (`manage startapp --with-manage-bin`) emitted `PgPool::connect`, so a scaffolded project's own binary bypassed the pool options its settings configured.
-
-### Added
-- `[database]` gains `pool_acquire_timeout_secs`, `pool_idle_timeout_secs` and `pool_max_lifetime_secs`, plus `RUSTANGO_DB_MAX_CONNECTIONS`, `RUSTANGO_DB_MIN_CONNECTIONS`, `RUSTANGO_DB_IDLE_TIMEOUT_SECS` and `RUSTANGO_DB_MAX_LIFETIME_SECS` as environment overrides. Environment wins over TOML, so a deploy can retune a pool without a config push.
-- `Pool::connect_postgres` / `connect_mysql` / `connect_sqlite` (and `_lazy` siblings) for callers that need a typed `sqlx::Pool<DB>` — `TenantPools::<DB>::new`, `migrate` and `health_router` all take one. Use these rather than sqlx's constructors, which apply none of the framework's options.
-- `sql::PoolTuning` and `sql::configure_pools`, called from `Cli::with_settings`.
-
 ## [0.57.0] — 2026-09-12
 
 ### Added
@@ -72,6 +60,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   but the texts existed nowhere — GitHub reported no license at all, and the
   terms an attribution claim would rest on were absent from the published
   crates. Both files are now packaged into all four published crates.
+- `[database]` gains `pool_acquire_timeout_secs`, `pool_idle_timeout_secs` and `pool_max_lifetime_secs`, plus `RUSTANGO_DB_MAX_CONNECTIONS`, `RUSTANGO_DB_MIN_CONNECTIONS`, `RUSTANGO_DB_IDLE_TIMEOUT_SECS` and `RUSTANGO_DB_MAX_LIFETIME_SECS` as environment overrides. Environment wins over TOML, so a deploy can retune a pool without a config push.
+- `Pool::connect_postgres` / `connect_mysql` / `connect_sqlite` (and `_lazy` siblings) for callers that need a typed `sqlx::Pool<DB>` — `TenantPools::<DB>::new`, `migrate` and `health_router` all take one. Use these rather than sqlx's constructors, which apply none of the framework's options.
+- `sql::PoolTuning` and `sql::configure_pools`, called from `Cli::with_settings`.
+- **`docs/database-tuning.md`**, in all four locales: what each pool knob does, the failure each default produces, and where to set it.
 
 ### Changed
 - **The MySQL and SQLite dialect emitters are no longer gated on their drivers**
@@ -107,6 +99,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
   every SQLite and MySQL deployment.
 
 ### Fixed
+- **`[database]` pool settings are applied.** `pool_max_size` and `pool_min_size` were parsed, type-checked and unit-tested — and reached no pool at all. Setting them did nothing, which is worse than not offering them: a pool sized for production silently ran on sqlx's default of 10, with no error and nothing in the logs to explain it (#1373).
+- **Every pool is built through one constructor.** Construction had spread to ~22 production sites, most calling sqlx directly. The main Postgres `runserver` pool was among them, so it ran on sqlx's 30s acquire timeout — the value this crate elsewhere rejects as "a batch-tool number, not a web-server one". `tests/pool_construction.rs` keeps it from regrowing.
+- **`Pool::connect_lazy` applied no options at all**, not even an acquire timeout.
+- **SQLite pools built by the `manage` dispatch skipped the framework's pragmas**, so they got neither WAL journal mode nor the `?mode=rwc` default that every other SQLite pool gets.
+- **Generated `manage` binaries** (`manage startapp --with-manage-bin`) emitted `PgPool::connect`, so a scaffolded project's own binary bypassed the pool options its settings configured.
+- **The generated `prod_settings.toml` pointed operators at a variable nothing reads.** It said to set the database URL via `RUSTANGO__DATABASE__URL`, which overrides `Settings.database.url` — a field no pool consults. Every pool reads plain `DATABASE_URL`. An operator following their own generated config either failed to boot naming a variable the file never mentioned, or silently connected to whatever `DATABASE_URL` happened to hold.
 - **`cargo test --no-default-features --features sqlite,tenancy` did not
   compile** (#1363). The canonical no-Postgres litmus had been broken for a
   long time: two emission tests wanted `sql::MySql` (see Changed), 36 files used
@@ -6516,7 +6514,7 @@ Initial workspace scaffolding through the first usable axe of the framework.
 - **`rustango-admin`** auto-CRUD router over the inventory registry. Zero per-model wiring — every derive shows up.
 - **Postgres DDL writer** in `rustango-sql` + **`migrate::apply_all(&pool)` / `migrate::drop_all(&pool)`** for fresh-DB bootstrap.
 
-[Unreleased]: https://github.com/ujeenet/rustango/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ujeenet/rustango/compare/v0.57.0...HEAD
 [0.5.0]: https://github.com/ujeenet/rustango/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ujeenet/rustango/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ujeenet/rustango/compare/v0.2.0...v0.3.0
