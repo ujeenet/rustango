@@ -6,11 +6,46 @@
 //! reverse of the usual drift and the reason this is worth pinning:
 //! help text is read far more often than a guide, and nothing compiles
 //! it against the parser it describes.
+//!
+//! ## Required features
+//!
+//! The real assertions need `tenancy,manage`, and the `create-user-key`
+//! one also needs `mcp` — that help block is gated, so the line it
+//! checks is not emitted without it.
+//!
+//! A gated test file reports `running 0 tests … ok` when the features
+//! are off, which is a green that asserted nothing. Someone editing help
+//! strings runs exactly this file, so that green is worst where it is
+//! most likely. `feature_summary` below is always compiled, so the run
+//! always names what did and did not happen instead of being silent.
+//!
+//! It does not *fail* when the features are off: `manage` is in
+//! `batteries` but `tenancy` is not, so a plain `cargo test -p rustango`
+//! has one and not the other, and failing there would break the most
+//! common local command to report a configuration that is fine.
 
-#![cfg(all(feature = "tenancy", feature = "manage"))]
-
+#[cfg(all(feature = "tenancy", feature = "manage"))]
 use rustango::tenancy::manage::write_help;
 
+/// Always compiled. Names the feature set so a run that asserts nothing
+/// says so, rather than printing `0 tests … ok`.
+#[test]
+fn feature_summary() {
+    let gated = cfg!(all(feature = "tenancy", feature = "manage"));
+    let mcp = cfg!(feature = "mcp");
+    println!(
+        "help guard: tenancy+manage = {gated}, mcp = {mcp} — \
+         {} assertion(s) active",
+        usize::from(gated) + usize::from(gated && mcp)
+    );
+    assert!(
+        !(mcp && !gated),
+        "`mcp` without `tenancy,manage` cannot happen — if it does, the \
+         cfg on this file is wrong and the guard is silently inert"
+    );
+}
+
+#[cfg(all(feature = "tenancy", feature = "manage"))]
 fn help() -> String {
     let mut buf: Vec<u8> = Vec::new();
     write_help(&mut buf).expect("write_help");
@@ -20,6 +55,7 @@ fn help() -> String {
 /// `init_tenancy_with` takes `_dir`, touches no filesystem, and returns
 /// `Ok(InitTenancyReport::default())`. Help used to advertise
 /// "Materialize bootstrap migrations into ./migrations/."
+#[cfg(all(feature = "tenancy", feature = "manage"))]
 #[test]
 fn init_tenancy_help_does_not_promise_files() {
     let h = help();
@@ -43,7 +79,7 @@ fn init_tenancy_help_does_not_promise_files() {
 ///
 /// The MCP block is feature-gated, so this only runs where the line is
 /// actually emitted.
-#[cfg(feature = "mcp")]
+#[cfg(all(feature = "tenancy", feature = "manage", feature = "mcp"))]
 #[test]
 fn create_user_key_help_shows_flags_not_a_third_positional() {
     let h = help();
