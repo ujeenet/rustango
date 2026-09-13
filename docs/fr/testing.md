@@ -30,6 +30,7 @@ Rust.
 - [Envoyer du JSON, des en-têtes et des corps](#envoyer-du-json-des-en-têtes-et-des-corps)
 - [Tester une vraie API](#tester-une-vraie-api)
 - [Tests de base de données avec rollback](#tests-de-base-de-données-avec-rollback)
+- [Suites live, et pourquoi une exécution verte peut ne rien prouver](#suites-live-et-pourquoi-une-exécution-verte-peut-ne-rien-prouver)
 - [Helpers d'assertion de réponse](#helpers-dassertion-de-réponse)
 - [Voir aussi](#voir-aussi)
 
@@ -147,6 +148,52 @@ async fn creating_a_post_persists_it() {
 
 Pour SQLite, les tests `*_sqlite_live.rs` à travers ce dépôt utilisent à la place une base de données
 en mémoire par test — également entièrement isolée, avec zéro configuration externe.
+
+---
+
+## Suites live, et pourquoi une exécution verte peut ne rien prouver
+
+Les tests nommés `*_live.rs` parlent à une vraie base de données. La plupart
+n'ont besoin de rien de votre part ; les autres ont besoin d'une variable
+d'environnement, et **quand elle manque, ils n'échouent pas. Ils font un
+`return`, et l'exécution signale un succès.**
+
+C'est délibéré — cela garde `cargo test` fonctionnel sur un portable sans
+serveur — mais cela veut dire qu'une exécution qui passe n'est pas la preuve que
+la suite a tourné. Bon à savoir avant de lire un résultat vert comme de la
+couverture.
+
+### Quelle variable veut chaque suite
+
+| Variable | Suites | Ce dont elles ont besoin |
+|---|---:|---|
+| *(aucune)* | 180 | Une base de données SQLite en mémoire. Tournent toujours, rien à configurer. |
+| `DATABASE_URL` | 109 | Un serveur PostgreSQL joignable. |
+| `MYSQL_TEST_URL` | 30 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
+| `REDIS_TEST_URL` | 2 | Un Redis joignable. |
+
+MySQL est celle qui piège les gens : elle lit sa propre variable, donc un shell
+où seule `DATABASE_URL` est définie exécute les suites Postgres et saute
+silencieusement les trente suites MySQL.
+
+### Distinguer un saut d'un succès
+
+La plupart des sauts sont un simple `return` anticipé, sans aucune sortie. Une
+minorité affiche d'abord une ligne sur stderr, que `cargo test` masque à moins
+que vous ne la demandiez :
+
+```bash
+cargo test --test <name> -- --nocapture
+```
+
+Le signal fiable est le compte. Une suite live qui rapporte `0 passed` — ou bien
+moins que ce que le fichier contient — a sauté.
+`running 2 tests … 2 passed` sans serveur en marche signifie que ces deux tests
+ont fait un `return` anticipé.
+
+Si vous voulez qu'une suite échoue plutôt que de sauter quand son serveur manque,
+définissez la variable sur une URL délibérément mauvaise : elle échouera alors à
+la connexion, ce qui est un signal plus bruyant et plus honnête qu'un saut.
 
 ---
 
