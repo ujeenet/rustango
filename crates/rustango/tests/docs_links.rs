@@ -260,3 +260,153 @@ fn every_locale_has_every_published_page() {
         problems.join("\n  "),
     );
 }
+
+/// #1305 — a repo link naming a path that is not in the tree.
+///
+/// A reader hit three 404s here. They resolved on their own, which is
+/// the tell: these URLs pin `/main/`, and `main` only moves at
+/// release-promote time. A doc written against develop can name a file
+/// `main` does not have yet, and the link is dead until the next
+/// promote.
+///
+/// Making them relative is not the fix — that is exactly what #1248
+/// removed, because `../crates/…` resolves on GitHub and nowhere else.
+/// Absolute is right; naming a path that exists is the missing half.
+///
+/// This cannot see whether `main` has the path yet, only whether the
+/// repo does. That still catches the common cause: a typo, a rename, or
+/// a delete. The reporter's own report had one (`django-party-audit`
+/// for `django-parity-audit`).
+#[test]
+fn every_repo_link_names_a_path_that_exists() {
+    let root = repo_root();
+    let mut problems = Vec::new();
+    let mut checked = 0usize;
+
+    for locale_dir in ["docs", "docs/de", "docs/es", "docs/fr"] {
+        let dir = root.join(locale_dir);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().into_string().unwrap_or_default();
+            if !name.ends_with(".md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(entry.path()).expect("read page");
+            for target in link_targets(&text) {
+                let Some(rest) = target
+                    .strip_prefix("https://github.com/ujeenet/rustango/blob/main/")
+                    .or_else(|| {
+                        target.strip_prefix("https://github.com/ujeenet/rustango/tree/main/")
+                    })
+                else {
+                    continue;
+                };
+                // Drop `#fragment` and `?query`; the path is what we check.
+                let path = rest
+                    .split(['#', '?'])
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end_matches('/');
+                if path.is_empty() {
+                    continue;
+                }
+                checked += 1;
+                if !root.join(path).exists() {
+                    problems.push(format!("{locale_dir}/{name}: `{path}` is not in the repo"));
+                }
+            }
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "no repo links found — the matcher stopped working"
+    );
+    assert!(
+        problems.is_empty(),
+        "{} repo link(s) naming a path that does not exist:\n  {}",
+        problems.len(),
+        problems.join("\n  "),
+    );
+}
+
+/// #1304 — a heading that names a release goes stale on the next one.
+///
+/// `## What's new (v0.41 / v0.42)` sat at the top of the ORM guide for
+/// fourteen releases. Near the top of a page, a version that old reads
+/// as "these docs stopped in 0.42", which is the opposite of what it
+/// was for. A reader said so.
+///
+/// Headings that are *about* a specific release are fine and are not
+/// matched here — `## Upgrading to 0.51.2` documents two yanked
+/// versions and would be wrong without the number. What rots is a
+/// standing section whose title happens to carry whatever version was
+/// current when someone last touched it.
+#[test]
+fn no_standing_heading_pins_itself_to_a_release() {
+    let root = repo_root();
+    // "What's new"/"Recent"/"Latest", in the four locales, followed by
+    // a version anywhere in the heading.
+    let standing = [
+        "what's new",
+        "whats new",
+        "recent",
+        "latest",
+        "was ist neu",
+        "neu in",
+        "neueste",
+        "novedades",
+        "reciente",
+        "lo último",
+        "nouveautés",
+        "nouveau dans",
+        "récent",
+    ];
+    let mut problems = Vec::new();
+
+    for locale_dir in ["docs", "docs/de", "docs/es", "docs/fr"] {
+        let dir = root.join(locale_dir);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().into_string().unwrap_or_default();
+            if !name.ends_with(".md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(entry.path()).expect("read page");
+            for line in text.lines() {
+                let Some(heading) = line.strip_prefix("## ") else {
+                    continue;
+                };
+                let lower = heading.to_lowercase();
+                if !standing.iter().any(|s| lower.contains(s)) {
+                    continue;
+                }
+                // A version number anywhere in it: `0.42`, `v0.41`.
+                let has_version =
+                    lower
+                        .split(|c: char| !c.is_ascii_digit() && c != '.')
+                        .any(|tok| {
+                            tok.contains('.')
+                                && tok
+                                    .split('.')
+                                    .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+                        });
+                if has_version {
+                    problems.push(format!("{locale_dir}/{name}: `## {heading}`"));
+                }
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "{} standing heading(s) pinned to a release — drop the version, or the \
+         heading is wrong at the next one:\n  {}",
+        problems.len(),
+        problems.join("\n  "),
+    );
+}

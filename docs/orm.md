@@ -16,7 +16,7 @@ Patterns for the **Rustango** ORM beyond the basics. If you come from Django's O
 
 A few Rust terms recur throughout. `&pool` is a shared reference to the database connection pool; you pass it to the methods that actually run SQL. `.await` runs an async call and waits for the result. `Option<T>` is a value that may be present (`Some`) or absent (`None`) — Rust's null. `Result` is success-or-error; the trailing `?` on a call returns early on error. `Auto<i64>` is an auto-incrementing primary key that's either `Set` (loaded from the DB) or `Unset` (not yet inserted).
 
-## What's new (v0.41 / v0.42)
+## Recent additions
 
 Recent releases added a batch of Django-parity features that aren't yet woven into every section below. Quick pointers:
 

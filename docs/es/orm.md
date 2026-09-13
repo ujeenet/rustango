@@ -16,7 +16,7 @@ Patrones para el ORM de **Rustango** más allá de lo básico. Si vienes del ORM
 
 Algunos términos de Rust se repiten a lo largo del documento. `&pool` es una referencia compartida al pool de conexiones de la base de datos; se la pasas a los métodos que realmente ejecutan SQL. `.await` ejecuta una llamada asíncrona y espera el resultado. `Option<T>` es un valor que puede estar presente (`Some`) o ausente (`None`) — el null de Rust. `Result` es éxito-o-error; el `?` al final de una llamada retorna anticipadamente ante un error. `Auto<i64>` es una primary key autoincremental que está o bien `Set` (cargada desde la BD) o bien `Unset` (aún no insertada).
 
-## Novedades (v0.41 / v0.42)
+## Novedades recientes
 
 Las versiones recientes añadieron un lote de características con paridad con Django que aún no están integradas en cada una de las secciones de abajo. Referencias rápidas:
 

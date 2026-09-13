@@ -1,6 +1,6 @@
 # Getting Started: build a blog with Rustango
 
-This walkthrough takes you from an empty directory to a deployed blog: posts, an admin UI, a JSON API, JWT authentication, and tests. End to end. If you've used Django, Laravel, or Rails, most steps will feel familiar; we point out the parallels as we go.
+This walkthrough takes you from an empty directory to a deployed blog: posts, an admin UI, a JSON API, JWT authentication, and tests. End to end.
 
 > **Time:** ~45 minutes for the full tour, ~10 minutes if you just want to see it running.
 >
@@ -10,7 +10,27 @@ This walkthrough takes you from an empty directory to a deployed blog: posts, an
 
 ---
 
-## What you need first
+## What you need to know first
+
+Two different questions, and the docs used to answer only the second one.
+
+**Rust is assumed.** Not expert Rust, but you should be comfortable with structs,
+traits, `Result` and `?`, and enough `async`/`.await` to read a function without
+looking things up. If that is not you yet, the [Rust Book](https://doc.rust-lang.org/book/)
+comes first; this guide will not teach the language underneath it.
+
+**Web backend experience is not assumed.** If you have never built a web API,
+start with [Web API basics](glossary.md#web-api-basics) in the glossary. It is a
+five-minute primer on requests, routes, handlers and migrations, and it is
+written for exactly this gap. Come back here afterwards.
+
+**Django is not assumed** — but it is where the design comes from, so these docs
+compare to it constantly. Those comparisons are asides, never the explanation: if
+a Django parallel means nothing to you, skip it and the step still stands on its
+own. Where a term is doing real work, the [glossary](glossary.md) defines it in
+plain language.
+
+## What you need installed
 
 | Tool | Why | Install |
 |---|---|---|
@@ -33,6 +53,15 @@ row fits your machine — everything after this step is identical:
 | **No database server at all** | Run with SQLite (below) | Nothing to install. Best for learning the framework. |
 | Postgres **without** Docker | Install Postgres natively, then point `DATABASE_URL` at `localhost` | See [Native Postgres](#native-postgres-no-docker). |
 | Postgres **with** Docker | `docker compose up -d` in the generated project | What the rest of this guide assumes. |
+| MySQL or MariaDB | Scaffold with `--backend mysql` | See [MySQL](#mysql). |
+
+Whichever you pick, the only thing that changes is `DATABASE_URL`. Here is the shape of each:
+
+```bash
+DATABASE_URL=postgres://user:password@localhost:5432/myblog_dev
+DATABASE_URL=mysql://user:password@localhost:3306/myblog_dev
+DATABASE_URL=sqlite://myblog_dev.db?mode=rwc
+```
 
 #### SQLite — zero setup
 
@@ -88,6 +117,37 @@ DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
 > start-up failures. If it is fighting you, use the SQLite path above to learn
 > the framework and come back to Docker when you are packaging for deployment —
 > that is what the container setup is really for.
+
+> **Already running Postgres locally?** Then port 5432 is taken, and the
+> container quietly loses the race. Your app connects to the local server, which
+> has none of your tables. The error that comes back is not readable, because a
+> non-English server sends its message in its own encoding. Either stop the local
+> service or move the container to another port.
+
+#### MySQL
+
+Scaffold with `--backend mysql` and the generated `.env.example`,
+`docker-compose.yml` and settings tiers are all written for MySQL:
+
+```bash
+cargo rustango new myblog --backend mysql
+```
+
+Running it natively instead of in the container takes a database and a user:
+
+```sql
+CREATE DATABASE myblog_dev CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'rustango'@'localhost' IDENTIFIED BY 'rustango';
+GRANT ALL PRIVILEGES ON myblog_dev.* TO 'rustango'@'localhost';
+```
+
+```bash
+DATABASE_URL=mysql://rustango:rustango@localhost:3306/myblog_dev
+```
+
+`utf8mb4` is worth setting deliberately: MySQL's older `utf8` is three bytes and
+cannot store an emoji, which surfaces much later as a write that fails on one
+row. MariaDB works through the same driver and the same URL scheme.
 
 ---
 
