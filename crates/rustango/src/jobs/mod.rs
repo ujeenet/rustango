@@ -143,6 +143,13 @@ struct JobEnvelope {
     payload: serde_json::Value,
     attempt: u32,
     max_attempts: u32,
+    /// The caller's ambient context, captured at `dispatch`.
+    ///
+    /// Captured here rather than where the worker spawns, because
+    /// workers are spawned once at `start()` — by then the caller is
+    /// long gone and there is nothing to inherit. The context has to
+    /// travel with the job.
+    context: crate::task_context::TaskContext,
 }
 
 // ------------------------------------------------------------------ Handler registry
@@ -299,6 +306,10 @@ impl JobQueue for InMemoryJobQueue {
             payload: value,
             attempt: 0,
             max_attempts: T::MAX_ATTEMPTS,
+            // `deferred()` marks the boundary: a job enqueued by user 42
+            // records `job:user:42`, not `user:42`. A retry days later
+            // must not claim that user acted at that moment.
+            context: crate::task_context::TaskContext::capture().deferred(),
         };
         self.pending
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -378,7 +389,10 @@ async fn worker_loop(
         };
 
         let payload = envelope.payload.clone();
-        let result = handler(payload).await;
+        // Run the handler inside the context the caller had at
+        // `dispatch`. Without this the job sees none of it — an audit
+        // row written here would record `system` and lose the actor.
+        let result = envelope.context.clone().install(handler(payload)).await;
 
         match result {
             Ok(()) => {
@@ -494,6 +508,82 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    /// The job records what the enqueuer's context was.
+    ///
+    /// Before this, a job ran with no ambient context at all — an audit
+    /// row written from one recorded `system`, so "who deleted this?"
+    /// was a dead end whenever a job did it.
+    ///
+    /// `job:user:99`, not `user:99`: the marker says a job did the work
+    /// on that user's behalf. A retry three days later must not claim
+    /// the user acted then.
+    #[tokio::test]
+    async fn a_job_sees_the_context_of_whoever_enqueued_it() {
+        use crate::audit::{current_source, with_source, AuditSource};
+
+        static SEEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct RecordSource;
+
+        #[async_trait::async_trait]
+        impl Job for RecordSource {
+            const NAME: &'static str = "record_source";
+            async fn run(&self) -> Result<(), JobError> {
+                *SEEN.lock().unwrap() = Some(current_source().as_token());
+                Ok(())
+            }
+        }
+
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<RecordSource>().await;
+        q.start().await;
+
+        with_source(AuditSource::User { id: "99".into() }, async {
+            q.dispatch(&RecordSource).await.unwrap();
+        })
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        q.shutdown().await;
+
+        assert_eq!(
+            SEEN.lock().unwrap().clone(),
+            Some("job:user:99".to_owned()),
+            "the job should see who enqueued it, marked as deferred work"
+        );
+    }
+
+    /// A job enqueued by nobody in particular stays attributable to the
+    /// system — it does not invent an actor.
+    #[tokio::test]
+    async fn a_job_enqueued_outside_any_scope_is_system() {
+        use crate::audit::current_source;
+
+        static SEEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct RecordPlain;
+
+        #[async_trait::async_trait]
+        impl Job for RecordPlain {
+            const NAME: &'static str = "record_plain";
+            async fn run(&self) -> Result<(), JobError> {
+                *SEEN.lock().unwrap() = Some(current_source().as_token());
+                Ok(())
+            }
+        }
+
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<RecordPlain>().await;
+        q.start().await;
+        q.dispatch(&RecordPlain).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        q.shutdown().await;
+
+        assert_eq!(SEEN.lock().unwrap().clone(), Some("job:system".to_owned()));
     }
 
     #[tokio::test]
