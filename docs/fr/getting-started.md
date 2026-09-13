@@ -384,12 +384,13 @@ mod urls;
 mod views;
 
 use crate::blog::models::Post;
+use rustango::sql::{FetcherPool, Pool};
 use rustango::{Auto, Model};
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 
     // CREATE
     let mut p = Post {
@@ -401,11 +402,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         published_at: Auto::default(),
         deleted_at: None,
     };
-    p.save(&pool).await?;
+    p.save_pool(&pool).await?;
     println!("created post id = {}", p.id.get().copied().unwrap());
 
     // READ
-    let posts = Post::objects().fetch_on(&pool).await?;
+    let posts = Post::objects().fetch(&pool).await?;
     for post in &posts {
         println!("- {}", post.title);
     }
@@ -419,7 +420,9 @@ Ce qui se passe ici, en termes simples :
 - `pool` est le pool de connexions à la base de données partagé. Vous passez une référence à celui-ci (`&pool`) dans les appels de requête plutôt que d'ouvrir une nouvelle connexion chaque fois.
 - Les appels à la base de données sont asynchrones, donc chacun se termine par `.await` — cela met en pause jusqu'à ce que le résultat revienne, puis continue. Le `?` après un `.await` signifie « si ceci a échoué, arrête et renvoie l'erreur ».
 - `main` renvoie un `Result`, le type succès-ou-erreur de Rust, ce qui explique pourquoi `?` et le `Ok(())` final fonctionnent.
-- Pour enregistrer une ligne, appelez `.save(&pool)` sur celle-ci. Pour lire des lignes, construisez une requête avec `Post::objects()` et exécutez-la avec `.fetch_on(&pool)` — l'équivalent approximatif du `Post.objects.all()` de Django. (`.save(&pool)` / `.fetch_on(&pool)` prennent un `sqlx::PgPool` ; la variante nue `.fetch(&pool)` prend à la place un `rustango::sql::Pool` multi-backend — voir le [guide de l'ORM](orm.md).)
+- Pour enregistrer une ligne, appelez `.save_pool(&pool)` sur celle-ci. Pour lire des lignes, construisez une requête avec `Post::objects()` et exécutez-la avec `.fetch(&pool)` — l'équivalent approximatif du `Post.objects.all()` de Django.
+- `.fetch(…)` provient du trait `FetcherPool`, c'est pourquoi les imports l'incluent. Sans cette ligne, la méthode n'existe pas et le compilateur vous le signale sans expliquer pourquoi.
+- Ce sont là les appels multi-backend, et tout ce qui précède compile sans modification sur les trois bases de données. Il existe aussi `.save(&pool)` et `.fetch_on(&pool)`, qui prennent un `sqlx::PgPool` propre au pilote et n'existent que lorsque la feature `postgres` est activée. Préférez la paire multi-backend, sauf si vous visez délibérément une seule base de données. Voir le [guide de l'ORM](orm.md).
 
 Exécutez-le :
 
@@ -435,16 +438,21 @@ Vous devriez voir l'identifiant de votre nouvel article ainsi que les lignes lue
 
 **Rustango** fournit une interface d'administration générée pour vos modèles, tout comme l'administration Django. Sa mise en place tient en deux petites étapes : un utilitaire qui transforme un pool en routeur d'administration, et un seul appel `.nest(...)` pour le monter.
 
-Ajoutez vous-même cet utilitaire dans `src/urls.rs` — le générateur de squelette ne le crée pas (il n'émet volontairement aucun code typé `PgPool`, afin que le même modèle fonctionne sur SQLite et MySQL). Le `admin_prefix` doit correspondre au chemin sous lequel vous l'imbriquerez à l'étape suivante (`/admin`) afin que les propres liens et actions de formulaire de l'administration se résolvent correctement :
+Ajoutez vous-même cet utilitaire dans `src/urls.rs` — le générateur de squelette ne le crée pas, car rien de ce qu'il génère ne l'appellerait. Le `admin_prefix` doit correspondre au chemin sous lequel vous l'imbriquerez à l'étape suivante (`/admin`) afin que les propres liens et actions de formulaire de l'administration se résolvent correctement :
 
 ```rust
-pub fn admin_router(pool: PgPool) -> Router {
+use rustango::admin;
+use rustango::sql::Pool;
+
+pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
         .title("Myblog Admin")
         .admin_prefix("/admin") // must match the `.nest("/admin", …)` below
         .build()
 }
 ```
+
+`Builder::new` accepte le pool de n'importe quel backend : cet utilitaire ne nomme donc aucun pilote et fonctionne sur les trois.
 
 Ensuite, connectez un pool dans `src/main.rs` et imbriquez l'administration dans le routeur de l'API avant de la remettre au `Cli`. Conservez la ligne `mod blog;` de l'étape 7 — c'est elle qui enregistre votre modèle `Post` auprès de l'administration :
 
@@ -457,7 +465,7 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = rustango::sql::Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 
     let api = urls::api().nest("/admin", urls::admin_router(pool));
 
@@ -576,10 +584,14 @@ pub struct PostSerializer {
     #[serializer(source = "body")]                      // rename in API
     pub content: String,
 
+    pub author_id: i64,                                 // writable: NOT NULL with no default
+
     #[serializer(read_only)]                            // include in GET, ignore in POST/PUT
     pub published_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 ```
+
+Dès qu'un serializer est attaché, **ses champs constituent toute la surface d'écriture** : tout ce qu'un client envoie et qui n'est pas listé ici est écarté avant l'`INSERT`. C'est pourquoi `author_id` y figure. Il est `NOT NULL` et sans valeur par défaut sur le modèle, donc l'omettre fait échouer toute création sur la contrainte NOT NULL. `status` peut rester en dehors, car le modèle lui donne `default = "'draft'"`.
 
 Le type de chaque champ du serializer reflète le champ correspondant du modèle, donc `id` et `published_at` conservent leur enveloppe `Auto<…>` héritée du modèle (un `Auto<i64>` se sérialise toujours en un simple entier JSON). Enregistrez ensuite le module en ajoutant `mod post_serializer;` avec les autres déclarations `mod` dans `src/main.rs`.
 
@@ -693,11 +705,17 @@ Modifiez `tests/post_smoke.rs`. Les tests d'intégration vivent dans une crate s
 ```rust
 use rustango::test_client::TestClient;
 use myblog::post_view_set::PostViewSet;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    // Un test dans `tests/` est une crate séparée et n'exécute jamais
+    // `main`, donc rien n'a chargé `.env` pour lui. Sans cette ligne,
+    // `DATABASE_URL` n'est pas définie et les deux tests paniquent avant
+    // d'atteindre la base de données.
+    let _ = dotenvy::dotenv();
+
+    let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     PostViewSet::router("/api/posts", pool)
 }
 
@@ -714,10 +732,12 @@ async fn list_posts_returns_200() {
 async fn create_post_returns_the_new_object() {
     let client = TestClient::new(app().await);
     let response = client.post("/api/posts")
+        // Envoyez les champs du serializer. `status` est omis parce que le
+        // serializer ne le liste pas : il serait de toute façon écarté —
+        // c'est le `default = "'draft'"` du modèle qui le remplit.
         .json(&json!({
             "title": "Test",
-            "body":  "x",
-            "status": "draft",
+            "content": "x",
             "author_id": 1,
         }))
         .send().await;
@@ -726,6 +746,14 @@ async fn create_post_returns_the_new_object() {
     assert_eq!(v["title"], "Test");
 }
 ```
+
+Trois détails de cet extrait sont faciles à rater, et chacun produit un échec différent :
+
+- **`dotenvy::dotenv()`** — si vous l'omettez, les *deux* tests échouent, avant même qu'une requête ne soit émise.
+- **`content`, et non `body`** — le serializer accepte ici l'un ou l'autre, puisque `source = "body"` laisse le nom du modèle continuer de fonctionner en entrée, mais `content` est le nom que votre API publie réellement.
+- **`author_id`** — si vous l'omettez, seul le test de création échoue, avec une violation de contrainte NOT NULL remontée par la base de données. Le test de liste passe toujours, car une table vide est une page vide valide.
+
+`Pool` est le pool multi-backend, et `router` accepte le pool de n'importe quel backend : ce fichier compile donc tel quel sur PostgreSQL, MySQL et SQLite.
 
 > **Attention :** les tests d'intégration dans `tests/` ne peuvent faire `use myblog::…` que si la crate expose une cible de bibliothèque. Un squelette neuf n'est composé que d'un binaire (`src/main.rs`, sans `src/lib.rs`), donc ajoutez une simple ligne `src/lib.rs` qui réexporte les modules que vous voulez tester — `pub mod models; pub mod post_view_set; pub mod urls;` — et conservez les lignes `mod …;` correspondantes dans `src/main.rs`. (Si vous préférez ne pas ajouter de cible de bibliothèque, construisez plutôt le routeur entièrement en ligne dans le test, de la façon dont `make:test` génère sa fonction `app()`.)
 

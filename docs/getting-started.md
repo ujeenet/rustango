@@ -381,12 +381,13 @@ mod urls;
 mod views;
 
 use crate::blog::models::Post;
+use rustango::sql::{FetcherPool, Pool};
 use rustango::{Auto, Model};
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 
     // CREATE
     let mut p = Post {
@@ -398,11 +399,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         published_at: Auto::default(),
         deleted_at: None,
     };
-    p.save(&pool).await?;
+    p.save_pool(&pool).await?;
     println!("created post id = {}", p.id.get().copied().unwrap());
 
     // READ
-    let posts = Post::objects().fetch_on(&pool).await?;
+    let posts = Post::objects().fetch(&pool).await?;
     for post in &posts {
         println!("- {}", post.title);
     }
@@ -416,7 +417,9 @@ What's happening here, in plain terms:
 - `pool` is the shared database connection pool. You pass a reference to it (`&pool`) into query calls instead of opening a new connection each time.
 - Database calls are asynchronous, so each one ends in `.await` — that pauses until the result comes back, then continues. The `?` after an `.await` says "if this errored, stop and return the error."
 - `main` returns a `Result`, Rust's success-or-error type, which is why `?` and the closing `Ok(())` work.
-- To save a row, call `.save(&pool)` on it. To read rows, build a query with `Post::objects()` and run it with `.fetch_on(&pool)` — the rough equivalent of Django's `Post.objects.all()`. (`.save(&pool)` / `.fetch_on(&pool)` take a `sqlx::PgPool`; the bare `.fetch(&pool)` variant takes a multi-backend `rustango::sql::Pool` instead — see the [ORM guide](orm.md).)
+- To save a row, call `.save_pool(&pool)` on it. To read rows, build a query with `Post::objects()` and run it with `.fetch(&pool)` — the rough equivalent of Django's `Post.objects.all()`.
+- `.fetch(…)` comes from the `FetcherPool` trait, which is why the imports bring it in. Without that line the method does not exist and the compiler says so without explaining why.
+- These are the multi-backend calls, and everything above compiles unchanged on all three databases. There are also `.save(&pool)` and `.fetch_on(&pool)`, which take a driver-specific `sqlx::PgPool` and exist only when the `postgres` feature is on. Prefer the multi-backend pair unless you deliberately want one database. See the [ORM guide](orm.md).
 
 Run it:
 
@@ -432,16 +435,21 @@ You should see your new post id and the rows read back. Restore `src/main.rs` to
 
 **Rustango** ships a generated admin UI for your models, just like Django admin. Building it is two small steps: a helper that turns a pool into an admin router, and one `.nest(...)` call to mount it.
 
-Add the helper to `src/urls.rs` yourself — the scaffolder does not generate it (it deliberately emits no `PgPool`-typed code, so the same template works on SQLite and MySQL). The `admin_prefix` must match the path you'll nest it under in the next step (`/admin`) so the admin's own links and form actions resolve:
+Add the helper to `src/urls.rs` yourself — the scaffolder does not generate it, because nothing it generates would call it. The `admin_prefix` must match the path you'll nest it under in the next step (`/admin`) so the admin's own links and form actions resolve:
 
 ```rust
-pub fn admin_router(pool: PgPool) -> Router {
+use rustango::admin;
+use rustango::sql::Pool;
+
+pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
         .title("Myblog Admin")
         .admin_prefix("/admin") // must match the `.nest("/admin", …)` below
         .build()
 }
 ```
+
+`Builder::new` takes any backend's pool, so this helper names no driver and works on all three.
 
 Then connect a pool in `src/main.rs` and nest the admin into the API router before handing it to the `Cli`. Keep the `mod blog;` line from Step 7 — that's what registers your `Post` model with the admin:
 
@@ -454,7 +462,7 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = rustango::sql::Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 
     let api = urls::api().nest("/admin", urls::admin_router(pool));
 
@@ -573,10 +581,14 @@ pub struct PostSerializer {
     #[serializer(source = "body")]                      // rename in API
     pub content: String,
 
+    pub author_id: i64,                                 // writable: NOT NULL with no default
+
     #[serializer(read_only)]                            // include in GET, ignore in POST/PUT
     pub published_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 ```
+
+Once a serializer is attached, **its fields are the whole write surface**: anything a client posts that is not listed here is dropped before the `INSERT`. That is why `author_id` appears. It is `NOT NULL` with no default on the model, so leaving it out makes every create fail on the not-null constraint. `status` can stay out because the model gives it `default = "'draft'"`.
 
 Each serializer field's type mirrors the matching model field, so `id` and `published_at` keep their `Auto<…>` wrapper from the model (an `Auto<i64>` still serializes to a plain JSON integer). Then register the module by adding `mod post_serializer;` alongside the other `mod` declarations in `src/main.rs`.
 
@@ -690,11 +702,16 @@ Edit `tests/post_smoke.rs`. Integration tests live in a separate crate, so they 
 ```rust
 use rustango::test_client::TestClient;
 use myblog::post_view_set::PostViewSet;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    // A test in `tests/` is a separate crate and never runs `main`, so
+    // nothing has loaded `.env` for it. Without this line `DATABASE_URL`
+    // is unset and both tests panic before reaching the database.
+    let _ = dotenvy::dotenv();
+
+    let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     PostViewSet::router("/api/posts", pool)
 }
 
@@ -711,10 +728,12 @@ async fn list_posts_returns_200() {
 async fn create_post_returns_the_new_object() {
     let client = TestClient::new(app().await);
     let response = client.post("/api/posts")
+        // Post the serializer's fields. `status` is omitted because the
+        // serializer does not list it, so it would be dropped anyway —
+        // the model's `default = "'draft'"` fills it in.
         .json(&json!({
             "title": "Test",
-            "body":  "x",
-            "status": "draft",
+            "content": "x",
             "author_id": 1,
         }))
         .send().await;
@@ -723,6 +742,14 @@ async fn create_post_returns_the_new_object() {
     assert_eq!(v["title"], "Test");
 }
 ```
+
+Three things in that snippet are easy to get wrong, and each produces a different failure:
+
+- **`dotenvy::dotenv()`** — omit it and *both* tests fail, before any request is made.
+- **`content`, not `body`** — the serializer accepts either here, since `source = "body"` keeps the model's name working on input, but `content` is the name your API actually publishes.
+- **`author_id`** — omit it and the create test alone fails, with a not-null violation from the database. The list test still passes, because an empty table is a valid empty page.
+
+`Pool` is the multi-backend pool, and `router` takes any backend's pool, so this file compiles unchanged on PostgreSQL, MySQL and SQLite.
 
 > **Heads-up:** integration tests in `tests/` can only `use myblog::…` if the crate exposes a library target. A fresh scaffold is binary-only (`src/main.rs`, no `src/lib.rs`), so add a one-line `src/lib.rs` that re-exports the modules you want to test — `pub mod models; pub mod post_view_set; pub mod urls;` — and keep the matching `mod …;` lines in `src/main.rs`. (If you'd rather not add a lib target, build the router fully inline in the test instead, the way `make:test` scaffolds its `app()`.)
 

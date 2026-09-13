@@ -298,6 +298,20 @@ jobs:
       # without Postgres — and the enumeration grew stale silently every
       # time a test file was added. `--no-run` needs no databases.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
+      # The getting-started example is what the guide's snippets are copied
+      # from, and it silently stopped building on SQLite: its manifest let
+      # rustango keep its default `postgres` while the example selected
+      # `sqlite`, so the derive and the trait bounds disagreed (#1272,
+      # #1293). `doc_examples` only ever ran it on Postgres. Compile-only,
+      # so no database is needed.
+      - name: Getting-started example builds without Postgres
+        working-directory: crates/rustango/examples/getting_started_blog
+        run: |
+          cargo build --no-default-features --features sqlite
+          # Every test target, not just one — the admin and middleware
+          # tests were the ones still naming a driver, and a single
+          # named test would not have caught them.
+          cargo test --no-default-features --features sqlite --no-run
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_choices

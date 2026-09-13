@@ -136,7 +136,7 @@ myblog/
     ├── main.rs                 # entry point: `Cli::new().api(urls::api()).run()`
     ├── models.rs               # every #[derive(Model)] lives here
     ├── views.rs                # axum request handlers
-    └── urls.rs                 # `pub fn api()` route aggregator + `admin_router(pool)`
+    └── urls.rs                 # `pub fn api()` route aggregator
 ```
 
 Hay un único binario: `cargo run` arranca el servidor HTTP, y cada verbo al estilo de Django (`migrate`, `makemigrations`, `startapp`, `check`, …) pasa por el mismo binario mediante `cargo run -- <verb>`. No hay un binario `manage` aparte.
@@ -382,12 +382,13 @@ mod urls;
 mod views;
 
 use crate::blog::models::Post;
+use rustango::sql::{FetcherPool, Pool};
 use rustango::{Auto, Model};
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 
     // CREATE
     let mut p = Post {
@@ -399,11 +400,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         published_at: Auto::default(),
         deleted_at: None,
     };
-    p.save(&pool).await?;
+    p.save_pool(&pool).await?;
     println!("created post id = {}", p.id.get().copied().unwrap());
 
     // READ
-    let posts = Post::objects().fetch_on(&pool).await?;
+    let posts = Post::objects().fetch(&pool).await?;
     for post in &posts {
         println!("- {}", post.title);
     }
@@ -417,7 +418,9 @@ Qué está pasando aquí, en términos sencillos:
 - `pool` es el pool de conexiones a la base de datos compartido. Le pasas una referencia (`&pool`) a las llamadas de consulta en lugar de abrir una conexión nueva cada vez.
 - Las llamadas a la base de datos son asíncronas, así que cada una termina en `.await` — eso pausa hasta que llega el resultado y luego continúa. El `?` tras un `.await` dice "si esto dio error, detente y devuelve el error".
 - `main` devuelve un `Result`, el tipo éxito-o-error de Rust, que es por lo que funcionan `?` y el `Ok(())` de cierre.
-- Para guardar una fila, llama a `.save(&pool)` sobre ella. Para leer filas, construye una consulta con `Post::objects()` y ejecútala con `.fetch_on(&pool)` — el equivalente aproximado de `Post.objects.all()` de Django. (`.save(&pool)` / `.fetch_on(&pool)` reciben un `sqlx::PgPool`; la variante escueta `.fetch(&pool)` recibe en su lugar un `rustango::sql::Pool` multi-backend — consulta la [guía del ORM](orm.md).)
+- Para guardar una fila, llama a `.save_pool(&pool)` sobre ella. Para leer filas, construye una consulta con `Post::objects()` y ejecútala con `.fetch(&pool)` — el equivalente aproximado de `Post.objects.all()` de Django.
+- `.fetch(…)` viene del trait `FetcherPool`, y por eso los imports lo traen. Sin esa línea el método no existe y el compilador lo dice sin explicar por qué.
+- Estas son las llamadas multi-backend, y todo lo anterior compila sin cambios en las tres bases de datos. También existen `.save(&pool)` y `.fetch_on(&pool)`, que reciben un `sqlx::PgPool` específico del driver y solo existen cuando la característica `postgres` está activada. Prefiere el par multi-backend salvo que quieras deliberadamente una sola base de datos. Consulta la [guía del ORM](orm.md).
 
 Ejecútalo:
 
@@ -431,18 +434,23 @@ Deberías ver el id de tu nueva publicación y las filas leídas de vuelta. Rest
 
 ## Paso 11: Activar el auto-admin
 
-**Rustango** incluye una interfaz de administración generada para tus modelos, igual que el admin de Django. El generador de andamiaje ya te dio un helper `admin_router(pool)` en `src/urls.rs` que construye el auto-admin a partir de un pool — solo tienes que anidarlo bajo `/admin` y pasarlo al `Cli`.
+**Rustango** incluye una interfaz de administración generada para tus modelos, igual que el admin de Django. Construirla son dos pasos pequeños: un helper que convierte un pool en un router de admin, y una sola llamada a `.nest(...)` para montarlo.
 
-Primero, dale un título al admin en `src/urls.rs`. El `admin_prefix` debe coincidir con la ruta bajo la que lo anidarás en el siguiente paso (`/admin`) para que los propios enlaces y las acciones de formulario del admin se resuelvan:
+Añade tú mismo el helper a `src/urls.rs` — el generador de andamiaje no lo genera, porque nada de lo que genera lo llamaría. El `admin_prefix` debe coincidir con la ruta bajo la que lo anidarás en el siguiente paso (`/admin`) para que los propios enlaces y las acciones de formulario del admin se resuelvan:
 
 ```rust
-pub fn admin_router(pool: PgPool) -> Router {
+use rustango::admin;
+use rustango::sql::Pool;
+
+pub fn admin_router(pool: Pool) -> Router {
     admin::Builder::new(pool)
         .title("Myblog Admin")
         .admin_prefix("/admin") // must match the `.nest("/admin", …)` below
         .build()
 }
 ```
+
+`Builder::new` acepta el pool de cualquier backend, así que este helper no nombra ningún driver y funciona en las tres.
 
 Luego conecta un pool en `src/main.rs` y anida el admin en el router de la API antes de entregárselo al `Cli`. Conserva la línea `mod blog;` del Paso 7 — eso es lo que registra tu modelo `Post` con el admin:
 
@@ -455,7 +463,7 @@ mod views;
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = rustango::sql::sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = rustango::sql::Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 
     let api = urls::api().nest("/admin", urls::admin_router(pool));
 
@@ -574,10 +582,14 @@ pub struct PostSerializer {
     #[serializer(source = "body")]                      // rename in API
     pub content: String,
 
+    pub author_id: i64,                                 // writable: NOT NULL with no default
+
     #[serializer(read_only)]                            // include in GET, ignore in POST/PUT
     pub published_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 ```
+
+Una vez que hay un serializer conectado, **sus campos son toda la superficie de escritura**: cualquier cosa que un cliente envíe y que no esté listada aquí se descarta antes del `INSERT`. Por eso aparece `author_id`. En el modelo es `NOT NULL` y no tiene valor por defecto, así que omitirlo hace que toda creación falle por la restricción not-null. `status` puede quedarse fuera porque el modelo le da `default = "'draft'"`.
 
 El tipo de cada campo del serializer refleja el campo correspondiente del modelo, así que `id` y `published_at` conservan su envoltorio `Auto<…>` del modelo (un `Auto<i64>` sigue serializándose a un entero JSON plano). Luego registra el módulo añadiendo `mod post_serializer;` junto a las otras declaraciones `mod` en `src/main.rs`.
 
@@ -687,11 +699,17 @@ Edita `tests/post_smoke.rs`. Las pruebas de integración viven en una crate sepa
 ```rust
 use rustango::test_client::TestClient;
 use myblog::post_view_set::PostViewSet;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    // Una prueba en `tests/` es una crate aparte y nunca ejecuta `main`, así
+    // que nada ha cargado `.env` por ella. Sin esta línea `DATABASE_URL` no
+    // está definida y ambas pruebas entran en pánico antes de llegar a la
+    // base de datos.
+    let _ = dotenvy::dotenv();
+
+    let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     PostViewSet::router("/api/posts", pool)
 }
 
@@ -708,10 +726,12 @@ async fn list_posts_returns_200() {
 async fn create_post_returns_the_new_object() {
     let client = TestClient::new(app().await);
     let response = client.post("/api/posts")
+        // Envía los campos del serializer. `status` se omite porque el
+        // serializer no lo lista, así que se descartaría igualmente —
+        // el `default = "'draft'"` del modelo lo rellena.
         .json(&json!({
             "title": "Test",
-            "body":  "x",
-            "status": "draft",
+            "content": "x",
             "author_id": 1,
         }))
         .send().await;
@@ -720,6 +740,14 @@ async fn create_post_returns_the_new_object() {
     assert_eq!(v["title"], "Test");
 }
 ```
+
+En ese fragmento hay tres cosas fáciles de equivocar, y cada una produce un fallo distinto:
+
+- **`dotenvy::dotenv()`** — si lo omites fallan *ambas* pruebas, antes de que se haga petición alguna.
+- **`content`, no `body`** — aquí el serializer acepta cualquiera de los dos, ya que `source = "body"` mantiene el nombre del modelo funcionando en la entrada, pero `content` es el nombre que tu API publica realmente.
+- **`author_id`** — si lo omites falla solo la prueba de creación, con una violación de not-null desde la base de datos. La prueba de listado sigue pasando, porque una tabla vacía es una página vacía válida.
+
+`Pool` es el pool multi-backend, y `router` acepta el pool de cualquier backend, así que este archivo compila sin cambios en PostgreSQL, MySQL y SQLite.
 
 > **Atención:** las pruebas de integración en `tests/` solo pueden hacer `use myblog::…` si la crate expone un target de librería. Un andamiaje nuevo es solo binario (`src/main.rs`, sin `src/lib.rs`), así que añade un `src/lib.rs` de una línea que reexporte los módulos que quieras probar — `pub mod models; pub mod post_view_set; pub mod urls;` — y conserva las líneas `mod …;` correspondientes en `src/main.rs`. (Si prefieres no añadir un target de librería, construye el router completamente en línea dentro de la prueba, tal como `make:test` genera su `app()`.)
 

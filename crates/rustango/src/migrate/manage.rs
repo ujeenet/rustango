@@ -2506,6 +2506,12 @@ use axum::Router;
 use axum::routing::get;
 
 fn app() -> Router {{
+    // This test touches no database. As soon as it does — the moment
+    // `app()` opens a pool from `DATABASE_URL` — uncomment this. A test
+    // in `tests/` is its own crate and never runs `main`, so nothing has
+    // loaded `.env` for it and the variable reads as unset (#1299).
+    // let _ = dotenvy::dotenv();
+
     Router::new().route("/hello", get(|| async {{ "hi" }}))
 }}
 
