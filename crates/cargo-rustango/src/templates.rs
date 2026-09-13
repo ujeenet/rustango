@@ -750,21 +750,22 @@ retention_days = 30
 /// `config/prod_settings.toml` — production. Strict defaults; expects
 /// real values (DATABASE_URL, secret_key, etc.) supplied via env
 /// vars or out-of-band secret management. The TOML purposefully
-/// leaves the database url commented — operators set it via
-/// `RUSTANGO__DATABASE__URL` or a secrets manager.
+/// leaves the database url commented — operators set `DATABASE_URL`,
+/// which is the variable every pool actually reads.
 pub fn config_prod_settings_toml(name: &str) -> String {
     format!(
         r##"# {name} — production tier
 # Loaded when RUSTANGO_ENV=prod. Strict-by-default; sensitive values
-# (database url, secret key) come from RUSTANGO__* env vars or your
-# secrets manager — leaving them out of source control.
+# (database url, secret key) come from the environment or your secrets
+# manager — leaving them out of source control.
 
-# Commented out because the URL comes from RUSTANGO__DATABASE__URL or your
-# secrets manager. To pin pool sizes here, uncomment the header *with* the
-# keys: a key left uncommented under a commented-out `[database]` lands at
-# the TOML root, where it is silently ignored.
+# The URL comes from the `DATABASE_URL` environment variable, which is
+# what every pool reads. Set it from your secrets manager.
+#
+# Pool sizes can be pinned here. If you do, uncomment the header *with*
+# the keys: a key left uncommented under a commented-out `[database]`
+# lands at the TOML root, where it is silently ignored.
 # [database]
-# url           = "set via RUSTANGO__DATABASE__URL or your secrets manager"
 # pool_min_size = 5
 # pool_max_size = 50
 
