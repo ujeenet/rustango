@@ -1374,6 +1374,16 @@ Senkt intern zu `save_partial` ab — gleiche Audit-Verengung, gleiche `Auto::Un
 
 ## Massenoperationen
 
+> **Nur Postgres.** `bulk_insert` / `bulk_insert_on` und `upsert` / `upsert_on`
+> werden unter `#[cfg(feature = "postgres")]` erzeugt und nehmen einen `&PgPool`
+> oder einen Postgres-Executor — auf einem MySQL- oder SQLite-Build existieren
+> sie nicht. Einen tri-dialektalen einfachen Bulk-Insert gibt es nicht; die
+> Mehr-Backend-Batch-Writer sind `bulk_upsert_pool` und
+> `bulk_insert_or_ignore_pool`, beide mit `&Pool`. Zusammen mit dem übrigen
+> Namens-Split verfolgt in
+> [#1293](https://github.com/ujeenet/rustango/issues/1293).
+
+
 > **Fallstrick — Massenoperationen überspringen Per-Zeile-Hooks.** `bulk_insert`, Queryset
 > `.update().execute()` und `.delete()` laufen als mengenbasiertes SQL: sie feuern **keine**
 > Signale, schreiben nicht den Audit-Trail, routen nicht durch Soft-Delete und führen
@@ -1726,7 +1736,16 @@ async fn handler(mut t: Tenant) -> Result<...> {
 }
 ```
 
-`fetch_on` funktioniert mit jedem `sqlx::Executor`; `fetch` ist Zucker für `fetch_on(&pool)`.
+`fetch_on` ist **nur für Postgres** (`#[cfg(feature = "postgres")]`, gebunden an
+`Database = sqlx::Postgres`) und nimmt jeden *Postgres*-sqlx-Executor entgegen —
+`&PgPool`, `&mut PgConnection` oder eine `Transaction`. Es existiert genau für den
+Fall oben: Schema-Mode-Tenants teilen sich den Registry-Pool, verlassen sich aber
+auf ein `SET search_path` pro Checkout, sodass ein `&PgPool` stillschweigend das
+falsche Schema träfe.
+
+`fetch` ist **kein** Zucker dafür. Es ist eine eigene `FetcherPool`-Methode, die
+`&Pool` nimmt, pro Dialekt dispatcht und auf allen drei Backends verfügbar ist —
+auf einem MySQL- oder SQLite-Build existiert von beiden also nur `fetch`.
 
 ---
 

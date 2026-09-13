@@ -1374,6 +1374,15 @@ Se ramène en interne à `save_partial` — même restriction d'audit, même con
 
 ## Opérations en masse
 
+> **Postgres uniquement.** `bulk_insert` / `bulk_insert_on` et `upsert` /
+> `upsert_on` sont émis sous `#[cfg(feature = "postgres")]` et prennent un
+> `&PgPool` ou un executor Postgres — sur un build MySQL ou SQLite ils n'existent
+> pas. Il n'y a pas d'insertion en masse simple tri-dialecte ; les writers de lot
+> multi-backends sont `bulk_upsert_pool` et `bulk_insert_or_ignore_pool`, tous
+> deux avec `&Pool`. Suivi avec le reste de la scission de nommage dans
+> [#1293](https://github.com/ujeenet/rustango/issues/1293).
+
+
 > **Piège — les opérations en masse sautent les hooks par ligne.** `bulk_insert`, le
 > `.update().execute()` sur un queryset et le `.delete()` s'exécutent comme du SQL basé sur des ensembles : ils ne
 > déclenchent **pas** de signaux, n'écrivent pas le journal d'audit, ne passent pas par la suppression logique, et n'exécutent pas
@@ -1726,7 +1735,16 @@ async fn handler(mut t: Tenant) -> Result<...> {
 }
 ```
 
-`fetch_on` fonctionne avec n'importe quel `sqlx::Executor` ; `fetch` est du sucre pour `fetch_on(&pool)`.
+`fetch_on` est **réservé à Postgres** (`#[cfg(feature = "postgres")]`, borné à
+`Database = sqlx::Postgres`) et accepte n'importe quel executor sqlx *Postgres* —
+`&PgPool`, `&mut PgConnection` ou une `Transaction`. Il existe précisément pour le
+cas ci-dessus : les tenants en mode schéma partagent le pool du registre mais
+dépendent d'un `SET search_path` par checkout, si bien qu'un `&PgPool` toucherait
+silencieusement le mauvais schéma.
+
+`fetch` n'en est **pas** du sucre. C'est une méthode `FetcherPool` distincte qui
+prend `&Pool`, dispatche selon le dialecte et existe sur les trois backends — sur
+un build MySQL ou SQLite, `fetch` est donc le seul des deux à exister.
 
 ---
 

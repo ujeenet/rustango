@@ -1374,6 +1374,15 @@ Internamente desciende a `save_partial` — mismo estrechamiento de auditoría, 
 
 ## Operaciones en lote
 
+> **Solo Postgres.** `bulk_insert` / `bulk_insert_on` y `upsert` / `upsert_on` se
+> emiten bajo `#[cfg(feature = "postgres")]` y reciben un `&PgPool` o un executor
+> de Postgres — en un build de MySQL o SQLite no existen. No hay una inserción
+> masiva simple tri-dialecto; los escritores por lotes multi-backend son
+> `bulk_upsert_pool` y `bulk_insert_or_ignore_pool`, ambos con `&Pool`. Se
+> rastrea junto al resto de la división de nombres en
+> [#1293](https://github.com/ujeenet/rustango/issues/1293).
+
+
 > **Trampa — las ops en lote omiten los hooks por fila.** `bulk_insert`, el
 > `.update().execute()` de queryset, y `.delete()` se ejecutan como SQL basado en conjuntos: **no**
 > disparan señales, no escriben el rastro de auditoría, no encaminan a través del borrado lógico, ni ejecutan
@@ -1726,7 +1735,16 @@ async fn handler(mut t: Tenant) -> Result<...> {
 }
 ```
 
-`fetch_on` funciona con cualquier `sqlx::Executor`; `fetch` es azúcar para `fetch_on(&pool)`.
+`fetch_on` es **solo para Postgres** (`#[cfg(feature = "postgres")]`, acotado a
+`Database = sqlx::Postgres`) y acepta cualquier executor sqlx de *Postgres* —
+`&PgPool`, `&mut PgConnection` o una `Transaction`. Existe exactamente para el caso
+de arriba: los tenants en modo esquema comparten el pool del registro pero dependen
+de un `SET search_path` por checkout, así que pasar `&PgPool` daría en el esquema
+equivocado sin avisar.
+
+`fetch` **no** es azúcar de eso. Es un método `FetcherPool` aparte que recibe
+`&Pool`, despacha por dialecto y existe en los tres backends — así que en un build
+de MySQL o SQLite `fetch` es el único de los dos que existe.
 
 ---
 

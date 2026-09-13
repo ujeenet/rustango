@@ -1374,6 +1374,15 @@ Internally lowers to `save_partial` — same audit narrowing, same `Auto::Unset`
 
 ## Bulk operations
 
+> **Postgres only.** `bulk_insert` / `bulk_insert_on` and `upsert` / `upsert_on`
+> are emitted under `#[cfg(feature = "postgres")]` and take a `&PgPool` or a
+> Postgres executor — on a MySQL or SQLite build they do not exist. There is no
+> tri-dialect plain bulk insert; the multi-backend batch writers are
+> `bulk_upsert_pool` and `bulk_insert_or_ignore_pool`, both taking `&Pool`.
+> Tracked with the rest of the naming split in
+> [#1293](https://github.com/ujeenet/rustango/issues/1293).
+
+
 > **Pitfall — bulk ops skip per-row hooks.** `bulk_insert`, queryset
 > `.update().execute()`, and `.delete()` run as set-based SQL: they do **not**
 > fire signals, write the audit trail, route through soft-delete, or run
@@ -1726,7 +1735,15 @@ async fn handler(mut t: Tenant) -> Result<...> {
 }
 ```
 
-`fetch_on` works with any `sqlx::Executor`; `fetch` is sugar for `fetch_on(&pool)`.
+`fetch_on` is **Postgres-only** (`#[cfg(feature = "postgres")]`, bound to
+`Database = sqlx::Postgres`) and takes any *Postgres* sqlx executor — `&PgPool`,
+`&mut PgConnection`, or a `Transaction`. It exists for exactly the case above:
+schema-mode tenants share the registry pool but rely on a per-checkout
+`SET search_path`, so passing `&PgPool` would silently hit the wrong schema.
+
+`fetch` is **not** sugar for it. It is a separate `FetcherPool` method taking
+`&Pool`, dispatching per dialect, and available on all three backends — so on a
+MySQL or SQLite build `fetch` is the only one of the two that exists.
 
 ---
 
