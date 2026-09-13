@@ -16,7 +16,7 @@
 //!
 //! let layer = LocaleMiddleware::new(&["en", "fr", "es"])
 //!     .default("en")
-//!     .cookie_name("django_language");
+//!     .cookie_name("django_language".to_string());
 //!
 //! let app = axum::Router::new()
 //!     .route("/", get(handler))
