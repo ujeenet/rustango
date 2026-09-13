@@ -66,9 +66,19 @@ Cookie `Secure` was filed as a security defect because `resolve_secure_cookies` 
 
 A source comment is not the code. When a doc and an inline comment agree and both disagree with the code, the doc was almost certainly written from the comment — and fixing only the doc leaves the next writer the same wrong source.
 
-`jobs.md` says retry backoff is "1s, 2s, 4s, 8s". The code is `1000ms << next_attempt` with `next_attempt` starting at 1, so the first retry waits 2s. The comments at `jobs/mod.rs:50` and `:405` carry the identical off-by-one. Three places to fix, and fixing one regenerates the others.
+The retry backoff is the canonical case, because the whole chain is visible in one file:
 
-**So:** when a doc claim is wrong, grep the source comments for the same claim before you edit. If they match, fix both, and say so in the commit — otherwise the doc rots back.
+- `jobs/mod.rs:405` — `// Re-enqueue after backoff (1s, 2s, 4s, 8s, ...)`, sitting **directly above the calculation it describes**
+- `jobs/mod.rs:50` — the module doc, written from that comment
+- `docs/jobs.md:242` — the guide, written from the module doc
+
+The code is `1000ms << next_attempt` with `attempt` starting at 0, so `next = 1` and the first retry waits **2s**, not 1s. Both backends compute identically, so `mod.rs` and `pg.rs` agree with each other and disagree with all three pieces of prose. Fix one and the others regenerate it.
+
+Note the direction: the error propagated *outward* from a comment that was wrong about the line beneath it. The guide is the last victim, not the source — so fixing the guide is the one edit that changes nothing.
+
+**So:** when a doc claim is wrong, grep the source comments for the same claim before you edit, and follow it to the innermost one. If they match, fix the whole chain in one commit and say so — otherwise the doc rots back from a source nobody looked at.
+
+Related: a doc can also propagate a bug *into user code*. `jobs.md:226` ships `tokio::signal::ctrl_c().await?;   // block until Ctrl-C / SIGTERM` inside a snippet readers paste into their own `main`. `ctrl_c()` is SIGINT only; the comment is a factual error about tokio's API. Wrong comments in copyable examples are worse than wrong prose.
 
 ### "The help says X" is false under most builds
 
