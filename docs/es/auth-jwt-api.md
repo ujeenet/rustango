@@ -247,6 +247,19 @@ menos que uses `refresh_with`.
   la cabecera `Authorization: Bearer`.
 - **Firma HS256**, suelo de clave de 32 bytes — mismo algoritmo y mismas
   restricciones que el [JWT independiente](auth-jwt.md#modelo-de-seguridad).
+- **Los tokens son JWTs corrientes**, así que cualquier cosa que verifique un JWT
+  puede verificar estos: `jwt.io`, la biblioteca estándar de tu plataforma, una
+  pasarela de API, otro servicio al que le entregues un token. Tres segmentos, una
+  cabecera JOSE `{"alg":"HS256","typ":"JWT"}`, firmada sobre `header.payload`.
+
+  Hasta [#1397](https://github.com/ujeenet/rustango/issues/1397) eran dos
+  segmentos sin cabecera, firmados solo sobre el payload — legibles por nada más
+  que rustango, y rechazados incluso por `rustango::jwt::decode`. Si escribiste un
+  verificador propio para sortearlo, puedes tirarlo.
+
+  Los tokens emitidos antes del arreglo se siguen aceptando al verificar, para que
+  una actualización no cierre la sesión de nadie. Esa ruta de compatibilidad
+  desaparece en 0.58, cuando cualquier token con la forma antigua haya caducado.
 
 
 ---

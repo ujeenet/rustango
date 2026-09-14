@@ -66,7 +66,8 @@ use std::path::{Path, PathBuf};
 /// Rust examples that nothing compiles or runs. Ordered worst-first.
 const UNBACKED: &[(&str, usize)] = &[
     ("orm.md", 57),
-    ("security.md", 32),
+    // `security.md` came off in #1443 — `admin_csrf_sqlite_live.rs`
+    // backs its CSRF section, which is the claim that was wrong.
     ("serializers.md", 15),
     ("getting-started.md", 12),
     ("urls.md", 10),

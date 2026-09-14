@@ -249,6 +249,19 @@ Benutzerdefinierte Claims überleben `refresh` (werden auf das neue Paar
   `Authorization: Bearer`-Header zu authentifizieren.
 - **HS256-Signierung**, 32-Byte-Schlüssel-Untergrenze — derselbe Algorithmus und
   dieselben Einschränkungen wie beim [eigenständigen JWT](auth-jwt.md#sicherheitsmodell).
+- **Die Tokens sind gewöhnliche JWTs**, also kann alles, was ein JWT prüft, auch
+  diese prüfen: `jwt.io`, die Standardbibliothek deiner Plattform, ein
+  API-Gateway, ein anderer Dienst, dem du ein Token gibst. Drei Segmente, ein
+  JOSE-Header `{"alg":"HS256","typ":"JWT"}`, signiert über `header.payload`.
+
+  Bis [#1397](https://github.com/ujeenet/rustango/issues/1397) waren es zwei
+  Segmente ohne Header, signiert nur über die Payload — lesbar von nichts außer
+  rustango und sogar von `rustango::jwt::decode` abgelehnt. Wer dafür einen
+  eigenen Verifier geschrieben hat, kann ihn wegwerfen.
+
+  Vor dem Fix ausgestellte Tokens werden beim Verifizieren weiterhin akzeptiert,
+  damit ein Upgrade niemanden ausloggt. Dieser Kompatibilitätspfad entfällt in
+  0.58, wenn jedes Token der alten Form längst abgelaufen ist.
 
 
 ---

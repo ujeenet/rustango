@@ -250,6 +250,19 @@ sauf si vous utilisez `refresh_with`.
   à partir de l'en-tête `Authorization: Bearer`.
 - **Signature HS256**, plancher de clé de 32 octets — même algorithme et mêmes
   contraintes que le [JWT autonome](auth-jwt.md#modèle-de-sécurité).
+- **Les jetons sont de vrais JWT**, donc tout ce qui vérifie un JWT peut vérifier
+  ceux-ci : `jwt.io`, la bibliothèque standard de votre plateforme, une passerelle
+  d'API, un autre service auquel vous confiez un jeton. Trois segments, un en-tête
+  JOSE `{"alg":"HS256","typ":"JWT"}`, signé sur `header.payload`.
+
+  Jusqu'à [#1397](https://github.com/ujeenet/rustango/issues/1397) c'étaient deux
+  segments sans en-tête, signés sur la seule charge utile — lisibles par rien
+  d'autre que rustango, et rejetés jusque par `rustango::jwt::decode`. Si vous
+  aviez écrit un vérificateur maison pour contourner cela, vous pouvez le jeter.
+
+  Les jetons émis avant le correctif restent acceptés à la vérification, pour
+  qu'une mise à niveau ne déconnecte personne. Ce chemin de compatibilité
+  disparaît en 0.58, quand tout jeton à l'ancienne forme aura expiré.
 
 
 ---
