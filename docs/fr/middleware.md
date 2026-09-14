@@ -63,10 +63,12 @@ Il existe deux formes, et vous utiliserez les deux :
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
 
-   Ceux qui sont réellement des `tower::Layer` — et acceptent donc `.layer(…)` —
-   sont `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
-   `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` et le builder
-   `api_version`. Vérifiez avant de recourir à `.layer(…)` :
+   Parmi les modules intégrés, ceux qui sont réellement des `tower::Layer` — et
+   acceptent donc `.layer(…)` — sont `CachePageLayer`, `CsrfLayer`,
+   `LocaleMiddleware`, `MethodOverrideLayer`, `HmacAuthLayer`, `TracingLayer`,
+   `RequestSignalsLayer` et le builder `api_version`. Les gardes d'auth de
+   [auth-decorators.md](auth-decorators.md) sont aussi des layers et se câblent
+   de la même façon. Vérifiez avant de recourir à `.layer(…)` :
    `rg 'impl.*tower::Layer' crates/rustango/src/`.
 
    Chaque module intégré exporte un trait `…RouterExt` (`SecurityHeadersRouterExt`,
@@ -130,9 +132,11 @@ Conséquences pratiques :
 
 ## Le catalogue intégré
 
-Chaque entrée est un `tower::Layer` avec un one-liner `…RouterExt` associé, sauf
-mention contraire. Amenez le trait `…RouterExt` du module dans la portée pour
-obtenir la méthode.
+La plupart des entrées sont un struct de configuration câblé par un one-liner
+`…RouterExt`, et non un `tower::Layer` — la colonne **Câblez-le avec** fait
+foi : si elle indique `.layer(…)`, le type est bien un layer ; sinon, la méthode
+d'extension est la seule forme. Amenez le trait `…RouterExt` du module dans la
+portée pour l'obtenir.
 
 | Préoccupation | Layer | Câblez-le avec |
 | --- | --- | --- |

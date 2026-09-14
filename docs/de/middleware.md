@@ -61,10 +61,12 @@ Es gibt zwei Formen, und du wirst beide verwenden:
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
 
-   Wirklich `tower::Layer` — und damit für `.layer(…)` geeignet — sind
-   `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
-   `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` und der
-   `api_version`-Builder. Vor einem `.layer(…)` prüfen:
+   Von den Bausteinen wirklich `tower::Layer` — und damit für `.layer(…)`
+   geeignet — sind `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`,
+   `MethodOverrideLayer`, `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer`
+   und der `api_version`-Builder. Auch die Auth-Gates in
+   [auth-decorators.md](auth-decorators.md) sind Layer und werden genauso
+   verdrahtet. Vor einem `.layer(…)` prüfen:
    `rg 'impl.*tower::Layer' crates/rustango/src/`.
 
    Jedes eingebaute Modul exportiert einen `…RouterExt`-Trait
@@ -130,9 +132,11 @@ Praktische Konsequenzen:
 
 ## Der eingebaute Katalog
 
-Jeder Eintrag ist ein `tower::Layer` mit einem passenden
-`…RouterExt`-Einzeiler, sofern nicht anders vermerkt. Bring den
-`…RouterExt`-Trait des Moduls in den Scope, um die Methode zu erhalten.
+Die meisten Einträge sind ein Konfigurations-Struct, das über einen
+`…RouterExt`-Einzeiler verdrahtet wird, und kein `tower::Layer` — maßgeblich ist
+die Spalte **Verdrahten mit**: steht dort `.layer(…)`, ist der Typ wirklich ein
+Layer, sonst ist die Extension-Methode die einzige Form. Bring den
+`…RouterExt`-Trait des Moduls in den Scope, um sie zu erhalten.
 
 | Thema | Layer | Verdrahten mit |
 | --- | --- | --- |

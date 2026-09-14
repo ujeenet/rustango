@@ -58,10 +58,11 @@ There are two shapes, and you'll use both:
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
 
-   The ones that genuinely are `tower::Layer` — and so accept `.layer(…)` — are
-   `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
+   The built-ins that genuinely are `tower::Layer` — and so accept `.layer(…)` —
+   are `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
    `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` and the `api_version`
-   builder. Check before reaching for `.layer(…)`:
+   builder. The auth gates in [auth-decorators.md](auth-decorators.md) are layers
+   too and are wired the same way. Check before reaching for `.layer(…)`:
    `rg 'impl.*tower::Layer' crates/rustango/src/`.
 
    Each built-in module exports a `…RouterExt` trait (`SecurityHeadersRouterExt`,
@@ -122,8 +123,10 @@ Practical consequences:
 
 ## The built-in catalog
 
-Every entry is a `tower::Layer` with a matching `…RouterExt` one-liner unless
-noted. Bring the module's `…RouterExt` trait into scope to get the method.
+Most entries are a config struct wired by a `…RouterExt` one-liner, not a
+`tower::Layer` — the **Wire it with** column is the authority: `.layer(…)` there
+means the type really is a layer, anything else means the extension method is
+the only form. Bring the module's `…RouterExt` trait into scope to get it.
 
 | Concern | Layer | Wire it with |
 | --- | --- | --- |
