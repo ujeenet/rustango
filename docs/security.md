@@ -122,7 +122,11 @@ let layer = CorsLayer::new()
 let layer = CorsLayer::permissive();              // any origin, common methods
 ```
 
-**Security note:** never combine `allow_credentials(true)` with `allow_any_origin()` — the browser will reject the response. With credentials, you MUST list explicit origins.
+**Security note:** with credentials you MUST list explicit origins. `allow_credentials(true)` combined with `allow_any_origin()` does not give you credentialed wildcard CORS — there is no such thing, and asking for it gets you neither half.
+
+Rustango answers such a request with `Access-Control-Allow-Origin: *` and **no** `Access-Control-Allow-Credentials` header, so the browser blocks the credentialed request. Until [#1394](https://github.com/ujeenet/rustango/issues/1394) it echoed the requesting origin back instead, which browsers *do* accept alongside credentials — that combination was a working hole, readable by any site the user happened to visit, and this page previously described it as something the browser would reject.
+
+Use `.allow_origins([...])` with the origins you actually serve. That path is unchanged and still sends `Access-Control-Allow-Credentials: true`.
 
 ---
 
