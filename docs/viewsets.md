@@ -26,7 +26,7 @@ is a reference for every knob.
 [![A Rustango ViewSet wired to a serializer: one #[viewset(serializer = …)] block gives typed JSON output and validated input across the six CRUD routes](img/viewsets.png)](img/viewsets.png)
 
 > **Source:** `rustango::viewset` (`ViewSet`, `#[derive(ViewSet)]`, the
-> `#[viewset(...)]` options + the `for_model` builder) — always compiled.
+> `#[viewset(...)]` options + the `for_model` builder) — gated on `admin` **or** `tenancy`. Within it, `.serializer::<S>()` needs `serializer`, the builder's `router()` needs `postgres`, `tenant_router()` / `OwnedBy` need `tenancy`, and the QUERY action needs `admin`.
 >
 > **Runnable version:** the blog built here mirrors the tested, compilable
 > [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
@@ -505,8 +505,10 @@ Mounting at `/api/posts` wires all six REST operations:
 | `PATCH` | `/api/posts/{pk}` | **partial update** | 200 | the updated object (only supplied fields change) |
 | `DELETE` | `/api/posts/{pk}` | **destroy** | 204 | empty |
 
-A trailing slash on the mount prefix is optional. Only these six verbs are
-wired — no automatic `HEAD`/`OPTIONS`. **Bulk create** is free: `POST` a JSON
+A trailing slash on the mount prefix is optional. These six verbs are wired,
+plus an RFC 10008 `QUERY` collection action whenever the `admin` feature is on.
+The routes are built with `axum::routing::get`, so axum answers `HEAD` from the
+`GET` handler automatically; `OPTIONS` is not wired. **Bulk create** is free: `POST` a JSON
 *array* and every element is inserted in order, validated atomically (one bad
 element rejects the whole batch).
 
@@ -537,7 +539,7 @@ mount the ViewSet and override the one route with your own handler (see
 | `filter_fields` | `"author_id, status"` | none | Fields filterable via `?field=value` (+ lookups). |
 | `search_fields` | `"title, body"` | none | Fields the `?search=` box matches (case-insensitive OR). |
 | `ordering` | `"-published_at, id"` | none | Default sort (`-` = DESC). |
-| `page_size` | `20` | 20 | Rows per page (client `?page_size=` capped at 1000). |
+| `page_size` | `20` | 20 | Rows per page (client `?page_size=` capped at 100). |
 | `read_only` | *(flag)* | off | Expose GET (list + retrieve) only. |
 | `permissions(...)` | `permissions(create = "post.add")` | none | Per-action permission codenames. |
 
@@ -555,7 +557,9 @@ Every method on `ViewSet::for_model(SCHEMA)` (each returns `Self`):
 | `search_fields(&["…"])` | Enable `?search=`. |
 | `ordering(&[("field", desc)])` | Default sort order. |
 | `ordering_fields(&["…"])` | Whitelist which fields `?ordering=` may use. |
-| `page_size(n)` | Default page size (≤ 1000). |
+| `page_size(n)` | Default page size (≤ 100). |
+| `max_page_size(n)` | Raise or lower the client cap itself (default 100). |
+| `pk_param(name)` | Rename the path parameter used for detail routes. |
 | `read_only()` | GET-only. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Per-action codename gates (the latter on tenancy). |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). |
@@ -625,7 +629,7 @@ for very large tables. `?cursor=<token>&page_size=20`:
 { "count": 137, "limit": 20, "offset": 40, "results": [ … ] }
 ```
 
-`page_size` / `limit` are clamped to 1000.
+`page_size` / `limit` are clamped to 100.
 
 ---
 
@@ -850,7 +854,7 @@ let api = urls::api()
 
 - **Builder + `router_pool` / `tenant_router`** is **tri-dialect** — PostgreSQL,
   SQLite and MySQL — and is the recommended path.
-- **The derive macro's `router(prefix, PgPool)`** captures a `PgPool` (PostgreSQL).
+- **The derive macro's `router(prefix, pool)`** takes `impl Into<rustango::sql::Pool>` — a `PgPool`, `MySqlPool`, `SqlitePool` or the `Pool` enum. It is not Postgres-only (#1273).
 - **Serializer input + output** now works on **all three backends** (the
   per-row render is tri-dialect; the old PG-only gate is gone).
 - Filtering, search, ordering, the three pagination modes, permissions,

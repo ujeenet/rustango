@@ -30,7 +30,7 @@ Eso coloca un binario `cargo-rustango` en tu `PATH`; Cargo lo expone entonces co
 
 ### La versión del propio generador es la que obtiene tu proyecto
 
-`cargo rustango new` escribe `rustango = "MAJOR.MINOR"` en el `Cargo.toml` generado, tomada de **la versión del generador**, no de lo más reciente que haya en crates.io. Instala el generador 0.58 y obtienes un proyecto 0.58.
+`cargo rustango new` escribe `rustango = "MAJOR.MINOR"` en el `Cargo.toml` generado, tomada de **la versión del generador**, no de lo más reciente que haya en crates.io. Sea cual sea el generador que instales, esa es la versión que fija tu proyecto.
 
 Eso es casi siempre lo que quieres, y por eso el comando de instalación de arriba no lleva versión fijada: el generador más nuevo escribe la fijación más nueva, y los dos no pueden separarse.
 
@@ -199,7 +199,7 @@ Así que `cargo run` arranca el servidor, y `cargo run -- <verb>` ejecuta migrac
 Cómo difieren las plantillas dentro de `main.rs` / `urls.rs`:
 
 - **api** — sin admin; `urls::api()` simplemente agrega tus propias rutas.
-- **fullstack** — `urls.rs` también expone `admin_router(pool)` (construido a partir de `admin::Builder::new(pool).build()`) para que el auto-admin se monte en `/admin`.
+- **fullstack** — el mismo `urls.rs`, más la funcionalidad de admin compilada dentro. El admin **no** queda cableado por ti: nada de lo generado lo llamaría, así que el generador no emite ningún `admin_router`. Añade uno tú mismo y anídalo — [Primeros pasos, Paso 11](getting-started.md#paso-11-activar-el-auto-admin) lo explica con detalle. Recibe un `rustango::sql::Pool` para que el ayudante no nombre ningún driver.
 - **tenant** — `main.rs` añade `.tenancy()`, sirviendo la consola de operador en el dominio ápice y cada tenant bajo su propio subdominio. Las propias tablas del framework se generan en una carpeta **`system/migrations/`** a partir de los modelos compilados (al estilo de Django) en el primer `cargo run -- migrate` — sin JSON de bootstrap entregado a mano, así que la primerísima migración funciona sin configuración adicional.
 
 ### Configuración por capas

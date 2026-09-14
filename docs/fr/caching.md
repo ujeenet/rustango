@@ -55,7 +55,7 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 |---|---|---|
 | `InMemoryCache` | `cache` | dev, tests, processus unique (HashMap par processus + TTL) |
 | `RedisCache` | `cache-redis` | production ; partagé entre réplicas |
-| `DbCache` | `cache` | production sans Redis ; une table `rustango_cache` |
+| `DatabaseCache` | `cache` | production sans Redis ; une table `rustango_cache` |
 | `NullCache` | `cache` | désactiver la mise en cache (chaque lecture rate) — pratique en tests |
 
 ---
@@ -202,10 +202,13 @@ que de réimplémenter quoi que ce soit, si bien que les primitives natives (Red
 
 **Compteurs atomiques et verrous.** `Cache::incr` est derrière le
 [rate limiting](middleware.md) et le verrouillage par compte ; `Cache::add`
-(set-if-absent) est derrière `DistributedLock`. Les deux sont atomiques sur
-`RedisCache` (`INCRBY` / `SET NX` natifs) et sur `InMemoryCache` (qui garde son
-verrou pendant le read-modify-write) ; `DatabaseCache` laisse les deux au
-comportement non atomique par défaut — suffisant pour un seul processus, mais
+(set-if-absent) est derrière `DistributedLock`. `Cache::add` est atomique sur les trois —
+`RedisCache` (`SET NX`), `InMemoryCache` (qui garde son verrou pendant le
+read-modify-write) et `DatabaseCache`, qui effectue le test-and-set sous des
+verrous de ligne, de sorte qu'une course se résout en exactement un gagnant.
+`Cache::incr` est atomique sur les deux premiers mais retombe sur le
+comportement non atomique par défaut avec `DatabaseCache` — un `DistributedLock`
+est donc sûr sur les trois, mais
 passez à Redis lorsqu'un compteur ou un verrou doit être exact entre réplicas.
 
 Deux choses à savoir :

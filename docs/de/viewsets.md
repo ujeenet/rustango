@@ -26,7 +26,7 @@ ist eine Referenz für jede Stellschraube.
 [![Ein Rustango-ViewSet, verdrahtet mit einem Serializer: Ein einziger #[viewset(serializer = …)]-Block liefert typisierte JSON-Ausgabe und validierte Eingabe über die sechs CRUD-Routen hinweg](../img/viewsets.png)](../img/viewsets.png)
 
 > **Quelle:** `rustango::viewset` (`ViewSet`, `#[derive(ViewSet)]`, die
-> `#[viewset(...)]`-Optionen + der `for_model`-Builder) — immer kompiliert.
+> `#[viewset(...)]`-Optionen + der `for_model`-Builder) — hinter `admin` **oder** `tenancy` gated. Darin braucht `.serializer::<S>()` das Feature `serializer`, das `router()` des Builders `postgres`, `tenant_router()` / `OwnedBy` brauchen `tenancy`, und die QUERY-Aktion braucht `admin`.
 >
 > **Lauffähige Version:** Der hier gebaute Blog spiegelt das getestete, kompilierbare
 > [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)-
@@ -505,8 +505,10 @@ Das Einbinden unter `/api/posts` verdrahtet alle sechs REST-Operationen:
 | `PATCH` | `/api/posts/{pk}` | **partial update** | 200 | das aktualisierte Objekt (nur gelieferte Felder ändern sich) |
 | `DELETE` | `/api/posts/{pk}` | **destroy** | 204 | leer |
 
-Ein abschließender Schrägstrich am Mount-Präfix ist optional. Nur diese sechs Verben werden
-verdrahtet — kein automatisches `HEAD`/`OPTIONS`. **Bulk-Create** gibt es gratis: `POST` ein JSON-
+Ein abschließender Schrägstrich am Mount-Präfix ist optional. Diese sechs Verben werden verdrahtet,
+dazu eine `QUERY`-Collection-Action nach RFC 10008, sobald das Feature `admin`
+aktiv ist. Die Routen werden mit `axum::routing::get` gebaut, also beantwortet
+axum `HEAD` automatisch aus dem `GET`-Handler; `OPTIONS` ist nicht verdrahtet. **Bulk-Create** gibt es gratis: `POST` ein JSON-
 *Array*, und jedes Element wird der Reihe nach eingefügt, atomar validiert (ein fehlerhaftes
 Element lehnt die ganze Charge ab).
 
@@ -537,7 +539,7 @@ binde das ViewSet ein und überschreibe die eine Route mit deinem eigenen Handle
 | `filter_fields` | `"author_id, status"` | keiner | Über `?field=value` filterbare Felder (+ Lookups). |
 | `search_fields` | `"title, body"` | keiner | Felder, die die `?search=`-Box durchsucht (Groß-/Kleinschreibung-unabhängiges ODER). |
 | `ordering` | `"-published_at, id"` | keiner | Standardsortierung (`-` = DESC). |
-| `page_size` | `20` | 20 | Zeilen pro Seite (Client-`?page_size=` gedeckelt bei 1000). |
+| `page_size` | `20` | 20 | Zeilen pro Seite (Client-`?page_size=` gedeckelt bei 100). |
 | `read_only` | *(Flag)* | aus | Nur GET (list + retrieve) exponieren. |
 | `permissions(...)` | `permissions(create = "post.add")` | keiner | Berechtigungs-Codenamen pro Aktion. |
 
@@ -555,7 +557,9 @@ Jede Methode auf `ViewSet::for_model(SCHEMA)` (jede gibt `Self` zurück):
 | `search_fields(&["…"])` | `?search=` aktivieren. |
 | `ordering(&[("field", desc)])` | Standardsortierreihenfolge. |
 | `ordering_fields(&["…"])` | Festlegen, welche Felder `?ordering=` verwenden darf. |
-| `page_size(n)` | Standard-Seitengröße (≤ 1000). |
+| `page_size(n)` | Standard-Seitengröße (≤ 100). |
+| `max_page_size(n)` | Hebt oder senkt das Client-Limit selbst (Default 100). |
+| `pk_param(name)` | Benennt den Pfadparameter der Detail-Routen um. |
 | `read_only()` | Nur GET. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Codename-Gates pro Aktion (letzteres bei Mandantenfähigkeit). |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset-Paginierung (überspringt `COUNT(*)`). |
@@ -625,7 +629,7 @@ für sehr große Tabellen. `?cursor=<token>&page_size=20`:
 { "count": 137, "limit": 20, "offset": 40, "results": [ … ] }
 ```
 
-`page_size` / `limit` werden auf 1000 begrenzt.
+`page_size` / `limit` werden auf 100 begrenzt.
 
 ---
 
@@ -850,7 +854,7 @@ let api = urls::api()
 
 - **Builder + `router_pool` / `tenant_router`** ist **tri-dialektfähig** — PostgreSQL,
   SQLite und MySQL — und ist der empfohlene Weg.
-- **Das `router(prefix, PgPool)` des Derive-Makros** erfasst einen `PgPool` (PostgreSQL).
+- **Das `router(prefix, pool)` des Derive-Makros** nimmt `impl Into<rustango::sql::Pool>` — einen `PgPool`, `MySqlPool`, `SqlitePool` oder das `Pool`-Enum. Es ist nicht Postgres-only (#1273).
 - **Serializer-Eingabe + -Ausgabe** funktioniert jetzt auf **allen drei Backends** (das
   Rendern pro Zeile ist tri-dialektfähig; das alte PG-only-Gate ist weg).
 - Filterung, Suche, Sortierung, die drei Paginierungsmodi, Berechtigungen,
