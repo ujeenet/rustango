@@ -148,6 +148,23 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Fixed
 
+- **Bulk create is now atomic in the writes, not only the validation** (#1403).
+  `docs/viewsets.md` said "validated atomically (one bad element rejects the
+  whole batch)". Validation was atomic; the writes were one `INSERT` each with
+  no enclosing transaction and an early return on the first database error.
+
+  So a `POST` of ten elements whose fifth violated a unique or foreign-key
+  constraint **committed elements 0–4**, answered `400 bulk entry 5`, and listed
+  none of the rows it had created. The caller is told the batch failed, five
+  rows exist, and nothing in the response says which — so a naive retry either
+  duplicates them or fails on element 0. Constraint violations are exactly the
+  class validation cannot decide up front.
+
+  The loop now runs inside one transaction and rolls back on any failure. The
+  rows are read back after the commit, so the response is unchanged on success.
+  Verified on PostgreSQL, MySQL and SQLite against live servers: reverting the
+  transaction leaves two rows behind on all three.
+
 - **`Cli::on_shutdown` was wired but unreachable on two of five paths** (#1409).
   `docs/jobs.md` documented draining in-flight jobs on shutdown; under any
   orchestrator the step never ran. Three defects:

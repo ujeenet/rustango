@@ -509,8 +509,16 @@ Une barre oblique finale sur le préfixe de montage est optionnelle. Ces six ver
 plus une action de collection `QUERY` (RFC 10008) dès que la fonctionnalité
 `admin` est activée. Les routes sont construites avec `axum::routing::get`, donc
 axum répond au `HEAD` depuis le handler `GET` ; `OPTIONS` n'est pas branché. La **création en masse** est gratuite : faites un `POST` d'un
-*tableau* JSON et chaque élément est inséré dans l'ordre, validé de manière atomique (un seul élément invalide
-rejette tout le lot).
+*tableau* JSON et chaque élément est inséré dans l'ordre, **au sein d'une transaction**.
+Un seul élément invalide rejette tout le lot et **ne laisse rien derrière** — qu'il soit
+rattrapé par la validation ou par la base de données.
+
+> Cette seconde moitié était fausse jusqu'à [#1403](https://github.com/ujeenet/rustango/issues/1403).
+> La validation était atomique ; les écritures étaient un `INSERT` chacune sans
+> transaction, si bien qu'une violation d'unicité ou de clé étrangère sur l'élément 5
+> validait les éléments 0–4, renvoyait `400 bulk entry 5` et ne nommait aucune des
+> lignes créées. Ces violations sont précisément la classe que la validation ne peut
+> pas trancher en amont.
 
 ---
 

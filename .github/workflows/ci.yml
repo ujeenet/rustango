@@ -693,6 +693,11 @@ jobs:
       - run: cargo test -p rustango --all-features --test mysql_live
       - run: cargo test -p rustango --features mysql --test explain_pool_mysql_live
       - run: cargo test -p rustango --features mysql --test bulk_upsert_mysql_live
+      # #1403 — bulk create must roll back on a constraint violation.
+      # `--all-features` so the MySQL arm of the tri-dialect guard is
+      # compiled in; the sqlite arm runs everywhere, this is the one that
+      # needs a server.
+      - run: cargo test -p rustango --all-features --test viewset_bulk_create_is_atomic
       # A second database for tenancy to provision *into*. The service
       # grants `rustango` rights on `rustango_test` only, so the test
       # cannot create this itself; and provisioning refuses a tenant
