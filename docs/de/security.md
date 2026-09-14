@@ -145,7 +145,13 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 Bei Erschöpfung: `429 Too Many Requests` mit `Retry-After`-Header. Jede erfolgreiche Antwort enthält `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Hinter einem Reverse Proxy: kombiniere `per_ip` mit `real_ip`.** `RateLimitLayer::per_ip` schlüsselt auf den verbindenden Socket (`ConnectInfo`), was hinter einem Proxy die IP des *Proxys* ist — also teilen sich alle Clients einen Bucket und das Limit ist nutzlos. Setze `real_ip::RealIpLayer` (liest `X-Forwarded-For` / `X-Real-IP`) davor, damit die echte Client-IP verwendet wird.
+> **Hinter einem Reverse Proxy funktioniert `per_ip` nicht, und `real_ip` behebt das nicht** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` schlüsselt auf den verbindenden Socket (`ConnectInfo`), was hinter einem Proxy die IP des *Proxys* ist — also teilen sich alle Clients einen Bucket. Ein einziger lauter Client limitiert dann alle anderen, und kein einzelner Angreifer wird je limitiert.
+>
+> `RealIpLayer` ändert daran **nichts**. Es fügt eine separate `RealIp`-Extension ein und schreibt `ConnectInfo` nie um; keiner der beiden Limiter liest diese Extension. Diese Seite empfahl früher, beide zu kombinieren — das tat nichts.
+>
+> Verdrahte die beiden auch nicht selbst. `RealIpLayer` nimmt den linkesten `X-Forwarded-For`-Eintrag, einen vom Client setzbaren Header ohne Trusted-Proxy-Prüfung — einen Limiter darauf zu schlüsseln macht aus „das Limit ist zu grob" ein „das Limit lässt sich per Header umgehen". Das ist der schlimmere der beiden Fehler.
+>
+> Bis das behoben ist: limitiere auf etwas, das du kontrollierst — `KeyBy::Header` auf einen authentifizierten API-Key, oder ein Limit pro Route im Proxy selbst, der die echte Client-Adresse ohnehin kennt.
 
 `RateLimitLayer` ist **prozesslokal** — es zählt Anfragen nur innerhalb einer laufenden Instanz, was in Ordnung ist, wenn du eine einzelne Instanz betreibst. Wenn du mehrere Instanzen (Replicas) hinter einem Load Balancer betreibst, würde jede ihre eigene Zählung führen, sodass sich das reale Limit vervielfacht. Um eine Zählung über alle Replicas hinweg zu teilen, nutze `rate_limit_cache::CacheRateLimitLayer`, das an eine beliebige `cache::Cache`-Implementierung delegiert (kombiniere es mit `cache::RedisCache` für einen gemeinsamen Zähler, der atomar per Redis `INCRBY` inkrementiert wird):
 

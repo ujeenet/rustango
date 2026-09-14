@@ -145,7 +145,13 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 Cuando se agota: `429 Too Many Requests` con la cabecera `Retry-After`. Cada respuesta exitosa incluye `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Detrás de un proxy inverso, empareja `per_ip` con `real_ip`.** `RateLimitLayer::per_ip` se basa en el socket de conexión (`ConnectInfo`), que detrás de un proxy es la IP del *proxy* — de modo que todos los clientes comparten un único cubo y el límite resulta inútil. Coloca `real_ip::RealIpLayer` (lee `X-Forwarded-For` / `X-Real-IP`) delante de él para que se use la IP real del cliente.
+> **Detrás de un proxy inverso, `per_ip` no funciona, y `real_ip` no lo arregla** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` se basa en el socket de conexión (`ConnectInfo`), que detrás de un proxy es la IP del *proxy* — de modo que todos los clientes comparten un único cubo. Un solo cliente ruidoso limita entonces a todos los demás, y ningún atacante individual llega a ser limitado.
+>
+> `RealIpLayer` **no** cambia esto. Inserta una extensión `RealIp` aparte y nunca reescribe `ConnectInfo`; ninguno de los dos limitadores lee esa extensión. Esta página recomendaba antes emparejarlos, lo cual no hacía nada.
+>
+> Tampoco los conectes tú mismo. `RealIpLayer` toma el `X-Forwarded-For` más a la izquierda, una cabecera que el cliente puede fijar y sin comprobación de proxy de confianza — basar un limitador en ella convierte «el límite es demasiado grueso» en «el límite se elude enviando una cabecera». Ese es el peor de los dos fallos.
+>
+> Hasta que se arregle, limita sobre algo que controles: `KeyBy::Header` con una clave de API autenticada, o un límite por ruta en el propio proxy, que ya conoce la dirección real del cliente.
 
 `RateLimitLayer` es **local al proceso** — cuenta las peticiones solo dentro de una instancia en ejecución, lo cual está bien si ejecutas una sola instancia. Si ejecutas varias instancias (réplicas) detrás de un balanceador de carga, cada una mantendría su propio recuento, de modo que el límite real se multiplica. Para compartir un único recuento entre todas las réplicas, usa `rate_limit_cache::CacheRateLimitLayer`, que delega en cualquier implementación de `cache::Cache` (empareja con `cache::RedisCache` para un contador compartido incrementado atómicamente por el `INCRBY` de Redis):
 

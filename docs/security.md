@@ -145,7 +145,13 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 When exhausted: `429 Too Many Requests` with `Retry-After` header. Every successful response includes `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Behind a reverse proxy, pair `per_ip` with `real_ip`.** `RateLimitLayer::per_ip` keys on the connecting socket (`ConnectInfo`), which behind a proxy is the *proxy's* IP — so every client shares one bucket and the limit is useless. Put `real_ip::RealIpLayer` (reads `X-Forwarded-For` / `X-Real-IP`) ahead of it so the true client IP is used.
+> **Behind a reverse proxy, `per_ip` does not work, and `real_ip` does not fix it** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` keys on the connecting socket (`ConnectInfo`), which behind a proxy is the *proxy's* IP — so every client shares one bucket. One noisy client then rate-limits everybody, and no individual attacker is ever limited.
+>
+> `RealIpLayer` does **not** change this. It inserts a separate `RealIp` extension and never rewrites `ConnectInfo`; neither limiter reads that extension. This page used to prescribe pairing them, which did nothing.
+>
+> Do not wire the two together yourself either. `RealIpLayer` takes the leftmost `X-Forwarded-For`, which is a client-settable header with no trusted-proxy check — keying a limiter on it turns "the limit is too coarse" into "the limit is bypassable by sending a header". That is the worse failure of the two.
+>
+> Until this is fixed, limit on something you control: `KeyBy::Header` on an authenticated API key, or a per-route limit at the proxy itself, which already knows the real client address.
 
 `RateLimitLayer` is **process-local** — it counts requests only within one running instance, which is fine if you run a single instance. If you run several instances (replicas) behind a load balancer, each would keep its own count, so the real limit multiplies. To share one count across all replicas, use `rate_limit_cache::CacheRateLimitLayer`, which delegates to any `cache::Cache` impl (pair with `cache::RedisCache` for a shared counter incremented atomically by Redis `INCRBY`):
 

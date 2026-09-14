@@ -145,7 +145,13 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 En cas d'épuisement : `429 Too Many Requests` avec l'en-tête `Retry-After`. Chaque réponse réussie inclut `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Derrière un reverse proxy, associez `per_ip` avec `real_ip`.** `RateLimitLayer::per_ip` s'indexe sur le socket de connexion (`ConnectInfo`), qui derrière un proxy est l'IP *du proxy* — donc tous les clients partagent un seul compartiment et la limite est inutile. Placez `real_ip::RealIpLayer` (qui lit `X-Forwarded-For` / `X-Real-IP`) avant lui pour que la vraie IP client soit utilisée.
+> **Derrière un reverse proxy, `per_ip` ne fonctionne pas, et `real_ip` n'y remédie pas** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` s'indexe sur le socket de connexion (`ConnectInfo`), qui derrière un proxy est l'IP *du proxy* — donc tous les clients partagent un seul compartiment. Un seul client bruyant limite alors tous les autres, et aucun attaquant individuel n'est jamais limité.
+>
+> `RealIpLayer` n'y change **rien**. Il insère une extension `RealIp` distincte et ne réécrit jamais `ConnectInfo` ; aucun des deux limiteurs ne lit cette extension. Cette page recommandait autrefois de les associer, ce qui ne faisait rien.
+>
+> Ne les câblez pas vous-même non plus. `RealIpLayer` prend le `X-Forwarded-For` le plus à gauche, un en-tête que le client peut définir et sans vérification de proxy de confiance — indexer un limiteur dessus transforme « la limite est trop grossière » en « la limite se contourne en envoyant un en-tête ». C'est la pire des deux défaillances.
+>
+> En attendant le correctif, limitez sur quelque chose que vous maîtrisez : `KeyBy::Header` sur une clé d'API authentifiée, ou une limite par route sur le proxy lui-même, qui connaît déjà l'adresse réelle du client.
 
 `RateLimitLayer` est **local au processus** — il compte les requêtes uniquement au sein d'une instance en cours d'exécution, ce qui convient si vous exécutez une seule instance. Si vous exécutez plusieurs instances (répliques) derrière un load balancer, chacune tiendrait son propre compte, et la limite réelle se multiplierait. Pour partager un seul compte entre toutes les répliques, utilisez `rate_limit_cache::CacheRateLimitLayer`, qui délègue à n'importe quelle implémentation de `cache::Cache` (à associer avec `cache::RedisCache` pour un compteur partagé incrémenté de façon atomique par le `INCRBY` de Redis) :
 
