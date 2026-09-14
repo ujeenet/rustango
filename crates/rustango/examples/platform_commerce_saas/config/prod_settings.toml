@@ -1,0 +1,25 @@
+# platform_commerce_saas — production tier
+# Loaded when RUSTANGO_ENV=prod. Strict-by-default; sensitive values
+# (database url, secret key) come from the environment or your secrets
+# manager — leaving them out of source control.
+
+# The URL comes from the `DATABASE_URL` environment variable, which is
+# what every pool reads. Set it from your secrets manager.
+#
+# Pool sizes can be pinned here. If you do, uncomment the header *with*
+# the keys: a key left uncommented under a commented-out `[database]`
+# lands at the TOML root, where it is silently ignored.
+# [database]
+# pool_min_size = 5
+# pool_max_size = 50
+
+[server]
+bind                 = "0.0.0.0:8080"
+request_timeout_secs = 30
+
+[security]
+headers_preset    = "strict"
+hsts_max_age_secs = 31536000
+
+[audit]
+retention_days = 365
