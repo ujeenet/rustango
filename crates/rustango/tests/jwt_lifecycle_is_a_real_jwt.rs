@@ -69,6 +69,12 @@ fn the_payload_still_carries_the_reserved_claims() {
 /// these now. It could not before — the framework rejected its own
 /// tokens, which is the sharpest possible statement that they were not
 /// JWTs.
+///
+/// Gated on `jwt` rather than gating the file: `tenancy::jwt_lifecycle`
+/// needs only `tenancy`, so gating the whole file would drop the other
+/// ten tests from every build without the `jwt` feature — including the
+/// MCP ones, which do not need it.
+#[cfg(feature = "jwt")]
 #[test]
 fn rustangos_own_decoder_accepts_the_token() {
     let life = JwtLifecycle::new(secret());
@@ -192,6 +198,7 @@ async fn alg_none_is_refused() {
 /// `rustango::jwt::decode` rather than the issuer's own verifier is the
 /// point: it is the standard reader that had never been able to see any
 /// of this.
+#[cfg(feature = "jwt")]
 #[test]
 fn custom_claims_round_trip_through_a_standard_decoder() {
     let life = JwtLifecycle::new(secret());
@@ -254,9 +261,13 @@ async fn custom_claims_round_trip_through_the_issuer() {
 /// MCP agent authentication rides the same issuer, so it changed shape
 /// too. Its tokens carry five custom claims — two of them arrays — and
 /// a tenant that is security-relevant rather than decorative.
+///
+/// Split from the standard-decoder assertion below so this half keeps
+/// running in builds without `jwt`: `mcp` does not imply that feature,
+/// and the agent-resolution path is worth checking either way.
 #[cfg(feature = "mcp")]
 #[tokio::test]
-async fn mcp_agent_tokens_are_real_jwts_and_still_resolve() {
+async fn mcp_agent_tokens_are_jwt_shaped_and_still_resolve() {
     use rustango::mcp::auth::{issue_agent_token, verify_agent_token};
 
     let life = JwtLifecycle::new(secret());
@@ -272,18 +283,6 @@ async fn mcp_agent_tokens_are_real_jwts_and_still_resolve() {
         "an agent token is a JWT like any other"
     );
 
-    // Readable by a standard decoder, claims and all.
-    let std_claims = rustango::jwt::decode(&token, &secret()).expect("standard decode");
-    assert_eq!(std_claims.get::<String>("kind").as_deref(), Some("agent"));
-    assert_eq!(std_claims.get::<String>("tenant").as_deref(), Some("acme"));
-    assert_eq!(
-        std_claims.get::<Vec<String>>("skills"),
-        Some(skills.clone())
-    );
-    assert_eq!(std_claims.get::<Vec<String>>("tools"), Some(tools.clone()));
-    assert_eq!(std_claims.get::<i64>("uid"), Some(5));
-
-    // And the MCP path still resolves it to an agent.
     let agent = verify_agent_token(&life, &token, "acme")
         .await
         .expect("agent token must still verify");
@@ -292,6 +291,27 @@ async fn mcp_agent_tokens_are_real_jwts_and_still_resolve() {
     assert_eq!(agent.skills, skills);
     assert_eq!(agent.tools, tools);
     assert_eq!(agent.user_id, Some(5));
+}
+
+/// And every one of those claims is readable by a standard decoder —
+/// the half that needs `rustango::jwt`.
+#[cfg(all(feature = "mcp", feature = "jwt"))]
+#[test]
+fn mcp_agent_claims_are_readable_by_a_standard_decoder() {
+    use rustango::mcp::auth::issue_agent_token;
+
+    let life = JwtLifecycle::new(secret());
+    let skills = vec!["search".to_owned(), "summarise".to_owned()];
+    let tools = vec!["fetch".to_owned()];
+    let token =
+        issue_agent_token(&life, 99, "acme", &skills, &tools, Some(5)).expect("agent token issues");
+
+    let std_claims = rustango::jwt::decode(&token, &secret()).expect("standard decode");
+    assert_eq!(std_claims.get::<String>("kind").as_deref(), Some("agent"));
+    assert_eq!(std_claims.get::<String>("tenant").as_deref(), Some("acme"));
+    assert_eq!(std_claims.get::<Vec<String>>("skills"), Some(skills));
+    assert_eq!(std_claims.get::<Vec<String>>("tools"), Some(tools));
+    assert_eq!(std_claims.get::<i64>("uid"), Some(5));
 }
 
 /// Tenant pinning still refuses a token minted for someone else. The
