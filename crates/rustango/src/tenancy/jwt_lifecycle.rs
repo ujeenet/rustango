@@ -329,11 +329,26 @@ impl JwtLifecycle {
         payload.insert("jti".into(), serde_json::Value::String(jti));
         payload.insert("typ".into(), serde_json::Value::String(typ.into()));
 
+        // Three segments, with the JOSE header, signed over
+        // `header.payload` — i.e. an actual JWT (#1397).
+        //
+        // This used to emit `base64(payload).base64(sig)`: two segments,
+        // no header, no `alg`, signed over the payload alone. Nothing
+        // outside rustango could read it — not jwt.io, not any language's
+        // standard library, not an API gateway asked to validate a JWT,
+        // and not `rustango::jwt::decode`, which rejected the framework's
+        // own tokens as malformed. Meanwhile every doc, the type names
+        // and the route all said JWT.
+        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({"alg": "HS256", "typ": "JWT"}))
+                .unwrap_or_default(),
+        );
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&payload).unwrap_or_default());
-        let sig = self.sign(payload_b64.as_bytes());
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig = self.sign(signing_input.as_bytes());
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-        format!("{payload_b64}.{sig_b64}")
+        format!("{signing_input}.{sig_b64}")
     }
 
     async fn verify_token(&self, token: &str) -> Option<JwtClaims> {
@@ -353,8 +368,39 @@ impl JwtLifecycle {
     /// Decode + verify signature only — does NOT check expiry or blacklist.
     /// Used for `revoke` so we can blacklist even an already-expired token's JTI.
     fn decode_unchecked(&self, token: &str) -> Option<JwtClaims> {
-        let (payload_b64, sig_b64) = token.split_once('.')?;
-        let expected = self.sign(payload_b64.as_bytes());
+        // Accepts both shapes (#1397). Three segments is what we issue
+        // now; two is the pre-#1397 format, still verified so that
+        // upgrading the framework does not log out everyone holding a
+        // token that has not expired yet.
+        //
+        // This is a compatibility path with an end date, not a permanent
+        // one — remove it in 0.58, by which time every token minted in
+        // the old shape has aged out. It weakens nothing in the
+        // meantime: both shapes are verified with the same HMAC key, and
+        // an attacker who cannot forge one cannot forge the other.
+        let parts: Vec<&str> = token.split('.').collect();
+        let (signing_input, payload_b64, sig_b64) = match parts.as_slice() {
+            [header, payload, sig] => {
+                // Pin the algorithm from the header rather than trusting
+                // it. Belt-and-braces — we verify HS256 over the whole
+                // `header.payload` with our own key regardless, so a
+                // swapped `alg` cannot validate — but refusing it here
+                // means `alg: none` is rejected as such instead of as a
+                // signature mismatch.
+                let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(header)
+                    .ok()?;
+                let header_json: serde_json::Value = serde_json::from_slice(&header_bytes).ok()?;
+                if header_json.get("alg").and_then(serde_json::Value::as_str) != Some("HS256") {
+                    return None;
+                }
+                (format!("{header}.{payload}"), *payload, *sig)
+            }
+            [payload, sig] => ((*payload).to_owned(), *payload, *sig),
+            _ => return None,
+        };
+
+        let expected = self.sign(signing_input.as_bytes());
         let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(sig_b64)
             .ok()?;
