@@ -2,6 +2,10 @@
 name = "platform_commerce"
 version = "0.1.0"
 edition = "2021"
+# Two binaries (the server and the worker `make:worker` added),
+# so plain `cargo run` needs to be told which one — otherwise
+# `cargo run -- migrate` fails as ambiguous.
+default-run = "platform_commerce"
 
 # Empty `[workspace]` table makes this project standalone: if a parent
 # directory has its own workspace `Cargo.toml`, cargo would otherwise

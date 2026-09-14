@@ -88,7 +88,7 @@ fn orders() -> Router<AppState> {
     ViewSet::for_model(Order::SCHEMA)
         .serializer::<OrderSerializer>()
         .filter_fields(&["status", "customer_id"])
-        .cursor_pagination_desc("placed_at")
+        .cursor_pagination_desc("id")
         .page_size(25)
         .tenant_router("/api/v1/orders")
         .with_state(())

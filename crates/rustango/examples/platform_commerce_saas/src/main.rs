@@ -13,8 +13,11 @@
 //! MySQL and SQLite must use **database mode**, because `SET
 //! search_path` has no equivalent there.
 
-mod commerce;
-mod models;
+// `commerce` comes from the library target (src/lib.rs) so the
+// worker binary can reach the same job types and the same tenant
+// supervisor this binary uses. `urls`/`views` are server-only.
+use platform_commerce_saas::commerce;
+
 mod urls;
 mod views;
 
@@ -30,6 +33,22 @@ fn fail_ratio_pct() -> u8 {
         .unwrap_or(10)
 }
 
+/// Is this process about to serve HTTP, or run a CLI verb?
+///
+/// `Cli::run()` dispatches on argv: no args (or `runserver`) serves,
+/// anything else is a management command. The supervisor below queries
+/// `rustango_orgs`, so booting it unconditionally makes **every** verb
+/// need tables that `migrate` has not created yet — including `migrate`
+/// itself. That is a chicken-and-egg that makes a fresh project
+/// impossible to bootstrap, and it is a mistake worth not repeating:
+/// keep start-up work that touches the database behind this check.
+fn will_serve() -> bool {
+    match std::env::args().nth(1) {
+        None => true,
+        Some(a) => a == "runserver" || a == "run-server",
+    }
+}
+
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
@@ -38,10 +57,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "missing env var 'DATABASE_URL'. Set it in your shell, or copy '.env.example' to '.env'."
     })?;
 
+    // Management verbs (`migrate`, `create-tenant`, …) take the plain
+    // path: no queues, no pools, nothing that reads a table that may not
+    // exist yet.
+    if !will_serve() {
+        return rustango::manage::Cli::new()
+            .tenancy()
+            .routes(RouteConfig::legacy())
+            .run()
+            .await;
+    }
+
     // Two handles on the same database, for two different jobs.
     // `TenantPools` needs the *typed* pool — `DefaultTenantDb` resolves
-    // to whichever backend this build selected, which is what keeps the
-    // supervisor tri-dialect. The erased `Pool` is what the ORM takes.
+    // to whichever backend this build selected. The erased `Pool` is
+    // what the ORM takes.
     let typed = rustango::sql::sqlx::Pool::<DefaultTenantDb>::connect(&url).await?;
     let registry = Pool::from(typed.clone());
 

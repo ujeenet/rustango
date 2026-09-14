@@ -1,0 +1,15 @@
+-- Databases the soak needs, created when the postgres volume is first
+-- initialised.
+--
+-- Why here and not in bootstrap.sh: the app image is debian-slim with
+-- curl and nothing else. Shipping psql and the MySQL client into a
+-- production-shaped image so a test script can create databases is the
+-- wrong trade — the image is meant to be the thing you would deploy.
+--
+-- `POSTGRES_DB=commerce` already exists by the time this runs; only the
+-- SaaS registry is missing.
+--
+-- Tenant *schemas* are not created here. Postgres tenants run in schema
+-- mode and the provisioning engine issues its own CREATE SCHEMA — one
+-- of the few things rustango does create for you.
+CREATE DATABASE commerce_saas_pg OWNER rustango;

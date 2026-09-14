@@ -81,13 +81,21 @@ fn products(pool: &Pool) -> Router<AppState> {
         .with_state(())
 }
 
-/// Cursor pagination — deliberately the *other* style, so both paginators
-/// are exercised by the same soak.
+/// Cursor pagination — deliberately the *other* style, so both
+/// paginators are exercised by the same soak.
+///
+/// Keyed on `id`, not on `placed_at`. Cursor pagination over a
+/// non-integer column is accepted at build time and then 500s on every
+/// request (#1459) — which is how this endpoint was dead on all six
+/// instances until the soak's first run found it. A timestamp is the
+/// natural cursor for an append-only table and is what the docs'
+/// "stable, monotonically-ordered column" describes; switch back when
+/// #1459 lands.
 fn orders(pool: &Pool) -> Router<AppState> {
     ViewSet::for_model(Order::SCHEMA)
         .serializer::<OrderSerializer>()
         .filter_fields(&["status", "customer_id"])
-        .cursor_pagination_desc("placed_at")
+        .cursor_pagination_desc("id")
         .page_size(25)
         .router_pool("/api/v1/orders", pool.clone())
         .with_state(())

@@ -15,7 +15,7 @@ use crate::views;
 #[must_use]
 pub fn api(pool: Pool, queue: Arc<DatabaseJobQueue>, fail_ratio_pct: u8) -> Router<()> {
     Router::new()
-        .merge(crate::commerce::urls::api(
+        .merge(platform_commerce::commerce::urls::api(
             pool.clone(),
             queue,
             fail_ratio_pct,

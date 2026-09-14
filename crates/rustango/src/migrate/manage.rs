@@ -2529,6 +2529,15 @@ fn write_generated_bin<W: Write>(
     writeln!(w, "wrote {}", path.display())?;
     // No `[[bin]]` stanza needed: cargo picks up `src/bin/*.rs` on its own.
     writeln!(w, "  run it with `cargo run --bin {bin_name}`")?;
+    // A second binary makes plain `cargo run` ambiguous, which breaks the
+    // `cargo run -- migrate` workflow every generated project's README
+    // documents. Cargo's error names the binaries but not the fix.
+    writeln!(
+        w,
+        "  NOTE: a second binary makes plain `cargo run` ambiguous. Add\n  \
+         `default-run = \"<your-app>\"` under [package] in Cargo.toml to keep\n  \
+         `cargo run -- migrate` working."
+    )?;
     Ok(())
 }
 

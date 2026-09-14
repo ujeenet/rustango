@@ -8,13 +8,17 @@
 //! API had never shown it (#1386). Every rename here exists to be
 //! provoked from the API tests.
 //!
-//! None of these declare `id`. A serializer field must match its
-//! model's field type, and an `Auto<i64>` primary key has no sensible
-//! serializer spelling — declaring `pub id: i64` fails to compile with
-//! `expected &i64, found &Auto<i64>` pointing at the derive. Every
-//! serializer in the framework's own test suite omits the PK for the
-//! same reason.
+//! Each declares `id` as `Auto<i64>` with `read_only` — a serializer
+//! field must match its model field's type exactly, so `pub id: i64`
+//! over an `Auto<i64>` primary key fails to compile with `expected
+//! &i64, found &Auto<i64>` pointing at the derive. `read_only` keeps it
+//! out of the writable set.
+//!
+//! Leaving it out compiles fine and is worse: the API then returns
+//! created rows with no identifier, so a client cannot address what it
+//! just made. That is how the soak driver first failed here.
 
+use rustango::sql::Auto;
 use rustango::Serializer;
 
 use super::models::{Customer, Order, Product};
@@ -26,6 +30,8 @@ use super::models::{Customer, Order, Product};
 #[serializer(model = Product)]
 #[allow(dead_code)]
 pub struct ProductSerializer {
+    #[serializer(read_only)]
+    pub id: Auto<i64>,
     pub sku: String,
     pub name: String,
     #[serializer(source = "description")]
@@ -39,6 +45,8 @@ pub struct ProductSerializer {
 #[serializer(model = Customer)]
 #[allow(dead_code)]
 pub struct CustomerSerializer {
+    #[serializer(read_only)]
+    pub id: Auto<i64>,
     #[serializer(source = "email")]
     pub contact_email: String,
     pub full_name: String,
@@ -62,6 +70,8 @@ pub struct CustomerSerializer {
 #[serializer(model = Order)]
 #[allow(dead_code)]
 pub struct OrderSerializer {
+    #[serializer(read_only)]
+    pub id: Auto<i64>,
     #[serializer(source = "reference")]
     pub ref_code: String,
     pub note: Option<String>,

@@ -1,0 +1,362 @@
+# The commerce soak fleet.
+#
+#   export RUSTANGO_SESSION_SECRET="$(openssl rand -base64 32)"
+#   docker compose -f docker/soak/docker-compose.yml build
+#   docker compose -f docker/soak/docker-compose.yml up -d
+#   docker compose -f docker/soak/docker-compose.yml --profile driver up driver
+#
+# `up -d` gives you a running fleet to poke at. The load driver sits
+# behind a profile so it does not start a 40-minute run every time
+# somebody brings the stack up.
+#
+# ## Ports
+#
+# Everything published is shifted, because this stack is meant to run
+# *alongside* the repo-root docker-compose.yml rather than instead of
+# it. Container-internal ports are always the standard ones and are the
+# only ones the services use to talk to each other.
+#
+#   postgres  5433 -> 5432     mysql  3406 -> 3306
+#   redis     6479 -> 6379     minio  9100 -> 9000, 9101 -> 9001
+#
+# On MySQL specifically: the root compose publishes 3406 to dodge a
+# local MySQL, while CI and the scaffolder use 3306 because they run in
+# isolated environments with nothing to collide with. This file follows
+# the root compose. That discrepancy has now confused someone three
+# times, hence this paragraph.
+
+name: rustango-soak
+
+x-app-env: &app-env
+  # `${VAR:?msg}` makes compose refuse to start rather than silently
+  # generating a per-container key. A committed base64 secret would also
+  # be a Trivy HIGH, and the `trivy` CI job blocks on those.
+  #   openssl rand -base64 32
+  RUSTANGO_SESSION_SECRET: "${RUSTANGO_SESSION_SECRET:?generate one with openssl rand -base64 32}"
+  RUSTANGO_BIND: 0.0.0.0:8080
+  RUSTANGO_ENV: prod
+  # A soak legitimately saturates pools; 5s turns that into spurious
+  # failures that look like bugs.
+  RUSTANGO_DB_ACQUIRE_TIMEOUT_SECS: "10"
+  # Tightens the cross-process leg of tenant-resolver convergence from
+  # 5s. The 30s negative-cache TTL is not tunable, so a newly
+  # provisioned tenant still takes ~35s to become routable.
+  RUSTANGO_HOST_GEN_CHECK_SECS: "2"
+  SOAK_FAIL_RATIO_PCT: "${SOAK_FAIL_RATIO_PCT:-10}"
+  RUST_LOG: ${RUST_LOG:-info,rustango=info,sqlx=warn}
+
+x-app-common: &app-common
+  restart: unless-stopped
+  # Docker's default is 10s. `PgJobQueue::shutdown` gives each in-flight
+  # job a hard-coded 5s, and `Cli::on_shutdown` runs *after* the server
+  # drains — so 10s reliably SIGKILLs mid-drain and loses exactly the
+  # jobs this soak counts.
+  stop_grace_period: 45s
+
+services:
+  # ---------------------------------------------------------------- infra
+
+  pg:
+    image: public.ecr.aws/docker/library/postgres:16-alpine
+    environment:
+      POSTGRES_USER: rustango
+      POSTGRES_PASSWORD: rustango
+      POSTGRES_DB: commerce
+    # 20 tenants x 16 connections x (web + worker) = 640, against a
+    # stock limit of 100. `TenantPoolsConfig` is unreachable from
+    # `manage::Cli` and reads no env vars (#1456), so the database
+    # server's own limit is the only lever there is.
+    command:
+      - postgres
+      - -c
+      - max_connections=600
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=8MB
+    ports: ["5433:5432"]
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      # Runs once, when the volume is first initialised. Creates the
+      # SaaS registry database — the app image is debian-slim and has no
+      # psql, and shipping a database client into a production-shaped
+      # image so a test script can create databases is the wrong trade.
+      - ./initdb/pg.sql:/docker-entrypoint-initdb.d/10-soak.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rustango -d commerce"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  my:
+    image: public.ecr.aws/docker/library/mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: rustango
+      MYSQL_DATABASE: commerce
+      MYSQL_USER: rustango
+      MYSQL_PASSWORD: rustango
+    command: ["--max-connections=1200", "--innodb-buffer-pool-size=768M"]
+    ports: ["3406:3306"]
+    volumes:
+      - my-data:/var/lib/mysql
+      # Every MySQL tenant is database-mode (schema mode is
+      # Postgres-only), and rustango does not create tenant databases —
+      # so all twenty are created here, plus the SaaS registry.
+      - ./initdb/my.sql:/docker-entrypoint-initdb.d/10-soak.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u rustango -prustango"]
+      interval: 2s
+      timeout: 2s
+      retries: 45
+
+  redis:
+    image: public.ecr.aws/docker/library/redis:7
+    ports: ["6479:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  minio:
+    image: quay.io/minio/minio:latest
+    # A normal service, not the `docker run` step CI uses — that
+    # workaround exists because GitHub Actions `services:` has no
+    # `command:` field. Compose does.
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: rustango
+      MINIO_ROOT_PASSWORD: rustango123
+    ports: ["9100:9000", "9101:9001"]
+    volumes: [minio-data:/data]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: quay.io/minio/mc:latest
+    restart: "no"
+    depends_on:
+      minio: {condition: service_healthy}
+    entrypoint:
+      - sh
+      - -c
+      - mc alias set m http://minio:9000 rustango rustango123 &&
+        mc mb --ignore-existing m/commerce-media
+
+  # ------------------------------------------------------------ bootstrap
+  #
+  # One per app instance, `restart: "no"`, and every web/worker waits on
+  # `service_completed_successfully`. Each one migrates, and for the
+  # SaaS instances creates the operator and the tenants.
+
+  bootstrap-single-pg: &bootstrap-single
+    image: rustango-soak/commerce:all
+    restart: "no"
+    depends_on:
+      pg: {condition: service_healthy}
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce
+    entrypoint: ["/bin/sh", "/soak/bootstrap.sh", "single"]
+    volumes: ["./bootstrap.sh:/soak/bootstrap.sh:ro"]
+
+  bootstrap-single-my:
+    <<: *bootstrap-single
+    depends_on:
+      my: {condition: service_healthy}
+    environment:
+      <<: *app-env
+      DATABASE_URL: mysql://rustango:rustango@my:3306/commerce
+
+  bootstrap-single-sq:
+    <<: *bootstrap-single
+    depends_on: {}
+    environment:
+      <<: *app-env
+      DATABASE_URL: sqlite:///data/single.db?mode=rwc
+    volumes:
+      - "./bootstrap.sh:/soak/bootstrap.sh:ro"
+      - sq-single:/data
+
+  bootstrap-saas-pg: &bootstrap-saas
+    image: rustango-soak/saas:postgres
+    restart: "no"
+    depends_on:
+      pg: {condition: service_healthy}
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce_saas_pg
+      RUSTANGO_APEX_DOMAIN: soak.localhost
+      SOAK_TENANTS: "${SOAK_TENANTS:-20}"
+      SOAK_TENANT_MODE: schema
+      SOAK_ADMIN_URL: postgres://rustango:rustango@pg:5432/postgres
+    entrypoint: ["/bin/sh", "/soak/bootstrap.sh", "saas"]
+    volumes: ["./bootstrap.sh:/soak/bootstrap.sh:ro"]
+
+  bootstrap-saas-my:
+    <<: *bootstrap-saas
+    image: rustango-soak/saas:mysql
+    depends_on:
+      my: {condition: service_healthy}
+    environment:
+      <<: *app-env
+      DATABASE_URL: mysql://rustango:rustango@my:3306/commerce_saas_my
+      RUSTANGO_APEX_DOMAIN: soak.localhost
+      SOAK_TENANTS: "${SOAK_TENANTS:-20}"
+      # `--mode schema` is Postgres-only: MySQL has no `SET
+      # search_path`, and a MySQL "schema" is a database.
+      SOAK_TENANT_MODE: database
+      SOAK_ADMIN_URL: mysql://root:rustango@my:3306/mysql
+
+  bootstrap-saas-sq:
+    <<: *bootstrap-saas
+    image: rustango-soak/saas:sqlite
+    depends_on: {}
+    environment:
+      <<: *app-env
+      DATABASE_URL: sqlite:///data/registry.db?mode=rwc
+      RUSTANGO_APEX_DOMAIN: soak.localhost
+      SOAK_TENANTS: "${SOAK_TENANTS:-20}"
+      SOAK_TENANT_MODE: database
+    volumes:
+      - "./bootstrap.sh:/soak/bootstrap.sh:ro"
+      - sq-saas:/data
+
+  # ------------------------------------------------------------------ web
+
+  web-single-pg:
+    <<: *app-common
+    image: rustango-soak/commerce:all
+    depends_on:
+      bootstrap-single-pg: {condition: service_completed_successfully}
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce
+    ports: ["18081:8080"]
+
+  web-single-my:
+    <<: *app-common
+    image: rustango-soak/commerce:all
+    depends_on:
+      bootstrap-single-my: {condition: service_completed_successfully}
+    environment:
+      <<: *app-env
+      DATABASE_URL: mysql://rustango:rustango@my:3306/commerce
+    ports: ["18082:8080"]
+
+  web-single-sq:
+    <<: *app-common
+    image: rustango-soak/commerce:all
+    depends_on:
+      bootstrap-single-sq: {condition: service_completed_successfully}
+    environment:
+      <<: *app-env
+      DATABASE_URL: sqlite:///data/single.db?mode=rwc
+      # SQLite runs its workers in-process. Two containers on one SQLite
+      # file would need POSIX advisory locks plus WAL shared memory
+      # across the container boundary, which is unreliable — and one
+      # process is what you would actually deploy.
+      SOAK_INLINE_WORKERS: "1"
+    volumes: [sq-single:/data]
+    ports: ["18083:8080"]
+
+  web-saas-pg:
+    <<: *app-common
+    image: rustango-soak/saas:postgres
+    depends_on:
+      bootstrap-saas-pg: {condition: service_completed_successfully}
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce_saas_pg
+      RUSTANGO_APEX_DOMAIN: soak.localhost
+    ports: ["18084:8080"]
+
+  web-saas-my:
+    <<: *app-common
+    image: rustango-soak/saas:mysql
+    depends_on:
+      bootstrap-saas-my: {condition: service_completed_successfully}
+    environment:
+      <<: *app-env
+      DATABASE_URL: mysql://rustango:rustango@my:3306/commerce_saas_my
+      RUSTANGO_APEX_DOMAIN: soak.localhost
+    ports: ["18085:8080"]
+
+  web-saas-sq:
+    <<: *app-common
+    image: rustango-soak/saas:sqlite
+    depends_on:
+      bootstrap-saas-sq: {condition: service_completed_successfully}
+    environment:
+      <<: *app-env
+      DATABASE_URL: sqlite:///data/registry.db?mode=rwc
+      RUSTANGO_APEX_DOMAIN: soak.localhost
+    volumes: [sq-saas:/data]
+    ports: ["18086:8080"]
+
+  # --------------------------------------------------------------- worker
+  #
+  # Postgres and MySQL only. The SQLite instances set
+  # SOAK_INLINE_WORKERS=1 instead, for the reason on `web-single-sq`.
+
+  worker-single-pg:
+    <<: *app-common
+    image: rustango-soak/commerce:all
+    command: ["worker"]
+    # The image's HEALTHCHECK curls :8080. A worker serves no HTTP, so
+    # it would sit "health: starting" forever and any `depends_on:
+    # service_healthy` against it would hang.
+    healthcheck:
+      disable: true
+    depends_on:
+      bootstrap-single-pg: {condition: service_completed_successfully}
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce
+
+  worker-single-my:
+    <<: *app-common
+    image: rustango-soak/commerce:all
+    command: ["worker"]
+    # The image's HEALTHCHECK curls :8080. A worker serves no HTTP, so
+    # it would sit "health: starting" forever and any `depends_on:
+    # service_healthy` against it would hang.
+    healthcheck:
+      disable: true
+    depends_on:
+      bootstrap-single-my: {condition: service_completed_successfully}
+    environment:
+      <<: *app-env
+      DATABASE_URL: mysql://rustango:rustango@my:3306/commerce
+
+  # -------------------------------------------------------------- driver
+
+  driver:
+    profiles: [driver]
+    image: rustango-soak/driver:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.driver
+    depends_on:
+      web-single-pg: {condition: service_started}
+      web-saas-pg: {condition: service_started}
+    environment:
+      SOAK_DURATION_SECS: "${SOAK_DURATION_SECS:-1800}"
+      SOAK_CONCURRENCY: "${SOAK_CONCURRENCY:-24}"
+      SOAK_TENANTS: "${SOAK_TENANTS:-20}"
+      SOAK_FAIL_RATIO_PCT: "${SOAK_FAIL_RATIO_PCT:-10}"
+      SOAK_APEX: soak.localhost
+    volumes: [soak-results:/results]
+
+volumes:
+  pg-data:
+  my-data:
+  minio-data:
+  # Named volumes, never bind mounts: SQLite over a Docker Desktop bind
+  # mount has unreliable advisory locking.
+  sq-single:
+  sq-saas:
+  soak-results:

@@ -12,8 +12,11 @@
 //! chose which is `default`. Run on another dialect with
 //! `cargo run --no-default-features --features sqlite`.
 
-mod commerce;
-mod models;
+// `commerce` comes from the library target (src/lib.rs) so the
+// worker binary can reach the same job types this binary
+// dispatches. `urls`/`views` are server-only.
+use platform_commerce::commerce;
+
 mod urls;
 mod views;
 
@@ -43,9 +46,31 @@ fn inline_workers() -> bool {
     std::env::var("SOAK_INLINE_WORKERS").is_ok_and(|v| v == "1")
 }
 
+/// Is this process about to serve HTTP, or run a CLI verb?
+///
+/// `Cli::run()` dispatches on argv: no args (or `runserver`) serves,
+/// anything else is a management command. Everything below this check
+/// touches the database, so doing it unconditionally makes verbs that
+/// need no database — `version`, `showmodels`, `make:*` — fail without
+/// one, and makes `migrate` need tables it is about to create.
+///
+/// Keep start-up work that touches the database behind this check. The
+/// framework's own `Cli` does its connecting inside dispatch for the
+/// same reason.
+fn will_serve() -> bool {
+    match std::env::args().nth(1) {
+        None => true,
+        Some(a) => a == "runserver" || a == "run-server",
+    }
+}
+
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
+
+    if !will_serve() {
+        return rustango::manage::Cli::new().run().await;
+    }
 
     let url = std::env::var("DATABASE_URL").map_err(|_| {
         "missing env var 'DATABASE_URL'. Set it in your shell, or copy '.env.example' to '.env'."

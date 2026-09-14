@@ -11,13 +11,16 @@ use std::sync::Arc;
 use axum::routing::get;
 use axum::Router;
 
-use crate::commerce::supervisor::QueueMap;
 use crate::views;
+use platform_commerce_saas::commerce::supervisor::QueueMap;
 
 #[must_use]
 pub fn api(queues: Arc<QueueMap>, fail_ratio_pct: u8) -> Router<()> {
     Router::new()
-        .merge(crate::commerce::urls::api(queues, fail_ratio_pct))
+        .merge(platform_commerce_saas::commerce::urls::api(
+            queues,
+            fail_ratio_pct,
+        ))
         .route("/", get(views::index))
         .route("/healthz", get(views::healthz))
 }
