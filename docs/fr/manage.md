@@ -485,6 +485,24 @@ commenté montrant comment la planifier.
 cargo run -- make:job EmailDigestJob
 ```
 
+### `make:worker <Name>`
+
+Génère un binaire de worker autonome pour `src/bin/` — un processus qui vide la
+file de tâches et ne sert aucun HTTP. Lancez-le à côté du processus web, ou comme
+son propre conteneur.
+
+La forme est courte et facile à écrire de travers d'une manière qui ne se voit
+qu'en production : un worker qui attend `tokio::signal::ctrl_c()` traite SIGINT
+mais **pas** SIGTERM, qui est précisément ce qu'envoient `docker stop`,
+Kubernetes et systemd. La vidange ne s'exécute alors jamais, le conteneur est tué
+à l'expiration de son délai de grâce, et les tâches en vol sont perdues sans que
+rien ne soit journalisé. Le worker généré attend `shutdown::shutdown_signal()`,
+qui traite les deux signaux.
+
+```bash
+cargo run -- make:worker JobsWorker
+```
+
 ### `make:notification <Name>`
 
 Génère une structure de notification qui construit un email — comme le
@@ -1542,7 +1560,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 |---|---|
 | `startapp <name>` | Génère un module d'application |
 | `make:viewset` / `make:serializer` / `make:form` | Génère un ViewSet, un Serializer ou un Form |
-| `make:job` / `make:middleware` / `make:notification` / `make:test` | Génère un job, un middleware, une notification ou un test |
+| `make:job` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Génère un job, un binaire de worker, un middleware, une notification ou un test |
 | `make:api_routes <app> [--tenant]` | Génère le module de routes API d'une application |
 
 ### Cache, sessions et courriel

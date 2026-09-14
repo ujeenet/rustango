@@ -472,6 +472,24 @@ wie man es einplant.
 cargo run -- make:job EmailDigestJob
 ```
 
+### `make:worker <Name>`
+
+Generiert ein eigenständiges Worker-Binary für `src/bin/` — ein Prozess, der die
+Job-Queue abarbeitet und kein HTTP bedient. Betreiben Sie ihn neben dem
+Web-Prozess oder als eigenen Container.
+
+Die Form ist kurz und lässt sich so falsch schreiben, dass es erst in Produktion
+auffällt: Ein Worker, der auf `tokio::signal::ctrl_c()` wartet, behandelt SIGINT,
+aber **nicht** SIGTERM — und genau das senden `docker stop`, Kubernetes und
+systemd. Das Abarbeiten läuft dann nie, der Container wird nach seiner Schonfrist
+getötet, und laufende Jobs gehen verloren, ohne dass etwas protokolliert wird.
+Der generierte Worker wartet auf `shutdown::shutdown_signal()`, das beide
+Signale annimmt.
+
+```bash
+cargo run -- make:worker JobsWorker
+```
+
 ### `make:notification <Name>`
 
 Generiert eine Notification-Struktur, die eine E-Mail aufbaut — wie Laravels
@@ -1502,7 +1520,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 |---|---|
 | `startapp <name>` | Legt ein App-Modul an |
 | `make:viewset` / `make:serializer` / `make:form` | Erzeugt ein ViewSet, einen Serializer oder ein Form |
-| `make:job` / `make:middleware` / `make:notification` / `make:test` | Erzeugt einen Job, eine Middleware, eine Notification oder einen Test |
+| `make:job` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Erzeugt einen Job, ein Worker-Binary, eine Middleware, eine Notification oder einen Test |
 | `make:api_routes <app> [--tenant]` | Erzeugt das API-Routen-Modul einer App |
 
 ### Cache, Sessions und Mail

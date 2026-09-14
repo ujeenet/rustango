@@ -139,6 +139,8 @@ A template turns on a sensible set; `--features` adds the opt-ins none of them r
 | `sso` / `admin-sso` | OIDC single sign-on, for application users / for the admin site |
 | `passkey` | WebAuthn / passkey authentication |
 | `cache-redis` / `cache-page` | Redis cache backend / whole-page response caching |
+| `jobs` / `jobs-postgres` | Background job queue, in-process / database-backed so it survives restarts |
+| `scheduler` | Fixed-interval background tasks |
 | `email-smtp` | SMTP transport for the email framework |
 | `mcp` | Model Context Protocol server for AI agents |
 | `testkit` / `test_utils` | Test-only schema builders, factories, and constructors |

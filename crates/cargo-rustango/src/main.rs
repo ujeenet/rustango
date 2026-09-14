@@ -217,6 +217,12 @@ pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
     ("passkey", "WebAuthn / passkey authentication"),
     ("cache-redis", "Redis cache backend"),
     ("cache-page", "whole-page response caching"),
+    ("jobs", "background job queue (in-process worker pool)"),
+    (
+        "jobs-postgres",
+        "database-backed job queue, surviving restarts",
+    ),
+    ("scheduler", "fixed-interval background tasks"),
     ("email-smtp", "SMTP transport for the email framework"),
     ("mcp", "Model Context Protocol server for AI agents"),
     ("testkit", "test-only schema builders and model factories"),
@@ -602,7 +608,12 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
         "docker-compose.yml",
         &templates::docker_compose(name, backend),
     )?;
-    write(root, "Dockerfile", templates::dockerfile())?;
+    // Two images, because they answer different questions: `Dockerfile`
+    // is the one you deploy (multi-stage, release, non-root),
+    // `Dockerfile.dev` is the cargo-watch one docker-compose.yml builds.
+    write(root, "Dockerfile", &templates::dockerfile_prod(name))?;
+    write(root, "Dockerfile.dev", templates::dockerfile_dev())?;
+    write(root, ".dockerignore", templates::DOCKERIGNORE)?;
     write(
         root,
         "README.md",
@@ -757,25 +768,80 @@ mod tests {
 
     // ---- #86 — Dockerfile + cargo-watch rust service in scaffolder ----
 
-    /// `Dockerfile` template emits a working rust toolchain image
-    /// with `cargo-watch` preinstalled — the foundation of the
-    /// hot-reload dev loop the docker-compose.yml expects.
+    /// `Dockerfile.dev` emits a working rust toolchain image with
+    /// `cargo-watch` preinstalled — the foundation of the hot-reload
+    /// dev loop the docker-compose.yml expects.
     #[test]
-    fn dockerfile_emits_rust_toolchain_with_cargo_watch() {
-        let body = templates::dockerfile();
+    fn dockerfile_dev_emits_rust_toolchain_with_cargo_watch() {
+        let body = templates::dockerfile_dev();
         assert!(
             body.contains("FROM rust:"),
-            "Dockerfile must base on a rust image, got `{body}`"
+            "Dockerfile.dev must base on a rust image, got `{body}`"
         );
         assert!(
             body.contains("cargo install cargo-watch"),
-            "Dockerfile must preinstall cargo-watch (powers the docker-compose.yml \
+            "Dockerfile.dev must preinstall cargo-watch (powers the docker-compose.yml \
              hot-reload command), got `{body}`"
         );
         assert!(
             body.contains("WORKDIR /app"),
-            "Dockerfile must set WORKDIR /app to match docker-compose.yml's bind \
+            "Dockerfile.dev must set WORKDIR /app to match docker-compose.yml's bind \
              mount target, got `{body}`"
+        );
+    }
+
+    /// The deployable image is the one a generated project was missing:
+    /// for a long time the only Dockerfile installed a toolchain and
+    /// waited for a bind mount, so a project could be developed in
+    /// Docker but not shipped in it.
+    #[test]
+    fn dockerfile_builds_a_release_binary_and_drops_root() {
+        let body = templates::dockerfile_prod("myapp");
+        assert!(
+            body.contains("AS builder") && body.matches("FROM ").count() >= 2,
+            "the deploy image must be multi-stage, or the toolchain ships with it: {body}"
+        );
+        assert!(
+            body.contains("--release"),
+            "a deploy image built at the debug profile is not a deploy image: {body}"
+        );
+        assert!(
+            body.contains("--locked"),
+            "a deploy image is exactly where an unnoticed dependency bump should fail \
+             the build rather than ship: {body}"
+        );
+        assert!(
+            body.contains("USER 10001"),
+            "the runtime stage must drop root: {body}"
+        );
+        assert!(
+            body.contains(r#"CMD ["myapp"]"#),
+            "CMD must name the generated binary, got: {body}"
+        );
+        // Both stages must agree on libc — a bookworm-built binary will
+        // not start on bullseye, and the failure is at run time.
+        assert!(
+            body.contains("rust:1-bookworm") && body.contains("debian:bookworm-slim"),
+            "builder and runtime must share a Debian release: {body}"
+        );
+    }
+
+    /// `.dockerignore` decides what reaches the daemon at all. Without
+    /// it `target/` (gigabytes) and `.env` (secrets) are uploaded on
+    /// every build and land in the image.
+    #[test]
+    fn dockerignore_excludes_target_and_secrets() {
+        let body = templates::DOCKERIGNORE;
+        for needle in ["target/", ".env", "*.db", ".git/"] {
+            assert!(
+                body.contains(needle),
+                "`.dockerignore` must exclude `{needle}`, got: {body}"
+            );
+        }
+        assert!(
+            body.contains("!.env.example"),
+            "`.env.example` is the committed template and must survive the `.env` \
+             exclusion, got: {body}"
         );
     }
 
@@ -795,9 +861,12 @@ mod tests {
             body.contains("cargo watch -x run"),
             "rust service must run cargo-watch, got: {body}"
         );
+        // Must be the DEV image specifically: the plain `Dockerfile` is
+        // now the deployable one, which copies the source in and would
+        // defeat the bind mount this service depends on.
         assert!(
-            body.contains("build: ."),
-            "rust service must build from the project Dockerfile, got: {body}"
+            body.contains("dockerfile: Dockerfile.dev"),
+            "rust service must build from Dockerfile.dev, got: {body}"
         );
         // Cargo cache volumes — without these, every `up` triggers
         // a full from-scratch rebuild (the worst dev UX possible).
