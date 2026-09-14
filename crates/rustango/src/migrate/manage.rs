@@ -5704,6 +5704,9 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
+    /// Gated: without `admin`/`tenancy` the audit cannot decode, and
+    /// reports the secret unvalidated instead of measuring it.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
     #[test]
     fn deploy_audit_short_session_secret_errors() {
         // Valid base64, deliberately — decodes to 6 bytes. `"too-short"`
@@ -5721,6 +5724,8 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
+    /// Gated for the same reason as the two above.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
     #[test]
     fn deploy_audit_non_base64_session_secret_errors() {
         let env = DeployAuditEnv {
@@ -5744,6 +5749,11 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     ///
     /// Both now call `SessionSecret::from_b64`, so this is the audit and
     /// the runtime answering with one voice rather than two.
+    ///
+    /// Gated like the code it covers: `session` is `admin`/`tenancy`-only,
+    /// and in a build with neither the audit reports the secret
+    /// unvalidated, so there is nothing here to assert.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
     #[test]
     fn deploy_audit_rejects_a_32_char_base64_secret_the_runtime_refuses() {
         let trap = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
