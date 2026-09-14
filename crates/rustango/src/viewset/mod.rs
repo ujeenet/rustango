@@ -541,8 +541,25 @@ impl ViewSetFilter for OwnedBy {
 /// cannot determine the principal — returning *no* predicates there would
 /// widen the query to the whole table, which is the failure this exists to
 /// prevent.
-#[cfg(feature = "tenancy")]
-fn match_nothing(schema: &'static ModelSchema) -> WhereExpr {
+///
+/// This is the fail-closed branch of a [`ViewSetFilter`], so it is public:
+/// writing one means having somewhere to go when the principal is absent,
+/// and the obvious guess is an empty `Vec`, which is not "match nothing"
+/// but "no filter at all" (#1411).
+///
+/// ```ignore
+/// fn filter(&self, _p: &HashMap<String, String>, schema: &'static ModelSchema)
+///     -> Vec<WhereExpr>
+/// {
+///     vec![match_nothing(schema)]   // not `vec![]`
+/// }
+/// ```
+///
+/// Returns one `WhereExpr`, so wrap it in `vec![]` where the trait wants a
+/// list. Not gated on `tenancy`: `ViewSetFilter` is not either, and a
+/// soft-delete or date-window backend needs to fail closed just as much as
+/// an ownership one.
+pub fn match_nothing(schema: &'static ModelSchema) -> WhereExpr {
     let column = schema
         .primary_key()
         .or_else(|| schema.scalar_fields().next())
