@@ -547,6 +547,10 @@ cargo run -- db:dump > backups/before-migrate.sql    # stdout → file
 cargo run -- db:dump --out backups/before-migrate.sql
 ```
 
+La ligne d'état `running: pg_dump …` part sur **stderr** : elle reste donc
+hors de la redirection et hors d'un tube. Jusqu'à [#1404](https://github.com/ujeenet/rustango/issues/1404)
+elle partait sur stdout et se retrouvait en première ligne du fichier `.sql`.
+
 ### `db:restore <path> [--clean]`
 
 Recharge un fichier de sauvegarde dans votre base de données — l'inverse

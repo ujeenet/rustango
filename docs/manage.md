@@ -636,6 +636,10 @@ cargo run -- db:dump > backups/before-migrate.sql    # stdout → file
 cargo run -- db:dump --out backups/before-migrate.sql
 ```
 
+The `running: pg_dump …` status line goes to **stderr**, so it stays out
+of the redirect and out of a pipe. Until [#1404](https://github.com/ujeenet/rustango/issues/1404)
+it went to stdout, which put it on the first line of the `.sql` file.
+
 ### `db:restore <path> [--clean]`
 
 Loads a dump file back into your database — the counterpart to
