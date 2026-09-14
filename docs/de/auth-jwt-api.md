@@ -47,7 +47,7 @@ Projekt sonst neu schreibt:
 |---|---|---|---|
 | POST | `/api/auth/login` | `{username, password}` | `{access, refresh, user}` |
 | POST | `/api/auth/refresh` | `{refresh}` | `{access, refresh}` |
-| POST | `/api/auth/logout` | `Authorization: Bearer <access>` | `204` (widerruft die JTI) |
+| POST | `/api/auth/logout` | `Authorization: Bearer <access>` + optional `{refresh}` | `204` (widerruft beide JTIs) |
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login verifiziert das Passwort mit [argon2id](auth-passwords.md) und stellt dann
@@ -152,6 +152,24 @@ let pair = jwt.issue_pair(1);
 assert!(jwt.revoke(&pair.access).await);
 assert!(jwt.verify_access(&pair.access).await.is_none());
 ```
+
+### Den Refresh-Token an `/logout` senden
+
+Nur den Bearer zu widerrufen beendet einen Token, der ohnehin in Minuten
+abgelaufen wäre. Der Refresh-Token ist derjenige mit tagelanger Lebensdauer und
+kann während seiner gesamten TTL neue Access-Token ausstellen — ein Logout, das
+ihn am Leben lässt, beendet die Sitzung also nicht, es verschiebt sie nur:
+
+```jsonc
+POST /api/auth/logout
+Authorization: Bearer <access>
+{ "refresh": "<refresh>" }        // widerruft auch die langlebige Hälfte
+```
+
+Der Body ist optional, sodass Clients, die gegen den älteren Endpunkt
+geschrieben wurden, unverändert weiterlaufen — sie widerrufen einfach weniger.
+Senden Sie ihn. Beide Hälften sind an den aufrufenden Mandanten gebunden, sodass
+eine Subdomain den Token einer anderen nicht widerrufen kann.
 
 Die Sperrliste liegt in einem austauschbaren `JtiStore`. Der Standard
 `InMemoryJtiStore` ist **einprozessig und verliert Widerrufe beim Neustart** —

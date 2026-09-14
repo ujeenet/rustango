@@ -90,11 +90,20 @@ const MIN_HMAC_KEY_LEN: usize = 32;
 
 impl Config {
     fn build_jwt(&self) -> JwtLifecycle {
-        let secret = self.session_secret.clone().unwrap_or_else(|| {
-            std::env::var("RUSTANGO_SESSION_SECRET")
-                .unwrap_or_default()
-                .into_bytes()
-        });
+        // `RUSTANGO_SESSION_SECRET` is base64, and this used to take the
+        // raw string bytes (#1396). A 32-character base64 secret is 24
+        // bytes of key — it cleared the 32-byte floor below while the
+        // cookie layer, which decodes, rejected the same value. One
+        // variable, two keys, and the assert measuring the wrong thing.
+        let secret = match &self.session_secret {
+            Some(explicit) => explicit.clone(),
+            None => {
+                let raw = std::env::var("RUSTANGO_SESSION_SECRET").unwrap_or_default();
+                crate::session::SessionSecret::from_b64(&raw)
+                    .map(|s| s.key().to_vec())
+                    .unwrap_or_default()
+            }
+        };
         // Fail closed: never sign JWTs with an empty / too-short key.
         // A misconfigured deployment must refuse to start rather than
         // silently mint forgeable access + refresh tokens.
@@ -390,13 +399,32 @@ async fn refresh(
     }))
 }
 
-/// Revoke the access token's `jti`. Subsequent requests with the
-/// same token return 401 even though `exp` would otherwise still be
-/// valid.
+/// Revoke the session — the access token's `jti`, and the refresh
+/// token's when the client sends it.
+///
+/// The refresh half matters more than it looks (#1402). Logging out used
+/// to revoke only the bearer, so the refresh token survived with its full
+/// seven-day life and could mint fresh access tokens indefinitely — on a
+/// credential the endpoint never looked at. A user who clicks log out on
+/// a borrowed device means *this session is over*, not "one of its two
+/// tokens is".
+///
+/// The body is optional so an existing client that sends none keeps
+/// working; it simply revokes less, exactly as before. Clients should
+/// send `{"refresh": "…"}`.
+#[derive(Debug, Deserialize)]
+pub struct LogoutInput {
+    /// The refresh token to revoke alongside the bearer. Optional for
+    /// back-compat with clients written against the old endpoint.
+    #[serde(default)]
+    pub refresh: Option<String>,
+}
+
 async fn logout(
     t: Tenant,
     headers: axum::http::HeaderMap,
     bearer: Bearer,
+    body: Option<Json<LogoutInput>>,
 ) -> Result<StatusCode, Response> {
     use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
     // Best-effort: decode the bearer to recover the user id for the
@@ -420,6 +448,30 @@ async fn logout(
     let meta = meta_from_headers(&headers, Some("/auth/logout"));
 
     jwt_handle().revoke(&bearer.0).await;
+
+    // The refresh token too, when we were given one. Revoking it is what
+    // actually ends the session: the access token expires on its own in
+    // minutes, the refresh token would have outlived the logout by days
+    // and could mint replacements the whole time.
+    //
+    // Tenant-pinned the same way the bearer is, so one subdomain cannot
+    // revoke another tenant's token by posting it here.
+    if let Some(Json(input)) = body {
+        if let Some(refresh) = input.refresh.as_deref() {
+            let ok = match jwt_handle().verify_refresh(refresh).await {
+                Some(c) => {
+                    c.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str())
+                }
+                // Unverifiable or expired: revoke best-effort, matching
+                // how the bearer is treated above. A stale token being
+                // logged out is still a valid thing to record.
+                None => true,
+            };
+            if ok {
+                jwt_handle().revoke(refresh).await;
+            }
+        }
+    }
 
     send_user_logged_out(UserLoggedOutContext {
         source: "jwt",

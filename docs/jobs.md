@@ -76,8 +76,9 @@ impl Job for WelcomeEmail {
 - `Err(JobError::Retryable(msg))` — transient; the worker retries with backoff.
 - `Err(JobError::Fatal(msg))` — permanent; skip retries, dead-letter it now.
 
-Override `const MAX_ATTEMPTS: u32 = 3;` on the impl to change the retry ceiling
-(default 5).
+Override `const MAX_ATTEMPTS: u32 = 3;` on the impl to change the ceiling on
+**total attempts** — not retries. The default of 5 is one initial run plus four
+retries; `MAX_ATTEMPTS = 3` gives two retries.
 
 ---
 
@@ -159,14 +160,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Share the queue with handlers (axum extension/state).
     let app = urls::api().layer(axum::Extension(queue.clone()));
 
-    // 4. Boot the server. Cli::run() blocks until Ctrl-C / SIGTERM.
-    Cli::new().api(app).with_health().run().await?;
-
-    // 5. On shutdown: drain in-flight jobs, then stop.
-    queue.shutdown().await;
+    // 4. Boot the server, and say what to do when it stops. The hook
+    //    runs after the server drains, on SIGINT *and* SIGTERM.
+    let draining = Arc::clone(&queue);
+    Cli::new()
+        .api(app)
+        .with_health()
+        .on_shutdown(move || async move { draining.shutdown().await })
+        .run()
+        .await?;
     Ok(())
 }
 ```
+
+> **Put the drain in `on_shutdown`, not after `run()`.** Until
+> [#1409](https://github.com/ujeenet/rustango/issues/1409) this example
+> called `queue.shutdown()` on the line *after* `run()`, and that line could
+> never execute: nothing handled SIGTERM, so an orchestrator's stop killed
+> the process outright. `run()` now returns on signal, so code after it does
+> run — but `on_shutdown` is still the right place, because it also runs on
+> the tenancy path and orders correctly against the server's own drain.
 
 A handler dispatches by reading the queue back out of the request:
 
@@ -223,7 +236,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     queue.register::<WelcomeEmail>().await;   // register the SAME job types
     queue.start().await;
 
-    tokio::signal::ctrl_c().await?;            // block until Ctrl-C / SIGTERM
+    // Blocks until Ctrl-C (SIGINT) *or* SIGTERM. `tokio::signal::ctrl_c()`
+    // alone is SIGINT-only on Unix, so a worker waiting on it is killed
+    // outright by `docker stop` / a pod eviction and drains nothing.
+    rustango::shutdown::shutdown_signal().await;
     queue.shutdown().await;                     // drain in-flight, then exit
     Ok(())
 }
@@ -240,8 +256,8 @@ recover jobs from a crashed worker.
 ## Retries and backoff
 
 A job that returns `Retryable` is re-queued with **exponential backoff** (1s, 2s,
-4s, 8s, …) up to `MAX_ATTEMPTS`. Use it for transient failures — a timeout, a
-rate-limited API, a deadlock:
+4s, 8s, …, capped at 1024s) until `MAX_ATTEMPTS` total attempts are spent. Use it
+for transient failures — a timeout, a rate-limited API, a deadlock:
 
 ```rust
 #[async_trait::async_trait]

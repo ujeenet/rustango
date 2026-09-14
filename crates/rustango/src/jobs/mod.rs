@@ -47,9 +47,10 @@
 //! ## Retry policy
 //!
 //! Jobs that return `Err(JobError::Retryable(_))` are retried with
-//! exponential backoff (1s, 2s, 4s, 8s, ...) up to `max_attempts` (default 5).
-//! `Err(JobError::Fatal(_))` skips the retry queue and goes straight to the
-//! dead-letter handler.
+//! exponential backoff (1s, 2s, 4s, 8s, ...) up to `max_attempts` — a
+//! **total**-attempt ceiling, so the default of 5 is one run plus four
+//! retries. `Err(JobError::Fatal(_))` skips the retry queue and goes
+//! straight to the dead-letter handler.
 
 #[cfg(feature = "jobs-postgres")]
 pub mod pg;
@@ -96,7 +97,9 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     /// Stable identifier for this job kind. Routes payloads to handlers.
     const NAME: &'static str;
 
-    /// Maximum retry attempts before giving up. Default 5.
+    /// Maximum **total** attempts before giving up — not retries. The
+    /// default of 5 is one initial run plus four retries; setting it to
+    /// 3 gives two retries (#1410).
     const MAX_ATTEMPTS: u32 = 5;
 
     /// Run the job. Return `Ok(())` on success, `Err(Retryable(_))` to
@@ -188,6 +191,21 @@ pub struct JobDeadLetter {
     pub payload: serde_json::Value,
     pub attempts: u32,
     pub error: String,
+}
+
+/// Milliseconds to wait before the retry that follows `failed_attempt`:
+/// 1s, 2s, 4s, 8s, … capped at 2^10 s.
+///
+/// `failed_attempt` is **0-based** — the index of the run that just
+/// failed — so the first retry waits 1s. It shifted off the 1-based
+/// `next_attempt` until #1410, making every wait twice what the module
+/// doc, the guide and the comment above the line all said.
+///
+/// Shared by both backends deliberately: they carried the same
+/// expression in two files and agreed with each other while disagreeing
+/// with every description of them.
+pub(crate) fn retry_backoff_ms(failed_attempt: u32) -> u64 {
+    1000u64.saturating_mul(1u64 << failed_attempt.min(10))
 }
 
 // ------------------------------------------------------------------ InMemoryJobQueue
@@ -402,8 +420,7 @@ async fn worker_loop(
                     }
                     pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 } else {
-                    // Re-enqueue after backoff (1s, 2s, 4s, 8s, ...)
-                    let backoff_ms = 1000u64.saturating_mul(1u64 << next_attempt.min(10));
+                    let backoff_ms = retry_backoff_ms(envelope.attempt);
                     let mut retry = envelope.clone();
                     retry.attempt = next_attempt;
                     let tx = tx.clone();
@@ -439,6 +456,38 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The sequence the module doc, `docs/jobs.md` and the comment above
+    /// the line all promised, pinned somewhere executable (#1410).
+    ///
+    /// It was `2s, 4s, 8s, 16s` — the shift ran off the 1-based
+    /// `next_attempt` — so every wait was double the documented one and
+    /// the first retry took twice as long as anyone reading expected.
+    /// Described in four places and asserted in none, which is why it
+    /// survived.
+    #[test]
+    fn retry_backoff_starts_at_one_second_and_doubles() {
+        // `failed_attempt` is 0-based: the run that just failed.
+        assert_eq!(
+            retry_backoff_ms(0),
+            1_000,
+            "the first retry waits 1s, not 2s"
+        );
+        assert_eq!(retry_backoff_ms(1), 2_000);
+        assert_eq!(retry_backoff_ms(2), 4_000);
+        assert_eq!(retry_backoff_ms(3), 8_000);
+    }
+
+    /// The cap, and that it cannot overflow the shift.
+    #[test]
+    fn retry_backoff_caps_rather_than_overflowing() {
+        assert_eq!(retry_backoff_ms(10), 1_024_000);
+        assert_eq!(
+            retry_backoff_ms(u32::MAX),
+            1_024_000,
+            "a runaway attempt count must clamp, not shift past 63 and panic"
+        );
+    }
 
     #[derive(Serialize, Deserialize, Debug)]
     struct Increment;
@@ -543,7 +592,8 @@ mod tests {
         })
         .await
         .unwrap();
-        // Backoff: ~2s after first failure, ~4s after second → wait ~7s to be safe.
+        // Backoff: ~1s after first failure, ~2s after second (#1410); the
+        // 7s sleep is deliberately well clear of that.
         tokio::time::sleep(Duration::from_millis(7000)).await;
         let succ = SUCCESSES.lock().unwrap();
         assert!(succ.contains(&marker), "expected marker, got {succ:?}");

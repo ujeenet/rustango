@@ -87,25 +87,62 @@ let url = PasswordReset::issue(
 mailer.send(&Email::new().to(addr).subject("Reset your password").body(&url)).await?;
 
 // 2. User clicks + submits a new password → verify + rotate the hash.
-let user_id = confirm_password_reset_pool_into(
+let user_id = confirm_password_reset_pool(
     &pool, &url, "a-brand-new-strong-password", secret,
-    "rustango_users", "id", "password_hash",  // table, pk col, password col
 ).await?;
 ```
 
-Der Bestätigungshelfer erzwingt eine Mindestlänge, hasht das neue Passwort mit argon2id und
-schreibt es — wobei er schwache, abgelaufene, manipulierte oder mit falschem Secret versehene
-Eingaben abweist, ohne die Zeile anzurühren:
+> **Verwende diese Form für `rustango_users`.** Sie stempelt auch
+> `password_changed_at`, was Sitzungen beendet, die vor dem Zurücksetzen
+> ausgestellt wurden ([#1449](https://github.com/ujeenet/rustango/issues/1449)).
+> `_into` nimmt eine beliebige Tabelle und kann keine Rotationsspalte
+> voraussetzen, schreibt also nur das Passwort — ein Zurücksetzen darüber lässt
+> jede bestehende Sitzung gültig, auch die eines Angreifers. Genau darauf kommt
+> es an, denn ein Zurücksetzen macht man, wenn man sein Konto für kompromittiert
+> hält.
+
+Der Bestätigungshelfer wendet die [Passwortrichtlinie](auth-passwords.md#stärkeprüfungen) an,
+hasht das neue Passwort mit argon2id und schreibt es — wobei er schwache, abgelaufene,
+manipulierte oder mit falschem Secret versehene Eingaben abweist, ohne die Zeile anzurühren:
 
 ```rust
 // valid token + strong pw → hash rotated (starts "$argon2…")
-// "short"                  → Err(WeakPassword), nothing written
+// "12345678"               → Err(WeakPassword), nothing written
 // user_id tampered         → Err(InvalidSignature), nothing written
 ```
 
-> `confirm_password_reset_pool` ist die bequeme Form, die die Standardwerte
-> `rustango_users` / `id` / `password_hash` annimmt; verwenden Sie `_into`, um auf Ihre eigene
-> Tabelle/Spalten zu verweisen.
+Es ist dasselbe `passwords::strength_score`, das der Rest des Frameworks verwendet — ein bei der
+Registrierung abgelehntes Passwort lässt sich also nicht per Zurücksetzen setzen (#1399).
+
+> `_into` verweist auf Ihre eigene Tabelle/Spalten — etwa ein mandantenspezifisches
+> `app_users`. Hat sie ein Gegenstück zu `password_changed_at`, stempeln Sie es
+> selbst in derselben Transaktion, sonst beendet das Zurücksetzen keine
+> bestehenden Sitzungen.
+
+### Den Link einmalig machen
+
+Die obigen Helfer prüfen nur Signatur und Ablauf, **der Link bleibt also seine gesamte TTL lang
+nutzbar** — auch nachdem das Passwort geändert wurde. Eine Kopie der E-Mail in einem geteilten
+Postfach, eine Weiterleitung oder ein Support-Ticket mit der eingefügten Mail ist bis zum Ablauf
+des Tokens eine funktionierende Kontoübernahme — zu einem Zeitpunkt, an dem der legitime Nutzer
+fertig ist und keinen Verdacht hat.
+
+Übergeben Sie einen Cache, und das Token wird bei der ersten Verwendung verbraucht:
+
+```rust
+use rustango::auth_flows::confirm_password_reset_single_use;
+
+let user_id = confirm_password_reset_single_use(
+    &pool, &url, "a-brand-new-strong-password", secret, &cache,
+).await?;                      // ein Replay → Err(AuthFlowError::AlreadyUsed)
+```
+
+`_single_use_into` nimmt dieselben Tabellen-/Spaltenangaben wie `_into`. Die Passwortrichtlinie
+wird *vor* dem Verbrauch des Tokens geprüft, ein abgelehntes Passwort kostet den Nutzer also nicht
+seinen Link.
+
+Die Verbraucht-Markierung liegt im Cache, nicht im Token — alle Replicas müssen sich einen Cache
+teilen; zwei Instanzen bedeuten zwei Sperrlisten und keine Durchsetzung.
 
 ---
 

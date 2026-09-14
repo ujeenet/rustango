@@ -1259,6 +1259,11 @@ pub mod password_hashers;
 #[cfg(any(feature = "admin", feature = "tenancy"))]
 pub mod session;
 
+/// Graceful-shutdown signal handling — SIGINT **and** SIGTERM, in one
+/// place so no serve path handles only half of them (#1409). See
+/// [`shutdown::shutdown_signal`].
+pub mod shutdown;
+
 /// TTY-gated interactive prompts for `manage` verbs — `ask(prompt)`
 /// reads a line, `ask_password(prompt)` reads a password without
 /// echoing. Both return `Ok(None)` on non-TTY stdin so scripted

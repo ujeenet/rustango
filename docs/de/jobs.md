@@ -81,8 +81,9 @@ impl Job for WelcomeEmail {
 - `Err(JobError::Fatal(msg))` — permanent; überspringe Retries, Dead-Letter es
   sofort.
 
-Überschreibe `const MAX_ATTEMPTS: u32 = 3;` auf dem Impl, um die
-Retry-Obergrenze zu ändern (Standard 5).
+Überschreibe `const MAX_ATTEMPTS: u32 = 3;` auf dem Impl, um die Obergrenze für
+**Gesamtversuche** zu ändern — nicht für Retries. Der Standard 5 bedeutet einen
+ersten Lauf plus vier Retries; `MAX_ATTEMPTS = 3` ergibt zwei Retries.
 
 ---
 
@@ -168,14 +169,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Share the queue with handlers (axum extension/state).
     let app = urls::api().layer(axum::Extension(queue.clone()));
 
-    // 4. Boot the server. Cli::run() blocks until Ctrl-C / SIGTERM.
-    Cli::new().api(app).with_health().run().await?;
-
-    // 5. On shutdown: drain in-flight jobs, then stop.
-    queue.shutdown().await;
+    // 4. Boot the server, and say what to do when it stops. The hook
+    //    runs after the server drains, on SIGINT *and* SIGTERM.
+    let draining = Arc::clone(&queue);
+    Cli::new()
+        .api(app)
+        .with_health()
+        .on_shutdown(move || async move { draining.shutdown().await })
+        .run()
+        .await?;
     Ok(())
 }
 ```
+
+> **Den Drain in `on_shutdown` legen, nicht hinter `run()`.** Bis
+> [#1409](https://github.com/ujeenet/rustango/issues/1409) rief dieses
+> Beispiel `queue.shutdown()` in der Zeile *nach* `run()` auf, und die konnte
+> nie ausgeführt werden: SIGTERM wurde nirgends behandelt, ein Stopp durch den
+> Orchestrator beendete den Prozess also sofort. `run()` kehrt jetzt beim
+> Signal zurück — aber `on_shutdown` bleibt der richtige Ort, weil der Hook
+> auch auf dem Tenancy-Pfad läuft und korrekt gegen den Drain des Servers
+> geordnet ist.
 
 Ein Handler dispatcht, indem er die Queue aus dem Request wieder ausliest:
 
@@ -234,7 +248,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     queue.register::<WelcomeEmail>().await;   // register the SAME job types
     queue.start().await;
 
-    tokio::signal::ctrl_c().await?;            // block until Ctrl-C / SIGTERM
+    // Blocks until Ctrl-C (SIGINT) *or* SIGTERM. `tokio::signal::ctrl_c()`
+    // alone is SIGINT-only on Unix, so a worker waiting on it is killed
+    // outright by `docker stop` / a pod eviction and drains nothing.
+    rustango::shutdown::shutdown_signal().await;
     queue.shutdown().await;                     // drain in-flight, then exit
     Ok(())
 }
@@ -251,8 +268,9 @@ um Jobs eines abgestürzten Workers zurückzuholen.
 ## Retries und Backoff
 
 Ein Job, der `Retryable` zurückgibt, wird mit **exponentiellem Backoff** (1s, 2s,
-4s, 8s, …) bis zu `MAX_ATTEMPTS` erneut in die Queue gestellt. Verwende es für
-transiente Fehler — einen Timeout, eine rate-limitierte API, einen Deadlock:
+4s, 8s, …, gedeckelt bei 1024s) erneut in die Queue gestellt, bis `MAX_ATTEMPTS`
+Gesamtversuche aufgebraucht sind. Verwende es für transiente Fehler — einen
+Timeout, eine rate-limitierte API, einen Deadlock:
 
 ```rust
 #[async_trait::async_trait]

@@ -78,6 +78,28 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
+`JwtBackend` accepts the access tokens `JwtLifecycle` issues, and refuses its
+refresh tokens — the two are wire-identical apart from `typ`, so a refresh
+token presented as a bearer would otherwise be an access credential with days
+of life instead of minutes.
+
+**Revocation is opt-in and off by default.** A bare `JwtBackend` never consults
+a blacklist, so a token revoked by `/api/auth/logout` keeps authenticating
+through this backend until it expires on its own. Share one store between the
+lifecycle and the backend to make logout take effect:
+
+```rust
+use rustango::jti_store::{InMemoryJtiStore, JtiStore};
+
+let shared: Arc<dyn JtiStore> = Arc::new(InMemoryJtiStore::new()); // Redis in prod
+let lifecycle = JwtLifecycle::new(secret.clone()).with_jti_store(Arc::clone(&shared));
+let backend = JwtBackend::new(secret).with_jti_store(Arc::clone(&shared));
+```
+
+It must be the *same* store. Wiring two instances looks configured and enforces
+nothing: logout writes to one and verification reads the other. See
+[revocation and the JTI store](auth-jwt-api.md#revocation-and-the-jti-store).
+
 Write a custom backend by implementing the trait (one async method that inspects
 the request `Parts` and returns `Option<AuthUser>`):
 

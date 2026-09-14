@@ -407,7 +407,7 @@ mod pg_live {
             .max_connections(5)
             .connect(&url)
             .await
-            .ok()?;
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"));
         // Each scenario gets its own ledger-free slate: drop anything a
         // previous run left, including the ledger, so `pending` is the
         // whole chain again.
@@ -507,7 +507,7 @@ mod mysql_live {
             .max_connections(5)
             .connect(&url)
             .await
-            .ok()?;
+            .unwrap_or_else(|e| panic!("MYSQL_TEST_URL is set but unreachable ({url}): {e}"));
         for t in ["a", "b", "c", "none", "dup", "pre", "s1", "s2"] {
             let _ = sqlx::query(&format!("DROP TABLE IF EXISTS `{prefix}_{t}`"))
                 .execute(&my)

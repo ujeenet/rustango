@@ -9,7 +9,7 @@
 
 use std::sync::OnceLock;
 
-use rustango::sql::__macro_internals::fetch_with_prefetch;
+use rustango::sql::fetch_with_prefetch;
 use rustango::sql::{sqlx, Auto, ForeignKey};
 use rustango::Model;
 use tokio::sync::Mutex;
@@ -42,7 +42,11 @@ fn lock() -> &'static Mutex<()> {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::PgPool::connect(&url).await.ok()
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 async fn setup(pool: &sqlx::PgPool) {

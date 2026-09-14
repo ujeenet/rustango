@@ -37,12 +37,29 @@ type SeedFut<'a> =
     Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>;
 type SeedFn = Box<dyn for<'a> FnOnce(&'a crate::sql::Pool) -> SeedFut<'a> + Send>;
 
+/// Work to run after the server stops accepting connections and its
+/// in-flight requests have finished. See [`Cli::on_shutdown`].
+type ShutdownFut = Pin<Box<dyn Future<Output = ()> + Send>>;
+type ShutdownFn = Box<dyn FnOnce() -> ShutdownFut + Send>;
+
+/// Run the [`Cli::on_shutdown`] hook, if one was registered.
+async fn run_shutdown_hook(hook: Option<ShutdownFn>) {
+    if let Some(hook) = hook {
+        tracing::info!(target: "rustango::shutdown", "running shutdown hook");
+        hook().await;
+    }
+}
+
 /// One-builder dispatcher. Hand it your API router (and optionally a
 /// seed hook), call [`Cli::run`], and you're done.
 #[must_use = "Cli does nothing until .run() is awaited"]
 pub struct Cli {
     api: Router,
     seed: Option<SeedFn>,
+    /// Ran after graceful shutdown drains the server, before `run`
+    /// returns. Set via [`Cli::on_shutdown`] — the only place a job
+    /// queue's `shutdown()` can actually execute (#1409).
+    on_shutdown: Option<ShutdownFn>,
     bind: String,
     migrations_dir: PathBuf,
     tenancy: bool,
@@ -113,6 +130,7 @@ impl Cli {
         Self {
             api: Router::new(),
             seed: None,
+            on_shutdown: None,
             bind: std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
             migrations_dir: PathBuf::from("./migrations"),
             tenancy: false,
@@ -176,6 +194,36 @@ impl Cli {
         Fut: Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'static,
     {
         self.seed = Some(Box::new(move |pool| Box::pin(hook(pool))));
+        self
+    }
+
+    /// Run a hook after the server has drained, before [`Cli::run`]
+    /// returns — draining a job queue, flushing a metrics exporter,
+    /// closing a pool.
+    ///
+    /// This is where `queue.shutdown()` belongs (#1409). Putting it
+    /// *after* `run()` — as `docs/jobs.md` used to — could never work:
+    /// nothing handled SIGTERM, so the process was killed outright and
+    /// no line after `run()` ever executed.
+    ///
+    /// ```ignore
+    /// let queue = Arc::new(InMemoryJobQueue::with_workers(4));
+    /// let q = Arc::clone(&queue);
+    /// Cli::new().api(routes)
+    ///     .on_shutdown(move || async move { q.shutdown().await })
+    ///     .run().await
+    /// ```
+    ///
+    /// Runs on SIGINT and SIGTERM alike. It does not run on a crash or
+    /// `SIGKILL`, so it is for a clean stop, not a durability guarantee
+    /// — work that must survive a hard kill needs a persistent queue.
+    #[must_use]
+    pub fn on_shutdown<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.on_shutdown = Some(Box::new(move || Box::pin(hook())));
         self
     }
 
@@ -846,7 +894,9 @@ impl Cli {
                 listener,
                 app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
+            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
             .await?;
+            run_shutdown_hook(self.on_shutdown).await;
             return Ok(());
         }
         #[cfg(feature = "postgres")]
@@ -899,7 +949,9 @@ impl Cli {
                     listener,
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
+                .with_graceful_shutdown(crate::shutdown::shutdown_signal())
                 .await?;
+                run_shutdown_hook(self.on_shutdown).await;
                 return Ok(());
             }
             let pool = crate::sql::Pool::connect_postgres(&url).await?;
@@ -945,7 +997,9 @@ impl Cli {
                 listener,
                 app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
+            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
             .await?;
+            run_shutdown_hook(self.on_shutdown).await;
             Ok(())
         } // end of #[cfg(feature = "postgres")] block for non-tenancy runserver
     }
@@ -958,6 +1012,12 @@ impl Cli {
     // mirrors that for symmetry.
     #[cfg(all(feature = "tenancy", feature = "postgres"))]
     async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
+        // Taken before `self` is picked apart below, so the hook still
+        // runs on this path too (#1409) — the tenancy server drains via
+        // its own `shutdown_signal`, and dropping the hook here would
+        // have left `on_shutdown` working on one path and silently not
+        // on the other.
+        let on_shutdown = self.on_shutdown;
         let api = self.api;
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
@@ -994,7 +1054,9 @@ impl Cli {
                 })
                 .await?;
         }
-        builder.serve(&self.bind).await
+        builder.serve(&self.bind).await?;
+        run_shutdown_hook(on_shutdown).await;
+        Ok(())
     }
 
     #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
@@ -1005,6 +1067,7 @@ impl Cli {
         // otherwise). Database-mode tenants work out of the box;
         // schema-mode tenants return `TenancyError::Validation` at
         // request time (schema-mode is PG-only by language).
+        let on_shutdown = self.on_shutdown;
         let api = self.api;
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
@@ -1058,7 +1121,9 @@ impl Cli {
                 })
                 .await?;
         }
-        builder.serve(&self.bind).await
+        builder.serve(&self.bind).await?;
+        run_shutdown_hook(on_shutdown).await;
+        Ok(())
     }
 }
 

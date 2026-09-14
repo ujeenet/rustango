@@ -201,9 +201,13 @@ where
     Ok(())
 }
 
+/// SIGINT **and** SIGTERM (#1409).
+///
+/// This waited on `tokio::signal::ctrl_c()` alone, which is SIGINT-only
+/// on Unix — so the graceful shutdown this path already had never ran
+/// under an orchestrator, which is the only place it mattered.
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!(target: "rustango::tenancy::server", "shutdown signal received");
+    crate::shutdown::shutdown_signal().await;
 }
 
 /// Print a loud warning if no operators exist — the operator UI
