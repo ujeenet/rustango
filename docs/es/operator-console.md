@@ -27,16 +27,32 @@ La consola es un router que montas; cuánto puede hacer depende de lo que le ent
 
 ```rust
 use rustango::tenancy::operator_console::{router, router_with_pools, router_with_provisioning, SessionSecret};
+use rustango::tenancy::provision::Provisioner;
+
+// Aquí `pools` es un `Arc<TenantPools<_>>`.
 
 // Solo lectura: recorrer tenants, operadores y el registro de auditoría.
 let app = router(registry.clone(), SessionSecret::from_env_or_random());
 
 // …más editar tenants, gestionar operadores, vincular hosts, precalentar pools.
-let app = router_with_pools(registry.clone(), pools.clone(), secret);
+let app = router_with_pools(registry.clone(), pools.clone().into_invalidator(), secret);
 
 // …más aprovisionar tenants nuevos y ejecutar migraciones.
-let app = router_with_provisioning(registry.clone(), pools.clone(), provisioner, secret);
+let provisioner = Provisioner::new(pools.clone(), registry_url.clone(), "migrations").erased();
+let app = router_with_provisioning(
+    registry.clone(),
+    pools.clone().into_invalidator(),
+    provisioner,
+    secret,
+);
 ```
+
+Ahí hay dos conversiones haciendo trabajo y ninguna es opcional.
+`pools` entra como `Arc<dyn TenantPoolInvalidator>`, así que necesita
+`.into_invalidator()` — la consola solo invalida pools, y tomar el trait
+estrecho es lo que le impide alcanzar el resto. `Provisioner::new` cierra
+sobre los pools, la URL del registro y el directorio de migraciones, y
+`.erased()` lo deja tras `Arc<dyn TenantProvisioner>`.
 
 En un proyecto `tenant` generado ya viene cableado — `Cli::new().tenancy().with_tenant_provisioning("migrations")` monta la versión completa. Véase [Andamiaje](scaffolding.md).
 
@@ -133,5 +149,23 @@ Qué rutas existen depende del constructor que hayas montado:
 | Ver las ejecuciones de aprovisionamiento | | | ✓ |
 
 Las rutas no montadas devuelven 404 en lugar de 403 — una consola de solo lectura no anuncia lo que no puede hacer.
+
+### Tres constructores más, de cableado y no de capacidad
+
+Los tres de arriba son los niveles de capacidad. Los demás toman esos
+mismos niveles y añaden cableado, así que no son un cuarto y un quinto
+peldaño:
+
+| Constructor | Nivel | Qué más recibe |
+|---|---|---|
+| `router_with_brand_storage` | solo lectura, o edición si pasas `Some(pools)` | un `BoxedStorage` para las subidas de marca, cuando el `LocalStorage` por defecto no es donde las quieres |
+| `router_with_impersonation` | edición | almacenamiento de marca, el secreto de sesión del tenant y una URL de traspaso, para que un operador pueda entrar en un tenant |
+| `router_full` | el que le pases | todo lo anterior como `Option` — `None` simplemente no monta esas rutas |
+
+`Server::Builder::serve` monta la suplantación por ti; un punto de
+montaje propio se acoge a ella usando `router_with_impersonation` en
+lugar de `router_with_pools`. Recurre a `router_full` cuando necesites
+una combinación que los atajos no nombran — existe para que un
+emparejamiento nuevo no requiera un constructor posicional nuevo.
 
 **Cada operador lo puede todo.** No hay controles de permisos por operador: un operador alcanza cada tenant y cada acción que la consola ofrece. La frontera de control de acceso es la propia lista de operadores — justo por eso una desactivación surte efecto en la siguiente petición.
