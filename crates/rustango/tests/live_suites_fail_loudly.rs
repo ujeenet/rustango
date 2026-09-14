@@ -10,8 +10,10 @@
 //! Unset means "no database configured here", and skipping is right. Set
 //! but unreachable means a wrong port, a service that never came up, or a
 //! container that died mid-run — and the suite then reports `ok. N passed`
-//! having done nothing at all. 60 suites and 204 test functions did that,
-//! after #1434 and #1444 fixed the eight django6 files.
+//! having done nothing at all. 66 suites and 204 test functions did that,
+//! after #1434 and #1444 fixed the eight django6 files. (60 of them were
+//! found by a single-line grep; the last six build the pool through
+//! `PoolOptions` across several lines and this guard is what caught them.)
 //!
 //! Not hypothetical: #1437 turned on 22 media tests that had never
 //! executed, and all 22 failed on first contact with a real database —
@@ -26,18 +28,35 @@
 use std::fs;
 use std::path::Path;
 
-/// `connect(&url).await.ok()` — the Result becomes an Option and the
-/// error is gone. Also catches `.ok()?`, which is the same discard.
+/// `connect(<anything>).await.ok()` — the Result becomes an Option and
+/// the error is gone. Also catches `.ok()?`, which is the same discard.
+///
+/// Deliberately agnostic about the argument's name: keying on the
+/// literal `&url` would let a suite spelling it `&db_url` walk straight
+/// past, which would make "a suite added tomorrow cannot reintroduce
+/// it" an overstatement rather than a guarantee.
 fn swallows_a_connect_error(src: &str) -> bool {
     // Normalise whitespace so a rustfmt line break cannot hide it.
     let flat: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
-    for marker in ["connect(&url) . await . ok ()", "connect(&url).await.ok()"] {
-        if flat.contains(marker) {
-            return true;
+
+    let mut rest = flat.as_str();
+    while let Some(at) = rest.find("connect(") {
+        let after = &rest[at + "connect(".len()..];
+        // Step over the argument to the closing paren, then require the
+        // discard to follow immediately.
+        if let Some(close) = after.find(')') {
+            let tail = after[close + 1..].trim_start();
+            if tail.starts_with(". await . ok ()")
+                || tail.starts_with(".await.ok()")
+                || tail.starts_with(". await .ok()")
+                || tail.starts_with(".await .ok()")
+            {
+                return true;
+            }
         }
+        rest = &rest[at + "connect(".len()..];
     }
-    // The shape rustfmt actually produces once joined.
-    flat.contains("connect(&url) .await .ok()") || flat.contains("connect(&url).await .ok()")
+    false
 }
 
 #[test]

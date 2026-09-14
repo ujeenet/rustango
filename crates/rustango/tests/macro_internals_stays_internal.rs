@@ -80,9 +80,10 @@ fn nothing_outside_the_macro_imports_macro_internals() {
          documented as \"do not import\" (#1431). The executor-taking operations are \
          public — use `rustango::sql::{{fetch_aggregate_on, fetch_with_prefetch, \
          select_rows_on, insert_on, update_on, bulk_insert_on, \
-         annotate_count_children}}`. If you need something that is genuinely only \
-         in the hidden module, that is a missing public API, not a reason to \
-         reach in.\n  {}",
+         annotate_count_children, annotate_count_children_on}}`. `delete_on` and \
+         `insert_returning_on` are deliberately still hidden — nothing outside \
+         codegen had asked for them. If you need one of those, that is a missing \
+         public API and belongs on #1431, not an import from here.\n  {}",
         offenders.len(),
         offenders.join("\n  ")
     );

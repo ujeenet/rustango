@@ -41,7 +41,11 @@ async fn pool() -> Pool {
     rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
         .await
         .expect("create users");
-    let Pool::Sqlite(sq) = &pool else {
+    // Irrefutable in a sqlite-only build, refutable once another backend
+    // feature is on.
+    #[allow(irrefutable_let_patterns)]
+    let Pool::Sqlite(sq) = &pool
+    else {
         unreachable!("connected to sqlite")
     };
     sqlx::query(

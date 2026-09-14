@@ -348,13 +348,13 @@ fn check_password_strength(new_password: &str) -> Result<(), AuthFlowError> {
 
 /// Hash and store the new password. Shared by the replayable and
 /// single-use confirm helpers.
-#[cfg(feature = "passwords")]
 ///
 /// `rotated_at_column`, when given, is stamped with "now" in the same
 /// UPDATE so sessions issued before the reset stop validating (#1449).
 /// It is `Some("password_changed_at")` for the framework's own
 /// `rustango_users` and `None` for a caller-named table, which may have
 /// no such column.
+#[cfg(feature = "passwords")]
 async fn write_password_hash(
     pool: &crate::sql::Pool,
     user_id: i64,

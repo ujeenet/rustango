@@ -614,7 +614,7 @@ jobs:
           --health-timeout 2s
           --health-retries 20
     env:
-      DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+      # DATABASE_URL is workflow-level with this same value.
       RUSTANGO_S3_TEST_ENDPOINT: http://127.0.0.1:9100
       RUSTANGO_S3_TEST_BUCKET: rustango-test
       RUSTANGO_S3_TEST_KEY: rustango

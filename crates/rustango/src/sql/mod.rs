@@ -114,6 +114,13 @@ pub use executor::{
 /// Now holds only what the macro actually emits (#1431). The operations
 /// callers need are public above; `raw_query_on` and `select_one_row_on`
 /// were emitted by nothing and used by nobody, and are gone.
+///
+/// `delete_on` and `insert_returning_on` stay here because nothing
+/// outside codegen has asked for them — the twelve re-exports were
+/// promoted on evidence of use, not on symmetry. If you need either
+/// against a scoped connection, say so on #1431 rather than importing
+/// this module: the point of the issue was that reaching in here is
+/// what a missing public API looks like.
 #[cfg(feature = "postgres")]
 #[doc(hidden)]
 pub mod __macro_internals {

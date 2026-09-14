@@ -117,9 +117,38 @@ sets no CORS — so the notes below are for hand-written apps.
   must be added *after* `rate_limit` to run before it, and the limiter now warns
   once when a forwarding header arrives with no trusted address.
 
+### Added
+
+- **`Cli::on_shutdown(hook)`** — work that runs after the server drains, on
+  SIGINT and SIGTERM (#1409). This is where a job queue's `shutdown()` belongs;
+  see the Changed note below for why putting it after `run()` never worked.
+- **`rustango::shutdown::shutdown_signal()`** — the shared both-signals future,
+  public so a hand-rolled `axum::serve` or a standalone worker can use it
+  instead of `tokio::signal::ctrl_c()`, which is SIGINT-only on Unix.
+- **The executor-taking query operations** (#1431): `rustango::sql::{fetch_aggregate_on,
+  fetch_with_prefetch, select_rows_on, insert_on, update_on, bulk_insert_on,
+  annotate_count_children, annotate_count_children_on}`. PostgreSQL only — see
+  Fixed for why they were hidden and what that cost.
+- **`SessionSecret::from_b64`** (#1396) — the one definition of what
+  `RUSTANGO_SESSION_SECRET` means, public so `check --deploy` and the runtime
+  cannot answer differently.
+
+### Changed
+
+- **`Cli::run` returns on signal instead of never returning** (#1409). It
+  installed no graceful shutdown, so SIGINT/SIGTERM killed the process and
+  nothing after `run()` ran — including the `queue.shutdown()` the docs put
+  there. Code after `run()` now executes. Prefer `on_shutdown` anyway: it also
+  runs on the tenancy path and orders correctly against the server's drain.
+
+- **`server::Builder::serve` and `server::App::serve` now install graceful
+  shutdown too** (#1409). Both are public and both are taught in the docs —
+  `App::serve` is the README's headline example — and both were bare
+  `axum::serve`, so anything after them was unreachable on a signal.
+
 ### Fixed
 
-- **`Cli::on_shutdown`**, and graceful shutdown that handles SIGTERM (#1409).
+- **`Cli::on_shutdown` was wired but unreachable on two of five paths** (#1409).
   `docs/jobs.md` documented draining in-flight jobs on shutdown; under any
   orchestrator the step never ran. Three defects:
 
@@ -134,28 +163,16 @@ sets no CORS — so the notes below are for hand-written apps.
   process to stop; Ctrl-C is a laptop. So the drain worked where losing a job
   does not matter and never where it does — invisibly: exit 0, nothing logged.
 
-  Now: one `rustango::shutdown::shutdown_signal()` handling both signals, used
-  by **every** serve path — `Cli::run`'s three, plus `server::Builder::serve`
-  and `server::App::serve`, which the tenancy `Cli` path and the README's
-  headline example go through. And `Cli::on_shutdown(hook)` for work that must
-  happen after the server drains. **`Cli::run` returns on signal rather than
-  never returning**, so code after it now executes — but put the drain in
-  `on_shutdown`, which also runs on the tenancy path.
+  One `shutdown_signal()` now serves every path. A guard fails the build on any
+  bare `axum::serve`, because the first pass at this wired the hook into five
+  call sites and only three could reach it — the other two sat behind a
+  `Builder::serve` with no graceful shutdown at all, so the hook was called on
+  a line the process never got to.
 
-  A guard fails the build on any bare `axum::serve`, because the first pass at
-  this wired the hook into five call sites and only three of them could reach
-  it: the other two sat behind a `Builder::serve` that had no graceful
-  shutdown at all.
-
-- **The executor-taking query operations are public** (#1431):
-  `rustango::sql::{fetch_aggregate_on, fetch_with_prefetch, select_rows_on,
-  insert_on, update_on, bulk_insert_on, annotate_count_children,
-  annotate_count_children_on}`. They run against a borrowed executor rather
-  than a pool, which is how a tenancy schema-mode connection keeps its
-  `SET search_path`.
-
-  They lived in `sql::__macro_internals`, marked `#[doc(hidden)]` and "do not
-  import", with **fourteen importers** — ten in-tree tests, the cookbook, and
+- **A documented prohibition the framework's own example violated** (#1431).
+  The executor-taking query operations — now public, see Added — lived in
+  `sql::__macro_internals`, marked `#[doc(hidden)]` and "do not import", with
+  **fourteen importers** — ten in-tree tests, the cookbook, and
   two in the flagship example's own request handlers. Not misuse: there was no
   public way to do it, and `cargo doc` would not show the functions. Four of
   them — `fetch_aggregate_on`, `select_rows_on` and the two
@@ -187,10 +204,20 @@ sets no CORS — so the notes below are for hand-written apps.
   so the meaning is defined once. **A value `check --deploy` accepts is a value
   the runtime accepts.**
 
-  **This will start failing deployments that were already broken.** If
-  `check --deploy` newly errors on a secret it used to pass, that secret was
-  not being used for cookies — regenerate with `openssl rand -base64 32`, which
-  gives 44 characters.
+  **Breaking, and it can stop a working app booting.** Two cases:
+
+  - A secret that is **not valid base64** but ≥32 raw characters (a passphrase,
+    a hex string) used to sign JWTs perfectly well — `build_jwt` took the raw
+    bytes. It is now rejected, so `jwt_router` **panics at startup** rather
+    than signing with a key the rest of the framework does not recognise. A
+    JWT-only API on such a secret was not broken before and will not start
+    now. That is deliberate — one variable must not mean two keys — but it is
+    a boot failure, not a warning.
+  - `check --deploy` newly errors on secrets it used to pass. For cookies
+    those were already falling back to an ephemeral key.
+
+  Either way: regenerate with `openssl rand -base64 32`, which gives 44
+  characters, or pass bytes directly via `auth_routes::Config::session_secret`.
 
 - **A password reset now ends sessions issued before it** (#1449).
   `confirm_password_reset_pool` rotated the hash and nothing else, leaving

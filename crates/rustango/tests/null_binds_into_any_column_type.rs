@@ -61,7 +61,11 @@ async fn sqlite_accepts_a_null_in_a_bigint_column() {
     .await
     .expect("a NULL must be writable into every column type");
 
-    let Pool::Sqlite(sq) = &pool else {
+    // Irrefutable in a sqlite-only build, refutable once another backend
+    // feature is on.
+    #[allow(irrefutable_let_patterns)]
+    let Pool::Sqlite(sq) = &pool
+    else {
         unreachable!("connected to sqlite")
     };
     let (n,): (i64,) =
