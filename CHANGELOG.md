@@ -119,6 +119,24 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Fixed
 
+- **A password reset now ends sessions issued before it** (#1449).
+  `confirm_password_reset_pool` rotated the hash and nothing else, leaving
+  `password_changed_at` — the column the session middleware compares `iat`
+  against — unwritten. `NULL` there is specifically the value that middleware
+  reads as "never rotated, do not enforce", so the check was not stale but
+  disabled: an attacker's session survived the victim's reset, in the one flow
+  where signing out everywhere is the entire point.
+
+  The admin change-password path had stamped it all along, so the same account
+  reached two documented ways got two different outcomes — and the weaker one
+  was the path the guide walked you through.
+
+  `confirm_password_reset_pool` / `_single_use` stamp it, in the same UPDATE as
+  the hash. **`_into` deliberately does not**: it takes a caller-named table
+  that may have no such column, so writing one would break custom schemas. If
+  yours has an equivalent, stamp it yourself in the same transaction — the docs
+  now say so, and steer you to the defaults form for `rustango_users`.
+
 - **66 live test suites reported green against a database that was not there**
   (#1440). They read `DATABASE_URL` / `MYSQL_TEST_URL`, and turned a failed
   connect into a skip — so a wrong port, a service that never came up, or a

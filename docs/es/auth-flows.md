@@ -87,11 +87,19 @@ let url = PasswordReset::issue(
 mailer.send(&Email::new().to(addr).subject("Reset your password").body(&url)).await?;
 
 // 2. User clicks + submits a new password → verify + rotate the hash.
-let user_id = confirm_password_reset_pool_into(
+let user_id = confirm_password_reset_pool(
     &pool, &url, "a-brand-new-strong-password", secret,
-    "rustango_users", "id", "password_hash",  // table, pk col, password col
 ).await?;
 ```
+
+> **Usa esta forma para `rustango_users`.** También marca
+> `password_changed_at`, que es lo que termina las sesiones emitidas antes del
+> restablecimiento ([#1449](https://github.com/ujeenet/rustango/issues/1449)).
+> `_into` acepta una tabla arbitraria y no puede suponer que exista una columna
+> de rotación, así que solo escribe la contraseña — un restablecimiento por ahí
+> deja válida toda sesión existente, incluida la de un atacante. Eso importa
+> precisamente porque un restablecimiento es lo que alguien hace cuando cree que
+> su cuenta está comprometida.
 
 El asistente de confirmación aplica la [política de contraseñas](auth-passwords.md#comprobaciones-de-robustez),
 aplica argon2id al nuevo password y lo escribe — rechazando entradas débiles, caducadas,
@@ -106,9 +114,10 @@ manipuladas o con el secreto equivocado sin tocar la fila:
 Es el mismo `passwords::strength_score` que usa el resto del framework, así que una contraseña
 rechazada en el registro no puede establecerse restableciéndola (#1399).
 
-> `confirm_password_reset_pool` es la forma cómoda que asume los valores por defecto
-> `rustango_users` / `id` / `password_hash`; usa `_into` para apuntar a tu propia
-> tabla/columnas.
+> `_into` apunta a tu propia tabla/columnas — por ejemplo un `app_users` de
+> inquilino. Si tiene un equivalente de `password_changed_at`, márcalo tú mismo
+> en la misma transacción, o el restablecimiento no terminará las sesiones
+> existentes.
 
 ### Haz que el enlace sea de un solo uso
 

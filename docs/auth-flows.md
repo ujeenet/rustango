@@ -87,11 +87,17 @@ let url = PasswordReset::issue(
 mailer.send(&Email::new().to(addr).subject("Reset your password").body(&url)).await?;
 
 // 2. User clicks + submits a new password → verify + rotate the hash.
-let user_id = confirm_password_reset_pool_into(
+let user_id = confirm_password_reset_pool(
     &pool, &url, "a-brand-new-strong-password", secret,
-    "rustango_users", "id", "password_hash",  // table, pk col, password col
 ).await?;
 ```
+
+> **Use this form for `rustango_users`.** It also stamps `password_changed_at`,
+> which is what ends sessions issued before the reset ([#1449](https://github.com/ujeenet/rustango/issues/1449)).
+> `_into` takes an arbitrary table and cannot assume a rotation column exists,
+> so it writes only the password — a reset through it leaves every existing
+> session valid, including an attacker's. That matters precisely because a
+> reset is what someone does when they think their account is compromised.
 
 The confirm helper applies the [password policy](auth-passwords.md#strength-checks),
 argon2id-hashes the new password, and writes it — rejecting weak, expired,
@@ -106,9 +112,9 @@ tampered, or wrong-secret inputs without touching the row:
 It is the same `passwords::strength_score` the rest of the framework uses, so a
 password refused at registration cannot be set by resetting (#1399).
 
-> `confirm_password_reset_pool` is the convenience form that assumes the defaults
-> `rustango_users` / `id` / `password_hash`; use `_into` to point at your own
-> table/columns.
+> `_into` points at your own table/columns — a tenant `app_users`, say. If it
+> has an equivalent of `password_changed_at`, stamp it yourself in the same
+> transaction, or the reset will not end existing sessions.
 
 ### Make the link single-use
 

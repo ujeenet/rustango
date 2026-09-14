@@ -87,11 +87,19 @@ let url = PasswordReset::issue(
 mailer.send(&Email::new().to(addr).subject("Reset your password").body(&url)).await?;
 
 // 2. User clicks + submits a new password → verify + rotate the hash.
-let user_id = confirm_password_reset_pool_into(
+let user_id = confirm_password_reset_pool(
     &pool, &url, "a-brand-new-strong-password", secret,
-    "rustango_users", "id", "password_hash",  // table, pk col, password col
 ).await?;
 ```
+
+> **Verwende diese Form für `rustango_users`.** Sie stempelt auch
+> `password_changed_at`, was Sitzungen beendet, die vor dem Zurücksetzen
+> ausgestellt wurden ([#1449](https://github.com/ujeenet/rustango/issues/1449)).
+> `_into` nimmt eine beliebige Tabelle und kann keine Rotationsspalte
+> voraussetzen, schreibt also nur das Passwort — ein Zurücksetzen darüber lässt
+> jede bestehende Sitzung gültig, auch die eines Angreifers. Genau darauf kommt
+> es an, denn ein Zurücksetzen macht man, wenn man sein Konto für kompromittiert
+> hält.
 
 Der Bestätigungshelfer wendet die [Passwortrichtlinie](auth-passwords.md#stärkeprüfungen) an,
 hasht das neue Passwort mit argon2id und schreibt es — wobei er schwache, abgelaufene,
@@ -106,9 +114,10 @@ manipulierte oder mit falschem Secret versehene Eingaben abweist, ohne die Zeile
 Es ist dasselbe `passwords::strength_score`, das der Rest des Frameworks verwendet — ein bei der
 Registrierung abgelehntes Passwort lässt sich also nicht per Zurücksetzen setzen (#1399).
 
-> `confirm_password_reset_pool` ist die bequeme Form, die die Standardwerte
-> `rustango_users` / `id` / `password_hash` annimmt; verwenden Sie `_into`, um auf Ihre eigene
-> Tabelle/Spalten zu verweisen.
+> `_into` verweist auf Ihre eigene Tabelle/Spalten — etwa ein mandantenspezifisches
+> `app_users`. Hat sie ein Gegenstück zu `password_changed_at`, stempeln Sie es
+> selbst in derselben Transaktion, sonst beendet das Zurücksetzen keine
+> bestehenden Sitzungen.
 
 ### Den Link einmalig machen
 

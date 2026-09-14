@@ -171,6 +171,13 @@ impl PasswordReset {
 /// [`confirm_password_reset_single_use`] instead wherever you have a
 /// cache.
 ///
+/// Stamps `password_changed_at`, so sessions issued before the reset stop
+/// validating (#1449) — a reset is what someone does when they think
+/// their account is compromised, and leaving the attacker's session alive
+/// defeats the point. [`confirm_password_reset_pool_into`] does **not**,
+/// because a caller-named table may have no such column; prefer this form
+/// for `rustango_users`.
+///
 /// Pairs with [`PasswordReset::issue`] — issue the URL, email it,
 /// and call this helper from your POST `/password-reset/confirm`
 /// endpoint to land the new password.
@@ -187,14 +194,18 @@ pub async fn confirm_password_reset_pool(
     new_password: &str,
     secret: &[u8],
 ) -> Result<i64, AuthFlowError> {
-    confirm_password_reset_pool_into(
+    let user_id = PasswordReset::verify(url, secret)?;
+    check_password_strength(new_password)?;
+    // Not a delegation to `_into`: this form owns `rustango_users`, so it
+    // also stamps `password_changed_at` and ends existing sessions (#1449).
+    write_password_hash(
         pool,
-        url,
+        user_id,
         new_password,
-        secret,
         "rustango_users",
         "id",
         "password_hash",
+        Some("password_changed_at"),
     )
     .await
 }
@@ -203,6 +214,13 @@ pub async fn confirm_password_reset_pool(
 /// caller-named table / columns. Use when the user model lives in a
 /// custom table (e.g. tenant `app_users`) rather than the framework's
 /// default `rustango_users`. Issue #391.
+///
+/// **Writes only the password column.** A caller-named table may have no
+/// rotation timestamp, so this form cannot stamp one — which means it
+/// does not end sessions issued before the reset (#1449). If your table
+/// has an equivalent of `password_changed_at`, update it yourself in the
+/// same transaction, or use [`confirm_password_reset_pool`] when the
+/// table really is `rustango_users`.
 ///
 /// # Errors
 /// Same shape as [`confirm_password_reset_pool`].
@@ -225,6 +243,7 @@ pub async fn confirm_password_reset_pool_into(
         user_table,
         pk_column,
         password_column,
+        None,
     )
     .await
 }
@@ -251,15 +270,19 @@ pub async fn confirm_password_reset_single_use(
     secret: &[u8],
     cache: &std::sync::Arc<dyn crate::cache::Cache>,
 ) -> Result<i64, AuthFlowError> {
-    confirm_password_reset_single_use_into(
+    let user_id = PasswordReset::verify(url, secret)?;
+    check_password_strength(new_password)?;
+    consume_single_use(url, cache).await?;
+    // As with the non-single-use form: this one owns `rustango_users`,
+    // so it stamps `password_changed_at` too (#1449).
+    write_password_hash(
         pool,
-        url,
+        user_id,
         new_password,
-        secret,
-        cache,
         "rustango_users",
         "id",
         "password_hash",
+        Some("password_changed_at"),
     )
     .await
 }
@@ -293,6 +316,7 @@ pub async fn confirm_password_reset_single_use_into(
         user_table,
         pk_column,
         password_column,
+        None,
     )
     .await
 }
@@ -325,6 +349,12 @@ fn check_password_strength(new_password: &str) -> Result<(), AuthFlowError> {
 /// Hash and store the new password. Shared by the replayable and
 /// single-use confirm helpers.
 #[cfg(feature = "passwords")]
+///
+/// `rotated_at_column`, when given, is stamped with "now" in the same
+/// UPDATE so sessions issued before the reset stop validating (#1449).
+/// It is `Some("password_changed_at")` for the framework's own
+/// `rustango_users` and `None` for a caller-named table, which may have
+/// no such column.
 async fn write_password_hash(
     pool: &crate::sql::Pool,
     user_id: i64,
@@ -332,6 +362,7 @@ async fn write_password_hash(
     user_table: &str,
     pk_column: &str,
     password_column: &str,
+    rotated_at_column: Option<&str>,
 ) -> Result<i64, AuthFlowError> {
     let hash =
         crate::passwords::hash(new_password).map_err(|e| AuthFlowError::Database(e.to_string()))?;
@@ -339,19 +370,24 @@ async fn write_password_hash(
     let t = dialect.quote_ident(user_table);
     let pw = dialect.quote_ident(password_column);
     let pk = dialect.quote_ident(pk_column);
-    let p1 = dialect.placeholder(1);
-    let p2 = dialect.placeholder(2);
-    let sql = format!("UPDATE {t} SET {pw} = {p1} WHERE {pk} = {p2}");
-    crate::sql::raw_execute_pool(
-        pool,
-        &sql,
-        vec![
-            crate::core::SqlValue::String(hash),
-            crate::core::SqlValue::I64(user_id),
-        ],
-    )
-    .await
-    .map_err(|e| AuthFlowError::Database(e.to_string()))?;
+
+    let mut sets = format!("{pw} = {}", dialect.placeholder(1));
+    let mut args = vec![crate::core::SqlValue::String(hash)];
+    if let Some(col) = rotated_at_column {
+        // Same statement as the hash: a reset that rotated the password
+        // but not the timestamp would leave every existing session live,
+        // which is the failure this closes.
+        let rot = dialect.quote_ident(col);
+        sets.push_str(&format!(", {rot} = {}", dialect.placeholder(2)));
+        args.push(crate::core::SqlValue::DateTime(chrono::Utc::now()));
+    }
+    let pk_ph = dialect.placeholder(args.len() + 1);
+    args.push(crate::core::SqlValue::I64(user_id));
+
+    let sql = format!("UPDATE {t} SET {sets} WHERE {pk} = {pk_ph}");
+    crate::sql::raw_execute_pool(pool, &sql, args)
+        .await
+        .map_err(|e| AuthFlowError::Database(e.to_string()))?;
     Ok(user_id)
 }
 
