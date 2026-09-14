@@ -119,6 +119,18 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Fixed
 
+- **Job retry backoff was `2s, 4s, 8s, 16s`, not the documented `1s, 2s, 4s,
+  8s`** (#1410). The shift ran off the 1-based `next_attempt`, so every wait was
+  double what the module doc, `docs/jobs.md` and the comment directly above the
+  line all said — a failing job took twice as long to recover as promised, which
+  matters against a latency budget. Both backends carried the same expression in
+  two files, agreeing with each other and disagreeing with every description of
+  them; they now share one `retry_backoff_ms`, pinned by a unit test.
+
+  Also corrected, and separate: `MAX_ATTEMPTS` is a ceiling on **total
+  attempts**, not retries. The default of 5 is one run plus four retries, so
+  `MAX_ATTEMPTS = 3` gives two. The docs called it a "retry ceiling".
+
 - **`JwtBackend` stopped accepting `JwtLifecycle`'s tokens** between #1397 and
   this release. #1397 made the lifecycle issue three-segment JWTs, and the
   backend required *exactly one dot* before it would attempt verification — so

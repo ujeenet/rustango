@@ -81,7 +81,9 @@ impl Job for WelcomeEmail {
   dead-letter immédiatement.
 
 Surchargez `const MAX_ATTEMPTS: u32 = 3;` sur l'impl pour changer le plafond de
-nouvelles tentatives (5 par défaut).
+**tentatives totales** — pas de nouvelles tentatives. La valeur par défaut de 5
+correspond à une exécution initiale plus quatre reprises ; `MAX_ATTEMPTS = 3`
+donne deux reprises.
 
 ---
 
@@ -252,8 +254,9 @@ tâches d'un worker crashé.
 ## Nouvelles tentatives et backoff
 
 Une tâche qui retourne `Retryable` est remise en file avec un **backoff
-exponentiel** (1s, 2s, 4s, 8s, …) jusqu'à `MAX_ATTEMPTS`. Utilisez-le pour les
-échecs transitoires — un timeout, une API rate-limitée, un deadlock :
+exponentiel** (1s, 2s, 4s, 8s, …, plafonné à 1024s) jusqu'à épuisement des
+`MAX_ATTEMPTS` tentatives totales. Utilisez-le pour les échecs transitoires — un
+timeout, une API rate-limitée, un deadlock :
 
 ```rust
 #[async_trait::async_trait]

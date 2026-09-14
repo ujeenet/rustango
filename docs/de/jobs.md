@@ -81,8 +81,9 @@ impl Job for WelcomeEmail {
 - `Err(JobError::Fatal(msg))` — permanent; überspringe Retries, Dead-Letter es
   sofort.
 
-Überschreibe `const MAX_ATTEMPTS: u32 = 3;` auf dem Impl, um die
-Retry-Obergrenze zu ändern (Standard 5).
+Überschreibe `const MAX_ATTEMPTS: u32 = 3;` auf dem Impl, um die Obergrenze für
+**Gesamtversuche** zu ändern — nicht für Retries. Der Standard 5 bedeutet einen
+ersten Lauf plus vier Retries; `MAX_ATTEMPTS = 3` ergibt zwei Retries.
 
 ---
 
@@ -251,8 +252,9 @@ um Jobs eines abgestürzten Workers zurückzuholen.
 ## Retries und Backoff
 
 Ein Job, der `Retryable` zurückgibt, wird mit **exponentiellem Backoff** (1s, 2s,
-4s, 8s, …) bis zu `MAX_ATTEMPTS` erneut in die Queue gestellt. Verwende es für
-transiente Fehler — einen Timeout, eine rate-limitierte API, einen Deadlock:
+4s, 8s, …, gedeckelt bei 1024s) erneut in die Queue gestellt, bis `MAX_ATTEMPTS`
+Gesamtversuche aufgebraucht sind. Verwende es für transiente Fehler — einen
+Timeout, eine rate-limitierte API, einen Deadlock:
 
 ```rust
 #[async_trait::async_trait]

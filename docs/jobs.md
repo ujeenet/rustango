@@ -76,8 +76,9 @@ impl Job for WelcomeEmail {
 - `Err(JobError::Retryable(msg))` — transient; the worker retries with backoff.
 - `Err(JobError::Fatal(msg))` — permanent; skip retries, dead-letter it now.
 
-Override `const MAX_ATTEMPTS: u32 = 3;` on the impl to change the retry ceiling
-(default 5).
+Override `const MAX_ATTEMPTS: u32 = 3;` on the impl to change the ceiling on
+**total attempts** — not retries. The default of 5 is one initial run plus four
+retries; `MAX_ATTEMPTS = 3` gives two retries.
 
 ---
 
@@ -240,8 +241,8 @@ recover jobs from a crashed worker.
 ## Retries and backoff
 
 A job that returns `Retryable` is re-queued with **exponential backoff** (1s, 2s,
-4s, 8s, …) up to `MAX_ATTEMPTS`. Use it for transient failures — a timeout, a
-rate-limited API, a deadlock:
+4s, 8s, …, capped at 1024s) until `MAX_ATTEMPTS` total attempts are spent. Use it
+for transient failures — a timeout, a rate-limited API, a deadlock:
 
 ```rust
 #[async_trait::async_trait]

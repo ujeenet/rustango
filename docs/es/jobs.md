@@ -80,7 +80,8 @@ impl Job for WelcomeEmail {
   inmediato.
 
 Sobrescribe `const MAX_ATTEMPTS: u32 = 3;` en la impl para cambiar el tope de
-reintentos (5 por defecto).
+**intentos totales** — no de reintentos. El valor por defecto de 5 es una
+ejecución inicial más cuatro reintentos; `MAX_ATTEMPTS = 3` da dos reintentos.
 
 ---
 
@@ -249,8 +250,9 @@ trabajos de un worker que se ha caído.
 ## Reintentos y backoff
 
 Un trabajo que retorna `Retryable` se reencola con **backoff exponencial** (1s,
-2s, 4s, 8s, …) hasta `MAX_ATTEMPTS`. Úsalo para fallos transitorios — un timeout,
-una API con límite de tasa, un deadlock:
+2s, 4s, 8s, …, con tope en 1024s) hasta agotar `MAX_ATTEMPTS` intentos totales.
+Úsalo para fallos transitorios — un timeout, una API con límite de tasa, un
+deadlock:
 
 ```rust
 #[async_trait::async_trait]
