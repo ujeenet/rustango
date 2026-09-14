@@ -363,3 +363,53 @@ pub fn is_mysql_dup_index_error(e: &crate::sql::sqlx::Error) -> bool {
 pub fn is_mysql_dup_index_error(_e: &crate::sql::sqlx::Error) -> bool {
     false
 }
+
+/// `true` when `e` is PostgreSQL losing a race to create an object that
+/// another session created first (#1458).
+///
+/// `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` are
+/// **not atomic** in PostgreSQL. Two sessions can both pass the
+/// existence check and both try to insert the catalogue row; the loser
+/// gets an error even though the object it asked for now exists. This
+/// is documented Postgres behaviour, not a version quirk.
+///
+/// That is exactly what two processes starting together do — the
+/// documented web + worker topology, where both call
+/// `DatabaseJobQueue::ensure_table_pool` at boot. Before this predicate
+/// the loser's error propagated and killed the process; under a
+/// container restart policy the only trace was a restart count.
+///
+/// Two SQLSTATEs, because the race has two shapes:
+///
+/// * `23505` — `unique_violation` on `pg_class_relname_nsp_index`,
+///   raised by the concurrent `CREATE INDEX`. The constraint name is
+///   checked as well as the code, so an ordinary unique violation in
+///   application data is never swallowed.
+/// * `42P07` — `duplicate_table` / `duplicate_object`, raised by the
+///   concurrent `CREATE TABLE`.
+///
+/// On a build without the `postgres` feature the predicate returns
+/// `false` for every error — there is no Postgres driver compiled in,
+/// so this path cannot fire.
+#[cfg(feature = "postgres")]
+pub fn is_pg_dup_object_error(e: &crate::sql::sqlx::Error) -> bool {
+    if let crate::sql::sqlx::Error::Database(db) = e {
+        return match db.code().as_deref() {
+            // Concurrent CREATE TABLE/INDEX IF NOT EXISTS: the object
+            // exists now, which is all the caller wanted.
+            Some("42P07") => true,
+            // Narrowed to the catalogue index deliberately. A bare
+            // `23505` is an ordinary unique violation — swallowing that
+            // would hide real data errors.
+            Some("23505") => db.message().contains("pg_class_relname_nsp_index"),
+            _ => false,
+        };
+    }
+    false
+}
+
+/// `cfg(not(postgres))` stub — see the documented variant above.
+#[cfg(not(feature = "postgres"))]
+pub fn is_pg_dup_object_error(_e: &crate::sql::sqlx::Error) -> bool {
+    false
+}
