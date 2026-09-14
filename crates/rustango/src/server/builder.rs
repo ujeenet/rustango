@@ -623,6 +623,7 @@ impl<DB: Database> Builder<DB> {
             listener,
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
+        .with_graceful_shutdown(crate::shutdown::shutdown_signal())
         .await?;
         Ok(())
     }

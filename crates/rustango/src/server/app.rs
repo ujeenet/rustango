@@ -166,7 +166,9 @@ impl AppBuilder {
         let pool = Arc::new(self.pool);
         let app = self.api.unwrap_or_else(Router::new).layer(Extension(pool));
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
+            .await?;
         Ok(())
     }
 }

@@ -135,10 +135,17 @@ sets no CORS — so the notes below are for hand-written apps.
   does not matter and never where it does — invisibly: exit 0, nothing logged.
 
   Now: one `rustango::shutdown::shutdown_signal()` handling both signals, used
-  by every serve path, and `Cli::on_shutdown(hook)` for work that must happen
-  after the server drains. **`Cli::run` returns on signal rather than never
-  returning**, so code after it now executes — but put the drain in
+  by **every** serve path — `Cli::run`'s three, plus `server::Builder::serve`
+  and `server::App::serve`, which the tenancy `Cli` path and the README's
+  headline example go through. And `Cli::on_shutdown(hook)` for work that must
+  happen after the server drains. **`Cli::run` returns on signal rather than
+  never returning**, so code after it now executes — but put the drain in
   `on_shutdown`, which also runs on the tenancy path.
+
+  A guard fails the build on any bare `axum::serve`, because the first pass at
+  this wired the hook into five call sites and only three of them could reach
+  it: the other two sat behind a `Builder::serve` that had no graceful
+  shutdown at all.
 
 - **The executor-taking query operations are public** (#1431):
   `rustango::sql::{fetch_aggregate_on, fetch_with_prefetch, select_rows_on,
