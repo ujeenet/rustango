@@ -4,7 +4,7 @@ Diese Anleitung führt dich von einem leeren Verzeichnis bis zu einem deployten 
 
 > **Dauer:** ~45 Minuten für die komplette Tour, ~10 Minuten, wenn du es nur laufen sehen willst.
 >
-> **Lauffähige Version:** Jeder Schritt unten ist in einem getesteten, kompilierbaren Beispiel unter [`crates/rustango/examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog) nachgebildet. Falls ein Schritt jemals seltsam aussieht, vergleiche ihn damit.
+> **Lauffähige Version:** Jeder Schritt unten ist in einem getesteten, kompilierbaren Beispiel unter [`crates/rustango/examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/develop/crates/rustango/examples/getting_started_blog) nachgebildet. Falls ein Schritt jemals seltsam aussieht, vergleiche ihn damit.
 
 [![Einen Blog mit Rustango bauen: die Migration generieren, sie anwenden, den Server starten und die JSON-API abfragen — alles aus einem einzigen Binary](../img/getting-started.png)](../img/getting-started.png)
 
@@ -888,15 +888,15 @@ Stelle sicher, dass dein Reverse-Proxy:
 
 | Thema | Doku |
 |---|---|
-| Lauffähige Version dieses Leitfadens | [`examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog) |
+| Lauffähige Version dieses Leitfadens | [`examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/develop/crates/rustango/examples/getting_started_blog) |
 | Jeder `manage`-Unterbefehl | [`docs/manage.md`](manage.md) |
 | ORM-Kochbuch (fortgeschrittene Filter, Aggregationen, M2M, Soft-Delete) | [`docs/orm.md`](orm.md) |
 | Middleware (der vollständige Schichtenkatalog + Reihenfolge) | [`docs/middleware.md`](middleware.md) |
 | Performance-Benchmarks (vs. Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | API-Konventionen (Benennung, Builder-Muster, Feature-Gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Security-Features im Detail | [`docs/security.md`](security.md) |
-| Django-Parity-Audit | [`docs/django-parity-audit-2026-05-21.md`](https://github.com/ujeenet/rustango/blob/main/docs/django-parity-audit-2026-05-21.md) |
-| Multi-Tenancy | [README — Abschnitt Multi-tenancy](https://github.com/ujeenet/rustango/blob/main/README.md#multi-tenancy) |
+| Django-Parity-Audit | [`docs/django-parity-audit-2026-05-21.md`](https://github.com/ujeenet/rustango/blob/develop/docs/django-parity-audit-2026-05-21.md) |
+| Multi-Tenancy | [README — Abschnitt Multi-tenancy](https://github.com/ujeenet/rustango/blob/develop/README.md#multi-tenancy) |
 | API-Doku | <https://docs.rs/rustango> |
 
 Wenn du auf etwas stößt, das nicht funktioniert oder unklar ist, öffne ein Issue.
