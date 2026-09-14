@@ -378,3 +378,164 @@ mod tests {
         assert!(claimed_versions(text).is_empty());
     }
 }
+
+// ------------------------------------------------------------------
+
+/// Install pins — the version strings a reader **runs** rather than reads.
+///
+/// `claimed_versions` above matches three-component transcripts, so a
+/// two-component dependency pin slips past it entirely. Those are the
+/// ones that matter most: `cargo add` resolves them, and a stale one
+/// installs an old rustango while every other page describes the new
+/// one.
+///
+/// Nothing checked them, and they had drifted accordingly — `0.44` on
+/// two pages while 0.57 shipped, thirteen releases (#1407 audit D-22).
+///
+/// Scoped to lines naming `rustango`, so the `axum = "0.8"` and
+/// `serde = "1"` pins beside them are left alone.
+/// Crates this workspace publishes, longest name first so
+/// `rustango-orm-macros` is tried before `rustango`.
+///
+/// `rustango-renamed-smoke` is absent on purpose — it is `publish =
+/// false`, so no reader ever pins it.
+const PUBLISHED_CRATES: &[&str] = &[
+    "rustango-orm-macros",
+    "rustango-macros",
+    "cargo-rustango",
+    "rustango",
+];
+
+fn install_pins(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if !line.contains("rustango") {
+            continue;
+        }
+        // `rustango = "0.57"` and `rustango = { version = "0.57", … }`,
+        // including the renamed form `orm = { package = "rustango", … }`.
+        //
+        // The bare form is matched for every crate this workspace
+        // publishes, not just `rustango`. They all take
+        // `version.workspace = true`, so a pin naming any of them names
+        // this version — and `rustango-orm-macros = "0.42"` sat in its
+        // own README for fifteen releases because only `rustango = "`
+        // was looked for.
+        let Some(pos) = line.find("version = \"").or_else(|| {
+            PUBLISHED_CRATES.iter().find_map(|c| {
+                let needle = format!("{c} = \"");
+                line.find(&needle).map(|p| p + needle.len() - 1)
+            })
+        }) else {
+            continue;
+        };
+        let rest = &line[pos..];
+        let Some(open) = rest.find('"') else { continue };
+        let Some(close) = rest[open + 1..].find('"') else {
+            continue;
+        };
+        let v = &rest[open + 1..open + 1 + close];
+        // Two components only; a three-component string is a transcript
+        // and belongs to `claimed_versions`.
+        let parts: Vec<&str> = v.split('.').collect();
+        if parts.len() == 2
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        {
+            out.push((i + 1, v.to_owned()));
+        }
+    }
+    out
+}
+
+/// Files whose pins are history and must not be bumped.
+///
+/// A changelog entry recording "scaffolder bumped to `rustango = 0.29`"
+/// is a true statement about 0.29. Rewriting it to say 0.57 would make
+/// it false, so this is the one place a stale-looking pin is correct.
+const PINS_ARE_HISTORY: &[&str] = &["CHANGELOG.md"];
+
+/// Every tracked `.md` in the repo, minus the ones above.
+///
+/// This began as an allowlist — the published pages plus two READMEs
+/// named by hand — and an allowlist has the defect that anything off it
+/// is invisible rather than failing. Four files went stale unnoticed
+/// for exactly that reason: the cookbook's four pins at 0.29/0.38/0.43,
+/// and the `rustango-orm-macros`, `admin_demo` and
+/// `getting_started_blog` READMEs at 0.42/0.43. None of them is a
+/// published page, so nothing reached them.
+///
+/// Sweeping instead and naming the exceptions trades a list for a list,
+/// but not an equivalent one: an allowlist fails silent and a denylist
+/// fails loud. A new page with an install snippet is now checked by
+/// default rather than forgotten by default, and the entries that remain
+/// are about historical record rather than about coverage.
+///
+/// Tracked files only, via `git ls-files` — a working tree shared
+/// between several checkouts collects untracked notes and drafts, and
+/// those are nobody's install instructions.
+fn files_that_may_carry_pins(root: &Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "*.md"])
+        .output()
+        .expect("run git ls-files");
+    assert!(
+        out.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut files: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && !PINS_ARE_HISTORY.contains(p))
+        .map(str::to_owned)
+        .collect();
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "git ls-files returned no markdown — this guard is checking nothing"
+    );
+    files
+}
+
+#[test]
+fn every_install_pin_names_the_shipping_series() {
+    let root = repo_root();
+    let expected: String = CURRENT
+        .rsplit_once('.')
+        .map_or(CURRENT, |(mm, _)| mm)
+        .to_owned();
+    let pages = files_that_may_carry_pins(&root);
+
+    let mut problems = Vec::new();
+    let mut checked = 0usize;
+    for rel in &pages {
+        let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+            continue;
+        };
+        for (lineno, found) in install_pins(&text) {
+            checked += 1;
+            if found != expected {
+                problems.push(format!("{rel}:{lineno}: pins `{found}`"));
+            }
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "found no install pins at all — the matcher stopped working"
+    );
+    assert!(
+        problems.is_empty(),
+        "{} install pin(s) name a series that is not shipping ({expected}):\n  {}\n\n\
+         These are the version strings a reader *runs* — `cargo add` resolves them — so a \
+         stale one installs an old rustango while the surrounding page describes the new \
+         one. Bump them to {expected}.",
+        problems.len(),
+        problems.join("\n  "),
+    );
+}

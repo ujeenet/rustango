@@ -76,9 +76,7 @@ async fn fresh_pool() -> Pool {
     // Cache may hold (app, model) → id from a sibling test's pool; this
     // fresh in-memory DB re-seeds with its own ids, so clear it.
     contenttypes::clear_cache();
-    let Pool::Sqlite(ref s) = pool else {
-        unreachable!()
-    };
+    let s = pool.as_sqlite().expect("sqlite pool");
     for ddl in [
         "CREATE TABLE gm2m_post (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)",
         "CREATE TABLE gm2m_video (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL)",

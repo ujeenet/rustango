@@ -30,6 +30,7 @@ Rust.
 - [JSON, Header und Bodies senden](#json-header-und-bodies-senden)
 - [Eine echte API testen](#eine-echte-api-testen)
 - [Datenbanktests mit Rollback](#datenbanktests-mit-rollback)
+- [Live-Suites, und warum ein grüner Lauf nichts beweisen muss](#live-suites-und-warum-ein-grüner-lauf-nichts-beweisen-muss)
 - [Response-Assertion-Helper](#response-assertion-helper)
 - [Siehe auch](#siehe-auch)
 
@@ -147,6 +148,55 @@ async fn creating_a_post_persists_it() {
 
 Für SQLite verwenden die `*_sqlite_live.rs`-Tests überall in diesem Repo stattdessen eine In-Memory-
 Datenbank pro Test — ebenfalls vollständig isoliert, mit null externem Setup.
+
+---
+
+## Live-Suites, und warum ein grüner Lauf nichts beweisen muss
+
+Tests mit dem Namen `*_live.rs` sprechen mit einer echten Datenbank. Die meisten
+brauchen nichts von dir; der Rest braucht eine Umgebungsvariable, und **wenn sie
+fehlt, schlagen sie nicht fehl. Sie machen ein `return`, und der Lauf meldet
+Erfolg.**
+
+Das ist Absicht — es hält `cargo test` auf einem Laptop ohne Server lauffähig —
+aber es bedeutet, dass ein bestandener Lauf kein Beleg dafür ist, dass die Suite
+gelaufen ist. Gut zu wissen, bevor du ein grünes Ergebnis als Abdeckung liest.
+
+### Welche Variable jede Suite will
+
+| Variable | Suites | Was sie brauchen |
+|---|---:|---|
+| *(keine)* | 213 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
+| `DATABASE_URL` | 93 | Ein erreichbarer PostgreSQL-Server. |
+| `MYSQL_TEST_URL` | 21 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
+| `REDIS_TEST_URL` | 2 | Ein erreichbares Redis. |
+
+Eine Suite, die zwei Variablen liest, wird unter beiden gezählt, die Spalte
+summiert sich also nicht auf die Anzahl der Dateien.
+
+MySQL ist das, worüber Leute stolpern: es liest seine eigene Variable, also führt
+eine Shell, in der nur `DATABASE_URL` gesetzt ist, die Postgres-Suites aus und
+überspringt stillschweigend jede MySQL-Suite.
+
+### Einen Skip von einem Pass unterscheiden
+
+Die meisten Skips sind ein nacktes frühes `return` ganz ohne Ausgabe. Eine
+Minderheit gibt zuvor eine Zeile auf stderr aus, die `cargo test` versteckt,
+solange du nicht danach fragst:
+
+```bash
+cargo test --test <name> -- --nocapture
+```
+
+Das verlässliche Signal ist die Anzahl. Eine Live-Suite, die `0 passed` meldet —
+oder weit weniger, als die Datei enthält —, hat übersprungen.
+`running 2 tests … 2 passed` ohne laufenden Server heißt, dass diese beiden Tests
+früh zurückgekehrt sind.
+
+Wenn du willst, dass eine Suite fehlschlägt statt zu überspringen, wenn ihr
+Server fehlt, setze die Variable auf eine absichtlich falsche URL: sie schlägt
+dann beim Verbinden fehl, was ein lauteres und ehrlicheres Signal ist als ein
+Skip.
 
 ---
 

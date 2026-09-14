@@ -4562,6 +4562,70 @@ mod tests {
         assert_eq!(ff[0].value, "Hello");
     }
 
+    /// Pull the backticked names out of the "each entry in `form.fields`
+    /// carries …" sentence, whatever language the page is written in.
+    fn documented_field_keys(text: &str) -> std::collections::BTreeSet<String> {
+        // The template example names `form.fields` too, but inside a
+        // fence and without backticks. The sentence wanted is the one
+        // where a backticked mention is followed by the field list.
+        let start = text
+            .match_indices("`form.fields`")
+            .find(|(i, _)| text[*i..text.len().min(i + 200)].contains("`max_length`"))
+            .map(|(i, _)| i)
+            .expect("no `form.fields` field-list sentence on this page");
+        // The list ends at the full stop directly after a closing backtick.
+        let end = start + text[start..].find("`.").expect("unterminated sentence") + 1;
+
+        text[start..end]
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|t| !t.contains('.')) // drops `form.fields` itself
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The contract `docs/html-views.md` states is the *serialized* key
+    /// set — a template author writes `{{ field.ty }}`, not a Rust field
+    /// access. The two tests above read the struct directly, so renaming
+    /// a field or adding one leaves them green while the page describes
+    /// a shape that no longer ships.
+    ///
+    /// All four translations carry the same list, so all four are checked.
+    #[test]
+    fn documented_form_field_keys_match_what_is_stamped() {
+        let value = serde_json::to_value(FormField {
+            name: "title",
+            column: "title",
+            ty: "string",
+            required: true,
+            max_length: Some(200),
+            value: String::new(),
+        })
+        .expect("serialize FormField");
+        let serde_json::Value::Object(map) = value else {
+            panic!("FormField no longer serializes as an object: {value:?}")
+        };
+        let stamped: std::collections::BTreeSet<String> = map.keys().cloned().collect();
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for page in [
+            "docs/html-views.md",
+            "docs/de/html-views.md",
+            "docs/es/html-views.md",
+            "docs/fr/html-views.md",
+        ] {
+            let text = std::fs::read_to_string(root.join(page)).expect("read page");
+            assert_eq!(
+                documented_field_keys(&text),
+                stamped,
+                "{page} describes a different set of `form.fields` keys than the \
+                 views stamp — a template written from that page would read \
+                 undefined values"
+            );
+        }
+    }
+
     /// `substitute_pk` is the simpler sibling of
     /// `interpolate_success_url` — used by Update/DeleteView where
     /// the PK is already in scope from the URL.

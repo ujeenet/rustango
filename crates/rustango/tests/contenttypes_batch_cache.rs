@@ -157,12 +157,11 @@ async fn get_by_natural_key_serves_from_cache_on_repeat() {
         .expect("post seeded");
 
     // Drop the source table — the cache should still serve the row.
-    if let Pool::Sqlite(sq) = &pool {
-        sqlx::query("DROP TABLE rustango_content_types")
-            .execute(sq)
-            .await
-            .expect("drop");
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    sqlx::query("DROP TABLE rustango_content_types")
+        .execute(sq)
+        .await
+        .expect("drop");
 
     let second = ContentType::get_by_natural_key(&pool, "ct_bc_blog", "post")
         .await
@@ -184,12 +183,11 @@ async fn clear_cache_forces_db_round_trip_again() {
         .expect("populate cache");
 
     // Drop + recreate the table empty (no seed rows).
-    if let Pool::Sqlite(sq) = &pool {
-        sqlx::query("DROP TABLE rustango_content_types")
-            .execute(sq)
-            .await
-            .expect("drop");
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    sqlx::query("DROP TABLE rustango_content_types")
+        .execute(sq)
+        .await
+        .expect("drop");
     contenttypes::ensure_table(&pool)
         .await
         .expect("recreate empty");
@@ -216,15 +214,14 @@ async fn negative_results_are_not_cached() {
     assert!(r1.is_none());
 
     // Insert a row for the previously-missing pair manually.
-    if let Pool::Sqlite(sq) = &pool {
-        sqlx::query(
-            "INSERT INTO rustango_content_types (app_label, model_name, \"table\") \
-             VALUES ('ghost_app', 'ghost_model', 'ghost_table')",
-        )
-        .execute(sq)
-        .await
-        .expect("insert");
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    sqlx::query(
+        "INSERT INTO rustango_content_types (app_label, model_name, \"table\") \
+         VALUES ('ghost_app', 'ghost_model', 'ghost_table')",
+    )
+    .execute(sq)
+    .await
+    .expect("insert");
 
     // Second lookup must find it (the None wasn't cached).
     let r2 = ContentType::get_by_natural_key(&pool, "ghost_app", "ghost_model")

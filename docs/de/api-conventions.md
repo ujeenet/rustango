@@ -29,9 +29,16 @@ Der Name einer Methode sagt Ihnen, was sie tut. Sobald Sie diese Suffixe gelernt
 
 ### Funktionen
 
-- **`save_on(executor)`, `delete_on(executor)`** — Schreibmethoden nehmen einen *Executor* entgegen (einen Pool, eine Verbindung oder eine Transaktion — das, was mit der Datenbank spricht). Das Suffix `_on` bedeutet „führe dies gegen den Executor aus, den ich dir übergebe“.
-- **`fetch_on(executor)`, `count_on(executor)`** — dasselbe `_on`-Suffix, für Lesevorgänge.
-- **`save()`, `fetch()`, `count()`** ohne `_on` — Kurzform, die die `_on`-Variante mit einem Standard-`&pool` aufruft. Funktioniert nur dort, wo das Queryset oder Modell bereits eine Pool-Referenz hält (selten im Anwendungscode).
+- **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — der schlichte Name nimmt einen `rustango::sql::Pool` und ist der Alltagsweg. Er funktioniert auf Postgres, MySQL und SQLite und wählt den Dialekt intern. Das ist es, was fast jeder Anwendungscode will.
+- **`fetch_on(executor)`, `count_on(executor)`** — das Suffix `_on` bedeutet „führe dies gegen den *Executor* aus, den ich dir übergebe“ — eine Verbindung oder eine offene Transaktion statt des Pools. Greif dazu, wenn du mehrere Statements in einer Transaktion brauchst. **`_on`-Methoden sind nur für Postgres** (`#[cfg(feature = "postgres")]`).
+- **Schreibvorgänge kehren dies um, und das ist die einzige Stelle, an der die Regel nicht gilt.** `save(&pool)`, `insert(&pool)` und `delete(&pool)` nehmen einen treiberspezifischen `sqlx::PgPool`; auf einem Build ohne das Feature `postgres` **existieren sie gar nicht** — die Auswahl von `sqlite` lässt die Methode verschwinden, statt mit einer Meldung zu scheitern, die die Ursache benennt. Die Mehr-Backend-Varianten tragen das Suffix `_pool`: `save_pool`, `insert_pool`, `delete_pool`, jeweils mit `rustango::sql::Pool`.
+
+  | | schlichter Name | Mehr-Backend-Variante |
+  |---|---|---|
+  | **Lesen** (`QuerySet`) | `fetch(&pool)` — bereits Mehr-Backend | *ist* der schlichte Name |
+  | **Schreiben** (Modell) | `save(&pool)` — **nur Postgres** | `save_pool(&pool)` |
+
+  Der kurze Name ist beim Schreiben also der engere und beim Lesen der breitere. Diese Umkehrung ist ein Schönheitsfehler, kein Entwurf: sie wird in [#1293](https://github.com/ujeenet/rustango/issues/1293) verfolgt und über einen Deprecation-Zyklus statt einer Umbenennung aufgelöst. Bis dahin gilt: **wer nicht auf Postgres arbeitet, schreibt `save_pool` / `insert_pool` / `delete_pool`.**
 - **`from_X(value)`** — konvertiert AUS einem anderen Wert (z. B. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — eine Builder-Methode, die eine Option setzt und das Objekt zurückgibt, sodass Sie Aufrufe verketten können (z. B. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — der minimale Konstruktor. Alle Argumente, die er entgegennimmt, sind erforderliche Abhängigkeiten (z. B. `RedisCache::new(url)` — Sie können den Cache nicht ohne URL bauen).
@@ -277,7 +284,7 @@ default = [
 Um ein Binary zu verschlanken, das nicht alles braucht, deaktivieren Sie die Standardwerte und listen Sie nur auf, was Sie verwenden:
 
 ```toml
-rustango = { version = "0.44", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.57", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

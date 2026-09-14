@@ -46,19 +46,28 @@ le kernel HTTP — la même idée, rattachée à votre routeur.
 
 Il existe deux formes, et vous utiliserez les deux :
 
-1. **Un `tower::Layer`** — une structure middleware réutilisable et
-   configurable. Chaque composant intégré en est un (`SecurityHeadersLayer`,
-   `RateLimitLayer`, …). Vous attachez un layer avec le `.layer(...)` d'axum,
-   ou — pour la plupart des composants intégrés — avec un **one-liner de trait
-   d'extension** qui se lit mieux :
+1. **Une structure de configuration plus un one-liner `…RouterExt`** — la forme
+   de la plupart des composants intégrés. Le type `…Layer` est une structure de
+   configuration, *pas* un `tower::Layer` : il est installé par son trait
+   d'extension, qui l'enveloppe dans `axum::middleware::from_fn` en interne.
+   `SecurityHeadersLayer`, `RateLimitLayer`, `RequestIdLayer`, `CorsLayer`,
+   `EtagLayer`, `CompressionLayer`, `BodyLimitLayer`, `IdempotencyLayer` et
+   `AccessLogLayer` ont tous cette forme, donc `.layer(…)` sur eux ne compile
+   pas :
 
    ```rust
    use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt};
 
-   // These two are equivalent; the second is the ergonomic form.
-   let app = router.layer(SecurityHeadersLayer::strict());
+   // La méthode RouterExt est la seule forme — le nom finit par `Layer`, mais
+   // le type n'implémente pas `tower::Layer`.
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
+
+   Ceux qui sont réellement des `tower::Layer` — et acceptent donc `.layer(…)` —
+   sont `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
+   `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` et le builder
+   `api_version`. Vérifiez avant de recourir à `.layer(…)` :
+   `rg 'impl.*tower::Layer' crates/rustango/src/`.
 
    Chaque module intégré exporte un trait `…RouterExt` (`SecurityHeadersRouterExt`,
    `RateLimitRouterExt`, …). Amenez-le dans la portée et vous obtenez une méthode
@@ -201,7 +210,9 @@ loc.is_rtl()     // true for ar, he, fa, …
 ```
 
 Le nom du cookie est par défaut `django_language` (compatible Django) ;
-changez-le avec `.cookie_name("…")`, ou passez `None` pour désactiver
+changez-le avec `.cookie_name("my_locale".to_string())` — le paramètre est
+`impl Into<Option<String>>`, ce que `&str` ne satisfait pas, donc un littéral nu
+est une erreur de borne de trait — ou passez `None` pour désactiver
 entièrement la recherche par cookie. L'ordre de résolution, vérifié de bout en
 bout :
 
@@ -372,8 +383,11 @@ non-concordance donne un `403 Forbidden` :
 ```
 
 Dans les templates Tera, `{{ csrf_token }}` donne le jeton brut et
-`{{ csrf_input }}` un `<input name="_csrf">` caché prêt à l'emploi — déposez-en
-un dans chaque formulaire. Surchargez les noms de cookie/en-tête ou le flag
+`{{ csrf_input | safe }}` un `<input name="_csrf">` caché prêt à l'emploi — déposez-en
+un dans chaque formulaire. Le `| safe` est obligatoire : Tera échappe `.html`
+automatiquement, sans quoi le formulaire ne porte aucun champ `_csrf` et chaque
+POST renvoie 403. Le formulaire de connexion de l'admin fait exactement cela —
+voir `crates/rustango/src/admin/templates/login.html`. Surchargez les noms de cookie/en-tête ou le flag
 `Secure` avec `csrf::with_config(CsrfConfig)` ; pour des configurations SPA,
 ajoutez `.with_trusted_origins([...])` pour activer la vérification de
 défense en profondeur de l'en-tête Origin en plus du jeton. Pour des endpoints
@@ -411,8 +425,6 @@ Le pattern est une petite structure `Layer` qui construit un `Service`, plus
 `rustango::request_id` est la plus petite référence complète à copier :
 
 - `RequestIdLayer` — le layer configurable (`::default()`, `.always_generate()`),
-- `RequestIdService<S>` — enveloppe le service interne ; lit/pose l'en-tête
-  `X-Request-Id` à l'intérieur de `call`,
 - `RequestId` — un extracteur `FromRequestParts` pour que les handlers puissent
   lire l'identifiant,
 - `RequestIdRouterExt` — fournit `Router::request_id(layer)`.

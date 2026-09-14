@@ -182,7 +182,10 @@ use rustango::media::{Media, MediaManager};
 
 let manager = MediaManager::new_pool(pool.clone(), registry);
 // Hand the browser a short-lived download link:
-let url = manager.presigned_get(&media, Duration::from_secs(3600)).await?;
+// Renvoie Option<String> — None sur les backends qui ne savent pas signer (p. ex. disque local).
+let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await else {
+    return Err(/* pas d'URL signée pour ce backend */);
+};
 ```
 
 Il gère aussi la suppression douce et la purge des orphelins. Le flux complet est mis à l'épreuve

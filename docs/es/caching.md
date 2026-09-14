@@ -55,7 +55,7 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 |---|---|---|
 | `InMemoryCache` | `cache` | dev, tests, un solo proceso (HashMap por proceso + TTL) |
 | `RedisCache` | `cache-redis` | producción; compartido entre réplicas |
-| `DbCache` | `cache` | producción sin Redis; una tabla `rustango_cache` |
+| `DatabaseCache` | `cache` | producción sin Redis; una tabla `rustango_cache` |
 | `NullCache` | `cache` | deshabilitar la caché (cada lectura falla) — práctico en tests |
 
 ---
@@ -199,10 +199,12 @@ de reimplementar nada, de modo que las primitivas nativas (Redis `INCRBY`,
 
 **Contadores atómicos y bloqueos.** `Cache::incr` está detrás del
 [rate limiting](middleware.md) y el bloqueo por cuenta; `Cache::add`
-(set-if-absent) está detrás de `DistributedLock`. Ambos son atómicos en
-`RedisCache` (`INCRBY` / `SET NX` nativos) y en `InMemoryCache` (que mantiene su
-cerrojo durante el read-modify-write); `DatabaseCache` deja ambos en el valor no
-atómico por defecto — suficiente para un proceso, pero usa Redis cuando un
+(set-if-absent) está detrás de `DistributedLock`. `Cache::add` es atómico en los tres —
+`RedisCache` (`SET NX`), `InMemoryCache` (que mantiene su cerrojo durante el
+read-modify-write) y `DatabaseCache`, que hace el test-and-set bajo cerrojos de
+fila, de modo que una carrera se resuelve con exactamente un ganador.
+`Cache::incr` es atómico en los dos primeros pero recae en el valor no atómico
+por defecto con `DatabaseCache`. Un `DistributedLock` es seguro en los tres; un
 contador o bloqueo deba ser exacto entre réplicas.
 
 Dos cosas que conviene saber:

@@ -173,18 +173,32 @@ let app = CreateView::for_model(Post::SCHEMA)
 ```
 
 The form template (`posts_form.html`) is shared with UpdateView. `is_update`
-tells the two apart, and `errors` carries any validation messages back:
+tells the two apart, and **`form`** carries both the fields and any validation
+messages:
 
 ```html
 <form method="post">
-  <input name="title" value="{{ object.title | default(value='') }}">
-  <textarea name="body">{{ object.body | default(value='') }}</textarea>
-  {% for field, msgs in errors %}
-    <p class="error">{{ field }}: {{ msgs | join(sep=', ') }}</p>
+  {{ csrf_input | safe }}
+  {% for field in form.fields %}
+    <label for="{{ field.name }}">{{ field.name }}</label>
+    <input id="{{ field.name }}" name="{{ field.name }}" value="{{ field.value }}"
+           {% if field.required %}required{% endif %}
+           {% if field.max_length %}maxlength="{{ field.max_length }}"{% endif %}>
+    {% if form.errors[field.name] %}
+      <p class="error">{{ form.errors[field.name] }}</p>
+    {% endif %}
   {% endfor %}
   <button>{% if is_update %}Save{% else %}Create{% endif %}</button>
 </form>
 ```
+
+Two things are easy to get wrong here. `form.errors` maps a field name to **one
+string**, not a list — `join` on it is an error. And there is no top-level
+`errors` variable; iterating one is a Tera render failure, so the page returns
+500 rather than showing the message.
+
+`{{ csrf_input | safe }}` needs the filter: Tera autoescapes `.html`, so without
+it the token renders as text and every POST is rejected.
 
 **Validation.** Schema rules (type, `max_length`, NOT NULL…) are enforced
 automatically. Add your own with a closure validator — on `Err`, the form
@@ -251,12 +265,22 @@ Every view stamps a consistent context so templates port cleanly between them:
 |---|---|
 | `ListView` | `object_list` (the page's rows), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev` |
 | `DetailView` | `object` (the row) |
-| `CreateView` / `UpdateView` | `object` (empty on create, prefilled on update), `is_update` (bool), `errors`, `values` |
+| `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **no `object`** |
+| `UpdateView` | `form` (`.fields`, `.errors`), `object` (the row), `pk`, `is_create` (false), `is_update` (true) |
 | `DeleteView` | `object` (the row to confirm) |
 
 Rows are exposed as plain maps keyed by column name (`{{ post.title }}`), with
 SQL `NULL` rendered as `null`. Use `.context_object_name("posts" / "post")` to
 add a friendlier alias alongside `object_list` / `object`.
+
+Each entry in `form.fields` carries `name`, `column`, `ty`, `required`,
+`max_length` and `value`. `form.errors` is keyed by field name and holds one
+message per field, not a list. With the `csrf` feature on, every view also
+stamps `csrf_token` and `csrf_input`.
+
+`CreateView` stamps no `object`, so `{{ object.title }}` on a create form is
+undefined rather than empty — use `{{ field.value }}` from `form.fields`, which
+is populated on both.
 
 ---
 

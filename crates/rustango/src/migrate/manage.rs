@@ -157,7 +157,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "check" => check_cmd(pool, dir, &args[1..], writer).await,
         "docs" => docs_cmd(writer),
         "version" | "--version" => version_cmd(writer),
-        "db:dump" => db_dump_cmd(&args[1..], writer),
+        "db:dump" => db_dump_cmd(&args[1..]),
         "db:restore" => db_restore_cmd(&args[1..], writer),
         "db:info" => db_info_cmd(writer),
         "dumpdata" => dumpdata_cmd(pool, &args[1..], writer).await,
@@ -2506,6 +2506,12 @@ use axum::Router;
 use axum::routing::get;
 
 fn app() -> Router {{
+    // This test touches no database. As soon as it does — the moment
+    // `app()` opens a pool from `DATABASE_URL` — uncomment this. A test
+    // in `tests/` is its own crate and never runs `main`, so nothing has
+    // loaded `.env` for it and the variable reads as unset (#1299).
+    // let _ = dotenvy::dotenv();
+
     Router::new().route("/hello", get(|| async {{ "hi" }}))
 }}
 
@@ -2602,7 +2608,13 @@ fn build_pg_dump_argv(parsed: &DbDumpArgs, database_url: &str) -> Vec<String> {
     argv
 }
 
-fn db_dump_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+/// Takes no writer, on purpose. Without `--out`, `pg_dump` inherits our
+/// stdout and *is* the output — so anything we print there lands inside
+/// the user's `.sql` file. `db:dump > backup.sql` is the documented
+/// form, and it used to produce a file whose first line was a status
+/// banner (#1404). The banner goes to stderr, and there is now no
+/// writer here to put it anywhere else.
+fn db_dump_cmd(args: &[String]) -> Result<(), MigrateError> {
     let parsed = parse_db_dump_args(args)?;
     let url = std::env::var("DATABASE_URL").map_err(|_| {
         MigrateError::Validation(
@@ -2612,7 +2624,7 @@ fn db_dump_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError>
         )
     })?;
     let argv = build_pg_dump_argv(&parsed, &url);
-    writeln!(w, "running: pg_dump {}", redact(&argv).join(" "))?;
+    eprintln!("running: pg_dump {}", redact(&argv).join(" "));
     let status = std::process::Command::new("pg_dump")
         .args(&argv)
         .status()

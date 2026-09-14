@@ -28,6 +28,20 @@ cargo install cargo-rustango
 
 Das legt ein `cargo-rustango`-Binary in deinem `PATH` ab; Cargo stellt es dann als `cargo rustango` bereit (auf dieselbe Weise, wie `django-admin` oder der `laravel`-Installer dir einen globalen Befehl geben).
 
+### Die Version des Generators ist die, die dein Projekt bekommt
+
+`cargo rustango new` schreibt `rustango = "MAJOR.MINOR"` in die generierte `Cargo.toml` — übernommen aus **der Version des Generators**, nicht aus dem, was gerade auf crates.io am neuesten ist. Welchen Generator du installierst, dessen Version pinnt dein Projekt.
+
+Das ist fast immer das, was du willst, und genau deshalb ist der Installationsbefehl oben ungepinnt: Der neueste Generator schreibt den neuesten Pin, und die beiden können nicht auseinanderdriften.
+
+Wissen solltest du es, wenn du bewusst ein älteres Release willst — um zu einem Projekt zu passen, das bereits darauf läuft, oder um einen Fehlerbericht zu reproduzieren. Pinne den Generator, nicht das Projekt:
+
+```sh
+cargo install cargo-rustango --version 0.57.0
+```
+
+Welchen du hast, prüfst du mit `cargo rustango --version`. Später aktualisieren ist derselbe Befehl mit `--force`, und das wirkt sich nur auf Projekte aus, die du danach generierst — der Pin eines bestehenden Projekts ist eine Zeile in dessen eigener `Cargo.toml`, die du selbst änderst.
+
 ---
 
 ## Ein Projekt erstellen: `cargo rustango new`
@@ -189,7 +203,7 @@ Also startet `cargo run` den Server, und `cargo run -- <verb>` führt Migratione
 Wie sich die Vorlagen innerhalb von `main.rs` / `urls.rs` unterscheiden:
 
 - **api** — kein Admin; `urls::api()` aggregiert schlicht deine eigenen Routen.
-- **fullstack** — `urls.rs` exponiert zusätzlich `admin_router(pool)` (gebaut aus `admin::Builder::new(pool).build()`), sodass der Auto-Admin unter `/admin` eingehängt wird.
+- **fullstack** — dieselbe `urls.rs`, plus das einkompilierte Admin-Feature. Der Admin wird **nicht** für dich verdrahtet: Nichts Generiertes würde ihn aufrufen, also gibt der Generator keinen `admin_router` aus. Füge selbst einen hinzu und hänge ihn ein — [Erste Schritte, Schritt 11](getting-started.md#schritt-11-den-auto-admin-einschalten) erklärt es Schritt für Schritt. Nimm `rustango::sql::Pool` entgegen, damit der Helfer keinen Treiber benennt.
 - **tenant** — `main.rs` ergänzt `.tenancy()`, bedient die Operator-Konsole auf der Apex-Domain und jeden Tenant unter seiner eigenen Subdomain. Die eigenen Tabellen des Frameworks werden beim ersten `cargo run -- migrate` aus den kompilierten Modellen (Django-Stil) in einen **`system/migrations/`**-Ordner generiert — kein handgeliefertes Bootstrap-JSON, sodass das allererste migrate ohne zusätzliche Einrichtung funktioniert.
 
 ### Geschichtete Konfiguration

@@ -450,3 +450,34 @@ async fn source_renamed_field_updates_on_partial_update() {
     );
     assert_eq!(v["title"], "Orig", "untouched field preserved");
 }
+
+/// #1386 — the error naming the field a client cannot see.
+///
+/// `source = "body"` exists to hide the model's column behind the name
+/// the API publishes. The write loop walks model fields, so a missing
+/// value used to be reported against `body` — a column absent from the
+/// schema the client was given, sending them after a field that does not
+/// exist for them.
+#[tokio::test]
+async fn a_missing_renamed_field_is_reported_by_its_published_name() {
+    let app = doc_router().await;
+
+    // Neither `content` (API) nor `body` (model) supplied.
+    let resp = app
+        .clone()
+        .oneshot(post("/docs", r#"{"title":"No body"}"#))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let v = json_body(resp).await;
+    let msg = v["error"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        msg.contains("content"),
+        "the error must name `content`, the field the API publishes: {msg}"
+    );
+    assert!(
+        !msg.contains("body"),
+        "the error must not leak `body`, the model column `source` hides: {msg}"
+    );
+}

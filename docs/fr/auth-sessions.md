@@ -45,7 +45,7 @@ use rustango::sessions::{Session, SessionStore};
 use rustango::cache::{BoxedCache, RedisCache};
 use std::sync::Arc;
 
-let store = SessionStore::new(Arc::new(RedisCache::new("redis://localhost/0")?) as BoxedCache);
+let store = SessionStore::new(Arc::new(RedisCache::new("redis://localhost/0").await?) as BoxedCache);
 
 // After the password check (see auth-passwords.md): stash who the user is,
 // save → an opaque id, and set that id as the cookie.

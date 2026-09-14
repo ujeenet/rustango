@@ -114,9 +114,7 @@ async fn cleanup_older_than_clears_when_cutoff_zero() {
     // space-shape value (space `0x20` < `T` `0x54`); post-fix both
     // sides bind in the same space format, so we need rows that
     // genuinely sit before the cutoff.
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     for i in 0..5 {
         sqlx::query(
             r#"INSERT INTO "rustango_audit_log"
@@ -181,9 +179,7 @@ async fn cleanup_older_than_compares_apples_to_apples_on_sqlite() {
     // Insert with an explicit space-shape occurred_at. Bypass
     // `emit_one_pool` so we control the timestamp shape exactly —
     // simulating what `CURRENT_TIMESTAMP` produces.
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     sqlx::query(
         r#"INSERT INTO "rustango_audit_log"
               ("entity_table", "entity_pk", "operation", "source", "changes", "occurred_at")
