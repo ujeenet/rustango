@@ -30,7 +30,16 @@ env:
   # in test fixtures, etc.) to a build error. The matching local
   # pre-push hook treats warnings as warnings; CI now does the
   # same. Real type errors / broken tests still fail the build.
-  DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+  # DATABASE_URL is deliberately NOT set here. It used to be, and every
+  # job inherited a URL pointing at a Postgres that only four of them
+  # actually run — so `mysql_live`, `sqlite_litmus`, `windows_test` and
+  # the rest all claimed a database they did not have.
+  #
+  # That was harmless while suites skipped on a failed connect. #1440
+  # made them fail loudly instead, which is right, and turned this into
+  # a job that fails on a database it was never supposed to reach. The
+  # variable now lives on the jobs that have the service.
+  #
   # Strip debuginfo from every build profile in CI. The `postgres_test`
   # job links the full workspace `--all-features`, which is ~450
   # statically-linked integration-test binaries; with the default
@@ -106,6 +115,8 @@ jobs:
           --health-interval 2s
           --health-timeout 2s
           --health-retries 20
+    env:
+      DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
     steps:
       # The all-features workspace build (postgres + mysql + sqlite +
       # tenancy + admin + jobs-* + ...) produces a lot of test binaries
@@ -622,7 +633,9 @@ jobs:
           --health-timeout 2s
           --health-retries 20
     env:
-      # DATABASE_URL is workflow-level with this same value.
+      # The media suites need both halves; this job runs the Postgres
+      # service above, so it is one of the places the URL is true.
+      DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
       RUSTANGO_S3_TEST_ENDPOINT: http://127.0.0.1:9100
       RUSTANGO_S3_TEST_BUCKET: rustango-test
       RUSTANGO_S3_TEST_KEY: rustango
