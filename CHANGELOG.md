@@ -344,6 +344,18 @@ sets no CORS — so the notes below are for hand-written apps.
   nobody is logged out. If you wrote a custom verifier because the standard
   libraries could not parse these, you can delete it. The two-segment
   compatibility path is removed in 0.58.
+
+### Dependencies
+
+- **All nine lockfiles refreshed** — the workspace and all eight example
+  crates. 37 transitive crates move in the workspace lock, including
+  `rustls` 0.23.43 → 0.23.45, `quinn` 0.11.11 → 0.11.12 (and `quinn-proto`
+  0.11.17 → 0.11.18), `tokio-rustls` 0.26.4 → 0.26.5, the `crossbeam`
+  family, `pest` 2.9.0 → 2.9.1, `uuid` 1.26.0 → 1.26.1 and the
+  `wasm-bindgen` 0.2.127 → 0.2.128 set. No direct dependency's requirement
+  changed, so this is a lockfile refresh, not a version bump — nothing to
+  do on upgrade.
+
 ## [0.57.1] — 2026-09-14
 
 A correctness-and-honesty release. Most of it is documentation that described
