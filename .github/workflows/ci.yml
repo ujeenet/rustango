@@ -589,6 +589,12 @@ jobs:
   # MinIO is started as a step rather than a `services:` container: the
   # image needs `server /data` as its command, which `services:` cannot
   # supply.
+  #
+  # Pulled from quay.io, not Docker Hub — an unauthenticated runner gets
+  # "pull access denied for minio/minio" there. Same rate-limit reason
+  # the Postgres/MySQL/Redis services use the AWS ECR mirror, but MinIO
+  # is not an official library image so that mirror has no copy; quay is
+  # MinIO's own registry.
   s3_live:
     runs-on: ubuntu-latest
     env:
@@ -606,14 +612,14 @@ jobs:
           docker run -d --name minio -p 9100:9000 \
             -e MINIO_ROOT_USER=$RUSTANGO_S3_TEST_KEY \
             -e MINIO_ROOT_PASSWORD=$RUSTANGO_S3_TEST_SECRET \
-            minio/minio:latest server /data
+            quay.io/minio/minio:latest server /data
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:9100/minio/health/live && break
             sleep 1
           done
           docker run --rm --network host \
             -e MC_HOST_m=http://$RUSTANGO_S3_TEST_KEY:$RUSTANGO_S3_TEST_SECRET@127.0.0.1:9100 \
-            minio/mc:latest mb --ignore-existing m/$RUSTANGO_S3_TEST_BUCKET
+            quay.io/minio/mc:latest mb --ignore-existing m/$RUSTANGO_S3_TEST_BUCKET
       - run: cargo test -p rustango --features postgres --test s3_live_presign
       # media_live and media_collections_tags_live stay out until #1450
       # lands — they fail against a real Postgres for a framework bug
