@@ -1,10 +1,16 @@
 //! Live MySQL tests for `DatabasePools<MySql>`.
 //!
-//! Env-gated on `MYSQL_URL`. Mirrors the in-memory SQLite live tests
+//! Env-gated on `MYSQL_TEST_URL`, the name every other MySQL suite
+//! reads and the one CI sets. Mirrors the in-memory SQLite live tests
 //! in `database_pools_sqlite_live.rs` so the two backends stay
 //! behaviorally aligned. Skips silently when the env var is unset
-//! — `MYSQL_URL=mysql://user:pass@localhost:3306/rustango_test
+//! — `MYSQL_TEST_URL=mysql://user:pass@localhost:3306/rustango_test
 //! cargo test --features mysql,...` enables them.
+//!
+//! It read `MYSQL_URL` until #1415. Nothing sets that, so the two
+//! tests below that need a server had never run anywhere — while the
+//! file still reported `4 passed`, because the other two need no
+//! database and pass on their own.
 //!
 //! The tests run against ONE shared database (not per-test) for
 //! simplicity; they only do `SELECT 1`-style queries that don't
@@ -27,8 +33,8 @@ fn fake_mysql_org(slug: &str, url: &str) -> Org {
 
 #[tokio::test]
 async fn acquire_returns_working_mysql_connection() {
-    let Ok(url) = std::env::var("MYSQL_URL") else {
-        eprintln!("MYSQL_URL not set — skipping");
+    let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+        eprintln!("MYSQL_TEST_URL not set — skipping");
         return;
     };
     let pools: DatabasePools<sqlx::MySql> = DatabasePools::new(BackendKind::MySql);
@@ -47,8 +53,8 @@ async fn acquire_returns_working_mysql_connection() {
 
 #[tokio::test]
 async fn pool_cached_on_repeat_acquire() {
-    let Ok(url) = std::env::var("MYSQL_URL") else {
-        eprintln!("MYSQL_URL not set — skipping");
+    let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+        eprintln!("MYSQL_TEST_URL not set — skipping");
         return;
     };
     let pools: DatabasePools<sqlx::MySql> = DatabasePools::new(BackendKind::MySql);
@@ -65,7 +71,7 @@ async fn pool_cached_on_repeat_acquire() {
 #[tokio::test]
 async fn rejects_postgres_org() {
     // No DB connection required for this validation path — runs even
-    // without MYSQL_URL.
+    // without MYSQL_TEST_URL.
     let pools: DatabasePools<sqlx::MySql> = DatabasePools::new(BackendKind::MySql);
     let mut org = fake_mysql_org("acme", "mysql://nobody:nothing@127.0.0.1:0/none");
     org.backend_kind = "postgres".into();
