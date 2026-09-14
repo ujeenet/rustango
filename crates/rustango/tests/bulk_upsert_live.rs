@@ -33,7 +33,9 @@ fn live_lock() -> &'static Mutex<()> {
 
 async fn pool() -> Option<Pool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pg = sqlx::PgPool::connect(&url).await.ok()?;
+    let pg = sqlx::PgPool::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"));
     sqlx::query(r#"DROP TABLE IF EXISTS "_bulk_upsert_pg_post" CASCADE"#)
         .execute(&pg)
         .await

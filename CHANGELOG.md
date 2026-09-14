@@ -119,6 +119,26 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Fixed
 
+- **66 live test suites reported green against a database that was not there**
+  (#1440). They read `DATABASE_URL` / `MYSQL_TEST_URL`, and turned a failed
+  connect into a skip — so a wrong port, a service that never came up, or a
+  container that died mid-run produced `ok. N passed` having done nothing.
+  204 test functions. #1434 and #1444 had fixed eight django6 files; this is
+  the rest.
+
+  Unset still skips, which is correct — "no database configured here". Set but
+  unreachable now panics with the URL and the driver error.
+
+  A guard recomputes this from the tree, so a suite added tomorrow cannot
+  reintroduce it. It found six files a hand-written grep missed, because they
+  build the pool through `PoolOptions` across several lines rather than in one
+  expression — which is also why the count is 66 rather than the 60 first
+  reported.
+
+  Not a hygiene exercise: #1437 turned on 22 media tests that had never run,
+  and all 22 failed on first contact with a real database — that was #1450, a
+  live break in media upload. A green wall hides defects, not just gaps.
+
 - **Writing `NULL` into any non-text column failed on PostgreSQL** (#1450).
   `SqlValue::Null` was bound as `None::<String>`, which sends the parameter with
   the **text** OID; Postgres then refuses it anywhere else:

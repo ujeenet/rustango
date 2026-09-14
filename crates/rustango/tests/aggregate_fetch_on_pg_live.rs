@@ -41,7 +41,11 @@ fn lock() -> &'static tokio::sync::Mutex<()> {
 
 async fn pool() -> Option<PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    PgPool::connect(&url).await.ok()
+    Some(
+        PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 /// Same table in two schemas, different numbers in each.
