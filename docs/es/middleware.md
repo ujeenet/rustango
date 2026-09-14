@@ -46,18 +46,28 @@ misma idea, adjunta a tu router.
 
 Hay dos formas, y usarás ambas:
 
-1. **Un `tower::Layer`** — una struct de middleware reutilizable y configurable.
-   Cada componente integrado es uno (`SecurityHeadersLayer`, `RateLimitLayer`,
-   …). Adjuntas un layer con el `.layer(...)` de axum, o — para la mayoría de
-   los integrados — con un **one-liner de trait de extensión** que se lee mejor:
+1. **Una struct de configuración más un one-liner `…RouterExt`** — la forma de
+   la mayoría de los integrados. El tipo `…Layer` es una struct de
+   configuración, *no* un `tower::Layer`: lo instala su trait de extensión, que
+   lo envuelve en `axum::middleware::from_fn` internamente.
+   `SecurityHeadersLayer`, `RateLimitLayer`, `RequestIdLayer`, `CorsLayer`,
+   `EtagLayer`, `CompressionLayer`, `BodyLimitLayer`, `IdempotencyLayer` y
+   `AccessLogLayer` tienen todos esta forma, así que `.layer(…)` sobre ellos no
+   compila:
 
    ```rust
    use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt};
 
-   // These two are equivalent; the second is the ergonomic form.
-   let app = router.layer(SecurityHeadersLayer::strict());
+   // El método RouterExt es la única forma — el nombre acaba en `Layer`, pero
+   // el tipo no implementa `tower::Layer`.
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
+
+   Los que sí son `tower::Layer` — y por tanto aceptan `.layer(…)` — son
+   `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
+   `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` y el builder
+   `api_version`. Comprueba antes de recurrir a `.layer(…)`:
+   `rg 'impl.*tower::Layer' crates/rustango/src/`.
 
    Cada módulo integrado exporta un trait `…RouterExt` (`SecurityHeadersRouterExt`,
    `RateLimitRouterExt`, …). Tráelo al scope y obtienes un método
@@ -199,7 +209,9 @@ loc.is_rtl()     // true for ar, he, fa, …
 ```
 
 El nombre de la cookie es por defecto `django_language` (compatible con Django);
-cámbialo con `.cookie_name("…")`, o pasa `None` para deshabilitar por completo la
+cámbialo con `.cookie_name("my_locale".to_string())` — el parámetro es
+`impl Into<Option<String>>`, que `&str` no satisface, así que un literal pelado
+es un error de cota de trait — o pasa `None` para deshabilitar por completo la
 búsqueda por cookie. El orden de precedencia de resolución, verificado de
 extremo a extremo:
 
@@ -409,8 +421,6 @@ trait de extensión `…RouterExt` para el one-liner. `rustango::request_id` es 
 referencia completa más pequeña para copiar:
 
 - `RequestIdLayer` — el layer configurable (`::default()`, `.always_generate()`),
-- `RequestIdService<S>` — envuelve el servicio interno; lee/fija la cabecera
-  `X-Request-Id` dentro de `call`,
 - `RequestId` — un extractor `FromRequestParts` para que los handlers puedan leer
   el id,
 - `RequestIdRouterExt` — proporciona `Router::request_id(layer)`.
