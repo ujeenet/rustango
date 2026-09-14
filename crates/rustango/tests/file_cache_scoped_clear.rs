@@ -18,6 +18,11 @@
 //! entries are gone, the fallback test because the default cleared
 //! instead of erroring.
 
+// Load-bearing, unlike the gratuitous gates removed in #1428: without
+// `cache` the types below do not exist, so this is "cannot run here"
+// rather than "chose not to run here".
+#![cfg(feature = "cache")]
+
 use std::sync::Arc;
 
 use rustango::cache::{BoxedCache, Cache, FileCache, ScopedCache};
