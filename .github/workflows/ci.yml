@@ -631,16 +631,28 @@ jobs:
       - run: cargo test -p rustango --features mysql --test funcs_batch1_mysql_live
       - run: cargo test -p rustango --features mysql --test json_path_mysql_live
       # Django 6.0 ORM parity execution-verification suite (audit §26).
-      # Shared scenario bodies; the mysql cfg-mod runs here, PG mods
-      # skip (DATABASE_URL unset), sqlite mods are compiled out.
-      - run: cargo test -p rustango --features mysql --test django6_aggregation
-      - run: cargo test -p rustango --features mysql --test django6_subquery
-      - run: cargo test -p rustango --features mysql --test django6_window
-      - run: cargo test -p rustango --features mysql --test django6_joins
-      - run: cargo test -p rustango --features mysql --test django6_setops
-      - run: cargo test -p rustango --features mysql --test django6_json_dates
-      - run: cargo test -p rustango --features mysql --test django6_writes
-      - run: cargo test -p rustango --features mysql --test django6_delta
+      # Shared scenario bodies; the mysql cfg-mod runs here, the sqlite
+      # and PG mods are compiled out.
+      #
+      # `--no-default-features` for the same reason as the cache test
+      # above, and these are where it actually cost something (#1435).
+      # `DATABASE_URL` is defined workflow-wide, so with the default
+      # feature set each of these eight compiled its PG arm in, found
+      # the variable set, dialled a Postgres this job does not run, and
+      # spent ~240s timing out — ~32 minutes per CI run, for eight
+      # suites that then reported green having connected to nothing.
+      #
+      # Verified against a real MySQL 8.0 before changing: all eight
+      # build and pass under `--no-default-features --features mysql`,
+      # same test counts, in under a second each.
+      - run: cargo test -p rustango --no-default-features --features mysql --test django6_aggregation
+      - run: cargo test -p rustango --no-default-features --features mysql --test django6_subquery
+      - run: cargo test -p rustango --no-default-features --features mysql --test django6_window
+      - run: cargo test -p rustango --no-default-features --features mysql --test django6_joins
+      - run: cargo test -p rustango --no-default-features --features mysql --test django6_setops
+      - run: cargo test -p rustango --no-default-features --features mysql --test django6_json_dates
+      - run: cargo test -p rustango --no-default-features --features mysql --test django6_writes
+      - run: cargo test -p rustango --no-default-features --features mysql --test django6_delta
 
   # PostGIS geometry live suite (#443). The regular `postgres_test` runs
   # against `pgvector/pgvector:pg16`, which has no PostGIS, so the
