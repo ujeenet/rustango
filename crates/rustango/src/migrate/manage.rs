@@ -4281,6 +4281,7 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
         // bytes of key: the old `s.len() >= 32` reported "length OK" for
         // a value the cookie layer then refused, so a green check meant
         // nothing about whether the app would come up with sessions.
+        #[cfg(any(feature = "admin", feature = "tenancy"))]
         Some(s) => match crate::session::SessionSecret::from_b64(s) {
             Ok(_) => out
                 .info
@@ -4290,6 +4291,18 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
                  fall back to an ephemeral key and sign everyone out on restart."
             )),
         },
+        // `session` is gated on `admin` / `tenancy`, and so is the base64
+        // crate it decodes with. In a build with neither there is no
+        // cookie layer and no JWT router, so nothing signs with this
+        // value — reporting it unvalidated is the honest answer, and
+        // asserting a length here would be the encoded-string mistake
+        // #1396 removed.
+        #[cfg(not(any(feature = "admin", feature = "tenancy")))]
+        Some(_) => out.info.push(
+            "RUSTANGO_SESSION_SECRET is set but not validated — this build has \
+             neither `admin` nor `tenancy`, so nothing in it signs cookies or JWTs."
+                .into(),
+        ),
     }
 
     // DATABASE_URL — required.
