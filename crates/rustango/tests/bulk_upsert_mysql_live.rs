@@ -38,7 +38,7 @@ async fn mysql_pool() -> Option<Pool> {
         .max_connections(5)
         .connect(&url)
         .await
-        .ok()?;
+        .unwrap_or_else(|e| panic!("MYSQL_TEST_URL is set but unreachable ({url}): {e}"));
     sqlx::query("DROP TABLE IF EXISTS `bulk_upsert_mysql_post`")
         .execute(&mp)
         .await

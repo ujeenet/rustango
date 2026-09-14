@@ -1,6 +1,5 @@
 //! PG-typed `_on` CRUD family — `insert_on` / `update_on` / `delete_on`
-//! / `select_rows_on` / `select_one_row_on` / `insert_returning_on` /
-//! `bulk_insert_on`.
+//! / `select_rows_on` / `insert_returning_on` / `bulk_insert_on`.
 //!
 //! These accept any sqlx executor (`&PgPool`, `&mut PgConnection`, or
 //! a `Transaction`). Tenant-scoped writes need this: schema-mode
@@ -147,23 +146,4 @@ where
         q = bind_query(q, value);
     }
     Ok(q.fetch_all(executor).await?)
-}
-
-/// Like [`select_one_row`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`select_one_row`].
-pub async fn select_one_row_on<'c, E>(
-    executor: E,
-    query: &SelectQuery,
-) -> Result<Option<PgRow>, ExecError>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    let stmt = Postgres.compile_select(query)?;
-    let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = bind_query(q, value);
-    }
-    Ok(q.fetch_optional(executor).await?)
 }

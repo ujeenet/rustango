@@ -1,5 +1,13 @@
 name: CI
 
+# Least privilege for every job. CodeQL flags a workflow with no
+# `permissions:` block because the default token can write to the repo —
+# contents, issues, packages — and CI only ever needs to read the code.
+# Declared at the top rather than per job so a job added tomorrow
+# inherits it instead of being the next one flagged.
+permissions:
+  contents: read
+
 on:
   push:
     # `develop` is the default branch and where every PR lands, but it
@@ -22,7 +30,16 @@ env:
   # in test fixtures, etc.) to a build error. The matching local
   # pre-push hook treats warnings as warnings; CI now does the
   # same. Real type errors / broken tests still fail the build.
-  DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+  # DATABASE_URL is deliberately NOT set here. It used to be, and every
+  # job inherited a URL pointing at a Postgres that only four of them
+  # actually run — so `mysql_live`, `sqlite_litmus`, `windows_test` and
+  # the rest all claimed a database they did not have.
+  #
+  # That was harmless while suites skipped on a failed connect. #1440
+  # made them fail loudly instead, which is right, and turned this into
+  # a job that fails on a database it was never supposed to reach. The
+  # variable now lives on the jobs that have the service.
+  #
   # Strip debuginfo from every build profile in CI. The `postgres_test`
   # job links the full workspace `--all-features`, which is ~450
   # statically-linked integration-test binaries; with the default
@@ -98,6 +115,8 @@ jobs:
           --health-interval 2s
           --health-timeout 2s
           --health-retries 20
+    env:
+      DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
     steps:
       # The all-features workspace build (postgres + mysql + sqlite +
       # tenancy + admin + jobs-* + ...) produces a lot of test binaries
@@ -169,6 +188,34 @@ jobs:
         with:
           manifest-path: ${{ matrix.manifest }}
           command: check advisories
+
+  # A committed lockfile buys reproducibility only if something actually
+  # resolves against it. Nothing passed `--locked`, so all eight example
+  # locks had drifted stale (#1422) — every local build rewrote them,
+  # leaving a tracked file dirty in a shared worktree with no author, and
+  # quietly disproving the guarantee `.gitignore` claims for them.
+  #
+  # `cargo metadata` only resolves, so this is seconds and no compile.
+  lockfiles:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest:
+          - Cargo.toml
+          - examples/showcase/Cargo.toml
+          - crates/rustango/examples/admin_demo/Cargo.toml
+          - crates/rustango/examples/auth_demo/Cargo.toml
+          - crates/rustango/examples/cookbook_blog/Cargo.toml
+          - crates/rustango/examples/getting_started_blog/Cargo.toml
+          - crates/rustango/examples/mcp_demo/Cargo.toml
+          - crates/rustango/examples/orm_cookbook/Cargo.toml
+          - crates/rustango/examples/tenant_user_extension/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - name: Committed lockfile is the one that resolves
+        run: cargo metadata --locked --format-version 1 --manifest-path ${{ matrix.manifest }} > /dev/null
 
   # Trivy security scan — the non-bypassable "detect vulnerabilities
   # before releases" gate. Complements `deny` (RustSec advisories) with
@@ -341,11 +388,11 @@ jobs:
       - name: Getting-started example builds without Postgres
         working-directory: crates/rustango/examples/getting_started_blog
         run: |
-          cargo build --no-default-features --features sqlite
+          cargo build --locked --no-default-features --features sqlite
           # Every test target, not just one — the admin and middleware
           # tests were the ones still naming a driver, and a single
           # named test would not have caught them.
-          cargo test --no-default-features --features sqlite --no-run
+          cargo test --locked --no-default-features --features sqlite --no-run
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_choices
@@ -551,6 +598,77 @@ jobs:
       - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_incr_live
       - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_prefix_live
 
+  # The S3 live suites gate on `RUSTANGO_S3_TEST_*`, which appeared
+  # nowhere in `.github/` and were `#[ignore]`d nowhere either — so they
+  # ran inside `cargo test --workspace --all-features` and were counted
+  # green on every build without touching an S3 server (#1437).
+  # `s3_live_presign` went from "3 passed in 0.00s" to 3.03s once a real
+  # endpoint existed, which is the whole bug in one line.
+  #
+  # MinIO is started as a step rather than a `services:` container: the
+  # image needs `server /data` as its command, which `services:` cannot
+  # supply.
+  #
+  # Pulled from quay.io, not Docker Hub — an unauthenticated runner gets
+  # "pull access denied for minio/minio" there. Same rate-limit reason
+  # the Postgres/MySQL/Redis services use the AWS ECR mirror, but MinIO
+  # is not an official library image so that mirror has no copy; quay is
+  # MinIO's own registry.
+  s3_live:
+    runs-on: ubuntu-latest
+    services:
+      # The media suites store rows in `rustango_media` alongside the
+      # bucket, so they need both halves.
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16-alpine
+        env:
+          POSTGRES_USER: rustango
+          POSTGRES_PASSWORD: rustango
+          POSTGRES_DB: rustango_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rustango -d rustango_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    env:
+      # The media suites need both halves; this job runs the Postgres
+      # service above, so it is one of the places the URL is true.
+      DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+      RUSTANGO_S3_TEST_ENDPOINT: http://127.0.0.1:9100
+      RUSTANGO_S3_TEST_BUCKET: rustango-test
+      RUSTANGO_S3_TEST_KEY: rustango
+      RUSTANGO_S3_TEST_SECRET: rustango123
+      RUSTANGO_S3_TEST_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9100:9000 \
+            -e MINIO_ROOT_USER=$RUSTANGO_S3_TEST_KEY \
+            -e MINIO_ROOT_PASSWORD=$RUSTANGO_S3_TEST_SECRET \
+            quay.io/minio/minio:latest server /data
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9100/minio/health/live && break
+            sleep 1
+          done
+          docker run --rm --network host \
+            -e MC_HOST_m=http://$RUSTANGO_S3_TEST_KEY:$RUSTANGO_S3_TEST_SECRET@127.0.0.1:9100 \
+            quay.io/minio/mc:latest mb --ignore-existing m/$RUSTANGO_S3_TEST_BUCKET
+      - run: cargo test -p rustango --features postgres --test s3_live_presign
+      # These 22 were the ones that exposed #1450 the first time they ran
+      # against a real database. `--test-threads=1`: the setup helper
+      # truncates the shared media tables, so they must not overlap.
+      - run: >-
+          cargo test -p rustango --features postgres,media,testkit
+          --test media_live -- --test-threads=1
+      - run: >-
+          cargo test -p rustango --features postgres,media,testkit
+          --test media_collections_tags_live -- --test-threads=1
+
   # v0.41 MySQL parity — the marketing claim is tri-dialect end-to-end
   # since v0.38, but every MySQL `_live.rs` test was skipped silently
   # in CI because `MYSQL_TEST_URL` was never set. This job runs the
@@ -596,6 +714,11 @@ jobs:
       - run: cargo test -p rustango --all-features --test mysql_live
       - run: cargo test -p rustango --features mysql --test explain_pool_mysql_live
       - run: cargo test -p rustango --features mysql --test bulk_upsert_mysql_live
+      # #1403 — bulk create must roll back on a constraint violation.
+      # `--all-features` so the MySQL arm of the tri-dialect guard is
+      # compiled in; the sqlite arm runs everywhere, this is the one that
+      # needs a server.
+      - run: cargo test -p rustango --all-features --test viewset_bulk_create_is_atomic
       # A second database for tenancy to provision *into*. The service
       # grants `rustango` rights on `rustango_test` only, so the test
       # cannot create this itself; and provisioning refuses a tenant
@@ -762,7 +885,7 @@ jobs:
           node-version: '20'
       - name: Pre-build showcase server
         working-directory: examples/showcase
-        run: cargo build --no-default-features --features ${{ matrix.backend }}
+        run: cargo build --locked --no-default-features --features ${{ matrix.backend }}
       - name: Install playwright + chromium
         working-directory: examples/showcase/e2e
         run: |
@@ -845,7 +968,10 @@ jobs:
       - name: Create schema (migrate)
         if: ${{ matrix.migrate }}
         working-directory: crates/rustango/examples/${{ matrix.example }}
-        run: cargo run -- migrate
+        run: cargo run --locked -- migrate
+      # `--locked` is the point of committing these lockfiles: a bad
+      # upstream release is then handled when we choose to bump, not at
+      # the moment it lands (#1422).
       - name: Test
         working-directory: crates/rustango/examples/${{ matrix.example }}
-        run: cargo test ${{ matrix.test_args }}
+        run: cargo test --locked ${{ matrix.test_args }}

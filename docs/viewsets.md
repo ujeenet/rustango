@@ -509,8 +509,15 @@ A trailing slash on the mount prefix is optional. These six verbs are wired,
 plus an RFC 10008 `QUERY` collection action whenever the `admin` feature is on.
 The routes are built with `axum::routing::get`, so axum answers `HEAD` from the
 `GET` handler automatically; `OPTIONS` is not wired. **Bulk create** is free: `POST` a JSON
-*array* and every element is inserted in order, validated atomically (one bad
-element rejects the whole batch).
+*array* and every element is inserted in order, inside one transaction. One bad
+element rejects the whole batch and **leaves nothing behind** — whether it is
+caught by validation or by the database.
+
+> That second half was not true until [#1403](https://github.com/ujeenet/rustango/issues/1403).
+> Validation was atomic; the writes were one `INSERT` each with no transaction,
+> so a unique or foreign-key violation on element 5 committed elements 0–4,
+> returned `400 bulk entry 5`, and named none of the rows it had created.
+> Constraint violations are exactly the class validation cannot decide up front.
 
 ---
 

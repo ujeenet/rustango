@@ -143,13 +143,13 @@ async fn handle(cfg: Arc<IpFilterLayer>, req: Request<Body>, next: Next) -> Resp
 // ------------------------------------------------------------------ CIDR parsing
 
 #[derive(Debug, Clone, Copy)]
-enum CidrRange {
+pub(crate) enum CidrRange {
     V4 { addr: u32, mask: u32 },
     V6 { addr: u128, mask: u128 },
 }
 
 impl CidrRange {
-    fn contains(&self, ip: IpAddr) -> bool {
+    pub(crate) fn contains(&self, ip: IpAddr) -> bool {
         match (self, ip) {
             (Self::V4 { addr, mask }, IpAddr::V4(v4)) => u32::from(v4) & mask == *addr & mask,
             (Self::V6 { addr, mask }, IpAddr::V6(v6)) => u128::from(v6) & mask == *addr & mask,
@@ -158,7 +158,7 @@ impl CidrRange {
     }
 }
 
-fn parse_all<I, S>(nets: I) -> Result<Vec<CidrRange>, IpFilterError>
+pub(crate) fn parse_all<I, S>(nets: I) -> Result<Vec<CidrRange>, IpFilterError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,

@@ -1106,7 +1106,21 @@ impl AcquiredConn {
         pk_field: &crate::core::FieldSchema,
     ) -> Result<SqlValue, crate::sql::ExecError> {
         let returning = crate::sql::insert_returning_pool(&self.pool, q).await?;
-        let pk = match returning {
+        Ok(pk_from_returning(returning, pk_field))
+    }
+}
+
+/// Decode the primary key out of an INSERT's RETURNING (or MySQL's
+/// `LAST_INSERT_ID()`). Shared by the single-row path and the
+/// transactional bulk path, which get the same enum from
+/// `insert_returning_pool` / `insert_returning_tx`.
+fn pk_from_returning(
+    returning: crate::sql::InsertReturningPool,
+    pk_field: &crate::core::FieldSchema,
+) -> SqlValue {
+    #[allow(unused_variables)]
+    {
+        match returning {
             #[cfg(feature = "postgres")]
             crate::sql::InsertReturningPool::PgRow(row) => {
                 use crate::sql::sqlx::Row as _;
@@ -1140,10 +1154,11 @@ impl AcquiredConn {
                     _ => SqlValue::Null,
                 }
             }
-        };
-        Ok(pk)
+        }
     }
+}
 
+impl AcquiredConn {
     async fn update(&mut self, q: &UpdateQuery) -> Result<u64, crate::sql::ExecError> {
         crate::sql::update_pool(&self.pool, q).await
     }
@@ -2401,13 +2416,56 @@ async fn create_many(
     //
     // The trade-off: N round-trips per request. We document
     // accordingly in the issue + viewset docs.
+    //
+    // All N inside one transaction (#1403). Validation was atomic and
+    // the writes were not, which is worse than plainly non-atomic: a
+    // unique or foreign-key violation on entry 5 committed entries 0-4,
+    // returned `400 bulk entry 5`, and listed none of them — so the
+    // caller is told the batch failed, five rows exist, and nothing in
+    // the response says which. Those constraints are exactly the class
+    // validation cannot decide up front.
     let fields = state.effective_fields();
-    let mut created: Vec<Value> = Vec::with_capacity(prepared.len());
+    let mut tx = match crate::sql::transaction_pool(&acq.pool).await {
+        Ok(tx) => tx,
+        Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    };
+
+    let mut pks: Vec<SqlValue> = Vec::with_capacity(prepared.len());
     for (i, (columns, values)) in prepared.into_iter().enumerate() {
-        match insert_and_fetch_one(state, acq, columns, values, pk_field, &fields).await {
-            Ok(obj) => created.push(obj),
-            Err((code, msg)) => {
-                return json_error(code, &format!("bulk entry {i}: {msg}"));
+        let query = InsertQuery {
+            model: state.vs.schema,
+            columns,
+            values,
+            returning: vec![pk_field.column],
+            on_conflict: None,
+        };
+        match crate::sql::insert_returning_tx(&mut tx, &query).await {
+            Ok(returning) => pks.push(pk_from_returning(returning, pk_field)),
+            Err(e) => {
+                // Drop every row this request wrote, including the ones
+                // that succeeded before entry `i`.
+                let _ = tx.rollback().await;
+                return json_error(StatusCode::BAD_REQUEST, &format!("bulk entry {i}: {e}"));
+            }
+        }
+    }
+    if let Err(e) = tx.commit().await {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+
+    // Read the rows back after the commit. They have to be committed to
+    // be visible here — `acq` is the pool, not the transaction — and
+    // atomicity is a property of the writes, which is the part that was
+    // missing.
+    let mut created: Vec<Value> = Vec::with_capacity(pks.len());
+    for (i, pk_val) in pks.into_iter().enumerate() {
+        match fetch_by_pk(state, acq, pk_field, pk_val, &fields).await {
+            Some(obj) => created.push(obj),
+            None => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("bulk entry {i}: created but could not retrieve"),
+                );
             }
         }
     }

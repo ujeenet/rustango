@@ -99,13 +99,17 @@ pub use postgres::Postgres;
 #[doc(hidden)]
 pub mod __macro_internals {
     pub use super::executor::{
-        annotate_count_children, annotate_count_children_on, bulk_insert_on,
-        delete_on, fetch_aggregate_on, fetch_with_prefetch, insert_on,
-        insert_returning_on, raw_query_on, select_one_row_on, select_rows_on,
-        update_on,
+        bulk_insert_on, delete_on, fetch_with_prefetch, insert_on,
+        insert_returning_on, update_on,
     };
 }
 ```
+
+> Shrunk by [#1431](https://github.com/ujeenet/rustango/issues/1431). The module
+> now holds only what the derive macro emits; `fetch_aggregate_on`,
+> `select_rows_on` and the two `annotate_count_children` forms are public on
+> `rustango::sql`, and `raw_query_on` / `select_one_row_on` were emitted by
+> nothing and are deleted.
 
 ### `rustango-orm::query` (2 files, 3,400 LOC)
 

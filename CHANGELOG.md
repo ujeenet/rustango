@@ -47,6 +47,285 @@ sets no CORS — so the notes below are for hand-written apps.
   sets either, switch to `from_settings_async(...).await?`** for redis, or build
   `DatabaseCache` where the pool is. `memory`, `null` and `file` are unchanged.
 
+- **Logging out now actually ends the session** (#1402). Three defects composed
+  into a logout that did nothing:
+
+  `JwtBackend` never read the revocation list, so `revoke()` and
+  `POST /api/auth/logout` wrote a `jti` that nothing on the authentication path
+  ever consulted. It never checked `typ` either, and access and refresh tokens
+  are wire-identical apart from it — so a refresh token presented as a bearer
+  authenticated, carrying days of life where minutes were intended. And logout
+  itself never touched the refresh token at all.
+
+  The result: a user clicked log out, got `204`, and the session survived for
+  the full refresh TTL — seven days by default — on a credential the endpoint
+  never looked at.
+
+  **You must wire a shared `JtiStore`** for revocation to be enforced:
+  `JwtBackend::new(secret).with_jti_store(store)`, the same store the
+  `JwtLifecycle` holds. Enforcement stays off without one — turning it on
+  silently would change what live tokens do — so a backend with no store
+  behaves exactly as before. **Clients should send `{"refresh": "…"}`** to
+  `/logout`; the body is optional and older clients keep working, revoking only
+  the bearer as they did before.
+
+- **The documented password-reset path now applies the documented password
+  policy** (#1399). `confirm_password_reset_pool` / `_into` checked only
+  `len() < 8`, while `passwords::strength_score` — the policy
+  `docs/auth-passwords.md` describes — rejects `12345678` and `password1`
+  outright. A user who could not set a weak password at registration could set
+  one by resetting.
+
+  **This is stricter than before.** A deployment that accepted 8-character
+  passwords at reset will start refusing them, with the reason in
+  `AuthFlowError::WeakPassword`. That is the point, but it will be visible.
+
+- **Reset links can now be made single-use** (#1399). The confirm helpers called
+  plain `verify`, so a reset link stayed valid for its full TTL — *including
+  after the password had been changed*. A copy of the email in a shared inbox, a
+  forward, or a support ticket with the mail pasted in was a working account
+  takeover until the token expired, at a point where the legitimate user had
+  finished and had no reason to suspect anything. `docs/auth-flows.md`
+  recommended single-use for reset while the helper it documented could not do
+  it.
+
+  New `confirm_password_reset_single_use` / `_single_use_into` take a `&Cache`
+  and refuse a replay with `AuthFlowError::AlreadyUsed`. The policy is checked
+  before the token is consumed, so a rejected password does not burn the link.
+  The existing helpers are unchanged and still replayable — the old signature
+  has nowhere to take a cache — and now say so in their docs.
+
+- **Per-IP rate limiting works behind a reverse proxy** (#1398), via a new
+  `RealIpLayer::trust_proxies([...])`. `RateLimitLayer::per_ip` keys on the
+  connecting socket, which behind a proxy is the proxy — so every client shared
+  one bucket, one noisy client throttled everybody, and no attacker was ever
+  individually limited. `docs/security.md` had prescribed pairing `per_ip` with
+  `real_ip`, which did nothing: `RealIpLayer` inserts a `RealIp` extension and
+  neither limiter had heard of it.
+
+  **The obvious repair would have been worse than the bug.** Keying the limiter
+  on `RealIp` trades a coarse limit for no limit — `X-Forwarded-For` is set by
+  whoever sends it, so any client could mint a fresh bucket per request by
+  varying a header. `RealIpLayer` has no trusted-proxy check; `HeaderStrategy`
+  selects which header to read, not whom to believe.
+
+  So a forwarded address now additionally produces `TrustedRealIp`, but **only**
+  when the connecting socket matches `trust_proxies`, and the limiters key on
+  that and never on the bare claim. **Nothing changes until you declare your
+  proxies** — `RealIp` is untouched for logging, and an undeclared deployment
+  keys on the socket exactly as before. Layer order is load-bearing: `real_ip`
+  must be added *after* `rate_limit` to run before it, and the limiter now warns
+  once when a forwarding header arrives with no trusted address.
+
+### Added
+
+- **`Cli::on_shutdown(hook)`** — work that runs after the server drains, on
+  SIGINT and SIGTERM (#1409). This is where a job queue's `shutdown()` belongs;
+  see the Changed note below for why putting it after `run()` never worked.
+- **`rustango::shutdown::shutdown_signal()`** — the shared both-signals future,
+  public so a hand-rolled `axum::serve` or a standalone worker can use it
+  instead of `tokio::signal::ctrl_c()`, which is SIGINT-only on Unix.
+- **The executor-taking query operations** (#1431): `rustango::sql::{fetch_aggregate_on,
+  fetch_with_prefetch, select_rows_on, insert_on, update_on, bulk_insert_on,
+  annotate_count_children, annotate_count_children_on}`. PostgreSQL only — see
+  Fixed for why they were hidden and what that cost.
+- **`SessionSecret::from_b64`** (#1396) — the one definition of what
+  `RUSTANGO_SESSION_SECRET` means, public so `check --deploy` and the runtime
+  cannot answer differently.
+
+### Changed
+
+- **`Cli::run` returns on signal instead of never returning** (#1409). It
+  installed no graceful shutdown, so SIGINT/SIGTERM killed the process and
+  nothing after `run()` ran — including the `queue.shutdown()` the docs put
+  there. Code after `run()` now executes. Prefer `on_shutdown` anyway: it also
+  runs on the tenancy path and orders correctly against the server's drain.
+
+- **`server::Builder::serve` and `server::App::serve` now install graceful
+  shutdown too** (#1409). Both are public and both are taught in the docs —
+  `App::serve` is the README's headline example — and both were bare
+  `axum::serve`, so anything after them was unreachable on a signal.
+
+### Fixed
+
+- **Bulk create is now atomic in the writes, not only the validation** (#1403).
+  `docs/viewsets.md` said "validated atomically (one bad element rejects the
+  whole batch)". Validation was atomic; the writes were one `INSERT` each with
+  no enclosing transaction and an early return on the first database error.
+
+  So a `POST` of ten elements whose fifth violated a unique or foreign-key
+  constraint **committed elements 0–4**, answered `400 bulk entry 5`, and listed
+  none of the rows it had created. The caller is told the batch failed, five
+  rows exist, and nothing in the response says which — so a naive retry either
+  duplicates them or fails on element 0. Constraint violations are exactly the
+  class validation cannot decide up front.
+
+  The loop now runs inside one transaction and rolls back on any failure. The
+  rows are read back after the commit, so the response is unchanged on success.
+  Verified on PostgreSQL, MySQL and SQLite against live servers: reverting the
+  transaction leaves two rows behind on all three.
+
+- **`Cli::on_shutdown` was wired but unreachable on two of five paths** (#1409).
+  `docs/jobs.md` documented draining in-flight jobs on shutdown; under any
+  orchestrator the step never ran. Three defects:
+
+  `Cli::run` installed no graceful shutdown at all, so the signal killed the
+  process and **nothing after `run()` executed** — including the
+  `queue.shutdown()` the docs put there. The tenancy path *did* shut down
+  gracefully but waited on `tokio::signal::ctrl_c()`, which is SIGINT-only on
+  Unix, so it never fired for SIGTERM. And nothing in the crate handled SIGTERM
+  anywhere.
+
+  SIGTERM is how Kubernetes, `docker stop`, systemd and most supervisors ask a
+  process to stop; Ctrl-C is a laptop. So the drain worked where losing a job
+  does not matter and never where it does — invisibly: exit 0, nothing logged.
+
+  One `shutdown_signal()` now serves every path. A guard fails the build on any
+  bare `axum::serve`, because the first pass at this wired the hook into five
+  call sites and only three could reach it — the other two sat behind a
+  `Builder::serve` with no graceful shutdown at all, so the hook was called on
+  a line the process never got to.
+
+- **A documented prohibition the framework's own example violated** (#1431).
+  The executor-taking query operations — now public, see Added — lived in
+  `sql::__macro_internals`, marked `#[doc(hidden)]` and "do not import", with
+  **fourteen importers** — ten in-tree tests, the cookbook, and
+  two in the flagship example's own request handlers. Not misuse: there was no
+  public way to do it, and `cargo doc` would not show the functions. Four of
+  them — `fetch_aggregate_on`, `select_rows_on` and the two
+  `annotate_count_children` forms — were **never emitted by the macro at all**;
+  they had been filed as codegen support and were never that.
+
+  **PostgreSQL only**, unlike the rest of the query surface. That is a gap
+  rather than a design choice (#1293), and it is now stated rather than hidden.
+
+  `__macro_internals` keeps only what codegen emits, and a guard fails the
+  build if anything imports it again. `raw_query_on` and `select_one_row_on`
+  were emitted by nothing and used by nobody, and are removed.
+
+- **`RUSTANGO_SESSION_SECRET` means one thing now, not three** (#1396). It was
+  read in three places that disagreed about "long enough": the cookie layer
+  base64-decoded and applied the 32-byte floor to the decoded bytes;
+  `auth_routes::Config::build_jwt` took the **raw string bytes**; and
+  `manage check --deploy` measured the **raw string length**.
+
+  A 32-character base64 secret — which several key generators emit — is 24
+  bytes. So `check --deploy` reported "length OK", JWTs were signed with a key
+  below the floor the assert believed it was enforcing, and the cookie layer
+  fell back to a random per-process key, silently ending session persistence
+  across restarts. Three answers, one variable, and the tool whose job is
+  catching this said it was fine.
+
+  Everything routes through `SessionSecret::from_b64`, now public — including
+  the two copies of the decode that already lived inside `session.rs` itself,
+  so the meaning is defined once. **A value `check --deploy` accepts is a value
+  the runtime accepts.**
+
+  **Breaking, and it can stop a working app booting.** Two cases:
+
+  - A secret that is **not valid base64** but ≥32 raw characters (a passphrase,
+    a hex string) used to sign JWTs perfectly well — `build_jwt` took the raw
+    bytes. It is now rejected, so `jwt_router` **panics at startup** rather
+    than signing with a key the rest of the framework does not recognise. A
+    JWT-only API on such a secret was not broken before and will not start
+    now. That is deliberate — one variable must not mean two keys — but it is
+    a boot failure, not a warning.
+  - `check --deploy` newly errors on secrets it used to pass. For cookies
+    those were already falling back to an ephemeral key.
+
+  Either way: regenerate with `openssl rand -base64 32`, which gives 44
+  characters, or pass bytes directly via `auth_routes::Config::session_secret`.
+
+- **A password reset now ends sessions issued before it** (#1449).
+  `confirm_password_reset_pool` rotated the hash and nothing else, leaving
+  `password_changed_at` — the column the session middleware compares `iat`
+  against — unwritten. `NULL` there is specifically the value that middleware
+  reads as "never rotated, do not enforce", so the check was not stale but
+  disabled: an attacker's session survived the victim's reset, in the one flow
+  where signing out everywhere is the entire point.
+
+  The admin change-password path had stamped it all along, so the same account
+  reached two documented ways got two different outcomes — and the weaker one
+  was the path the guide walked you through.
+
+  `confirm_password_reset_pool` / `_single_use` stamp it, in the same UPDATE as
+  the hash. **`_into` deliberately does not**: it takes a caller-named table
+  that may have no such column, so writing one would break custom schemas. If
+  yours has an equivalent, stamp it yourself in the same transaction — the docs
+  now say so, and steer you to the defaults form for `rustango_users`.
+
+- **66 live test suites reported green against a database that was not there**
+  (#1440). They read `DATABASE_URL` / `MYSQL_TEST_URL`, and turned a failed
+  connect into a skip — so a wrong port, a service that never came up, or a
+  container that died mid-run produced `ok. N passed` having done nothing.
+  204 test functions. #1434 and #1444 had fixed eight django6 files; this is
+  the rest.
+
+  Unset still skips, which is correct — "no database configured here". Set but
+  unreachable now panics with the URL and the driver error.
+
+  A guard recomputes this from the tree, so a suite added tomorrow cannot
+  reintroduce it. It found six files a hand-written grep missed, because they
+  build the pool through `PoolOptions` across several lines rather than in one
+  expression — which is also why the count is 66 rather than the 60 first
+  reported.
+
+  Not a hygiene exercise: #1437 turned on 22 media tests that had never run,
+  and all 22 failed on first contact with a real database — that was #1450, a
+  live break in media upload. A green wall hides defects, not just gaps.
+
+- **Writing `NULL` into any non-text column failed on PostgreSQL** (#1450).
+  `SqlValue::Null` was bound as `None::<String>`, which sends the parameter with
+  the **text** OID; Postgres then refuses it anywhere else:
+
+  ```
+  column "uploaded_by_id" is of type bigint but expression is of type text
+  ```
+
+  **Media upload was broken outright on Postgres** — `uploaded_by_id: None` is
+  the ordinary case for an anonymous or system upload — and 50-odd other sites
+  across `soft_delete`, `audit`, `fixtures`, `forms`, `viewset`, `admin` and
+  `migrate` share the expression. MySQL and SQLite type parameters loosely
+  enough to accept a text NULL in a bigint column, so only Postgres ever showed
+  it, and a tri-dialect suite passing on two backends said nothing about the
+  third.
+
+  Now bound with OID 0 — the wire protocol's "unspecified" — so the server
+  infers the type from the column. Nothing to update. The MySQL and SQLite
+  binders are deliberately unchanged.
+
+  Found by #1437: the 22 media tests that had never executed all failed the
+  first time they ran against a real database, and all 22 pass now.
+
+- **The S3 live suites had never run, and reported green on every build**
+  (#1437). Twenty-five tests gated on `RUSTANGO_S3_TEST_*`, which was set
+  nowhere in CI, and none carried `#[ignore]` — so `cargo test --workspace
+  --all-features` ran them and counted them passing without touching an S3
+  server. `s3_live_presign` went from "3 passed in 0.00s" to 3.03s once a real
+  endpoint existed. A new `s3_live` job runs it against MinIO.
+
+  The 22 media tests are `#[ignore]`d rather than wired in, because pointing
+  them at a real Postgres for the first time made all 22 fail — on #1450, a
+  framework bug they were written to catch and never got the chance to.
+
+- **Job retry backoff was `2s, 4s, 8s, 16s`, not the documented `1s, 2s, 4s,
+  8s`** (#1410). The shift ran off the 1-based `next_attempt`, so every wait was
+  double what the module doc, `docs/jobs.md` and the comment directly above the
+  line all said — a failing job took twice as long to recover as promised, which
+  matters against a latency budget. Both backends carried the same expression in
+  two files, agreeing with each other and disagreeing with every description of
+  them; they now share one `retry_backoff_ms`, pinned by a unit test.
+
+  Also corrected, and separate: `MAX_ATTEMPTS` is a ceiling on **total
+  attempts**, not retries. The default of 5 is one run plus four retries, so
+  `MAX_ATTEMPTS = 3` gives two. The docs called it a "retry ceiling".
+
+- **`JwtBackend` stopped accepting `JwtLifecycle`'s tokens** between #1397 and
+  this release. #1397 made the lifecycle issue three-segment JWTs, and the
+  backend required *exactly one dot* before it would attempt verification — so
+  the pairing `docs/auth-jwt-api.md` tells you to use silently authenticated
+  nobody. It now accepts both shapes (#1402).
+
 ### Changed
 
 - **`JwtLifecycle` tokens are now actual JWTs** (#1397). They were

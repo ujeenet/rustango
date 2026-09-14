@@ -509,8 +509,15 @@ Ein abschließender Schrägstrich am Mount-Präfix ist optional. Diese sechs Ver
 dazu eine `QUERY`-Collection-Action nach RFC 10008, sobald das Feature `admin`
 aktiv ist. Die Routen werden mit `axum::routing::get` gebaut, also beantwortet
 axum `HEAD` automatisch aus dem `GET`-Handler; `OPTIONS` ist nicht verdrahtet. **Bulk-Create** gibt es gratis: `POST` ein JSON-
-*Array*, und jedes Element wird der Reihe nach eingefügt, atomar validiert (ein fehlerhaftes
-Element lehnt die ganze Charge ab).
+*Array*, und jedes Element wird der Reihe nach eingefügt, **in einer Transaktion**. Ein
+fehlerhaftes Element lehnt die ganze Charge ab und **hinterlässt nichts** — gleich ob
+die Validierung oder die Datenbank es abfängt.
+
+> Die zweite Hälfte stimmte bis [#1403](https://github.com/ujeenet/rustango/issues/1403)
+> nicht. Die Validierung war atomar; die Schreibvorgänge waren je ein `INSERT` ohne
+> Transaktion, sodass ein Unique- oder Fremdschlüsselverstoß bei Element 5 die Elemente
+> 0–4 committete, `400 bulk entry 5` zurückgab und keine der erzeugten Zeilen nannte.
+> Genau diese Verstöße kann die Validierung vorab nicht entscheiden.
 
 ---
 

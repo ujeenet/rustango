@@ -47,7 +47,7 @@ que todo proyecto reescribe de otro modo:
 |---|---|---|---|
 | POST | `/api/auth/login` | `{username, password}` | `{access, refresh, user}` |
 | POST | `/api/auth/refresh` | `{refresh}` | `{access, refresh}` |
-| POST | `/api/auth/logout` | `Authorization: Bearer <access>` | `204` (revoca el JTI) |
+| POST | `/api/auth/logout` | `Authorization: Bearer <access>` + `{refresh}` opcional | `204` (revoca ambos JTI) |
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login verifica la contraseña con [argon2id](auth-passwords.md), luego emite un
@@ -149,6 +149,24 @@ let pair = jwt.issue_pair(1);
 assert!(jwt.revoke(&pair.access).await);
 assert!(jwt.verify_access(&pair.access).await.is_none());
 ```
+
+### Envía el token de refresco a `/logout`
+
+Revocar solo el bearer termina un token que habría expirado en minutos de todas
+formas. El token de refresco es el que dura días, y puede emitir nuevos tokens
+de acceso durante todo su TTL — así que un cierre de sesión que lo deja vivo no
+termina la sesión, solo la aplaza:
+
+```jsonc
+POST /api/auth/logout
+Authorization: Bearer <access>
+{ "refresh": "<refresh>" }        // revoca también la mitad de larga duración
+```
+
+El cuerpo es opcional, así que los clientes escritos contra el endpoint anterior
+siguen funcionando sin cambios — simplemente revocan menos. Envíalo. Ambas
+mitades están fijadas al inquilino que llama, de modo que un subdominio no puede
+revocar el token de otro.
 
 La lista negra reside en un `JtiStore` intercambiable. El `InMemoryJtiStore` por
 defecto es **de un solo proceso y pierde las revocaciones al reiniciar** — bien

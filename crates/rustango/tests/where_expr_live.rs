@@ -224,7 +224,5 @@ async fn empty_or_branch_returns_named_writer_error() {
         compound_limit: None,
         compound_offset: None,
     };
-    rustango::sql::__macro_internals::select_rows_on(&pool, &q2)
-        .await
-        .unwrap();
+    rustango::sql::select_rows_on(&pool, &q2).await.unwrap();
 }

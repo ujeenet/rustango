@@ -32,7 +32,9 @@ pub struct Post {
 
 async fn pool() -> Option<Pool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pg = sqlx::PgPool::connect(&url).await.ok()?;
+    let pg = sqlx::PgPool::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"));
     Some(Pool::Postgres(pg))
 }
 

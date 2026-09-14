@@ -47,7 +47,7 @@ réécrit sinon :
 |---|---|---|---|
 | POST | `/api/auth/login` | `{username, password}` | `{access, refresh, user}` |
 | POST | `/api/auth/refresh` | `{refresh}` | `{access, refresh}` |
-| POST | `/api/auth/logout` | `Authorization: Bearer <access>` | `204` (révoque le JTI) |
+| POST | `/api/auth/logout` | `Authorization: Bearer <access>` + `{refresh}` optionnel | `204` (révoque les deux JTI) |
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login vérifie le mot de passe avec [argon2id](auth-passwords.md), puis émet une
@@ -152,6 +152,24 @@ let pair = jwt.issue_pair(1);
 assert!(jwt.revoke(&pair.access).await);
 assert!(jwt.verify_access(&pair.access).await.is_none());
 ```
+
+### Envoyez le token de rafraîchissement à `/logout`
+
+Ne révoquer que le bearer met fin à un token qui aurait de toute façon expiré en
+quelques minutes. Le token de rafraîchissement est celui qui vit des jours, et
+il peut émettre de nouveaux tokens d'accès pendant toute sa TTL — une
+déconnexion qui le laisse en vie ne termine donc pas la session, elle la reporte :
+
+```jsonc
+POST /api/auth/logout
+Authorization: Bearer <access>
+{ "refresh": "<refresh>" }        // révoque aussi la moitié à longue durée
+```
+
+Le corps est optionnel, donc les clients écrits pour l'ancien endpoint
+continuent de fonctionner sans changement — ils révoquent simplement moins.
+Envoyez-le. Les deux moitiés sont rattachées au locataire appelant, de sorte
+qu'un sous-domaine ne peut pas révoquer le token d'un autre.
 
 La liste noire réside dans un `JtiStore` interchangeable. Le `InMemoryJtiStore`
 par défaut est **mono-processus et perd les révocations au redémarrage** —

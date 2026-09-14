@@ -20,7 +20,6 @@
 
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
-use http_body_util::BodyExt;
 use rustango::sql::Pool;
 use rustango::Model;
 use tower::ServiceExt;

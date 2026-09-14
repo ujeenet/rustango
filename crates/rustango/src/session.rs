@@ -81,33 +81,15 @@ impl SessionSecret {
     #[must_use]
     pub fn from_env_or_random() -> Self {
         if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
-            match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
-                Ok(bytes) if bytes.len() >= 32 => return Self(bytes),
-                Ok(bytes) => {
-                    tracing::warn!(
-                        actual_len = bytes.len(),
-                        "RUSTANGO_SESSION_SECRET decoded to fewer than 32 bytes — falling back to random",
-                    );
-                    eprintln!(
-                        "\x1b[33;1mwarning:\x1b[0m RUSTANGO_SESSION_SECRET is set but \
-                         decoded to {} bytes (need ≥ 32). Using a random key. \
-                         Sessions will NOT survive a server restart. \
-                         Generate one with: \
-                         openssl rand -base64 32",
-                        bytes.len()
-                    );
-                }
+            // One definition of "valid secret", shared with build_jwt and
+            // `check --deploy` since #1396.
+            match Self::from_b64(&raw) {
+                Ok(secret) => return secret,
                 Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "RUSTANGO_SESSION_SECRET is not valid base64 — falling back to random",
-                    );
+                    tracing::warn!(error = %e, "RUSTANGO_SESSION_SECRET unusable — falling back to random");
                     eprintln!(
-                        "\x1b[33;1mwarning:\x1b[0m RUSTANGO_SESSION_SECRET is set but \
-                         is not valid base64 ({e}). Using a random key. \
-                         Sessions will NOT survive a server restart. \
-                         Generate one with: \
-                         openssl rand -base64 32",
+                        "\x1b[33;1mwarning:\x1b[0m {e}. Using a random key. \
+                         Sessions will NOT survive a server restart.",
                     );
                 }
             }
@@ -142,19 +124,15 @@ impl SessionSecret {
     #[must_use]
     pub fn from_env_or_disk(disk_path: &std::path::Path) -> Self {
         if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
-            match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
-                Ok(bytes) if bytes.len() >= 32 => return Self(bytes),
+            match Self::from_b64(&raw) {
+                Ok(secret) => return secret,
                 // Set but unusable. This used to fall through in silence,
                 // and the "generated new session secret … set
                 // RUSTANGO_SESSION_SECRET to override" line that followed
                 // read as though the variable were unset — so a malformed
                 // real secret, or a deliberate rotation, looked applied and
                 // was not (#1359).
-                Ok(bytes) => warn_unusable_secret(&format!(
-                    "it decoded to {} bytes, and 32 are needed",
-                    bytes.len()
-                )),
-                Err(e) => warn_unusable_secret(&format!("it is not valid base64 ({e})")),
+                Err(e) => warn_unusable_secret(&e.to_string()),
             }
         }
         if let Ok(bytes) = std::fs::read(disk_path) {
@@ -206,7 +184,7 @@ impl SessionSecret {
     /// fewer than 32.
     pub fn try_from_env() -> Result<Self, SessionSecretError> {
         if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
-            return Self::decode_b64(&raw);
+            return Self::from_b64(&raw);
         }
         tracing::warn!(
             "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
@@ -230,15 +208,28 @@ impl SessionSecret {
     /// `TooShort` per [`Self::try_from_env`].
     pub fn require_from_env() -> Result<Self, SessionSecretError> {
         match std::env::var("RUSTANGO_SESSION_SECRET") {
-            Ok(raw) => Self::decode_b64(&raw),
+            Ok(raw) => Self::from_b64(&raw),
             Err(_) => Err(SessionSecretError::Missing),
         }
     }
 
-    /// Decode + validate a base64 secret string. Shared by
-    /// [`Self::try_from_env`] / [`Self::require_from_env`] and unit-
-    /// testable without touching the process environment.
-    fn decode_b64(raw: &str) -> Result<Self, SessionSecretError> {
+    /// Decode + validate a base64 secret string — **the** definition of
+    /// what `RUSTANGO_SESSION_SECRET` means.
+    ///
+    /// Public since #1396, because it was not, and two other readers
+    /// grew their own answers: `auth_routes::Config::build_jwt` signed
+    /// JWTs with the raw string bytes, and `manage check --deploy`
+    /// measured the raw string's length. A 32-character base64 secret
+    /// decodes to 24 bytes, so it passed both 32-byte floors while this
+    /// one — the runtime's — rejected it. One variable, three answers.
+    ///
+    /// Every reader now calls this, so a value `check --deploy` accepts
+    /// is a value the runtime accepts.
+    ///
+    /// # Errors
+    /// [`SessionSecretError::BadBase64`] or `TooShort` (measured on the
+    /// **decoded** bytes, which is the key that actually signs).
+    pub fn from_b64(raw: &str) -> Result<Self, SessionSecretError> {
         match base64::engine::general_purpose::STANDARD.decode(raw.trim()) {
             Ok(bytes) if bytes.len() >= 32 => Ok(Self(bytes)),
             Ok(bytes) => Err(SessionSecretError::TooShort {
@@ -426,24 +417,24 @@ mod tests {
     }
 
     #[test]
-    fn decode_b64_accepts_valid_32_byte_key() {
+    fn from_b64_accepts_valid_32_byte_key() {
         let raw = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
-        assert!(SessionSecret::decode_b64(&raw).is_ok());
+        assert!(SessionSecret::from_b64(&raw).is_ok());
     }
 
     #[test]
-    fn decode_b64_rejects_short_key() {
+    fn from_b64_rejects_short_key() {
         let raw = base64::engine::general_purpose::STANDARD.encode([7u8; 16]);
         assert!(matches!(
-            SessionSecret::decode_b64(&raw),
+            SessionSecret::from_b64(&raw),
             Err(SessionSecretError::TooShort { actual: 16 })
         ));
     }
 
     #[test]
-    fn decode_b64_rejects_bad_base64() {
+    fn from_b64_rejects_bad_base64() {
         assert!(matches!(
-            SessionSecret::decode_b64("!!! not base64 !!!"),
+            SessionSecret::from_b64("!!! not base64 !!!"),
             Err(SessionSecretError::BadBase64 { .. })
         ));
     }
