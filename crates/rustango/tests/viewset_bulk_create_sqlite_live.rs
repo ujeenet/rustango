@@ -132,9 +132,7 @@ async fn bulk_entry_with_invalid_field_rejects_whole_bulk_atomically() {
         rustango::sql::raw_execute_pool(&pool, "SELECT COUNT(*) FROM bulk_widget", Vec::new())
             .await;
     assert!(count.is_ok());
-    let Pool::Sqlite(sp) = &pool else {
-        panic!("test gated to sqlite");
-    };
+    let sp = pool.as_sqlite().expect("test gated to sqlite");
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bulk_widget")
         .fetch_one(sp)
         .await

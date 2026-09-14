@@ -27,7 +27,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use rustango::core::Model as _;
-use rustango::extractors::{Tenant, TenantContext};
+use rustango::extractors::TenantContext;
 use rustango::sql::sqlx;
 use rustango::sql::{Auto, Pool};
 use rustango::tenancy::auth_routes::require_bearer;

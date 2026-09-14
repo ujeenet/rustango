@@ -67,9 +67,7 @@ async fn seeder_emits_only_declared_subset() {
     rustango::testkit::migrate_framework(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
 
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
 
     // dp_readonly: view only — 1 codename.
     let read_only_rows: Vec<(String,)> = sqlx::query_as(
@@ -129,9 +127,7 @@ async fn re_seed_stays_idempotent_with_filtered_set() {
     auto_create_permissions_pool(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
 
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     let (count,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM rustango_permissions WHERE table_name = 'dp_readonly'",
     )

@@ -77,16 +77,15 @@ async fn empty_field_list_is_a_noop() {
         .await
         .expect("empty list = no-op");
     // Confirm the original row in the DB is untouched.
-    if let Pool::Sqlite(sq) = &pool {
-        let (title, status, views): (String, String, i64) =
-            sqlx::query_as("SELECT title, status, views FROM spf_post WHERE id = 1")
-                .fetch_one(sq)
-                .await
-                .unwrap();
-        assert_eq!(title, "orig");
-        assert_eq!(status, "draft");
-        assert_eq!(views, 0);
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    let (title, status, views): (String, String, i64) =
+        sqlx::query_as("SELECT title, status, views FROM spf_post WHERE id = 1")
+            .fetch_one(sq)
+            .await
+            .unwrap();
+    assert_eq!(title, "orig");
+    assert_eq!(status, "draft");
+    assert_eq!(views, 0);
 }
 
 /// Happy path on SQLite — only listed columns get written; the others
@@ -103,22 +102,21 @@ async fn only_listed_columns_get_written() {
         views: 999,
     };
     row.save_partial(&["title"], &pool).await.unwrap();
-    if let Pool::Sqlite(sq) = &pool {
-        let (title, status, views): (String, String, i64) =
-            sqlx::query_as("SELECT title, status, views FROM spf_post WHERE id = 1")
-                .fetch_one(sq)
-                .await
-                .unwrap();
-        assert_eq!(title, "rewritten", "title should be updated");
-        assert_eq!(
-            status, "draft",
-            "status should be untouched — not in update_fields list"
-        );
-        assert_eq!(
-            views, 0,
-            "views should be untouched — not in update_fields list"
-        );
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    let (title, status, views): (String, String, i64) =
+        sqlx::query_as("SELECT title, status, views FROM spf_post WHERE id = 1")
+            .fetch_one(sq)
+            .await
+            .unwrap();
+    assert_eq!(title, "rewritten", "title should be updated");
+    assert_eq!(
+        status, "draft",
+        "status should be untouched — not in update_fields list"
+    );
+    assert_eq!(
+        views, 0,
+        "views should be untouched — not in update_fields list"
+    );
 }
 
 /// Multi-field narrowing — two cols listed, one third stays untouched.
@@ -132,16 +130,15 @@ async fn multiple_listed_columns_get_written() {
         views: 50,
     };
     row.save_partial(&["title", "views"], &pool).await.unwrap();
-    if let Pool::Sqlite(sq) = &pool {
-        let (title, status, views): (String, String, i64) =
-            sqlx::query_as("SELECT title, status, views FROM spf_post WHERE id = 1")
-                .fetch_one(sq)
-                .await
-                .unwrap();
-        assert_eq!(title, "new-title");
-        assert_eq!(status, "draft", "status not listed → untouched");
-        assert_eq!(views, 50);
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    let (title, status, views): (String, String, i64) =
+        sqlx::query_as("SELECT title, status, views FROM spf_post WHERE id = 1")
+            .fetch_one(sq)
+            .await
+            .unwrap();
+    assert_eq!(title, "new-title");
+    assert_eq!(status, "draft", "status not listed → untouched");
+    assert_eq!(views, 50);
 }
 
 /// Concurrency-safety scenario from the issue rationale: two writers
@@ -170,14 +167,13 @@ async fn concurrent_writers_dont_overwrite_each_other() {
     };
     b.save_partial(&["status"], &pool).await.unwrap();
 
-    if let Pool::Sqlite(sq) = &pool {
-        let (title, status, views): (String, String, i64) =
-            sqlx::query_as("SELECT title, status, views FROM spf_post WHERE id = 1")
-                .fetch_one(sq)
-                .await
-                .unwrap();
-        assert_eq!(title, "from-A", "A's title write survived");
-        assert_eq!(status, "from-B", "B's status write survived");
-        assert_eq!(views, 0, "neither writer touched views");
-    }
+    let sq = pool.as_sqlite().expect("sqlite pool");
+    let (title, status, views): (String, String, i64) =
+        sqlx::query_as("SELECT title, status, views FROM spf_post WHERE id = 1")
+            .fetch_one(sq)
+            .await
+            .unwrap();
+    assert_eq!(title, "from-A", "A's title write survived");
+    assert_eq!(status, "from-B", "B's status write survived");
+    assert_eq!(views, 0, "neither writer touched views");
 }
