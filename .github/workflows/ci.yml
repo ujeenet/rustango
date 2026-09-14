@@ -170,6 +170,34 @@ jobs:
           manifest-path: ${{ matrix.manifest }}
           command: check advisories
 
+  # A committed lockfile buys reproducibility only if something actually
+  # resolves against it. Nothing passed `--locked`, so all eight example
+  # locks had drifted stale (#1422) — every local build rewrote them,
+  # leaving a tracked file dirty in a shared worktree with no author, and
+  # quietly disproving the guarantee `.gitignore` claims for them.
+  #
+  # `cargo metadata` only resolves, so this is seconds and no compile.
+  lockfiles:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest:
+          - Cargo.toml
+          - examples/showcase/Cargo.toml
+          - crates/rustango/examples/admin_demo/Cargo.toml
+          - crates/rustango/examples/auth_demo/Cargo.toml
+          - crates/rustango/examples/cookbook_blog/Cargo.toml
+          - crates/rustango/examples/getting_started_blog/Cargo.toml
+          - crates/rustango/examples/mcp_demo/Cargo.toml
+          - crates/rustango/examples/orm_cookbook/Cargo.toml
+          - crates/rustango/examples/tenant_user_extension/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - name: Committed lockfile is the one that resolves
+        run: cargo metadata --locked --format-version 1 --manifest-path ${{ matrix.manifest }} > /dev/null
+
   # Trivy security scan — the non-bypassable "detect vulnerabilities
   # before releases" gate. Complements `deny` (RustSec advisories) with
   # a broader vuln DB (GHSA), plus committed-secret and IaC/misconfig
@@ -341,11 +369,11 @@ jobs:
       - name: Getting-started example builds without Postgres
         working-directory: crates/rustango/examples/getting_started_blog
         run: |
-          cargo build --no-default-features --features sqlite
+          cargo build --locked --no-default-features --features sqlite
           # Every test target, not just one — the admin and middleware
           # tests were the ones still naming a driver, and a single
           # named test would not have caught them.
-          cargo test --no-default-features --features sqlite --no-run
+          cargo test --locked --no-default-features --features sqlite --no-run
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_choices
@@ -762,7 +790,7 @@ jobs:
           node-version: '20'
       - name: Pre-build showcase server
         working-directory: examples/showcase
-        run: cargo build --no-default-features --features ${{ matrix.backend }}
+        run: cargo build --locked --no-default-features --features ${{ matrix.backend }}
       - name: Install playwright + chromium
         working-directory: examples/showcase/e2e
         run: |
@@ -845,7 +873,10 @@ jobs:
       - name: Create schema (migrate)
         if: ${{ matrix.migrate }}
         working-directory: crates/rustango/examples/${{ matrix.example }}
-        run: cargo run -- migrate
+        run: cargo run --locked -- migrate
+      # `--locked` is the point of committing these lockfiles: a bad
+      # upstream release is then handled when we choose to bump, not at
+      # the moment it lands (#1422).
       - name: Test
         working-directory: crates/rustango/examples/${{ matrix.example }}
-        run: cargo test ${{ matrix.test_args }}
+        run: cargo test --locked ${{ matrix.test_args }}
