@@ -46,9 +46,7 @@ async fn fresh_pool_returns_fresh_instance_without_mutating_self() {
     let pk = p1.id.get().copied().unwrap();
 
     // External update.
-    let Pool::Sqlite(raw) = &pool else {
-        unreachable!()
-    };
+    let raw = pool.as_sqlite().expect("sqlite pool");
     sqlx::query("UPDATE mfr_post SET title = ?, views = ? WHERE id = ?")
         .bind("fresh-title")
         .bind(99_i64)
@@ -78,9 +76,7 @@ async fn fresh_pool_returns_none_when_row_deleted() {
     let pk = p.id.get().copied().unwrap();
 
     // Delete the row out from under us.
-    let Pool::Sqlite(raw) = &pool else {
-        unreachable!()
-    };
+    let raw = pool.as_sqlite().expect("sqlite pool");
     sqlx::query("DELETE FROM mfr_post WHERE id = ?")
         .bind(pk)
         .execute(raw)
