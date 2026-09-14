@@ -11,7 +11,11 @@
 //!
 //! Nothing here is wrong today. It is here so that stays true.
 
-#![cfg(feature = "sqlite")]
+// No feature gate, deliberately. This reads files off disk and calls
+// nothing from the crate, so gating it only decides whether it runs —
+// and it was `#![cfg(feature = "sqlite")]`, which is not in the default
+// feature set, so `cargo test -p rustango --test docs_inventories`
+// reported `ok. 0 passed` while proving nothing.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

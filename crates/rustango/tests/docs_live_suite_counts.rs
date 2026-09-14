@@ -18,7 +18,11 @@
 //! four more copies of the same counts, and a table nobody can check is
 //! exactly how the English one came to be wrong.
 
-#![cfg(feature = "sqlite")]
+// No feature gate, deliberately. This reads files off disk and calls
+// nothing from the crate, so gating it only decides whether it runs —
+// and it was `#![cfg(feature = "sqlite")]`, which is not in the default
+// feature set, so `cargo test -p rustango --test docs_live_suite_counts`
+// reported `ok. 0 passed` while proving nothing.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
