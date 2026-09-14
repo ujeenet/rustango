@@ -38,6 +38,31 @@ pub fn current() -> Option<AdminSession> {
     CURRENT_SESSION.try_with(|s| s.clone()).ok()
 }
 
+tokio::task_local! {
+    /// Per-request CSRF token, set by `csrf_context` (#1395).
+    ///
+    /// Same reasoning as `CURRENT_SESSION`: `chrome_context` is the one
+    /// place every admin template's variables come from, and it is
+    /// called from nine render sites across five files. Threading a
+    /// token through all of them — and through the helpers that render
+    /// inline panels — is a lot of signature churn for a value that is
+    /// request-scoped and read in exactly one place.
+    pub(crate) static CURRENT_CSRF_TOKEN: String;
+}
+
+/// The current request's CSRF token, if the admin middleware installed
+/// one.
+///
+/// `None` outside an admin request, which is why `chrome_context`
+/// tolerates its absence: hand-rendered pages and tests call it with no
+/// request in scope, and a missing token there is correct rather than
+/// an error. Enforcement does not depend on this — `CsrfLayer` rejects
+/// an unsafe request whatever the template did.
+#[must_use]
+pub fn current_csrf_token() -> Option<String> {
+    CURRENT_CSRF_TOKEN.try_with(Clone::clone).ok()
+}
+
 /// Default session TTL — 8 hours. Operators get re-prompted once a
 /// workday. Future slice exposes this as a knob on
 /// [`crate::admin::Builder`].

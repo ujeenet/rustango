@@ -27,6 +27,7 @@
       <p>To re-enroll (e.g. on a new device), submit the form below with a fresh setup —
          this replaces your current device.</p>
       <form method="post" action="{{ action }}">
+        {{ csrf_input | safe }}
         <button type="submit" name="reset" value="1">Re-enroll</button>
       </form>
     {% else %}
@@ -40,6 +41,7 @@
       <p class="totp-uri">{{ otpauth_url }}</p>
 
       <form method="post" action="{{ action }}">
+        {{ csrf_input | safe }}
         <label>
           Verification code
           <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code"

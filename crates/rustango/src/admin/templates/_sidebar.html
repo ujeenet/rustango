@@ -40,6 +40,7 @@
        middleware seated an `AdminSession` on the request. #}
     {% if session_user %}
         <form method="post" action="{{ logout_url | default(value=admin_prefix ~ '/logout') }}" class="logout-form">
+            {{ csrf_input | safe }}
             <p class="signed-in-as">
                 {% if session_user.username %}
                     Signed in as <strong>{{ session_user.username }}</strong>
