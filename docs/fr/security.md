@@ -122,7 +122,11 @@ let layer = CorsLayer::new()
 let layer = CorsLayer::permissive();              // any origin, common methods
 ```
 
-**Note de sécurité :** ne combinez jamais `allow_credentials(true)` avec `allow_any_origin()` — le navigateur rejettera la réponse. Avec des identifiants, vous DEVEZ lister des origines explicites.
+**Note de sécurité :** avec des identifiants, vous DEVEZ lister des origines explicites. `allow_credentials(true)` combiné à `allow_any_origin()` ne donne pas un CORS joker avec identifiants — cela n'existe pas, et le demander ne vous donne aucune des deux moitiés.
+
+Rustango répond alors `Access-Control-Allow-Origin: *` et **aucun** en-tête `Access-Control-Allow-Credentials`, si bien que le navigateur bloque la requête avec identifiants. Jusqu'à [#1394](https://github.com/ujeenet/rustango/issues/1394), l'origine demandeuse était renvoyée en écho — ce que les navigateurs acceptent justement avec des identifiants : cette combinaison était un trou bien réel, lisible par n'importe quel site visité par l'utilisateur, et cette page le décrivait comme quelque chose que le navigateur rejetterait.
+
+Utilisez `.allow_origins([...])` avec les origines que vous servez réellement. Ce chemin est inchangé et envoie toujours `Access-Control-Allow-Credentials: true`.
 
 ---
 
