@@ -62,15 +62,30 @@ pub enum HeaderStrategy {
     Auto,
 }
 
+/// A client IP resolved from a header sent by a **trusted** proxy — the
+/// connecting socket matched [`RealIpLayer::trust_proxies`] (#1398).
+///
+/// [`RealIp`] says only "some header claimed this". Any client can claim
+/// anything, so that value must never key a security decision. This one
+/// carries the extra fact that the claim arrived over a hop the operator
+/// declared trusted, which is what makes it safe for
+/// [`crate::rate_limit`] to bucket on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrustedRealIp(pub IpAddr);
+
 #[derive(Clone, Debug)]
 pub struct RealIpLayer {
     pub strategy: HeaderStrategy,
+    /// Networks whose forwarding headers are believed. `None` (the
+    /// default) means none are, and only [`RealIp`] is inserted.
+    trusted_proxies: Option<Vec<crate::ip_filter::CidrRange>>,
 }
 
 impl Default for RealIpLayer {
     fn default() -> Self {
         Self {
             strategy: HeaderStrategy::Auto,
+            trusted_proxies: None,
         }
     }
 }
@@ -78,7 +93,50 @@ impl Default for RealIpLayer {
 impl RealIpLayer {
     #[must_use]
     pub fn new(strategy: HeaderStrategy) -> Self {
-        Self { strategy }
+        Self {
+            strategy,
+            trusted_proxies: None,
+        }
+    }
+
+    /// Declare which networks' forwarding headers to believe, so the
+    /// resolved address can key a security decision (#1398).
+    ///
+    /// Without this, a forwarding header is just a claim by whoever sent
+    /// it, and [`RealIp`] is only safe for logging. Name the addresses
+    /// your ingress actually connects from — your load balancer, your
+    /// nginx, your CDN's egress ranges — and a request arriving from one
+    /// of them additionally gets a [`TrustedRealIp`], which
+    /// [`crate::rate_limit::RateLimitLayer::per_ip`] will bucket on.
+    ///
+    /// A request from anywhere else is unaffected: it still gets
+    /// `RealIp`, never `TrustedRealIp`, so a client cannot win itself a
+    /// private rate-limit bucket by inventing an `X-Forwarded-For`.
+    ///
+    /// ```no_run
+    /// # use rustango::real_ip::RealIpLayer;
+    /// let layer = RealIpLayer::default()
+    ///     .trust_proxies(["10.0.0.0/8", "172.16.0.0/12"])
+    ///     .expect("valid CIDRs");
+    /// ```
+    ///
+    /// # Errors
+    /// [`crate::ip_filter::IpFilterError::InvalidCidr`] if an entry is
+    /// not an IP or CIDR block.
+    pub fn trust_proxies<I, S>(mut self, nets: I) -> Result<Self, crate::ip_filter::IpFilterError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.trusted_proxies = Some(crate::ip_filter::parse_all(nets)?);
+        Ok(self)
+    }
+
+    /// Whether `peer` is a proxy whose forwarding headers we believe.
+    fn trusts(&self, peer: IpAddr) -> bool {
+        self.trusted_proxies
+            .as_ref()
+            .is_some_and(|nets| nets.iter().any(|n| n.contains(peer)))
     }
 }
 
@@ -95,7 +153,18 @@ impl<S: Clone + Send + Sync + 'static> RealIpRouterExt for Router<S> {
                 let cfg = cfg.clone();
                 async move {
                     if let Some(ip) = extract(&req, &cfg.strategy) {
+                        // The claim, for logging — unchanged, and never
+                        // trusted on its own.
                         req.extensions_mut().insert(RealIp(ip));
+                        // The claim plus the fact that it came over a hop
+                        // the operator declared trusted (#1398).
+                        let peer = req
+                            .extensions()
+                            .get::<ConnectInfo<std::net::SocketAddr>>()
+                            .map(|ci| ci.ip());
+                        if peer.is_some_and(|p| cfg.trusts(p)) {
+                            req.extensions_mut().insert(TrustedRealIp(ip));
+                        }
                     }
                     next.run(req).await
                 }

@@ -149,13 +149,25 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 En cas d'épuisement : `429 Too Many Requests` avec l'en-tête `Retry-After`. Chaque réponse réussie inclut `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Derrière un reverse proxy, `per_ip` ne fonctionne pas, et `real_ip` n'y remédie pas** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` s'indexe sur le socket de connexion (`ConnectInfo`), qui derrière un proxy est l'IP *du proxy* — donc tous les clients partagent un seul compartiment. Un seul client bruyant limite alors tous les autres, et aucun attaquant individuel n'est jamais limité.
+> **Derrière un reverse proxy, nommez vos proxys ou `per_ip` ne limite rien d'utile** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` s'indexe sur le socket de connexion, qui derrière un proxy est l'adresse *du proxy* — donc tous les clients partagent un seul compartiment. Un seul client bruyant limite alors tous les autres, et aucun attaquant individuel n'est jamais limité.
 >
-> `RealIpLayer` n'y change **rien**. Il insère une extension `RealIp` distincte et ne réécrit jamais `ConnectInfo` ; aucun des deux limiteurs ne lit cette extension. Cette page recommandait autrefois de les associer, ce qui ne faisait rien.
+> Montez `RealIpLayer` **et dites-lui à quels sauts croire** :
 >
-> Ne les câblez pas vous-même non plus. `RealIpLayer` prend le `X-Forwarded-For` le plus à gauche, un en-tête que le client peut définir et sans vérification de proxy de confiance — indexer un limiteur dessus transforme « la limite est trop grossière » en « la limite se contourne en envoyant un en-tête ». C'est la pire des deux défaillances.
+> ```rust
+> use rustango::real_ip::{HeaderStrategy, RealIpLayer, RealIpRouterExt};
 >
-> En attendant le correctif, limitez sur quelque chose que vous maîtrisez : `KeyBy::Header` sur une clé d'API authentifiée, ou une limite par route sur le proxy lui-même, qui connaît déjà l'adresse réelle du client.
+> app.rate_limit(RateLimitLayer::per_ip(60, Duration::from_secs(60)))
+>    .real_ip(
+>        RealIpLayer::new(HeaderStrategy::XForwardedFor)
+>            .trust_proxies(["10.0.0.0/8"])?,   // votre ingress, pas Internet
+>    );
+> ```
+>
+> **L'ordre est déterminant et échoue en silence.** Les couches s'appliquent de l'extérieur en dernier : `real_ip` doit donc être ajouté *après* `rate_limit` pour s'exécuter *avant*. Dans l'autre sens, le limiteur ne voit aucune adresse résolue et s'indexe de nouveau silencieusement sur le socket — il avertit une fois lorsqu'un en-tête de transfert arrive sans adresse résolue.
+>
+> **`trust_proxies` n'est pas une décoration facultative.** `X-Forwarded-For` est défini par celui qui l'envoie. Sans liste de proxys déclarée, l'en-tête n'est qu'une affirmation : le limiteur l'ignore entièrement et s'indexe sur le socket — délibérément. Sinon, n'importe quel client pourrait se forger un compartiment neuf à chaque requête en variant un en-tête, transformant « la limite est trop grossière » en « il n'y a pas de limite ». `RealIp` (l'affirmation) convient pour la journalisation ; seul `TrustedRealIp`, présent quand le pair correspond à `trust_proxies`, indexe un limiteur.
+>
+> Nommez les adresses depuis lesquelles votre ingress se connecte réellement. Faire confiance à une plage plus large offre le contournement à quiconque s'y trouve.
 
 `RateLimitLayer` est **local au processus** — il compte les requêtes uniquement au sein d'une instance en cours d'exécution, ce qui convient si vous exécutez une seule instance. Si vous exécutez plusieurs instances (répliques) derrière un load balancer, chacune tiendrait son propre compte, et la limite réelle se multiplierait. Pour partager un seul compte entre toutes les répliques, utilisez `rate_limit_cache::CacheRateLimitLayer`, qui délègue à n'importe quelle implémentation de `cache::Cache` (à associer avec `cache::RedisCache` pour un compteur partagé incrémenté de façon atomique par le `INCRBY` de Redis) :
 

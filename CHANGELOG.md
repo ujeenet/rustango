@@ -95,6 +95,28 @@ sets no CORS — so the notes below are for hand-written apps.
   The existing helpers are unchanged and still replayable — the old signature
   has nowhere to take a cache — and now say so in their docs.
 
+- **Per-IP rate limiting works behind a reverse proxy** (#1398), via a new
+  `RealIpLayer::trust_proxies([...])`. `RateLimitLayer::per_ip` keys on the
+  connecting socket, which behind a proxy is the proxy — so every client shared
+  one bucket, one noisy client throttled everybody, and no attacker was ever
+  individually limited. `docs/security.md` had prescribed pairing `per_ip` with
+  `real_ip`, which did nothing: `RealIpLayer` inserts a `RealIp` extension and
+  neither limiter had heard of it.
+
+  **The obvious repair would have been worse than the bug.** Keying the limiter
+  on `RealIp` trades a coarse limit for no limit — `X-Forwarded-For` is set by
+  whoever sends it, so any client could mint a fresh bucket per request by
+  varying a header. `RealIpLayer` has no trusted-proxy check; `HeaderStrategy`
+  selects which header to read, not whom to believe.
+
+  So a forwarded address now additionally produces `TrustedRealIp`, but **only**
+  when the connecting socket matches `trust_proxies`, and the limiters key on
+  that and never on the bare claim. **Nothing changes until you declare your
+  proxies** — `RealIp` is untouched for logging, and an undeclared deployment
+  keys on the socket exactly as before. Layer order is load-bearing: `real_ip`
+  must be added *after* `rate_limit` to run before it, and the limiter now warns
+  once when a forwarding header arrives with no trusted address.
+
 ### Fixed
 
 - **`JwtBackend` stopped accepting `JwtLifecycle`'s tokens** between #1397 and

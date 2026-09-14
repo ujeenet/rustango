@@ -149,13 +149,25 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 When exhausted: `429 Too Many Requests` with `Retry-After` header. Every successful response includes `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Behind a reverse proxy, `per_ip` does not work, and `real_ip` does not fix it** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` keys on the connecting socket (`ConnectInfo`), which behind a proxy is the *proxy's* IP — so every client shares one bucket. One noisy client then rate-limits everybody, and no individual attacker is ever limited.
+> **Behind a reverse proxy, name your proxies or `per_ip` limits nothing useful** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` keys on the connecting socket, which behind a proxy is the *proxy's* address — so every client shares one bucket. One noisy client rate-limits everybody, and no individual attacker is ever limited.
 >
-> `RealIpLayer` does **not** change this. It inserts a separate `RealIp` extension and never rewrites `ConnectInfo`; neither limiter reads that extension. This page used to prescribe pairing them, which did nothing.
+> Mount `RealIpLayer` **and tell it which hops to believe**:
 >
-> Do not wire the two together yourself either. `RealIpLayer` takes the leftmost `X-Forwarded-For`, which is a client-settable header with no trusted-proxy check — keying a limiter on it turns "the limit is too coarse" into "the limit is bypassable by sending a header". That is the worse failure of the two.
+> ```rust
+> use rustango::real_ip::{HeaderStrategy, RealIpLayer, RealIpRouterExt};
 >
-> Until this is fixed, limit on something you control: `KeyBy::Header` on an authenticated API key, or a per-route limit at the proxy itself, which already knows the real client address.
+> app.rate_limit(RateLimitLayer::per_ip(60, Duration::from_secs(60)))
+>    .real_ip(
+>        RealIpLayer::new(HeaderStrategy::XForwardedFor)
+>            .trust_proxies(["10.0.0.0/8"])?,   // your ingress, not the internet
+>    );
+> ```
+>
+> **Order is load-bearing and fails silently.** Layers apply outermost-last, so `real_ip` must be added *after* `rate_limit` in order to run *before* it. Get it backwards and the limiter sees no resolved address and quietly keys on the socket again — it warns once when a forwarding header arrives without one.
+>
+> **`trust_proxies` is not optional decoration.** `X-Forwarded-For` is set by whoever sends it. Without a declared proxy list the header is only a claim, so the limiter ignores it entirely and keys on the socket — deliberately. If it did otherwise, any client could mint a fresh bucket per request by varying a header, turning "the limit is too coarse" into "there is no limit". `RealIp` (the claim) is fine for logging; only `TrustedRealIp`, which appears when the peer matches `trust_proxies`, keys a limiter.
+>
+> Name the addresses your ingress actually connects from. Trusting a range wider than that hands the bypass to anyone inside it.
 
 `RateLimitLayer` is **process-local** — it counts requests only within one running instance, which is fine if you run a single instance. If you run several instances (replicas) behind a load balancer, each would keep its own count, so the real limit multiplies. To share one count across all replicas, use `rate_limit_cache::CacheRateLimitLayer`, which delegates to any `cache::Cache` impl (pair with `cache::RedisCache` for a shared counter incremented atomically by Redis `INCRBY`):
 
@@ -176,7 +188,7 @@ let app = axum::Router::new()
     );
 ```
 
-> **Keying by a secret header is safe to share.** When you `key_by(KeyBy::Header("authorization"))` or `"x-api-key"`, the cache-backed limiter **hashes** the header value before using it as a key (#1252), so a shared Redis never stores a live credential where someone reading keys could harvest it. Keying by `KeyBy::Ip` needs `ConnectInfo` (or a `RealIpLayer` in front); without it the limiter warns once and falls back to a single shared bucket.
+> **Keying by a secret header is safe to share.** When you `key_by(KeyBy::Header("authorization"))` or `"x-api-key"`, the cache-backed limiter **hashes** the header value before using it as a key (#1252), so a shared Redis never stores a live credential where someone reading keys could harvest it. Keying by `KeyBy::Ip` needs `ConnectInfo` (or a `RealIpLayer` with `trust_proxies` in front); without it the limiter warns once and falls back to a single shared bucket.
 
 
 ---
