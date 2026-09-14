@@ -4,6 +4,67 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Security
+
+These change behaviour. A freshly scaffolded project uses none of the affected
+surfaces — the generator wires no admin, calls no `cache::from_settings`, and
+sets no CORS — so the notes below are for hand-written apps.
+
+- **Admin mutations now require a CSRF token.** `docs/security.md` had always
+  claimed this; only `POST /login` actually had it, so create, update, delete,
+  bulk actions and audit cleanup accepted a cross-site POST riding the
+  administrator's session — audit cleanup included, meaning the same request
+  class could erase its own trace (#1395).
+
+  **You must update** any **custom admin template** with a POST form, and any
+  **custom admin view registered with `Method::POST`** — both are mounted inside
+  the new layer and will return `403` until the form carries a token. Add
+  `{{ csrf_input | safe }}` inside the `<form>` (the variable is in every admin
+  template's context automatically), or send `X-CSRF-Token`. The bundled
+  templates are already done.
+
+  Only applies when you call `.with_session_auth(...)`; CSRF defends
+  cookie-borne credentials, and an admin without it has none.
+
+- **`allow_any_origin()` with `allow_credentials(true)` no longer reflects the
+  request origin** (#1394). It echoed it verbatim, and browsers accept a
+  reflected concrete origin alongside credentials even though they reject `*` —
+  so that pairing was a working read-any-response hole, and this page described
+  it as something the browser prevents. Such a response is now `*` with no
+  credentials header. **If you relied on it, move to
+  `.allow_origins([...])`** — which is unchanged and still sends credentials.
+
+- **`ScopedCache::clear()` no longer deletes other tenants' entries on a
+  `FileCache`** (#1400). `FileCache` had no `delete_prefix`, so it fell through
+  to a trait default that cleared everything. Nothing to update; the on-disk
+  format gained a header and old entries are evicted on first access, so the
+  only effect is a one-time cold cache.
+
+- **`cache::from_settings` panics for `backend = "redis"` or `"db"`** instead of
+  silently returning an in-memory cache (#1400). A per-process cache is not a
+  degraded shared one — it multiplies `CacheRateLimitLayer`'s limit by the
+  replica count and stops `verify_single_use` failing closed. **If your config
+  sets either, switch to `from_settings_async(...).await?`** for redis, or build
+  `DatabaseCache` where the pool is. `memory`, `null` and `file` are unchanged.
+
+### Changed
+
+- **`JwtLifecycle` tokens are now actual JWTs** (#1397). They were
+  `base64url(payload).base64url(signature)` — two segments, no JOSE header, no
+  `alg`, signed over the payload alone — while every doc, the type names, the
+  route and `/api/auth/login` called them JWTs. Nothing outside rustango could
+  read one, including `rustango::jwt::decode`, which rejected the framework's
+  own tokens as malformed.
+
+  They are now three segments with `{"alg":"HS256","typ":"JWT"}`, signed over
+  `header.payload`. Claims are unchanged — including MCP agent tokens, whose
+  `kind` / `tenant` / `skills` / `tools` / `uid` all survive and are now
+  readable by a standard decoder.
+
+  **Nothing to update**, and tokens minted before the upgrade still verify, so
+  nobody is logged out. If you wrote a custom verifier because the standard
+  libraries could not parse these, you can delete it. The two-segment
+  compatibility path is removed in 0.58.
 ## [0.57.1] — 2026-09-14
 
 A correctness-and-honesty release. Most of it is documentation that described

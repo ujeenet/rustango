@@ -239,6 +239,19 @@ Custom claims survive `refresh` (carried onto the new pair) unless you use
   to authenticate arbitrary routes from the `Authorization: Bearer` header.
 - **HS256 signing**, 32-byte key floor — same algorithm and constraints as
   [standalone JWT](auth-jwt.md#security-model).
+- **The tokens are ordinary JWTs**, so anything that verifies a JWT can verify
+  these: `jwt.io`, your platform's standard library, an API gateway, another
+  service you hand a token to. Three segments, a JOSE header of
+  `{"alg":"HS256","typ":"JWT"}`, signed over `header.payload`.
+
+  Until [#1397](https://github.com/ujeenet/rustango/issues/1397) they were two
+  segments with no header, signed over the payload alone — readable by nothing
+  but rustango, and rejected even by `rustango::jwt::decode`. If you wrote a
+  custom verifier to work around that, you can drop it.
+
+  Tokens minted before the fix are still accepted on verify so an upgrade does
+  not log anyone out. That compatibility path is removed in 0.58, by which point
+  any token in the old shape has long expired.
 
 
 ---

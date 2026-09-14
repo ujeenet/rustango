@@ -122,7 +122,11 @@ let layer = CorsLayer::new()
 let layer = CorsLayer::permissive();              // any origin, common methods
 ```
 
-**Note de sécurité :** ne combinez jamais `allow_credentials(true)` avec `allow_any_origin()` — le navigateur rejettera la réponse. Avec des identifiants, vous DEVEZ lister des origines explicites.
+**Note de sécurité :** avec des identifiants, vous DEVEZ lister des origines explicites. `allow_credentials(true)` combiné à `allow_any_origin()` ne donne pas un CORS joker avec identifiants — cela n'existe pas, et le demander ne vous donne aucune des deux moitiés.
+
+Rustango répond alors `Access-Control-Allow-Origin: *` et **aucun** en-tête `Access-Control-Allow-Credentials`, si bien que le navigateur bloque la requête avec identifiants. Jusqu'à [#1394](https://github.com/ujeenet/rustango/issues/1394), l'origine demandeuse était renvoyée en écho — ce que les navigateurs acceptent justement avec des identifiants : cette combinaison était un trou bien réel, lisible par n'importe quel site visité par l'utilisateur, et cette page le décrivait comme quelque chose que le navigateur rejetterait.
+
+Utilisez `.allow_origins([...])` avec les origines que vous servez réellement. Ce chemin est inchangé et envoie toujours `Access-Control-Allow-Credentials: true`.
 
 ---
 
@@ -231,7 +235,11 @@ let app = Router::new()
 
 **Exempter les endpoints collecteurs.** `CsrfConfig::exempt_prefix("/path")` (répétable) ignore l'application du CSRF pour les méthodes non sûres sur les requêtes dont le chemin commence par le préfixe donné. Ceci concerne les endpoints append-only, sans état d'authentification, atteints via `navigator.sendBeacon` — par exemple un collecteur d'analytics — qui ne peuvent pas définir un en-tête `X-CSRF-Token` et, lorsque la page est servie depuis un cache CDN qui supprime `Set-Cookie`, peuvent ne porter aucun cookie CSRF du tout. Gardez les préfixes étroits et n'exemptez jamais quoi que ce soit qui lit ou écrit un état d'authentification.
 
-L'auto-admin active le CSRF sur chaque mutation par défaut, et il n'y a aucun moyen de s'y soustraire.
+**L'auto-admin.** Dès que vous appelez `.with_session_auth(...)`, le CSRF est monté automatiquement sur chaque mutation de l'admin — création, modification, suppression, actions groupées, purge d'audit — et chaque formulaire de l'admin rend son jeton pour vous. Il n'y a rien à câbler et aucun moyen de s'y soustraire.
+
+La condition est délibérée, pas fortuite : le CSRF défend des identifiants que le navigateur joint de lui-même, c'est donc le cookie de session qui lui donne un sens. Un admin construit sans `with_session_auth` n'a aucun identifiant géré par rustango à usurper, et ses mutations sont directement joignables par quiconque atteint la route — c'est un trou d'authentification, pas de CSRF, et le CSRF ne le réduirait pas. Si vous placez votre propre auth par cookie devant, montez `csrf::layer()` vous-même.
+
+Jusqu'à [#1395](https://github.com/ujeenet/rustango/issues/1395), ce paragraphe affirmait que la protection était inconditionnelle alors que la seule route protégée était `POST /login`. Toute autre mutation de l'admin acceptait un POST inter-sites porté par la session de l'administrateur — y compris la purge d'audit, si bien que la même classe de requête pouvait effacer sa propre trace.
 
 ---
 

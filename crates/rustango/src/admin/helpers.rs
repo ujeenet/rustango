@@ -80,7 +80,24 @@ pub(crate) fn chrome_context_with_session(
         .brand_tagline
         .as_deref()
         .or(state.config.subtitle.as_deref());
+    // #1395 — every admin template's POST form renders `csrf_input`, and
+    // this is the one place all of them get their variables from. The
+    // token comes from the request-scoped task-local installed by
+    // `csrf_context`; outside a request there is none, and the empty
+    // string is the honest value. That case is a hand-rendered page or a
+    // test, neither of which submits anything — and enforcement never
+    // depends on the template, because `CsrfLayer` rejects an unsafe
+    // request whatever was rendered.
+    let csrf_token = super::session::current_csrf_token().unwrap_or_default();
+    let csrf_input = if csrf_token.is_empty() {
+        String::new()
+    } else {
+        crate::forms::csrf::csrf_input_html(&csrf_token)
+    };
+
     serde_json::json!({
+        "csrf_token": csrf_token,
+        "csrf_input": csrf_input,
         "sidebar_groups": sidebar_context(state, active_table),
         "active_table": active_table.unwrap_or(""),
         "admin_title": admin_title,
