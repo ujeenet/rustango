@@ -33,7 +33,7 @@ fn fail_ratio_pct() -> u8 {
     std::env::var("SOAK_FAIL_RATIO_PCT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(10)
+        .unwrap_or(2)
 }
 
 /// Workers in this process, or in a separate container?
@@ -87,6 +87,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .poll_interval(Duration::from_millis(250)),
     );
     commerce::jobs::register_all(&queue).await;
+    // Without this the in-process queue falls through to the framework's
+    // generic "no callback configured" log — which is what the SQLite
+    // instance did, 98 times, while every other instance attributed its
+    // dead letters properly.
+    queue
+        .on_dead_letter(|dl| async move { commerce::jobs::log_dead_letter(None, &dl) })
+        .await;
 
     if inline_workers() {
         queue.start().await;

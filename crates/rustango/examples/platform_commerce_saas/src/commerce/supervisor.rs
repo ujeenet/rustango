@@ -109,15 +109,7 @@ async fn ensure_queue(
     let slug_for_dl = org.slug.clone();
     q.on_dead_letter(move |dl| {
         let slug = slug_for_dl.clone();
-        async move {
-            tracing::error!(
-                tenant = %slug,
-                job = dl.name,
-                attempts = dl.attempts,
-                error = %dl.error,
-                "job dead-lettered"
-            );
-        }
+        async move { jobs::log_dead_letter(Some(&slug), &dl) }
     })
     .await;
     q.start().await;

@@ -30,7 +30,7 @@ fn fail_ratio_pct() -> u8 {
     std::env::var("SOAK_FAIL_RATIO_PCT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(10)
+        .unwrap_or(2)
 }
 
 /// Is this process about to serve HTTP, or run a CLI verb?
