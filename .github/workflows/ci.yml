@@ -1,5 +1,13 @@
 name: CI
 
+# Least privilege for every job. CodeQL flags a workflow with no
+# `permissions:` block because the default token can write to the repo —
+# contents, issues, packages — and CI only ever needs to read the code.
+# Declared at the top rather than per job so a job added tomorrow
+# inherits it instead of being the next one flagged.
+permissions:
+  contents: read
+
 on:
   push:
     # `develop` is the default branch and where every PR lands, but it
