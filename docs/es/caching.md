@@ -155,8 +155,34 @@ línea en el arranque — normalmente impulsado por la configuración para que
 difiera según el entorno:
 
 ```rust
-// Build the cache from `[cache]` settings (backend = "memory" | "redis" | "db" | "null").
-let cache: BoxedCache = rustango::cache::from_settings(&settings.cache);
+// Build the cache from `[cache]` settings. `from_settings_async` is the one
+// to reach for — it can build the backends that need to connect.
+let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).await?;
+```
+
+| `backend` | `from_settings` (síncrono) | `from_settings_async` |
+|---|---|---|
+| `memory`, `null`, `file` | ✓ | ✓ |
+| `redis` | **pánico** — no se puede construir de forma síncrona | ✓ |
+| `db` | **pánico** — necesita un `&Pool` en tiempo de ejecución | error; constrúyelo donde esté el pool |
+
+El resolutor síncrono lanza un pánico en lugar de sustituir el backend
+([#1400](https://github.com/ujeenet/rustango/issues/1400)). Antes avisaba y
+devolvía una caché en memoria, que no es una caché compartida degradada: es
+otra distinta. Una caché por proceso multiplica el límite de
+`CacheRateLimitLayer` por el número de réplicas y deja de hacer que
+`verify_single_use` falle en cerrado, así que el mismo enlace de restablecimiento
+funciona una vez por réplica. Ambas cosas están documentadas como funcionales
+*porque* la caché es compartida, y un aviso al arrancar no llega a quien depura
+eso una semana después.
+
+`db` no puede salir de `[cache]` en absoluto, porque `DatabaseCache` necesita un
+pool que los ajustes no llevan:
+
+```rust
+let cache = DatabaseCache::new(pool.clone(), "rustango_cache");
+cache.ensure_table().await?;
+let boxed: BoxedCache = std::sync::Arc::new(cache);
 ```
 
 En producción, apúntalo a Redis (compartido entre todas tus réplicas):
@@ -212,7 +238,7 @@ Dos cosas que conviene saber:
 | | |
 |---|---|
 | **Es un namespace, no una frontera** | Todo sigue viviendo en un solo backend, y el código que tenga la caché *sin acotar* puede leer cualquier clave. La idea es que el camino ergonómico sea el correcto. |
-| **`clear()` necesita enumerar claves** | Va por `Cache::delete_prefix`. `InMemoryCache` filtra su mapa y `DatabaseCache` lanza un `DELETE … LIKE 'prefix%'`. Un backend que *no* puede enumerar — `FileCache` convierte las claves en rutas con hash — recurre a borrar todo y registra una advertencia. Es deliberado: borrar de menos dejaría que otro namespace leyera una entrada obsoleta, lo cual es un fallo de corrección; borrar de más solo cuesta un fallo de caché. |
+| **`clear()` necesita enumerar claves** | Va por `Cache::delete_prefix`, y todos los backends integrados lo implementan: `InMemoryCache` filtra su mapa, `DatabaseCache` lanza `DELETE … LIKE 'prefix%'` con `%`, `_` y el carácter de escape escapados, `RedisCache` usa `SCAN`+`MATCH` con los metacaracteres de glob escapados, y `FileCache` recorre su directorio y compara la clave guardada en cada entrada. Un backend que no lo implemente ahora devuelve un **error** en lugar de recurrir a un fallback. |
 
 El `Cache::clear()` sin acotar sigue siendo global al proceso, así que usa la
 vista acotada siempre que el cambio de un solo tenant sea lo que disparó la

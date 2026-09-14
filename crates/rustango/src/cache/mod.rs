@@ -283,15 +283,26 @@ pub trait Cache: Send + Sync + 'static {
     /// would let one tenant's invalidation wipe every other tenant,
     /// every rate-limit counter and every lock key.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
-        tracing::warn!(
-            target: "rustango::cache",
-            prefix = %prefix,
-            "this cache backend cannot enumerate keys, so a prefix delete clears \
-             the WHOLE cache — other namespaces will see a cold cache. Use a \
-             backend that overrides `delete_prefix` (memory / database) if that \
-             matters",
-        );
-        self.clear().await
+        // Fails rather than clearing everything.
+        //
+        // This used to call `self.clear()` behind a `tracing::warn!`,
+        // which meant a backend that simply had not implemented this
+        // would delete *other namespaces'* data on a scoped clear —
+        // `ScopedCache::clear()` routes here, so one tenant wiped the
+        // rest while `docs/caching.md` said it wiped only its own. A
+        // warning is not consent, and the caller is not the one who
+        // chose the backend.
+        //
+        // Every backend in-tree overrides this, so reaching it means a
+        // third-party `impl Cache` that has not considered the
+        // question. Erring gives that implementor a loud, local failure
+        // instead of silent data loss in someone else's namespace.
+        Err(CacheError::Connection(format!(
+            "this cache backend does not implement `delete_prefix`, so the prefix \
+             `{prefix}` cannot be deleted without clearing unrelated namespaces. \
+             Implement `delete_prefix` on the backend — clearing everything is not \
+             a safe fallback for a scoped delete."
+        )))
     }
 }
 
@@ -302,17 +313,26 @@ pub type BoxedCache = Arc<dyn Cache>;
 /// [`crate::config::CacheSettings`] section (#87 wiring, v0.29).
 ///
 /// Backend selection from `s.backend`:
-/// - `"memory"` (default) → [`InMemoryCache`]
-/// - `"redis"` → [`redis_backend::RedisCache`] (requires
-///   `cache-redis` feature; falls back to `InMemoryCache` with a
-///   warning when the feature isn't compiled in)
+/// - `"memory"` (default) / unset → [`InMemoryCache`]
 /// - `"null"` / `"none"` → [`NullCache`]
-/// - any other / unset → [`InMemoryCache`] with a warning if the
-///   value was non-empty (typo defense)
+/// - `"file"` → [`FileCache`] (needs `file_cache_dir`; warns and uses
+///   [`InMemoryCache`] without it — a cache that is merely colder, not
+///   a different guarantee)
+/// - `"redis"`, `"db"` / `"database"` → **panics**. Both need async
+///   construction, so this resolver cannot build them, and returning
+///   something else is what #1400 was.
+/// - any other value → [`InMemoryCache`] with a warning (typo defense)
 ///
-/// `redis_url` is required when `backend = "redis"` — without it
-/// the resolver falls back to `InMemoryCache` with a warning so
-/// startup doesn't block on a misconfig.
+/// # Panics
+/// On `backend = "redis"` or `"db"`. Use
+/// [`from_settings_async`] for redis, and build the DB backend where
+/// the `Pool` is. The message says which.
+///
+/// It used to warn and hand back an [`InMemoryCache`] for those two.
+/// The caller got a working cache with no way to tell which backend it
+/// held — and a per-process cache is not a degraded shared one, it is a
+/// different one. `CacheRateLimitLayer` then multiplies its limit by the
+/// replica count, and `verify_single_use` stops failing closed.
 ///
 /// ```ignore
 /// let cfg = rustango::config::Settings::load_from_env()?;
@@ -323,65 +343,43 @@ pub type BoxedCache = Arc<dyn Cache>;
 #[must_use]
 pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
     match s.backend.as_deref() {
-        Some("redis") => {
-            #[cfg(feature = "cache-redis")]
-            {
-                if s.redis_url.as_deref().is_some_and(|u| !u.is_empty()) {
-                    // `RedisCache::new` is async (it pings the
-                    // server eagerly to surface bad URLs at boot)
-                    // but `from_settings` is sync — we can't .await
-                    // here without changing the public API. Users
-                    // who want redis must construct it explicitly:
-                    //
-                    //     let cache = RedisCache::new(&url).await?;
-                    //     let boxed: BoxedCache = Arc::new(cache);
-                    //
-                    // We fall back to InMemoryCache + warn rather
-                    // than silently returning the wrong backend.
-                    tracing::warn!(
-                        target: "rustango::cache",
-                        "cache.backend = \"redis\" requires async construction; \
-                         build `RedisCache::new(url).await?` and pass the Arc \
-                         directly. Falling back to InMemoryCache."
-                    );
-                } else {
-                    tracing::warn!(
-                        target: "rustango::cache",
-                        "cache.backend = \"redis\" but redis_url is unset; falling back to InMemoryCache",
-                    );
-                }
-            }
-            #[cfg(not(feature = "cache-redis"))]
-            {
-                tracing::warn!(
-                    target: "rustango::cache",
-                    "cache.backend = \"redis\" but the `cache-redis` feature isn't compiled in; falling back to InMemoryCache",
-                );
-            }
-            Arc::new(InMemoryCache::new())
-        }
+        // `redis` and `db` both need async construction, so this sync
+        // resolver cannot build either — and must not pretend (#1400).
+        //
+        // It used to warn and hand back an `InMemoryCache`. The caller
+        // got a working `BoxedCache` with no way to tell which backend
+        // it held, which matters because a per-process cache is not a
+        // degraded shared one: `CacheRateLimitLayer` multiplies the
+        // limit by the replica count, and `verify_single_use` stops
+        // failing closed — the same reset link works once per replica.
+        // Both of those are documented as working *because* the cache
+        // is shared. A warning at boot does not reach the person
+        // debugging that days later.
+        Some("redis") => panic!(
+            "cache.backend = \"redis\" cannot be built by `from_settings`, which is \
+             sync — `RedisCache::new(url)` is async because it pings the server to \
+             surface a bad URL at boot.\n\n\
+             Use `from_settings_async(&settings.cache).await?`, or build it yourself:\n\
+             \x20   let cache: BoxedCache = Arc::new(RedisCache::new(&url).await?);\n\n\
+             This used to fall back to an in-memory cache, which silently voided \
+             every protection that depends on the cache being shared across replicas."
+        ),
         Some("null" | "none") => Arc::new(NullCache),
         Some("file") => file_from_settings_or_warn(s),
-        Some("db" | "database") => {
-            // #409 — DatabaseCache needs a runtime Pool and an async
-            // `ensure_table()` step that this sync resolver can't
-            // perform. Apps that want the DB backend must build it
-            // explicitly:
-            //
-            //     let cache = DatabaseCache::new(pool.clone(), "rustango_cache");
-            //     cache.ensure_table().await?;
-            //     let boxed: BoxedCache = Arc::new(cache);
-            //
-            // We fall back to InMemoryCache + warn rather than
-            // silently producing a different backend.
-            tracing::warn!(
-                target: "rustango::cache",
-                "cache.backend = \"db\" requires async construction with a `&Pool`; \
-                 build `DatabaseCache::new(pool, table)` and call `ensure_table().await` \
-                 then pass the Arc directly. Falling back to InMemoryCache."
-            );
-            Arc::new(InMemoryCache::new())
-        }
+        // #409 — `DatabaseCache` needs a runtime `Pool` and an async
+        // `ensure_table()`. Unlike redis, settings alone cannot describe
+        // it, so there is no async resolver for this one either.
+        Some("db" | "database") => panic!(
+            "cache.backend = \"db\" cannot be built from settings: `DatabaseCache` \
+             needs a runtime `&Pool`, which `[cache]` does not carry, plus an async \
+             `ensure_table()` call.\n\n\
+             Build it where the pool exists:\n\
+             \x20   let cache = DatabaseCache::new(pool.clone(), \"rustango_cache\");\n\
+             \x20   cache.ensure_table().await?;\n\
+             \x20   let boxed: BoxedCache = Arc::new(cache);\n\n\
+             This used to fall back to an in-memory cache, which silently voided \
+             every protection that depends on the cache being shared across replicas."
+        ),
         Some("memory") | None => Arc::new(InMemoryCache::new()),
         Some(other) => {
             tracing::warn!(
@@ -391,6 +389,68 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
             );
             Arc::new(InMemoryCache::new())
         }
+    }
+}
+
+/// [`from_settings`], but able to build the backends that need to
+/// connect — today that means `redis` (#1400).
+///
+/// Reach for this one wherever you can `.await`. It is the only way to
+/// get the backend `[cache] backend = "redis"` actually asks for; the
+/// sync resolver panics rather than hand back something else.
+///
+/// `db` is still not buildable from settings and returns an error
+/// saying so: `DatabaseCache` needs a runtime `&Pool`, which `[cache]`
+/// does not carry. That is a fact about the backend, not a limitation
+/// of this function.
+///
+/// ```no_run
+/// # async fn f() -> Result<(), rustango::cache::CacheError> {
+/// let cfg = rustango::config::Settings::load_from_env().unwrap();
+/// let cache: rustango::cache::BoxedCache =
+///     rustango::cache::from_settings_async(&cfg.cache).await?;
+/// # Ok(()) }
+/// ```
+///
+/// # Errors
+/// Returns [`CacheError`] when the backend is configured but cannot be
+/// reached or built — an unreachable Redis, a missing `redis_url`, or
+/// `db`, which needs a pool.
+#[cfg(feature = "config")]
+pub async fn from_settings_async(
+    s: &crate::config::CacheSettings,
+) -> Result<BoxedCache, CacheError> {
+    match s.backend.as_deref() {
+        Some("redis") => {
+            #[cfg(feature = "cache-redis")]
+            {
+                let url = s
+                    .redis_url
+                    .as_deref()
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| {
+                        CacheError::Connection(
+                            "cache.backend = \"redis\" but [cache].redis_url is unset".into(),
+                        )
+                    })?;
+                Ok(Arc::new(redis_backend::RedisCache::new(url).await?))
+            }
+            #[cfg(not(feature = "cache-redis"))]
+            {
+                Err(CacheError::Connection(
+                    "cache.backend = \"redis\" but the `cache-redis` feature is not \
+                     compiled in — enable it, or change the backend"
+                        .into(),
+                ))
+            }
+        }
+        Some("db" | "database") => Err(CacheError::Connection(
+            "cache.backend = \"db\" cannot be built from settings: `DatabaseCache` needs \
+             a runtime `&Pool`. Build it where the pool exists and pass the Arc directly."
+                .into(),
+        )),
+        // Everything else is buildable synchronously and behaves identically.
+        _ => Ok(from_settings(s)),
     }
 }
 
@@ -880,6 +940,12 @@ pub struct FileCache {
 }
 
 impl FileCache {
+    /// File-format marker. Bump the digit if the layout changes again:
+    /// an unrecognised magic makes the entry undecodable, and an
+    /// undecodable entry is discarded on next access, so a version bump
+    /// migrates a cache directory by itself.
+    const MAGIC: &'static [u8] = b"RCF1";
+
     /// Build a cache that stores entries under `dir`. The directory
     /// is auto-created on the first `set` call.
     #[must_use]
@@ -919,42 +985,69 @@ impl FileCache {
             .unwrap_or(0)
     }
 
-    /// Encode `[expires_at: i64 BE epoch-millis][value bytes]`.
-    /// `expires_at = 0` means no TTL.
+    /// Encode `[magic "RCF1"][expires_at: i64 BE epoch-millis][key_len:
+    /// u32 BE][key bytes][value bytes]`. `expires_at = 0` means no TTL.
     ///
     /// Milliseconds, not seconds. At second granularity a `set` landing
     /// at wall-clock `T.999` stamped `expires_at = T + 1`, and the read
     /// a millisecond later was already at `T+1` — so a 1-second TTL
     /// could expire in one millisecond, and any sub-second TTL rounded
-    /// to `as_secs() == 0` and was born expired (#1233). The header is
-    /// the same 8 bytes; only its unit changed.
-    fn encode(value: &str, ttl: Option<Duration>) -> Vec<u8> {
+    /// to `as_secs() == 0` and was born expired (#1233).
+    ///
+    /// The key is stored because the filename cannot carry it: it is a
+    /// SHA-256 of the key, so nothing about the original is recoverable
+    /// from disk. Without it `delete_prefix` is not merely unimplemented
+    /// but *impossible*, and the trait's default — clear everything —
+    /// meant one tenant's `ScopedCache::clear()` wiped every other
+    /// tenant's entries.
+    ///
+    /// The `RCF1` magic makes pre-#1400 files fail to decode rather than
+    /// be misread as `[key_len][key]`. They are then treated like any
+    /// unreadable entry and removed on next access, so an existing cache
+    /// directory self-heals with no migration step — which is safe
+    /// precisely because this is a cache.
+    fn encode(key: &str, value: &str, ttl: Option<Duration>) -> Vec<u8> {
         let expires_at = ttl
             .and_then(|d| i64::try_from(d.as_millis()).ok())
             .map(|ms| Self::now_unix_millis().saturating_add(ms))
             .unwrap_or(0);
-        let mut out = Vec::with_capacity(8 + value.len());
+        let key_len = u32::try_from(key.len()).unwrap_or(u32::MAX);
+        let mut out = Vec::with_capacity(Self::MAGIC.len() + 12 + key.len() + value.len());
+        out.extend_from_slice(Self::MAGIC);
         out.extend_from_slice(&expires_at.to_be_bytes());
+        out.extend_from_slice(&key_len.to_be_bytes());
+        out.extend_from_slice(key.as_bytes());
         out.extend_from_slice(value.as_bytes());
         out
     }
 
-    /// Decode the file body. Returns `Some(value)` if present + not
-    /// expired, else `None`. Caller is responsible for deleting the
-    /// file when this returns `None` due to expiry.
+    /// Decode the file body into `(key, value, expired)`.
+    ///
+    /// Returns `None` for anything unreadable — a truncated write, a
+    /// pre-`RCF1` file, a bad length. The caller removes the file in
+    /// that case, which is how the format change migrates itself.
     ///
     /// Expiry is `>`, not `>=`: an entry is live for the full duration
     /// it was promised, rather than dying on the boundary tick.
-    fn decode(buf: &[u8]) -> Option<(String, bool /* expired */)> {
-        if buf.len() < 8 {
+    fn decode(buf: &[u8]) -> Option<(String, String, bool /* expired */)> {
+        let rest = buf.strip_prefix(Self::MAGIC)?;
+        if rest.len() < 12 {
             return None;
         }
         let mut ts = [0u8; 8];
-        ts.copy_from_slice(&buf[..8]);
+        ts.copy_from_slice(&rest[..8]);
         let expires_at = i64::from_be_bytes(ts);
-        let value = std::str::from_utf8(&buf[8..]).ok()?.to_owned();
+
+        let mut kl = [0u8; 4];
+        kl.copy_from_slice(&rest[8..12]);
+        let key_len = usize::try_from(u32::from_be_bytes(kl)).ok()?;
+
+        let body = rest.get(12..)?;
+        let key = std::str::from_utf8(body.get(..key_len)?).ok()?.to_owned();
+        let value = std::str::from_utf8(body.get(key_len..)?).ok()?.to_owned();
+
         let expired = expires_at != 0 && Self::now_unix_millis() > expires_at;
-        Some((value, expired))
+        Some((key, value, expired))
     }
 }
 
@@ -968,11 +1061,11 @@ impl Cache for FileCache {
             Err(e) => return Err(CacheError::Connection(format!("read: {e}"))),
         };
         match Self::decode(&buf) {
-            Some((_, true)) => {
+            Some((_, _, true)) => {
                 let _ = std::fs::remove_file(&path);
                 Ok(None)
             }
-            Some((v, false)) => Ok(Some(v)),
+            Some((_, v, false)) => Ok(Some(v)),
             None => {
                 let _ = std::fs::remove_file(&path);
                 Ok(None)
@@ -984,7 +1077,7 @@ impl Cache for FileCache {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| CacheError::Connection(format!("create_dir_all: {e}")))?;
         let path = self.key_path(key);
-        std::fs::write(&path, Self::encode(value, ttl))
+        std::fs::write(&path, Self::encode(key, value, ttl))
             .map_err(|e| CacheError::Connection(format!("write: {e}")))?;
         Ok(())
     }
@@ -1012,6 +1105,51 @@ impl Cache for FileCache {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("cache") {
                 let _ = std::fs::remove_file(&path);
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete only the entries whose key starts with `prefix`.
+    ///
+    /// This is what makes `ScopedCache::clear()` honest on a file cache.
+    /// Without the override it fell through to the trait default, which
+    /// calls `clear()` — so one tenant's clear removed every tenant's
+    /// entries while the docs said it removed only its own.
+    ///
+    /// Filenames are SHA-256 of the key and carry nothing recoverable,
+    /// so the match has to come from inside each file. That makes this
+    /// O(entries): a full directory scan, one read per file. Acceptable
+    /// because a prefix delete is a rare administrative act, and the
+    /// alternative was deleting other namespaces' data.
+    ///
+    /// Expired and undecodable entries are removed as they are passed —
+    /// the scan is already paying for the read.
+    async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(CacheError::Connection(format!("read_dir: {e}"))),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("cache") {
+                continue;
+            }
+            let Ok(buf) = std::fs::read(&path) else {
+                continue;
+            };
+            match Self::decode(&buf) {
+                // Matching entry, or one that is dead anyway.
+                Some((key, _, expired)) if expired || key.starts_with(prefix) => {
+                    let _ = std::fs::remove_file(&path);
+                }
+                // Another namespace's live entry — leave it alone.
+                Some(_) => {}
+                // Unreadable or written by an older format: evict.
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
             }
         }
         Ok(())
@@ -1063,33 +1201,58 @@ mod settings_tests {
         assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
     }
 
-    /// `"redis"` without `cache-redis` feature falls back to
-    /// InMemoryCache (don't block startup on a misconfig).
-    /// Whether the redis arm runs depends on the feature; both paths
-    /// must yield a working cache.
-    #[tokio::test]
-    async fn redis_without_url_falls_back_to_inmemory() {
+    /// #1400 — the sync resolver must refuse `redis` rather than hand
+    /// back an in-memory cache.
+    ///
+    /// This test replaced one asserting the opposite. That test was
+    /// pinning the bug: it required a *working* cache back, which the
+    /// fallback provided, and a working cache is exactly what made the
+    /// wrong backend undetectable to the caller.
+    #[test]
+    #[should_panic(expected = "cannot be built by `from_settings`")]
+    fn redis_backend_refuses_the_sync_resolver() {
         let mut s = crate::config::CacheSettings::default();
         s.backend = Some("redis".into());
-        // No redis_url — the fallback path should still produce a
-        // usable cache.
-        let cache = from_settings(&s);
-        // Round-trip works only on the in-memory fallback. This
-        // test serves as both the "missing url" and "no feature"
-        // regression: in either case, the resulting cache is
-        // InMemoryCache.
-        #[cfg(not(feature = "cache-redis"))]
-        {
-            cache.set("k", "v", None).await.unwrap();
-            assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
-        }
-        #[cfg(feature = "cache-redis")]
-        {
-            // With the feature on, missing url still falls back to
-            // in-memory.
-            cache.set("k", "v", None).await.unwrap();
-            assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
-        }
+        let _ = from_settings(&s);
+    }
+
+    /// Same for `db`, which additionally cannot be described by
+    /// settings at all — `DatabaseCache` needs a runtime `&Pool`.
+    #[test]
+    #[should_panic(expected = "cannot be built from settings")]
+    fn db_backend_refuses_the_sync_resolver() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("db".into());
+        let _ = from_settings(&s);
+    }
+
+    /// The async resolver reports a missing url as an error rather than
+    /// substituting a backend — the whole point of #1400.
+    #[tokio::test]
+    async fn async_resolver_errors_on_redis_without_url() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("redis".into());
+        // `expect_err` would need `BoxedCache: Debug`, and `Arc<dyn Cache>`
+        // is not — match instead of loosening the trait for a test.
+        let Err(err) = from_settings_async(&s).await else {
+            panic!("missing redis_url must be an error, not a fallback");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("redis"),
+            "the error must name the backend it could not build: {msg}"
+        );
+    }
+
+    /// And the backends it *can* build synchronously still work through
+    /// it, so callers can use one resolver everywhere.
+    #[tokio::test]
+    async fn async_resolver_still_builds_the_sync_backends() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("memory".into());
+        let cache = from_settings_async(&s).await.expect("memory builds");
+        cache.set("k", "v", None).await.unwrap();
+        assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
     }
 }
 
