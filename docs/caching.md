@@ -50,12 +50,18 @@ use std::sync::Arc;
 let cache: BoxedCache = Arc::new(InMemoryCache::new());
 ```
 
-| Backend | Feature | Use for |
-|---|---|---|
-| `InMemoryCache` | `cache` | dev, tests, single process (per-process HashMap + TTL) |
-| `RedisCache` | `cache-redis` | production; shared across replicas |
-| `DatabaseCache` | `cache` | production without Redis; a `rustango_cache` table |
-| `NullCache` | `cache` | disable caching (every read misses) — handy in tests |
+| Backend | Feature | `[cache] backend` | Use for |
+|---|---|---|---|
+| `InMemoryCache` | `cache` | `memory` *(default)* | dev, tests, single process (per-process HashMap + TTL) |
+| `RedisCache` | `cache-redis` | `redis` | production; shared across replicas |
+| `DatabaseCache` | `cache` | `db` / `database` | production without Redis; a `rustango_cache` table |
+| `FileCache` | `cache` | `file` | one file per key under `file_cache_dir`; shared only if the directory is |
+| `NullCache` | `cache` | `null` / `none` | disable caching (every read misses) — handy in tests |
+
+There is no `postgres` value — the DB backend is `db` or `database`. A
+`CacheSettings` doc comment claimed otherwise until
+[#1400](https://github.com/ujeenet/rustango/issues/1400), and an unrecognised
+value gets you an in-memory cache with a warning.
 
 ---
 
@@ -151,8 +157,33 @@ one-line change at startup — usually driven by config so it differs per
 environment:
 
 ```rust
-// Build the cache from `[cache]` settings (backend = "memory" | "redis" | "db" | "null").
-let cache: BoxedCache = rustango::cache::from_settings(&settings.cache);
+// Build the cache from `[cache]` settings. `from_settings_async` is the one
+// to reach for — it can build the backends that need to connect.
+let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).await?;
+```
+
+| `backend` | `from_settings` (sync) | `from_settings_async` |
+|---|---|---|
+| `memory`, `null`, `file` | ✓ | ✓ |
+| `redis` | **panics** — cannot be built synchronously | ✓ |
+| `db` | **panics** — needs a runtime `&Pool` | error; build it where the pool is |
+
+The sync resolver panics rather than substituting a backend
+([#1400](https://github.com/ujeenet/rustango/issues/1400)). It used to warn and
+return an in-memory cache, which is not a degraded shared cache — it is a
+different one. A per-process cache multiplies `CacheRateLimitLayer`'s limit by
+the replica count, and stops `verify_single_use` failing closed, so the same
+reset link works once per replica. Both of those are documented as working
+*because* the cache is shared, and a warning at boot does not reach whoever
+debugs that a week later.
+
+`db` cannot come from `[cache]` at all, because `DatabaseCache` needs a pool
+that settings do not carry:
+
+```rust
+let cache = DatabaseCache::new(pool.clone(), "rustango_cache");
+cache.ensure_table().await?;
+let boxed: BoxedCache = std::sync::Arc::new(cache);
 ```
 
 In production, point it at Redis (shared across all your replicas):
@@ -207,7 +238,7 @@ Two things worth knowing:
 | | |
 |---|---|
 | **It is a namespace, not a boundary** | Everything still lives in one backend, and code holding the *unscoped* cache can read any key. The point is that the ergonomic path is the correct one. |
-| **`clear()` needs key enumeration** | It routes through `Cache::delete_prefix`. `InMemoryCache` filters its map and `DatabaseCache` issues a `DELETE … LIKE 'prefix%'`. A backend that *cannot* enumerate — `FileCache` hashes keys into paths — falls back to clearing everything and logs a warning. That is deliberate: under-deleting would let another namespace read a stale entry, which is a correctness bug, while over-deleting only costs a cache miss. |
+| **`clear()` needs key enumeration** | It routes through `Cache::delete_prefix`, and every built-in backend implements it: `InMemoryCache` filters its map, `DatabaseCache` issues `DELETE … LIKE 'prefix%'` with `%`, `_` and the escape character themselves escaped, `RedisCache` uses `SCAN`+`MATCH` with glob metacharacters escaped, and `FileCache` scans its directory and matches the key stored in each entry. A backend that does not implement it now gets an **error** rather than a fallback. |
 
 The unscoped `Cache::clear()` is still process-global, so reach for the scoped
 view whenever a single tenant's change is what triggered the invalidation.

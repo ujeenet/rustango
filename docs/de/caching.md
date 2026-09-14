@@ -157,8 +157,34 @@ einzeilige Änderung beim Start — meist von der Konfiguration gesteuert, sodas
 sich pro Umgebung unterscheidet:
 
 ```rust
-// Build the cache from `[cache]` settings (backend = "memory" | "redis" | "db" | "null").
-let cache: BoxedCache = rustango::cache::from_settings(&settings.cache);
+// Build the cache from `[cache]` settings. `from_settings_async` is the one
+// to reach for — it can build the backends that need to connect.
+let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).await?;
+```
+
+| `backend` | `from_settings` (sync) | `from_settings_async` |
+|---|---|---|
+| `memory`, `null`, `file` | ✓ | ✓ |
+| `redis` | **panik** — synchron nicht baubar | ✓ |
+| `db` | **panik** — braucht einen `&Pool` zur Laufzeit | Fehler; dort bauen, wo der Pool ist |
+
+Der synchrone Resolver bricht ab, statt einen anderen Backend unterzuschieben
+([#1400](https://github.com/ujeenet/rustango/issues/1400)). Früher warnte er und
+lieferte einen In-Memory-Cache — das ist kein abgeschwächter geteilter Cache,
+sondern ein anderer. Ein prozesslokaler Cache multipliziert das Limit von
+`CacheRateLimitLayer` mit der Anzahl der Replicas und lässt `verify_single_use`
+nicht mehr fail-closed laufen, sodass derselbe Reset-Link einmal pro Replica
+funktioniert. Beides ist dokumentiert als funktionierend, *weil* der Cache
+geteilt ist, und eine Warnung beim Start erreicht niemanden, der das eine Woche
+später debuggt.
+
+`db` lässt sich überhaupt nicht aus `[cache]` bauen, weil `DatabaseCache` einen
+Pool braucht, den die Settings nicht tragen:
+
+```rust
+let cache = DatabaseCache::new(pool.clone(), "rustango_cache");
+cache.ensure_table().await?;
+let boxed: BoxedCache = std::sync::Arc::new(cache);
 ```
 
 In der Produktion richtest du es auf Redis (über alle deine Replicas geteilt):
@@ -215,7 +241,7 @@ Zwei Dinge, die man wissen sollte:
 | | |
 |---|---|
 | **Ein Namespace, keine Sicherheitsgrenze** | Alles liegt weiter in einem Backend, und Code mit dem *ungescopeten* Cache kann jeden Key lesen. Der Punkt ist, dass der ergonomische Pfad der korrekte ist. |
-| **`clear()` braucht Key-Enumeration** | Es läuft über `Cache::delete_prefix`. `InMemoryCache` filtert seine Map, `DatabaseCache` schickt ein `DELETE … LIKE 'prefix%'`. Ein Backend, das *nicht* enumerieren kann — `FileCache` hasht Keys in Pfade — fällt darauf zurück, alles zu leeren, und loggt eine Warnung. Das ist Absicht: zu wenig zu löschen ließe einen anderen Namespace einen veralteten Eintrag lesen (ein Korrektheitsfehler), zu viel zu löschen kostet nur einen Cache-Miss. |
+| **`clear()` braucht Key-Enumeration** | Es läuft über `Cache::delete_prefix`, und jedes eingebaute Backend implementiert das: `InMemoryCache` filtert seine Map, `DatabaseCache` schickt ein `DELETE … LIKE 'prefix%'` mit escaptem `%`, `_` und Escape-Zeichen, `RedisCache` nutzt `SCAN`+`MATCH` mit escapten Glob-Metazeichen, und `FileCache` scannt sein Verzeichnis und vergleicht den in jedem Eintrag gespeicherten Key. Ein Backend, das es nicht implementiert, liefert jetzt einen **Fehler** statt eines Fallbacks. |
 
 Das ungescopete `Cache::clear()` ist weiterhin prozessweit — greife also zur
 gescopeten Sicht, wann immer die Änderung eines einzelnen Tenants die

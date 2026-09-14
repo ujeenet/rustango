@@ -434,7 +434,19 @@ pub struct TenancySettings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CacheSettings {
-    /// `"memory"` (default), `"redis"`, `"file"`, `"postgres"`.
+    /// `"memory"` (the default, and what an unset value means),
+    /// `"null"` / `"none"`, `"file"`, `"redis"`, `"db"` / `"database"`.
+    ///
+    /// This used to read `"postgres"`, which the resolver has never
+    /// matched — it fell through to the unknown-value branch and
+    /// quietly produced an in-memory cache. The DB backend is spelled
+    /// `"db"` or `"database"`.
+    ///
+    /// `"redis"` and `"db"` cannot be built by
+    /// [`cache::from_settings`](crate::cache::from_settings), which is
+    /// sync; it panics rather than substitute a different backend
+    /// (#1400). Use `cache::from_settings_async` for `"redis"`, and
+    /// build the DB backend where the `Pool` is.
     pub backend: Option<String>,
     /// Redis connection URL when `backend = "redis"`.
     pub redis_url: Option<String>,

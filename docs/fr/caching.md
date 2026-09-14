@@ -158,8 +158,34 @@ changement d'une ligne au démarrage — habituellement piloté par la config af
 qu'il diffère selon l'environnement :
 
 ```rust
-// Build the cache from `[cache]` settings (backend = "memory" | "redis" | "db" | "null").
-let cache: BoxedCache = rustango::cache::from_settings(&settings.cache);
+// Build the cache from `[cache]` settings. `from_settings_async` is the one
+// to reach for — it can build the backends that need to connect.
+let cache: BoxedCache = rustango::cache::from_settings_async(&settings.cache).await?;
+```
+
+| `backend` | `from_settings` (synchrone) | `from_settings_async` |
+|---|---|---|
+| `memory`, `null`, `file` | ✓ | ✓ |
+| `redis` | **panique** — non constructible de façon synchrone | ✓ |
+| `db` | **panique** — exige un `&Pool` à l'exécution | erreur ; construisez-le là où est le pool |
+
+Le résolveur synchrone panique plutôt que de substituer un backend
+([#1400](https://github.com/ujeenet/rustango/issues/1400)). Il avertissait
+auparavant et renvoyait un cache en mémoire, qui n'est pas un cache partagé
+dégradé : c'est un autre cache. Un cache par processus multiplie la limite de
+`CacheRateLimitLayer` par le nombre de réplicas et empêche `verify_single_use`
+d'échouer en fermeture, si bien que le même lien de réinitialisation fonctionne
+une fois par réplica. Les deux sont documentés comme fonctionnant *parce que* le
+cache est partagé, et un avertissement au démarrage n'atteint pas la personne qui
+débogue cela une semaine plus tard.
+
+`db` ne peut pas venir de `[cache]` du tout, car `DatabaseCache` a besoin d'un
+pool que les réglages ne transportent pas :
+
+```rust
+let cache = DatabaseCache::new(pool.clone(), "rustango_cache");
+cache.ensure_table().await?;
+let boxed: BoxedCache = std::sync::Arc::new(cache);
 ```
 
 En production, pointez-le vers Redis (partagé entre tous vos réplicas) :
@@ -216,7 +242,7 @@ Deux choses à savoir :
 | | |
 |---|---|
 | **C'est un espace de noms, pas une frontière** | Tout vit encore dans un seul backend, et du code détenant le cache *non cadré* peut lire n'importe quelle clé. L'idée est que le chemin ergonomique soit le chemin correct. |
-| **`clear()` a besoin d'énumérer les clés** | Il passe par `Cache::delete_prefix`. `InMemoryCache` filtre sa map et `DatabaseCache` émet un `DELETE … LIKE 'prefix%'`. Un backend qui ne *peut pas* énumérer — `FileCache` hache les clés en chemins — se rabat sur un vidage complet et journalise un avertissement. C'est délibéré : trop peu supprimer laisserait un autre espace de noms lire une entrée périmée, ce qui est un bug de correction ; trop supprimer ne coûte qu'un défaut de cache. |
+| **`clear()` a besoin d'énumérer les clés** | Il passe par `Cache::delete_prefix`, et tous les backends intégrés l'implémentent : `InMemoryCache` filtre sa map, `DatabaseCache` émet `DELETE … LIKE 'prefix%'` avec `%`, `_` et le caractère d'échappement eux-mêmes échappés, `RedisCache` utilise `SCAN`+`MATCH` avec les métacaractères glob échappés, et `FileCache` parcourt son répertoire et compare la clé stockée dans chaque entrée. Un backend qui ne l'implémente pas renvoie désormais une **erreur** plutôt qu'un repli. |
 
 Le `Cache::clear()` non cadré reste global au processus : utilisez la vue cadrée
 dès que c'est le changement d'un seul tenant qui a déclenché l'invalidation.
