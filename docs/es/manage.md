@@ -463,6 +463,23 @@ comentado de cómo programarlo.
 cargo run -- make:job EmailDigestJob
 ```
 
+### `make:worker <Name>`
+
+Genera un binario de worker independiente para `src/bin/` — un proceso que vacía
+la cola de trabajos y no sirve HTTP. Ejecútalo junto al proceso web, o como su
+propio contenedor.
+
+La forma es corta y fácil de escribir mal de un modo que solo aparece en
+producción: un worker que espera `tokio::signal::ctrl_c()` atiende SIGINT pero
+**no** SIGTERM, que es lo que envían `docker stop`, Kubernetes y systemd.
+Entonces el vaciado nunca se ejecuta, el contenedor muere al agotarse su periodo
+de gracia, y los trabajos en vuelo se pierden sin que se registre nada. El worker
+generado espera `shutdown::shutdown_signal()`, que atiende ambas señales.
+
+```bash
+cargo run -- make:worker JobsWorker
+```
+
 ### `make:notification <Name>`
 
 Genera una estructura de notificación que construye un correo electrónico — como
@@ -1472,7 +1489,7 @@ alcanzan mediante `Cli::tenancy()`.
 |---|---|
 | `startapp <name>` | Crea un módulo de aplicación |
 | `make:viewset` / `make:serializer` / `make:form` | Genera un ViewSet, Serializer o Form |
-| `make:job` / `make:middleware` / `make:notification` / `make:test` | Genera un job, middleware, notificación o test |
+| `make:job` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Genera un job, un binario de worker, middleware, notificación o test |
 | `make:api_routes <app> [--tenant]` | Genera el módulo de rutas API de una app |
 
 ### Caché, sesiones y correo

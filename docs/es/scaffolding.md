@@ -139,6 +139,8 @@ Una plantilla enciende un conjunto razonable; `--features` añade las opciones q
 | `sso` / `admin-sso` | Inicio de sesión único OIDC, para usuarios de la app / para el sitio de admin |
 | `passkey` | Autenticación WebAuthn / passkey |
 | `cache-redis` / `cache-page` | Backend de caché Redis / caché de páginas completas |
+| `jobs` / `jobs-postgres` | Cola de trabajos en segundo plano, en proceso / respaldada por la base de datos y por tanto resistente a reinicios |
+| `scheduler` | Tareas en segundo plano a intervalos fijos |
 | `email-smtp` | Transporte SMTP para el framework de email |
 | `mcp` | Servidor Model Context Protocol para agentes de IA |
 | `testkit` / `test_utils` | Constructores de esquema, factorías y constructores solo para tests |

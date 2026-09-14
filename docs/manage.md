@@ -104,7 +104,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `startapp <name>` | Scaffold an app module |
 | `make:viewset` / `make:serializer` / `make:form` | Generate a ViewSet, Serializer or Form |
-| `make:job` / `make:middleware` / `make:notification` / `make:test` | Generate a job, middleware, notification or test |
+| `make:job` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Generate a job, worker binary, middleware, notification or test |
 | `make:api_routes <app> [--tenant]` | Generate an app's API route module |
 
 ### Cache, sessions and mail
@@ -575,6 +575,23 @@ of how to schedule it.
 
 ```bash
 cargo run -- make:job EmailDigestJob
+```
+
+### `make:worker <Name>`
+
+Generates a standalone worker binary for `src/bin/` — a process that
+drains the job queue and serves no HTTP. Run it beside the web process,
+or as its own container.
+
+The shape is short and easy to get wrong in a way that only appears in
+production: a worker that awaits `tokio::signal::ctrl_c()` handles
+SIGINT but **not** SIGTERM, which is what `docker stop`, Kubernetes and
+systemd send. The drain then never runs, the container is killed after
+its grace period, and in-flight jobs are lost with nothing logged. The
+generated worker awaits `shutdown::shutdown_signal()`, which takes both.
+
+```bash
+cargo run -- make:worker JobsWorker
 ```
 
 ### `make:notification <Name>`

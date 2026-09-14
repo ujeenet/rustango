@@ -226,7 +226,12 @@ pub fn docker_compose(name: &str, backend: Backend) -> String {
   # restarts the binary on every source edit.
 {skip_hint}
   rust:
-    build: .
+    # Dockerfile.dev, not Dockerfile: the plain one is the deployable
+    # release image, which copies the source in and would defeat the
+    # bind mount below.
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
 {depends_on}    env_file:
       - .env
     volumes:
@@ -260,13 +265,114 @@ volumes:
 /// in `rust-toolchain.toml` — see [`RUST_TOOLCHAIN`] for why neither
 /// is pinned to an exact version. Pin both together (`rust:1.90` +
 /// `channel = "1.90"`) if you need byte-reproducible dev images.
-pub fn dockerfile() -> &'static str {
+///
+/// This is `Dockerfile.dev`. The plain `Dockerfile` is
+/// [`dockerfile_prod`] — see its docs for why a project needs both.
+pub fn dockerfile_dev() -> &'static str {
     "FROM rust:1\n\
      \n\
      WORKDIR /app\n\
      \n\
      RUN cargo install cargo-watch\n"
 }
+
+/// The image you actually deploy.
+///
+/// For a long time the only generated Dockerfile was [`dockerfile_dev`],
+/// which builds nothing: it installs a toolchain and waits for a bind
+/// mount. That is right for the hot-reload loop and wrong for every
+/// other purpose — it runs the **debug** profile, needs the source tree
+/// mounted at run time, and runs as root. A generated project could be
+/// developed in Docker but not shipped in it.
+///
+/// So: multi-stage, release profile, sources copied in rather than
+/// mounted, and a runtime stage that carries only the binary. The two
+/// stages must agree on libc, hence `bookworm` on both — a
+/// `bookworm`-built binary will not start on `bullseye`.
+///
+/// `--locked` is deliberate. A deploy image is exactly where an
+/// unnoticed dependency bump should fail the build rather than ship.
+pub fn dockerfile_prod(name: &str) -> String {
+    format!(
+        r#"# The deployable image. `Dockerfile.dev` is the hot-reload one
+# docker-compose.yml uses; this one is for shipping.
+#
+#   docker build -t {name}:latest .
+#   docker run --rm -p 8080:8080 -e DATABASE_URL=... {name}:latest
+#
+# Pick a non-default backend at build time:
+#   docker build --build-arg FEATURES=sqlite --build-arg NO_DEFAULT=1 .
+
+FROM rust:1-bookworm AS builder
+ARG FEATURES=""
+ARG NO_DEFAULT=""
+WORKDIR /src
+COPY . .
+# Incremental compilation only grows the cache in a one-shot image build.
+ENV CARGO_INCREMENTAL=0
+RUN set -eux; \
+    flags="--release --locked"; \
+    if [ -n "$NO_DEFAULT" ]; then flags="$flags --no-default-features"; fi; \
+    if [ -n "$FEATURES" ]; then flags="$flags --features $FEATURES"; fi; \
+    cargo build $flags; \
+    mkdir -p /out; \
+    cp target/release/{name} /out/
+
+# Same Debian release as the builder: the binary links the builder's glibc.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /out/{name} /usr/local/bin/{name}
+# Migrations and settings are read at run time, so they travel with the
+# binary rather than being baked into it.
+COPY migrations /app/migrations
+COPY config /app/config
+# Never root. The numeric id keeps the ownership stable if the image is
+# rebuilt on a host whose useradd picks a different one.
+RUN useradd --uid 10001 --create-home app && chown -R 10001 /app
+USER 10001
+WORKDIR /app
+EXPOSE 8080
+# `.with_health()` mounts /health; drop this line if you removed it.
+HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=12 \
+  CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+CMD ["{name}"]
+"#
+    )
+}
+
+// ---------------- .dockerignore ----------------
+
+/// Without this, `docker build .` sends the whole working tree to the
+/// daemon — `target/` included, which is gigabytes, and `.env`, which is
+/// secrets. Both then land in the image.
+///
+/// It matters for [`dockerfile_dev`] too: that image mounts the source
+/// rather than copying it, but the build context is still uploaded.
+pub const DOCKERIGNORE: &str = "\
+# Build output — the image builds its own, and this is the single
+# biggest thing that would otherwise be uploaded to the daemon.
+target/
+**/target/
+
+# Secrets. `.env.example` is the committed template and is safe.
+.env
+.env.*
+!.env.example
+
+# Local databases — a SQLite file here would be baked into the image.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Nothing in the image needs these.
+.git/
+.gitignore
+node_modules/
+**/node_modules/
+";
 
 // ---------------- README.md ----------------
 

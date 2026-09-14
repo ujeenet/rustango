@@ -107,6 +107,7 @@ pub fn run_pool_free<W: Write>(
         "make:serializer" => make_serializer_cmd(&args[1..], writer),
         "make:form" => make_form_cmd(&args[1..], writer),
         "make:job" => make_job_cmd(&args[1..], writer),
+        "make:worker" => make_worker_cmd(&args[1..], writer),
         "make:notification" => make_notification_cmd(&args[1..], writer),
         "make:middleware" => make_middleware_cmd(&args[1..], writer),
         "make:test" => make_test_cmd(&args[1..], writer),
@@ -150,6 +151,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "make:serializer" => make_serializer_cmd(&args[1..], writer),
         "make:form" => make_form_cmd(&args[1..], writer),
         "make:job" => make_job_cmd(&args[1..], writer),
+        "make:worker" => make_worker_cmd(&args[1..], writer),
         "make:notification" => make_notification_cmd(&args[1..], writer),
         "make:middleware" => make_middleware_cmd(&args[1..], writer),
         "make:test" => make_test_cmd(&args[1..], writer),
@@ -459,6 +461,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "  make:serializer <Name> [--model <Model>]")?;
     writeln!(w, "  make:form <Name>")?;
     writeln!(w, "  make:job <Name>")?;
+    writeln!(w, "  make:worker <Name>")?;
     writeln!(w, "  make:notification <Name>")?;
     writeln!(w, "  make:middleware <Name>")?;
     writeln!(w, "  make:test <Name>")?;
@@ -2429,6 +2432,104 @@ impl {name} {{
 "#
     );
     write_generated(w, &format!("{snake}.rs"), body)
+}
+
+/// Scaffold a standalone worker binary.
+///
+/// The shape is three lines long and easy to get wrong in a way that
+/// only shows up in production: a worker that awaits
+/// `tokio::signal::ctrl_c()` handles SIGINT but **not** SIGTERM, which
+/// is what `docker stop`, Kubernetes and systemd actually send — so the
+/// drain never runs, the container is `SIGKILL`ed after its grace period,
+/// and in-flight jobs are lost with nothing logged. `shutdown_signal()`
+/// takes both (#1409). Encoding that once is the whole point of this
+/// verb.
+fn make_worker_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _, crate_root) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:worker {name}`.
+//!
+//! A standalone worker process: it drains the job queue and serves no
+//! HTTP. Run it alongside the web process, or as its own container.
+//!
+//! Put this at `src/bin/{snake}.rs` and run it with `cargo run --bin {snake}`.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use {crate_root}::jobs::{{DatabaseJobQueue, JobQueue}};
+use {crate_root}::sql::Pool;
+
+#[{crate_root}::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {{
+    {crate_root}::logging::setup();
+    // `std::env::var(..)?` would surface as the bare word `NotPresent`,
+    // which tells an operator nothing about which variable or why.
+    let url = std::env::var("DATABASE_URL").map_err(|_| {{
+        "missing env var 'DATABASE_URL'. Set it in your shell, or copy \
+         '.env.example' to '.env'."
+    }})?;
+    let pool = Pool::connect(&url).await?;
+
+    // The queue is tri-dialect despite the `Database` name — the table
+    // DDL and the row-pickup strategy are chosen from the pool's dialect.
+    DatabaseJobQueue::ensure_table_pool(&pool).await?;
+    let queue = Arc::new(DatabaseJobQueue::with_workers_pool(pool.clone(), 4));
+
+    // Register EVERY job type this queue might see, not just the ones
+    // this process dispatches. A worker that picks up a row whose name
+    // is unregistered here logs and returns *without unlocking it* — the
+    // row is then stranded until a `reclaim_stuck_jobs_pool` sweep, and
+    // it does not show up in `pending_count()`.
+    //
+    //   queue.register::<crate::jobs::WelcomeEmail>().await;
+
+    queue.start().await;
+    tracing::info!("{snake}: draining jobs");
+
+    // SIGINT *and* SIGTERM. `tokio::signal::ctrl_c()` alone is
+    // SIGINT-only, so under `docker stop` the drain below never runs.
+    {crate_root}::shutdown::shutdown_signal().await;
+
+    tracing::info!("{snake}: signal received, draining in-flight jobs");
+    queue.shutdown().await;
+
+    // Rows whose worker died mid-job stay locked. Nothing sweeps them
+    // for you; run this on a scheduler, or at boot as done here.
+    let _ = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await;
+    Ok(())
+}}
+"#
+    );
+    write_generated_bin(w, &snake, body)
+}
+
+/// Like [`write_generated`], but for `src/bin/` — where cargo
+/// auto-discovers the target, so the "add `mod ...`" advice
+/// `write_generated` prints would be wrong.
+fn write_generated_bin<W: Write>(
+    w: &mut W,
+    bin_name: &str,
+    contents: String,
+) -> Result<(), MigrateError> {
+    let path = std::path::PathBuf::from("src")
+        .join("bin")
+        .join(format!("{bin_name}.rs"));
+    if path.exists() {
+        return Err(MigrateError::Validation(format!(
+            "{} already exists — refusing to overwrite",
+            path.display()
+        )));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, contents)?;
+    writeln!(w, "wrote {}", path.display())?;
+    // No `[[bin]]` stanza needed: cargo picks up `src/bin/*.rs` on its own.
+    writeln!(w, "  run it with `cargo run --bin {bin_name}`")?;
+    Ok(())
 }
 
 fn make_notification_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
@@ -4692,6 +4793,7 @@ mod gen_tests {
             "make:serializer",
             "make:form",
             "make:job",
+            "make:worker",
             "make:notification",
             "make:middleware",
             "make:test",
