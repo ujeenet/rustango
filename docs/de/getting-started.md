@@ -171,7 +171,7 @@ Das ergänzt den `cargo rustango ...`-Unterbefehl global. Bestätige, dass er vo
 cargo rustango --help
 ```
 
-Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.57.1`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
+Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.57.5`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
 
 ---
 

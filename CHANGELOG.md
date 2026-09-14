@@ -4,6 +4,19 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.57.5] — 2026-09-14
+
+The correctness train. Version numbers 0.57.2 through 0.57.4 were consumed by
+release branches that were withdrawn before any of them was tagged or
+published, so this is the first release after 0.57.1 and carries all of their
+content.
+
+**Read the Changed section before upgrading.** Despite the patch number, this
+release rejects configuration it used to accept: a non-base64
+`RUSTANGO_SESSION_SECRET` of 32 or more characters signed JWTs fine and now
+panics at startup, and a live-test suite whose database URL is set but
+unreachable now fails instead of skipping.
+
 ### Security
 
 These change behaviour. A freshly scaffolded project uses none of the affected
