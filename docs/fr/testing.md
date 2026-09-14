@@ -167,14 +167,24 @@ couverture.
 
 | Variable | Suites | Ce dont elles ont besoin |
 |---|---:|---|
-| *(aucune)* | 180 | Une base de données SQLite en mémoire. Tournent toujours, rien à configurer. |
-| `DATABASE_URL` | 109 | Un serveur PostgreSQL joignable. |
-| `MYSQL_TEST_URL` | 30 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
+| *(aucune)* | 213 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
+| `DATABASE_URL` | 93 | Un serveur PostgreSQL joignable. |
+| `MYSQL_TEST_URL` | 20 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
+| `MYSQL_URL` | 1 | Rien que vous devriez définir — voir plus bas. |
 | `REDIS_TEST_URL` | 2 | Un Redis joignable. |
+
+Une suite qui lit deux variables est comptée sous les deux ; la colonne ne
+totalise donc pas le nombre de fichiers.
+
+`MYSQL_URL` est un bug, pas une option ([#1415](https://github.com/ujeenet/rustango/issues/1415)) :
+une suite la lit là où toutes les autres suites MySQL lisent `MYSQL_TEST_URL`.
+Définir la variable documentée laisse celle-là sautée, y compris en CI. Elle est
+listée ici pour que le trou soit visible plutôt que déduit, et la ligne
+disparaîtra quand la suite sera corrigée.
 
 MySQL est celle qui piège les gens : elle lit sa propre variable, donc un shell
 où seule `DATABASE_URL` est définie exécute les suites Postgres et saute
-silencieusement les trente suites MySQL.
+silencieusement toutes les suites MySQL.
 
 ### Distinguer un saut d'un succès
 
