@@ -91,6 +91,10 @@ pub struct Cli {
     /// create tenants (#1322). `None` = the create routes are not
     /// mounted. See `Cli::with_tenant_provisioning`.
     provisioning_dir: Option<std::path::PathBuf>,
+    /// Per-tenant pool sizing. `None` = `TenantPoolsConfig::default()`.
+    /// Set via [`Cli::with_tenant_pools`] (#1456).
+    #[cfg(feature = "tenancy")]
+    tenant_pools: Option<crate::tenancy::TenantPoolsConfig>,
     /// `(prefix, root_dir)` pairs registered via [`Cli::with_static`].
     /// Mounted at `runserver` time as
     /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`.
@@ -142,6 +146,8 @@ impl Cli {
             settings_for_layers: None,
             health_endpoints: false,
             provisioning_dir: None,
+            #[cfg(feature = "tenancy")]
+            tenant_pools: None,
             #[cfg(feature = "admin")]
             static_dirs: Vec::new(),
             #[cfg(feature = "csrf")]
@@ -258,6 +264,46 @@ impl Cli {
     #[must_use]
     pub fn with_health(mut self) -> Self {
         self.health_endpoints = true;
+        self
+    }
+
+    /// Size the per-tenant connection pools (#1456).
+    ///
+    /// Until this existed, `TenantPoolsConfig` was public and
+    /// documented but unreachable from here: every path built
+    /// `TenantPools::new(pool)`, which takes
+    /// [`crate::tenancy::TenantPoolsConfig::default`], and
+    /// `tenancy/pools.rs` reads no environment variables. The
+    /// `RUSTANGO_DB_*` knobs are honoured by `sql::Pool` only, so they
+    /// did not reach tenant pools either.
+    ///
+    /// It matters because connections multiply by tenant *and* by
+    /// process. Twenty database-mode tenants at the default 16
+    /// connections, across a web and a worker process, is 640 — against
+    /// a stock PostgreSQL limit of 100. With no way to lower it, the
+    /// only lever was the database server's own `max_connections`,
+    /// which is the wrong place to size an application's pools and is
+    /// frequently not the operator's to change.
+    ///
+    /// ```no_run
+    /// use rustango::tenancy::TenantPoolsConfig;
+    ///
+    /// rustango::manage::Cli::new()
+    ///     .tenancy()
+    ///     .with_tenant_pools(TenantPoolsConfig {
+    ///         database_pool_max_connections: 4,
+    ///         max_cached_database_pools: 200,
+    ///         ..Default::default()
+    ///     });
+    /// ```
+    ///
+    /// Note `max_cached_database_pools` does not evict: past the cap an
+    /// uncached tenant errors rather than displacing another. Raise it
+    /// above your tenant count.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn with_tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
+        self.tenant_pools = Some(config);
         self
     }
 
@@ -743,7 +789,14 @@ impl Cli {
             } else {
                 crate::sql::Pool::connect_postgres(&url).await?
             };
-            let pools = crate::tenancy::TenantPools::new(pool);
+            // #1456 — honour `Cli::with_tenant_pools`. This built
+            // `TenantPools::new(pool)` unconditionally, so tenant pool
+            // sizing was unreachable from every app that boots through
+            // `Cli`, which is every app the scaffolder generates.
+            let pools = match self.tenant_pools.clone() {
+                Some(cfg) => crate::tenancy::TenantPools::new(pool).config(cfg),
+                None => crate::tenancy::TenantPools::new(pool),
+            };
             crate::tenancy::manage::run_with_init(
                 &pools,
                 &url,
@@ -875,6 +928,23 @@ impl Cli {
             #[cfg(feature = "admin")]
             let api = if self.welcome_page {
                 try_mount_welcome(api)
+            } else {
+                api
+            };
+            // #1457 — this arm never read `health_endpoints`, so
+            // `Cli::with_health()` was a silent no-op on every SQLite and
+            // MySQL build: `/health` and `/ready` answered 404 while the
+            // identical call on Postgres served them. A load balancer or
+            // container HEALTHCHECK pointed at `/health` then reported the
+            // service permanently unhealthy, with nothing in the logs to
+            // explain it.
+            //
+            // `health_router` takes `impl Into<Pool>` and `crate::health`
+            // is gated on `admin` rather than on a backend, so the merge is
+            // the same one the Postgres arm does.
+            #[cfg(feature = "admin")]
+            let api = if self.health_endpoints {
+                api.merge(crate::health::health_router(pool.clone()))
             } else {
                 api
             };
@@ -1045,6 +1115,10 @@ impl Cli {
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
         }
+        // #1456 — same reason as the dispatch path above.
+        if let Some(cfg) = self.tenant_pools.clone() {
+            builder = builder.tenant_pools(cfg);
+        }
         if let Some(seed) = self.seed {
             // Tenancy Builder's seed_with takes (Arc<TenantPools>, PgPool,
             // String); we forward the registry pool and discard the rest.
@@ -1111,6 +1185,10 @@ impl Cli {
         }
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
+        }
+        // #1456 — same reason as the dispatch path above.
+        if let Some(cfg) = self.tenant_pools.clone() {
+            builder = builder.tenant_pools(cfg);
         }
         if let Some(seed) = self.seed {
             // Mirror the PG arm above (line 828) so sqlite/mysql tenancy
