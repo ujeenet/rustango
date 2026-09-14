@@ -177,6 +177,11 @@ pub struct FlakyPaymentCapture {
     pub tenant: String,
     pub order_id: i64,
     /// Percentage of orders that fail every attempt, 0-100.
+    ///
+    /// Kept low deliberately. At 10% a 30-minute run produced 6308
+    /// ERROR lines in five minutes and buried everything real; 2% still
+    /// yields hundreds of samples, which is far more than enough to
+    /// pin an attempt count.
     pub fail_ratio_pct: u8,
 }
 
@@ -231,7 +236,50 @@ impl Job for FatalProbe {
     }
 }
 
-/// Register every job type on a queue.
+/// Is this dead letter one the soak *caused on purpose*?
+///
+/// Two of the four job types fail by construction — that is how the
+/// run proves `MAX_ATTEMPTS` is a total-attempt ceiling and that
+/// `JobError::Fatal` bypasses retry. Their dead letters are assertions
+/// passing, not faults.
+///
+/// Logging them at ERROR was a mistake worth not repeating. At a 10%
+/// failure ratio the fleet produced **6308 ERROR lines in five
+/// minutes**, and a real failure in that stream would have been
+/// invisible — which is the precise failure mode this whole release is
+/// about. Expected failures log at WARN; ERROR is reserved for a dead
+/// letter nobody asked for, so one of those still stands out.
+#[must_use]
+pub fn is_expected_failure(job_name: &str) -> bool {
+    job_name == FlakyPaymentCapture::NAME || job_name == FatalProbe::NAME
+}
+
+/// The dead-letter handler every queue in both apps installs.
+///
+/// Shared so the single-tenant app, the SaaS supervisor and the worker
+/// binary cannot disagree about severity — they did, and the
+/// single-tenant in-process queue had no handler at all, so its dead
+/// letters fell through to the framework's generic
+/// "no callback configured" log.
+pub fn log_dead_letter(tenant: Option<&str>, dl: &rustango::jobs::JobDeadLetter) {
+    let tenant = tenant.unwrap_or(SINGLE);
+    if is_expected_failure(dl.name) {
+        tracing::warn!(
+            tenant = %tenant, job = dl.name, attempts = dl.attempts,
+            expected = true,
+            "job dead-lettered (deliberate: this is the soak's own failure injection)"
+        );
+    } else {
+        tracing::error!(
+            tenant = %tenant, job = dl.name, attempts = dl.attempts,
+            error = %dl.error,
+            "job dead-lettered"
+        );
+    }
+}
+
+/// Register every job type on a queue, and install the dead-letter
+/// handler.
 ///
 /// **All four, in every process that calls `start()`.** A database-queue
 /// worker that picks up a row whose `NAME` is not registered here logs

@@ -48,14 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // All four types the server can dispatch. See the module doc.
     jobs::register_all(&queue).await;
     queue
-        .on_dead_letter(|dl| async move {
-            tracing::error!(
-                job = dl.name,
-                attempts = dl.attempts,
-                error = %dl.error,
-                "job dead-lettered"
-            );
-        })
+        .on_dead_letter(|dl| async move { jobs::log_dead_letter(None, &dl) })
         .await;
 
     // Rows whose worker died mid-job stay locked. Sweeping at boot
