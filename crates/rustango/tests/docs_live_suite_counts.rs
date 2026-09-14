@@ -25,10 +25,12 @@ use std::path::{Path, PathBuf};
 
 /// Variables a live suite reads to decide whether it can run.
 ///
-/// `MYSQL_URL` is one suite reading the wrong name (#1415). It stays on
-/// this list, and in the table, until that is fixed — a reader who sets
-/// `MYSQL_TEST_URL` should be able to see that one suite still will not
-/// run. When #1415 lands, its count goes to zero and the row comes out.
+/// `MYSQL_URL` is here as a tripwire, not as a variable anyone should
+/// set. One suite read it instead of `MYSQL_TEST_URL` and so had never
+/// run anywhere (#1415, fixed). Nothing reads it now, so it contributes
+/// no count and needs no row — but if a suite starts reading it again,
+/// it appears in the measured set with no row to match and this fails
+/// naming it, which is how the original would have been caught.
 const GATING_VARS: &[&str] = &[
     "DATABASE_URL",
     "MYSQL_TEST_URL",
