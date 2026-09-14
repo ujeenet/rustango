@@ -166,14 +166,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Share the queue with handlers (axum extension/state).
     let app = urls::api().layer(axum::Extension(queue.clone()));
 
-    // 4. Boot the server. Cli::run() blocks until Ctrl-C / SIGTERM.
-    Cli::new().api(app).with_health().run().await?;
-
-    // 5. On shutdown: drain in-flight jobs, then stop.
-    queue.shutdown().await;
+    // 4. Boot the server, and say what to do when it stops. The hook
+    //    runs after the server drains, on SIGINT *and* SIGTERM.
+    let draining = Arc::clone(&queue);
+    Cli::new()
+        .api(app)
+        .with_health()
+        .on_shutdown(move || async move { draining.shutdown().await })
+        .run()
+        .await?;
     Ok(())
 }
 ```
+
+> **Pon el drenaje en `on_shutdown`, no después de `run()`.** Hasta
+> [#1409](https://github.com/ujeenet/rustango/issues/1409) este ejemplo
+> llamaba a `queue.shutdown()` en la línea *posterior* a `run()`, y esa línea
+> no podía ejecutarse nunca: nada manejaba SIGTERM, así que la parada del
+> orquestador mataba el proceso de inmediato. Ahora `run()` retorna con la
+> señal — pero `on_shutdown` sigue siendo el lugar correcto, porque también se
+> ejecuta en la ruta de tenancy y se ordena bien respecto al drenaje del
+> servidor.
 
 Un handler despacha releyendo la cola desde la petición:
 
@@ -232,7 +245,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     queue.register::<WelcomeEmail>().await;   // register the SAME job types
     queue.start().await;
 
-    tokio::signal::ctrl_c().await?;            // block until Ctrl-C / SIGTERM
+    // Blocks until Ctrl-C (SIGINT) *or* SIGTERM. `tokio::signal::ctrl_c()`
+    // alone is SIGINT-only on Unix, so a worker waiting on it is killed
+    // outright by `docker stop` / a pod eviction and drains nothing.
+    rustango::shutdown::shutdown_signal().await;
     queue.shutdown().await;                     // drain in-flight, then exit
     Ok(())
 }

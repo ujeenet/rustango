@@ -119,6 +119,27 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Fixed
 
+- **`Cli::on_shutdown`**, and graceful shutdown that handles SIGTERM (#1409).
+  `docs/jobs.md` documented draining in-flight jobs on shutdown; under any
+  orchestrator the step never ran. Three defects:
+
+  `Cli::run` installed no graceful shutdown at all, so the signal killed the
+  process and **nothing after `run()` executed** — including the
+  `queue.shutdown()` the docs put there. The tenancy path *did* shut down
+  gracefully but waited on `tokio::signal::ctrl_c()`, which is SIGINT-only on
+  Unix, so it never fired for SIGTERM. And nothing in the crate handled SIGTERM
+  anywhere.
+
+  SIGTERM is how Kubernetes, `docker stop`, systemd and most supervisors ask a
+  process to stop; Ctrl-C is a laptop. So the drain worked where losing a job
+  does not matter and never where it does — invisibly: exit 0, nothing logged.
+
+  Now: one `rustango::shutdown::shutdown_signal()` handling both signals, used
+  by every serve path, and `Cli::on_shutdown(hook)` for work that must happen
+  after the server drains. **`Cli::run` returns on signal rather than never
+  returning**, so code after it now executes — but put the drain in
+  `on_shutdown`, which also runs on the tenancy path.
+
 - **The executor-taking query operations are public** (#1431):
   `rustango::sql::{fetch_aggregate_on, fetch_with_prefetch, select_rows_on,
   insert_on, update_on, bulk_insert_on, annotate_count_children,
