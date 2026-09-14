@@ -47,6 +47,36 @@ sets no CORS — so the notes below are for hand-written apps.
   sets either, switch to `from_settings_async(...).await?`** for redis, or build
   `DatabaseCache` where the pool is. `memory`, `null` and `file` are unchanged.
 
+- **Logging out now actually ends the session** (#1402). Three defects composed
+  into a logout that did nothing:
+
+  `JwtBackend` never read the revocation list, so `revoke()` and
+  `POST /api/auth/logout` wrote a `jti` that nothing on the authentication path
+  ever consulted. It never checked `typ` either, and access and refresh tokens
+  are wire-identical apart from it — so a refresh token presented as a bearer
+  authenticated, carrying days of life where minutes were intended. And logout
+  itself never touched the refresh token at all.
+
+  The result: a user clicked log out, got `204`, and the session survived for
+  the full refresh TTL — seven days by default — on a credential the endpoint
+  never looked at.
+
+  **You must wire a shared `JtiStore`** for revocation to be enforced:
+  `JwtBackend::new(secret).with_jti_store(store)`, the same store the
+  `JwtLifecycle` holds. Enforcement stays off without one — turning it on
+  silently would change what live tokens do — so a backend with no store
+  behaves exactly as before. **Clients should send `{"refresh": "…"}`** to
+  `/logout`; the body is optional and older clients keep working, revoking only
+  the bearer as they did before.
+
+### Fixed
+
+- **`JwtBackend` stopped accepting `JwtLifecycle`'s tokens** between #1397 and
+  this release. #1397 made the lifecycle issue three-segment JWTs, and the
+  backend required *exactly one dot* before it would attempt verification — so
+  the pairing `docs/auth-jwt-api.md` tells you to use silently authenticated
+  nobody. It now accepts both shapes (#1402).
+
 ### Changed
 
 - **`JwtLifecycle` tokens are now actual JWTs** (#1397). They were

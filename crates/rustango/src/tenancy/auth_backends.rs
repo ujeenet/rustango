@@ -387,6 +387,15 @@ pub struct JwtBackend {
     secret: Vec<u8>,
     /// Token lifetime in seconds for tokens issued via [`JwtBackend::issue`].
     pub ttl_secs: i64,
+    /// Revocation list consulted on every authentication (#1402).
+    ///
+    /// `None` means revocation is not enforced on this backend, which is
+    /// the pre-0.57.3 behaviour and stays the default only because
+    /// turning it on silently would change what an existing deployment's
+    /// tokens do. Set it with [`JwtBackend::with_jti_store`], passing the
+    /// **same** store the issuing [`JwtLifecycle`] holds — two stores
+    /// mean logout writes to one and verification reads the other.
+    jti_store: Option<std::sync::Arc<dyn crate::jti_store::JtiStore>>,
 }
 
 impl JwtBackend {
@@ -407,7 +416,25 @@ impl JwtBackend {
         Self {
             secret,
             ttl_secs: 3600,
+            jti_store: None,
         }
+    }
+
+    /// Enforce revocation on this backend (#1402).
+    ///
+    /// Pass the **same** store the issuing [`JwtLifecycle`] holds. Without
+    /// this, `revoke()` and `/api/auth/logout` write to a blacklist that
+    /// nothing on the authentication path reads — a revoked token keeps
+    /// authenticating until it expires, and a deployment can watch a
+    /// shared Redis store fill with JTIs that all still work.
+    ///
+    /// Off by default because turning it on changes what an existing
+    /// deployment's live tokens do, which is not a thing to do silently
+    /// in a patch release.
+    #[must_use]
+    pub fn with_jti_store(mut self, store: std::sync::Arc<dyn crate::jti_store::JtiStore>) -> Self {
+        self.jti_store = Some(store);
+        self
     }
 
     /// Build from the operator-console session secret (convenient for
@@ -431,27 +458,70 @@ impl JwtBackend {
         format!("{payload_b64}.{sig_b64}")
     }
 
-    fn verify_token(&self, token: &str) -> Option<i64> {
+    /// Verify and return `(sub, jti)`.
+    ///
+    /// Accepts both token shapes. Three segments is what `JwtLifecycle`
+    /// issues since #1397 and what any standard JWT looks like; two is
+    /// what `JwtBackend::issue` still emits and what `JwtLifecycle` emitted
+    /// before it. Signing input differs — `header.payload` for the former,
+    /// `payload` alone for the latter — so each is checked against its own.
+    ///
+    /// Handling both is not politeness: `docs/auth-jwt-api.md` tells you to
+    /// pair this backend with `JwtLifecycle`, and between #1397 and this
+    /// change that pairing silently stopped authenticating anyone, because
+    /// the caller below required exactly one dot.
+    ///
+    /// **Refresh tokens are refused.** They carry `typ: "refresh"` and are
+    /// wire-identical to access tokens, so without this check one
+    /// authenticates as a bearer credential with the refresh token's much
+    /// longer life — seven days by default (#1402).
+    fn verify_claims(&self, token: &str) -> Option<(i64, Option<String>)> {
         use base64::Engine;
         use subtle::ConstantTimeEq;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-        let (payload_b64, sig_b64) = token.split_once('.')?;
-        let expected = hmac_sha256(&self.secret, payload_b64.as_bytes());
-        let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(sig_b64)
-            .ok()?;
+        let parts: Vec<&str> = token.split('.').collect();
+        let (signing_input, payload_b64, sig_b64) = match parts.as_slice() {
+            [header, payload, sig] => {
+                // Pin the algorithm. The HMAC below catches a swapped one
+                // anyway, but refusing here makes `alg: none` fail as
+                // itself rather than as a signature mismatch.
+                let h: serde_json::Value =
+                    serde_json::from_slice(&b64.decode(header).ok()?).ok()?;
+                if h.get("alg").and_then(serde_json::Value::as_str) != Some("HS256") {
+                    return None;
+                }
+                (format!("{header}.{payload}"), *payload, *sig)
+            }
+            [payload, sig] => ((*payload).to_owned(), *payload, *sig),
+            _ => return None,
+        };
+
+        let expected = hmac_sha256(&self.secret, signing_input.as_bytes());
+        let provided = b64.decode(sig_b64).ok()?;
         if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
             return None;
         }
-        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload_b64)
-            .ok()?;
-        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+
+        let payload: serde_json::Value =
+            serde_json::from_slice(&b64.decode(payload_b64).ok()?).ok()?;
         let exp = payload.get("exp")?.as_i64()?;
         if chrono::Utc::now().timestamp() >= exp {
             return None; // expired
         }
-        payload.get("sub")?.as_i64()
+        // Absent `typ` is a `JwtBackend::issue` token, which is an access
+        // credential by construction. Present-and-not-"access" is refused.
+        if let Some(typ) = payload.get("typ").and_then(serde_json::Value::as_str) {
+            if typ != "access" {
+                return None;
+            }
+        }
+        let sub = payload.get("sub")?.as_i64()?;
+        let jti = payload
+            .get("jti")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        Some((sub, jti))
     }
 }
 
@@ -484,20 +554,38 @@ impl AuthBackend for JwtBackend {
             return Ok(None);
         };
 
-        // JWT has exactly one dot (payload.sig). API key has one dot (prefix.secret).
-        // Both are one dot — distinguish by prefix length (JWT payload is base64, not 8 hex chars).
-        if token.chars().filter(|&c| c == '.').count() != 1 {
+        // A JWT is two dots (`header.payload.sig`) since #1397, or one for
+        // the legacy shape `JwtBackend::issue` still emits. An API key is
+        // also one dot (`prefix.secret`), distinguished by its 8-char hex
+        // prefix — a base64 JWT payload is never 8 characters.
+        //
+        // This used to require *exactly* one dot, which meant a real JWT
+        // was handed back as "not mine" before verification ran. Between
+        // #1397 and #1402 that silently stopped `JwtLifecycle` tokens
+        // authenticating through the backend chain the docs tell you to
+        // pair them with.
+        let dots = token.chars().filter(|&c| c == '.').count();
+        if dots != 1 && dots != 2 {
             return Ok(None);
         }
-        // If the part before the first dot is exactly 8 chars, it's an API key prefix.
-        if token.split_once('.').map(|(p, _)| p.len()) == Some(8) {
+        if dots == 1 && token.split_once('.').map(|(p, _)| p.len()) == Some(8) {
             return Ok(None);
         }
 
-        let user_id = match self.verify_token(token) {
-            Some(id) => id,
+        let (user_id, jti) = match self.verify_claims(token) {
+            Some(c) => c,
             None => return Err(AuthError::InvalidToken),
         };
+
+        // Revocation, when a store is wired (#1402). Without this the
+        // blacklist is write-only: `revoke()` and `/api/auth/logout` record
+        // a JTI that nothing ever reads, so a "logged out" token keeps
+        // working for its full remaining life.
+        if let (Some(store), Some(jti)) = (self.jti_store.as_ref(), jti.as_deref()) {
+            if store.is_used(jti).await {
+                return Err(AuthError::InvalidToken);
+            }
+        }
 
         let users = super::auth::User::objects()
             .where_(super::auth::User::id.eq(user_id))
