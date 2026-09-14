@@ -1307,8 +1307,8 @@ test result: ok. 17 passed; 0 failed; 0 ignored
   `order_by_view_count_desc`
 * §3.36 `.limit(N).offset(M)` for pagination → `limit_offset_paginates`
 * §3.37 `.aggregate().annotate("alias", AggregateExpr::Count|Sum|Avg|...)`
-  + `fetch_aggregate(&q, &pool)` → `Vec<HashMap<String, SqlValue>>`
-  → `aggregate_count_and_sum`
+  + `rustango::sql::fetch_aggregate_on(&pool, &q)` →
+  `Vec<HashMap<String, SqlValue>>` → `aggregate_count_and_sum`
 * §3.42 `model.save(&pool)` does INSERT (PK Unset) or UPDATE (PK Set) →
   `save_inserts_then_updates_in_place`
 * §3.46 raw `sqlx::query_scalar / query_as` for SQL the QuerySet
@@ -1320,7 +1320,7 @@ test result: ok. 17 passed; 0 failed; 0 ignored
 
 > **Note**: aggregates over big-integer columns (`SUM` / `AVG` of a
 > `BIGINT`) are cast to a decodable type on every dialect, so
-> `fetch_aggregate` returns the computed number rather than a
+> `fetch_aggregate_on` returns the computed number rather than a
 > surprise `NULL`.
 
 ### 3.50 QuerySet inspection + introspection

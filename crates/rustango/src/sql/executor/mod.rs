@@ -285,8 +285,7 @@ pub use page::Page;
 mod pg_on;
 #[cfg(feature = "postgres")]
 pub use pg_on::{
-    bulk_insert_on, delete_on, insert_on, insert_returning_on, select_one_row_on, select_rows_on,
-    update_on,
+    bulk_insert_on, delete_on, insert_on, insert_returning_on, select_rows_on, update_on,
 };
 
 mod row_to_json;
@@ -973,29 +972,6 @@ pub(super) fn bind_query(
 }
 
 // ------------------------------------------------------------------ bulk UPDATE
-
-// ------------------------------------------------------------------ raw SQL escape hatch
-
-/// Like [`raw_query`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`raw_query`].
-#[cfg(feature = "postgres")]
-pub async fn raw_query_on<'c, T, E>(
-    sql: &str,
-    binds: Vec<SqlValue>,
-    executor: E,
-) -> Result<Vec<T>, ExecError>
-where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> = sqlx::query_as(sql);
-    for b in binds {
-        q = bind_query_as(q, b);
-    }
-    Ok(q.fetch_all(executor).await?)
-}
 
 // ------------------------------------------------------------------ aggregate
 

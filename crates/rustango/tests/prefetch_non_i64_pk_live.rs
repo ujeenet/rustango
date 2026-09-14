@@ -11,7 +11,7 @@
 
 #![cfg(feature = "tenancy")]
 
-use rustango::sql::__macro_internals::fetch_with_prefetch;
+use rustango::sql::fetch_with_prefetch;
 use rustango::sql::{sqlx, Auto, ForeignKey};
 
 #[derive(rustango::Model, Debug, Clone)]

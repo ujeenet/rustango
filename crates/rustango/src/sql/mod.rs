@@ -79,6 +79,30 @@ pub use executor::{
 #[cfg(feature = "postgres")]
 pub use executor::row_to_json;
 
+/// Query operations that take a **borrowed executor** rather than a
+/// pool — for running against one connection you have already scoped,
+/// which is how tenancy schema-mode applies `SET search_path`.
+///
+/// These lived in the `#[doc(hidden)]` `__macro_internals` module until
+/// #1431, under a "do not import" notice, with no supported alternative.
+/// Ten in-tree tests and the flagship example's own request handlers
+/// imported them anyway, because there was no other way to run an
+/// aggregate or a prefetch against a specific connection. A prohibition
+/// the framework's own example violates is not a prohibition.
+///
+/// The macro never emitted `fetch_aggregate_on`,
+/// `annotate_count_children{,_on}` or `select_rows_on` at all — they
+/// were filed as codegen support and were never that.
+///
+/// **PostgreSQL only.** They are typed `E: sqlx::Executor<Database =
+/// Postgres>`, so unlike the rest of the query surface they are not
+/// tri-dialect. That is a real gap, not a design choice; see #1293.
+#[cfg(feature = "postgres")]
+pub use executor::{
+    annotate_count_children, annotate_count_children_on, bulk_insert_on, fetch_aggregate_on,
+    fetch_with_prefetch, insert_on, select_rows_on, update_on,
+};
+
 /// Hidden path for the `#[derive(Model)]` macro's generic-executor
 /// emissions. The functions inside are PG-typed (`E: sqlx::Executor<
 /// Database = Postgres>`) and exist purely to support the macro's
@@ -86,13 +110,15 @@ pub use executor::row_to_json;
 /// `Self::insert_returning_on` / `Self::bulk_insert_on` codegen that
 /// needs a generic executor for tenancy schema-mode `SET search_path`
 /// scoping. **Not part of the public API; do not import.**
+///
+/// Now holds only what the macro actually emits (#1431). The operations
+/// callers need are public above; `raw_query_on` and `select_one_row_on`
+/// were emitted by nothing and used by nobody, and are gone.
 #[cfg(feature = "postgres")]
 #[doc(hidden)]
 pub mod __macro_internals {
     pub use super::executor::{
-        annotate_count_children, annotate_count_children_on, bulk_insert_on, delete_on,
-        fetch_aggregate_on, fetch_with_prefetch, insert_on, insert_returning_on, raw_query_on,
-        select_one_row_on, select_rows_on, update_on,
+        bulk_insert_on, delete_on, fetch_with_prefetch, insert_on, insert_returning_on, update_on,
     };
 }
 

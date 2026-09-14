@@ -119,6 +119,28 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Fixed
 
+- **The executor-taking query operations are public** (#1431):
+  `rustango::sql::{fetch_aggregate_on, fetch_with_prefetch, select_rows_on,
+  insert_on, update_on, bulk_insert_on, annotate_count_children,
+  annotate_count_children_on}`. They run against a borrowed executor rather
+  than a pool, which is how a tenancy schema-mode connection keeps its
+  `SET search_path`.
+
+  They lived in `sql::__macro_internals`, marked `#[doc(hidden)]` and "do not
+  import", with **fourteen importers** — ten in-tree tests, the cookbook, and
+  two in the flagship example's own request handlers. Not misuse: there was no
+  public way to do it, and `cargo doc` would not show the functions. Four of
+  them — `fetch_aggregate_on`, `select_rows_on` and the two
+  `annotate_count_children` forms — were **never emitted by the macro at all**;
+  they had been filed as codegen support and were never that.
+
+  **PostgreSQL only**, unlike the rest of the query surface. That is a gap
+  rather than a design choice (#1293), and it is now stated rather than hidden.
+
+  `__macro_internals` keeps only what codegen emits, and a guard fails the
+  build if anything imports it again. `raw_query_on` and `select_one_row_on`
+  were emitted by nothing and used by nobody, and are removed.
+
 - **`RUSTANGO_SESSION_SECRET` means one thing now, not three** (#1396). It was
   read in three places that disagreed about "long enough": the cookie layer
   base64-decoded and applied the 32-byte floor to the decoded bytes;
