@@ -77,7 +77,8 @@ const UNBACKED: &[(&str, usize)] = &[
     ("websockets.md", 3),
     ("sso.md", 2),
     ("operator-console.md", 1),
-    ("scaffolding.md", 1),
+    // `scaffolding.md` came off this list in #1421, which holds its
+    // `--features` table to what `cargo rustango new --help` prints.
     ("benchmarks.md", 0),
     ("database-tuning.md", 0),
     ("glossary.md", 0),
