@@ -235,7 +235,11 @@ let app = Router::new()
 
 **Eximir endpoints recolectores.** `CsrfConfig::exempt_prefix("/path")` (repetible) omite la aplicación de CSRF para los métodos inseguros en peticiones cuya ruta comienza con el prefijo dado. Esto es para endpoints de solo anexado, sin estado de autenticación, alcanzados vía `navigator.sendBeacon` — por ejemplo, un recolector de analíticas — que no pueden establecer una cabecera `X-CSRF-Token` y, cuando la página se sirve desde una caché de CDN que elimina `Set-Cookie`, puede que no lleven ninguna cookie CSRF en absoluto. Mantén los prefijos estrechos y nunca eximas nada que lea o escriba estado de autenticación.
 
-El auto-admin habilita CSRF en cada mutación por defecto, y no hay forma de desactivarlo.
+**El auto-admin.** En cuanto llamas a `.with_session_auth(...)`, CSRF se monta automáticamente en cada mutación del admin — crear, actualizar, borrar, acciones masivas, limpieza de auditoría — y cada formulario del admin renderiza su token por ti. No hay nada que cablear ni forma de desactivarlo.
+
+La condición es deliberada, no incidental: CSRF defiende credenciales que el navegador adjunta por su cuenta, así que es la cookie de sesión la que lo hace significativo. Un admin construido sin `with_session_auth` no tiene ninguna credencial gestionada por rustango que falsificar, y sus mutaciones son alcanzables directamente por cualquiera que llegue a la ruta — eso es un hueco de autenticación, no de CSRF, y CSRF no lo estrecharía. Si pones tu propia auth por cookie delante, monta `csrf::layer()` tú mismo.
+
+Hasta [#1395](https://github.com/ujeenet/rustango/issues/1395) este párrafo afirmaba que la protección era incondicional cuando la única ruta protegida era `POST /login`. Cualquier otra mutación del admin aceptaba un POST entre sitios montado sobre la sesión del administrador — incluida la limpieza de auditoría, de modo que la misma clase de petición podía borrar su propio rastro.
 
 ---
 

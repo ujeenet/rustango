@@ -65,6 +65,7 @@
 <p><em>No rows on this page.</em></p>
 {% else %}
 <form method="post" action="/{{ model.table }}/__action" class="list-form">
+  {{ csrf_input | safe }}
   {% if actions and actions | length > 0 and not read_only and actions_on_top %}
   <div class="action-bar action-bar-top">
     <label>Action:
