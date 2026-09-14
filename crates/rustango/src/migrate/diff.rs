@@ -1573,12 +1573,15 @@ mod sql_type_tests {
             assert_eq!(sq.immediate, vec![r#"DROP TABLE "foo""#.to_string()]);
         }
 
-        let drop_col = [SchemaChange::DropColumn {
-            table: "t".into(),
-            column: "c".into(),
-        }];
+        // Bound inside the gate: nothing else reads it, so at
+        // `--no-default-features --features sqlite` it is an unused
+        // binding rather than a fixture (#1370).
         #[cfg(feature = "mysql")]
         {
+            let drop_col = [SchemaChange::DropColumn {
+                table: "t".into(),
+                column: "c".into(),
+            }];
             let my =
                 render_changes_split_with_dialect(&drop_col, &snap, &crate::sql::MySql).unwrap();
             assert_eq!(

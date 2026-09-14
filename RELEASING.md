@@ -113,6 +113,18 @@ Do not add these to a checklist; they are already handled:
   in the docs, so it always resolves to the newest published version.
 - **Doc transcripts** are guarded by
   `crates/rustango/tests/docs_versions.rs`, in all four locales.
+- **Version-labelled doc headings** cannot go stale unnoticed: a heading
+  like `## What's new (v0.41 / v0.42)` fails
+  `docs_links::no_standing_heading_pins_itself_to_a_release`. It sat
+  fourteen releases out of date before anyone noticed (#1304). Headings
+  that are genuinely *about* one release, like `## Upgrading to 0.51.2`,
+  are deliberately not matched.
+- **The release-notes page** (`docs/release-notes.md`) links to the
+  changelog and to GitHub Releases rather than restating them, so it does
+  not need touching per release.
+- **Repo links in docs** are checked against the tree by
+  `docs_links::every_repo_link_names_a_path_that_exists`, so a renamed or
+  deleted file fails before a reader finds the 404 (#1305).
 
 ## `gh pr checks` lags
 

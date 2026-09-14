@@ -58,6 +58,120 @@ for inline usage.
 - [Tenancy commands](#tenancy-commands)
 - [Custom subcommands](#custom-subcommands)
 - [Common workflows](#common-workflows)
+- [Every verb](#every-verb)
+
+---
+
+## Every verb
+
+The sections below explain the commonly used verbs in depth. This table is
+the **complete** list, taken from the two dispatchers
+(`migrate/manage.rs` and `tenancy/manage/mod.rs`) rather than from the
+prose — so a verb missing from the guide is still findable here. Run
+`<verb> --help` for its flags; the help text is authoritative and this
+page is not.
+
+Verbs marked **T** need the `tenancy` feature and are reached through
+`Cli::tenancy()`.
+
+### Migrations and schema
+
+| Verb | What it does |
+|---|---|
+| `makemigrations [name]` / `--empty <name>` | Generate a migration from the model diff |
+| `migrate [target]` / `--dry-run` / `--squash` | Apply pending migrations |
+| `downgrade [N]` | Roll back the last N migrations |
+| `showmigrations` / `status` | List migrations and their applied state |
+| `sqlmigrate <name>` | Print the SQL a migration would run, without running it |
+| `forget-pending <name>` | Delete an un-applied migration JSON |
+| `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Append a hand-written data operation |
+| `inspectdb [--schema <s>] [--table <t>]` | Read a live schema and emit `#[derive(Model)]` source |
+
+### Data
+
+| Verb | What it does |
+|---|---|
+| `dumpdata` | Export rows as JSON fixtures |
+| `loaddata <fixture.json> [--fail-fast]` | Load JSON fixtures back in |
+| `flush [--yes] [--app <label>] [--model <name>]` | Wipe every model table; the flags limit the set |
+| `prune [--model <name>] [--except <name>] [--pretend]` | Streaming bulk delete; `--pretend` reports without deleting |
+| `db:dump` / `db:restore` / `db:info` | Native dump / restore / inspect |
+| `dbshell` | Exec the native client (`psql` / `mysql` / `sqlite3`). Needs only `DATABASE_URL`, not a working pool — it is handled before the pool is built, so it works when sqlx cannot connect |
+
+### Scaffolders and generators
+
+| Verb | What it does |
+|---|---|
+| `startapp <name>` | Scaffold an app module |
+| `make:viewset` / `make:serializer` / `make:form` | Generate a ViewSet, Serializer or Form |
+| `make:job` / `make:middleware` / `make:notification` / `make:test` | Generate a job, middleware, notification or test |
+| `make:api_routes <app> [--tenant]` | Generate an app's API route module |
+
+### Cache, sessions and mail
+
+| Verb | What it does |
+|---|---|
+| `createcachetable` / `create-cache-table` `[--table <name>]` | Create the cache table (and the session table when sessions go to the DB) |
+| `clear-cache [--table <name>]` / `clearsessions` | Empty it; returns the number of rows deleted |
+| `sendtestemail --to <addr>` | Send a fixed test email through the configured backend |
+
+### Introspection
+
+| Verb | What it does |
+|---|---|
+| `showmodels [--format plain\|json] [--app <label>]` | Every registered model, sorted for deterministic output |
+| `showurls [--format plain\|json]` | Every named route, sorted |
+| `check [--deploy]` | Health checks; `--deploy` adds the production audits |
+| `create-admin` | Bootstrap an `AdminUser` row for projects using `admin::Builder::with_session_auth`. **Not** tenancy-gated — it takes a plain `&Pool` and writes `rustango_admin_users`, creating the table if absent. The only way to get a first admin login on a non-tenancy project |
+| `about` / `version` / `--version` | Build and version information |
+| `docs` | Open the documentation |
+
+### Users and access **T**
+
+| Verb | What it does |
+|---|---|
+| `create-superuser` / `set-superuser` | Create a superuser, or promote an existing user |
+| `create-user` / `create-operator` | Create a tenant user or an operator |
+| `reset-password` / `change-password` | Tenant-user password recovery |
+| `reset-operator-password` / `change-operator-password` | Operator password recovery |
+| `set-operator-active` | Enable or disable an operator |
+| `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
+| `grant-perm` / `revoke-perm` | Permissions by codename |
+| `seed-permissions [--slug <s>]` | Seed the default permission rows |
+| `create-api-key` | Issue an API key |
+
+### Tenants **T**
+
+| Verb | What it does |
+|---|---|
+| `create-tenant` / `edit-tenant` / `list-tenants` | Provision, edit, list |
+| `drop-tenant` / `purge-tenant` | Deactivate (reversible) / destroy (not) |
+| `migrate-tenants` / `migrate-registry` | Apply migrations across tenants, or to the registry |
+| `migrate-tenant-storage <slug> --to schema\|database` | Move a tenant between storage modes |
+| `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host routing |
+| `test-tenant-connection` | Verify a tenant's database is reachable |
+| `prewarm-pools` | Open tenant pools ahead of first request |
+| `run-server` / `runserver` | Run the multi-tenant server |
+| `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup and interactive entry points |
+
+### Audit **T**
+
+| Verb | What it does |
+|---|---|
+| `audit-log` | Read the audit trail |
+| `audit-cleanup` | Trim it |
+
+### MCP **T**
+
+Documented in full in [the MCP guide](mcp.md).
+
+| Verb | What it does |
+|---|---|
+| `create-agent` / `list-agents` / `rotate-agent-secret` | Agents |
+| `create-skill` / `list-skills` / `grant-skill` / `revoke-skill` | Skills |
+| `map-skill-permission` / `unmap-skill-permission` | Bind a skill to a permission |
+| `create-user-key` / `list-user-keys` / `revoke-user-key` | Per-user MCP credentials |
+| `list-runs` / `show-run` | Run history |
 
 ---
 
@@ -522,6 +636,10 @@ cargo run -- db:dump > backups/before-migrate.sql    # stdout → file
 cargo run -- db:dump --out backups/before-migrate.sql
 ```
 
+The `running: pg_dump …` status line goes to **stderr**, so it stays out
+of the redirect and out of a pipe. Until [#1404](https://github.com/ujeenet/rustango/issues/1404)
+it went to stdout, which put it on the first line of the `.sql` file.
+
 ### `db:restore <path> [--clean]`
 
 Loads a dump file back into your database — the counterpart to
@@ -546,7 +664,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.57.0
+rustango 0.57.1
 ```
 
 ### `about`
@@ -558,7 +676,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.57.0
+  version:        0.57.1
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -575,14 +693,18 @@ Django's `check --deploy` works.
 **Always-on checks:**
 - ≥ 1 model registered via `inventory`
 - DB reachable (`SELECT 1`)
-- Migration count vs model count
+- Models registered but **no** migrations on disk (it does not compare counts — an existing `migrations/` directory is reported as info, whatever the number)
 
 **With `--deploy`:**
 - `RUSTANGO_ENV` is `prod` or `production`
 - `RUSTANGO_SESSION_SECRET` set and ≥ 32 bytes (the HMAC key for
   cookies + JWTs; `SECRET_KEY` is never read by the framework)
 - `DATABASE_URL` set
-- `RUSTANGO_APEX_DOMAIN` set (tenancy projects)
+- `RUSTANGO_APEX_DOMAIN` set — the warning fires for **every** project when unset or `localhost`, and says so; single-tenant projects can ignore it
+- `DATABASE_URL` pointing at `localhost` / `127.0.0.1` (warning — usually a managed hostname in production)
+- `RUSTANGO_BIND` starting `127.0.0.1` (warning — loopback-only won't accept external traffic)
+- A settings-tier audit over your TOML, flagging dev defaults left in a prod tier (needs the `config` feature)
+- `Meta.required_db_vendor` / `required_db_features` on every registered model, checked against the dialect you are actually connected to
 
 ```bash
 $ cargo run -- check --deploy
@@ -725,8 +847,9 @@ cargo run -- runserver           # explicit
 ### `create-tenant <slug> [options]`
 
 Sets up a new tenant (customer/org) and applies the tenant migrations to
-it. The `<slug>` is its short identifier. Safe to re-run — calling it
-again on an existing tenant won't duplicate anything.
+it. The `<slug>` is its short identifier. **Not** safe to re-run: calling it
+again on an existing slug is refused up front with ``tenant slug `<slug>`
+already exists`` (tenancy/provision.rs:599), before anything else happens.
 
 ```bash
 cargo run -- create-tenant acme --display-name "ACME Corp"
@@ -740,6 +863,10 @@ cargo run -- create-tenant beta --mode database --database-url postgres://...
 | `--database-url <url>` | Tenant-specific DB URL (required for database mode) |
 | `--host-pattern <pattern>` | Override the host pattern used by `SubdomainResolver` |
 | `--no-migrate` | Skip applying tenant-scoped migrations after provisioning |
+| `--backend postgres \| mysql \| sqlite` | Driver for a database-mode tenant (default: `postgres`). Validated against `--mode` |
+| `--schema-name <s>` | Override the generated schema name in schema mode |
+| `--port <n>` | Port the tenant is reachable on, for routing |
+| `--path-prefix <s>` | Path prefix the tenant is reachable under, for routing |
 
 ### `edit-tenant <slug> [options]`
 
@@ -788,8 +915,9 @@ cargo run -- test-tenant-connection "$URL" --no-write-probe --timeout 5
 ### `drop-tenant <slug> [--confirm <slug>]`
 
 Deactivates a tenant by setting `active = false`. This is the soft,
-reversible option — the tenant's data stays on disk, and re-running
-`create-tenant` brings it back. When you're not running interactively
+reversible option — the tenant's data stays on disk, and reactivate it with
+`edit-tenant <slug> --activate`. Re-running `create-tenant` does **not** work:
+the `Org` row still exists, so it is refused as a duplicate slug. When you're not running interactively
 (no terminal attached), you must pass `--confirm <slug>` with the slug
 typed again to confirm.
 
@@ -802,9 +930,10 @@ cargo run -- drop-tenant acme --confirm acme
 **Permanently deletes a tenant.** It drops the tenant's schema and
 removes its row from `rustango_orgs`, with no undo. When you're not
 running interactively (no terminal attached), you must pass
-`--confirm <slug>` with the slug typed again. For database-mode tenants,
-the underlying database is left in place unless you also pass
-`--purge-database`.
+`--confirm <slug>` with the slug typed again. For database-mode tenants the command
+**refuses outright** unless you also pass `--purge-database` — it does not
+remove the `Org` row and leave the database behind, it does nothing at all
+(tenancy/manage/tenants.rs:479).
 
 ```bash
 cargo run -- purge-tenant acme --confirm acme
@@ -1175,7 +1304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("import-csv")) {
         let url = std::env::var("DATABASE_URL")?;
-        let pool = rustango::sql::sqlx::PgPool::connect(&url).await?;
+        let pool = rustango::sql::Pool::connect_postgres(&url).await?;
         return my_csv_importer::run(&pool, &args[1..]).await;
     }
     rustango::manage::Cli::new().api(urls::api()).run().await
@@ -1196,7 +1325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let url = std::env::var("DATABASE_URL")?;
-    let pool = rustango::sql::sqlx::PgPool::connect(&url).await?;
+    let pool = rustango::sql::Pool::connect_postgres(&url).await?;
 
     match args.first().map(String::as_str) {
         Some("import-csv") => my_csv_importer::run(&pool, &args[1..]).await,
@@ -1347,7 +1476,7 @@ on pre-warming. The settings live on `TenantPoolsConfig`:
 | Field | Default | Purpose |
 |---|---|---|
 | `max_cached_database_pools` | 64 | Pool cache cap. Once full, the next uncached tenant errors out (no silent eviction). |
-| `database_pool_max_connections` | 4 | Per-pool `max_connections`. Keep small so a tenant fan-out doesn't exhaust PG `max_connections`. |
+| `database_pool_max_connections` | 16 | Per-pool `max_connections`. Keep small so a tenant fan-out doesn't exhaust PG `max_connections`. |
 | `database_pool_min_connections` | 0 | Keeps N connections warm at all times. `≥1` drops first-request latency by paying the TCP/TLS/auth round-trip at boot. |
 | `database_pool_acquire_timeout` | 30s | How long `pool.acquire()` waits before erroring `PoolTimedOut`. |
 | `database_pool_idle_timeout` | 10 min | Close idle connections after this duration. Defends against load-balancer / `idle_in_transaction_session_timeout` cuts. |

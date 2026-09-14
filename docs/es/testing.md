@@ -31,6 +31,7 @@ Rust.
 - [Enviar JSON, cabeceras y cuerpos](#enviar-json-cabeceras-y-cuerpos)
 - [Probar una API real](#probar-una-api-real)
 - [Pruebas de base de datos con reversión](#pruebas-de-base-de-datos-con-reversión)
+- [Suites en vivo, y por qué una ejecución en verde puede no probar nada](#suites-en-vivo-y-por-qué-una-ejecución-en-verde-puede-no-probar-nada)
 - [Ayudantes de aserción de respuesta](#ayudantes-de-aserción-de-respuesta)
 - [Véase también](#véase-también)
 
@@ -150,6 +151,53 @@ async fn creating_a_post_persists_it() {
 Para SQLite, las pruebas `*_sqlite_live.rs` repartidas por este repositorio usan en
 su lugar una base de datos en memoria por prueba — también totalmente aislada, con
 cero configuración externa.
+
+---
+
+## Suites en vivo, y por qué una ejecución en verde puede no probar nada
+
+Las pruebas llamadas `*_live.rs` hablan con una base de datos real. La mayoría no
+necesita nada de ti; el resto necesita una variable de entorno y, **cuando falta,
+no fallan. Hacen un `return` y la ejecución informa de éxito.**
+
+Es deliberado — mantiene `cargo test` funcionando en un portátil sin servidor —
+pero significa que una ejecución que pasa no es prueba de que la suite se haya
+ejecutado. Conviene saberlo antes de leer un resultado en verde como cobertura.
+
+### Qué variable quiere cada suite
+
+| Variable | Suites | Qué necesitan |
+|---|---:|---|
+| *(ninguna)* | 213 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
+| `DATABASE_URL` | 93 | Un servidor PostgreSQL accesible. |
+| `MYSQL_TEST_URL` | 21 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
+| `REDIS_TEST_URL` | 2 | Un Redis accesible. |
+
+Una suite que lee dos variables se cuenta en ambas, así que la columna no suma el
+número de archivos.
+
+MySQL es la que pilla a la gente: lee su propia variable, así que un shell con
+solo `DATABASE_URL` definida ejecuta las suites de Postgres y se salta en
+silencio todas las de MySQL.
+
+### Distinguir un salto de un aprobado
+
+La mayoría de los saltos son un `return` temprano y pelado, sin salida alguna.
+Una minoría imprime antes una línea en stderr, que `cargo test` oculta salvo que
+se la pidas:
+
+```bash
+cargo test --test <name> -- --nocapture
+```
+
+La señal fiable es el recuento. Una suite en vivo que informa de `0 passed` — o
+de bastantes menos de las que contiene el archivo — se saltó.
+`running 2 tests … 2 passed` sin ningún servidor en marcha significa que esas dos
+pruebas retornaron pronto.
+
+Si quieres que una suite falle en lugar de saltarse cuando falta su servidor,
+define la variable con una URL deliberadamente incorrecta: entonces fallará al
+conectar, que es una señal más ruidosa y más honesta que un salto.
 
 ---
 

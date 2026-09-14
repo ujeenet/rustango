@@ -42,18 +42,27 @@ kernel — same idea, attached to your router.
 
 There are two shapes, and you'll use both:
 
-1. **A `tower::Layer`** — a reusable, configurable middleware struct. Every
-   built-in is one (`SecurityHeadersLayer`, `RateLimitLayer`, …). You attach a
-   layer with axum's `.layer(...)`, or — for most built-ins — with an
-   **extension-trait one-liner** that reads better:
+1. **A config struct plus a `…RouterExt` one-liner** — how most built-ins are
+   shaped. The `…Layer` type is a configuration struct, *not* a `tower::Layer`:
+   it is installed by its extension trait, which wraps it in
+   `axum::middleware::from_fn` internally. `SecurityHeadersLayer`,
+   `RateLimitLayer`, `RequestIdLayer`, `CorsLayer`, `EtagLayer`,
+   `CompressionLayer`, `BodyLimitLayer`, `IdempotencyLayer` and `AccessLogLayer`
+   are all this shape, so `.layer(…)` on them does not compile:
 
    ```rust
    use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt};
 
-   // These two are equivalent; the second is the ergonomic form.
-   let app = router.layer(SecurityHeadersLayer::strict());
+   // The RouterExt method is the only form — the name ends in `Layer`, but the
+   // type does not implement `tower::Layer`.
    let app = router.security_headers(SecurityHeadersLayer::strict());
    ```
+
+   The ones that genuinely are `tower::Layer` — and so accept `.layer(…)` — are
+   `CachePageLayer`, `CsrfLayer`, `LocaleMiddleware`, `MethodOverrideLayer`,
+   `HmacAuthLayer`, `TracingLayer`, `RequestSignalsLayer` and the `api_version`
+   builder. Check before reaching for `.layer(…)`:
+   `rg 'impl.*tower::Layer' crates/rustango/src/`.
 
    Each built-in module exports a `…RouterExt` trait (`SecurityHeadersRouterExt`,
    `RateLimitRouterExt`, …). Bring it into scope and you get a `.security_headers()`
@@ -191,7 +200,9 @@ loc.is_rtl()     // true for ar, he, fa, …
 ```
 
 The cookie name defaults to `django_language` (Django-compatible); change it
-with `.cookie_name("…")`, or pass `None` to disable cookie lookup entirely.
+with `.cookie_name("my_locale".to_string())` — the parameter is
+`impl Into<Option<String>>`, which `&str` does not satisfy, so a bare literal is
+a trait-bound error — or pass `None` to disable cookie lookup entirely.
 The resolution precedence, verified end-to-end:
 
 ```rust
@@ -352,8 +363,11 @@ method (POST/PUT/PATCH/DELETE) must echo that cookie's value back, either in the
 //   X-CSRF-Token:  <t>                 → 200 OK   (double-submit matches)
 ```
 
-In Tera templates, `{{ csrf_token }}` gives the raw token and `{{ csrf_input }}`
-a ready-made hidden `<input name="_csrf">` — drop one in every form. Override
+In Tera templates, `{{ csrf_token }}` gives the raw token and `{{ csrf_input | safe }}`
+a ready-made hidden `<input name="_csrf">` — drop one in every form. The `| safe`
+is required: Tera autoescapes `.html`, so without it the form carries no `_csrf`
+field and every POST 403s. The admin's own login form does exactly this — see
+`crates/rustango/src/admin/templates/login.html`. Override
 the cookie/header names or the `Secure` flag with `csrf::with_config(CsrfConfig)`;
 for SPA setups, add `.with_trusted_origins([...])` to enable the Origin-header
 defense-in-depth check on top of the token. For append-only collector endpoints
@@ -385,12 +399,12 @@ let app = router.layer(from_fn(add_app_version));
 Reach for a full **`tower::Layer`** when the middleware is reusable and
 configurable — when you'd ship it as part of a library. The pattern is a small
 `Layer` struct that builds a `Service`, plus (by convention) a `…RouterExt`
-extension trait for the one-liner. `rustango::request_id` is the smallest
-complete reference to copy:
+extension trait for the one-liner. `rustango::request_id` is the smallest module to read, but note it is the
+`from_fn` shape above rather than a real `Layer` — for the genuine
+`Layer` + `Service` pair copy `rustango::cache_page` (`CachePageLayer` +
+`CachePageService<S>`) or `rustango::forms::csrf`:
 
-- `RequestIdLayer` — the configurable layer (`::default()`, `.always_generate()`),
-- `RequestIdService<S>` — wraps the inner service; reads/sets the `X-Request-Id`
-  header inside `call`,
+- `RequestIdLayer` — the configuration struct (`::default()`, `.always_generate()`),
 - `RequestId` — a `FromRequestParts` extractor so handlers can read the id,
 - `RequestIdRouterExt` — gives `Router::request_id(layer)`.
 

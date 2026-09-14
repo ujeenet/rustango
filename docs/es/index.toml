@@ -24,4 +24,4 @@ pages = ["benchmarks.md"]
 [[section]]
 title = "Referencia"
 slug = "referencia"
-pages = ["api-conventions.md"]
+pages = ["api-conventions.md", "release-notes.md"]

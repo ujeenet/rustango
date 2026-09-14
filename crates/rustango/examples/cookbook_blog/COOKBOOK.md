@@ -989,6 +989,16 @@ let mut act = Activity {
 act.save(&pool).await?;
 ```
 
+> **`save` is Postgres-only; `save_pool` is the portable one.** `save` is
+> `#[cfg(feature = "postgres")]` and takes `&PgPool`, so it does not exist
+> on a SQLite or MySQL build — this chapter uses it because the recipes
+> here run on Postgres. `save_pool(&Pool)` is the same operation across all
+> three backends, and it is what Chapter 13 uses. The naming reads
+> backwards (the unsuffixed name is the *narrower* one) and cannot be
+> corrected without a deprecation cycle; [#1293](https://github.com/ujeenet/rustango/issues/1293)
+> tracks it. Writing portable code today means reaching for the `_pool`
+> suffix.
+
 **Verified by**: `generic_fk_schema_and_content_type_lookup`
 
 ### 2.24b Typed `<name>_pool` accessor on the GFK target
@@ -2828,9 +2838,9 @@ combine with the existing dialect features:
 
 ```toml
 [dependencies]
-rustango = { version = "0.29", features = ["sqlite"] }
+rustango = { version = "0.57", features = ["sqlite"] }
 # or both at once:
-rustango = { version = "0.29", features = ["postgres", "sqlite"] }
+rustango = { version = "0.57", features = ["postgres", "sqlite"] }
 ```
 
 The macro emits per-backend trait impls only when the feature is
@@ -3203,7 +3213,12 @@ template-driven site) alongside the tenant admin:
 ## Chapter 16 — Every feature on every backend
 
 "Tri-dialect everywhere": every framework surface runs on
-PostgreSQL, MySQL 8+, and SQLite out of the box. Concretely:
+PostgreSQL, MySQL 8+, and SQLite out of the box, with one exception —
+**schema-mode tenancy is Postgres-only**, because it dispatches on
+Postgres schemas, which the other two do not have. 16.221 gives the
+detail; `database` mode is the default and runs on all three.
+
+Concretely:
 
 ### 16.220 — Multi-tenant runserver on any backend
 
@@ -3292,7 +3307,7 @@ UPDATE`, `INSERT … RETURNING`) translated to portable equivalents.
 
 ```toml
 # Tri-dialect media
-rustango = { version = "0.38", default-features = false, features = ["sqlite", "media", "storage"] }
+rustango = { version = "0.57", default-features = false, features = ["sqlite", "media", "storage"] }
 ```
 
 ```rust,ignore
@@ -3326,20 +3341,22 @@ load_all_pool` / `Fixture::load_into_pool` all run on any backend.
 
 ## Known backend limitations
 
-- **SQLite — adding foreign keys:**
-  `ddl::create_constraints_sql_with_dialect` emits `ALTER TABLE …
-  ADD CONSTRAINT FOREIGN KEY`, which SQLite's parser rejects (FK
-  constraints must be inline at CREATE TABLE). The `sqlite_orm_demo`
-  example skips that loop on SQLite. A fuller fix would move FK
-  constraints into the inline column list when the dialect doesn't
-  support ALTER-style FK addition.
-- **SQLite — `apply_all_pool` and framework models:**
-  `apply_all_pool` walks the full `inventory::registered_models()`
-  list, which on a default build includes framework models (Org,
-  Operator, Job, …) whose DDL emits Postgres-shape SQL that fails on
-  SQLite. The demo emits DDL by hand for just its own models. A
-  `Dialect::supports_model(&ModelSchema)` filter would let
-  `apply_all_pool` skip incompatible models cleanly.
+Both limitations this section used to list have been fixed, and the
+section is kept only to say so — they were quoted often enough that
+their absence is worth stating.
+
+- **SQLite — adding foreign keys.** Fixed.
+  `create_constraints_sql_with_dialect` now returns nothing when the
+  dialect inlines FKs, and `inline_fk_clauses` emits them inside
+  `CREATE TABLE`. The earlier workaround skipped FKs on SQLite
+  entirely, which silently dropped referential integrity rather than
+  merely failing.
+- **SQLite — `apply_all_pool` and framework models.** Fixed.
+  It walks `bootstrap_models()` and the DDL is emitted per dialect, so
+  the framework's own tables create cleanly on SQLite. Verified by
+  running it against `sqlite::memory:` with tenancy and batteries on —
+  all nineteen managed framework models (`rustango_orgs`,
+  `rustango_operators`, `rustango_audit_log`, …) applied without error.
 
 ---
 
@@ -3352,7 +3369,7 @@ your framework-exposed **tools** over JSON-RPC 2.0 / Streamable HTTP.
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.43", features = ["mcp"] }
+rustango = { version = "0.57", features = ["mcp"] }
 # mcp pulls tenancy + sse + serializer + openapi automatically.
 ```
 

@@ -84,7 +84,8 @@ let api = Router::new().route("/api/me", get(me)).layer(login_required_or_401())
 | `active_required(url)` | `active_required_or_403()` | angemeldet **und** `active` |
 | `superuser_required(url)` | `superuser_required_or_403()` | `is_superuser && active` |
 | `user_passes_test(url, pred)` | `user_passes_test_or_403(pred)` | Prädikat über die `User`-Zeile |
-| `permission_required(url, codename)` | `permission_required_or_403(codename)` | hält den Berechtigungs-Codename |
+| `permission_required(url, codename)` † | `permission_required_or_403(codename)` | hält den Berechtigungs-Codename |
+† `permission_required` ist das einzige Gate dieser Spalte, das nicht immer weiterleitet. Ein **anonymer** Besucher bekommt den 302 auf `login_url`; wer angemeldet ist, aber den Codename nicht hat, bekommt ein nacktes **403** ohne Redirect und ohne Body (`auth_decorators.rs:560`). Die anderen vier leiten in jedem Fehlerfall weiter.
 
 Alle sind tower-Layer — `.layer(...)` sie auf einen Router oder Sub-Router.
 

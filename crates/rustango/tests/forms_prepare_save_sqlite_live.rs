@@ -147,10 +147,7 @@ async fn prepare_save_updates_existing_row_with_overridden_value() {
 
     let (title, author): (String, i64) =
         sqlx::query_as::<_, (String, i64)>("SELECT title, author_id FROM ps_post WHERE id = 1")
-            .fetch_one(match &pool {
-                Pool::Sqlite(s) => s,
-                _ => unreachable!(),
-            })
+            .fetch_one(sqlite_pool(&pool))
             .await
             .expect("fetch");
     assert_eq!(title, "form-edit", "form's title should land");

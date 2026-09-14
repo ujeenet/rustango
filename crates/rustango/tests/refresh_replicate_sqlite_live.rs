@@ -55,9 +55,7 @@ async fn refresh_from_db_picks_up_external_update() {
     let pk = post.id.get().copied().unwrap();
 
     // Another process / connection updates the row out of band.
-    let Pool::Sqlite(raw) = &pool else {
-        unreachable!()
-    };
+    let raw = pool.as_sqlite().expect("sqlite pool");
     sqlx::query("UPDATE rr_post SET title = ?, views = ? WHERE id = ?")
         .bind("Edited externally")
         .bind(99_i64)
@@ -90,9 +88,7 @@ async fn refresh_from_db_errors_when_row_was_deleted() {
     post.save_pool(&pool).await.unwrap();
     let pk = post.id.get().copied().unwrap();
 
-    let Pool::Sqlite(raw) = &pool else {
-        unreachable!()
-    };
+    let raw = pool.as_sqlite().expect("sqlite pool");
     sqlx::query("DELETE FROM rr_post WHERE id = ?")
         .bind(pk)
         .execute(raw)

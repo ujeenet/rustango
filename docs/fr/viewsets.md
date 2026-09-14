@@ -26,7 +26,7 @@ est une référence pour chaque réglage.
 [![Un ViewSet Rustango branché sur un sérialiseur : un seul bloc #[viewset(serializer = …)] fournit une sortie JSON typée et une entrée validée sur les six routes CRUD](../img/viewsets.png)](../img/viewsets.png)
 
 > **Source :** `rustango::viewset` (`ViewSet`, `#[derive(ViewSet)]`, les
-> options `#[viewset(...)]` + le builder `for_model`) — toujours compilé.
+> options `#[viewset(...)]` + le builder `for_model`) — conditionné à `admin` **ou** `tenancy`. À l'intérieur, `.serializer::<S>()` exige `serializer`, le `router()` du builder exige `postgres`, `tenant_router()` / `OwnedBy` exigent `tenancy`, et l'action QUERY exige `admin`.
 >
 > **Version exécutable :** le blog construit ici reflète l'exemple testé et compilable
 > [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
@@ -505,8 +505,10 @@ Le montage sur `/api/posts` branche les six opérations REST :
 | `PATCH` | `/api/posts/{pk}` | **partial update** | 200 | l'objet mis à jour (seuls les champs fournis changent) |
 | `DELETE` | `/api/posts/{pk}` | **destroy** | 204 | vide |
 
-Une barre oblique finale sur le préfixe de montage est optionnelle. Seuls ces six verbes sont
-branchés — pas de `HEAD`/`OPTIONS` automatique. La **création en masse** est gratuite : faites un `POST` d'un
+Une barre oblique finale sur le préfixe de montage est optionnelle. Ces six verbes sont branchés,
+plus une action de collection `QUERY` (RFC 10008) dès que la fonctionnalité
+`admin` est activée. Les routes sont construites avec `axum::routing::get`, donc
+axum répond au `HEAD` depuis le handler `GET` ; `OPTIONS` n'est pas branché. La **création en masse** est gratuite : faites un `POST` d'un
 *tableau* JSON et chaque élément est inséré dans l'ordre, validé de manière atomique (un seul élément invalide
 rejette tout le lot).
 
@@ -537,7 +539,7 @@ montez le ViewSet et surchargez la route unique avec votre propre handler (voir
 | `filter_fields` | `"author_id, status"` | aucun | Champs filtrables via `?field=value` (+ lookups). |
 | `search_fields` | `"title, body"` | aucun | Champs que la boîte `?search=` fait correspondre (OU insensible à la casse). |
 | `ordering` | `"-published_at, id"` | aucun | Tri par défaut (`-` = DESC). |
-| `page_size` | `20` | 20 | Lignes par page (le `?page_size=` du client est plafonné à 1000). |
+| `page_size` | `20` | 20 | Lignes par page (le `?page_size=` du client est plafonné à 100). |
 | `read_only` | *(drapeau)* | désactivé | N'exposer que GET (list + retrieve). |
 | `permissions(...)` | `permissions(create = "post.add")` | aucun | Codenames de permission par action. |
 
@@ -555,7 +557,9 @@ Chaque méthode sur `ViewSet::for_model(SCHEMA)` (chacune renvoie `Self`) :
 | `search_fields(&["…"])` | Activer `?search=`. |
 | `ordering(&[("field", desc)])` | Ordre de tri par défaut. |
 | `ordering_fields(&["…"])` | Liste blanche des champs que `?ordering=` peut utiliser. |
-| `page_size(n)` | Taille de page par défaut (≤ 1000). |
+| `page_size(n)` | Taille de page par défaut (≤ 100). |
+| `max_page_size(n)` | Relève ou abaisse le plafond client lui-même (100 par défaut). |
+| `pk_param(name)` | Renomme le paramètre de chemin des routes de détail. |
 | `read_only()` | GET uniquement. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Barrières de codename par action (cette dernière sur la multi-location). |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Pagination par keyset (saute `COUNT(*)`). |
@@ -625,7 +629,7 @@ pour les très grandes tables. `?cursor=<token>&page_size=20` :
 { "count": 137, "limit": 20, "offset": 40, "results": [ … ] }
 ```
 
-`page_size` / `limit` sont bornés à 1000.
+`page_size` / `limit` sont bornés à 100.
 
 ---
 
@@ -784,17 +788,20 @@ fenêtre de dates — implémentez le trait et surchargez `filter_with`, qui re�
 les `Parts` de la requête :
 
 ```rust
+use std::collections::HashMap;
+
 use axum::http::request::Parts;
+use rustango::core::{Filter, ModelSchema, Op, SqlValue, WhereExpr};
 use rustango::tenancy::Principal;
-use rustango::viewset::ViewSetFilter;
+use rustango::viewset::{match_nothing, ViewSetFilter};
 
 struct OwnerFilter;
 
 impl ViewSetFilter for OwnerFilter {
-    // No principal in hand — fail closed. Returning no predicates here would
-    // widen the query to every row in the table.
+    // No principal in hand — fail closed. `vec![]` here would be *no filter*,
+    // not a filter matching nothing, and would widen the query to every row.
     fn filter(&self, _p: &HashMap<String, String>, schema: &'static ModelSchema) -> Vec<WhereExpr> {
-        deny_all(schema)
+        vec![match_nothing(schema)]
     }
 
     fn filter_with(
@@ -804,7 +811,7 @@ impl ViewSetFilter for OwnerFilter {
         schema: &'static ModelSchema,
     ) -> Vec<WhereExpr> {
         let Some(principal) = Principal::from_parts(parts) else {
-            return deny_all(schema);
+            return vec![match_nothing(schema)];
         };
         vec![WhereExpr::Predicate(Filter {
             column: schema.field("owner_id").expect("owner_id").column,
@@ -821,6 +828,13 @@ ViewSet::for_model(Note::SCHEMA)
 
 `filter_with` a `filter` par défaut, de sorte qu'un backend qui n'a pas besoin de la requête
 — y compris la forme de closure simple — n'implémente que `filter` comme avant.
+
+`match_nothing` est la branche fail-closed, et mieux vaut l'utiliser que la
+réécrire : elle renvoie `col IS NULL AND col IS NOT NULL`, une contradiction qui
+ne lie aucun paramètre et s'écrit pareil sur tous les backends. Si elle est
+exportée, c'est justement parce que le substitut évident est un `Vec` vide — et
+dans une API de filtres, `vec![]` signifie *aucun filtre*, l'inverse de ce à quoi
+sert la branche.
 
 ---
 
@@ -850,7 +864,7 @@ lignes `.merge(...)` ; branchez-le dans votre `urls.rs` de niveau supérieur.
 
 - **Le builder + `router_pool` / `tenant_router`** est **tri-dialecte** — PostgreSQL,
   SQLite et MySQL — et c'est le chemin recommandé.
-- **Le `router(prefix, PgPool)` de la macro derive** capture un `PgPool` (PostgreSQL).
+- **Le `router(prefix, pool)` de la macro derive** prend `impl Into<rustango::sql::Pool>` — un `PgPool`, `MySqlPool`, `SqlitePool` ou l'énumération `Pool`. Il n'est pas réservé à Postgres (#1273).
 - **L'entrée + sortie du sérialiseur** fonctionne désormais sur **les trois backends** (le
   rendu par ligne est tri-dialecte ; l'ancienne barrière PG-uniquement a disparu).
 - Le filtrage, la recherche, le tri, les trois modes de pagination, les permissions,

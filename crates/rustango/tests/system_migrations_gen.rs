@@ -88,9 +88,7 @@ async fn system_migrations_apply_cleanly_on_sqlite() {
         let pool = Pool::connect(&url).await.unwrap();
         let applied = rustango::migrate::migrate_pool(&pool, dir).await.unwrap();
         assert_eq!(applied.len(), 1, "one system migration applied for {dir:?}");
-        let Pool::Sqlite(sq) = &pool else {
-            unreachable!()
-        };
+        let sq = pool.as_sqlite().expect("sqlite pool");
         let tables: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'rustango\\_%' ESCAPE '\\'",
         )
@@ -146,9 +144,7 @@ async fn system_migrations_apply_cleanly_on_sqlite() {
 
     // The composite unique index on the permissions table came through
     // from the model's `unique_together` (tenant DB).
-    let Pool::Sqlite(sq) = &ten_pool else {
-        unreachable!()
-    };
+    let sq = ten_pool.as_sqlite().expect("sqlite pool");
     let idx: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='rustango_permissions_table_name_codename_idx'",
     ).fetch_one(sq).await.unwrap();

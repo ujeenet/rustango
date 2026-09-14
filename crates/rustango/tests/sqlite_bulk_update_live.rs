@@ -129,9 +129,7 @@ async fn bulk_update_round_trips_against_sqlite_live_pool() {
     assert_eq!(affected, 2, "two rows in the VALUES set, two updates");
 
     // Verify the round-trip — alice + carol got updated; bob untouched.
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     let mut rows: Vec<(i64, String, i64)> =
         sqlx::query_as("SELECT id, name, age FROM sbu_user ORDER BY id")
             .fetch_all(sq)

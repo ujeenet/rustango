@@ -12,7 +12,8 @@
 Rustango gives you the productivity of Django or Laravel with the speed and type-safety of Rust: a tri-dialect ORM, auto-migrations, an auto-generated admin, multi-tenancy, first-class auth, and every standard middleware — all shipped, all opt-out via cargo features, and all working on **Postgres, MySQL, and SQLite** out of the box.
 
 📚 **Docs:** [rustango.com](https://rustango.com) · [in-repo guides](docs/) · [API reference](https://docs.rs/rustango)
-🍳 **Cookbook:** [`cookbook_blog/COOKBOOK.md`](crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a runnable, test-backed recipe for every feature below.
+🌍 **Also in:** [Deutsch](docs/de/) · [Español](docs/es/) · [Français](docs/fr/) — every published guide, not a subset.
+🍳 **Cookbook:** [`cookbook_blog/COOKBOOK.md`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a runnable, test-backed recipe for every feature below.
 
 ---
 
@@ -21,16 +22,16 @@ Rustango gives you the productivity of Django or Laravel with the speed and type
 ```toml
 [dependencies]
 # Postgres (default)
-rustango = "0.56"
+rustango = "0.57"
 
 # SQLite — file-backed or in-memory
-rustango = { version = "0.56", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
+rustango = { version = "0.57", default-features = false, features = ["sqlite", "tenancy", "admin", "manage"] }
 
 # MySQL 8+
-rustango = { version = "0.56", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
+rustango = { version = "0.57", default-features = false, features = ["mysql", "tenancy", "admin", "manage"] }
 ```
 
-Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.56" }` needs no extra wiring.
+Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.57" }` needs no extra wiring.
 
 ## An app on SQLite in 30 lines
 
@@ -58,12 +59,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn list(Extension(pool): Extension<Arc<Pool>>) -> Json<Vec<User>> {
-    Json(User::objects().fetch_pool(&pool).await.unwrap())
+    Json(User::objects().fetch(&pool).await.unwrap())
 }
 ```
 
 ```sh
-DATABASE_URL='sqlite:./var/app.db?mode=rwc' cargo run --features sqlite,runserver
+# Backend selection lives in your Cargo.toml — see Install above.
+# `cargo run --features sqlite` would name a feature of *your* crate, not rustango's.
+DATABASE_URL='sqlite:./var/app.db?mode=rwc' cargo run
 ```
 
 The **same code** boots on Postgres with `DATABASE_URL=postgres://…` or MySQL with `DATABASE_URL=mysql://…` — no changes. Every SQLite connection turns on sensible defaults automatically (`PRAGMA foreign_keys = ON`, `journal_mode = WAL` for file-backed DBs, `busy_timeout = 5s`).
@@ -111,8 +114,9 @@ cargo rustango new shop --template tenant    # multi-tenancy + operator console
 ```bash
 cd myblog
 cp .env.example .env                         # edit DATABASE_URL
-docker compose up -d                         # starts Postgres
-cargo run -- migrate                         # generate + apply migrations
+docker compose up -d postgres                # starts Postgres only
+cargo run -- makemigrations                  # generate migrations from your models
+cargo run -- migrate                         # apply pending migrations
 cargo run                                    # http://localhost:8080
 ```
 
@@ -166,11 +170,11 @@ Full walkthrough: [getting started](docs/getting-started.md) · [scaffolding](do
 ```rust
 // Filter, order, paginate
 let recent = Post::objects()
-    .filter("published_at", Op::Lt, Utc::now())
-    .exclude("status", Op::Eq, "draft")
+    .filter("published_at__lt", Utc::now())
+    .exclude("status", "draft")
     .order_by(&[("published_at", true)])   // true = DESC
     .limit(20)
-    .fetch_pool(&pool).await?;
+    .fetch(&pool).await?;
 
 // Aggregate (scalar): .values(&[]) → one row, no GROUP BY
 let stats = Post::objects()
@@ -182,16 +186,16 @@ let stats = Post::objects()
 
 Supported: every field type (ints, floats, `String`, `bool`, `DateTime`/`Date`, `Uuid`, `Json`, `Decimal`, plus PG-only `Array`/`Range`/`HStore`/`Vector`/`Geometry`), nullable `Option<T>`, `Auto<T>` primary keys, `ForeignKey<T>` / one-to-one / many-to-many, generic FKs + composite-key FKs (ContentTypes), soft-delete, `unique_together` / `index_together`, container-level default scopes, subquery/`EXISTS` filters, bulk insert/update, transactions, and raw SQL escape hatches. `EXPLAIN` works on any queryset.
 
-📖 [ORM guide](docs/orm.md) · [models](docs/models.md) · [runnable ORM recipes](crates/rustango/examples/cookbook_blog/COOKBOOK.md)
+📖 [ORM guide](docs/orm.md) · [models](docs/models.md) · [runnable ORM recipes](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md)
 
 ## Migrations
 
-`makemigrations` diffs your models against the last migration snapshot and emits JSON operations; `migrate` applies pending ones and can `unapply` to roll back. Schema changes (create/alter/drop tables, columns, indexes, constraints, composite FKs) are auto-detected; data migrations are hand-authored with `sql` + `reverse_sql`. `embed_migrations!("migrations")` bakes them into the binary.
+`makemigrations` diffs your models against the last migration snapshot and emits JSON operations; `migrate` applies pending ones, and `downgrade` rolls back. Schema changes (create/alter/drop tables, columns, indexes, constraints, composite FKs) are auto-detected; data migrations are hand-authored with `sql` + `reverse_sql`. `embed_migrations!("migrations")` bakes them into the binary.
 
 ```bash
 cargo run -- makemigrations
 cargo run -- migrate
-cargo run -- migrate --unapply <name>
+cargo run -- downgrade                       # roll back the last migration
 ```
 
 📖 [Adopt an existing schema](docs/manage.md) with `manage inspectdb` — it emits `#[derive(Model)]` source for every table.
@@ -249,7 +253,7 @@ Django-shape class-based views (`ListView`, `DetailView`, `CreateView`, `UpdateV
 
 Database-mode is the default and works identically everywhere; schema-mode is a Postgres-only pool optimization. Set `schema` on MySQL/SQLite and the framework returns a clear error pointing you back to database-mode.
 
-📖 Runnable walkthrough: [cookbook Ch. 5 — Multi-tenancy](crates/rustango/examples/cookbook_blog/COOKBOOK.md#chapter-5--multi-tenancy)
+📖 Runnable walkthrough: [cookbook Ch. 5 — Multi-tenancy](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md#chapter-5--multi-tenancy)
 
 ## Authentication & permissions
 
@@ -278,13 +282,13 @@ One hardened middleware chain: request IDs, access logging, rate limiting (in-pr
 
 ## The `manage` CLI
 
-`cargo run -- <cmd>` — Django's `manage.py` in Rust. Migrations (`makemigrations` / `migrate` / `inspectdb`), scaffolders (`startapp` / `make:viewset` / `make:serializer`), system commands (`check` / `check --deploy` / `shell`), and — with the `tenancy` feature — operator/tenant/superuser provisioning and recovery verbs.
+`cargo run -- <cmd>` — Django's `manage.py` in Rust. Migrations (`makemigrations` / `migrate` / `inspectdb`), scaffolders (`startapp` / `make:viewset` / `make:serializer`), system commands (`check` / `check --deploy` / `dbshell`), and — with the `tenancy` feature — operator/tenant/superuser provisioning and recovery verbs.
 
 📖 [manage reference](docs/manage.md)
 
 ## Configuration
 
-Layered config: a `<env>_settings.toml` pipeline (base → env → local → environment variables), typed sections, compile-time feature reflection, and a deploy audit. Everything has a sensible default; override only what you need.
+Layered config: a `<env>_settings.toml` pipeline (`default.toml` → `<env>_settings.toml` → `RUSTANGO__*` environment variables), typed sections, compile-time feature reflection, and a deploy audit. Everything has a sensible default; override only what you need.
 
 ## Testing
 
@@ -321,7 +325,7 @@ A `TestClient` drives the router as a tower service (no socket), a `RequestFacto
 ## Documentation
 
 - **Guides & tutorials**: <https://rustango.com>
-- **Runnable cookbook**: [`cookbook_blog/COOKBOOK.md`](crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a test-backed recipe for every feature, on all three backends.
+- **Runnable cookbook**: [`cookbook_blog/COOKBOOK.md`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/examples/cookbook_blog/COOKBOOK.md) — a test-backed recipe for every feature, on all three backends.
 - **In-repo guides** ([`docs/`](docs/)): [getting started](docs/getting-started.md) · [models](docs/models.md) · [ORM](docs/orm.md) · [migrations & CLI](docs/manage.md) · [admin](docs/admin.md) · [viewsets](docs/viewsets.md) · [serializers](docs/serializers.md) · [auth](docs/auth-flows.md) · [security](docs/security.md) · [middleware](docs/middleware.md) · [caching](docs/caching.md) · [email](docs/email.md) · [files](docs/files.md) · [jobs](docs/jobs.md) · [i18n](docs/i18n.md) · [MCP](docs/mcp.md) · [testing](docs/testing.md) · [glossary](docs/glossary.md)
 - **API reference**: <https://docs.rs/rustango>
 - **Changelog**: [`CHANGELOG.md`](CHANGELOG.md)

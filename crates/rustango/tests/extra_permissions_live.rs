@@ -60,9 +60,7 @@ async fn auto_create_permissions_seeds_extra_codenames() {
     auto_create_permissions_pool(&pool).await.unwrap();
 
     // Verify the extra codenames landed under the model's table.
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT table_name, codename, name FROM rustango_permissions \
          WHERE table_name = 'xperms_post' ORDER BY codename",
@@ -91,9 +89,7 @@ async fn idempotent_re_seed_doesnt_duplicate_extras() {
     // Second call should be a no-op via the existing ON CONFLICT DO NOTHING
     // tail in the INSERT — both extras + CRUD codenames stay at one row each.
     auto_create_permissions_pool(&pool).await.unwrap();
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     let count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM rustango_permissions WHERE table_name = 'xperms_post'",
     )
@@ -108,9 +104,7 @@ async fn plain_model_seeds_only_crud_codenames() {
     let pool = fresh_pool().await;
     rustango::testkit::migrate_framework(&pool).await.unwrap();
     auto_create_permissions_pool(&pool).await.unwrap();
-    let Pool::Sqlite(sq) = &pool else {
-        unreachable!()
-    };
+    let sq = pool.as_sqlite().expect("sqlite pool");
     let count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM rustango_permissions WHERE table_name = 'xperms_plain'",
     )

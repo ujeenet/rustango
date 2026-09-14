@@ -145,7 +145,13 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 Bei Erschöpfung: `429 Too Many Requests` mit `Retry-After`-Header. Jede erfolgreiche Antwort enthält `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Hinter einem Reverse Proxy: kombiniere `per_ip` mit `real_ip`.** `RateLimitLayer::per_ip` schlüsselt auf den verbindenden Socket (`ConnectInfo`), was hinter einem Proxy die IP des *Proxys* ist — also teilen sich alle Clients einen Bucket und das Limit ist nutzlos. Setze `real_ip::RealIpLayer` (liest `X-Forwarded-For` / `X-Real-IP`) davor, damit die echte Client-IP verwendet wird.
+> **Hinter einem Reverse Proxy funktioniert `per_ip` nicht, und `real_ip` behebt das nicht** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` schlüsselt auf den verbindenden Socket (`ConnectInfo`), was hinter einem Proxy die IP des *Proxys* ist — also teilen sich alle Clients einen Bucket. Ein einziger lauter Client limitiert dann alle anderen, und kein einzelner Angreifer wird je limitiert.
+>
+> `RealIpLayer` ändert daran **nichts**. Es fügt eine separate `RealIp`-Extension ein und schreibt `ConnectInfo` nie um; keiner der beiden Limiter liest diese Extension. Diese Seite empfahl früher, beide zu kombinieren — das tat nichts.
+>
+> Verdrahte die beiden auch nicht selbst. `RealIpLayer` nimmt den linkesten `X-Forwarded-For`-Eintrag, einen vom Client setzbaren Header ohne Trusted-Proxy-Prüfung — einen Limiter darauf zu schlüsseln macht aus „das Limit ist zu grob" ein „das Limit lässt sich per Header umgehen". Das ist der schlimmere der beiden Fehler.
+>
+> Bis das behoben ist: limitiere auf etwas, das du kontrollierst — `KeyBy::Header` auf einen authentifizierten API-Key, oder ein Limit pro Route im Proxy selbst, der die echte Client-Adresse ohnehin kennt.
 
 `RateLimitLayer` ist **prozesslokal** — es zählt Anfragen nur innerhalb einer laufenden Instanz, was in Ordnung ist, wenn du eine einzelne Instanz betreibst. Wenn du mehrere Instanzen (Replicas) hinter einem Load Balancer betreibst, würde jede ihre eigene Zählung führen, sodass sich das reale Limit vervielfacht. Um eine Zählung über alle Replicas hinweg zu teilen, nutze `rate_limit_cache::CacheRateLimitLayer`, das an eine beliebige `cache::Cache`-Implementierung delegiert (kombiniere es mit `cache::RedisCache` für einen gemeinsamen Zähler, der atomar per Redis `INCRBY` inkrementiert wird):
 
@@ -221,7 +227,7 @@ let app = Router::new()
     .layer(csrf::layer());
 ```
 
-`csrf::layer()` baut den Layer mit sinnvollen Standardwerten; `csrf::with_config(CsrfConfig)` erlaubt dir, die Cookie-/Header-Namen und das `Secure`-Flag zu überschreiben. In Templates gibt `{{ csrf_token }}` das rohe Token und `{{ csrf_input }}` ein fertiges verstecktes `<input>` — platziere eines in jedem Formular. Es verwendet das Double-Submit-Cookie-Muster: bei unsicheren Methoden (POST, PUT, PATCH, DELETE) prüft der Layer den `X-CSRF-Token`-Header (oder das `_csrf`-Formularfeld) gegen das `rustango_csrf`-Cookie; eine Nichtübereinstimmung gibt `403 Forbidden` zurück.
+`csrf::layer()` baut den Layer mit `secure: true`, das Cookie wird also über reines HTTP abgelehnt — auf `http://localhost` nimm `CsrfConfig::allow_insecure_for_dev()`, sonst scheint der Layer nichts zu tun. `csrf::with_config(CsrfConfig)` überschreibt die Cookie-/Header-Namen und das `Secure`-Flag sowie `trusted_origins` — standardmäßig leer, die Origin-Header-Prüfung ist also **aus**, bis du einen hinzufügst. In Templates gibt `{{ csrf_token }}` das rohe Token und `{{ csrf_input }}` ein fertiges verstecktes `<input>` — schreib es als `{{ csrf_input | safe }}`, denn Tera escapt `.html`-Templates automatisch: ohne den Filter rendert die Seite ein sichtbares literales `<input …>`, das Formular trägt kein `_csrf`-Feld und jedes POST endet in 403. Beide Variablen liegen nur für die `template_views`-CBVs im Context oder nachdem du `forms::csrf::stamp_into_context` selbst aufgerufen hast — ein handgeschriebener Handler hat keine davon. Es verwendet das Double-Submit-Cookie-Muster: bei unsicheren Methoden (POST, PUT, PATCH, DELETE) prüft der Layer den `X-CSRF-Token`-Header (oder das `_csrf`-Formularfeld) gegen das `rustango_csrf`-Cookie; eine Nichtübereinstimmung gibt `403 Forbidden` zurück.
 
 **Collector-Endpunkte ausnehmen.** `CsrfConfig::exempt_prefix("/path")` (wiederholbar) überspringt die CSRF-Durchsetzung für unsichere Methoden bei Anfragen, deren Pfad mit dem angegebenen Präfix beginnt. Das ist für Append-only-, zustandslose Endpunkte gedacht, die per `navigator.sendBeacon` angesprochen werden — z. B. ein Analytics-Collector — die keinen `X-CSRF-Token`-Header setzen können und, wenn die Seite aus einem CDN-Cache ausgeliefert wird, der `Set-Cookie` entfernt, möglicherweise gar kein CSRF-Cookie mitführen. Halte Präfixe eng und nimm niemals etwas aus, das Auth-Zustand liest oder schreibt.
 
@@ -233,7 +239,7 @@ Der Auto-Admin aktiviert CSRF standardmäßig bei jeder Mutation, und es gibt ke
 
 XSS (Cross-Site Scripting) tritt auf, wenn Benutzereingaben als HTML gerendert werden und als Code im Browser einer anderen Person laufen. Die Lösung ist, jede Benutzereingabe zu escapen, bevor sie die Seite erreicht. **Rustango** löst das auf zwei Wegen:
 
-**1. Tera-Template-Auto-Escape** — Tera ist **Rustango**s Template-Engine (wie Django-Templates oder Blade). Jedes `{{ var }}` wird automatisch HTML-escapt. Verwende `{{ var | safe }}`, um dich abzumelden — selten und gefährlich, also tue das nur für HTML, dem du vollständig vertraust.
+**1. Tera-Template-Auto-Escape** — Tera ist **Rustango**s Template-Engine (wie Django-Templates oder Blade). Jedes `{{ var }}` wird automatisch HTML-escapt — aber nur in Templates, die Tera autoescapt, also seinem Standard-Satz `.html`, `.htm` und `.xml`. Rustango setzt keine `autoescape_suffixes`, ein `.txt`-, `.j2`- oder `.tera`-Template wird also **nicht** escapt. Verwende `{{ var | safe }}`, um dich abzumelden — selten und gefährlich, also tue das nur für HTML, dem du vollständig vertraust.
 
 **2. Manueller Escape-Helper** — für den Fall, dass du HTML in Rust-Code statt in einem Template baust:
 
@@ -302,12 +308,17 @@ let backends = vec![
     Arc::new(JwtBackend::new(secret)) as _,         // Authorization: Bearer <jwt>
 ];
 
+// `require_auth` / `require_perm` are `Router::layer` calls: each wraps the
+// routes registered BEFORE it. Chaining them on one router would put /me
+// behind post.add. Gate the permission on an inner sub-router instead.
+let posts = Router::new()
+    .route("/posts/new", post(create_post))
+    .require_perm("post.add", pool.clone());        // inner: needs the codename
+
 let app = Router::new()
     .route("/me", get(profile))
-    .require_auth(backends.clone(), pool.clone())   // 401 if no backend recognizes
-    .route("/posts/new", post(create_post))
-    .require_perm("post.add", pool.clone())         // gate by codename
-    .require_auth(backends, pool);
+    .merge(posts)
+    .require_auth(backends, pool);                  // outer: resolves the user first
 ```
 
 Die Middleware probiert jedes Backend der Reihe nach. Das erste, das erfolgreich ist, gewinnt; das erste, das einen harten Fehler zurückgibt, stoppt die Kette.

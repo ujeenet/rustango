@@ -86,7 +86,12 @@ pub type CheckFn =
 /// Builder for the health router.
 pub struct HealthRouter {
     pool: Pool,
-    extra_checks: Vec<(String, CheckFn)>,
+    /// `(name, target, check)`. `target` is what the probe is reaching
+    /// for — an address, a URL — and exists so a **timeout** can name it.
+    /// A probe's own errors carry it already; a timeout is raised outside
+    /// the probe, so without this it reads "timed out after 500ms" and
+    /// says nothing about where (#1285).
+    extra_checks: Vec<(String, Option<String>, CheckFn)>,
     per_check_timeout: Duration,
     /// Should the built-in `database` probe run? Set to false if your
     /// app wants to register its own DB probe with a different
@@ -97,7 +102,7 @@ pub struct HealthRouter {
 #[derive(Clone)]
 struct HealthState {
     pool: Pool,
-    extra_checks: Arc<Vec<(String, CheckFn)>>,
+    extra_checks: Arc<Vec<(String, Option<String>, CheckFn)>>,
     per_check_timeout: Duration,
     include_db_probe: bool,
 }
@@ -151,7 +156,20 @@ impl HealthRouter {
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
         let boxed: CheckFn = Arc::new(move || Box::pin(check()));
-        self.extra_checks.push((name.to_owned(), boxed));
+        self.extra_checks.push((name.to_owned(), None, boxed));
+        self
+    }
+
+    /// [`Self::check`], plus what the probe is reaching for, so a
+    /// timeout can name it.
+    fn check_with_target<F, Fut>(mut self, name: &str, target: String, check: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let boxed: CheckFn = Arc::new(move || Box::pin(check()));
+        self.extra_checks
+            .push((name.to_owned(), Some(target), boxed));
         self
     }
 
@@ -162,7 +180,8 @@ impl HealthRouter {
     #[must_use]
     pub fn tcp_probe(self, name: &str, addr: impl Into<String>) -> Self {
         let addr = addr.into();
-        self.check(name, move || {
+        let target = addr.clone();
+        self.check_with_target(name, target, move || {
             let addr = addr.clone();
             async move {
                 tokio::net::TcpStream::connect(&addr)
@@ -274,7 +293,7 @@ async fn handle_ready(State(state): State<HealthState>) -> Response {
 
     if state.include_db_probe {
         let pool = state.pool.clone();
-        let outcome = run_with_timeout(state.per_check_timeout, async move {
+        let outcome = run_with_timeout(state.per_check_timeout, None, async move {
             // `SELECT 1` is universal — Postgres, MySQL, SQLite all
             // accept it as a connectivity sentinel. We dispatch
             // through the Pool enum so this works across backends
@@ -290,8 +309,8 @@ async fn handle_ready(State(state): State<HealthState>) -> Response {
         }
     }
 
-    for (name, check) in state.extra_checks.iter() {
-        let outcome = run_with_timeout(state.per_check_timeout, check()).await;
+    for (name, target, check) in state.extra_checks.iter() {
+        let outcome = run_with_timeout(state.per_check_timeout, target.as_deref(), check()).await;
         if record(&mut checks, name, outcome) {
             all_ok = false;
         }
@@ -311,14 +330,29 @@ async fn handle_ready(State(state): State<HealthState>) -> Response {
 
 /// Run `fut` under `timeout`, capturing the elapsed time alongside the
 /// outcome.
-async fn run_with_timeout<F>(timeout: Duration, fut: F) -> (Result<(), String>, Duration)
+/// `target` names what the probe was reaching for, and is included in the
+/// timeout message. A probe's own error carries it, but a timeout is
+/// raised out here where only the future is in scope — so without it an
+/// operator reads "timed out after 500ms" and learns nothing about where.
+///
+/// Not hypothetical: a connection to a closed port is refused on Linux
+/// and macOS but times out on Windows, so the same probe reported the
+/// address on two platforms and withheld it on the third.
+async fn run_with_timeout<F>(
+    timeout: Duration,
+    target: Option<&str>,
+    fut: F,
+) -> (Result<(), String>, Duration)
 where
     F: Future<Output = Result<(), String>>,
 {
     let start = Instant::now();
     let outcome = match tokio::time::timeout(timeout, fut).await {
         Ok(r) => r,
-        Err(_) => Err(format!("timed out after {}ms", timeout.as_millis())),
+        Err(_) => Err(match target {
+            Some(t) => format!("{t}: timed out after {}ms", timeout.as_millis()),
+            None => format!("timed out after {}ms", timeout.as_millis()),
+        }),
     };
     (outcome, start.elapsed())
 }

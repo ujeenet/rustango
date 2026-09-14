@@ -186,8 +186,14 @@ mod pg_live {
     }
 
     async fn fresh_pool() -> Option<Pool> {
+        // Absent means "not configured for PG" and skips. Set-but-
+        // unreachable is a broken database and must fail: `.ok()?` made
+        // the two the same outcome, so this suite reported green
+        // against a port nothing was listening on (#1434).
         let url = std::env::var("DATABASE_URL").ok()?;
-        let pg = sqlx::PgPool::connect(&url).await.ok()?;
+        let pg = sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"));
         for sql in [
             r#"DROP TABLE IF EXISTS "d6set_item" CASCADE"#,
             r#"CREATE TABLE "d6set_item" (
@@ -208,7 +214,7 @@ mod pg_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("DATABASE_URL unset — skipping PG django6 test");
+                    eprintln!("DATABASE_URL not set — skipping the PG arm of this django6 test");
                     return;
                 };
                 scenarios::seed(&pool).await;

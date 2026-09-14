@@ -30,6 +30,7 @@ Rust.
 - [Sending JSON, headers, and bodies](#sending-json-headers-and-bodies)
 - [Testing a real API](#testing-a-real-api)
 - [Database tests with rollback](#database-tests-with-rollback)
+- [Live suites, and why a green run may prove nothing](#live-suites-and-why-a-green-run-may-prove-nothing)
 - [Response assertion helpers](#response-assertion-helpers)
 - [See also](#see-also)
 
@@ -147,6 +148,51 @@ async fn creating_a_post_persists_it() {
 
 For SQLite, the `*_sqlite_live.rs` tests throughout this repo use an in-memory
 database per test instead — also fully isolated, with zero external setup.
+
+---
+
+## Live suites, and why a green run may prove nothing
+
+Tests named `*_live.rs` talk to a real database. Most need nothing from you; the
+rest need an environment variable, and **when it is missing they do not fail.
+They return, and the run reports success.**
+
+That is deliberate — it keeps `cargo test` working on a laptop with no server —
+but it means a passing run is not evidence the suite ran. Worth knowing before
+you read a green result as coverage.
+
+### Which variable each suite wants
+
+| Variable | Suites | What they need |
+|---|---:|---|
+| *(none)* | 213 | Nothing — an in-memory or temp-file SQLite. Always run. |
+| `DATABASE_URL` | 93 | A reachable PostgreSQL server. |
+| `MYSQL_TEST_URL` | 21 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
+| `REDIS_TEST_URL` | 2 | A reachable Redis. |
+
+A suite reading two variables is counted under both, so the column does not sum
+to the number of files.
+
+MySQL is the one that catches people: it reads its own variable, so a shell with
+only `DATABASE_URL` set runs the Postgres suites and silently skips every MySQL
+one.
+
+### Telling a skip from a pass
+
+Most skips are a bare early `return` with no output at all. A minority print a
+line to stderr first, which `cargo test` hides unless you ask:
+
+```bash
+cargo test --test <name> -- --nocapture
+```
+
+The reliable signal is the count. A live suite that reports `0 passed` — or far
+fewer than the file contains — skipped. `running 2 tests … 2 passed` with no
+server running means those two tests returned early.
+
+If you want a suite to fail rather than skip when its server is missing, set the
+variable to a deliberately bad URL: it will then fail at connect, which is a
+louder and more honest signal than a skip.
 
 ---
 

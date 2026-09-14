@@ -67,7 +67,7 @@ MCP ist das optionale `mcp`-Feature (standardmäßig aus). Schalten Sie es ein:
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.44", features = ["mcp"] }
+rustango = { version = "0.57", features = ["mcp"] }
 ```
 
 Es zieht `tenancy` (Agenten/Skills), `sse` (den Benachrichtigungsstrom),
@@ -171,7 +171,7 @@ jedem Mount:
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.57.0" },
+    "serverInfo": { "name": "rustango", "version": "0.57.1" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": {}, "resources": {} } } }
 ```
 

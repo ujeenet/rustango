@@ -28,6 +28,20 @@ cargo install cargo-rustango
 
 That puts a `cargo-rustango` binary on your `PATH`; Cargo then exposes it as `cargo rustango` (the same way `django-admin` or the `laravel` installer give you a global command).
 
+### The generator's own version is the one your project gets
+
+`cargo rustango new` writes `rustango = "MAJOR.MINOR"` into the generated `Cargo.toml`, taken from **the generator's version**, not from whatever is newest on crates.io. Whichever generator you install is the version your project pins.
+
+That is almost always what you want, and it is why the install command above is unpinned: the newest generator writes the newest pin, and the two cannot drift apart.
+
+It is worth knowing when you deliberately want an older release — to match a project already on it, or to reproduce a report. Pin the generator, not the project:
+
+```sh
+cargo install cargo-rustango --version 0.57.0
+```
+
+Check which one you have with `cargo rustango --version`. Upgrading later is the same command with `--force`, and it only affects projects you generate afterwards — an existing project's pin is a line in its own `Cargo.toml`, which you edit yourself.
+
 ---
 
 ## Create a project: `cargo rustango new`
@@ -185,7 +199,7 @@ So `cargo run` starts the server, and `cargo run -- <verb>` runs migrations, gen
 How the templates differ inside `main.rs` / `urls.rs`:
 
 - **api** — no admin; `urls::api()` simply aggregates your own routes.
-- **fullstack** — `urls.rs` also exposes `admin_router(pool)` (built from `admin::Builder::new(pool).build()`) so the auto-admin mounts at `/admin`.
+- **fullstack** — same `urls.rs`, plus the admin feature compiled in. The admin is **not** wired up for you: nothing generated would call it, so the generator emits no `admin_router`. Add one yourself and nest it — [getting started, Step 11](getting-started.md#step-11-turn-on-the-auto-admin) spells it out. Take `rustango::sql::Pool` so the helper names no driver.
 - **tenant** — `main.rs` adds `.tenancy()`, serving the operator console at the apex domain and each tenant under its own subdomain. The framework's own tables are generated into a **`system/migrations/`** folder from the compiled models (Django-style) on the first `cargo run -- migrate` — no hand-shipped bootstrap JSON, so the very first migrate works with no extra setup.
 
 ### Layered configuration

@@ -202,9 +202,17 @@ fn ensure_trailing_slash(mut s: String) -> String {
 /// with `_`. The result is safe to embed in any storage key.
 pub fn sanitize_filename(name: &str) -> String {
     // Take the basename only — clients sometimes send full paths.
-    let base = Path::new(name)
-        .file_name()
-        .and_then(|s| s.to_str())
+    //
+    // Split on both separators rather than `Path::file_name`, which
+    // answers per-platform: `\` is a separator on Windows and an ordinary
+    // character everywhere else, so the same upload produced a different
+    // stored name depending on the server's OS. A browser on Windows
+    // sends `C:\Users\me\photo.jpg`, and a Linux server kept the whole
+    // string as one mangled filename (#1285).
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
         .unwrap_or(name);
     let mut out = String::with_capacity(base.len());
     for c in base.chars() {
@@ -255,10 +263,20 @@ mod tests {
         // Client sends a full path; we keep only the basename.
         assert_eq!(sanitize_filename("/etc/passwd"), "passwd");
         assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
-        assert_eq!(
-            sanitize_filename("C:\\windows\\evil.exe"),
-            "C__windows_evil.exe"
-        );
+        // Windows separators too, on every platform. `Path::file_name`
+        // treats `\` as a separator only on Windows, so this used to
+        // return `C__windows_evil.exe` on Linux and `evil.exe` on
+        // Windows — the same upload stored under two different names
+        // depending on the server's OS (#1285).
+        assert_eq!(sanitize_filename("C:\\windows\\evil.exe"), "evil.exe");
+        assert_eq!(sanitize_filename("C:/Users/me/photo.jpg"), "photo.jpg");
+    }
+
+    /// A path that is nothing but separators has no basename to keep.
+    #[test]
+    fn sanitize_handles_a_path_with_no_filename() {
+        assert_eq!(sanitize_filename("/"), "_");
+        assert_eq!(sanitize_filename("dir/"), "dir_");
     }
 
     #[test]

@@ -616,7 +616,8 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "MIGRATIONS:")?;
     writeln!(
         w,
-        "  init-tenancy         Materialize bootstrap migrations into ./migrations/."
+        "  init-tenancy         No-op, kept so old scripts don't break. Framework tables\n\
+         \x20                      are generated from the models and applied by `migrate`."
     )?;
     writeln!(
         w,
@@ -723,7 +724,12 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         writeln!(w, "  revoke-skill <slug> <agent> <skill>")?;
         writeln!(w, "                       Revoke a skill from an agent.")?;
         writeln!(w, "  list-skills <slug>   List a tenant's MCP skills.")?;
-        writeln!(w, "  create-user-key <slug> <username> [label]")?;
+        // Flags, not a positional `[label]` — the parser rejects a third
+        // positional with "unexpected argument" (#1407).
+        writeln!(
+            w,
+            "  create-user-key <slug> <username> [--label <l>] [--skill <codename>]…"
+        )?;
         writeln!(
             w,
             "                       Issue a personal, user-owned MCP key (prints its token once)."

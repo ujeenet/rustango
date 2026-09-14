@@ -70,7 +70,7 @@ hold a **`BoxedMailer`** (`Arc<dyn Mailer>`):
 | `NullMailer` | `email` | disable email entirely |
 
 Build it from config so it differs per environment (`ConsoleMailer` locally,
-`SmtpMailer` in prod) via `email::from_settings(&settings.email)`.
+`SmtpMailer` in prod) via `email::from_settings(&settings.mail)`.
 
 ---
 
