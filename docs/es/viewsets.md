@@ -808,17 +808,20 @@ borrado lógico, una ventana de fechas — implementa el trait y sobrescribe
 `filter_with`, que recibe los `Parts` de la petición:
 
 ```rust
+use std::collections::HashMap;
+
 use axum::http::request::Parts;
+use rustango::core::{Filter, ModelSchema, Op, SqlValue, WhereExpr};
 use rustango::tenancy::Principal;
-use rustango::viewset::ViewSetFilter;
+use rustango::viewset::{match_nothing, ViewSetFilter};
 
 struct OwnerFilter;
 
 impl ViewSetFilter for OwnerFilter {
-    // No principal in hand — fail closed. Returning no predicates here would
-    // widen the query to every row in the table.
+    // No principal in hand — fail closed. `vec![]` here would be *no filter*,
+    // not a filter matching nothing, and would widen the query to every row.
     fn filter(&self, _p: &HashMap<String, String>, schema: &'static ModelSchema) -> Vec<WhereExpr> {
-        deny_all(schema)
+        vec![match_nothing(schema)]
     }
 
     fn filter_with(
@@ -828,7 +831,7 @@ impl ViewSetFilter for OwnerFilter {
         schema: &'static ModelSchema,
     ) -> Vec<WhereExpr> {
         let Some(principal) = Principal::from_parts(parts) else {
-            return deny_all(schema);
+            return vec![match_nothing(schema)];
         };
         vec![WhereExpr::Predicate(Filter {
             column: schema.field("owner_id").expect("owner_id").column,
@@ -846,6 +849,13 @@ ViewSet::for_model(Note::SCHEMA)
 `filter_with` recae por defecto en `filter`, de modo que un backend que no
 necesita la petición — incluida la forma de closure simple — implementa solo
 `filter` como antes.
+
+`match_nothing` es la rama de fallo cerrado, y conviene usarla en lugar de
+escribirla a mano: devuelve `col IS NULL AND col IS NOT NULL`, una contradicción
+que no vincula parámetros y se lee igual en todos los backends. La razón de que
+esté exportada es que el sustituto obvio es un `Vec` vacío, y en una API de
+filtros `vec![]` significa *ningún filtro* — lo contrario de para lo que existe
+la rama.
 
 ---
 

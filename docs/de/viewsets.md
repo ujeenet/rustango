@@ -788,17 +788,20 @@ Zeitfenster von Daten — implementiere das Trait und überschreibe `filter_with
 die Anfrage-`Parts` erhält:
 
 ```rust
+use std::collections::HashMap;
+
 use axum::http::request::Parts;
+use rustango::core::{Filter, ModelSchema, Op, SqlValue, WhereExpr};
 use rustango::tenancy::Principal;
-use rustango::viewset::ViewSetFilter;
+use rustango::viewset::{match_nothing, ViewSetFilter};
 
 struct OwnerFilter;
 
 impl ViewSetFilter for OwnerFilter {
-    // No principal in hand — fail closed. Returning no predicates here would
-    // widen the query to every row in the table.
+    // No principal in hand — fail closed. `vec![]` here would be *no filter*,
+    // not a filter matching nothing, and would widen the query to every row.
     fn filter(&self, _p: &HashMap<String, String>, schema: &'static ModelSchema) -> Vec<WhereExpr> {
-        deny_all(schema)
+        vec![match_nothing(schema)]
     }
 
     fn filter_with(
@@ -808,7 +811,7 @@ impl ViewSetFilter for OwnerFilter {
         schema: &'static ModelSchema,
     ) -> Vec<WhereExpr> {
         let Some(principal) = Principal::from_parts(parts) else {
-            return deny_all(schema);
+            return vec![match_nothing(schema)];
         };
         vec![WhereExpr::Predicate(Filter {
             column: schema.field("owner_id").expect("owner_id").column,
@@ -825,6 +828,13 @@ ViewSet::for_model(Note::SCHEMA)
 
 `filter_with` fällt standardmäßig auf `filter` zurück, sodass ein Backend, das die Anfrage nicht braucht
 — einschließlich der schlichten Closure-Form — nur `filter` wie zuvor implementiert.
+
+`match_nothing` ist der Fail-closed-Zweig, und es lohnt sich, ihn zu verwenden
+statt selbst zu bauen: er liefert `col IS NULL AND col IS NOT NULL`, einen
+Widerspruch, der keine Parameter bindet und auf jedem Backend gleich lautet.
+Exportiert ist er überhaupt deshalb, weil der naheliegende Ersatz ein leerer
+`Vec` ist — und in einer Filter-API bedeutet `vec![]` *kein Filter*, also das
+Gegenteil dessen, wofür der Zweig da ist.
 
 ---
 
