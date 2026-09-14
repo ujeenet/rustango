@@ -119,6 +119,29 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Fixed
 
+- **`RUSTANGO_SESSION_SECRET` means one thing now, not three** (#1396). It was
+  read in three places that disagreed about "long enough": the cookie layer
+  base64-decoded and applied the 32-byte floor to the decoded bytes;
+  `auth_routes::Config::build_jwt` took the **raw string bytes**; and
+  `manage check --deploy` measured the **raw string length**.
+
+  A 32-character base64 secret — which several key generators emit — is 24
+  bytes. So `check --deploy` reported "length OK", JWTs were signed with a key
+  below the floor the assert believed it was enforcing, and the cookie layer
+  fell back to a random per-process key, silently ending session persistence
+  across restarts. Three answers, one variable, and the tool whose job is
+  catching this said it was fine.
+
+  Everything routes through `SessionSecret::from_b64`, now public — including
+  the two copies of the decode that already lived inside `session.rs` itself,
+  so the meaning is defined once. **A value `check --deploy` accepts is a value
+  the runtime accepts.**
+
+  **This will start failing deployments that were already broken.** If
+  `check --deploy` newly errors on a secret it used to pass, that secret was
+  not being used for cookies — regenerate with `openssl rand -base64 32`, which
+  gives 44 characters.
+
 - **A password reset now ends sessions issued before it** (#1449).
   `confirm_password_reset_pool` rotated the hash and nothing else, leaving
   `password_changed_at` — the column the session middleware compares `iat`

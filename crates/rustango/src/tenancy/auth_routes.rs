@@ -90,11 +90,20 @@ const MIN_HMAC_KEY_LEN: usize = 32;
 
 impl Config {
     fn build_jwt(&self) -> JwtLifecycle {
-        let secret = self.session_secret.clone().unwrap_or_else(|| {
-            std::env::var("RUSTANGO_SESSION_SECRET")
-                .unwrap_or_default()
-                .into_bytes()
-        });
+        // `RUSTANGO_SESSION_SECRET` is base64, and this used to take the
+        // raw string bytes (#1396). A 32-character base64 secret is 24
+        // bytes of key — it cleared the 32-byte floor below while the
+        // cookie layer, which decodes, rejected the same value. One
+        // variable, two keys, and the assert measuring the wrong thing.
+        let secret = match &self.session_secret {
+            Some(explicit) => explicit.clone(),
+            None => {
+                let raw = std::env::var("RUSTANGO_SESSION_SECRET").unwrap_or_default();
+                crate::session::SessionSecret::from_b64(&raw)
+                    .map(|s| s.key().to_vec())
+                    .unwrap_or_default()
+            }
+        };
         // Fail closed: never sign JWTs with an empty / too-short key.
         // A misconfigured deployment must refuse to start rather than
         // silently mint forgeable access + refresh tokens.

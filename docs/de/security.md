@@ -670,7 +670,7 @@ Immer aktive Prüfungen (laufen mit oder ohne `--deploy`):
 
 Zusätzliche `--deploy`-Prüfungen (Produktionshärtung):
 - ✅ `RUSTANGO_ENV` ist `prod` oder `production`
-- ✅ `RUSTANGO_SESSION_SECRET` gesetzt und ≥ 32 Bytes (der HMAC-Schlüssel für Cookie- + JWT-Signierung — `SECRET_KEY` wird vom Framework **nicht** gelesen), ohne verbliebenen Scaffolder-Platzhalter
+- ✅ `RUSTANGO_SESSION_SECRET` gesetzt und **dekodiert** ≥ 32 Bytes (der HMAC-Schlüssel für Cookie- + JWT-Signierung — `SECRET_KEY` wird vom Framework **nicht** gelesen), ohne verbliebenen Scaffolder-Platzhalter. Es ist base64: `openssl rand -base64 32` liefert 44 Zeichen. Ein Secret mit 32 *Zeichen* hat nur 24 Bytes und wird abgelehnt — seit [#1396](https://github.com/ujeenet/rustango/issues/1396) von `check --deploy` und der Laufzeit gleichermaßen; genau darum geht es, denn die Prüfung maß früher die kodierte Zeichenkette und ließ einen Wert durch, den die App dann ablehnte
 - ✅ `DATABASE_URL` gesetzt (und warnt, wenn es auf localhost zeigt)
 - ⚠️ `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` Plausibilitätswarnungen für Tenancy + Nicht-Loopback-Binding
 

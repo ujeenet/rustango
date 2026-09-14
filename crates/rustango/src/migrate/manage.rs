@@ -4269,13 +4269,6 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
                     .into(),
             );
         }
-        Some(s) if s.len() < 32 => {
-            out.errors.push(format!(
-                "RUSTANGO_SESSION_SECRET is only {} bytes — need ≥ 32 for HMAC key strength. \
-                 Regenerate with `openssl rand -base64 32`.",
-                s.len()
-            ));
-        }
         Some(s) if s.contains("change-me") || s.contains("placeholder") => {
             out.errors.push(
                 "RUSTANGO_SESSION_SECRET still contains the scaffolder placeholder \
@@ -4283,9 +4276,20 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
                     .into(),
             );
         }
-        Some(_) => {
-            out.info.push("RUSTANGO_SESSION_SECRET length OK".into());
-        }
+        // Decode it the way the runtime does, rather than measuring the
+        // encoded string (#1396). A 32-character base64 secret is 24
+        // bytes of key: the old `s.len() >= 32` reported "length OK" for
+        // a value the cookie layer then refused, so a green check meant
+        // nothing about whether the app would come up with sessions.
+        Some(s) => match crate::session::SessionSecret::from_b64(s) {
+            Ok(_) => out
+                .info
+                .push("RUSTANGO_SESSION_SECRET decodes to a valid ≥32-byte key".into()),
+            Err(e) => out.errors.push(format!(
+                "{e}. This is the same check the runtime applies, so the app would \
+                 fall back to an ephemeral key and sign everyone out on restart."
+            )),
+        },
     }
 
     // DATABASE_URL — required.
@@ -5689,17 +5693,71 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
 
     #[test]
     fn deploy_audit_short_session_secret_errors() {
+        // Valid base64, deliberately — decodes to 6 bytes. `"too-short"`
+        // was the old fixture and its hyphen made it a *base64* failure,
+        // so this case never actually reached the length check.
         let env = DeployAuditEnv {
-            session_secret: Some("too-short".into()),
+            session_secret: Some("AAAAAAAA".into()),
             ..good_prod_env()
         };
         let r = run(&env);
         assert!(
+            r.errors.iter().any(|e| e.contains("decoded to 6 bytes")),
+            "expected a decoded-length error, got: {:?}",
             r.errors
-                .iter()
-                .any(|e| e.contains("only") && e.contains("bytes")),
-            "expected length error for short secret, got: {:?}",
+        );
+    }
+
+    #[test]
+    fn deploy_audit_non_base64_session_secret_errors() {
+        let env = DeployAuditEnv {
+            session_secret: Some("correct-horse-battery-staple-and-then-som".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors.iter().any(|e| e.contains("not valid base64")),
+            "a long non-base64 value is still not a key, got: {:?}",
             r.errors
+        );
+    }
+
+    /// #1396 — the value that passed this check and broke the runtime.
+    ///
+    /// 32 base64 characters is 24 bytes of key. The audit measured the
+    /// encoded string (`s.len() >= 32`), reported "length OK", and the
+    /// cookie layer then decoded it, saw 24 bytes, and fell back to a
+    /// random per-process key. Passing the check predicted nothing.
+    ///
+    /// Both now call `SessionSecret::from_b64`, so this is the audit and
+    /// the runtime answering with one voice rather than two.
+    #[test]
+    fn deploy_audit_rejects_a_32_char_base64_secret_the_runtime_refuses() {
+        let trap = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert_eq!(
+            trap.len(),
+            32,
+            "the premise: 32 characters, so the old check passed"
+        );
+        assert!(
+            crate::session::SessionSecret::from_b64(trap).is_err(),
+            "the premise: the runtime refuses it"
+        );
+
+        let env = DeployAuditEnv {
+            session_secret: Some(trap.into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors.iter().any(|e| e.contains("decoded to 24 bytes")),
+            "check --deploy must refuse what the runtime refuses, got: {:?}",
+            r.errors
+        );
+        assert!(
+            !r.info.iter().any(|i| i.contains("SESSION_SECRET")),
+            "and must not also report it OK, got: {:?}",
+            r.info
         );
     }
 

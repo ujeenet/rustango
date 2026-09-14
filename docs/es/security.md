@@ -671,7 +671,7 @@ Comprobaciones siempre activas (se ejecutan con o sin `--deploy`):
 
 Comprobaciones adicionales de `--deploy` (endurecimiento para producción):
 - ✅ `RUSTANGO_ENV` es `prod` o `production`
-- ✅ `RUSTANGO_SESSION_SECRET` establecida y ≥ 32 bytes (la clave HMAC para la firma de cookies + JWT — `SECRET_KEY` **no** la lee el framework), sin ningún marcador de posición del scaffolder dejado dentro
+- ✅ `RUSTANGO_SESSION_SECRET` establecida y **decodificando a** ≥ 32 bytes (la clave HMAC para la firma de cookies + JWT — `SECRET_KEY` **no** la lee el framework), sin ningún marcador de posición del scaffolder dejado dentro. Es base64: `openssl rand -base64 32` da 44 caracteres. Un secreto de 32 *caracteres* son solo 24 bytes y se rechaza — por `check --deploy` y por el runtime desde [#1396](https://github.com/ujeenet/rustango/issues/1396); ese es justamente el punto, porque la comprobación medía la cadena codificada y aprobaba un valor que la app luego rechazaba
 - ✅ `DATABASE_URL` establecida (y advierte si apunta a localhost)
 - ⚠️ Advertencias de coherencia de `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` para la tenencia + el enlace no de loopback
 
