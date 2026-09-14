@@ -592,7 +592,8 @@ mod tests {
         })
         .await
         .unwrap();
-        // Backoff: ~2s after first failure, ~4s after second → wait ~7s to be safe.
+        // Backoff: ~1s after first failure, ~2s after second (#1410); the
+        // 7s sleep is deliberately well clear of that.
         tokio::time::sleep(Duration::from_millis(7000)).await;
         let succ = SUCCESSES.lock().unwrap();
         assert!(succ.contains(&marker), "expected marker, got {succ:?}");

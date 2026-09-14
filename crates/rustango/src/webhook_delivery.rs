@@ -94,8 +94,13 @@ pub struct WebhookEvent {
 #[async_trait::async_trait]
 impl Job for WebhookEvent {
     const NAME: &'static str = "rustango.webhook_delivery";
-    /// Webhooks typically retry for a long time — 8 attempts with the
-    /// queue's `1s · 2^attempt` backoff covers ~17 minutes.
+    /// Webhooks retry for a while: 8 **total** attempts, so 7 retries,
+    /// and the queue's `1s · 2^attempt` backoff sums to 127s — about two
+    /// minutes end to end.
+    ///
+    /// The "~17 minutes" this used to claim needs 10 retries, not 7; the
+    /// arithmetic was against a larger ceiling than the constant it sits
+    /// above (#1410). Raise `MAX_ATTEMPTS` to 11 if you want that reach.
     const MAX_ATTEMPTS: u32 = 8;
 
     async fn run(&self) -> Result<(), JobError> {
@@ -441,9 +446,10 @@ mod tests {
 
     #[tokio::test]
     async fn retryable_on_5xx() {
-        // First two attempts fail with 503, third succeeds. With the
-        // default backoff (2s after first fail, 4s after second), wait
-        // ~7 seconds.
+        // First two attempts fail with 503, third succeeds. Deliveries
+        // are `crate::jobs` jobs, so the backoff is the queue's: 1s after
+        // the first failure, 2s after the second (#1410 — it was 2s/4s
+        // until the shift was corrected). The 7s sleep stays generous.
         let received = Arc::new(Mutex::new(Vec::new()));
         let status_seq = Arc::new(Mutex::new(vec![503u16, 503u16, 200u16]));
 
@@ -501,7 +507,8 @@ mod tests {
             .await
             .unwrap();
 
-        // 503 → 2s backoff → 503 → 4s backoff → 200. ~7s total.
+        // 503 → 1s backoff → 503 → 2s backoff → 200 (#1410). ~3s of
+        // backoff; the sleep below is deliberately well clear of it.
         tokio::time::sleep(Duration::from_millis(7500)).await;
         let recv = received.lock().unwrap();
         assert!(
