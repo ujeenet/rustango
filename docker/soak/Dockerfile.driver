@@ -1,0 +1,12 @@
+# The load driver / assertion harness.
+#
+# Python rather than Rust on purpose: it is a test client, it changes
+# far more often than the apps do, and a 4-second image rebuild beats a
+# 4-minute one when you are iterating on assertions.
+FROM public.ecr.aws/docker/library/python:3.12-slim
+RUN pip install --no-cache-dir httpx==0.27.2
+WORKDIR /driver
+COPY driver.py /driver/driver.py
+RUN useradd --uid 10001 --create-home driver && mkdir -p /results && chown -R 10001 /results
+USER 10001
+ENTRYPOINT ["python", "-u", "/driver/driver.py"]
