@@ -579,6 +579,46 @@ jobs:
       - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_incr_live
       - run: cargo test -p rustango --features cache,cache-redis --test cache_redis_prefix_live
 
+  # The S3 live suites gate on `RUSTANGO_S3_TEST_*`, which appeared
+  # nowhere in `.github/` and were `#[ignore]`d nowhere either — so they
+  # ran inside `cargo test --workspace --all-features` and were counted
+  # green on every build without touching an S3 server (#1437).
+  # `s3_live_presign` went from "3 passed in 0.00s" to 3.03s once a real
+  # endpoint existed, which is the whole bug in one line.
+  #
+  # MinIO is started as a step rather than a `services:` container: the
+  # image needs `server /data` as its command, which `services:` cannot
+  # supply.
+  s3_live:
+    runs-on: ubuntu-latest
+    env:
+      RUSTANGO_S3_TEST_ENDPOINT: http://127.0.0.1:9100
+      RUSTANGO_S3_TEST_BUCKET: rustango-test
+      RUSTANGO_S3_TEST_KEY: rustango
+      RUSTANGO_S3_TEST_SECRET: rustango123
+      RUSTANGO_S3_TEST_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9100:9000 \
+            -e MINIO_ROOT_USER=$RUSTANGO_S3_TEST_KEY \
+            -e MINIO_ROOT_PASSWORD=$RUSTANGO_S3_TEST_SECRET \
+            minio/minio:latest server /data
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9100/minio/health/live && break
+            sleep 1
+          done
+          docker run --rm --network host \
+            -e MC_HOST_m=http://$RUSTANGO_S3_TEST_KEY:$RUSTANGO_S3_TEST_SECRET@127.0.0.1:9100 \
+            minio/mc:latest mb --ignore-existing m/$RUSTANGO_S3_TEST_BUCKET
+      - run: cargo test -p rustango --features postgres --test s3_live_presign
+      # media_live and media_collections_tags_live stay out until #1450
+      # lands — they fail against a real Postgres for a framework bug
+      # this job is what uncovered, not for anything S3-related.
+
   # v0.41 MySQL parity — the marketing claim is tri-dialect end-to-end
   # since v0.38, but every MySQL `_live.rs` test was skipped silently
   # in CI because `MYSQL_TEST_URL` was never set. This job runs the

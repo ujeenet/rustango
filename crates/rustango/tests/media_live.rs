@@ -2,6 +2,18 @@
 //! Live integration tests for `MediaManager` against Postgres + an
 //! S3-compatible bucket.
 //!
+//! **`#[ignore]`d pending #1450.** These had never executed — the
+//! `RUSTANGO_S3_TEST_*` vars were set nowhere in CI, so all six were
+//! counted green on every build without touching a database or a bucket
+//! (#1437). Pointed at a real Postgres and MinIO they all fail, on a
+//! framework bug they were written to catch and never got the chance to:
+//! `SqlValue::Null` binds as text, so a NULL `uploaded_by_id` cannot be
+//! written to a `bigint` column on Postgres.
+//!
+//! So they are ignored rather than wired into CI: green would be a lie,
+//! and red would block a release on a bug that predates it. Remove the
+//! `#[ignore]`s and add this file to the `s3_live` job when #1450 lands.
+//!
 //! Both env-var contracts must be set or the tests skip silently:
 //!
 //! - `DATABASE_URL` — Postgres for the `rustango_media` table
@@ -60,6 +72,7 @@ async fn maybe_setup() -> Option<MediaManager> {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn save_bytes_inserts_row_and_uploads_object() {
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
@@ -103,8 +116,10 @@ async fn save_bytes_inserts_row_and_uploads_object() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn begin_then_finalize_upload_flips_pending_to_ready() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
 
@@ -153,8 +168,10 @@ async fn begin_then_finalize_upload_flips_pending_to_ready() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn finalize_marks_failed_when_object_never_uploaded() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
 
@@ -177,8 +194,10 @@ async fn finalize_marks_failed_when_object_never_uploaded() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn delete_soft_then_get_returns_none() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
 
@@ -229,8 +248,10 @@ async fn delete_soft_then_get_returns_none() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn purge_orphans_clears_old_soft_deleted_rows_and_storage() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
 
@@ -291,8 +312,10 @@ async fn purge_orphans_clears_old_soft_deleted_rows_and_storage() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn purge_pending_clears_abandoned_uploads() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
 

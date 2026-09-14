@@ -119,6 +119,17 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Fixed
 
+- **The S3 live suites had never run, and reported green on every build**
+  (#1437). Twenty-five tests gated on `RUSTANGO_S3_TEST_*`, which was set
+  nowhere in CI, and none carried `#[ignore]` — so `cargo test --workspace
+  --all-features` ran them and counted them passing without touching an S3
+  server. `s3_live_presign` went from "3 passed in 0.00s" to 3.03s once a real
+  endpoint existed. A new `s3_live` job runs it against MinIO.
+
+  The 22 media tests are `#[ignore]`d rather than wired in, because pointing
+  them at a real Postgres for the first time made all 22 fail — on #1450, a
+  framework bug they were written to catch and never got the chance to.
+
 - **Job retry backoff was `2s, 4s, 8s, 16s`, not the documented `1s, 2s, 4s,
   8s`** (#1410). The shift ran off the 1-based `next_attempt`, so every wait was
   double what the module doc, `docs/jobs.md` and the comment directly above the

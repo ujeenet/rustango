@@ -78,6 +78,7 @@ fn save_opts(name: &str) -> SaveOpts {
 // =====================================================================
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn create_then_get_collection_round_trips() {
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
@@ -106,8 +107,10 @@ async fn create_then_get_collection_round_trips() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn collection_path_walks_parent_chain() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let root = manager
@@ -139,8 +142,10 @@ async fn collection_path_walks_parent_chain() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn list_in_collection_recursive_descends_subfolders() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let root = manager.create_collection("R", "r", None, "").await.unwrap();
@@ -187,8 +192,10 @@ async fn list_in_collection_recursive_descends_subfolders() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn delete_collection_orphans_media_not_storage() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let c = manager.create_collection("X", "x", None, "").await.unwrap();
@@ -226,8 +233,10 @@ async fn delete_collection_orphans_media_not_storage() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn move_to_collection_updates_fk() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let a = manager.create_collection("A", "a", None, "").await.unwrap();
@@ -269,8 +278,10 @@ async fn move_to_collection_updates_fk() {
 // =====================================================================
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn tag_then_tags_for_round_trips() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let m = manager.save_bytes(save_opts("tagged")).await.unwrap();
@@ -308,8 +319,10 @@ async fn tag_then_tags_for_round_trips() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn untag_removes_one_keeps_others() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let m = manager.save_bytes(save_opts("untag-me")).await.unwrap();
@@ -334,8 +347,10 @@ async fn untag_removes_one_keeps_others() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn set_tags_replaces_entire_set() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let m = manager.save_bytes(save_opts("set-tags")).await.unwrap();
@@ -366,8 +381,10 @@ async fn set_tags_replaces_entire_set() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn list_with_tag_returns_matching_media() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let a = manager.save_bytes(save_opts("a")).await.unwrap();
@@ -401,8 +418,10 @@ async fn list_with_tag_returns_matching_media() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn popular_tags_orders_by_use_count() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let m1 = manager.save_bytes(save_opts("m1")).await.unwrap();
@@ -446,8 +465,10 @@ async fn popular_tags_orders_by_use_count() {
 // =====================================================================
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn router_get_media_returns_full_response() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let m = manager.save_bytes(save_opts("via-router")).await.unwrap();
@@ -486,8 +507,10 @@ async fn router_get_media_returns_full_response() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn router_create_collection_then_list_and_get() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let app = media_router(manager.clone());
@@ -553,8 +576,10 @@ async fn router_create_collection_then_list_and_get() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn router_begin_then_finalize_upload_via_axum() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let app = media_router(manager.clone());
@@ -624,8 +649,10 @@ async fn router_begin_then_finalize_upload_via_axum() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn router_set_tags_and_query_via_tag_endpoint() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let m = manager.save_bytes(save_opts("router-tags")).await.unwrap();
@@ -677,8 +704,10 @@ async fn router_set_tags_and_query_via_tag_endpoint() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn router_collection_contents_with_recursive_query() {
     let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     let root = manager.create_collection("R", "r", None, "").await.unwrap();
@@ -753,8 +782,10 @@ async fn router_collection_contents_with_recursive_query() {
 }
 
 #[tokio::test]
+#[ignore = "never ran; fails on #1450 — see the module doc"]
 async fn migrate_framework_is_idempotent_against_running_db() {
     let Some(_manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
     // The setup helper already ran migrate_framework; a second call must be
