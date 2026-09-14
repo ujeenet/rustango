@@ -7,7 +7,7 @@ read-only **inline** on the post page, and `Post` has an **audit trail**. The
 app self-seeds (15 posts + comments) on first boot so the admin has data.
 
 In-repo example → path dep on the framework. A real project uses
-`rustango = "0.43"` from crates.io.
+`rustango = "0.57"` from crates.io.
 
 ## What maps to which admin feature
 
