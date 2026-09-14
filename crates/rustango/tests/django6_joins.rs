@@ -551,8 +551,13 @@ mod mysql_live {
     }
 
     async fn fresh_pool() -> Option<Pool> {
+        // Absent means "not configured for MySQL" and skips.
+        // Set-but-unreachable is a broken database and must fail —
+        // same reasoning as the PG arm above (#1434).
         let url = std::env::var("MYSQL_TEST_URL").ok()?;
-        let my = sqlx::MySqlPool::connect(&url).await.ok()?;
+        let my = sqlx::MySqlPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("MYSQL_TEST_URL is set but unreachable ({url}): {e}"));
         for sql in [
             "DROP TABLE IF EXISTS d6join_like",
             "DROP TABLE IF EXISTS d6join_comment",
