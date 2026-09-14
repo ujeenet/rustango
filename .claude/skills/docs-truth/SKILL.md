@@ -233,8 +233,16 @@ Complementary; don't duplicate them:
 | Test | Enforces |
 |---|---|
 | `docs_links.rs` | Every link, image and anchor resolves, in every locale |
-| `docs_versions.rs` | Sample output shows the shipping version (note: its adjacency rule misses two-component pins like `version = "0.44"`) |
+| `docs_versions.rs` | Sample output shows the shipping version, **and** every install pin names the shipping series — two-component (`version = "0.57"`) as well as three, for every crate this workspace publishes, across every tracked `.md` except `CHANGELOG.md` |
 | `docs_contract.rs` | Backing-test coverage, and untested pages gain no new examples |
+| `docs_live_suite_counts.rs` | The live-suite table in `testing.md` is recomputed from the test tree, in all four locales |
+| `docs_inventories.rs` | A page that publishes a list the code owns matches it — currently the `test_assertions` helpers |
+| `help_features_match_the_docs.rs` (cargo-rustango) | `scaffolding.md`'s `--features` table is what `cargo rustango new --help` actually prints |
+
+Two of those were added because a count or a list went stale silently. If
+you are about to write a guard for a published number or a published set,
+add an assertion to `docs_inventories.rs` rather than a new file — it
+exists for that class.
 
 ## Reference
 
