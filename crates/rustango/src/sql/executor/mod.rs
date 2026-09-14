@@ -732,13 +732,51 @@ impl<T: Model + Send> UpdaterPool<T> for UpdateBuilder<T> {
 /// `PgArguments` and `SqlValue::Array` binding as a typed PG array,
 /// neither of which exists on MySQL / SQLite. The bi-directional
 /// counterparts are `bind_match_mysql!` + `bind_match_sqlite!`.
+/// A NULL with no type attached, so PostgreSQL infers one from the
+/// column it lands in (#1450).
+///
+/// [`SqlValue::Null`] used to bind `None::<String>`, which sends the
+/// parameter with the **text** OID. Postgres then refuses it anywhere but
+/// a text column:
+///
+/// ```text
+/// column "uploaded_by_id" is of type bigint but expression is of type text
+/// ```
+///
+/// So writing NULL to any non-text column failed — media upload was
+/// broken outright, and 50-odd other sites shared the expression. MySQL
+/// and SQLite type parameters loosely enough not to care, which is why
+/// only Postgres ever showed it, and why the two tri-dialect binders
+/// below are left alone.
+///
+/// OID 0 is the wire protocol's "unspecified": the server resolves the
+/// type from context during Parse.
+#[cfg(feature = "postgres")]
+struct UntypedNull;
+
+#[cfg(feature = "postgres")]
+impl sqlx::Type<sqlx::Postgres> for UntypedNull {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl sqlx::Encode<'_, sqlx::Postgres> for UntypedNull {
+    fn encode_by_ref(
+        &self,
+        _buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        Ok(sqlx::encode::IsNull::Yes)
+    }
+}
+
 // Macros are made visible to sibling modules below via `pub(super) use`.
 #[cfg(feature = "postgres")]
 macro_rules! bind_match {
     ($q:expr, $value:expr) => {
         match $value {
-            // `None::<String>` produces a typed NULL Postgres accepts in any context.
-            SqlValue::Null => $q.bind(None::<String>),
+            SqlValue::Null => $q.bind($crate::sql::executor::UntypedNull),
             SqlValue::I16(v) => $q.bind(v),
             SqlValue::I32(v) => $q.bind(v),
             SqlValue::I64(v) => $q.bind(v),

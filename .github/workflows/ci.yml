@@ -597,7 +597,24 @@ jobs:
   # MinIO's own registry.
   s3_live:
     runs-on: ubuntu-latest
+    services:
+      # The media suites store rows in `rustango_media` alongside the
+      # bucket, so they need both halves.
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16-alpine
+        env:
+          POSTGRES_USER: rustango
+          POSTGRES_PASSWORD: rustango
+          POSTGRES_DB: rustango_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rustango -d rustango_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
     env:
+      DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
       RUSTANGO_S3_TEST_ENDPOINT: http://127.0.0.1:9100
       RUSTANGO_S3_TEST_BUCKET: rustango-test
       RUSTANGO_S3_TEST_KEY: rustango
@@ -621,9 +638,15 @@ jobs:
             -e MC_HOST_m=http://$RUSTANGO_S3_TEST_KEY:$RUSTANGO_S3_TEST_SECRET@127.0.0.1:9100 \
             quay.io/minio/mc:latest mb --ignore-existing m/$RUSTANGO_S3_TEST_BUCKET
       - run: cargo test -p rustango --features postgres --test s3_live_presign
-      # media_live and media_collections_tags_live stay out until #1450
-      # lands — they fail against a real Postgres for a framework bug
-      # this job is what uncovered, not for anything S3-related.
+      # These 22 were the ones that exposed #1450 the first time they ran
+      # against a real database. `--test-threads=1`: the setup helper
+      # truncates the shared media tables, so they must not overlap.
+      - run: >-
+          cargo test -p rustango --features postgres,media,testkit
+          --test media_live -- --test-threads=1
+      - run: >-
+          cargo test -p rustango --features postgres,media,testkit
+          --test media_collections_tags_live -- --test-threads=1
 
   # v0.41 MySQL parity — the marketing claim is tri-dialect end-to-end
   # since v0.38, but every MySQL `_live.rs` test was skipped silently

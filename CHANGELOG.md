@@ -119,6 +119,29 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Fixed
 
+- **Writing `NULL` into any non-text column failed on PostgreSQL** (#1450).
+  `SqlValue::Null` was bound as `None::<String>`, which sends the parameter with
+  the **text** OID; Postgres then refuses it anywhere else:
+
+  ```
+  column "uploaded_by_id" is of type bigint but expression is of type text
+  ```
+
+  **Media upload was broken outright on Postgres** — `uploaded_by_id: None` is
+  the ordinary case for an anonymous or system upload — and 50-odd other sites
+  across `soft_delete`, `audit`, `fixtures`, `forms`, `viewset`, `admin` and
+  `migrate` share the expression. MySQL and SQLite type parameters loosely
+  enough to accept a text NULL in a bigint column, so only Postgres ever showed
+  it, and a tri-dialect suite passing on two backends said nothing about the
+  third.
+
+  Now bound with OID 0 — the wire protocol's "unspecified" — so the server
+  infers the type from the column. Nothing to update. The MySQL and SQLite
+  binders are deliberately unchanged.
+
+  Found by #1437: the 22 media tests that had never executed all failed the
+  first time they ran against a real database, and all 22 pass now.
+
 - **The S3 live suites had never run, and reported green on every build**
   (#1437). Twenty-five tests gated on `RUSTANGO_S3_TEST_*`, which was set
   nowhere in CI, and none carried `#[ignore]` — so `cargo test --workspace
