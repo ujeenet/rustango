@@ -161,9 +161,15 @@ impl PasswordReset {
 /// - `pk_column` = `"id"`
 /// - `password_column` = `"password_hash"`
 ///
-/// The password is rejected if shorter than 8 characters
-/// (`AuthFlowError::WeakPassword`); operators wanting stricter rules
-/// run their own validators on the input before calling this helper.
+/// The new password must pass [`crate::passwords::strength_score`] —
+/// the same policy `docs/auth-passwords.md` documents, so a password
+/// refused at registration can no longer be set by resetting (#1399).
+///
+/// **This link is replayable for its full TTL.** A copy of the email —
+/// forwarded, archived, in a shared inbox, pasted into a support ticket —
+/// still works after the legitimate reset completes. Use
+/// [`confirm_password_reset_single_use`] instead wherever you have a
+/// cache.
 ///
 /// Pairs with [`PasswordReset::issue`] — issue the URL, email it,
 /// and call this helper from your POST `/password-reset/confirm`
@@ -172,7 +178,7 @@ impl PasswordReset {
 /// # Errors
 /// - [`AuthFlowError`] from `PasswordReset::verify` (Malformed,
 ///   InvalidSignature, Expired, WrongPurpose).
-/// - [`AuthFlowError::WeakPassword`] when `new_password.len() < 8`.
+/// - [`AuthFlowError::WeakPassword`] when the password fails the policy.
 /// - [`AuthFlowError::Database`] for SQL / driver failures.
 #[cfg(feature = "passwords")]
 pub async fn confirm_password_reset_pool(
@@ -211,11 +217,122 @@ pub async fn confirm_password_reset_pool_into(
     password_column: &str,
 ) -> Result<i64, AuthFlowError> {
     let user_id = PasswordReset::verify(url, secret)?;
-    if new_password.len() < 8 {
-        return Err(AuthFlowError::WeakPassword(
-            "Password must be at least 8 characters.".into(),
-        ));
+    check_password_strength(new_password)?;
+    write_password_hash(
+        pool,
+        user_id,
+        new_password,
+        user_table,
+        pk_column,
+        password_column,
+    )
+    .await
+}
+
+/// As [`confirm_password_reset_pool`] but the link is **single-use**: the
+/// token is recorded in `cache` and a replay returns
+/// [`AuthFlowError::AlreadyUsed`] (#1399).
+///
+/// `docs/auth-flows.md` recommends single-use for reset links; this is
+/// the helper that can honour it. Without it a leaked copy of the reset
+/// email is a working account takeover for the rest of the TTL, *after*
+/// the legitimate user has completed their reset.
+///
+/// The password policy is checked before the token is consumed, so a
+/// rejected password does not burn the user's link.
+///
+/// # Errors
+/// As [`confirm_password_reset_pool`], plus [`AuthFlowError::AlreadyUsed`].
+#[cfg(all(feature = "passwords", feature = "cache"))]
+pub async fn confirm_password_reset_single_use(
+    pool: &crate::sql::Pool,
+    url: &str,
+    new_password: &str,
+    secret: &[u8],
+    cache: &std::sync::Arc<dyn crate::cache::Cache>,
+) -> Result<i64, AuthFlowError> {
+    confirm_password_reset_single_use_into(
+        pool,
+        url,
+        new_password,
+        secret,
+        cache,
+        "rustango_users",
+        "id",
+        "password_hash",
+    )
+    .await
+}
+
+/// As [`confirm_password_reset_single_use`] but writes into a
+/// caller-named table / columns.
+///
+/// # Errors
+/// Same shape as [`confirm_password_reset_single_use`].
+#[cfg(all(feature = "passwords", feature = "cache"))]
+#[allow(clippy::too_many_arguments)]
+pub async fn confirm_password_reset_single_use_into(
+    pool: &crate::sql::Pool,
+    url: &str,
+    new_password: &str,
+    secret: &[u8],
+    cache: &std::sync::Arc<dyn crate::cache::Cache>,
+    user_table: &str,
+    pk_column: &str,
+    password_column: &str,
+) -> Result<i64, AuthFlowError> {
+    let user_id = PasswordReset::verify(url, secret)?;
+    // Policy before consumption: a weak password must not cost the user
+    // their link, but a replay must not reach the write.
+    check_password_strength(new_password)?;
+    consume_single_use(url, cache).await?;
+    write_password_hash(
+        pool,
+        user_id,
+        new_password,
+        user_table,
+        pk_column,
+        password_column,
+    )
+    .await
+}
+
+/// The framework's documented password policy, applied where the reset
+/// path used to check only `len() < 8` (#1399).
+#[cfg(feature = "passwords")]
+fn check_password_strength(new_password: &str) -> Result<(), AuthFlowError> {
+    use crate::passwords::StrengthIssue;
+
+    let issues = crate::passwords::strength_score(new_password);
+    if issues.is_empty() {
+        return Ok(());
     }
+    let reasons: Vec<&str> = issues
+        .iter()
+        .map(|i| match i {
+            StrengthIssue::TooShort => "it must be at least 12 characters",
+            StrengthIssue::NoDigitsOrSymbols => "it needs a digit or a symbol",
+            StrengthIssue::NoVariety => "it needs more than lowercase letters",
+            StrengthIssue::KnownWeak => "it is a well-known weak password",
+        })
+        .collect();
+    Err(AuthFlowError::WeakPassword(format!(
+        "Password rejected: {}.",
+        reasons.join("; ")
+    )))
+}
+
+/// Hash and store the new password. Shared by the replayable and
+/// single-use confirm helpers.
+#[cfg(feature = "passwords")]
+async fn write_password_hash(
+    pool: &crate::sql::Pool,
+    user_id: i64,
+    new_password: &str,
+    user_table: &str,
+    pk_column: &str,
+    password_column: &str,
+) -> Result<i64, AuthFlowError> {
     let hash =
         crate::passwords::hash(new_password).map_err(|e| AuthFlowError::Database(e.to_string()))?;
     let dialect = pool.dialect();

@@ -69,6 +69,32 @@ sets no CORS — so the notes below are for hand-written apps.
   `/logout`; the body is optional and older clients keep working, revoking only
   the bearer as they did before.
 
+- **The documented password-reset path now applies the documented password
+  policy** (#1399). `confirm_password_reset_pool` / `_into` checked only
+  `len() < 8`, while `passwords::strength_score` — the policy
+  `docs/auth-passwords.md` describes — rejects `12345678` and `password1`
+  outright. A user who could not set a weak password at registration could set
+  one by resetting.
+
+  **This is stricter than before.** A deployment that accepted 8-character
+  passwords at reset will start refusing them, with the reason in
+  `AuthFlowError::WeakPassword`. That is the point, but it will be visible.
+
+- **Reset links can now be made single-use** (#1399). The confirm helpers called
+  plain `verify`, so a reset link stayed valid for its full TTL — *including
+  after the password had been changed*. A copy of the email in a shared inbox, a
+  forward, or a support ticket with the mail pasted in was a working account
+  takeover until the token expired, at a point where the legitimate user had
+  finished and had no reason to suspect anything. `docs/auth-flows.md`
+  recommended single-use for reset while the helper it documented could not do
+  it.
+
+  New `confirm_password_reset_single_use` / `_single_use_into` take a `&Cache`
+  and refuse a replay with `AuthFlowError::AlreadyUsed`. The policy is checked
+  before the token is consumed, so a rejected password does not burn the link.
+  The existing helpers are unchanged and still replayable — the old signature
+  has nowhere to take a cache — and now say so in their docs.
+
 ### Fixed
 
 - **`JwtBackend` stopped accepting `JwtLifecycle`'s tokens** between #1397 and

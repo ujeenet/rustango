@@ -93,19 +93,47 @@ let user_id = confirm_password_reset_pool_into(
 ).await?;
 ```
 
-The confirm helper enforces a minimum length, argon2id-hashes the new password,
-and writes it — rejecting weak, expired, tampered, or wrong-secret inputs without
-touching the row:
+The confirm helper applies the [password policy](auth-passwords.md#strength-checks),
+argon2id-hashes the new password, and writes it — rejecting weak, expired,
+tampered, or wrong-secret inputs without touching the row:
 
 ```rust
 // valid token + strong pw → hash rotated (starts "$argon2…")
-// "short"                  → Err(WeakPassword), nothing written
+// "12345678"               → Err(WeakPassword), nothing written
 // user_id tampered         → Err(InvalidSignature), nothing written
 ```
+
+It is the same `passwords::strength_score` the rest of the framework uses, so a
+password refused at registration cannot be set by resetting (#1399).
 
 > `confirm_password_reset_pool` is the convenience form that assumes the defaults
 > `rustango_users` / `id` / `password_hash`; use `_into` to point at your own
 > table/columns.
+
+### Make the link single-use
+
+The helpers above verify signature and expiry only, so **the link stays usable
+for its full TTL** — including after the password has been changed. A copy of
+the email in a shared inbox, a forwarded message, or a support ticket with the
+mail pasted in is a working account takeover until the token expires, at a point
+where the legitimate user has finished and has no reason to suspect anything.
+
+Pass a cache and the token is consumed on first use:
+
+```rust
+use rustango::auth_flows::confirm_password_reset_single_use;
+
+let user_id = confirm_password_reset_single_use(
+    &pool, &url, "a-brand-new-strong-password", secret, &cache,
+).await?;                      // a replay → Err(AuthFlowError::AlreadyUsed)
+```
+
+`_single_use_into` takes the same table/columns as `_into`. The password policy
+is checked *before* the token is consumed, so a rejected password does not cost
+the user their link.
+
+The used-marker lives in the cache, not in the token, so every replica must
+share one cache — two instances means two blacklists and no enforcement.
 
 ---
 
@@ -154,7 +182,8 @@ let email = MagicLink::verify_single_use(&url, secret, &cache).await?;
 Plain `verify` only checks signature + expiry, so a leaked link is replayable
 until it expires. For login and reset, prefer `verify_single_use(url, secret,
 &cache)` — it records the token's signature in a `Cache` and refuses a second
-use:
+use. For reset specifically, `confirm_password_reset_single_use` does this as
+part of the same call ([above](#make-the-link-single-use)):
 
 ```rust
 // first click  → Ok(email)

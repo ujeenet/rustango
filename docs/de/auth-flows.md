@@ -93,19 +93,47 @@ let user_id = confirm_password_reset_pool_into(
 ).await?;
 ```
 
-Der Bestätigungshelfer erzwingt eine Mindestlänge, hasht das neue Passwort mit argon2id und
-schreibt es — wobei er schwache, abgelaufene, manipulierte oder mit falschem Secret versehene
-Eingaben abweist, ohne die Zeile anzurühren:
+Der Bestätigungshelfer wendet die [Passwortrichtlinie](auth-passwords.md#stärkeprüfungen) an,
+hasht das neue Passwort mit argon2id und schreibt es — wobei er schwache, abgelaufene,
+manipulierte oder mit falschem Secret versehene Eingaben abweist, ohne die Zeile anzurühren:
 
 ```rust
 // valid token + strong pw → hash rotated (starts "$argon2…")
-// "short"                  → Err(WeakPassword), nothing written
+// "12345678"               → Err(WeakPassword), nothing written
 // user_id tampered         → Err(InvalidSignature), nothing written
 ```
+
+Es ist dasselbe `passwords::strength_score`, das der Rest des Frameworks verwendet — ein bei der
+Registrierung abgelehntes Passwort lässt sich also nicht per Zurücksetzen setzen (#1399).
 
 > `confirm_password_reset_pool` ist die bequeme Form, die die Standardwerte
 > `rustango_users` / `id` / `password_hash` annimmt; verwenden Sie `_into`, um auf Ihre eigene
 > Tabelle/Spalten zu verweisen.
+
+### Den Link einmalig machen
+
+Die obigen Helfer prüfen nur Signatur und Ablauf, **der Link bleibt also seine gesamte TTL lang
+nutzbar** — auch nachdem das Passwort geändert wurde. Eine Kopie der E-Mail in einem geteilten
+Postfach, eine Weiterleitung oder ein Support-Ticket mit der eingefügten Mail ist bis zum Ablauf
+des Tokens eine funktionierende Kontoübernahme — zu einem Zeitpunkt, an dem der legitime Nutzer
+fertig ist und keinen Verdacht hat.
+
+Übergeben Sie einen Cache, und das Token wird bei der ersten Verwendung verbraucht:
+
+```rust
+use rustango::auth_flows::confirm_password_reset_single_use;
+
+let user_id = confirm_password_reset_single_use(
+    &pool, &url, "a-brand-new-strong-password", secret, &cache,
+).await?;                      // ein Replay → Err(AuthFlowError::AlreadyUsed)
+```
+
+`_single_use_into` nimmt dieselben Tabellen-/Spaltenangaben wie `_into`. Die Passwortrichtlinie
+wird *vor* dem Verbrauch des Tokens geprüft, ein abgelehntes Passwort kostet den Nutzer also nicht
+seinen Link.
+
+Die Verbraucht-Markierung liegt im Cache, nicht im Token — alle Replicas müssen sich einen Cache
+teilen; zwei Instanzen bedeuten zwei Sperrlisten und keine Durchsetzung.
 
 ---
 
