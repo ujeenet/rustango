@@ -454,9 +454,11 @@ pub(crate) async fn table_view(
     //    the `(ct_column, pk_column)` pair collapses into a single
     //    clickable target link.
     //
-    // Names that match none are silently dropped. Empty
-    // `list_display` falls back to every scalar field (today's
-    // behavior).
+    // A name matching none of the four is dropped, and warns (#1412) —
+    // the column's absence is otherwise the only symptom, which reads
+    // as "the admin does not support that field" rather than "that name
+    // resolved to nothing". Empty `list_display` falls back to every
+    // scalar field.
     enum DisplayItem {
         Field(&'static FieldSchema),
         Computed(&'static crate::admin::computed_fields::ComputedField),
@@ -498,6 +500,19 @@ pub(crate) async fn table_view(
                         } else {
                             None
                         }
+                    })
+                    .or_else(|| {
+                        tracing::warn!(
+                            table = model.table,
+                            name = %name,
+                            "list_display names `{name}`, which is not a field, a \
+                             registered computed field, a generic_fk, or a dotted \
+                             path into a JSON column on `{}` — the column is omitted. \
+                             Check for a typo, a renamed field, or a \
+                             register_admin_computed! that did not run.",
+                            model.table,
+                        );
+                        None
                     })
             })
             .collect()
