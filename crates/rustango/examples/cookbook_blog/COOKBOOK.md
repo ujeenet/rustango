@@ -989,6 +989,16 @@ let mut act = Activity {
 act.save(&pool).await?;
 ```
 
+> **`save` is Postgres-only; `save_pool` is the portable one.** `save` is
+> `#[cfg(feature = "postgres")]` and takes `&PgPool`, so it does not exist
+> on a SQLite or MySQL build — this chapter uses it because the recipes
+> here run on Postgres. `save_pool(&Pool)` is the same operation across all
+> three backends, and it is what Chapter 13 uses. The naming reads
+> backwards (the unsuffixed name is the *narrower* one) and cannot be
+> corrected without a deprecation cycle; [#1293](https://github.com/ujeenet/rustango/issues/1293)
+> tracks it. Writing portable code today means reaching for the `_pool`
+> suffix.
+
 **Verified by**: `generic_fk_schema_and_content_type_lookup`
 
 ### 2.24b Typed `<name>_pool` accessor on the GFK target
