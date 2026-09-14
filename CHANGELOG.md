@@ -65,8 +65,70 @@ sets no CORS — so the notes below are for hand-written apps.
   nobody is logged out. If you wrote a custom verifier because the standard
   libraries could not parse these, you can delete it. The two-segment
   compatibility path is removed in 0.58.
+## [0.57.1] — 2026-09-14
+
+A correctness-and-honesty release. Most of it is documentation that described
+something the code did not do — and, in several cases, a guard so the page
+cannot drift from the code again.
 
 ### Fixed
+- **`db:dump > backup.sql` produced a file that was not valid SQL.** Its first
+  line was a `running: pg_dump …` status banner, because `pg_dump` inherits
+  stdout and the banner was written there. A restore choked on it — at the
+  moment you needed the backup rather than when you took it. The banner now goes
+  to stderr, and `db_dump_cmd` no longer takes a writer at all, so nothing can
+  put anything on the data stream (#1404).
+- **An unresolvable `list_display` name was dropped in silence.** A typo, a
+  renamed field, or a `register_admin_computed!` behind a `#[cfg]` that did not
+  run all produced a missing column and no output of any kind — which reads as
+  "the admin does not support that field". It now warns, naming the table, the
+  name, and the four things it could have been (#1412).
+- **A `Serializer` `source` rename leaked the model's column name** in validation
+  errors, so a field published as `content` reported a missing `body` (#1386).
+- **Two `tenancy --help` lines contradicted the code**, and the docs were the
+  correct side (#1407, #1408).
+- **A MySQL live suite read `MYSQL_URL` while CI sets `MYSQL_TEST_URL`**, so two
+  of its four tests had never run anywhere — while the file reported `4 passed`,
+  because the other two need no database (#1415).
+
+### Added
+- **`viewset::match_nothing` is public.** The documented fail-closed filter
+  backend could not be written: the docs named a `deny_all` that never existed,
+  and the function that does the job was private. It also loses its `tenancy`
+  gate — `ViewSetFilter` never had one, and a soft-delete or date-window backend
+  needs to fail closed just as much as an ownership one (#1411).
+- **`cache::from_settings_async`**, which can build the backends that need to
+  connect. See the note under `[Unreleased]`.
+
+### Documentation
+- **Rate limiting behind a proxy.** `security.md` diagnosed the problem and then
+  prescribed a remedy that does nothing: `RealIpLayer` inserts its own extension
+  and never rewrites `ConnectInfo`, which neither limiter reads. The page now
+  says so, says not to hand-roll it either — `RealIpLayer` takes the leftmost
+  `X-Forwarded-For` with no trusted-proxy check, so keying a limiter on it turns
+  a coarse limit into a bypassable one — and gives a working alternative
+  meanwhile. The code fix needs a trust boundary first (#1398).
+- The HTML-form example described a context the views never stamp; the
+  scaffolding page claimed an `admin_router(pool)` the generator does not emit;
+  the operator-console mounting example could not be typed in as written; four
+  install pins named a series thirteen releases stale.
+
+### Testing
+- Six guards now recompute doc claims from the tree rather than restating them:
+  install pins across every tracked `.md`, the live-suite table, the
+  assertion-helper inventory, the scaffolder's `--features` table, the
+  `form.fields` contract, and the docs contract itself. Each was written after a
+  published number or list turned out to be wrong.
+- **The Django 6.0 parity suite reported `8 passed` against an unreachable
+  database.** `.ok()?` made "not configured" and "broken" the same outcome, so
+  the suite that verifies #1024–#1040 could not report a failure caused by its
+  own database (#1434).
+- **`mysql_live` spent ~32 minutes per run dialling a Postgres it does not
+  have.** `DATABASE_URL` is workflow-wide; eight suites compiled their PG arm in,
+  found the variable set, and timed out (#1435).
+- The selective-feature test build is at zero warnings, down from 44 (#1370).
+
+### Fixed (pool configuration)
 - **`[database]` pool settings are applied.** `pool_max_size` and `pool_min_size` were parsed, type-checked and unit-tested — and reached no pool at all. Setting them did nothing, which is worse than not offering them: a pool sized for production silently ran on sqlx's default of 10, with no error and nothing in the logs to explain it (#1373).
 - **Every pool is built through one constructor.** Construction had spread to ~22 production sites, most calling sqlx directly. The main Postgres `runserver` pool was among them, so it ran on sqlx's 30s acquire timeout — the value this crate elsewhere rejects as "a batch-tool number, not a web-server one". `tests/pool_construction.rs` keeps it from regrowing.
 - **`Pool::connect_lazy` applied no options at all**, not even an acquire timeout.
