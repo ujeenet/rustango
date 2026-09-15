@@ -566,7 +566,15 @@ lettre = { version = "0.11", default-features = false, features = [
 
 # `runtime` feature dep — used by `#[rustango::main]` to install a
 # default tracing subscriber (env-filter) before the user body runs.
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json"], optional = true }
+# `ansi` is what makes colour possible at all. Without it
+# `tracing-subscriber` compiles the escape-code path out entirely — not
+# "colour off by default", *absent* — so no rustango line has ever been
+# coloured, `docs/logging.md` advertised colour that could not exist, and
+# `with_ansi(true)` panics in debug builds (#1480). It pulls
+# `nu-ansi-term`, which was correspondingly missing from `Cargo.lock`.
+# Whether colour is *used* is decided at runtime by tty detection and the
+# `[logging] color` setting; this only makes the choice available.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "json", "ansi"], optional = true }
 tracing-appender = { workspace = true, optional = true }
 # Not used directly — declared only to pin the transitive `time` away from
 # the broken 0.3.48 (see the workspace.dependencies note). `time` is

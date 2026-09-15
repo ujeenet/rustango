@@ -13,8 +13,14 @@
 //! Emits one `tracing::info!` event per completed request:
 //!
 //! ```text
-//! INFO method=GET path=/api/posts status=200 duration_ms=12 ip=192.0.2.1 tenant=acme
+//! INFO http.request.method=GET url.path=/api/posts http.response.status_code=200
+//!      duration_ms=12 client.address=192.0.2.1 tenant=acme
 //! ```
+//!
+//! Field names are the OpenTelemetry HTTP semantic conventions, shared
+//! with [`crate::tracing_layer`]. Before #1480 the two layers named
+//! every field differently except `duration_ms` and `tenant`, so an app
+//! running both emitted the same request under two schemas.
 //!
 //! Filter via tracing-subscriber's env-filter (e.g. `RUST_LOG=rustango::access_log=info`).
 //!
@@ -240,32 +246,44 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
 
     let tenant = tenant_label(cfg.tenant_field, tenant);
 
+    // Field names follow the OpenTelemetry HTTP semantic conventions,
+    // which is what `tracing_layer` already emitted. The two layers used
+    // to disagree on every field but `duration_ms` and `tenant` —
+    // `method`/`path`/`status` here against
+    // `http.request.method`/`url.path`/`http.response.status_code`
+    // there — so an app running both logged the same request twice under
+    // two different schemas (#1480).
+    //
+    // OTel was chosen over the shorter names because these lines are
+    // what gets shipped to a collector, and renaming at the edge is
+    // work every deployment would repeat.
+    let client_address = ip.as_deref().unwrap_or("-");
     if duration_ms >= cfg.slow_threshold_ms {
         tracing::warn!(
-            method = %method,
-            path = %path,
-            status,
+            "http.request.method" = %method,
+            "url.path" = %path,
+            "http.response.status_code" = status,
             duration_ms,
-            ip = ip.as_deref().unwrap_or("-"),
+            "client.address" = client_address,
             tenant = %tenant,
             "slow request",
         );
     } else if is_error {
         tracing::warn!(
-            method = %method,
-            path = %path,
-            status,
+            "http.request.method" = %method,
+            "url.path" = %path,
+            "http.response.status_code" = status,
             duration_ms,
-            ip = ip.as_deref().unwrap_or("-"),
+            "client.address" = client_address,
             tenant = %tenant,
         );
     } else {
         tracing::info!(
-            method = %method,
-            path = %path,
-            status,
+            "http.request.method" = %method,
+            "url.path" = %path,
+            "http.response.status_code" = status,
             duration_ms,
-            ip = ip.as_deref().unwrap_or("-"),
+            "client.address" = client_address,
             tenant = %tenant,
         );
     }
