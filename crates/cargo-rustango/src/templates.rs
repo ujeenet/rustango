@@ -601,10 +601,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
         .api(urls::api())
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
-        // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),
-        // then RUSTANGO__* env overrides. Without it the files the
-        // scaffolder writes are inert.
-        .with_settings_from_env()
+        // NOTE: no .with_settings_from_env() here. It is gated on the
+        // config feature, and this template is deliberately bare: ORM +
+        // axum + the manage dispatcher. Adding config alone does not
+        // help either — the settings layers it switches on also need
+        // session, signals, access_log, allowed_hosts and body_limit,
+        // which together are batteries, which is the fullstack template.
+        //
+        // So the config/*.toml this scaffolder writes are inert in an api
+        // project. Pre-existing, and worth fixing properly — either stop
+        // writing them here, or give the template the features to read
+        // them — but not by making a minimal template heavy.
         .run()
         .await
 }
