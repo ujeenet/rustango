@@ -1453,14 +1453,19 @@ als `skipped_cap` im [`PrewarmReport`]). Per-Tenant-Build-Fehler loggen ein
 
 ### Tracing
 
-`crate::tenancy::pools::tenant_pool_init` ist ein `tracing::info_span!`, der den
-Cold-Path-Pool-Build umschließt. Abonnieren Sie ihn, um die Per-Tenant-Build-
-Latenz zu sehen:
+`tenant_pool_init` ist ein `tracing::info_span!`, der den
+Cold-Path-Pool-Build umschließt; die Events darin tragen das Target
+`rustango::tenancy::pools`. Abonnieren Sie es, um die
+Per-Tenant-Build-Latenz zu sehen:
 
 ```text
-INFO crate::tenancy::pools: tenant pool connected (database mode)
+INFO rustango::tenancy::pools: tenant pool connected (database mode)
      slug=acme elapsed_ms=42 min_conn=1 max_conn=4
 ```
+
+Einschalten mit `RUST_LOG=rustango::tenancy::pools=info`. Ein Filter auf
+`crate::tenancy::pools` passt auf nichts — ein Target ist ein String und
+kein Pfad, siehe [Logging](logging.md#targets-das-subsystem-benennen).
 
 ### Einrichtungs-Falle — macOS `.local`-TLDs
 

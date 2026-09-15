@@ -1,3 +1,5 @@
+//! Backing test for `docs/logging.md` — the file-sink section.
+//!
 //! `Setup::with_file` rolls log events to a rotating file appender —
 //! closes future-backlog item #1 ("advanced logging config:
 //! multiple processors, JSON formatter, pluggable formatter/sink").
