@@ -19,6 +19,27 @@ pub fn cargo_toml(
 ) -> String {
     let rustango_dep = template.rustango_dep(rustango_path, features);
     let default_backend = backend.feature();
+
+    // `rustango::jobs::Job` is an async trait, so a project that
+    // implements one needs `#[async_trait]`. rustango depends on
+    // async-trait itself (behind `_async_trait`) but does not re-export
+    // the attribute macro, so the project must name it directly.
+    //
+    // Without this, `manage make:job` emits a file that does not
+    // compile, and the only remedy is a comment inside it — generated
+    // code carrying its own bug report. `batteries` pulls `jobs` in, so
+    // the check covers the templates that get jobs implicitly as well as
+    // an explicit `--features jobs`.
+    let wants_jobs = template.base_features().iter().any(|f| *f == "batteries")
+        || features
+            .iter()
+            .any(|f| f == "jobs" || f == "jobs-postgres" || f == "batteries");
+    let async_trait_dep = if wants_jobs {
+        "\n# `rustango::jobs::Job` is an async trait — implementing one needs this.\n\
+         async-trait = \"0.1\""
+    } else {
+        ""
+    };
     format!(
         r#"[package]
 name = "{name}"
@@ -46,7 +67,7 @@ serde_json = "1"
 chrono = {{ version = "0.4", default-features = false, features = ["serde", "clock"] }}
 tracing = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
-dotenvy = "0.15"
+dotenvy = "0.15"{async_trait_dep}
 
 [dev-dependencies]
 tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
@@ -105,8 +126,33 @@ RUSTANGO_APEX_DOMAIN=localhost
 
 // ---------------- .gitignore ----------------
 
+/// What a generated project must never commit.
+///
+/// `var/` is the one that matters and was missing. When
+/// `RUSTANGO_SESSION_SECRET` is unset, the server generates a signing
+/// key and writes it to `./var/.rustango_session.key` — plus
+/// `.rustango_tenant_session.key` and `.rustango_operator_session.key`
+/// on a tenancy project. So `cargo run` followed by `git add .`
+/// committed a session signing key, on the very first run, in a
+/// three-line `.gitignore` that did not mention the directory.
+///
+/// `*.db*` for the same reason in a different register: a
+/// sqlite-backend project otherwise commits its development database.
+/// (The generated `.dockerignore` already excluded those and this file
+/// did not, which is the asymmetry that made it easy to miss.)
 pub const GITIGNORE: &str = "/target
 /.env
+
+# Runtime state. The server writes generated session signing keys here
+# when RUSTANGO_SESSION_SECRET is unset — never commit them.
+/var/
+
+# Local databases (sqlite backend, test fixtures).
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
 *.log
 ";
 
@@ -226,7 +272,12 @@ pub fn docker_compose(name: &str, backend: Backend) -> String {
   # restarts the binary on every source edit.
 {skip_hint}
   rust:
-    build: .
+    # Dockerfile.dev, not Dockerfile: the plain one is the deployable
+    # release image, which copies the source in and would defeat the
+    # bind mount below.
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
 {depends_on}    env_file:
       - .env
     volumes:
@@ -260,13 +311,114 @@ volumes:
 /// in `rust-toolchain.toml` — see [`RUST_TOOLCHAIN`] for why neither
 /// is pinned to an exact version. Pin both together (`rust:1.90` +
 /// `channel = "1.90"`) if you need byte-reproducible dev images.
-pub fn dockerfile() -> &'static str {
+///
+/// This is `Dockerfile.dev`. The plain `Dockerfile` is
+/// [`dockerfile_prod`] — see its docs for why a project needs both.
+pub fn dockerfile_dev() -> &'static str {
     "FROM rust:1\n\
      \n\
      WORKDIR /app\n\
      \n\
      RUN cargo install cargo-watch\n"
 }
+
+/// The image you actually deploy.
+///
+/// For a long time the only generated Dockerfile was [`dockerfile_dev`],
+/// which builds nothing: it installs a toolchain and waits for a bind
+/// mount. That is right for the hot-reload loop and wrong for every
+/// other purpose — it runs the **debug** profile, needs the source tree
+/// mounted at run time, and runs as root. A generated project could be
+/// developed in Docker but not shipped in it.
+///
+/// So: multi-stage, release profile, sources copied in rather than
+/// mounted, and a runtime stage that carries only the binary. The two
+/// stages must agree on libc, hence `bookworm` on both — a
+/// `bookworm`-built binary will not start on `bullseye`.
+///
+/// `--locked` is deliberate. A deploy image is exactly where an
+/// unnoticed dependency bump should fail the build rather than ship.
+pub fn dockerfile_prod(name: &str) -> String {
+    format!(
+        r#"# The deployable image. `Dockerfile.dev` is the hot-reload one
+# docker-compose.yml uses; this one is for shipping.
+#
+#   docker build -t {name}:latest .
+#   docker run --rm -p 8080:8080 -e DATABASE_URL=... {name}:latest
+#
+# Pick a non-default backend at build time:
+#   docker build --build-arg FEATURES=sqlite --build-arg NO_DEFAULT=1 .
+
+FROM rust:1-bookworm AS builder
+ARG FEATURES=""
+ARG NO_DEFAULT=""
+WORKDIR /src
+COPY . .
+# Incremental compilation only grows the cache in a one-shot image build.
+ENV CARGO_INCREMENTAL=0
+RUN set -eux; \
+    flags="--release --locked"; \
+    if [ -n "$NO_DEFAULT" ]; then flags="$flags --no-default-features"; fi; \
+    if [ -n "$FEATURES" ]; then flags="$flags --features $FEATURES"; fi; \
+    cargo build $flags; \
+    mkdir -p /out; \
+    cp target/release/{name} /out/
+
+# Same Debian release as the builder: the binary links the builder's glibc.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /out/{name} /usr/local/bin/{name}
+# Migrations and settings are read at run time, so they travel with the
+# binary rather than being baked into it.
+COPY migrations /app/migrations
+COPY config /app/config
+# Never root. The numeric id keeps the ownership stable if the image is
+# rebuilt on a host whose useradd picks a different one.
+RUN useradd --uid 10001 --create-home app && chown -R 10001 /app
+USER 10001
+WORKDIR /app
+EXPOSE 8080
+# `.with_health()` mounts /health; drop this line if you removed it.
+HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=12 \
+  CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+CMD ["{name}"]
+"#
+    )
+}
+
+// ---------------- .dockerignore ----------------
+
+/// Without this, `docker build .` sends the whole working tree to the
+/// daemon — `target/` included, which is gigabytes, and `.env`, which is
+/// secrets. Both then land in the image.
+///
+/// It matters for [`dockerfile_dev`] too: that image mounts the source
+/// rather than copying it, but the build context is still uploaded.
+pub const DOCKERIGNORE: &str = "\
+# Build output — the image builds its own, and this is the single
+# biggest thing that would otherwise be uploaded to the daemon.
+target/
+**/target/
+
+# Secrets. `.env.example` is the committed template and is safe.
+.env
+.env.*
+!.env.example
+
+# Local databases — a SQLite file here would be baked into the image.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Nothing in the image needs these.
+.git/
+.gitignore
+node_modules/
+**/node_modules/
+";
 
 // ---------------- README.md ----------------
 
@@ -363,12 +515,67 @@ feature list.
 /// the tenant template would scaffold a server that 404s on `/admin`
 /// because nothing wires the auto-admin or operator console in — the
 /// v0.8.1 Builder does that work.
-pub fn main_rs(template: Template) -> &'static str {
-    match template {
+///
+/// Emits `src/main.rs` — the binary, which uses the library target
+/// written by [`lib_rs`].
+///
+/// `name` is the package name; the crate name Rust sees replaces `-`
+/// with `_`. Interpolated with `replace` rather than `format!` because
+/// these templates are Rust source full of braces.
+pub fn main_rs(template: Template, name: &str) -> String {
+    let body = match template {
         Template::Api => MAIN_RS_API,
         Template::Fullstack => MAIN_RS_FULLSTACK,
         Template::Tenant => MAIN_RS_TENANT,
-    }
+    };
+    body.replace("{crate_name}", &crate_name(name))
+}
+
+/// The identifier Rust uses for a package: hyphens become underscores.
+pub fn crate_name(package_name: &str) -> String {
+    package_name.replace('-', "_")
+}
+
+/// `src/lib.rs` — where the app actually lives.
+///
+/// A generated project had only a binary, and that made
+/// `manage make:worker` produce something that could not work: a file
+/// under `src/bin/` is **its own crate**, so the `crate::jobs::…` its
+/// template suggested referred to the worker itself, and there was no
+/// path from it to the app's models or job types. Every project that
+/// wanted a worker had to notice this and restructure by hand.
+///
+/// With a library target the binary and every `src/bin/*.rs` share one
+/// crate: `use my_app::jobs::SendReceipt;` works from both, and the
+/// worker registers exactly the types the server dispatches — which is
+/// not a nicety. A worker that registers a *different* set picks up
+/// rows it has no handler for and returns without unlocking them,
+/// stranding work where `pending_count()` cannot see it.
+pub fn lib_rs(name: &str) -> String {
+    let krate = crate_name(name);
+    format!(
+        "//! `{krate}` — the application, as a library.
+//!
+//! Everything lives here rather than in `src/main.rs` so that binaries
+//! under `src/bin/` can reach it. A file in `src/bin/` is its own
+//! crate: `crate::` there is that binary, not this project, so a
+//! worker generated by `manage make:worker` could not otherwise see
+//! your models or job types.
+//!
+//! From `src/main.rs` or any `src/bin/*.rs`:
+//!
+//! ```ignore
+//! use {krate}::urls;
+//! use {krate}::models::SomeModel;
+//! ```
+//!
+//! `manage startapp <name>` adds its `pub mod <name>;` line here.
+
+pub mod models;
+pub mod urls;
+pub mod views;
+"
+    )
 }
 
 const MAIN_RS_API: &str = "//! Project entrypoint — `Cli::run()` is the unified dispatcher
@@ -382,9 +589,11 @@ const MAIN_RS_API: &str = "//! Project entrypoint — `Cli::run()` is the unifie
 //! or replace the macro with a hand-rolled subscriber in front of
 //! `Cli::new()` for JSON / file-rotation / OTel export.
 
-mod models;
-mod urls;
-mod views;
+// The app's modules live in the library target (src/lib.rs) so that
+// binaries under src/bin/ — a worker from `manage make:worker`, say —
+// can reach the same models and jobs this one does. A `src/bin/*.rs`
+// file is its own crate, so `crate::` there is NOT this project.
+use {crate_name}::urls;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -392,6 +601,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
         .api(urls::api())
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
+        // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),
+        // then RUSTANGO__* env overrides. Without it the files the
+        // scaffolder writes are inert.
+        .with_settings_from_env()
         .run()
         .await
 }
@@ -410,9 +623,9 @@ const MAIN_RS_FULLSTACK: &str = "//! Project entrypoint — `Cli::run()` is the 
 //! or replace the macro with a hand-rolled subscriber in front of
 //! `Cli::new()` for JSON / file-rotation / OTel export.
 
-mod models;
-mod urls;
-mod views;
+// See the note in the api template: the app's modules live in the
+// library target so `src/bin/*.rs` binaries can reach them.
+use {crate_name}::urls;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -421,6 +634,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .api(urls::api())
         .with_welcome() // friendly `/` on first run; drop once you have a root handler
         .with_health() // /health + /ready endpoints for load balancers
+        // Loads config/*.toml for the RUSTANGO_ENV tier (default `dev`),
+        // then RUSTANGO__* env overrides. Without it the files the
+        // scaffolder writes are inert.
+        .with_settings_from_env()
         .run()
         .await
 }
@@ -435,9 +652,9 @@ const MAIN_RS_TENANT: &str = r##"//! Tenant project entrypoint — HTTP server s
 //! or replace the macro with a hand-rolled subscriber in front of
 //! `Cli::new()` for JSON / file-rotation / OTel export.
 
-mod models;
-mod urls;
-mod views;
+// See the note in the api template: the app's modules live in the
+// library target so `src/bin/*.rs` binaries can reach them.
+use {crate_name}::urls;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -690,6 +907,15 @@ pub fn config_default_toml(name: &str, backend: Backend) -> String {
 # [audit]
 # retention_days = 90
 
+# [logging]                        # needs `Cli::with_logging()` AND a `main`
+#                                  # without `#[rustango::main]` — see
+#                                  # config/prod_settings.toml for why
+# level             = "info,sqlx=warn"   # RUST_LOG syntax; RUST_LOG still wins
+# format            = "pretty"           # pretty | json | compact
+# with_line_numbers = false
+# file_dir          = "/var/log/{name}"  # set to also write a rolling file
+# file_rotation     = "daily"            # daily | hourly | minutely | never
+
 # [mcp]                            # Model Context Protocol server (feature = "mcp")
 # prefix                = "/mcp"   # URL prefix the MCP router mounts under
 # token_ttl_secs        = 900      # agent access-token lifetime (15 min)
@@ -798,6 +1024,15 @@ hsts_max_age_secs = 31536000
 
 [audit]
 retention_days = 365
+
+# Read by `Cli::with_logging()`, which this project does NOT call — and
+# which would lose anyway while `src/main.rs` keeps `#[rustango::main]`:
+# the macro installs a subscriber first, and the first one wins. Swap the
+# macro for `#[tokio::main]` and add `.with_logging()` to make this live.
+# `RUST_LOG` overrides `level` either way, and works today.
+# [logging]
+# level  = "info"
+# format = "json"     # one object per event, for a log aggregator
 "##
     )
 }

@@ -1440,7 +1440,23 @@ pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Erro
         match execute_pool(pool, stmt, Vec::new()).await {
             Ok(_) => {}
             Err(crate::sql::ExecError::Driver(err)) => {
-                if !crate::sql::is_mysql_dup_index_error(&err) {
+                // Two ways an idempotent DDL statement can fail while
+                // still having done its job:
+                //
+                //  * MySQL has no `CREATE INDEX IF NOT EXISTS`, so a
+                //    second run raises ER_DUP_KEYNAME.
+                //  * Postgres *has* the syntax but it is **not atomic**
+                //    (#1458): two sessions can both pass the existence
+                //    check and race on the catalogue insert. The loser
+                //    errors even though the object now exists — which
+                //    is exactly what a web and a worker process do when
+                //    they start together and both call
+                //    `ensure_table_pool`.
+                //
+                // Either way the post-condition holds, so continue.
+                if !crate::sql::is_mysql_dup_index_error(&err)
+                    && !crate::sql::is_pg_dup_object_error(&err)
+                {
                     return Err(err);
                 }
             }

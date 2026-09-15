@@ -11,6 +11,12 @@
 //! - `http.response.status_code`   — set after the handler returns
 //! - `http.response.body.size`     — Content-Length when emitted
 //! - `duration_ms`                 — full request lifetime
+//! - `tenant` / `org_id`           — set when a tenant resolves
+//!
+//! `tenant` is recorded by [`crate::tenant_log::record`] partway through
+//! the request, so every event emitted after it — the ORM's included —
+//! carries the tenant in its span context. It is omitted entirely when
+//! no tenant resolves.
 //!
 //! Plus, when the incoming request carries a W3C `traceparent`
 //! header, the parsed trace_id / parent_span_id are recorded so any
@@ -147,6 +153,11 @@ fn build_request_span(req: &Request<Body>) -> tracing::Span {
         "http.response.status_code" = field::Empty,
         "http.response.body.size" = field::Empty,
         "duration_ms" = field::Empty,
+        // Tenant identity, recorded mid-request by the resolver via
+        // `tenant_log::record`. Empty (and so omitted) on single-tenant
+        // apps and on apex / operator-console requests.
+        "tenant" = field::Empty,
+        "org_id" = field::Empty,
         // Distributed-tracing fields populated when traceparent is present.
         "trace_id" = field::Empty,
         "parent_span_id" = field::Empty,

@@ -464,12 +464,42 @@ cargo run -- make:form ContactForm
 
 ### `make:job <Name>`
 
-Generiert ein Hintergrund-Job-Gerüst (Arbeit, die außerhalb des Requests läuft,
-wie eine Celery-Task oder ein Laravel-Job), mit einem auskommentierten Beispiel,
-wie man es einplant.
+Generiert einen `jobs::Job` — eine Payload-Struktur plus die Trait-Implementierung
+mit `NAME`, `MAX_ATTEMPTS` und `async fn run(&self)`. Das ist Arbeit, die Sie aus
+einem Handler in die Queue stellen und ein Worker später ausführt.
+
+`run` erhält **nur die Payload**: keinen Pool, keinen Tenant, keinen
+Request-Kontext. Tragen Sie alles Nötige in den Feldern.
 
 ```bash
 cargo run -- make:job EmailDigestJob
+```
+
+### `make:scheduled <Name>`
+
+Generiert eine Aufgabe mit festem Intervall für `scheduler::Scheduler` — die Form,
+die `make:job` emittierte, bevor dieser einen echten Job erzeugte.
+
+```bash
+cargo run -- make:scheduled NightlySweep
+```
+
+### `make:worker <Name>`
+
+Generiert ein eigenständiges Worker-Binary für `src/bin/` — ein Prozess, der die
+Job-Queue abarbeitet und kein HTTP bedient. Betreiben Sie ihn neben dem
+Web-Prozess oder als eigenen Container.
+
+Die Form ist kurz und lässt sich so falsch schreiben, dass es erst in Produktion
+auffällt: Ein Worker, der auf `tokio::signal::ctrl_c()` wartet, behandelt SIGINT,
+aber **nicht** SIGTERM — und genau das senden `docker stop`, Kubernetes und
+systemd. Das Abarbeiten läuft dann nie, der Container wird nach seiner Schonfrist
+getötet, und laufende Jobs gehen verloren, ohne dass etwas protokolliert wird.
+Der generierte Worker wartet auf `shutdown::shutdown_signal()`, das beide
+Signale annimmt.
+
+```bash
+cargo run -- make:worker JobsWorker
 ```
 
 ### `make:notification <Name>`
@@ -1423,14 +1453,19 @@ als `skipped_cap` im [`PrewarmReport`]). Per-Tenant-Build-Fehler loggen ein
 
 ### Tracing
 
-`crate::tenancy::pools::tenant_pool_init` ist ein `tracing::info_span!`, der den
-Cold-Path-Pool-Build umschließt. Abonnieren Sie ihn, um die Per-Tenant-Build-
-Latenz zu sehen:
+`tenant_pool_init` ist ein `tracing::info_span!`, der den
+Cold-Path-Pool-Build umschließt; die Events darin tragen das Target
+`rustango::tenancy::pools`. Abonnieren Sie es, um die
+Per-Tenant-Build-Latenz zu sehen:
 
 ```text
-INFO crate::tenancy::pools: tenant pool connected (database mode)
+INFO rustango::tenancy::pools: tenant pool connected (database mode)
      slug=acme elapsed_ms=42 min_conn=1 max_conn=4
 ```
+
+Einschalten mit `RUST_LOG=rustango::tenancy::pools=info`. Ein Filter auf
+`crate::tenancy::pools` passt auf nichts — ein Target ist ein String und
+kein Pfad, siehe [Logging](logging.md#targets-das-subsystem-benennen).
 
 ### Einrichtungs-Falle — macOS `.local`-TLDs
 
@@ -1502,7 +1537,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 |---|---|
 | `startapp <name>` | Legt ein App-Modul an |
 | `make:viewset` / `make:serializer` / `make:form` | Erzeugt ein ViewSet, einen Serializer oder ein Form |
-| `make:job` / `make:middleware` / `make:notification` / `make:test` | Erzeugt einen Job, eine Middleware, eine Notification oder einen Test |
+| `make:job` / `make:scheduled` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Erzeugt einen Queue-Job, eine Intervall-Aufgabe, ein Worker-Binary, eine Middleware, eine Notification oder einen Test |
 | `make:api_routes <app> [--tenant]` | Erzeugt das API-Routen-Modul einer App |
 
 ### Cache, Sessions und Mail

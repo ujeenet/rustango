@@ -705,6 +705,16 @@ pub mod secrets;
 #[cfg(any(feature = "admin", feature = "tenancy"))]
 pub mod access_log;
 
+/// Ambient tenant identity for log lines — the per-request slot the
+/// resolver fills and the access log reads back. See
+/// [`tenant_log::record`] / [`tenant_log::current`].
+///
+/// Gated like [`access_log`] rather than on `tenancy`: the layers that
+/// read it compile without tenancy, and with no resolver to fill the
+/// slot they simply log no tenant.
+#[cfg(any(feature = "admin", feature = "tenancy"))]
+pub mod tenant_log;
+
 /// Test fixture loader — seed a database from JSON files.
 /// See [`fixtures::Fixture`].
 pub mod fixtures;

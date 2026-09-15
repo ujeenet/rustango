@@ -692,21 +692,104 @@ impl ViewSet {
         self
     }
 
-    /// Switch to cursor-based pagination on `field`. The cursor field
-    /// should be a stable, monotonically-ordered column (typically `"id"`).
-    /// This skips the `COUNT(*)` query that page-number pagination runs,
-    /// so it scales well for large tables.
+    /// Switch to cursor-based pagination on `field`. This skips the
+    /// `COUNT(*)` query that page-number pagination runs, so it scales
+    /// well for large tables.
+    ///
+    /// The field must be a **totally ordered** column: an integer,
+    /// timestamp, date, uuid or string. `"id"` is the usual choice; a
+    /// `created_at` timestamp is the other common one, and is what you
+    /// want on an append-only table.
+    ///
+    /// # Panics
+    ///
+    /// If `field` is not on the model, or is of a type that cannot be a
+    /// cursor (a float, bool, json or blob). This is a programming
+    /// error and it is caught here rather than per request: until
+    /// #1459 an unusable field was accepted silently and then returned
+    /// **500 on every request**, so a misconfigured ViewSet built fine,
+    /// started fine, passed its health check, and served nothing.
     #[must_use]
     pub fn cursor_pagination(mut self, field: &'static str) -> Self {
+        self.assert_cursor_field(field);
+        self.assert_cursor_is_projected(field);
         self.pagination = PaginationStyle::Cursor { field, desc: false };
         self
     }
 
-    /// Cursor pagination, descending order.
+    /// Cursor pagination, descending order. Same constraints and same
+    /// panics as [`Self::cursor_pagination`].
     #[must_use]
     pub fn cursor_pagination_desc(mut self, field: &'static str) -> Self {
+        self.assert_cursor_field(field);
+        self.assert_cursor_is_projected(field);
         self.pagination = PaginationStyle::Cursor { field, desc: true };
         self
+    }
+
+    /// Fail where the mistake is, not once per request (#1459).
+    fn assert_cursor_field(&self, field: &'static str) {
+        let table = self.schema.table;
+        let Some(f) = self.schema.field(field) else {
+            let known: Vec<&str> = self
+                .schema
+                .fields
+                .iter()
+                .filter(|f| cursor_field_supported(f.ty))
+                .map(|f| f.name)
+                .collect();
+            panic!(
+                "cursor_pagination(\"{field}\"): `{table}` has no field `{field}`. \
+                 Usable cursor fields on this model: {known:?}"
+            );
+        };
+        assert!(
+            cursor_field_supported(f.ty),
+            "cursor_pagination(\"{field}\"): `{table}.{field}` is {:?}, which cannot \
+             be a cursor — the value has to round-trip through a token and order \
+             totally. Use an integer, timestamp, date, uuid or string column.",
+            f.ty
+        );
+    }
+
+    /// A `.fields([..])` projection must include the cursor column and
+    /// the primary key.
+    ///
+    /// The `next` token is built from the *rendered* row, so a
+    /// projection that drops either leaves nothing to encode — and
+    /// that is a static fact about the builder, knowable here rather
+    /// than once per request. Checked in both directions: from
+    /// `fields()` when a cursor is already set, and from
+    /// `cursor_pagination()` when the projection is.
+    ///
+    /// Only `.fields([..])` is covered. A serializer can project the
+    /// same column away and `ModelSerializer` exposes no field list to
+    /// check against, so that case is still caught at request time —
+    /// which is how the commerce soak found `OrderSerializer` omitting
+    /// `placed_at` and 500ing on all six instances.
+    fn assert_cursor_is_projected(&self, field: &str) {
+        let Some(projection) = self.fields.as_ref() else {
+            return; // no projection: every column is rendered
+        };
+        let table = self.schema.table;
+        assert!(
+            projection.iter().any(|f| f == field),
+            "cursor_pagination(\"{field}\") with .fields({projection:?}): the cursor \
+             column is projected away, so no `next` token can be built from a rendered \
+             row and pagination would stop after one page. Add `{field}` to the field \
+             list, or paginate on a field that is in it."
+        );
+        if let Some(pk) = self.schema.fields.iter().find(|f| f.primary_key) {
+            assert!(
+                pk.name == field || projection.iter().any(|f| f == pk.name),
+                "cursor_pagination(\"{field}\") with .fields({projection:?}): the primary \
+                 key `{table}.{}` is projected away. It breaks ties between rows sharing \
+                 a `{field}`, and without it a page boundary inside a run of equal values \
+                 skips the rest of the run. Add `{}` to the field list.",
+                pk.name,
+                pk.name
+            );
+        }
     }
 
     /// Switch to DRF-shape limit/offset pagination — `?limit=&offset=`.
@@ -756,6 +839,11 @@ impl ViewSet {
     /// accepted on create/update. Default: all scalar fields.
     pub fn fields(mut self, fields: &[&str]) -> Self {
         self.fields = Some(fields.iter().map(|&s| s.to_owned()).collect());
+        // Order-independent: the projection can be narrowed after the
+        // cursor is chosen just as easily as before it.
+        if let PaginationStyle::Cursor { field, .. } = self.pagination {
+            self.assert_cursor_is_projected(field);
+        }
         self
     }
 
@@ -2108,34 +2196,81 @@ async fn handle_list_cursor(
             &format!("cursor field `{cursor_field}` not found on model"),
         );
     };
-    if !matches!(
-        cursor_schema.ty,
-        FieldType::I16 | FieldType::I32 | FieldType::I64
-    ) {
+    if !cursor_field_supported(cursor_schema.ty) {
+        // Still a 500, because it is a server-side misconfiguration
+        // rather than anything the caller did — but the set of usable
+        // types is much wider now, and `cursor_pagination()` panics at
+        // build time on an unusable one, so reaching this at request
+        // time takes a `pagination(PaginationStyle::Cursor { .. })`
+        // constructed by hand (#1459).
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "cursor pagination requires an integer field (i16/i32/i64)",
+            &format!(
+                "cursor pagination needs a totally-ordered column; `{cursor_field}` is \
+                 {:?}, which does not round-trip through a cursor token. Use an \
+                 integer, timestamp, date, uuid or string column.",
+                cursor_schema.ty
+            ),
         );
     }
 
+    // The primary key breaks ties. A cursor column that is *not* unique
+    // — any timestamp, and #1459 made those legal — puts equal values on
+    // both sides of a page boundary, and a strict `>` on the column
+    // alone then skips every tied row after the first. Ordering by
+    // `(col, pk)` and comparing the pair makes the position total.
+    //
+    // Skipped when the cursor *is* the primary key, which is the
+    // pre-#1459 case and already unique.
+    let pk_schema = state.vs.schema.fields.iter().find(|f| f.primary_key);
+    let tiebreak = pk_schema.filter(|pk| pk.column != cursor_schema.column);
+
     // Decode the incoming cursor (if any)
-    let cursor_val: Option<i64> = match params.get("cursor") {
-        Some(c) if !c.is_empty() => match decode_cursor(c) {
-            Some(v) => Some(v),
-            None => return json_error(StatusCode::BAD_REQUEST, "invalid cursor"),
-        },
+    let cursor_pos: Option<(SqlValue, Option<SqlValue>)> = match params.get("cursor") {
+        Some(c) if !c.is_empty() => {
+            let pk_ty = tiebreak.map_or(cursor_schema.ty, |pk| pk.ty);
+            match decode_cursor(c, cursor_schema.ty, pk_ty) {
+                Some(v) => Some(v),
+                None => return json_error(StatusCode::BAD_REQUEST, "invalid cursor"),
+            }
+        }
         _ => None,
     };
 
     // Build WHERE = filters AND (cursor predicate, if any)
-    let final_where = match cursor_val {
-        Some(v) => {
+    let final_where = match cursor_pos {
+        Some((v, pk_v)) => {
             let op = if desc { Op::Lt } else { Op::Gt };
-            let cursor_pred = WhereExpr::Predicate(Filter {
-                column: cursor_schema.column,
-                op,
-                value: SqlValue::I64(v),
-            });
+            let cursor_pred = match (tiebreak, pk_v) {
+                // `col > v OR (col = v AND pk > pk_v)` — strictly after
+                // the last row of the previous page, ties included.
+                (Some(pk), Some(pk_v)) => WhereExpr::Or(vec![
+                    WhereExpr::Predicate(Filter {
+                        column: cursor_schema.column,
+                        op,
+                        value: v.clone(),
+                    }),
+                    WhereExpr::And(vec![
+                        WhereExpr::Predicate(Filter {
+                            column: cursor_schema.column,
+                            op: Op::Eq,
+                            value: v,
+                        }),
+                        WhereExpr::Predicate(Filter {
+                            column: pk.column,
+                            op,
+                            value: pk_v,
+                        }),
+                    ]),
+                ]),
+                // No tiebreak: the cursor is the PK, or the token is a
+                // pre-#1459 one that carries no pk component.
+                _ => WhereExpr::Predicate(Filter {
+                    column: cursor_schema.column,
+                    op,
+                    value: v,
+                }),
+            };
             match where_clause {
                 WhereExpr::And(v) if v.is_empty() => cursor_pred,
                 WhereExpr::And(mut v) => {
@@ -2148,8 +2283,12 @@ async fn handle_list_cursor(
         None => where_clause,
     };
 
-    // Force ordering by the cursor field (cursor pagination requires it)
-    let order_by = vec![crate::core::OrderItem::column(cursor_schema.column, desc)];
+    // Order by the cursor field, then the tiebreaker — the ORDER BY has
+    // to match the comparison above or the "strictly after" is a lie.
+    let mut order_by = vec![crate::core::OrderItem::column(cursor_schema.column, desc)];
+    if let Some(pk) = tiebreak {
+        order_by.push(crate::core::OrderItem::column(pk.column, desc));
+    }
 
     // #562 — struct-update over SelectQuery::new for the cursor-
     // paginated SELECT. Fetch page_size+1 to detect if a next page
@@ -2173,11 +2312,51 @@ async fn handle_list_cursor(
     let next_cursor = if has_more {
         // Read the cursor field value from the last JSON row.
         let last = page_rows.last().expect("non-empty page");
-        let val: i64 = last
-            .get(cursor_schema.name)
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        Some(encode_cursor(val))
+        // The tiebreaker travels in the token. If the PK is projected
+        // away the position cannot be made total, and issuing a
+        // value-only token would quietly reintroduce the row-skipping
+        // this exists to prevent — so it is reported, like a missing
+        // cursor column.
+        let pk_part = match tiebreak {
+            Some(pk) => match cursor_value_of(last, pk.name) {
+                Some(v) => Some(v),
+                None => {
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!(
+                            "cursor pagination on `{}` needs the primary key `{}` in the \
+                             rendered rows to break ties, and it is not projected. Two rows \
+                             sharing a `{}` would otherwise be split across a page boundary \
+                             and all but one skipped. Include `{}` in `.fields([..])` / the \
+                             serializer.",
+                            cursor_schema.name, pk.name, cursor_schema.name, pk.name,
+                        ),
+                    );
+                }
+            },
+            None => None,
+        };
+        match cursor_value_of(last, cursor_schema.name) {
+            Some(v) => Some(encode_cursor(&v, pk_part.as_deref())),
+            // The cursor column is not in the rendered row — almost
+            // always `.fields([...])` (or a serializer) projecting it
+            // away. Answering `next: null` here would be **silent
+            // truncation**: `has_more` is true, the caller sees a page
+            // with no continuation token, and pagination stops at page
+            // one with nothing reporting an error. Say so instead.
+            None => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!(
+                        "cursor field `{}` is not present in the rendered rows, so no \
+                         `next` token can be issued and pagination would silently stop \
+                         after one page. Include it in `.fields([..])` / the \
+                         serializer, or paginate on a field that is projected.",
+                        cursor_schema.name
+                    ),
+                );
+            }
+        }
     } else {
         None
     };
@@ -2190,20 +2369,122 @@ async fn handle_list_cursor(
     }))
 }
 
-/// Encode an i64 cursor value as URL-safe base64 of its decimal string.
-fn encode_cursor(value: i64) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string().as_bytes())
+/// Can this column be a cursor?
+///
+/// Cursor pagination needs a **totally ordered** column whose value
+/// round-trips through a string. Integers qualify, and so do timestamps,
+/// dates, UUIDs and strings — the last two because monotonic ids
+/// (`UUIDv7`, ULID) are a common cursor and sort correctly in SQL.
+///
+/// What is excluded is excluded for a reason: floats do not round-trip
+/// exactly, `Json` / `Binary` / `Array` have no useful total order, and
+/// `Bool` has too few values to page by.
+///
+/// Before #1459 this list was `I16 | I32 | I64` only, and a
+/// non-integer field was not rejected where it was *configured* — it
+/// was accepted by `cursor_pagination()` and then returned 500 on every
+/// request, forever, while the docs described "a stable,
+/// monotonically-ordered column (typically `id`)". A `TIMESTAMPTZ
+/// created_at` is exactly that, and is the canonical cursor in the DRF
+/// API this one is shaped after.
+pub(crate) fn cursor_field_supported(ty: FieldType) -> bool {
+    matches!(
+        ty,
+        FieldType::I16
+            | FieldType::I32
+            | FieldType::I64
+            | FieldType::DateTime
+            | FieldType::Date
+            | FieldType::Uuid
+            | FieldType::String
+    )
 }
 
-/// Decode a cursor token. Returns `None` for malformed input.
-fn decode_cursor(token: &str) -> Option<i64> {
+/// Encode a cursor position as URL-safe base64.
+///
+/// `tiebreak` is the row's primary key, carried alongside the cursor
+/// value whenever the cursor column is not itself the primary key.
+/// Without it a page boundary that lands on a run of equal values drops
+/// every row in that run but one: the next page asks for `col > v`, and
+/// the rest of the tied rows are `= v`. That was latent while cursors
+/// had to be integers (in practice the unique PK); #1459 widened them to
+/// timestamps and strings, where ties are ordinary — a `bulk_insert`, or
+/// Postgres' per-transaction `now()`.
+///
+/// Composite tokens are a two-element JSON array; a bare value is the
+/// pre-#1459 form. [`decode_cursor`] reads both, so a client paginating
+/// across an upgrade keeps working.
+fn encode_cursor(value: &str, tiebreak: Option<&str>) -> String {
+    use base64::Engine;
+    let payload = match tiebreak {
+        Some(pk) => serde_json::json!([value, pk]).to_string(),
+        None => value.to_owned(),
+    };
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes())
+}
+
+/// Decode a cursor token into a bind value of the cursor column's type.
+///
+/// Returns `None` for malformed input, which the caller turns into a
+/// 400 — a bad cursor is the client's, unlike the 500 a misconfigured
+/// cursor *field* used to produce.
+fn decode_cursor(
+    token: &str,
+    ty: FieldType,
+    pk_ty: FieldType,
+) -> Option<(SqlValue, Option<SqlValue>)> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token.as_bytes())
         .ok()?;
     let s = std::str::from_utf8(&bytes).ok()?;
-    s.parse::<i64>().ok()
+
+    // Composite form first: `["<value>", "<pk>"]`. A pre-#1459 token is
+    // a bare value, and a bare value that happens to parse as JSON (an
+    // integer cursor does) is not a two-element array of strings, so
+    // the two forms cannot be confused.
+    if let Some([a, b]) = serde_json::from_str::<Vec<String>>(s)
+        .ok()
+        .filter(|v| v.len() == 2)
+        .as_deref()
+    {
+        return Some((
+            parse_cursor_scalar(a, ty)?,
+            Some(parse_cursor_scalar(b, pk_ty)?),
+        ));
+    }
+    Some((parse_cursor_scalar(s, ty)?, None))
+}
+
+/// One cursor component, parsed per the column's type.
+fn parse_cursor_scalar(s: &str, ty: FieldType) -> Option<SqlValue> {
+    match ty {
+        FieldType::I16 | FieldType::I32 | FieldType::I64 => {
+            s.parse::<i64>().ok().map(SqlValue::I64)
+        }
+        FieldType::DateTime => chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| SqlValue::DateTime(dt.with_timezone(&chrono::Utc))),
+        FieldType::Date => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .ok()
+            .map(SqlValue::Date),
+        FieldType::Uuid => s.parse::<uuid::Uuid>().ok().map(SqlValue::Uuid),
+        FieldType::String => Some(SqlValue::String(s.to_owned())),
+        _ => None,
+    }
+}
+
+/// The string form of a rendered row's cursor column, for the `next`
+/// token.
+///
+/// Reads the JSON the list endpoint already produced rather than
+/// re-querying: an integer arrives as a number, everything else as a
+/// string, and the two cases are the whole of it.
+fn cursor_value_of(row: &Value, field_name: &str) -> Option<String> {
+    let v = row.get(field_name)?;
+    v.as_i64()
+        .map(|n| n.to_string())
+        .or_else(|| v.as_str().map(std::borrow::ToOwned::to_owned))
 }
 
 async fn handle_retrieve(
@@ -2785,36 +3066,150 @@ fn json_object_to_form(obj: &serde_json::Map<String, Value>) -> HashMap<String, 
 
 #[cfg(test)]
 mod cursor_tests {
-    use super::{decode_cursor, encode_cursor};
+    use super::{cursor_field_supported, decode_cursor, encode_cursor, FieldType, SqlValue};
+
+    fn int_token(v: i64) -> String {
+        encode_cursor(&v.to_string(), None)
+    }
+
+    /// Decode a value-only token. Most cases below predate the
+    /// tiebreaker and only care about the cursor component.
+    fn decode_value(token: &str, ty: FieldType) -> Option<SqlValue> {
+        decode_cursor(token, ty, FieldType::I64).map(|(v, _)| v)
+    }
 
     #[test]
     fn cursor_roundtrip_positive() {
-        let token = encode_cursor(12345);
-        assert_eq!(decode_cursor(&token), Some(12345));
+        let token = int_token(12345);
+        assert_eq!(
+            decode_value(&token, FieldType::I64),
+            Some(SqlValue::I64(12345))
+        );
     }
 
     #[test]
     fn cursor_roundtrip_zero() {
-        let token = encode_cursor(0);
-        assert_eq!(decode_cursor(&token), Some(0));
+        let token = int_token(0);
+        assert_eq!(decode_value(&token, FieldType::I64), Some(SqlValue::I64(0)));
     }
 
     #[test]
     fn cursor_roundtrip_max() {
-        let token = encode_cursor(i64::MAX);
-        assert_eq!(decode_cursor(&token), Some(i64::MAX));
+        let token = int_token(i64::MAX);
+        assert_eq!(
+            decode_value(&token, FieldType::I64),
+            Some(SqlValue::I64(i64::MAX))
+        );
     }
 
     #[test]
     fn cursor_decode_invalid_base64_returns_none() {
-        assert!(decode_cursor("not!valid!base64@@").is_none());
+        assert!(decode_value("not!valid!base64@@", FieldType::I64).is_none());
     }
 
     #[test]
     fn cursor_decode_non_numeric_payload_returns_none() {
         use base64::Engine;
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("not_a_number");
-        assert!(decode_cursor(&token).is_none());
+        assert!(decode_value(&token, FieldType::I64).is_none());
+    }
+
+    /// Tokens issued before #1459 must still decode. An integer cursor
+    /// is base64 of its decimal string in both the old and the new
+    /// encoder, so a client paginating across an upgrade keeps working.
+    #[test]
+    fn integer_tokens_are_unchanged_by_the_generalisation() {
+        use base64::Engine;
+        let legacy = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"4242");
+        assert_eq!(int_token(4242), legacy);
+        assert_eq!(
+            decode_value(&legacy, FieldType::I64),
+            Some(SqlValue::I64(4242))
+        );
+    }
+
+    /// A composite token carries the tiebreaker and comes back intact.
+    ///
+    /// The tiebreaker is what stops a page boundary inside a run of
+    /// equal cursor values from skipping the rest of the run — see
+    /// `tests/cursor_pagination_on_a_timestamp.rs` for the end-to-end
+    /// version.
+    #[test]
+    fn composite_tokens_round_trip_both_components() {
+        let iso = "2026-09-14T22:41:59Z";
+        let token = encode_cursor(iso, Some("4242"));
+        let (value, tie) =
+            decode_cursor(&token, FieldType::DateTime, FieldType::I64).expect("decodes");
+        assert!(matches!(value, SqlValue::DateTime(_)), "got {value:?}");
+        assert_eq!(tie, Some(SqlValue::I64(4242)));
+    }
+
+    /// A bare value and a composite must never be confused. An integer
+    /// cursor's payload (`4242`) is valid JSON, so the discriminator has
+    /// to be "a two-element array of strings", not "parses as JSON".
+    #[test]
+    fn a_bare_integer_token_is_not_read_as_composite() {
+        let (value, tie) =
+            decode_cursor(&int_token(4242), FieldType::I64, FieldType::I64).expect("decodes");
+        assert_eq!(value, SqlValue::I64(4242));
+        assert_eq!(
+            tie, None,
+            "a pre-tiebreaker token carries no second component"
+        );
+    }
+
+    /// The case that 500'd on every request before #1459.
+    #[test]
+    fn timestamp_cursors_round_trip() {
+        let iso = "2026-09-14T22:41:59Z";
+        let token = encode_cursor(iso, None);
+        let decoded = decode_value(&token, FieldType::DateTime);
+        match decoded {
+            Some(SqlValue::DateTime(dt)) => {
+                assert_eq!(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true), iso);
+            }
+            other => panic!("expected a DateTime cursor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uuid_and_string_cursors_round_trip() {
+        let u = "0199c1f4-0000-7000-8000-000000000000";
+        assert!(matches!(
+            decode_value(&encode_cursor(u, None), FieldType::Uuid),
+            Some(SqlValue::Uuid(_))
+        ));
+        assert_eq!(
+            decode_value(&encode_cursor("01J8Z", None), FieldType::String),
+            Some(SqlValue::String("01J8Z".into()))
+        );
+    }
+
+    /// The supported set is a decision, not an accident — floats do not
+    /// round-trip exactly and JSON/binary have no total order, so they
+    /// stay out.
+    #[test]
+    fn only_totally_ordered_types_are_accepted() {
+        for ok in [
+            FieldType::I16,
+            FieldType::I32,
+            FieldType::I64,
+            FieldType::DateTime,
+            FieldType::Date,
+            FieldType::Uuid,
+            FieldType::String,
+        ] {
+            assert!(cursor_field_supported(ok), "{ok:?} should be usable");
+        }
+        for bad in [
+            FieldType::F32,
+            FieldType::F64,
+            FieldType::Bool,
+            FieldType::Json,
+            FieldType::Binary,
+        ] {
+            assert!(!cursor_field_supported(bad), "{bad:?} must not be usable");
+        }
     }
 }
 

@@ -132,6 +132,33 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Added
 
+- **`Cli::with_tenant_pools` / `server::Builder::tenant_pools`** — size the
+  per-tenant connection pools (#1456). See Fixed for why this was previously
+  impossible.
+- **`manage make:worker`** — scaffolds a standalone worker binary. The shape is
+  short enough to look obvious while being wrong in a way that only appears in
+  production: a worker awaiting `tokio::signal::ctrl_c()` handles SIGINT and
+  **not** SIGTERM, which is what `docker stop`, Kubernetes and systemd send, so
+  the drain never runs and in-flight jobs are lost with an exit code of 0.
+- **`manage make:scheduled`** — the fixed-interval task shape, under the name
+  that describes it (#1455).
+- **Deployable generated projects.** `cargo rustango new` now writes a
+  multi-stage `Dockerfile` (release profile, `--locked`, non-root, HEALTHCHECK)
+  alongside the existing cargo-watch image, which becomes `Dockerfile.dev`, plus
+  a `.dockerignore` — there was none anywhere in the repo, so a real image build
+  shipped `target/` and `.env`. `jobs`, `jobs-postgres` and `scheduler` are also
+  accepted by `--features`, which refused them outright before.
+- **`bin/bump-version.sh`** — the release version is repeated across 25 sites
+  cargo will not fix (four manifest pins, the `manage version` / `manage about`
+  transcripts, the MCP `serverInfo` and the `cargo install` line in all four doc
+  languages) plus nine lockfiles. A hand pass on this release missed one; the
+  script found it. Lockfiles are regenerated with `cargo metadata`, never
+  edited, and `CHANGELOG.md` is left alone because its older headings are
+  history.
+- **`docker/soak/`** — the commerce soak: two scaffolder-generated applications,
+  single- and multi-tenant, across all three dialects, under load in Docker,
+  asserting one named check per behaviour change in this release. Six of the
+  fixes above came from it.
 - **`Cli::on_shutdown(hook)`** — work that runs after the server drains, on
   SIGINT and SIGTERM (#1409). This is where a job queue's `shutdown()` belongs;
   see the Changed note below for why putting it after `run()` never worked.
@@ -160,6 +187,93 @@ sets no CORS — so the notes below are for hand-written apps.
   `axum::serve`, so anything after them was unreachable on a signal.
 
 ### Fixed
+
+Known gap, filed rather than fixed:
+[#1464](https://github.com/ujeenet/rustango/issues/1464) — on SQLite an
+`auto_now_add` column is written by `DEFAULT CURRENT_TIMESTAMP` as
+`"YYYY-MM-DD HH:MM:SS"` while sqlx binds `DateTime<Utc>` as RFC3339, and
+`' '` sorts before `'T'`. Every comparison against such a column is
+therefore true, and cursor pagination on one serves page one forever.
+Postgres and MySQL are unaffected. Every fix changes SQLite's stored
+datetime format, so it wants its own release and a migration for
+databases already holding both shapes; the framework hit this once
+before and patched a single call site (`audit.rs`, citing #560) instead
+of the binder, which is why it survived to be found again.
+
+The first six items were found by a soak test built for this release — two
+commerce applications, single- and multi-tenant, across PostgreSQL, MySQL and
+SQLite, under load in Docker (`docker/soak/`). Every fix in this release had
+been verified in isolation by a test written for that one issue; nothing had
+run them together against real infrastructure. Three of the six are only
+reachable that way.
+
+- **`Cli::with_health()` did nothing on SQLite and MySQL builds** (#1457).
+  `runserver` has **three** serving paths — a non-Postgres build, a Postgres
+  build on a `postgres://` URL, and a multi-backend build on a non-PG URL — and
+  only the Postgres one read the flag. On any other backend the builder method
+  set its boolean, returned `self`, the server started, and `/health` and
+  `/ready` answered **404** — identical code, 200 on Postgres. A load balancer
+  or container `HEALTHCHECK` aimed at `/health` reported the service
+  permanently unhealthy, with nothing logged to say why. The existing test
+  asserted the setter flips its own boolean, which was true throughout.
+
+  The first fix reached two of the three paths and a review caught the third
+  still 404ing, on exactly the `--features postgres,mysql,sqlite` build the
+  soak fleet ships. Three copies of the same router assembly is what let that
+  happen, so there is now one: every serving path goes through
+  `Cli::assemble_app`, and the guard is a request against the assembled router
+  rather than a search of one arm's source text.
+
+- **Two processes calling `ensure_table_pool` at once could crash one of them**
+  (#1458). `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` are
+  not atomic on PostgreSQL: both sessions pass the existence check, then race on
+  the catalogue insert, and the loser errors even though the object now exists.
+  `run_ddl_idempotent` swallowed MySQL's duplicate-index error and nothing else,
+  so that error propagated and killed the caller. This is the documented web +
+  worker topology — both call it at boot — and under a restart policy the only
+  evidence was a restart count. Now matched by a narrow predicate: `42P07`, and
+  `23505` **only** on the three catalogue indexes a racing `CREATE` can lose on
+  — `pg_class_relname_nsp_index` (the relation row), `pg_type_typname_nsp_index`
+  (the composite type Postgres creates for every table), and
+  `pg_namespace_nspname_index` (a racing `CREATE SCHEMA IF NOT EXISTS`, one per
+  tenant in schema mode) — plus `42710`. An ordinary unique violation is still
+  an error.
+
+- **Tenant pool sizing was unconfigurable** (#1456). `TenantPoolsConfig` was
+  public and documented, but every route to a running server built
+  `TenantPools::new(pool)` — the default — and `tenancy/pools.rs` reads no
+  environment variables. Connections multiply by tenant *and* by process: twenty
+  database-mode tenants at the default 16, across a web and a worker, is 640
+  against a stock PostgreSQL limit of 100, and the only lever was the database
+  server's own `max_connections`. New: `Cli::with_tenant_pools` and
+  `server::Builder::tenant_pools`, wired into all three paths that build tenant
+  pools.
+
+- **A serializer could not carry a foreign-key column at all** (#1454). Not
+  awkwardly — there was no spelling that compiled. `pub customer_id: i64` failed
+  on the type mismatch; `pub customer_id: ForeignKey<Customer>` failed on three
+  missing bounds. Every model with a relation had to give up field renaming,
+  validation, `read_only` and OpenAPI generation on that column, or drop the
+  serializer. `ForeignKey` now implements `Deserialize`, `Default` and
+  `OpenApiSchema`, and round-trips as its **key** — what a REST client sends,
+  and what DRF's `PrimaryKeyRelatedField` does.
+
+- **Cursor pagination on anything but an integer returned 500 on every
+  request** (#1459). The column was accepted at build time and rejected per
+  request, forever: the ViewSet built, the process started, health checks
+  passed, and the endpoint was dead. The restriction was undocumented — the docs
+  said "a stable, monotonically-ordered column", which a timestamp is, and which
+  is the canonical cursor on an append-only table. Timestamps, dates, uuids and
+  strings now work alongside integers, existing integer tokens are unchanged,
+  and an unusable column panics where it is configured instead.
+
+- **`make:job` scaffolded a scheduler task, not a job** (#1455). It emitted a
+  struct holding a `PgPool` with an inherent `run(self: Arc<Self>)` wired to
+  `scheduler::every(..)`. Nothing it produced could be dispatched, registered,
+  retried or dead-lettered, and the hardcoded `PgPool` meant it did not compile
+  in a `--features sqlite` project. It now emits a real `Job`; the timer shape
+  moved to a new **`make:scheduled`**, routed through `sql::Pool`. This changes
+  what an existing verb writes.
 
 - **Bulk create is now atomic in the writes, not only the validation** (#1403).
   `docs/viewsets.md` said "validated atomically (one bad element rejects the
@@ -396,6 +510,26 @@ cannot drift from the code again.
   because the other two need no database (#1415).
 
 ### Added
+- **Log lines name the tenant** (#1463). Tenant identity was an axum extractor,
+  so it lived in the request and died with it: every access-log line carried
+  method, path, status and IP, and nothing in the framework carried the tenant.
+  Investigating "tenant A saw tenant B's data" meant grepping logs that could
+  not tell the two apart.
+
+  `ChainResolver` — the one funnel every request path goes through — now
+  publishes what it resolved to the new `tenant_log` module. `AccessLogLayer`
+  reads it back and emits `tenant=acme`, or `tenant=-` when none resolved (an
+  apex or operator-console request, or a single-tenant app). `TracingLayer`'s
+  `http.request` span gained `tenant` / `org_id` fields, so with it installed
+  every event during the request — the ORM's included — carries the tenant in
+  its span context without any subsystem knowing what a tenant is.
+
+  `AccessLogLayer::tenant_field(TenantField::Id)` labels by org id instead:
+  the slug is operator-chosen and is often the customer's name, which some
+  deployments will not ship to an aggregator. `TenantField::Off` omits it.
+
+  Scope is the request path. A background job still has no tenant to log —
+  that needs the task-local propagation in #1229 / #1223.
 - **`viewset::match_nothing` is public.** The documented fail-closed filter
   backend could not be written: the docs named a `deny_all` that never existed,
   and the function that does the job was private. It also loses its `tenancy`
@@ -405,6 +539,27 @@ cannot drift from the code again.
   connect. See the note under `[Unreleased]`.
 
 ### Documentation
+- **`docs/logging.md`** — a page for a subsystem that had none (#1462). Across
+  the 39 published pages, `RUST_LOG` appeared zero times and
+  `logging::setup` / `[logging]` / `Cli::with_logging` appeared nowhere, so the
+  whole `rustango::logging` surface was undiscoverable from the docs site. The
+  page covers what `#[rustango::main]` already installs, levels and filters, the
+  32 `rustango::*` targets as a table, formats, the `[logging]` TOML section,
+  file rotation and the `WorkerGuard`, the access log's fields and levels, the
+  tenant field, `TracingLayer` and OTel, logging in tests, and a
+  nothing-is-coming-out section. Backed by `logging_doc.rs`,
+  `logging_first_installer_wins.rs`, `logging_file_appender_live.rs` and
+  `access_log_tenant_sqlite_live.rs`; the target table is guarded against the
+  code by `docs_inventories.rs`. Translated to de/es/fr.
+- **`manage.md` named a tracing target that cannot be filtered** — it told
+  readers to subscribe to `crate::tenancy::pools`, where the real target is
+  `rustango::tenancy::pools` and the span is `tenant_pool_init`. A `RUST_LOG`
+  filter written from that page matched nothing. Fixed in all four locales —
+  the same class of error `tracing_targets.rs` guards in the source, reproduced
+  in prose where that test could not see it.
+- **The scaffolder's generated config gained a `[logging]` block**, commented,
+  with a note about why it is inert until `#[rustango::main]` is swapped out
+  (#1465).
 - **Rate limiting behind a proxy.** `security.md` diagnosed the problem and then
   prescribed a remedy that does nothing: `RealIpLayer` inserts its own extension
   and never rewrites `ConnectInfo`, which neither limiter reads. The page now

@@ -198,6 +198,51 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// The tenant pools this builder will hand the server.
+    ///
+    /// Read access, mirroring [`TenantPools::pool_config`]. Useful for
+    /// asserting that a [`Builder::tenant_pools`] call actually reached
+    /// the pools — a setter that stores a value nothing reads is the
+    /// shape of #1456, so being able to check is worth the method.
+    #[must_use]
+    pub fn pools(&self) -> &Arc<TenantPools<DB>> {
+        &self.pools
+    }
+
+    /// Size the per-tenant connection pools (#1456).
+    ///
+    /// `from_pool` builds `TenantPools` with
+    /// [`TenantPoolsConfig::default`], and until this existed there was
+    /// no way to change it: the type was public and documented, but
+    /// every route to a running server went through a constructor that
+    /// ignored it, and `tenancy/pools.rs` reads no environment
+    /// variables. Connection counts multiply by tenant *and* by
+    /// process — 20 database-mode tenants at the default 16 across a
+    /// web and a worker process is 640 connections, against a stock
+    /// `PostgreSQL` limit of 100 — so the only available lever was the
+    /// database server's own `max_connections`, which is the wrong
+    /// place to size an application's pools and often not the
+    /// operator's to change.
+    ///
+    /// ```no_run
+    /// # use rustango::tenancy::TenantPoolsConfig;
+    /// # fn demo<DB: sqlx::Database>(b: rustango::server::Builder<DB>) -> rustango::server::Builder<DB> {
+    /// b.tenant_pools(TenantPoolsConfig {
+    ///     database_pool_max_connections: 4,
+    ///     max_cached_database_pools: 200,
+    ///     ..Default::default()
+    /// })
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
+        // `TenantPools` is behind an `Arc` by this point, so rebuild
+        // rather than mutate — the registry pool itself is cheap to
+        // clone (it is an `Arc` internally).
+        self.pools = Arc::new(TenantPools::<DB>::new(self.registry.clone()).config(config));
+        self
+    }
+
     /// Swap the tenant user model used by [`Builder::migrate`]. Same
     /// semantics as [`crate::manage::Cli::user_model`].
     #[must_use]

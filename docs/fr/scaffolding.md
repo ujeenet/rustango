@@ -139,6 +139,8 @@ Un template active un ensemble raisonnable ; `--features` ajoute les options qu'
 | `sso` / `admin-sso` | Authentification unique OIDC, pour les utilisateurs / pour le site d'admin |
 | `passkey` | Authentification WebAuthn / passkey |
 | `cache-redis` / `cache-page` | Backend de cache Redis / mise en cache de pages entières |
+| `jobs` / `jobs-postgres` | File de tâches en arrière-plan, en processus / adossée à la base et donc résistante aux redémarrages |
+| `scheduler` | Tâches d'arrière-plan à intervalle fixe |
 | `email-smtp` | Transport SMTP pour le framework e-mail |
 | `mcp` | Serveur Model Context Protocol pour les agents IA |
 | `testkit` / `test_utils` | Constructeurs de schéma, fabriques et constructeurs réservés aux tests |

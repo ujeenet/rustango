@@ -181,6 +181,8 @@ jobs:
           - crates/rustango/examples/getting_started_blog/Cargo.toml
           - crates/rustango/examples/mcp_demo/Cargo.toml
           - crates/rustango/examples/orm_cookbook/Cargo.toml
+          - crates/rustango/examples/platform_commerce/Cargo.toml
+          - crates/rustango/examples/platform_commerce_saas/Cargo.toml
           - crates/rustango/examples/tenant_user_extension/Cargo.toml
     steps:
       - uses: actions/checkout@v4
@@ -190,8 +192,8 @@ jobs:
           command: check advisories
 
   # A committed lockfile buys reproducibility only if something actually
-  # resolves against it. Nothing passed `--locked`, so all eight example
-  # locks had drifted stale (#1422) — every local build rewrote them,
+  # resolves against it. Nothing passed `--locked`, so every example
+  # lock had drifted stale (#1422) — every local build rewrote them,
   # leaving a tracked file dirty in a shared worktree with no author, and
   # quietly disproving the guarantee `.gitignore` claims for them.
   #
@@ -210,12 +212,80 @@ jobs:
           - crates/rustango/examples/getting_started_blog/Cargo.toml
           - crates/rustango/examples/mcp_demo/Cargo.toml
           - crates/rustango/examples/orm_cookbook/Cargo.toml
+          - crates/rustango/examples/platform_commerce/Cargo.toml
+          - crates/rustango/examples/platform_commerce_saas/Cargo.toml
           - crates/rustango/examples/tenant_user_extension/Cargo.toml
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
       - name: Committed lockfile is the one that resolves
         run: cargo metadata --locked --format-version 1 --manifest-path ${{ matrix.manifest }} > /dev/null
+
+  # The soak-test applications. `platform_commerce` (single-tenant) and
+  # `platform_commerce_saas` (multi-tenant) are severed workspaces with
+  # a one-of-three backend selector, and they are the only examples that
+  # exercise background jobs.
+  #
+  # This job exists because **nothing else in CI compiles any example.**
+  # `bin/examples.sh` is referenced by no workflow, `deny-examples` only
+  # scans advisories and `lockfiles` only resolves — so an example can
+  # stop building and every check stays green. That is how all eight
+  # example lockfiles came to be stale (#1422), a bill this repo has
+  # just finished paying.
+  #
+  # `cargo check`, not `build`: the point is API drift, and check is
+  # ~6 minutes across the matrix where build is far longer.
+  # `--all-targets` is load-bearing — it pulls in `tests/`, which is
+  # where drift actually shows up first.
+  platform_examples:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [postgres, mysql, sqlite]
+    env:
+      # One shared target dir across both examples, for the reason
+      # bin/examples.sh documents: each example's own target/ is ~1.3 GB.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target-examples
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: platform-${{ matrix.backend }}
+      - name: platform_commerce
+        working-directory: crates/rustango/examples/platform_commerce
+        run: cargo check --locked --no-default-features --features ${{ matrix.backend }} --all-targets
+      - name: platform_commerce_saas
+        working-directory: crates/rustango/examples/platform_commerce_saas
+        run: cargo check --locked --no-default-features --features ${{ matrix.backend }} --all-targets
+      - name: Unit tests (no database needed)
+        working-directory: crates/rustango/examples/platform_commerce
+        # `--lib --bins`, not `--bins`. Every test in these examples lives
+        # under `src/commerce/`, which is reachable only from `src/lib.rs`
+        # — neither binary declares `mod commerce` and neither contains a
+        # `#[test]`. With `--bins` alone these six steps compiled two
+        # empty test binaries and reported `0 passed`, three times over.
+        #
+        # The tests *were* in the bin target before the examples grew a
+        # library (the worker binary needs one to reach the same job
+        # types the server dispatches), and this command was not re-run
+        # after that move.
+        run: cargo test --locked --no-default-features --features ${{ matrix.backend }} --lib --bins
+      - name: Unit tests (no database needed) — saas
+        working-directory: crates/rustango/examples/platform_commerce_saas
+        # `--lib --bins`, not `--bins`. Every test in these examples lives
+        # under `src/commerce/`, which is reachable only from `src/lib.rs`
+        # — neither binary declares `mod commerce` and neither contains a
+        # `#[test]`. With `--bins` alone these six steps compiled two
+        # empty test binaries and reported `0 passed`, three times over.
+        #
+        # The tests *were* in the bin target before the examples grew a
+        # library (the worker binary needs one to reach the same job
+        # types the server dispatches), and this command was not re-run
+        # after that move.
+        run: cargo test --locked --no-default-features --features ${{ matrix.backend }} --lib --bins
 
   # Trivy security scan — the non-bypassable "detect vulnerabilities
   # before releases" gate. Complements `deny` (RustSec advisories) with

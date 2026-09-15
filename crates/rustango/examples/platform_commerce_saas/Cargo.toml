@@ -1,0 +1,50 @@
+[package]
+name = "platform_commerce_saas"
+version = "0.1.0"
+edition = "2021"
+# Two binaries (the server and the worker `make:worker` added),
+# so plain `cargo run` needs to be told which one — otherwise
+# `cargo run -- migrate` fails as ambiguous.
+default-run = "platform_commerce_saas"
+
+# Empty `[workspace]` table makes this project standalone: if a parent
+# directory has its own workspace `Cargo.toml`, cargo would otherwise
+# refuse to build (see "current package believes it's in a workspace
+# when it's not"). This declaration severs that link without taking on
+# any workspace members. Delete it if you intentionally want the
+# project to be a member of a parent workspace.
+[workspace]
+
+[dependencies]
+# `rustango` re-exports every proc-macro (Model / Form / ViewSet /
+# Serializer / embed_migrations / main), so you do NOT need to depend
+# on `rustango-macros` directly. Use `rustango::Model` etc.
+rustango = { path = "../..", default-features = false, features = ["batteries", "tenancy", "cache-redis", "cache-page"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
+tower = { version = "0.5", features = ["util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+# `rustango::jobs::Job` is an async trait, so implementing it needs
+# `#[async_trait]`. rustango depends on async-trait itself (behind its
+# `_async_trait` feature) but does not re-export the attribute macro, so
+# a project that implements a Job has to name it directly.
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# The `#[derive(Model)]` FromRow / LoadRelated impls are
+# `#[cfg(feature = "...")]`-gated on THIS crate's features, so a backend
+# feature must be enabled here for them to compile. `default` picks the
+# one `cargo run` uses; switch with e.g.
+# `cargo run --no-default-features --features sqlite`.
+[features]
+default = ["postgres"]
+postgres = ["rustango/postgres"]
+sqlite = ["rustango/sqlite"]
+mysql = ["rustango/mysql"]
