@@ -1015,25 +1015,12 @@ fn render_changes_split_inner(
                          that rebuilds the table without the CHECK. Tracked in #559."
                     ));
                 }
-                // MySQL spells this `DROP CHECK`, and accepts no `IF
-                // EXISTS` on any drop-constraint form — `DROP CONSTRAINT
-                // IF EXISTS` is error 1064 there. So the drop is
-                // idempotent on Postgres and not on MySQL (3821 if the
-                // constraint is absent); same shape as `DROP FOREIGN KEY`
-                // in `ddl::drop_constraints_sql_with_dialect`.
-                out.immediate.push(if dialect.name() == "mysql" {
-                    format!(
-                        "ALTER TABLE {} DROP CHECK {}",
-                        dialect.quote_ident(table),
-                        dialect.quote_ident(name),
-                    )
-                } else {
-                    format!(
-                        "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-                        dialect.quote_ident(table),
-                        dialect.quote_ident(name),
-                    )
-                });
+                // The dialect owns the spelling: `DROP CHECK` on MySQL,
+                // `DROP CONSTRAINT IF EXISTS` elsewhere. Emitting it
+                // here by hand is how this arm came to send Postgres
+                // syntax to MySQL in the first place (#559).
+                out.immediate
+                    .push(dialect.drop_check_constraint_sql(table, name));
             }
             SchemaChange::AddExclusionConstraint {
                 name,
@@ -1183,24 +1170,9 @@ fn render_changes_split_inner(
                          that rebuilds the table without the FK. Tracked in #559."
                     ));
                 }
-                // MySQL spells this `DROP FOREIGN KEY` and has no `IF
-                // EXISTS` form, exactly as
-                // `ddl::drop_constraints_sql_with_dialect` already does
-                // for per-field FKs. Emitting the Postgres shape here was
-                // error 1064 on every MySQL migration that dropped one.
-                out.immediate.push(if dialect.name() == "mysql" {
-                    format!(
-                        "ALTER TABLE {} DROP FOREIGN KEY {}",
-                        dialect.quote_ident(table),
-                        dialect.quote_ident(name),
-                    )
-                } else {
-                    format!(
-                        "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-                        dialect.quote_ident(table),
-                        dialect.quote_ident(name),
-                    )
-                });
+                // Same single owner as the CHECK arm above.
+                out.immediate
+                    .push(dialect.drop_foreign_key_sql(table, name));
             }
         }
     }
