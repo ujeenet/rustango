@@ -106,9 +106,49 @@ if ! $ASSUME_YES; then
   case "$reply" in [yY]|[yY][eE][sS]) ;; *) echo "aborted"; exit 1 ;; esac
 fi
 
+# Only rewrite VERSION CLAIMS, never prose that happens to name a version.
+#
+# The old sweep replaced every occurrence and relied on you reading the list.
+# That is not good enough: bumping 0.57.5 -> 0.57.6 silently rewrote eleven
+# files of *history* — "Before 0.57.5, `SqlValue::Null` bound as text",
+# "until 0.57.5 added `Cli::with_tenant_pools`" — each of which became false
+# the moment it moved. A sentence about what an old release did must keep
+# naming that release forever.
+#
+# So the match has to be anchored to something that makes it a claim about
+# the CURRENT version:
+#
+#   version = "X"        manifests, and the README pin in renamed-smoke
+#   "version": "X"       the MCP serverInfo block
+#   version:     X       the `manage about` transcript
+#   --version X          the `cargo install cargo-rustango` line
+#   rustango X           the `manage version` transcript, at line start
+#
+# Anything else is left alone and reported below for you to check.
 for f in "${FILES[@]}"; do
-  perl -pi -e "s/(^|[^0-9.])\Q$OLD\E(?![0-9.])/\${1}$NEW/g" "$f"
+  perl -pi -e '
+    BEGIN { ($o, $n) = @ARGV[0,1]; splice(@ARGV, 0, 2) }
+    s/(version\s*=\s*")\Q$o\E(?![0-9.])/$1$n/g;
+    s/("version"\s*:\s*")\Q$o\E(?![0-9.])/$1$n/g;
+    s/(version:\s+)\Q$o\E(?![0-9.])/$1$n/g;
+    s/(--version\s+"?)\Q$o\E(?![0-9.])/$1$n/g;
+    s/^(rustango\s+)\Q$o\E(?![0-9.])/$1$n/gm;
+  ' "$OLD" "$NEW" "$f"
 done
+
+# What still names the old version, now that the claims are rewritten. These
+# are prose, and prose about an old release is supposed to keep its number —
+# but a genuine claim in a shape this script does not know would also land
+# here, so they are printed rather than assumed correct.
+LEFT=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|$)" -- . \
+  ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' 2>/dev/null || true)
+if [ -n "$LEFT" ]; then
+  echo
+  echo "left alone — these name $OLD in prose, which is usually right."
+  echo "check none of them is a version claim this script failed to match:"
+  printf '%s\n' "$LEFT" | sed 's/^/  /' | cut -c1-140
+  echo
+fi
 
 echo "regenerating lockfiles"
 for lock in "${LOCKS[@]}"; do

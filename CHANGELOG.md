@@ -4,6 +4,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.57.6] — unreleased
+
+Nothing yet. Opened alongside the `release/v0.57.6` branch so entries land
+here as they are merged, rather than being reconstructed at tag time.
+
+Carried forward from 0.57.5 as known and unfixed:
+
+- **[#1464](https://github.com/ujeenet/rustango/issues/1464) — SQLite
+  `auto_now_add` columns cannot be compared against a Rust-bound `DateTime`.**
+  `DEFAULT CURRENT_TIMESTAMP` writes `"YYYY-MM-DD HH:MM:SS"`; sqlx binds
+  RFC3339. `' '` sorts before `'T'`, so the comparison is true for every row
+  and cursor pagination on such a column serves page one forever. Every fix
+  changes the stored format, so it wants its own release and a migration.
+
 ## [0.57.5] — 2026-09-14
 
 The correctness train. Version numbers 0.57.2 through 0.57.4 were consumed by
