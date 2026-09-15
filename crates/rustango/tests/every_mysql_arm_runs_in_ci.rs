@@ -43,7 +43,7 @@
 //! three backends, running on two, looking green. So the guard watches
 //! both families.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Repository root, derived from this crate rather than the working
@@ -96,21 +96,78 @@ fn job_block(yaml: &str, job: &str) -> String {
     rest.to_owned()
 }
 
-/// Every `--test <target>` named anywhere in a block.
+/// One `- run:` command, ending before the next step or comment.
 ///
-/// Scans the raw text rather than only `- run:` lines, so a target inside
-/// a multi-line `run: |` script or after a `\` continuation still counts.
-fn named_test_targets(block: &str) -> BTreeSet<String> {
+/// Splitting matters: the check below asks whether the command that
+/// names a target also enables the `mysql` feature, and that question
+/// only means anything per command. Trailing comments are cut because
+/// several of them mention `--features mysql` in prose, which would
+/// otherwise vouch for the step that follows.
+fn run_commands(block: &str) -> Vec<String> {
     block
-        .match_indices("--test ")
-        .map(|(i, m)| {
-            block[i + m.len()..]
+        .split("- run:")
+        .skip(1)
+        .map(|chunk| {
+            let mut cmd = String::new();
+            for line in chunk.lines() {
+                let t = line.trim_start();
+                if t.starts_with('#') || t.starts_with("- ") {
+                    break;
+                }
+                cmd.push_str(line);
+                cmd.push('\n');
+            }
+            cmd
+        })
+        .collect()
+}
+
+/// Does this command compile the `mysql` feature in?
+///
+/// `--all-features` does. So does any `--features` list carrying `mysql`
+/// as a whole token — `mysql,testkit` yes, `mysqlish` no.
+fn enables_mysql(cmd: &str) -> bool {
+    if cmd.contains("--all-features") {
+        return true;
+    }
+    cmd.match_indices("--features ").any(|(i, m)| {
+        cmd[i + m.len()..]
+            .chars()
+            .take_while(|c| !c.is_whitespace())
+            .collect::<String>()
+            .split(',')
+            .any(|f| f == "mysql")
+    })
+}
+
+/// Every `--test <target>` in the block, and whether the command naming
+/// it actually builds with MySQL.
+///
+/// The `bool` is the point. An earlier version of this guard collected
+/// target names and nothing else, so a suite named in a step that did
+/// not enable `mysql` satisfied it while compiling no `tri_mysql` module
+/// and running no MySQL arm — the guard's own failure mode, one level
+/// down. Checking the name is checking a proxy; checking the name
+/// alongside the feature set is checking the thing.
+fn named_test_targets(block: &str) -> BTreeMap<String, bool> {
+    let mut out: BTreeMap<String, bool> = BTreeMap::new();
+    for cmd in run_commands(block) {
+        let mysql = enables_mysql(&cmd);
+        for (i, m) in cmd.match_indices("--test ") {
+            let name: String = cmd[i + m.len()..]
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect::<String>()
-        })
-        .filter(|name| !name.is_empty())
-        .collect()
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            // A target run more than once counts as covered if any one
+            // of those runs builds MySQL in.
+            let e = out.entry(name).or_insert(false);
+            *e = *e || mysql;
+        }
+    }
+    out
 }
 
 /// Does a suite with this target name have a MySQL arm to run?
@@ -173,7 +230,7 @@ fn every_suite_with_a_mysql_arm_is_named_in_the_ci_job() {
          parse is broken, so a pass here would mean nothing.\n\n{block}"
     );
 
-    let missing: Vec<&String> = on_disk.difference(&named).collect();
+    let missing: Vec<&String> = on_disk.iter().filter(|s| !named.contains_key(*s)).collect();
     assert!(
         missing.is_empty(),
         "these suites have a MySQL arm that is named in no CI step, so it skips on \
@@ -185,6 +242,27 @@ fn every_suite_with_a_mysql_arm_is_named_in_the_ci_job() {
          mysql,<...> --test <name>` line to the `mysql_live` job in \
          .github/workflows/ci.yml.",
         missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    // Named is not the same as run. A step that omits the `mysql`
+    // feature compiles no `tri_mysql` module and no MySQL-gated suite,
+    // so the target is listed, the job is green, and the arm never
+    // executes — the precise failure this guard exists to catch, one
+    // level down from where it was looking.
+    let unfeatured: Vec<&String> = on_disk
+        .iter()
+        .filter(|s| named.get(*s) == Some(&false))
+        .collect();
+    assert!(
+        unfeatured.is_empty(),
+        "these suites are named in the `mysql_live` job by a step that does not build \
+         the `mysql` feature, so the MySQL arm does not exist in the binary that runs:\
+         \n\n  {}\n\nAdd `mysql` to that step's `--features`, or use `--all-features`.",
+        unfeatured
             .iter()
             .map(|s| s.as_str())
             .collect::<Vec<_>>()
@@ -205,7 +283,7 @@ fn every_named_target_with_a_mysql_arm_still_exists() {
     let named = named_test_targets(&block);
 
     let dangling: Vec<&String> = named
-        .iter()
+        .keys()
         .filter(|n| has_a_mysql_arm(n))
         .filter(|n| !on_disk.contains(*n))
         .collect();
@@ -247,6 +325,9 @@ jobs:
           cargo test -p rustango --features mysql,tenancy --test beta_mysql_live
       - run: cargo test -p rustango --all-features \\
           --test gamma_mysql_live
+      # a comment mentioning --features mysql must not vouch for the next step
+      - run: cargo test -p rustango --features sqlite --test delta_mysql_live
+      - run: cargo test -p rustango --features mysqlish --test epsilon_mysql_live
   deny-examples:
     runs-on: ubuntu-latest
     steps:
@@ -272,16 +353,62 @@ jobs:
     fn targets_are_found_in_every_run_shape() {
         let found = named_test_targets(&job_block(SAMPLE, "mysql_live"));
         assert!(
-            found.contains("alpha_mysql_live"),
+            found.contains_key("alpha_mysql_live"),
             "plain `- run:`: {found:?}"
         );
         assert!(
-            found.contains("beta_mysql_live"),
+            found.contains_key("beta_mysql_live"),
             "`run: |` block: {found:?}"
         );
         assert!(
-            found.contains("gamma_mysql_live"),
+            found.contains_key("gamma_mysql_live"),
             "after a `\\` continuation: {found:?}"
+        );
+    }
+
+    /// The feature check, which is the half that makes the name mean
+    /// something.
+    #[test]
+    fn a_target_is_only_covered_when_its_step_builds_mysql() {
+        let found = named_test_targets(&job_block(SAMPLE, "mysql_live"));
+
+        assert_eq!(
+            found.get("alpha_mysql_live"),
+            Some(&true),
+            "--features mysql"
+        );
+        assert_eq!(found.get("beta_mysql_live"), Some(&true), "mysql in a list");
+        assert_eq!(found.get("gamma_mysql_live"), Some(&true), "--all-features");
+
+        assert_eq!(
+            found.get("delta_mysql_live"),
+            Some(&false),
+            "named by a step building only sqlite — listed, but no MySQL arm exists \
+             in that binary: {found:?}"
+        );
+        assert_eq!(
+            found.get("epsilon_mysql_live"),
+            Some(&false),
+            "`mysqlish` is not `mysql`; the feature must match as a whole token: \
+             {found:?}"
+        );
+    }
+
+    /// A comment naming `--features mysql` must not vouch for the step
+    /// after it — several real comments in this job do exactly that.
+    #[test]
+    fn comments_do_not_leak_into_the_next_command() {
+        let cmds = run_commands(&job_block(SAMPLE, "mysql_live"));
+        assert!(
+            cmds.iter().any(|c| c.contains("delta_mysql_live")),
+            "the delta step went missing: {cmds:?}"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| c.contains("delta_mysql_live") && enables_mysql(c)),
+            "the preceding comment's `--features mysql` vouched for a step that \
+             builds sqlite: {cmds:?}"
         );
     }
 
