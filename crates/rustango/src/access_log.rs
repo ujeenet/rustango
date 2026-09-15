@@ -13,10 +13,15 @@
 //! Emits one `tracing::info!` event per completed request:
 //!
 //! ```text
-//! INFO method=GET path=/api/posts status=200 duration_ms=12 ip=192.0.2.1
+//! INFO method=GET path=/api/posts status=200 duration_ms=12 ip=192.0.2.1 tenant=acme
 //! ```
 //!
 //! Filter via tracing-subscriber's env-filter (e.g. `RUST_LOG=rustango::access_log=info`).
+//!
+//! `tenant` names the tenant the request resolved to, and is `-` when
+//! none did — an apex or operator-console request, or a single-tenant
+//! app. [`TenantField`] switches it to the org id, or off. See
+//! [`crate::tenant_log`] for how the identity gets out of the handler.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -51,6 +56,27 @@ pub struct AccessLogLayer {
     /// AWS ALB) that strips client-supplied values and rewrites them
     /// with the real client IP. v0.30.16.
     pub trust_proxy_headers: bool,
+    /// Which tenant identifier to put on the line. Defaults to
+    /// [`TenantField::Slug`]; `-` whenever no tenant resolved.
+    pub tenant_field: TenantField,
+}
+
+/// How the access log names the request's tenant.
+///
+/// The slug is readable but operator-chosen, so it often *is* the
+/// customer's name — [`TenantField::Id`] keeps tenant attribution in the
+/// logs without putting that in every line shipped to an aggregator.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TenantField {
+    /// `tenant=acme` — `Org.slug`. The default.
+    #[default]
+    Slug,
+    /// `tenant=42` — `Org.id`.
+    Id,
+    /// `tenant=acme#42` — both, for correlating a renamed slug.
+    Both,
+    /// Never look one up; the field is always `-`.
+    Off,
 }
 
 impl Default for AccessLogLayer {
@@ -70,7 +96,16 @@ impl AccessLogLayer {
             slow_threshold_ms: 1000,
             redact_query_params: default_redact_params(),
             trust_proxy_headers: false,
+            tenant_field: TenantField::default(),
         }
+    }
+
+    /// Choose which tenant identifier appears on the line, or [`TenantField::Off`]
+    /// to omit it. Default [`TenantField::Slug`].
+    #[must_use]
+    pub fn tenant_field(mut self, field: TenantField) -> Self {
+        self.tenant_field = field;
+        self
     }
 
     /// Honor `X-Forwarded-For` / `X-Real-IP` when resolving the
@@ -180,7 +215,21 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
         None
     };
 
-    let response = next.run(req).await;
+    // The tenant is resolved inside the handler, below this middleware.
+    // Hold a slot open across it so the identity can come back out, and
+    // read it back *inside* the scope — a read after the scope future
+    // resolves sees nothing. See `crate::tenant_log`.
+    let want_tenant = cfg.tenant_field != TenantField::Off;
+    let (response, tenant) = crate::tenant_log::scope(async {
+        let response = next.run(req).await;
+        let tenant = if want_tenant {
+            crate::tenant_log::current()
+        } else {
+            None
+        };
+        (response, tenant)
+    })
+    .await;
     let status = response.status().as_u16();
     let duration_ms = started.elapsed().as_millis() as u64;
 
@@ -189,6 +238,8 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
         return response;
     }
 
+    let tenant = tenant_label(cfg.tenant_field, tenant);
+
     if duration_ms >= cfg.slow_threshold_ms {
         tracing::warn!(
             method = %method,
@@ -196,6 +247,7 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
             status,
             duration_ms,
             ip = ip.as_deref().unwrap_or("-"),
+            tenant = %tenant,
             "slow request",
         );
     } else if is_error {
@@ -205,6 +257,7 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
             status,
             duration_ms,
             ip = ip.as_deref().unwrap_or("-"),
+            tenant = %tenant,
         );
     } else {
         tracing::info!(
@@ -213,10 +266,31 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
             status,
             duration_ms,
             ip = ip.as_deref().unwrap_or("-"),
+            tenant = %tenant,
         );
     }
 
     response
+}
+
+/// Render the request's tenant for the log line. `-` when none
+/// resolved — an apex or operator-console request, or a single-tenant
+/// deployment. Never blank, so "no tenant" reads differently from a
+/// field that went missing.
+fn tenant_label(field: TenantField, tenant: Option<crate::tenant_log::TenantLabel>) -> String {
+    const NONE: &str = "-";
+    let Some(t) = tenant else {
+        return NONE.to_owned();
+    };
+    match field {
+        TenantField::Off => NONE.to_owned(), // `tenant` is None when Off
+        TenantField::Slug => t.slug,
+        TenantField::Id => t.id.map_or_else(|| NONE.to_owned(), |id| id.to_string()),
+        TenantField::Both => match t.id {
+            Some(id) => format!("{}#{id}", t.slug),
+            None => t.slug,
+        },
+    }
 }
 
 /// Resolve the client IP for an inbound request. v0.30.16.

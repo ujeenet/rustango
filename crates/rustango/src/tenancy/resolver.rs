@@ -668,7 +668,14 @@ impl OrgResolver for ChainResolver {
     async fn resolve(&self, parts: &Parts, registry: &Pool) -> Result<Option<Org>, TenancyError> {
         for resolver in &self.resolvers {
             match resolver.resolve(parts, registry).await? {
-                Some(org) => return Ok(Some(org)),
+                Some(org) => {
+                    // The one funnel every request path goes through —
+                    // extractors, tenant admin, operator console. Publish
+                    // the identity here and every log line downstream can
+                    // name it. See `crate::tenant_log`.
+                    crate::tenant_log::record(&org.slug, org.id.get().copied());
+                    return Ok(Some(org));
+                }
                 None => continue,
             }
         }

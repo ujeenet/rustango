@@ -125,3 +125,97 @@ fn the_documented_assertion_helpers_are_the_ones_that_exist() {
         );
     }
 }
+
+// =====================================================================
+// `docs/logging.md` — the tracing-target table
+// =====================================================================
+
+/// Pages carrying the target table.
+const LOGGING_PAGES: &[&str] = &[
+    "docs/logging.md",
+    "docs/de/logging.md",
+    "docs/es/logging.md",
+    "docs/fr/logging.md",
+];
+
+/// Every target the framework names explicitly in a `target:` argument.
+///
+/// Events that pass no `target:` inherit their module path and are
+/// reachable the same way — the page says so, and they are deliberately
+/// out of this set, because there is no list of them to drift against.
+fn explicit_targets(root: &Path) -> BTreeSet<String> {
+    let src = root.join("crates/rustango/src");
+    let mut out = BTreeSet::new();
+    let mut stack = vec![src];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for line in text.lines() {
+                    let mut rest = line;
+                    while let Some(at) = rest.find("target: \"rustango::") {
+                        let tail = &rest[at + "target: \"".len()..];
+                        if let Some(end) = tail.find('"') {
+                            out.insert(tail[..end].to_owned());
+                            rest = &tail[end..];
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "found no `target: \"rustango::…\"` sites — the convention changed, \
+         so this guard is no longer reading what it claims to"
+    );
+    out
+}
+
+/// Targets a page's table lists, as `| `rustango::x` | …` rows.
+fn documented_targets(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix("| `rustango::"))
+        .filter_map(|rest| rest.split('`').next())
+        .map(|name| format!("rustango::{name}"))
+        .collect()
+}
+
+/// The page presents the table as *the* filter vocabulary: a reader picks
+/// `RUST_LOG=rustango::tenancy=debug` off it. A target missing from the
+/// table is a subsystem nobody can turn up, and one only the table has is
+/// a filter that matches nothing and looks like silence.
+#[test]
+fn the_documented_tracing_targets_are_the_ones_that_exist() {
+    let root = repo_root();
+    let actual = explicit_targets(&root);
+
+    for page in LOGGING_PAGES {
+        let path = root.join(page);
+        if !path.exists() {
+            continue; // translation not landed yet
+        }
+        let text = std::fs::read_to_string(&path).expect("read page");
+        let documented = documented_targets(&text);
+
+        let missing: Vec<&String> = actual.difference(&documented).collect();
+        let invented: Vec<&String> = documented.difference(&actual).collect();
+
+        assert!(
+            missing.is_empty() && invented.is_empty(),
+            "{page}'s target table does not match the code.\n  \
+             emitted but undocumented: {missing:?}\n  \
+             documented but never emitted: {invented:?}"
+        );
+    }
+}

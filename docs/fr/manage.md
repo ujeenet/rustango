@@ -1491,15 +1491,20 @@ un `tracing::warn!` mais n'interrompent pas la boucle.
 
 ### Traçage
 
-`crate::tenancy::pools::tenant_pool_init` est un
-`tracing::info_span!` qui enveloppe la construction du pool sur le
-chemin froid. Abonnez-vous-y pour voir la latence de construction par
-tenant :
+`tenant_pool_init` est un `tracing::info_span!` qui enveloppe la
+construction du pool sur le chemin froid, et les événements qu'il
+contient portent le target `rustango::tenancy::pools`. Abonnez-vous-y
+pour voir la latence de construction par tenant :
 
 ```text
-INFO crate::tenancy::pools: tenant pool connected (database mode)
+INFO rustango::tenancy::pools: tenant pool connected (database mode)
      slug=acme elapsed_ms=42 min_conn=1 max_conn=4
 ```
+
+Activez-le avec `RUST_LOG=rustango::tenancy::pools=info`. Un filtre sur
+`crate::tenancy::pools` ne correspond à rien — un target est une chaîne,
+pas un chemin ; voir
+[Journalisation](logging.md#targets--nommer-le-sous-système).
 
 ### Piège de configuration — TLD `.local` sur macOS
 
