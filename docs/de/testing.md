@@ -166,13 +166,20 @@ gelaufen ist. Gut zu wissen, bevor du ein grünes Ergebnis als Abdeckung liest.
 
 | Variable | Suites | Was sie brauchen |
 |---|---:|---|
-| *(keine)* | 217 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
-| `DATABASE_URL` | 89 | Ein erreichbarer PostgreSQL-Server. |
-| `MYSQL_TEST_URL` | 18 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
+| *(keine)* | 210 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
+| `DATABASE_URL` | 96 | Ein erreichbarer PostgreSQL-Server. |
+| `MYSQL_TEST_URL` | 25 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Ein erreichbares Redis. |
 
 Eine Suite, die zwei Variablen liest, wird unter beiden gezählt, die Spalte
 summiert sich also nicht auf die Anzahl der Dateien.
+
+Die `*_tri.rs`-Suiten werden unter beiden Server-Variablen gezählt. Sie lesen
+selbst keine Variable — `Backend::pool()` übernimmt das — und ihr SQLite-Arm
+läuft auch ohne gesetzte Variablen. Sie als „braucht nichts“ zu zählen wäre
+deshalb formal haltbar und praktisch falsch: Die beiden Arme, die einen Server
+brauchen, sind der Grund für diese Suiten. Starte beide Server, sonst meldet
+eine Tri-Suite eine gesunde Trefferzahl und hat ein Backend von dreien geprüft.
 
 MySQL ist das, worüber Leute stolpern: es liest seine eigene Variable, also führt
 eine Shell, in der nur `DATABASE_URL` gesetzt ist, die Postgres-Suites aus und

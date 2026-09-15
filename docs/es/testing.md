@@ -168,13 +168,20 @@ ejecutado. Conviene saberlo antes de leer un resultado en verde como cobertura.
 
 | Variable | Suites | Qué necesitan |
 |---|---:|---|
-| *(ninguna)* | 217 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
-| `DATABASE_URL` | 89 | Un servidor PostgreSQL accesible. |
-| `MYSQL_TEST_URL` | 18 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
+| *(ninguna)* | 210 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
+| `DATABASE_URL` | 96 | Un servidor PostgreSQL accesible. |
+| `MYSQL_TEST_URL` | 25 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis accesible. |
 
 Una suite que lee dos variables se cuenta en ambas, así que la columna no suma el
 número de archivos.
+
+Las suites `*_tri.rs` se cuentan bajo ambas variables de servidor. Ellas no leen
+ninguna variable — lo hace `Backend::pool()` — y su brazo SQLite se ejecuta sin
+nada configurado, así que contarlas como «no necesita nada» sería técnicamente
+defendible y prácticamente falso: los dos brazos que necesitan un servidor son
+la razón de ser de esas suites. Levanta ambos servidores, o una suite tri
+informará un recuento sano habiendo ejercitado un backend de tres.
 
 MySQL es la que pilla a la gente: lee su propia variable, así que un shell con
 solo `DATABASE_URL` definida ejecuta las suites de Postgres y se salta en
