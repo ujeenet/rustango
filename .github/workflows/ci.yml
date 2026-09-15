@@ -27,24 +27,12 @@ on:
       - develop
       - '**release**'
       - '**Release**'
-  # Deliberately narrow: only PRs *into* `main`, which is the release
-  # promote. A feature PR into `develop` runs nothing.
-  #
-  # This is a decision about cost, and it moves the gate rather than
-  # removing it. The full matrix is 20 jobs / ~57 instances, it ran on
-  # every commit pushed to every open PR, and nothing cancelled a
-  # superseded run. The gate for feature work is now the `develop` push
-  # above — it runs once per merge instead of once per commit-in-review.
-  #
-  # What this costs: a broken feature branch is found after it lands on
-  # `develop`, not before. `workflow_dispatch` below is the escape hatch
-  # for checking one on purpose, and it takes any branch.
-  #
-  # Release branches do not need a rule here — they are matched by the
-  # `**release**` glob above, so a release PR is covered by its push
-  # whichever branch it targets.
+  # Every PR reaches the workflow; the `gate` job below decides whether
+  # the matrix actually runs. `labeled` is in the list so adding the
+  # opt-in label to an open PR starts a run immediately, rather than
+  # waiting for the next push.
   pull_request:
-    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
   # Lets a run be triggered by hand against any branch, without
   # inventing a no-op commit or opening a throwaway PR — useful for
   # re-checking a branch after an advisory lands, since `deny` can go
@@ -100,7 +88,33 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+  # Does the matrix run for this event?
+  #
+  # Every other job is `needs: gate`, so this is the single place the
+  # answer lives. Twenty copies of the same `if:` would drift, which is
+  # the failure this repo keeps paying for elsewhere.
+  #
+  # It runs when:
+  #   * the event is not a pull request — a push to `main`, `develop` or
+  #     a release branch, or a manual `workflow_dispatch`;
+  #   * the PR targets `main`, which is the release promote;
+  #   * the PR carries the `ci` label. **That is the manual trigger for
+  #     an ordinary feature PR**: add the label and the full matrix runs
+  #     against the merge result; remove it and later pushes go quiet.
+  gate:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request'
+      || github.base_ref == 'main'
+      || contains(github.event.pull_request.labels.*.name, 'ci')
+    steps:
+      - name: Why this run is happening
+        run: |
+          echo "event=${{ github.event_name }} base=${{ github.base_ref }}"
+          echo "Add the ci label to a pull request to run this matrix on it."
+
   fmt:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -110,6 +124,7 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -133,6 +148,7 @@ jobs:
   # so each dialect has an explicitly-named job: `postgres_test`,
   # `mysql_live`, `sqlite_live`.
   postgres_test:
+    needs: gate
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -186,6 +202,7 @@ jobs:
       - run: cargo test --workspace --all-features
 
   doc:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -199,6 +216,7 @@ jobs:
       - run: cargo doc --workspace --no-deps
 
   deny:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -213,6 +231,7 @@ jobs:
   # carry no `license` field, so `check licenses` fails them as
   # `unlicensed` for reasons that have nothing to do with security.
   deny-examples:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -243,6 +262,7 @@ jobs:
   #
   # `cargo metadata` only resolves, so this is seconds and no compile.
   lockfiles:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -282,6 +302,7 @@ jobs:
   # `--all-targets` is load-bearing — it pulls in `tests/`, which is
   # where drift actually shows up first.
   platform_examples:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -339,6 +360,7 @@ jobs:
   # HIGH/CRITICAL (fixable only); misconfig is report-only so a
   # pre-existing finding never silently blocks a release.
   trivy:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -383,6 +405,7 @@ jobs:
   # for everyone else. The tests pass `--rustango-path`, so they validate this
   # commit rather than the last published release.
   scaffolded_projects:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -414,6 +437,7 @@ jobs:
   # exactly where cfg'd-out code leaves unused imports and unconstructed
   # variants behind, and a warning is the only signal that a gate is wrong.
   feature_combos:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -462,6 +486,7 @@ jobs:
   # reasons unrelated to the PR. Drop it once a few runs are green; the
   # job is useless as a gate until then, but its output is not.
   windows_test:
+    needs: gate
     runs-on: windows-latest
     continue-on-error: true
     steps:
@@ -478,6 +503,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
 
   sqlite_litmus:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -607,6 +633,7 @@ jobs:
   # #1363 the whole suite compiles under `--no-default-features`, and
   # `sqlite_litmus` asserts that with `--no-run`.
   sqlite_live:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -686,6 +713,7 @@ jobs:
   # The matrix is the point: run the SAME suite against 6 and 7. A
   # 7-only job passes on the broken code and proves nothing.
   redis_live:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -729,6 +757,7 @@ jobs:
   # is not an official library image so that mirror has no copy; quay is
   # MinIO's own registry.
   s3_live:
+    needs: gate
     runs-on: ubuntu-latest
     services:
       # The media suites store rows in `rustango_media` alongside the
@@ -791,6 +820,7 @@ jobs:
   # query strings that PG/SQLite accept (e.g. `LIMIT` vs `FOR UPDATE
   # SKIP LOCKED` order in v0.38's jobs pickup).
   mysql_live:
+    needs: gate
     runs-on: ubuntu-latest
     services:
       mysql:
@@ -900,6 +930,7 @@ jobs:
   # namespace image (not on the AWS ECR `library/` mirror), so it's
   # pulled straight from Docker Hub.
   postgis_live:
+    needs: gate
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -935,6 +966,7 @@ jobs:
   # one-of-three backend feature selector; the matrix flips it per
   # row so the binary's `runserver` picks the right Pool constructor.
   e2e:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1028,6 +1060,7 @@ jobs:
   # getting_started_blog runs `migrate` first to create its schema;
   # orm_cookbook resets the `public` schema inside the test itself.
   doc_examples:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
