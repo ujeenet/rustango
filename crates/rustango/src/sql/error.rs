@@ -350,6 +350,7 @@ pub enum ExecError {
 /// returns `false` for every error — there's no MySQL driver
 /// compiled in so this code path can't fire.
 #[cfg(feature = "mysql")]
+#[must_use]
 pub fn is_mysql_dup_index_error(e: &crate::sql::sqlx::Error) -> bool {
     if let crate::sql::sqlx::Error::Database(db) = e {
         return db.code().as_deref() == Some("42000")
@@ -360,15 +361,16 @@ pub fn is_mysql_dup_index_error(e: &crate::sql::sqlx::Error) -> bool {
 
 /// `cfg(not(mysql))` stub — see the documented variant above.
 #[cfg(not(feature = "mysql"))]
+#[must_use]
 pub fn is_mysql_dup_index_error(_e: &crate::sql::sqlx::Error) -> bool {
     false
 }
 
-/// `true` when `e` is PostgreSQL losing a race to create an object that
+/// `true` when `e` is `PostgreSQL` losing a race to create an object that
 /// another session created first (#1458).
 ///
 /// `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` are
-/// **not atomic** in PostgreSQL. Two sessions can both pass the
+/// **not atomic** in `PostgreSQL`. Two sessions can both pass the
 /// existence check and both try to insert the catalogue row; the loser
 /// gets an error even though the object it asked for now exists. This
 /// is documented Postgres behaviour, not a version quirk.
@@ -392,6 +394,7 @@ pub fn is_mysql_dup_index_error(_e: &crate::sql::sqlx::Error) -> bool {
 /// `false` for every error — there is no Postgres driver compiled in,
 /// so this path cannot fire.
 #[cfg(feature = "postgres")]
+#[must_use]
 pub fn is_pg_dup_object_error(e: &crate::sql::sqlx::Error) -> bool {
     if let crate::sql::sqlx::Error::Database(db) = e {
         return match db.code().as_deref() {
@@ -410,6 +413,7 @@ pub fn is_pg_dup_object_error(e: &crate::sql::sqlx::Error) -> bool {
 
 /// `cfg(not(postgres))` stub — see the documented variant above.
 #[cfg(not(feature = "postgres"))]
+#[must_use]
 pub fn is_pg_dup_object_error(_e: &crate::sql::sqlx::Error) -> bool {
     false
 }

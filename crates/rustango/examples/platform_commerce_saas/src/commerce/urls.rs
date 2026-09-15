@@ -88,7 +88,7 @@ fn orders() -> Router<AppState> {
     ViewSet::for_model(Order::SCHEMA)
         .serializer::<OrderSerializer>()
         .filter_fields(&["status", "customer_id"])
-        .cursor_pagination_desc("id")
+        .cursor_pagination_desc("placed_at")
         .page_size(25)
         .tenant_router("/api/v1/orders")
         .with_state(())
@@ -176,6 +176,7 @@ async fn confirm_order(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+    tracing::info!(order = id, tenant = %slug, "order queued for fulfilment");
     Ok((
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "order_id": id, "tenant": slug, "queued": true })),

@@ -18,10 +18,10 @@
 //! created rows with no identifier, so a client cannot address what it
 //! just made. That is how the soak driver first failed here.
 
-use rustango::sql::Auto;
+use rustango::sql::{Auto, ForeignKey};
 use rustango::Serializer;
 
-use super::models::{Customer, Order, Product};
+use super::models::{Customer, Order, Product, StaffMember};
 
 /// `description` → `blurb`.
 ///
@@ -53,19 +53,15 @@ pub struct CustomerSerializer {
     pub loyalty_tier: String,
 }
 
-/// `reference` → `ref_code`.
+/// `reference` → `ref_code`, and the foreign keys.
 ///
-/// **This serializer carries no foreign-key column, and that is a
-/// framework limitation rather than a choice.** A serializer field must
-/// match its model field's type exactly, and `ForeignKey<T>` implements
-/// none of `Deserialize`, `Default` or `OpenApiSchema` — so declaring
-/// `customer_id` here, under any name and any type, does not compile.
-/// The only foreign-key serializer in the framework's own tests uses
-/// `#[serializer(nested)]`, which is read-oriented.
-///
-/// The consequence for this app: the nullable-FK write path (#1450)
-/// cannot be exercised *through* a serializer, so `/api/v1/orders-raw`
-/// exists to exercise it without one. See `urls.rs`.
+/// The FK fields could not be declared here at all until #1454:
+/// `ForeignKey<T>` implemented none of `Deserialize`, `Default` or
+/// `OpenApiSchema`, and a serializer field must match its model field's
+/// type exactly — so there was no spelling that compiled, and the
+/// nullable-FK write path (#1450) could only be reached through a
+/// serializer-less ViewSet. They now round-trip as their key, which is
+/// what a REST client sends.
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = Order)]
 #[allow(dead_code)]
@@ -74,6 +70,10 @@ pub struct OrderSerializer {
     pub id: Auto<i64>,
     #[serializer(source = "reference")]
     pub ref_code: String,
+    pub customer_id: ForeignKey<Customer, i64>,
+    /// The #1450 column, now reachable through a serializer (#1454).
+    #[serializer(source = "assigned_picker_id")]
+    pub picker_id: Option<ForeignKey<StaffMember, i64>>,
     pub note: Option<String>,
     pub status: String,
     pub total_cents: i64,

@@ -107,6 +107,7 @@ pub fn run_pool_free<W: Write>(
         "make:serializer" => make_serializer_cmd(&args[1..], writer),
         "make:form" => make_form_cmd(&args[1..], writer),
         "make:job" => make_job_cmd(&args[1..], writer),
+        "make:scheduled" => make_scheduled_cmd(&args[1..], writer),
         "make:worker" => make_worker_cmd(&args[1..], writer),
         "make:notification" => make_notification_cmd(&args[1..], writer),
         "make:middleware" => make_middleware_cmd(&args[1..], writer),
@@ -151,6 +152,7 @@ pub async fn run_with_writer<W: Write + Send>(
         "make:serializer" => make_serializer_cmd(&args[1..], writer),
         "make:form" => make_form_cmd(&args[1..], writer),
         "make:job" => make_job_cmd(&args[1..], writer),
+        "make:scheduled" => make_scheduled_cmd(&args[1..], writer),
         "make:worker" => make_worker_cmd(&args[1..], writer),
         "make:notification" => make_notification_cmd(&args[1..], writer),
         "make:middleware" => make_middleware_cmd(&args[1..], writer),
@@ -461,6 +463,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "  make:serializer <Name> [--model <Model>]")?;
     writeln!(w, "  make:form <Name>")?;
     writeln!(w, "  make:job <Name>")?;
+    writeln!(w, "  make:scheduled <Name>")?;
     writeln!(w, "  make:worker <Name>")?;
     writeln!(w, "  make:notification <Name>")?;
     writeln!(w, "  make:middleware <Name>")?;
@@ -2399,36 +2402,119 @@ pub struct {name} {{
     write_generated(w, &format!("{snake}.rs"), body)
 }
 
+/// Scaffold a real [`crate::jobs::Job`] (#1455).
+///
+/// This verb used to emit a struct holding a `PgPool` with an inherent
+/// `run(self: Arc<Self>)` and a comment wiring it to
+/// `scheduler::every(..)` — a *scheduler task*, which is a real thing
+/// the framework has, but not the one the verb is named after. Nothing
+/// it produced could be `dispatch`ed, `register`ed, retried, backed off
+/// or dead-lettered, and the hardcoded `PgPool` meant it did not compile
+/// in a `--features sqlite` project at all.
+///
+/// The scheduler shape now lives under `make:scheduled`, which is what
+/// it always was.
 fn make_job_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let (name, _, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:job {name}`.
 //!
-//! Background job — run async work outside the request lifecycle.
-//! Pair with `{crate_root}::scheduler::Scheduler` (cron-shape) or your queue layer.
+//! A background job: enqueued from a handler, executed later by a
+//! worker. For work that runs on a timer instead, see
+//! `manage make:scheduled`.
+
+use {crate_root}::jobs::{{Job, JobError}};
+use serde::{{Deserialize, Serialize}};
+
+/// The payload. `run` receives **only this** — no pool, no tenant, no
+/// request context: workers are spawned tasks and inherit no
+/// task-local state. Carry everything the job needs in these fields.
+#[derive(Serialize, Deserialize)]
+pub struct {name} {{
+    pub id: i64,
+}}
+
+#[async_trait::async_trait]        // add `async-trait` to your Cargo.toml
+impl Job for {name} {{
+    /// Globally unique: this is the routing key a worker matches a
+    /// queued row against. Two job types must not share one.
+    const NAME: &'static str = "{snake}";
+
+    /// A ceiling on **total attempts**, not on retries — 5 is one run
+    /// plus four retries. Backoff between them is 1s, 2s, 4s, 8s.
+    const MAX_ATTEMPTS: u32 = 5;
+
+    async fn run(&self) -> Result<(), JobError> {{
+        // Err(JobError::Retryable(..)) to back off and try again;
+        // Err(JobError::Fatal(..)) to dead-letter immediately.
+        let _ = self.id;
+        Ok(())
+    }}
+}}
+
+// Wire up wherever you build the queue — the web process, a worker
+// binary from `make:worker`, or both:
+//
+//   queue.register::<{name}>().await;   // BEFORE start(); every
+//                                       // process that calls start()
+//                                       // must register every type it
+//                                       // might pick up, or the row is
+//                                       // locked and abandoned
+//   queue.start().await;
+//
+// and to enqueue one, from a handler:
+//
+//   queue.dispatch(&{name} {{ id: 42 }}).await?;
+"#
+    );
+    write_generated(w, &format!("{snake}.rs"), body)
+}
+
+/// Scaffold a fixed-interval scheduler task (#1455).
+///
+/// This is the shape `make:job` used to emit, under the name it should
+/// always have had — and routed through `sql::Pool` rather than the
+/// hardcoded `PgPool`, which made the old template uncompilable in a
+/// non-Postgres project.
+fn make_scheduled_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _, crate_root) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:scheduled {name}`.
+//!
+//! A task that runs on a timer, not in response to a request. For work
+//! enqueued by a handler and executed by a worker, see
+//! `manage make:job`.
 
 use std::sync::Arc;
-use {crate_root}::sql::sqlx::PgPool;
+
+use {crate_root}::sql::Pool;
 
 pub struct {name} {{
-    pub pool: PgPool,
+    pub pool: Pool,
 }}
 
 impl {name} {{
     pub async fn run(self: Arc<Self>) {{
-        // TODO: implement
-        let _ = self.pool.acquire().await;
+        // The scheduler isolates panics per task, but a task that
+        // returns early on error simply skips that tick — log, do not
+        // swallow silently.
+        let _ = &self.pool;
     }}
 }}
 
 // Wire up in main.rs:
 //
-//   let job = Arc::new({name} {{ pool: pool.clone() }});
-//   scheduler.every("{snake}", Duration::from_secs(60), move || {{
-//       let job = job.clone();
-//       async move {{ job.run().await }}
+//   let scheduler = {crate_root}::scheduler::Scheduler::new();
+//   let task = Arc::new({name} {{ pool: pool.clone() }});
+//   scheduler.every("{snake}", std::time::Duration::from_secs(60), move || {{
+//       let task = Arc::clone(&task);
+//       async move {{ task.run().await }}
 //   }});
+//   let handle = scheduler.start();
+//
+// The first run happens after one full interval, not immediately.
 "#
     );
     write_generated(w, &format!("{snake}.rs"), body)
@@ -4802,6 +4888,7 @@ mod gen_tests {
             "make:serializer",
             "make:form",
             "make:job",
+            "make:scheduled",
             "make:worker",
             "make:notification",
             "make:middleware",

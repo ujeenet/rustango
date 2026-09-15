@@ -569,7 +569,7 @@ Every method on `ViewSet::for_model(SCHEMA)` (each returns `Self`):
 | `pk_param(name)` | Rename the path parameter used for detail routes. |
 | `read_only()` | GET-only. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Per-action codename gates (the latter on tenancy). |
-| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). |
+| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). Any totally-ordered column: integer, timestamp, date, uuid or string. |
 | `limit_offset_pagination()` | `?limit=&offset=` windowing. |
 | `pagination(PaginationStyle::…)` | Set the style explicitly. |
 | `filter_backend(closure)` | Add custom `WHERE` predicates beyond `filter_fields`. |
@@ -624,7 +624,11 @@ Three styles; page-number is the default. The list envelope differs per style:
 ```
 
 **Cursor** — `.cursor_pagination("id")` (or `_desc`); skips `COUNT(*)`, ideal
-for very large tables. `?cursor=<token>&page_size=20`:
+for very large tables. The field must be **totally ordered**: an integer,
+timestamp, date, uuid or string. `"id"` is the usual choice; a `created_at`
+timestamp is the other, and is what you want on an append-only table. A float,
+bool, json or blob column panics at build time rather than failing per request.
+`?cursor=<token>&page_size=20`:
 
 ```json
 { "page_size": 20, "next": "<opaque-cursor-or-null>", "results": [ … ] }
