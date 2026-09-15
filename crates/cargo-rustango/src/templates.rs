@@ -690,6 +690,15 @@ pub fn config_default_toml(name: &str, backend: Backend) -> String {
 # [audit]
 # retention_days = 90
 
+# [logging]                        # needs `Cli::with_logging()` AND a `main`
+#                                  # without `#[rustango::main]` — see
+#                                  # config/prod_settings.toml for why
+# level             = "info,sqlx=warn"   # RUST_LOG syntax; RUST_LOG still wins
+# format            = "pretty"           # pretty | json | compact
+# with_line_numbers = false
+# file_dir          = "/var/log/{name}"  # set to also write a rolling file
+# file_rotation     = "daily"            # daily | hourly | minutely | never
+
 # [mcp]                            # Model Context Protocol server (feature = "mcp")
 # prefix                = "/mcp"   # URL prefix the MCP router mounts under
 # token_ttl_secs        = 900      # agent access-token lifetime (15 min)
@@ -798,6 +807,15 @@ hsts_max_age_secs = 31536000
 
 [audit]
 retention_days = 365
+
+# Read by `Cli::with_logging()`, which this project does NOT call — and
+# which would lose anyway while `src/main.rs` keeps `#[rustango::main]`:
+# the macro installs a subscriber first, and the first one wins. Swap the
+# macro for `#[tokio::main]` and add `.with_logging()` to make this live.
+# `RUST_LOG` overrides `level` either way, and works today.
+# [logging]
+# level  = "info"
+# format = "json"     # one object per event, for a log aggregator
 "##
     )
 }

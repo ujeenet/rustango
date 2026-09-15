@@ -155,7 +155,7 @@ Jeder Eintrag ist ein `tower::Layer` mit einem passenden
 | HTTP-Methoden einschränken | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` |
 | **Observability** | | |
 | Request-ID (`X-Request-Id`) | `RequestIdLayer` | `.request_id(..)` |
-| Access-Log (PII-redigiert) | `AccessLogLayer` | `.access_log(..)` |
+| [Access-Log](logging.md#das-access-log) (PII-redigiert) | `AccessLogLayer` | `.access_log(..)` |
 | `tracing`-Spans | `TracingLayer` | `.layer(..)` |
 | `Server-Timing`-Header | `ServerTimingLayer` | `.server_timing(..)` |
 | Echte Client-IP (hinter Proxys) | `RealIpLayer` | `.real_ip(..)` |

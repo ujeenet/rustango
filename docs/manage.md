@@ -1504,14 +1504,19 @@ build failures log a `tracing::warn!` but don't abort the loop.
 
 ### Tracing
 
-`crate::tenancy::pools::tenant_pool_init` is a `tracing::info_span!`
-that wraps the cold-path pool build. Subscribe to it to see
-per-tenant build latency:
+`tenant_pool_init` is a `tracing::info_span!` that wraps the cold-path
+pool build, and the events inside it carry the
+`rustango::tenancy::pools` target. Subscribe to see per-tenant build
+latency:
 
 ```text
-INFO crate::tenancy::pools: tenant pool connected (database mode)
+INFO rustango::tenancy::pools: tenant pool connected (database mode)
      slug=acme elapsed_ms=42 min_conn=1 max_conn=4
 ```
+
+Turn it on with `RUST_LOG=rustango::tenancy::pools=info`. A filter on
+`crate::tenancy::pools` matches nothing — a target is a string, not a
+path; see [Logging](logging.md#targets--naming-the-subsystem).
 
 ### Setup gotcha — macOS `.local` TLDs
 

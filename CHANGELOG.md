@@ -92,6 +92,26 @@ cannot drift from the code again.
   because the other two need no database (#1415).
 
 ### Added
+- **Log lines name the tenant** (#1463). Tenant identity was an axum extractor,
+  so it lived in the request and died with it: every access-log line carried
+  method, path, status and IP, and nothing in the framework carried the tenant.
+  Investigating "tenant A saw tenant B's data" meant grepping logs that could
+  not tell the two apart.
+
+  `ChainResolver` — the one funnel every request path goes through — now
+  publishes what it resolved to the new `tenant_log` module. `AccessLogLayer`
+  reads it back and emits `tenant=acme`, or `tenant=-` when none resolved (an
+  apex or operator-console request, or a single-tenant app). `TracingLayer`'s
+  `http.request` span gained `tenant` / `org_id` fields, so with it installed
+  every event during the request — the ORM's included — carries the tenant in
+  its span context without any subsystem knowing what a tenant is.
+
+  `AccessLogLayer::tenant_field(TenantField::Id)` labels by org id instead:
+  the slug is operator-chosen and is often the customer's name, which some
+  deployments will not ship to an aggregator. `TenantField::Off` omits it.
+
+  Scope is the request path. A background job still has no tenant to log —
+  that needs the task-local propagation in #1229 / #1223.
 - **`viewset::match_nothing` is public.** The documented fail-closed filter
   backend could not be written: the docs named a `deny_all` that never existed,
   and the function that does the job was private. It also loses its `tenancy`
@@ -101,6 +121,27 @@ cannot drift from the code again.
   connect. See the note under `[Unreleased]`.
 
 ### Documentation
+- **`docs/logging.md`** — a page for a subsystem that had none (#1462). Across
+  the 39 published pages, `RUST_LOG` appeared zero times and
+  `logging::setup` / `[logging]` / `Cli::with_logging` appeared nowhere, so the
+  whole `rustango::logging` surface was undiscoverable from the docs site. The
+  page covers what `#[rustango::main]` already installs, levels and filters, the
+  32 `rustango::*` targets as a table, formats, the `[logging]` TOML section,
+  file rotation and the `WorkerGuard`, the access log's fields and levels, the
+  tenant field, `TracingLayer` and OTel, logging in tests, and a
+  nothing-is-coming-out section. Backed by `logging_doc.rs`,
+  `logging_first_installer_wins.rs`, `logging_file_appender_live.rs` and
+  `access_log_tenant_sqlite_live.rs`; the target table is guarded against the
+  code by `docs_inventories.rs`. Translated to de/es/fr.
+- **`manage.md` named a tracing target that cannot be filtered** — it told
+  readers to subscribe to `crate::tenancy::pools`, where the real target is
+  `rustango::tenancy::pools` and the span is `tenant_pool_init`. A `RUST_LOG`
+  filter written from that page matched nothing. Fixed in all four locales —
+  the same class of error `tracing_targets.rs` guards in the source, reproduced
+  in prose where that test could not see it.
+- **The scaffolder's generated config gained a `[logging]` block**, commented,
+  with a note about why it is inert until `#[rustango::main]` is swapped out
+  (#1465).
 - **Rate limiting behind a proxy.** `security.md` diagnosed the problem and then
   prescribed a remedy that does nothing: `RealIpLayer` inserts its own extension
   and never rewrites `ConnectInfo`, which neither limiter reads. The page now

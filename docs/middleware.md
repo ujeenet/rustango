@@ -146,7 +146,7 @@ noted. Bring the module's `…RouterExt` trait into scope to get the method.
 | Restrict HTTP methods | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` |
 | **Observability** | | |
 | Request id (`X-Request-Id`) | `RequestIdLayer` | `.request_id(..)` |
-| Access log (PII-redacted) | `AccessLogLayer` | `.access_log(..)` |
+| [Access log](logging.md#the-access-log) (PII-redacted) | `AccessLogLayer` | `.access_log(..)` |
 | `tracing` spans | `TracingLayer` | `.layer(..)` |
 | `Server-Timing` header | `ServerTimingLayer` | `.server_timing(..)` |
 | Real client IP (behind proxies) | `RealIpLayer` | `.real_ip(..)` |
