@@ -5,7 +5,8 @@
 //!
 //! ```text
 //! cargo rustango new platform_commerce_saas --template tenant \
-//!     --backend postgres --features cache-redis --rustango-path ../..
+//!     --backend postgres --features cache-redis,cache-page \
+//!     --rustango-path ../..
 //! ```
 //!
 //! Every backend feature is present in `Cargo.toml`; `--backend` only
@@ -68,6 +69,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     }
 
+    // `config/default.toml`, then `config/<RUSTANGO_ENV>_settings.toml`,
+    // then `RUSTANGO__*` env overrides. Loaded here rather than left to
+    // `Cli::with_settings_from_env()` because the page cache is built
+    // from the same `Settings`, and loading twice could disagree.
+    //
+    // Nothing read these files before: they shipped with every generated
+    // project and were inert, which is worse than not shipping them.
+    let settings = rustango::config::Settings::load_from_env()
+        .map_err(|e| -> Box<dyn std::error::Error> { format!("loading config: {e}").into() })?;
+
+    // The shared page cache. `from_settings_async`, not `from_settings`:
+    // the sync one panics for `backend = "redis"` because `RedisCache`
+    // pings the server on construction (#1400). An unreachable Redis is
+    // a boot failure by design — six instances silently each keeping
+    // their own in-memory cache is not a working page cache.
+    let cache = rustango::cache::from_settings_async(&settings.cache)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> {
+            format!("building the page cache: {e}").into()
+        })?;
+
     // Two handles on the same database, for two different jobs.
     // `TenantPools` needs the *typed* pool — `DefaultTenantDb` resolves
     // to whichever backend this build selected. The erased `Pool` is
@@ -82,7 +104,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The supervisor's errors are `Send + Sync` because they cross an
     // await inside a spawned task; `#[rustango::main]` returns the
     // plain `Box<dyn Error>`, so they are flattened here.
-    let pools = Arc::new(TenantPools::<DefaultTenantDb>::new(typed));
+    //
+    // Both sets of pools get the same sizing: this one, which the
+    // supervisor's queues run on, and the one `Cli` builds for serving
+    // (below). Configuring only one leaves the other at 16 per tenant,
+    // which is exactly the exhaustion this is meant to avoid.
+    let pool_cfg = commerce::supervisor::pool_config_from_env();
+    let pools = Arc::new(TenantPools::<DefaultTenantDb>::new(typed).config(pool_cfg.clone()));
     let queues = commerce::supervisor::boot(&registry, &pools)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
@@ -109,7 +137,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // the framework claims unconditionally, so this costs one
         // namespace rather than two.
         .routes(RouteConfig::legacy())
-        .api(urls::api(Arc::clone(&queues), fail_ratio_pct()))
+        // #1456 — before 0.57.5 this method did not exist and the
+        // server's tenant pools were fixed at their defaults, with no
+        // way to reach them short of not using `Cli` at all.
+        .with_tenant_pools(pool_cfg.clone())
+        // Item 5 of the review: the config tiers now actually drive the
+        // server (bind, security headers, CORS, body limit).
+        .with_settings(&settings)
+        .api(urls::api(
+            Arc::clone(&queues),
+            fail_ratio_pct(),
+            pool_cfg.clone(),
+            cache,
+            registry.clone(),
+        ))
         .with_health()
         // #1409 — the drain belongs here, not after `run()`. Before
         // 0.57.5 the tenancy server waited on `ctrl_c()`, which is

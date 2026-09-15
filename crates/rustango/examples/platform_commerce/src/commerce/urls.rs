@@ -45,7 +45,12 @@ pub struct AppState {
 }
 
 #[must_use]
-pub fn api(pool: Pool, queue: Arc<DatabaseJobQueue>, fail_ratio_pct: u8) -> Router<()> {
+pub fn api(
+    pool: Pool,
+    queue: Arc<DatabaseJobQueue>,
+    fail_ratio_pct: u8,
+    cache: rustango::cache::BoxedCache,
+) -> Router<()> {
     let state = AppState {
         pool: pool.clone(),
         queue,
@@ -61,10 +66,30 @@ pub fn api(pool: Pool, queue: Arc<DatabaseJobQueue>, fail_ratio_pct: u8) -> Rout
         .merge(customers(&pool))
         .merge(inventory(&pool))
         .route("/api/v1/orders/{id}/confirm", post(confirm_order))
-        .route("/shop/products", get(views::storefront))
+        .merge(storefront(cache))
         .route("/_soak/info", get(soak_info))
         .route("/_soak/jobs", get(soak_jobs))
         .with_state(state)
+}
+
+/// The one cached route.
+///
+/// `vary_on(["host"])` is not needed here — one tenant, one catalogue —
+/// but it is kept identical to the SaaS twin on purpose. In the
+/// multi-tenant app every tenant's storefront is the *same path*, so
+/// dropping the vary there lets the first tenant to warm the cache
+/// serve its catalogue to all the others: a cross-tenant leak produced
+/// by a caching layer doing exactly what it says on the tin. Leaving it
+/// here costs one header lookup and keeps the two files comparable.
+fn storefront(cache: rustango::cache::BoxedCache) -> Router<AppState> {
+    Router::new()
+        .route("/shop/products", get(views::storefront))
+        .layer(
+            rustango::cache_page::CachePageLayer::new(cache)
+                .timeout(std::time::Duration::from_secs(30))
+                .key_prefix("commerce.storefront")
+                .vary_on(["host"]),
+        )
 }
 
 /// Limit/offset pagination, filtering and search.

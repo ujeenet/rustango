@@ -19,7 +19,7 @@ default-run = "platform_commerce"
 # `rustango` re-exports every proc-macro (Model / Form / ViewSet /
 # Serializer / embed_migrations / main), so you do NOT need to depend
 # on `rustango-macros` directly. Use `rustango::Model` etc.
-rustango = { path = "../..", default-features = false, features = ["batteries", "cache-redis"] }
+rustango = { path = "../..", default-features = false, features = ["batteries", "cache-redis", "cache-page"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }
 tower = { version = "0.5", features = ["util"] }

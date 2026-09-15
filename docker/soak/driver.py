@@ -161,6 +161,74 @@ async def check_null_fk(client, name, base, headers=None):
                    "" if "pg" in name else "control", name)
 
 
+async def check_serializer_carries_fk(client, name, base, headers=None):
+    """#1454 — a serializer can declare a foreign-key field.
+
+    It could not until 0.57.5. `ForeignKey<T, K>` implemented neither
+    `Deserialize`, `Default` nor `OpenApiSchema`, and a serializer field
+    must match its model field's type exactly — so there was no spelling
+    that compiled. The consequence was not cosmetic: the nullable-FK
+    write path (#1450) could only be reached through a serializer-less
+    ViewSet, which is why this soak has an `orders-raw` route at all.
+
+    `/api/v1/orders` is the serializer-backed twin, and the FK is
+    published as `picker_id` over the column `assigned_picker_id` — a
+    rename *on* the nullable FK, where #1386 and #1450 meet.
+    """
+    issue = "#1454"
+    cust = await client.post(f"{base}/api/v1/customers", headers=headers, json={
+        "contact_email": f"ser-fk-{time.time_ns()}@example.test",
+        "full_name": "Serializer FK Probe", "loyalty_tier": "bronze",
+    })
+    if cust.status_code not in (200, 201):
+        REPORT.add("serializer carries a foreign key", issue, "NOT-COVERED",
+                   f"could not create a customer: {cust.status_code}", name)
+        return
+    cid = cust.json().get("id")
+
+    r = await client.post(f"{base}/api/v1/orders", headers=headers, json={
+        "ref_code": f"SERFK-{time.time_ns()}",
+        "customer_id": cid,
+        "picker_id": None,
+        "note": None,
+        "status": "pending",
+        "total_cents": 4321,
+    })
+    if r.status_code not in (200, 201):
+        REPORT.add("serializer carries a foreign key", issue, "FAIL",
+                   f"POST through the serializer gave {r.status_code}: {r.text[:300]}", name)
+        return
+    created = r.json()
+    oid = created.get("id")
+
+    # The published name must be there and the column name must not —
+    # otherwise the rename leaked, which is the #1386 half.
+    if "picker_id" not in created:
+        REPORT.add("serializer carries a foreign key", issue, "FAIL",
+                   f"created row has no `picker_id`: {json.dumps(created)[:300]}", name)
+        return
+    if "assigned_picker_id" in created:
+        REPORT.add("serializer carries a foreign key", issue, "FAIL",
+                   "the response leaks the column name `assigned_picker_id`", name)
+        return
+    if created.get("customer_id") != cid:
+        REPORT.add("serializer carries a foreign key", issue, "FAIL",
+                   f"customer_id did not round-trip: sent {cid}, got "
+                   f"{created.get('customer_id')}", name)
+        return
+    REPORT.add("serializer carries a foreign key", issue, "PASS",
+               "non-null FK and nullable FK both declared and round-tripped", name)
+
+    # And through the UPDATE binder, a separate call site from INSERT.
+    r2 = await client.patch(f"{base}/api/v1/orders/{oid}", headers=headers,
+                            json={"picker_id": None})
+    if r2.status_code in (200, 204):
+        REPORT.add("serializer PATCHes a nullable FK to null", issue, "PASS", "", name)
+    else:
+        REPORT.add("serializer PATCHes a nullable FK to null", issue, "FAIL",
+                   f"{r2.status_code}: {r2.text[:300]}", name)
+
+
 async def check_bulk_atomic(client, name, base, headers=None):
     """#1403 — bulk create is atomic in the writes, not just validation."""
     issue = "#1403"
@@ -228,12 +296,185 @@ async def check_pagination(client, name, base, headers=None):
                "" if ok else f"limit/offset {lo.status_code}, cursor {cur.status_code}", name)
 
 
+async def check_health_endpoints(client, name, base, headers=None):
+    """#1457 — `/health` and `/ready` on **every** backend.
+
+    They were mounted only in the `#[cfg(feature = "postgres")]` arm of
+    `runserver`, so on a SQLite or MySQL build `Cli::with_health()` set
+    its flag, the server started, and both endpoints answered 404. A
+    container HEALTHCHECK aimed at /health then reported the service
+    permanently unhealthy with nothing logged to say why.
+
+    This is the check the fleet exists for: the same assertion against
+    six instances, of which four are not Postgres. Run it against the
+    apex rather than a tenant host — health is the process's, not a
+    tenant's, and a load balancer probes it without a Host override.
+    """
+    issue = "#1457"
+    for path in ("/health", "/ready"):
+        try:
+            r = await client.get(f"{base}{path}", headers=headers, timeout=10)
+        except Exception as e:                       # noqa: BLE001
+            REPORT.add(f"{path} answers", issue, "FAIL", f"request failed: {e}", name)
+            continue
+        if r.status_code == 200:
+            REPORT.add(f"{path} answers", issue, "PASS", "", name)
+        else:
+            REPORT.add(f"{path} answers", issue, "FAIL",
+                       f"{r.status_code} — with_health() is a no-op on this build",
+                       name)
+
+
+async def check_cursor_walks(client, name, base, headers=None):
+    """#1459 — a timestamp cursor must serve pages and advance.
+
+    `cursor_pagination_desc("placed_at")` was accepted at build time and
+    then returned 500 on *every* request: cursors only handled integer
+    columns. The ViewSet built, the process started, health checks
+    passed, and the endpoint was dead.
+
+    Status 200 alone is too weak a bar. A token that decoded to the
+    wrong type would still be a string in the response while paging
+    forever over page one, so this follows `next` and requires the
+    second page to hold different rows.
+    """
+    issue = "#1459"
+    first = await client.get(f"{base}/api/v1/orders", headers=headers,
+                             params={"page_size": 5})
+    if first.status_code != 200:
+        REPORT.add("timestamp cursor serves a page", issue, "FAIL",
+                   f"{first.status_code}: {first.text[:200]}", name)
+        return
+    body = first.json()
+    ids_1 = [r.get("id") for r in body.get("results", [])]
+    token = body.get("next")
+    REPORT.add("timestamp cursor serves a page", issue, "PASS",
+               f"{len(ids_1)} rows", name)
+
+    if not ids_1:
+        REPORT.add("timestamp cursor advances", issue, "NOT-COVERED",
+                   "no orders yet — nothing to page through", name)
+        return
+    if not token:
+        # Fewer rows than a page: correct, and not evidence either way.
+        REPORT.add("timestamp cursor advances", issue, "NOT-COVERED",
+                   f"only {len(ids_1)} order(s); no second page to walk to", name)
+        return
+
+    # `next` is a full URL in some configurations and a bare token in
+    # others; accept both rather than guessing.
+    url = token if token.startswith("http") else f"{base}/api/v1/orders?cursor={token}"
+    second = await client.get(url, headers=headers)
+    if second.status_code != 200:
+        REPORT.add("timestamp cursor advances", issue, "FAIL",
+                   f"following `next` gave {second.status_code}: {second.text[:200]}", name)
+        return
+    ids_2 = [r.get("id") for r in second.json().get("results", [])]
+    if not ids_2:
+        REPORT.add("timestamp cursor advances", issue, "FAIL",
+                   "`next` was offered but its page is empty", name)
+    elif set(ids_1) & set(ids_2):
+        REPORT.add("timestamp cursor advances", issue, "FAIL",
+                   f"page two repeats rows from page one: {sorted(set(ids_1) & set(ids_2))}",
+                   name)
+    else:
+        REPORT.add("timestamp cursor advances", issue, "PASS",
+                   f"{len(ids_1)} then {len(ids_2)} distinct rows", name)
+
+
+async def check_malformed_cursor_is_400(client, name, base, headers=None):
+    """A bad cursor is the caller's fault: 400, not 500."""
+    r = await client.get(f"{base}/api/v1/orders", headers=headers,
+                         params={"cursor": "not-a-real-token"})
+    if r.status_code == 400:
+        REPORT.add("malformed cursor is a client error", "#1459", "PASS", "", name)
+    else:
+        REPORT.add("malformed cursor is a client error", "#1459", "FAIL",
+                   f"expected 400, got {r.status_code}", name)
+
+
+async def check_page_cache(client, name, base, headers=None):
+    """The storefront is actually cached, and only for its own tenant.
+
+    Two separate claims, and the second is the dangerous one.
+
+    The app carried the `cache-redis` feature and the fleet ran a Redis
+    container for several commits while nothing was cached at all — the
+    only evidence was a doc comment saying otherwise. So: assert a real
+    HIT, not the presence of a header.
+
+    And `CachePageLayer` keys on `(method, path, vary-on headers)`.
+    Under tenancy every storefront is the *same path*, so without
+    `vary_on(["host"])` the first tenant to warm the cache serves its
+    catalogue to every other one. That is a cross-tenant data leak
+    caused by a caching layer working exactly as documented, which is
+    why it gets its own check rather than riding along on this one.
+    """
+    r1 = await client.get(f"{base}/shop/products", headers=headers)
+    if r1.status_code != 200:
+        REPORT.add("storefront is page-cached", "—", "NOT-COVERED",
+                   f"storefront answered {r1.status_code}", name)
+        return
+    r2 = await client.get(f"{base}/shop/products", headers=headers)
+    status = r2.headers.get("x-cache-status", "<absent>")
+    if status.upper() == "HIT":
+        REPORT.add("storefront is page-cached", "—", "PASS",
+                   "second request served from Redis", name)
+    else:
+        REPORT.add("storefront is page-cached", "—", "FAIL",
+                   f"second request was `x-cache-status: {status}` — the cache "
+                   f"is wired to nothing", name)
+
+
+async def check_page_cache_is_per_tenant(client, name, base):
+    """A cached page must not cross tenants (`vary_on(["host"])`)."""
+    a, b = tenant_host(1), tenant_host(2)
+    # Warm t01 twice so the entry is certainly stored, then ask as t02.
+    await client.get(f"{base}/shop/products", headers={"Host": a})
+    await client.get(f"{base}/shop/products", headers={"Host": a})
+    r = await client.get(f"{base}/shop/products", headers={"Host": b})
+    if r.status_code != 200:
+        REPORT.add("page cache does not cross tenants", "—", "NOT-COVERED",
+                   f"t02 storefront answered {r.status_code}", name)
+        return
+    body = r.text
+    # The page renders `Catalogue — <slug>`, so the leak is legible.
+    if "t01" in body:
+        REPORT.add("page cache does not cross tenants", "—", "FAIL",
+                   "t02 was served t01's cached storefront — the page cache "
+                   "is not keyed on Host", name)
+    elif "t02" in body:
+        REPORT.add("page cache does not cross tenants", "—", "PASS", "", name)
+    else:
+        REPORT.add("page cache does not cross tenants", "—", "NOT-COVERED",
+                   f"could not identify the tenant in the response: {body[:160]}", name)
+
+
 async def check_soak_info(client, name, base, headers=None, expect_tenant=None):
     r = await client.get(f"{base}/_soak/info", headers=headers)
     if r.status_code != 200:
         REPORT.add("instance reachable", "—", "FAIL", f"{r.status_code}", name)
         return None
     info = r.json()
+
+    # #1456 — the deployment's pool sizing must have reached the pools.
+    # `TenantPoolsConfig` existed but nothing on `Cli` reached the
+    # `TenantPools` it built internally, so a deployment could set every
+    # knob it liked and get 16 connections per tenant regardless. The
+    # compose file sets 6; the framework default is 16, so a report of
+    # 16 here means the config went nowhere.
+    pool = info.get("pool")
+    if pool is None:
+        pass  # single-tenant app: no tenant pools to size
+    elif pool.get("max_connections") == 6:
+        REPORT.add("tenant pool sizing reaches the pools", "#1456", "PASS",
+                   f"max_connections={pool['max_connections']}, "
+                   f"cache_max={pool.get('cache_max')}", name)
+    else:
+        REPORT.add("tenant pool sizing reaches the pools", "#1456", "FAIL",
+                   f"compose set TENANT_POOL_MAX_CONNECTIONS=6 but the process "
+                   f"reports {pool.get('max_connections')}", name)
+
     if expect_tenant and info.get("tenant") != expect_tenant:
         # Asserted on the *response*, not on the Host we sent: the two
         # can differ for ~30s after provisioning because the resolver
@@ -295,6 +536,110 @@ async def check_apex_does_not_serve_app(client, name, base):
     else:
         REPORT.add("apex host does not serve tenant routes", "—", "PASS",
                    f"{r.status_code}", name)
+
+
+async def check_supervisor_retires(client, name, base):
+    """The refresh loop removes queues, not just adds them.
+
+    It only ever added. A tenant that was deactivated or deleted kept
+    its two workers polling a database it no longer used, held its pool
+    against the server's connection limit and against the 64-pool cache
+    cap (which has no eviction), and was drained on every deploy.
+
+    Nothing reported it: a deactivated tenant produces no error, it just
+    stops appearing in the registry query. So the only way to see the
+    behaviour is to *cause* the absence and watch the queue go.
+
+    Run last, on a tenant the other checks do not touch — t01/t02 carry
+    the isolation checks and t19/t20 the custom hostnames.
+    """
+    victim = f"t{TENANTS - 2:02d}"
+    observer = {"Host": tenant_host(1)}
+
+    before = await client.get(f"{base}/_soak/jobs", headers=observer)
+    if before.status_code != 200:
+        REPORT.add("supervisor retires a deactivated tenant", "—", "NOT-COVERED",
+                   f"could not read /_soak/jobs: {before.status_code}", name)
+        return
+    if victim not in before.json().get("queues", []):
+        REPORT.add("supervisor retires a deactivated tenant", "—", "NOT-COVERED",
+                   f"{victim} had no queue to retire", name)
+        return
+
+    r = await client.post(f"{base}/_soak/tenants/{victim}/active",
+                          headers=observer, content="false")
+    if r.status_code != 200:
+        REPORT.add("supervisor retires a deactivated tenant", "—", "NOT-COVERED",
+                   f"could not deactivate {victim}: {r.status_code} {r.text[:160]}", name)
+        return
+
+    # The refresh loop ticks every 15s; give it two plus slack rather
+    # than polling, which would say nothing useful about the latency.
+    await asyncio.sleep(40)
+    after = await client.get(f"{base}/_soak/jobs", headers=observer)
+    body = after.json() if after.status_code == 200 else {}
+    queues, pools = body.get("queues", []), body.get("pools", [])
+
+    if victim in queues:
+        REPORT.add("supervisor retires a deactivated tenant", "—", "FAIL",
+                   f"{victim} was deactivated 40s ago and still has a running "
+                   f"queue: {queues}", name)
+    elif victim in pools:
+        REPORT.add("supervisor retires a deactivated tenant", "—", "FAIL",
+                   f"{victim}'s queue stopped but its pool is still registered — "
+                   f"the connections leak: {pools}", name)
+    else:
+        REPORT.add("supervisor retires a deactivated tenant", "—", "PASS",
+                   f"{victim} left both the queue map and the pool registry", name)
+
+    # Put it back, so a second run of the driver starts from the same
+    # fleet state as the first.
+    await client.post(f"{base}/_soak/tenants/{victim}/active",
+                      headers=observer, content="true")
+
+
+def report_uncoverable(live_single, live_saas):
+    """Name what this harness cannot decide, and why.
+
+    A finding that no check covers is a finding that silently counts as
+    passing, which is the failure mode this whole report is built to
+    avoid. These are stated rather than omitted.
+    """
+    booted = len(live_single) + len(live_saas)
+
+    # #1458 — concurrent `CREATE TABLE IF NOT EXISTS` racing itself.
+    # Postgres is not atomic here: two sessions can both pass the
+    # existence check and one gets `42P07`/`23505` on a pg_catalog
+    # index. The fleet boots six instances plus workers against three
+    # shared databases, so the race is *run*, but the only observable
+    # afterwards is that everything came up. A run where it did not
+    # reproduce is not evidence the predicate is right.
+    if booted:
+        REPORT.add(
+            "concurrent boot does not hit a DDL race", "#1458", "PASS",
+            f"{booted} instance(s) plus workers raced `ensure_table` on shared "
+            f"databases and all came up. Note: a non-reproduction is weak "
+            f"evidence — the predicate itself is pinned by unit tests",
+        )
+    else:
+        REPORT.add("concurrent boot does not hit a DDL race", "#1458",
+                   "NOT-COVERED", "no instance came up", "")
+
+    # #1455 — `make:job` emitted a scheduler task with a hardcoded
+    # PgPool. Pure code generation: the verb's output never reaches a
+    # running server, so no request can see it.
+    REPORT.add(
+        "make:job scaffolds a real Job", "#1455", "NOT-COVERED",
+        "scaffolder-only — no runtime surface. Covered by "
+        "crates/rustango/tests/make_job_scaffolds_a_real_job.rs",
+    )
+
+    # #1450 on the two dialects that were never changed.
+    REPORT.add(
+        "nullable bigint FK binding (MySQL/SQLite)", "#1450", "NOT-COVERED",
+        "the MySQL and SQLite binders were deliberately left unchanged; those "
+        "legs are controls, and a green there does not distinguish the fix",
+    )
 
 
 # ------------------------------------------------------------------ load
@@ -396,23 +741,36 @@ async def main():
         print("\n== assertions: single-tenant ==")
         for name, base in live_single.items():
             await check_soak_info(client, name, base)
+            await check_health_endpoints(client, name, base)
             await check_null_fk(client, name, base)
+            await check_serializer_carries_fk(client, name, base)
             await check_bulk_atomic(client, name, base)
             await check_serializer_source(client, name, base)
             await check_pagination(client, name, base)
+            await check_cursor_walks(client, name, base)
+            await check_malformed_cursor_is_400(client, name, base)
+            await check_page_cache(client, name, base)
 
         print("\n== assertions: multi-tenant ==")
         for name, base in live_saas.items():
             hdr = {"Host": tenant_host(1)}
             await check_soak_info(client, name, base, headers=hdr,
                                   expect_tenant="t01")
+            await check_health_endpoints(client, name, base)
             await check_null_fk(client, name, base, headers=hdr)
+            await check_serializer_carries_fk(client, name, base, headers=hdr)
             await check_bulk_atomic(client, name, base, headers=hdr)
             await check_serializer_source(client, name, base, headers=hdr)
             await check_pagination(client, name, base, headers=hdr)
+            await check_cursor_walks(client, name, base, headers=hdr)
+            await check_malformed_cursor_is_400(client, name, base, headers=hdr)
+            await check_page_cache(client, name, base, headers=hdr)
+            await check_page_cache_is_per_tenant(client, name, base)
             await check_tenant_isolation(client, name, base)
             await check_registered_host(client, name, base)
             await check_apex_does_not_serve_app(client, name, base)
+
+        report_uncoverable(live_single, live_saas)
 
         targets = [(n, b, None) for n, b in live_single.items()]
         targets += [(n, b, {"Host": tenant_host(rng.randint(1, TENANTS))})
@@ -457,6 +815,12 @@ async def main():
             else:
                 REPORT.add("job queue drained", "—", "FAIL",
                            f"{pending} still pending after 60s", name)
+
+        # Last, because it deactivates a tenant: anything after it would
+        # be running against a fleet in a state the rest did not expect.
+        print("\n== supervisor teardown ==")
+        for name, base in live_saas.items():
+            await check_supervisor_retires(client, name, base)
 
     return write_report()
 

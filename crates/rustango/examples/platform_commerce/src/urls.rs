@@ -13,12 +13,18 @@ use rustango::sql::Pool;
 use crate::views;
 
 #[must_use]
-pub fn api(pool: Pool, queue: Arc<DatabaseJobQueue>, fail_ratio_pct: u8) -> Router<()> {
+pub fn api(
+    pool: Pool,
+    queue: Arc<DatabaseJobQueue>,
+    fail_ratio_pct: u8,
+    cache: rustango::cache::BoxedCache,
+) -> Router<()> {
     Router::new()
         .merge(platform_commerce::commerce::urls::api(
             pool.clone(),
             queue,
             fail_ratio_pct,
+            cache,
         ))
         // The auto-admin, mounted under `/__admin` rather than `/admin`
         // so it matches where the SaaS twin's console lands under

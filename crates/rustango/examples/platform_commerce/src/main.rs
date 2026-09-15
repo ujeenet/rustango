@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! cargo rustango new platform_commerce --template fullstack \
-//!     --backend postgres --features cache-redis --rustango-path ../..
+//!     --backend postgres --features cache-redis,cache-page --rustango-path ../..
 //! ```
 //!
 //! Every backend feature is present in `Cargo.toml`; `--backend` only
@@ -77,6 +77,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let pool = Pool::connect(&url).await?;
 
+    // `config/default.toml`, then `config/<RUSTANGO_ENV>_settings.toml`,
+    // then `RUSTANGO__*` env overrides. Nothing read these files before:
+    // they shipped with every generated project and were inert, which is
+    // worse than not shipping them.
+    let settings = rustango::config::Settings::load_from_env()
+        .map_err(|e| -> Box<dyn std::error::Error> { format!("loading config: {e}").into() })?;
+
+    // The storefront page cache. `from_settings_async`, not
+    // `from_settings`: the sync one panics for `backend = "redis"`
+    // because `RedisCache` pings the server on construction (#1400). An
+    // unreachable Redis is a boot failure by design — instances each
+    // silently keeping their own in-memory cache is not a page cache.
+    let cache = rustango::cache::from_settings_async(&settings.cache)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> {
+            format!("building the page cache: {e}").into()
+        })?;
+
     // One pool, filed under the single-tenant slug, so the job handlers
     // — which receive no pool of their own — can find it.
     commerce::jobs::register_pool(commerce::jobs::SINGLE, pool.clone());
@@ -115,10 +133,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let drain = Arc::clone(&queue);
     rustango::manage::Cli::new()
+        // Item 5 of the review: the config tiers now actually drive the
+        // server (bind, security headers, CORS, body limit).
+        .with_settings(&settings)
         .api(urls::api(
             pool.clone(),
             Arc::clone(&queue),
             fail_ratio_pct(),
+            cache,
         ))
         .with_health()
         // #1409. This is the only correct place for the drain: before

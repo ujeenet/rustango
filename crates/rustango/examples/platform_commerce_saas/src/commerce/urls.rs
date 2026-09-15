@@ -29,7 +29,8 @@ use axum::Router;
 use rustango::core::Model as _;
 use rustango::extractors::Tenant;
 use rustango::jobs::JobQueue as _;
-use rustango::tenancy::DefaultTenantDb;
+use rustango::sql::UpdaterPool as _;
+use rustango::tenancy::{DefaultTenantDb, Org};
 use rustango::viewset::ViewSet;
 
 use super::jobs::{self, FlakyPaymentCapture, OrderConfirmation};
@@ -46,13 +47,29 @@ use super::views;
 pub struct AppState {
     pub queues: Arc<super::supervisor::QueueMap>,
     pub fail_ratio_pct: u8,
+    /// The **registry**, not a tenant's database — `Org` lives there and
+    /// the `Tenant` extractor does not expose it. The only handler that
+    /// uses it is the gated `_soak` one below.
+    pub registry: rustango::sql::Pool,
+    /// Reported on `/_soak/info` so the driver can assert the process
+    /// actually applied the deployment's sizing rather than silently
+    /// falling back to the defaults (#1456).
+    pub pool_cfg: rustango::tenancy::TenantPoolsConfig,
 }
 
 #[must_use]
-pub fn api(queues: Arc<super::supervisor::QueueMap>, fail_ratio_pct: u8) -> Router<()> {
+pub fn api(
+    queues: Arc<super::supervisor::QueueMap>,
+    fail_ratio_pct: u8,
+    pool_cfg: rustango::tenancy::TenantPoolsConfig,
+    cache: rustango::cache::BoxedCache,
+    registry: rustango::sql::Pool,
+) -> Router<()> {
     let state = AppState {
         queues,
         fail_ratio_pct,
+        pool_cfg,
+        registry,
     };
 
     Router::new()
@@ -63,10 +80,32 @@ pub fn api(queues: Arc<super::supervisor::QueueMap>, fail_ratio_pct: u8) -> Rout
         .merge(customers())
         .merge(inventory())
         .route("/api/v1/orders/{id}/confirm", post(confirm_order))
-        .route("/shop/products", get(views::storefront))
+        .merge(storefront(cache))
         .route("/_soak/info", get(soak_info))
         .route("/_soak/jobs", get(soak_jobs))
+        .route("/_soak/tenants/{slug}/active", post(soak_set_tenant_active))
         .with_state(state)
+}
+
+/// The one cached route, and the one place tenancy makes page caching
+/// dangerous.
+///
+/// `CachePageLayer` keys on `(method, path, vary-on header values)`.
+/// Every tenant's storefront is the *same path* — `/shop/products` —
+/// so without `vary_on(["host"])` the first tenant to warm the cache
+/// serves its catalogue to every other tenant. That is a cross-tenant
+/// leak produced by a caching layer doing exactly what it says.
+///
+/// `cache_authenticated` is deliberately left off: a request carrying
+/// `Cookie` or `Authorization` then bypasses the cache entirely, which
+/// is right for a storefront that renders a signed-in user's name.
+fn storefront(cache: rustango::cache::BoxedCache) -> Router<AppState> {
+    Router::new().route("/shop/products", get(views::storefront)).layer(
+        rustango::cache_page::CachePageLayer::new(cache)
+            .timeout(std::time::Duration::from_secs(30))
+            .key_prefix("commerce.storefront")
+            .vary_on(["host"]),
+    )
 }
 
 fn products() -> Router<AppState> {
@@ -94,10 +133,14 @@ fn orders() -> Router<AppState> {
         .with_state(())
 }
 
-/// The #1450 endpoint: the same model with **no serializer**, because a
-/// serializer cannot carry a foreign-key column (#1454). Without one,
-/// the ViewSet writes the model's own columns, which is the only route
-/// from HTTP to the nullable-`bigint` binder.
+/// The same model with **no serializer** — the control for `/orders`.
+///
+/// This route existed because it had to: until #1454 a serializer could
+/// not declare a foreign-key field at all, so a serializer-less ViewSet
+/// was the only way to reach the nullable-`bigint` binder (#1450) from
+/// HTTP. It is kept now that `OrderSerializer` carries the FK, because
+/// the two together are what distinguish "the binder works" from "the
+/// serializer happens to hide the column".
 fn orders_raw() -> Router<AppState> {
     ViewSet::for_model(Order::SCHEMA)
         .filter_fields(&["status", "customer_id"])
@@ -189,13 +232,24 @@ async fn confirm_order(
 /// header it sent: the resolver caches negative results for 30s, so
 /// "the tenant I meant" and "the tenant I got" can differ for a minute
 /// after provisioning.
-async fn soak_info(t: Tenant<DefaultTenantDb>) -> Json<serde_json::Value> {
+async fn soak_info(
+    State(st): State<AppState>,
+    t: Tenant<DefaultTenantDb>,
+) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "app": "platform_commerce_saas",
         "tenancy": "multi",
         "tenant": t.org.slug,
         "dialect": t.pool().dialect().name(),
         "version": env!("CARGO_PKG_VERSION"),
+        // #1456. A default here means the sizing never reached the
+        // pools, which is a connection-exhaustion outage waiting for
+        // the twentieth tenant rather than a cosmetic mismatch.
+        "pool": {
+            "max_connections": st.pool_cfg.database_pool_max_connections,
+            "min_connections": st.pool_cfg.database_pool_min_connections,
+            "cache_max": st.pool_cfg.max_cached_database_pools,
+        },
     }))
 }
 
@@ -215,4 +269,48 @@ async fn soak_jobs(
         "pools": jobs::registered_slugs(),
         "queues": st.queues.slugs(),
     }))
+}
+
+/// Flip a tenant's `active` flag, so the soak can observe the
+/// supervisor's *other* direction.
+///
+/// The refresh loop learns about a deactivated tenant by its absence
+/// from `Org::objects().filter("active", true)` — there is no event to
+/// subscribe to. Without something that can produce that absence, the
+/// retirement path is code no test ever runs, which is exactly how it
+/// came to be missing in the first place.
+///
+/// Gated on `SOAK_ALLOW_TENANT_MUTATION`, off by default. An endpoint
+/// that deactivates tenants is not something an example should mount
+/// just because it is convenient for a harness.
+async fn soak_set_tenant_active(
+    State(st): State<AppState>,
+    Path(slug): Path<String>,
+    body: String,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if std::env::var("SOAK_ALLOW_TENANT_MUTATION").as_deref() != Ok("1") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "set SOAK_ALLOW_TENANT_MUTATION=1 to enable this endpoint".to_owned(),
+        ));
+    }
+    let active = body.trim() != "false";
+
+    // The registry, not the calling tenant's own database: `Org` lives
+    // there.
+    let updated = Org::objects()
+        .filter("slug", slug.clone())
+        .update()
+        .set("active", active)
+        .execute_pool(&st.registry)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if updated == 0 {
+        return Err((StatusCode::NOT_FOUND, format!("no tenant `{slug}`")));
+    }
+    tracing::info!(tenant = %slug, active, "tenant active flag changed by _soak endpoint");
+    Ok(Json(
+        serde_json::json!({ "tenant": slug, "active": active, "updated": updated }),
+    ))
 }

@@ -33,6 +33,37 @@ use rustango::tenancy::{DefaultTenantDb, Org, TenantPools};
 
 use super::jobs;
 
+/// Tenant pool sizing, from the environment (#1456).
+///
+/// Twenty tenants at the default 16 connections each, times a web and a
+/// worker process, is 640 against a Postgres default `max_connections`
+/// of 100 — so this has to be tunable *per deployment*, not per build.
+/// It was not: `TenantPoolsConfig` existed but nothing on `Cli` reached
+/// the `TenantPools` it built internally, and the soak found that
+/// before it had sent a single request.
+///
+/// In the library rather than either binary, because the server and the
+/// standalone worker must size their pools the same way. Two answers to
+/// this question is how a fleet exhausts a database with every
+/// individual process looking correctly configured.
+#[must_use]
+pub fn pool_config_from_env() -> rustango::tenancy::TenantPoolsConfig {
+    fn var(name: &str) -> Option<u32> {
+        std::env::var(name).ok().and_then(|v| v.parse().ok())
+    }
+    let mut cfg = rustango::tenancy::TenantPoolsConfig::default();
+    if let Some(n) = var("TENANT_POOL_MAX_CONNECTIONS") {
+        cfg.database_pool_max_connections = n;
+    }
+    if let Some(n) = var("TENANT_POOL_MIN_CONNECTIONS") {
+        cfg.database_pool_min_connections = n;
+    }
+    if let Some(n) = var("TENANT_POOL_CACHE_MAX") {
+        cfg.max_cached_database_pools = n as usize;
+    }
+    cfg
+}
+
 /// Queues by tenant slug.
 ///
 /// `DatabaseJobQueue`'s `register`/`dispatch` are generic, so
@@ -79,6 +110,13 @@ impl QueueMap {
             .unwrap_or_else(|e| e.into_inner())
             .insert(slug, q);
     }
+
+    fn remove(&self, slug: &str) -> Option<Arc<DatabaseJobQueue>> {
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(slug)
+    }
 }
 
 /// Build and start a queue for one tenant. Idempotent by slug.
@@ -116,6 +154,54 @@ async fn ensure_queue(
     tracing::info!(tenant = %org.slug, workers = 2, "tenant queue started");
     map.insert(org.slug.clone(), q);
     Ok(true)
+}
+
+/// Which running queues no longer belong to an active tenant.
+///
+/// A tenant that was deactivated or deleted is simply *absent* from the
+/// registry query — there is no event to subscribe to, so this set
+/// difference is the only signal there is. That is why the omission was
+/// invisible: nothing errored, the queues just accumulated.
+///
+/// Taken against the live queue map rather than a remembered list, so a
+/// queue started by an earlier tick is covered too.
+pub fn retired_slugs(running: &[String], active: &[String]) -> Vec<String> {
+    let active: std::collections::HashSet<&str> = active.iter().map(String::as_str).collect();
+    running
+        .iter()
+        .filter(|s| !active.contains(s.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Stop and forget one tenant's queue.
+///
+/// The mirror of [`ensure_queue`], and the half this example was
+/// missing. Adding without removing leaks in three ways, all of them
+/// silent:
+///
+///   * the queue's two workers keep polling a database the tenant no
+///     longer uses — and if it was dropped, every poll errors, forever;
+///   * `jobs::POOLS` and `TenantPools`'s cache both keep the pool
+///     alive, holding its connections against the server's limit. The
+///     cache is capped at 64 with no eviction, so a long-lived process
+///     that churns tenants eventually cannot open a pool at all;
+///   * `shutdown_all` drains queues nobody is feeding, slowing every
+///     deploy a little more.
+///
+/// Drain first, then evict: shutting the queue down lets in-flight jobs
+/// finish on a pool that is still open. The reverse order kills them.
+async fn retire_queue(map: &QueueMap, pools: &TenantPools<DefaultTenantDb>, slug: &str) {
+    let Some(q) = map.remove(slug) else {
+        return;
+    };
+    q.shutdown().await;
+    jobs::unregister_pool(slug);
+    // Drops the cached database-mode pool *and* the schema-mode scoped
+    // pool; a tenant reactivated later gets a freshly built one, which
+    // is also what makes a changed `database_url` take effect.
+    pools.invalidate(slug).await;
+    tracing::info!(tenant = %slug, "tenant queue retired");
 }
 
 /// Build queues for every currently-active tenant.
@@ -174,6 +260,12 @@ pub fn spawn_refresh(
                         tracing::error!(tenant = %org.slug, error = %e, "queue start failed");
                     }
                 }
+            }
+
+            // And the other direction, which this loop used to skip.
+            let active: Vec<String> = orgs.iter().map(|o| o.slug.clone()).collect();
+            for slug in retired_slugs(&map.slugs(), &active) {
+                retire_queue(&map, &pools, &slug).await;
             }
         }
     })
