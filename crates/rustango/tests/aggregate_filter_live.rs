@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use rustango::core::aggregates::{count, count_all, stddev, sum};
 use rustango::core::{Column as _, SqlValue};
-use rustango::sql::__macro_internals::fetch_aggregate_on;
+use rustango::sql::fetch_aggregate_on;
 use rustango::sql::{sqlx, Auto};
 use rustango::Model;
 use tokio::sync::Mutex;
@@ -35,7 +35,11 @@ pub struct Post {
 
 async fn pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
-    sqlx::PgPool::connect(&url).await.ok()
+    Some(
+        sqlx::PgPool::connect(&url)
+            .await
+            .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}")),
+    )
 }
 
 async fn fresh(pool: &sqlx::PgPool) {

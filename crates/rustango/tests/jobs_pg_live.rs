@@ -135,10 +135,12 @@ async fn retryable_failure_reschedules_with_backoff() {
 
     q.dispatch(&PgRetry).await.unwrap();
 
-    // First attempt fails immediately, then a 2-second backoff before
-    // retry. Wait at least one full backoff, then poll for both the
-    // attempt counter AND the row deletion — same post-success race
-    // window as `dispatch_persists_and_runs`.
+    // First attempt fails immediately, then a 1-second backoff before
+    // retry (#1410 — this said 2s, which is what the shift produced
+    // before it was corrected). The sleep stays generous: it only has to
+    // clear one full backoff, and then we poll for both the attempt
+    // counter AND the row deletion — same post-success race window as
+    // `dispatch_persists_and_runs`.
     tokio::time::sleep(Duration::from_millis(3500)).await;
     let mut row_count: i64 = -1;
     for _ in 0..80 {

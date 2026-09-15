@@ -519,8 +519,15 @@ Una barra final en el prefijo de montaje es opcional. Solo se conectan estos sei
 verbos, más una acción de colección `QUERY` (RFC 10008) cuando la característica
 `admin` está activa. Las rutas se construyen con `axum::routing::get`, así que
 axum responde al `HEAD` desde el handler `GET`; `OPTIONS` no está cableado. La **creación masiva** viene gratis:
-haz `POST` de un *arreglo* JSON y cada elemento se inserta en orden, validado
-atómicamente (un elemento inválido rechaza todo el lote).
+haz `POST` de un *arreglo* JSON y cada elemento se inserta en orden, **dentro de una
+transacción**. Un elemento inválido rechaza todo el lote y **no deja nada atrás** — lo
+detecte la validación o la base de datos.
+
+> Esa segunda mitad no era cierta hasta [#1403](https://github.com/ujeenet/rustango/issues/1403).
+> La validación era atómica; las escrituras eran un `INSERT` cada una sin transacción,
+> así que una violación de unicidad o de clave foránea en el elemento 5 confirmaba los
+> elementos 0–4, devolvía `400 bulk entry 5` y no nombraba ninguna de las filas creadas.
+> Esas violaciones son justo la clase que la validación no puede decidir de antemano.
 
 ---
 

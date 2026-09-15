@@ -143,6 +143,8 @@ Eine Vorlage schaltet einen sinnvollen Satz ein; `--features` ergänzt die Opt-i
 | `sso` / `admin-sso` | OIDC Single Sign-on, für App-Benutzer / für die Admin-Site |
 | `passkey` | WebAuthn-/Passkey-Authentifizierung |
 | `cache-redis` / `cache-page` | Redis-Cache-Backend / Caching ganzer Seiten |
+| `jobs` / `jobs-postgres` | Hintergrund-Job-Queue, prozessintern / datenbankgestützt und damit neustartfest |
+| `scheduler` | Hintergrundaufgaben in festen Intervallen |
 | `email-smtp` | SMTP-Transport für das E-Mail-Framework |
 | `mcp` | Model-Context-Protocol-Server für KI-Agenten |
 | `testkit` / `test_utils` | Nur-Test-Schema-Builder, Factories und Konstruktoren |

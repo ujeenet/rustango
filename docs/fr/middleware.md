@@ -155,7 +155,7 @@ obtenir la méthode.
 | Restreindre les méthodes HTTP | `MethodRestrictLayer` | `.require_get()` / `.require_post()` / `.require_safe()` |
 | **Observabilité** | | |
 | Identifiant de requête (`X-Request-Id`) | `RequestIdLayer` | `.request_id(..)` |
-| Journal d'accès (PII expurgées) | `AccessLogLayer` | `.access_log(..)` |
+| [Journal d'accès](logging.md#le-journal-daccès) (PII expurgées) | `AccessLogLayer` | `.access_log(..)` |
 | Spans `tracing` | `TracingLayer` | `.layer(..)` |
 | En-tête `Server-Timing` | `ServerTimingLayer` | `.server_timing(..)` |
 | IP client réelle (derrière des proxys) | `RealIpLayer` | `.real_ip(..)` |

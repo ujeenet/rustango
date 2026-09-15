@@ -46,7 +46,7 @@ otherwise rewrites:
 |---|---|---|---|
 | POST | `/api/auth/login` | `{username, password}` | `{access, refresh, user}` |
 | POST | `/api/auth/refresh` | `{refresh}` | `{access, refresh}` |
-| POST | `/api/auth/logout` | `Authorization: Bearer <access>` | `204` (revokes the JTI) |
+| POST | `/api/auth/logout` | `Authorization: Bearer <access>` + optional `{refresh}` | `204` (revokes both JTIs) |
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login verifies the password with [argon2id](auth-passwords.md), then issues a
@@ -147,6 +147,23 @@ assert!(jwt.revoke(&pair.access).await);
 assert!(jwt.verify_access(&pair.access).await.is_none());
 ```
 
+### Send the refresh token to `/logout`
+
+Revoking the bearer alone ends a token that would have expired in minutes
+anyway. The refresh token is the one with days of life, and it can mint fresh
+access tokens for its whole TTL — so a logout that leaves it alive doesn't end
+the session, it postpones it:
+
+```jsonc
+POST /api/auth/logout
+Authorization: Bearer <access>
+{ "refresh": "<refresh>" }        // revokes the long-lived half too
+```
+
+The body is optional, so clients written against the older endpoint keep
+working unchanged — they simply revoke less. Send it. Both halves are pinned to
+the calling tenant, so one subdomain cannot revoke another's token.
+
 The blacklist lives in a pluggable `JtiStore`. The default `InMemoryJtiStore` is
 **single-process and loses revocations on restart** — fine for one instance. Any
 multi-replica deployment MUST install a shared, durable store (Redis / DB) so a
@@ -239,6 +256,19 @@ Custom claims survive `refresh` (carried onto the new pair) unless you use
   to authenticate arbitrary routes from the `Authorization: Bearer` header.
 - **HS256 signing**, 32-byte key floor — same algorithm and constraints as
   [standalone JWT](auth-jwt.md#security-model).
+- **The tokens are ordinary JWTs**, so anything that verifies a JWT can verify
+  these: `jwt.io`, your platform's standard library, an API gateway, another
+  service you hand a token to. Three segments, a JOSE header of
+  `{"alg":"HS256","typ":"JWT"}`, signed over `header.payload`.
+
+  Until [#1397](https://github.com/ujeenet/rustango/issues/1397) they were two
+  segments with no header, signed over the payload alone — readable by nothing
+  but rustango, and rejected even by `rustango::jwt::decode`. If you wrote a
+  custom verifier to work around that, you can drop it.
+
+  Tokens minted before the fix are still accepted on verify so an upgrade does
+  not log anyone out. That compatibility path is removed in 0.58, by which point
+  any token in the old shape has long expired.
 
 
 ---

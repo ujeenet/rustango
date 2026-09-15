@@ -18,6 +18,7 @@
 {% endif %}
 
 <form method="post" action="{{ admin_prefix }}{{ audit_url }}/cleanup" class="audit-cleanup" onsubmit="return confirm('Apply audit cleanup? This is irreversible.');">
+  {{ csrf_input | safe }}
   <label>
     <input type="radio" name="mode" value="older_than" checked>
     Older than

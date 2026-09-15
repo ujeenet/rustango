@@ -82,6 +82,29 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
+`JwtBackend` accepte les tokens d'accès émis par `JwtLifecycle` et refuse ses
+tokens de rafraîchissement — les deux sont identiques sur le fil à `typ` près,
+donc un token de rafraîchissement présenté comme bearer serait une
+authentification valant des jours au lieu de quelques minutes.
+
+**La révocation est optionnelle et désactivée par défaut.** Un `JwtBackend` nu
+ne consulte jamais de liste noire : un token révoqué par `/api/auth/logout`
+continue donc de s'authentifier via ce backend jusqu'à sa propre expiration.
+Partagez un magasin entre le cycle de vie et le backend pour que la déconnexion
+prenne effet :
+
+```rust
+use rustango::jti_store::{InMemoryJtiStore, JtiStore};
+
+let shared: Arc<dyn JtiStore> = Arc::new(InMemoryJtiStore::new()); // Redis en production
+let lifecycle = JwtLifecycle::new(secret.clone()).with_jti_store(Arc::clone(&shared));
+let backend = JwtBackend::new(secret).with_jti_store(Arc::clone(&shared));
+```
+
+Ce doit être le *même* magasin. En câbler deux a l'air configuré et n'applique
+rien : la déconnexion écrit dans l'un et la vérification lit l'autre. Voir
+[révocation et le magasin de JTI](auth-jwt-api.md#révocation-et-le-magasin-de-jti).
+
 Écrivez un backend personnalisé en implémentant le trait (une seule méthode async
 qui inspecte les `Parts` de la requête et renvoie `Option<AuthUser>`) :
 

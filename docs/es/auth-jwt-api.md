@@ -47,7 +47,7 @@ que todo proyecto reescribe de otro modo:
 |---|---|---|---|
 | POST | `/api/auth/login` | `{username, password}` | `{access, refresh, user}` |
 | POST | `/api/auth/refresh` | `{refresh}` | `{access, refresh}` |
-| POST | `/api/auth/logout` | `Authorization: Bearer <access>` | `204` (revoca el JTI) |
+| POST | `/api/auth/logout` | `Authorization: Bearer <access>` + `{refresh}` opcional | `204` (revoca ambos JTI) |
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login verifica la contraseña con [argon2id](auth-passwords.md), luego emite un
@@ -150,6 +150,24 @@ assert!(jwt.revoke(&pair.access).await);
 assert!(jwt.verify_access(&pair.access).await.is_none());
 ```
 
+### Envía el token de refresco a `/logout`
+
+Revocar solo el bearer termina un token que habría expirado en minutos de todas
+formas. El token de refresco es el que dura días, y puede emitir nuevos tokens
+de acceso durante todo su TTL — así que un cierre de sesión que lo deja vivo no
+termina la sesión, solo la aplaza:
+
+```jsonc
+POST /api/auth/logout
+Authorization: Bearer <access>
+{ "refresh": "<refresh>" }        // revoca también la mitad de larga duración
+```
+
+El cuerpo es opcional, así que los clientes escritos contra el endpoint anterior
+siguen funcionando sin cambios — simplemente revocan menos. Envíalo. Ambas
+mitades están fijadas al inquilino que llama, de modo que un subdominio no puede
+revocar el token de otro.
+
 La lista negra reside en un `JtiStore` intercambiable. El `InMemoryJtiStore` por
 defecto es **de un solo proceso y pierde las revocaciones al reiniciar** — bien
 para una sola instancia. Cualquier despliegue con múltiples réplicas DEBE
@@ -247,6 +265,19 @@ menos que uses `refresh_with`.
   la cabecera `Authorization: Bearer`.
 - **Firma HS256**, suelo de clave de 32 bytes — mismo algoritmo y mismas
   restricciones que el [JWT independiente](auth-jwt.md#modelo-de-seguridad).
+- **Los tokens son JWTs corrientes**, así que cualquier cosa que verifique un JWT
+  puede verificar estos: `jwt.io`, la biblioteca estándar de tu plataforma, una
+  pasarela de API, otro servicio al que le entregues un token. Tres segmentos, una
+  cabecera JOSE `{"alg":"HS256","typ":"JWT"}`, firmada sobre `header.payload`.
+
+  Hasta [#1397](https://github.com/ujeenet/rustango/issues/1397) eran dos
+  segmentos sin cabecera, firmados solo sobre el payload — legibles por nada más
+  que rustango, y rechazados incluso por `rustango::jwt::decode`. Si escribiste un
+  verificador propio para sortearlo, puedes tirarlo.
+
+  Los tokens emitidos antes del arreglo se siguen aceptando al verificar, para que
+  una actualización no cierre la sesión de nadie. Esa ruta de compatibilidad
+  desaparece en 0.58, cuando cualquier token con la forma antigua haya caducado.
 
 
 ---

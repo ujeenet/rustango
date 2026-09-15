@@ -579,7 +579,7 @@ async fn run_one(
             if next_attempt >= job.max_attempts {
                 handle_dead_letter(pool, dead_letter, &job, static_name, &msg).await;
             } else {
-                let backoff_ms = 1000u64.saturating_mul(1u64 << (next_attempt as u32).min(10));
+                let backoff_ms = super::retry_backoff_ms(u32::try_from(job.attempt).unwrap_or(0));
                 let next_run: DateTime<Utc> = Utc::now()
                     + chrono::Duration::milliseconds(i64::try_from(backoff_ms).unwrap_or(i64::MAX));
                 schedule_retry(pool, job.id, next_attempt, next_run, &msg).await;

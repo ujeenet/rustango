@@ -37,12 +37,29 @@ type SeedFut<'a> =
     Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>>;
 type SeedFn = Box<dyn for<'a> FnOnce(&'a crate::sql::Pool) -> SeedFut<'a> + Send>;
 
+/// Work to run after the server stops accepting connections and its
+/// in-flight requests have finished. See [`Cli::on_shutdown`].
+type ShutdownFut = Pin<Box<dyn Future<Output = ()> + Send>>;
+type ShutdownFn = Box<dyn FnOnce() -> ShutdownFut + Send>;
+
+/// Run the [`Cli::on_shutdown`] hook, if one was registered.
+async fn run_shutdown_hook(hook: Option<ShutdownFn>) {
+    if let Some(hook) = hook {
+        tracing::info!(target: "rustango::shutdown", "running shutdown hook");
+        hook().await;
+    }
+}
+
 /// One-builder dispatcher. Hand it your API router (and optionally a
 /// seed hook), call [`Cli::run`], and you're done.
 #[must_use = "Cli does nothing until .run() is awaited"]
 pub struct Cli {
     api: Router,
     seed: Option<SeedFn>,
+    /// Ran after graceful shutdown drains the server, before `run`
+    /// returns. Set via [`Cli::on_shutdown`] — the only place a job
+    /// queue's `shutdown()` can actually execute (#1409).
+    on_shutdown: Option<ShutdownFn>,
     bind: String,
     migrations_dir: PathBuf,
     tenancy: bool,
@@ -74,6 +91,10 @@ pub struct Cli {
     /// create tenants (#1322). `None` = the create routes are not
     /// mounted. See `Cli::with_tenant_provisioning`.
     provisioning_dir: Option<std::path::PathBuf>,
+    /// Per-tenant pool sizing. `None` = `TenantPoolsConfig::default()`.
+    /// Set via [`Cli::with_tenant_pools`] (#1456).
+    #[cfg(feature = "tenancy")]
+    tenant_pools: Option<crate::tenancy::TenantPoolsConfig>,
     /// `(prefix, root_dir)` pairs registered via [`Cli::with_static`].
     /// Mounted at `runserver` time as
     /// `Router::nest(prefix, static_router(StaticFiles::new(root_dir)))`.
@@ -113,6 +134,7 @@ impl Cli {
         Self {
             api: Router::new(),
             seed: None,
+            on_shutdown: None,
             bind: std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
             migrations_dir: PathBuf::from("./migrations"),
             tenancy: false,
@@ -124,6 +146,8 @@ impl Cli {
             settings_for_layers: None,
             health_endpoints: false,
             provisioning_dir: None,
+            #[cfg(feature = "tenancy")]
+            tenant_pools: None,
             #[cfg(feature = "admin")]
             static_dirs: Vec::new(),
             #[cfg(feature = "csrf")]
@@ -179,6 +203,36 @@ impl Cli {
         self
     }
 
+    /// Run a hook after the server has drained, before [`Cli::run`]
+    /// returns — draining a job queue, flushing a metrics exporter,
+    /// closing a pool.
+    ///
+    /// This is where `queue.shutdown()` belongs (#1409). Putting it
+    /// *after* `run()` — as `docs/jobs.md` used to — could never work:
+    /// nothing handled SIGTERM, so the process was killed outright and
+    /// no line after `run()` ever executed.
+    ///
+    /// ```ignore
+    /// let queue = Arc::new(InMemoryJobQueue::with_workers(4));
+    /// let q = Arc::clone(&queue);
+    /// Cli::new().api(routes)
+    ///     .on_shutdown(move || async move { q.shutdown().await })
+    ///     .run().await
+    /// ```
+    ///
+    /// Runs on SIGINT and SIGTERM alike. It does not run on a crash or
+    /// `SIGKILL`, so it is for a clean stop, not a durability guarantee
+    /// — work that must survive a hard kill needs a persistent queue.
+    #[must_use]
+    pub fn on_shutdown<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.on_shutdown = Some(Box::new(move || Box::pin(hook())));
+        self
+    }
+
     /// Override the bind address. Defaults to `RUSTANGO_BIND` env or
     /// `0.0.0.0:8080`.
     #[must_use]
@@ -210,6 +264,46 @@ impl Cli {
     #[must_use]
     pub fn with_health(mut self) -> Self {
         self.health_endpoints = true;
+        self
+    }
+
+    /// Size the per-tenant connection pools (#1456).
+    ///
+    /// Until this existed, `TenantPoolsConfig` was public and
+    /// documented but unreachable from here: every path built
+    /// `TenantPools::new(pool)`, which takes
+    /// [`crate::tenancy::TenantPoolsConfig::default`], and
+    /// `tenancy/pools.rs` reads no environment variables. The
+    /// `RUSTANGO_DB_*` knobs are honoured by `sql::Pool` only, so they
+    /// did not reach tenant pools either.
+    ///
+    /// It matters because connections multiply by tenant *and* by
+    /// process. Twenty database-mode tenants at the default 16
+    /// connections, across a web and a worker process, is 640 — against
+    /// a stock `PostgreSQL` limit of 100. With no way to lower it, the
+    /// only lever was the database server's own `max_connections`,
+    /// which is the wrong place to size an application's pools and is
+    /// frequently not the operator's to change.
+    ///
+    /// ```no_run
+    /// use rustango::tenancy::TenantPoolsConfig;
+    ///
+    /// rustango::manage::Cli::new()
+    ///     .tenancy()
+    ///     .with_tenant_pools(TenantPoolsConfig {
+    ///         database_pool_max_connections: 4,
+    ///         max_cached_database_pools: 200,
+    ///         ..Default::default()
+    ///     });
+    /// ```
+    ///
+    /// Note `max_cached_database_pools` does not evict: past the cap an
+    /// uncached tenant errors rather than displacing another. Raise it
+    /// above your tenant count.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn with_tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
+        self.tenant_pools = Some(config);
         self
     }
 
@@ -695,7 +789,14 @@ impl Cli {
             } else {
                 crate::sql::Pool::connect_postgres(&url).await?
             };
-            let pools = crate::tenancy::TenantPools::new(pool);
+            // #1456 — honour `Cli::with_tenant_pools`. This built
+            // `TenantPools::new(pool)` unconditionally, so tenant pool
+            // sizing was unreachable from every app that boots through
+            // `Cli`, which is every app the scaffolder generates.
+            let pools = match self.tenant_pools.clone() {
+                Some(cfg) => crate::tenancy::TenantPools::new(pool).config(cfg),
+                None => crate::tenancy::TenantPools::new(pool),
+            };
             crate::tenancy::manage::run_with_init(
                 &pools,
                 &url,
@@ -792,7 +893,58 @@ impl Cli {
         Ok(())
     }
 
-    async fn runserver(self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Everything between "the pool is open" and "bind the socket":
+    /// welcome page, health endpoints, static dirs, CSRF, the settings
+    /// layers, and the pool extension.
+    ///
+    /// One function, because `runserver` has **three** serving paths —
+    /// a non-Postgres build, a Postgres build on a `postgres://` URL,
+    /// and a multi-backend build on a non-PG URL (#560) — and each used
+    /// to assemble its own router from the same list of steps.
+    ///
+    /// That duplication *was* #1457. One copy never read
+    /// `health_endpoints`, so `/health` 404'd; the fix corrected two of
+    /// the three, and the third — the one the soak fleet's own
+    /// `--features postgres,mysql,sqlite` image takes on a `sqlite://`
+    /// URL — went on answering 404. Three copies of a list of steps is
+    /// a list of steps that will drift again, so there is one now.
+    ///
+    /// Generic over the pool type because the Postgres path extends a
+    /// `PgPool` (handlers taking `Extension<PgPool>` predate the `Pool`
+    /// enum) while the other two extend `crate::sql::Pool`.
+    fn assemble_app<P>(&mut self, pool: P) -> Router
+    where
+        P: Clone + Send + Sync + 'static,
+        P: Into<crate::sql::Pool>,
+    {
+        let api = std::mem::take(&mut self.api);
+        #[cfg(feature = "admin")]
+        let api = if self.welcome_page {
+            try_mount_welcome(api)
+        } else {
+            api
+        };
+        // `crate::health` is gated on `admin` rather than on a backend
+        // (#1208), so the merge is too — but it is now the only one.
+        #[cfg(feature = "admin")]
+        let api = if self.health_endpoints {
+            api.merge(crate::health::health_router(pool.clone()))
+        } else {
+            api
+        };
+        #[cfg(feature = "admin")]
+        let api = mount_static_dirs(api, &self.static_dirs);
+        #[cfg(feature = "csrf")]
+        let api = match self.csrf.take() {
+            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            None => api,
+        };
+        #[cfg(feature = "config")]
+        let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        api.layer(axum::Extension(pool))
+    }
+
+    async fn runserver(mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Logging install lives in `run()` (the outermost dispatch
         // point) so the WorkerGuard outlives every runserver +
         // management-verb path uniformly.
@@ -815,7 +967,7 @@ impl Cli {
             })?;
             let pool = crate::sql::Pool::connect(&url).await?;
             let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
-            if let Some(seed) = self.seed {
+            if let Some(seed) = self.seed.take() {
                 // The seed hook's error is now `Send + Sync` (so a seed can
                 // hold an error across an `.await` without the future losing
                 // `Send`); coerce to this fn's `Box<dyn Error>` at the boundary.
@@ -823,30 +975,16 @@ impl Cli {
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
-            let api = self.api;
-            #[cfg(feature = "admin")]
-            let api = if self.welcome_page {
-                try_mount_welcome(api)
-            } else {
-                api
-            };
-            #[cfg(feature = "admin")]
-            let api = mount_static_dirs(api, &self.static_dirs);
-            #[cfg(feature = "csrf")]
-            let api = match self.csrf {
-                Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
-                None => api,
-            };
-            #[cfg(feature = "config")]
-            let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-            let app = api.layer(axum::Extension(pool));
+            let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
             axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
+            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
             .await?;
+            run_shutdown_hook(self.on_shutdown).await;
             return Ok(());
         }
         #[cfg(feature = "postgres")]
@@ -871,70 +1009,31 @@ impl Cli {
                 // `#[cfg]` blocks at the top of the fn.
                 let pool = crate::sql::Pool::connect(&url).await?;
                 let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
-                if let Some(seed) = self.seed {
+                if let Some(seed) = self.seed.take() {
                     seed(&pool)
                         .await
                         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
                 }
-                let api = self.api;
-                #[cfg(feature = "admin")]
-                let api = if self.welcome_page {
-                    try_mount_welcome(api)
-                } else {
-                    api
-                };
-                #[cfg(feature = "admin")]
-                let api = mount_static_dirs(api, &self.static_dirs);
-                #[cfg(feature = "csrf")]
-                let api = match self.csrf {
-                    Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
-                    None => api,
-                };
-                #[cfg(feature = "config")]
-                let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-                let app = api.layer(axum::Extension(pool));
+                let app = self.assemble_app(pool);
                 let listener = tokio::net::TcpListener::bind(&self.bind).await?;
                 eprintln!("server listening on http://{}", listener.local_addr()?);
                 axum::serve(
                     listener,
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
+                .with_graceful_shutdown(crate::shutdown::shutdown_signal())
                 .await?;
+                run_shutdown_hook(self.on_shutdown).await;
                 return Ok(());
             }
             let pool = crate::sql::Pool::connect_postgres(&url).await?;
             let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
-            if let Some(seed) = self.seed {
+            if let Some(seed) = self.seed.take() {
                 seed(&crate::sql::Pool::from(pool.clone()))
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
-            let api = self.api;
-            #[cfg(feature = "admin")]
-            let api = if self.welcome_page {
-                try_mount_welcome(api)
-            } else {
-                api
-            };
-            // `crate::health` is `#[cfg(feature = "admin")]`, so the merge has
-            // to be too (#1208) — it was unconditional, which broke every
-            // admin-less build.
-            #[cfg(feature = "admin")]
-            let api = if self.health_endpoints {
-                api.merge(crate::health::health_router(pool.clone()))
-            } else {
-                api
-            };
-            #[cfg(feature = "admin")]
-            let api = mount_static_dirs(api, &self.static_dirs);
-            #[cfg(feature = "csrf")]
-            let api = match self.csrf {
-                Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
-                None => api,
-            };
-            #[cfg(feature = "config")]
-            let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-            let app = api.layer(axum::Extension(pool));
+            let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
             // v0.30.16 — `into_make_service_with_connect_info` is what
@@ -945,7 +1044,9 @@ impl Cli {
                 listener,
                 app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
+            .with_graceful_shutdown(crate::shutdown::shutdown_signal())
             .await?;
+            run_shutdown_hook(self.on_shutdown).await;
             Ok(())
         } // end of #[cfg(feature = "postgres")] block for non-tenancy runserver
     }
@@ -957,7 +1058,13 @@ impl Cli {
     // `axum::serve`. The non-PG runserver_tenancy fallback below
     // mirrors that for symmetry.
     #[cfg(all(feature = "tenancy", feature = "postgres"))]
-    async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn runserver_tenancy(mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Taken before `self` is picked apart below, so the hook still
+        // runs on this path too (#1409) — the tenancy server drains via
+        // its own `shutdown_signal`, and dropping the hook here would
+        // have left `on_shutdown` working on one path and silently not
+        // on the other.
+        let on_shutdown = self.on_shutdown;
         let api = self.api;
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
@@ -985,7 +1092,11 @@ impl Cli {
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
         }
-        if let Some(seed) = self.seed {
+        // #1456 — same reason as the dispatch path above.
+        if let Some(cfg) = self.tenant_pools.clone() {
+            builder = builder.tenant_pools(cfg);
+        }
+        if let Some(seed) = self.seed.take() {
             // Tenancy Builder's seed_with takes (Arc<TenantPools>, PgPool,
             // String); we forward the registry pool and discard the rest.
             builder = builder
@@ -994,17 +1105,20 @@ impl Cli {
                 })
                 .await?;
         }
-        builder.serve(&self.bind).await
+        builder.serve(&self.bind).await?;
+        run_shutdown_hook(on_shutdown).await;
+        Ok(())
     }
 
     #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
-    async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn runserver_tenancy(mut self) -> Result<(), Box<dyn std::error::Error>> {
         // v0.38 slice 24 — `server::Builder<DB>` is generic. On non-PG
         // single-backend builds, `DefaultTenantDb` resolves to whichever
         // sqlx backend the feature flags picked (sqlite first, mysql
         // otherwise). Database-mode tenants work out of the box;
         // schema-mode tenants return `TenancyError::Validation` at
         // request time (schema-mode is PG-only by language).
+        let on_shutdown = self.on_shutdown;
         let api = self.api;
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
@@ -1049,7 +1163,11 @@ impl Cli {
         if let Some(routes) = self.routes {
             builder = builder.routes(routes);
         }
-        if let Some(seed) = self.seed {
+        // #1456 — same reason as the dispatch path above.
+        if let Some(cfg) = self.tenant_pools.clone() {
+            builder = builder.tenant_pools(cfg);
+        }
+        if let Some(seed) = self.seed.take() {
             // Mirror the PG arm above (line 828) so sqlite/mysql tenancy
             // projects get their `Cli::seed` hook fired on boot too.
             builder = builder
@@ -1058,7 +1176,9 @@ impl Cli {
                 })
                 .await?;
         }
-        builder.serve(&self.bind).await
+        builder.serve(&self.bind).await?;
+        run_shutdown_hook(on_shutdown).await;
+        Ok(())
     }
 }
 
@@ -1736,5 +1856,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+    }
+}
+
+/// `Cli::with_health()` must reach every serving path (#1457).
+///
+/// Tested on the assembled router rather than on the source text of one
+/// `runserver` arm. The source-slicing guard this replaces was wrong
+/// three times — it matched the fix's own explanatory comment, then it
+/// matched the *Postgres* arm, then it could not see the third serving
+/// path at all — because each version checked a proxy for the property
+/// instead of the property, which is that a request gets a 200.
+#[cfg(all(
+    test,
+    feature = "admin",
+    feature = "sqlite",
+    feature = "runserver",
+    feature = "manage"
+))]
+mod assemble_app_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    async fn status(app: &Router, path: &str) -> StatusCode {
+        app.clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .expect("request")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn with_health_mounts_both_endpoints() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new().with_health().assemble_app(pool);
+
+        assert_eq!(
+            status(&app, "/health").await,
+            StatusCode::OK,
+            "`with_health()` set its flag and /health still 404s — that is #1457, \
+             and it reaches every serving path because they all assemble here"
+        );
+        assert_eq!(status(&app, "/ready").await, StatusCode::OK);
+    }
+
+    /// The other direction. Without this, the test above would pass even
+    /// if the endpoints were mounted unconditionally — which would make
+    /// it evidence of nothing.
+    #[tokio::test]
+    async fn without_with_health_they_are_absent() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new().assemble_app(pool);
+
+        assert_eq!(
+            status(&app, "/health").await,
+            StatusCode::NOT_FOUND,
+            "health endpoints must be opt-in; mounting them always would make \
+             the positive test above vacuous"
+        );
     }
 }

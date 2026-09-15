@@ -107,6 +107,8 @@ pub fn run_pool_free<W: Write>(
         "make:serializer" => make_serializer_cmd(&args[1..], writer),
         "make:form" => make_form_cmd(&args[1..], writer),
         "make:job" => make_job_cmd(&args[1..], writer),
+        "make:scheduled" => make_scheduled_cmd(&args[1..], writer),
+        "make:worker" => make_worker_cmd(&args[1..], writer),
         "make:notification" => make_notification_cmd(&args[1..], writer),
         "make:middleware" => make_middleware_cmd(&args[1..], writer),
         "make:test" => make_test_cmd(&args[1..], writer),
@@ -150,6 +152,8 @@ pub async fn run_with_writer<W: Write + Send>(
         "make:serializer" => make_serializer_cmd(&args[1..], writer),
         "make:form" => make_form_cmd(&args[1..], writer),
         "make:job" => make_job_cmd(&args[1..], writer),
+        "make:scheduled" => make_scheduled_cmd(&args[1..], writer),
+        "make:worker" => make_worker_cmd(&args[1..], writer),
         "make:notification" => make_notification_cmd(&args[1..], writer),
         "make:middleware" => make_middleware_cmd(&args[1..], writer),
         "make:test" => make_test_cmd(&args[1..], writer),
@@ -459,6 +463,8 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "  make:serializer <Name> [--model <Model>]")?;
     writeln!(w, "  make:form <Name>")?;
     writeln!(w, "  make:job <Name>")?;
+    writeln!(w, "  make:scheduled <Name>")?;
+    writeln!(w, "  make:worker <Name>")?;
     writeln!(w, "  make:notification <Name>")?;
     writeln!(w, "  make:middleware <Name>")?;
     writeln!(w, "  make:test <Name>")?;
@@ -1985,11 +1991,18 @@ fn write_generated<W: Write>(
     }
     std::fs::write(&path, contents)?;
     writeln!(w, "wrote {}", path.display())?;
-    writeln!(
-        w,
-        "  add `mod {};` to src/main.rs (or `pub mod ...;` to src/lib.rs)",
-        file_name.trim_end_matches(".rs")
-    )?;
+    // Lead with whichever entry the project actually has. A scaffolded
+    // project keeps its modules in the library so that binaries under
+    // `src/bin/` can reach them — `mod` there would hide it from them.
+    let module = file_name.trim_end_matches(".rs");
+    if std::path::Path::new("src/lib.rs").exists() {
+        writeln!(w, "  add `pub mod {module};` to src/lib.rs")?;
+    } else {
+        writeln!(
+            w,
+            "  add `mod {module};` to src/main.rs (or `pub mod ...;` to src/lib.rs)"
+        )?;
+    }
     Ok(())
 }
 
@@ -2175,6 +2188,49 @@ fn project_uses_tenancy() -> bool {
     has_inline || has_table_block
 }
 
+/// The project's own crate name, as a Rust path segment.
+///
+/// A file under `src/bin/` is its own crate: `crate::jobs::X` written
+/// there names the *binary*, not the project, so a worker reaching into
+/// the app must spell it `my_app::jobs::X`. Falls back to `your_app`
+/// when there is no readable Cargo.toml — an obvious placeholder beats
+/// a plausible-looking wrong path.
+fn project_crate_name() -> String {
+    std::fs::read_to_string("Cargo.toml")
+        .ok()
+        .as_deref()
+        .and_then(package_name_from_cargo_toml)
+        .unwrap_or_else(|| "your_app".to_string())
+}
+
+/// Pure half of [`project_crate_name`]: the `name` key of `[package]`,
+/// hyphens folded to underscores the way cargo derives a crate name.
+fn package_name_from_cargo_toml(src: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        // `name = "my-app"`, tolerating whitespace around the `=`.
+        if let Some(value) = trimmed
+            .strip_prefix("name")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            let name = value.trim().trim_matches('"');
+            if !name.is_empty() {
+                return Some(name.replace('-', "_"));
+            }
+        }
+    }
+    None
+}
+
 /// `manage make:api_routes <app> [--tenant]` — emit
 /// `src/<app>/api_routes.rs`, the per-app composer that merges
 /// every viewset's router into a single `Router<()>` (#82).
@@ -2227,7 +2283,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
             writeln!(w, "  extractor).")?;
             writeln!(
                 w,
-                "  --crate <name> overrides the emitted `use …::sql::sqlx::PgPool;`"
+                "  --crate <name> overrides the emitted `use …::sql::Pool;`"
             )?;
             writeln!(w, "  crate root (default: `rustango`).")?;
             return Ok(());
@@ -2336,16 +2392,21 @@ fn api_routes_template_pool(app: &str, crate_root: &str) -> String {
 //!
 //! API routing for the `{app}` app. Composes per-model viewsets
 //! into a single `Router<()>`. Each viewset captures the supplied
-//! `PgPool` at mount time.
+//! pool at mount time.
+//!
+//! The pool is `sql::Pool`, not a driver-typed one: it dispatches on
+//! the `DATABASE_URL` scheme, so this file compiles and runs on all
+//! three backends. A `PgPool` here would pin the whole app to
+//! Postgres — `ViewSet::router_pool` takes exactly this type.
 //!
 //! Adding a resource:
 //!   1. Run `manage make:viewset <Name> --model <Model>`.
 //!   2. Add one `.merge(...)` line below.
 
 use axum::Router;
-use {crate_root}::sql::sqlx::PgPool;
+use {crate_root}::sql::Pool;
 
-pub fn api(pool: PgPool) -> Router<()> {{
+pub fn api(pool: Pool) -> Router<()> {{
     let _pool = pool;
     Router::new()
         // .merge(super::viewsets::<snake>::router("/api/<snake>", _pool.clone()))
@@ -2361,15 +2422,27 @@ fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:serializer {name}`.
 
+use {crate_root}::sql::Auto;
 use {crate_root}::Serializer;
 
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = {model})]
 pub struct {name} {{
-    pub id: i64,
+    // A serializer field must match its model field's type **exactly**.
+    // The scaffolders emit `pub id: Auto<i64>` for a primary key, so
+    // `pub id: i64` here does not compile — it fails inside the derive
+    // with `expected &i64, found &Auto<i64>`, which does not obviously
+    // point back to this line.
+    //
+    // `read_only` keeps it out of the writable set while still
+    // returning it, which is what you want: drop the field entirely and
+    // the API answers a create with no identifier, so the client cannot
+    // address what it just made.
+    #[serializer(read_only)]
+    pub id: Auto<i64>,
     // pub title: String,
-    // #[serializer(read_only)]
-    // pub created_at: chrono::DateTime<chrono::Utc>,
+    // #[serializer(source = "body")]   // publish under a different name
+    // pub content: String,
 }}
 "#
     );
@@ -2396,39 +2469,237 @@ pub struct {name} {{
     write_generated(w, &format!("{snake}.rs"), body)
 }
 
+/// Scaffold a real [`crate::jobs::Job`] (#1455).
+///
+/// This verb used to emit a struct holding a `PgPool` with an inherent
+/// `run(self: Arc<Self>)` and a comment wiring it to
+/// `scheduler::every(..)` — a *scheduler task*, which is a real thing
+/// the framework has, but not the one the verb is named after. Nothing
+/// it produced could be `dispatch`ed, `register`ed, retried, backed off
+/// or dead-lettered, and the hardcoded `PgPool` meant it did not compile
+/// in a `--features sqlite` project at all.
+///
+/// The scheduler shape now lives under `make:scheduled`, which is what
+/// it always was.
 fn make_job_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let (name, _, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:job {name}`.
 //!
-//! Background job — run async work outside the request lifecycle.
-//! Pair with `{crate_root}::scheduler::Scheduler` (cron-shape) or your queue layer.
+//! A background job: enqueued from a handler, executed later by a
+//! worker. For work that runs on a timer instead, see
+//! `manage make:scheduled`.
+
+use {crate_root}::jobs::{{Job, JobError}};
+use serde::{{Deserialize, Serialize}};
+
+/// The payload. `run` receives **only this** — no pool, no tenant, no
+/// request context: workers are spawned tasks and inherit no
+/// task-local state. Carry everything the job needs in these fields.
+#[derive(Serialize, Deserialize)]
+pub struct {name} {{
+    pub id: i64,
+}}
+
+#[async_trait::async_trait]        // add `async-trait` to your Cargo.toml
+impl Job for {name} {{
+    /// Globally unique: this is the routing key a worker matches a
+    /// queued row against. Two job types must not share one.
+    const NAME: &'static str = "{snake}";
+
+    /// A ceiling on **total attempts**, not on retries — 5 is one run
+    /// plus four retries. Backoff between them is 1s, 2s, 4s, 8s.
+    const MAX_ATTEMPTS: u32 = 5;
+
+    async fn run(&self) -> Result<(), JobError> {{
+        // Err(JobError::Retryable(..)) to back off and try again;
+        // Err(JobError::Fatal(..)) to dead-letter immediately.
+        let _ = self.id;
+        Ok(())
+    }}
+}}
+
+// Wire up wherever you build the queue — the web process, a worker
+// binary from `make:worker`, or both:
+//
+//   queue.register::<{name}>().await;   // BEFORE start(); every
+//                                       // process that calls start()
+//                                       // must register every type it
+//                                       // might pick up, or the row is
+//                                       // locked and abandoned
+//   queue.start().await;
+//
+// and to enqueue one, from a handler:
+//
+//   queue.dispatch(&{name} {{ id: 42 }}).await?;
+"#
+    );
+    write_generated(w, &format!("{snake}.rs"), body)
+}
+
+/// Scaffold a fixed-interval scheduler task (#1455).
+///
+/// This is the shape `make:job` used to emit, under the name it should
+/// always have had — and routed through `sql::Pool` rather than the
+/// hardcoded `PgPool`, which made the old template uncompilable in a
+/// non-Postgres project.
+fn make_scheduled_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _, crate_root) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:scheduled {name}`.
+//!
+//! A task that runs on a timer, not in response to a request. For work
+//! enqueued by a handler and executed by a worker, see
+//! `manage make:job`.
 
 use std::sync::Arc;
-use {crate_root}::sql::sqlx::PgPool;
+
+use {crate_root}::sql::Pool;
 
 pub struct {name} {{
-    pub pool: PgPool,
+    pub pool: Pool,
 }}
 
 impl {name} {{
     pub async fn run(self: Arc<Self>) {{
-        // TODO: implement
-        let _ = self.pool.acquire().await;
+        // The scheduler isolates panics per task, but a task that
+        // returns early on error simply skips that tick — log, do not
+        // swallow silently.
+        let _ = &self.pool;
     }}
 }}
 
 // Wire up in main.rs:
 //
-//   let job = Arc::new({name} {{ pool: pool.clone() }});
-//   scheduler.every("{snake}", Duration::from_secs(60), move || {{
-//       let job = job.clone();
-//       async move {{ job.run().await }}
+//   let scheduler = {crate_root}::scheduler::Scheduler::new();
+//   let task = Arc::new({name} {{ pool: pool.clone() }});
+//   scheduler.every("{snake}", std::time::Duration::from_secs(60), move || {{
+//       let task = Arc::clone(&task);
+//       async move {{ task.run().await }}
 //   }});
+//   let handle = scheduler.start();
+//
+// The first run happens after one full interval, not immediately.
 "#
     );
     write_generated(w, &format!("{snake}.rs"), body)
+}
+
+/// Scaffold a standalone worker binary.
+///
+/// The shape is three lines long and easy to get wrong in a way that
+/// only shows up in production: a worker that awaits
+/// `tokio::signal::ctrl_c()` handles SIGINT but **not** SIGTERM, which
+/// is what `docker stop`, Kubernetes and systemd actually send — so the
+/// drain never runs, the container is `SIGKILL`ed after its grace period,
+/// and in-flight jobs are lost with nothing logged. `shutdown_signal()`
+/// takes both (#1409). Encoding that once is the whole point of this
+/// verb.
+fn make_worker_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    let (name, _, crate_root) = parse_name_and_model(args)?;
+    let snake = pascal_to_snake(&name);
+    // `src/bin/*.rs` is its own crate, so job types must be named
+    // through the project's library — `crate::` here would resolve to
+    // the worker binary itself and never compile.
+    let app_crate = project_crate_name();
+    let body = format!(
+        r#"//! Auto-scaffolded by `manage make:worker {name}`.
+//!
+//! A standalone worker process: it drains the job queue and serves no
+//! HTTP. Run it alongside the web process, or as its own container.
+//!
+//! Put this at `src/bin/{snake}.rs` and run it with `cargo run --bin {snake}`.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use {crate_root}::jobs::{{DatabaseJobQueue, JobQueue}};
+use {crate_root}::sql::Pool;
+
+#[{crate_root}::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {{
+    {crate_root}::logging::setup();
+    // `std::env::var(..)?` would surface as the bare word `NotPresent`,
+    // which tells an operator nothing about which variable or why.
+    let url = std::env::var("DATABASE_URL").map_err(|_| {{
+        "missing env var 'DATABASE_URL'. Set it in your shell, or copy \
+         '.env.example' to '.env'."
+    }})?;
+    let pool = Pool::connect(&url).await?;
+
+    // The queue is tri-dialect despite the `Database` name — the table
+    // DDL and the row-pickup strategy are chosen from the pool's dialect.
+    DatabaseJobQueue::ensure_table_pool(&pool).await?;
+    let queue = Arc::new(DatabaseJobQueue::with_workers_pool(pool.clone(), 4));
+
+    // Register EVERY job type this queue might see, not just the ones
+    // this process dispatches. A worker that picks up a row whose name
+    // is unregistered here logs and returns *without unlocking it* — the
+    // row is then stranded until a `reclaim_stuck_jobs_pool` sweep, and
+    // it does not show up in `pending_count()`.
+    //
+    // Note the crate name: this file is its own binary crate, so `crate::`
+    // would mean *this* worker. Job types live in the library, and
+    // `manage make:job WelcomeEmail` writes `src/welcome_email.rs`.
+    //
+    //   queue.register::<{app_crate}::welcome_email::WelcomeEmail>().await;
+
+    queue.start().await;
+    tracing::info!("{snake}: draining jobs");
+
+    // SIGINT *and* SIGTERM. `tokio::signal::ctrl_c()` alone is
+    // SIGINT-only, so under `docker stop` the drain below never runs.
+    {crate_root}::shutdown::shutdown_signal().await;
+
+    tracing::info!("{snake}: signal received, draining in-flight jobs");
+    queue.shutdown().await;
+
+    // Rows whose worker died mid-job stay locked. Nothing sweeps them
+    // for you; run this on a scheduler, or at boot as done here.
+    let _ = DatabaseJobQueue::reclaim_stuck_jobs_pool(&pool, Duration::from_secs(300)).await;
+    Ok(())
+}}
+"#
+    );
+    write_generated_bin(w, &snake, body)
+}
+
+/// Like [`write_generated`], but for `src/bin/` — where cargo
+/// auto-discovers the target, so the "add `mod ...`" advice
+/// `write_generated` prints would be wrong.
+fn write_generated_bin<W: Write>(
+    w: &mut W,
+    bin_name: &str,
+    contents: String,
+) -> Result<(), MigrateError> {
+    let path = std::path::PathBuf::from("src")
+        .join("bin")
+        .join(format!("{bin_name}.rs"));
+    if path.exists() {
+        return Err(MigrateError::Validation(format!(
+            "{} already exists — refusing to overwrite",
+            path.display()
+        )));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, contents)?;
+    writeln!(w, "wrote {}", path.display())?;
+    // No `[[bin]]` stanza needed: cargo picks up `src/bin/*.rs` on its own.
+    writeln!(w, "  run it with `cargo run --bin {bin_name}`")?;
+    // A second binary makes plain `cargo run` ambiguous, which breaks the
+    // `cargo run -- migrate` workflow every generated project's README
+    // documents. Cargo's error names the binaries but not the fix.
+    writeln!(
+        w,
+        "  NOTE: a second binary makes plain `cargo run` ambiguous. Add\n  \
+         `default-run = \"<your-app>\"` under [package] in Cargo.toml to keep\n  \
+         `cargo run -- migrate` working."
+    )?;
+    Ok(())
 }
 
 fn make_notification_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
@@ -4269,13 +4540,6 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
                     .into(),
             );
         }
-        Some(s) if s.len() < 32 => {
-            out.errors.push(format!(
-                "RUSTANGO_SESSION_SECRET is only {} bytes — need ≥ 32 for HMAC key strength. \
-                 Regenerate with `openssl rand -base64 32`.",
-                s.len()
-            ));
-        }
         Some(s) if s.contains("change-me") || s.contains("placeholder") => {
             out.errors.push(
                 "RUSTANGO_SESSION_SECRET still contains the scaffolder placeholder \
@@ -4283,9 +4547,33 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
                     .into(),
             );
         }
-        Some(_) => {
-            out.info.push("RUSTANGO_SESSION_SECRET length OK".into());
-        }
+        // Decode it the way the runtime does, rather than measuring the
+        // encoded string (#1396). A 32-character base64 secret is 24
+        // bytes of key: the old `s.len() >= 32` reported "length OK" for
+        // a value the cookie layer then refused, so a green check meant
+        // nothing about whether the app would come up with sessions.
+        #[cfg(any(feature = "admin", feature = "tenancy"))]
+        Some(s) => match crate::session::SessionSecret::from_b64(s) {
+            Ok(_) => out
+                .info
+                .push("RUSTANGO_SESSION_SECRET decodes to a valid ≥32-byte key".into()),
+            Err(e) => out.errors.push(format!(
+                "{e}. This is the same check the runtime applies, so the app would \
+                 fall back to an ephemeral key and sign everyone out on restart."
+            )),
+        },
+        // `session` is gated on `admin` / `tenancy`, and so is the base64
+        // crate it decodes with. In a build with neither there is no
+        // cookie layer and no JWT router, so nothing signs with this
+        // value — reporting it unvalidated is the honest answer, and
+        // asserting a length here would be the encoded-string mistake
+        // #1396 removed.
+        #[cfg(not(any(feature = "admin", feature = "tenancy")))]
+        Some(_) => out.info.push(
+            "RUSTANGO_SESSION_SECRET is set but not validated — this build has \
+             neither `admin` nor `tenancy`, so nothing in it signs cookies or JWTs."
+                .into(),
+        ),
     }
 
     // DATABASE_URL — required.
@@ -4675,6 +4963,8 @@ mod gen_tests {
             "make:serializer",
             "make:form",
             "make:job",
+            "make:scheduled",
+            "make:worker",
             "make:notification",
             "make:middleware",
             "make:test",
@@ -5401,7 +5691,7 @@ mod gen_tests {
     #[test]
     fn api_routes_template_pool_threads_renamed_crate_root() {
         let body = api_routes_template_pool("blog", "rustango_orm");
-        assert!(body.contains("use rustango_orm::sql::sqlx::PgPool;"));
+        assert!(body.contains("use rustango_orm::sql::Pool;"));
         assert!(!body.contains("use rustango::"));
     }
 
@@ -5465,6 +5755,42 @@ mod gen_tests {
     fn cwd_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// `make:worker` puts this name into the generated binary, so a
+    /// wrong answer is a path that cannot compile.
+    #[test]
+    fn package_name_reads_the_package_table() {
+        let manifest = r#"[package]
+name = "my-shop"
+version = "0.1.0"
+
+[dependencies]
+name = "not-this-one"
+rustango = { version = "0.57", features = ["batteries"] }
+"#;
+        assert_eq!(
+            package_name_from_cargo_toml(manifest).as_deref(),
+            // Hyphens become underscores: cargo's crate name, not the
+            // package name, is what a `use` path needs.
+            Some("my_shop"),
+            "must read [package].name and fold hyphens, ignoring `name` keys \
+             in any other table"
+        );
+    }
+
+    #[test]
+    fn package_name_tolerates_spacing_and_missing_tables() {
+        assert_eq!(
+            package_name_from_cargo_toml("[package]\n  name   =   \"probe\"\n").as_deref(),
+            Some("probe")
+        );
+        assert_eq!(
+            package_name_from_cargo_toml("[dependencies]\nname = \"x\"\n"),
+            None,
+            "no [package] table → no name to report"
+        );
+        assert_eq!(package_name_from_cargo_toml(""), None);
     }
 
     /// `project_uses_tenancy` reads Cargo.toml from CWD and looks for
@@ -5602,25 +5928,37 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
-    /// Default template threads `PgPool` so per-model derived
-    /// viewsets have something to capture at mount time.
+    /// Default template threads the dialect-agnostic `sql::Pool` so
+    /// per-model viewsets have something to capture at mount time.
+    ///
+    /// It threaded `PgPool` until 0.57.5, which pinned every generated
+    /// project to Postgres at the one place three backends are meant to
+    /// be interchangeable — `ViewSet::router_pool` takes `sql::Pool`.
     #[test]
-    fn api_routes_template_pool_threads_pgpool() {
+    fn api_routes_template_pool_threads_a_dialect_agnostic_pool() {
         let body = api_routes_template_pool("blog", "rustango");
         assert!(
-            body.contains("pub fn api(pool: PgPool) -> Router<()>"),
+            body.contains("pub fn api(pool: Pool) -> Router<()>"),
             "expected pool-arg api fn, got: {body}"
         );
-        // Phase 2b of #145 — default `--crate` argument keeps emit
-        // bit-identical to the pre-#145 shape so existing call sites
-        // (the api / fullstack scaffolder templates) are unaffected.
         assert!(
-            body.contains("use rustango::sql::sqlx::PgPool;"),
-            "default crate root must emit `use rustango::sql::sqlx::PgPool;`, got: {body}"
+            body.contains("use rustango::sql::Pool;"),
+            "default crate root must emit `use rustango::sql::Pool;`, got: {body}"
         );
+        // Comments stripped first: the template's own header explains
+        // why a `PgPool` would be wrong here, and a raw substring search
+        // matches that prose rather than the code it warns about.
+        let code: String = body
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            body.contains("use rustango::sql::sqlx::PgPool;"),
-            "expected PgPool import, got: {body}"
+            !code.contains("PgPool"),
+            "a generated project must not be pinned to Postgres here, got: {code}"
         );
     }
 
@@ -5687,19 +6025,83 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
+    /// Gated: without `admin`/`tenancy` the audit cannot decode, and
+    /// reports the secret unvalidated instead of measuring it.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
     #[test]
     fn deploy_audit_short_session_secret_errors() {
+        // Valid base64, deliberately — decodes to 6 bytes. `"too-short"`
+        // was the old fixture and its hyphen made it a *base64* failure,
+        // so this case never actually reached the length check.
         let env = DeployAuditEnv {
-            session_secret: Some("too-short".into()),
+            session_secret: Some("AAAAAAAA".into()),
             ..good_prod_env()
         };
         let r = run(&env);
         assert!(
+            r.errors.iter().any(|e| e.contains("decoded to 6 bytes")),
+            "expected a decoded-length error, got: {:?}",
             r.errors
-                .iter()
-                .any(|e| e.contains("only") && e.contains("bytes")),
-            "expected length error for short secret, got: {:?}",
+        );
+    }
+
+    /// Gated for the same reason as the two above.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    #[test]
+    fn deploy_audit_non_base64_session_secret_errors() {
+        let env = DeployAuditEnv {
+            session_secret: Some("correct-horse-battery-staple-and-then-som".into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors.iter().any(|e| e.contains("not valid base64")),
+            "a long non-base64 value is still not a key, got: {:?}",
             r.errors
+        );
+    }
+
+    /// #1396 — the value that passed this check and broke the runtime.
+    ///
+    /// 32 base64 characters is 24 bytes of key. The audit measured the
+    /// encoded string (`s.len() >= 32`), reported "length OK", and the
+    /// cookie layer then decoded it, saw 24 bytes, and fell back to a
+    /// random per-process key. Passing the check predicted nothing.
+    ///
+    /// Both now call `SessionSecret::from_b64`, so this is the audit and
+    /// the runtime answering with one voice rather than two.
+    ///
+    /// Gated like the code it covers: `session` is `admin`/`tenancy`-only,
+    /// and in a build with neither the audit reports the secret
+    /// unvalidated, so there is nothing here to assert.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    #[test]
+    fn deploy_audit_rejects_a_32_char_base64_secret_the_runtime_refuses() {
+        let trap = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert_eq!(
+            trap.len(),
+            32,
+            "the premise: 32 characters, so the old check passed"
+        );
+        assert!(
+            crate::session::SessionSecret::from_b64(trap).is_err(),
+            "the premise: the runtime refuses it"
+        );
+
+        let env = DeployAuditEnv {
+            session_secret: Some(trap.into()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors.iter().any(|e| e.contains("decoded to 24 bytes")),
+            "check --deploy must refuse what the runtime refuses, got: {:?}",
+            r.errors
+        );
+        assert!(
+            !r.info.iter().any(|i| i.contains("SESSION_SECRET")),
+            "and must not also report it OK, got: {:?}",
+            r.info
         );
     }
 

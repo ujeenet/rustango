@@ -122,7 +122,11 @@ let layer = CorsLayer::new()
 let layer = CorsLayer::permissive();              // any origin, common methods
 ```
 
-**Sicherheitshinweis:** Kombiniere niemals `allow_credentials(true)` mit `allow_any_origin()` — der Browser wird die Antwort ablehnen. Mit Credentials MUSST du explizite Origins auflisten.
+**Sicherheitshinweis:** Mit Credentials MUSST du explizite Origins auflisten. `allow_credentials(true)` zusammen mit `allow_any_origin()` ergibt kein „credentialed Wildcard-CORS" — das gibt es nicht, und wer es verlangt, bekommt keine der beiden Hälften.
+
+Rustango antwortet darauf mit `Access-Control-Allow-Origin: *` und **ohne** `Access-Control-Allow-Credentials`-Header, sodass der Browser die Anfrage mit Credentials blockiert. Bis [#1394](https://github.com/ujeenet/rustango/issues/1394) wurde stattdessen die anfragende Origin zurückgespiegelt — und genau das akzeptieren Browser zusammen mit Credentials. Diese Kombination war ein funktionierendes Loch, lesbar von jeder Seite, die der Nutzer besuchte, und diese Seite beschrieb es als etwas, das der Browser ablehnen würde.
+
+Nutze `.allow_origins([...])` mit den Origins, die du tatsächlich bedienst. Dieser Pfad ist unverändert und sendet weiterhin `Access-Control-Allow-Credentials: true`.
 
 ---
 
@@ -145,13 +149,25 @@ router.rate_limit(RateLimitLayer::global(10, Duration::from_secs(1)));
 
 Bei Erschöpfung: `429 Too Many Requests` mit `Retry-After`-Header. Jede erfolgreiche Antwort enthält `X-RateLimit-Limit` + `X-RateLimit-Remaining`.
 
-> **Hinter einem Reverse Proxy funktioniert `per_ip` nicht, und `real_ip` behebt das nicht** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` schlüsselt auf den verbindenden Socket (`ConnectInfo`), was hinter einem Proxy die IP des *Proxys* ist — also teilen sich alle Clients einen Bucket. Ein einziger lauter Client limitiert dann alle anderen, und kein einzelner Angreifer wird je limitiert.
+> **Hinter einem Reverse Proxy: benenne deine Proxys, sonst limitiert `per_ip` nichts Sinnvolles** ([#1398](https://github.com/ujeenet/rustango/issues/1398)). `RateLimitLayer::per_ip` schlüsselt auf den verbindenden Socket, was hinter einem Proxy die Adresse des *Proxys* ist — also teilen sich alle Clients einen Bucket. Ein einziger lauter Client limitiert dann alle anderen, und kein einzelner Angreifer wird je limitiert.
 >
-> `RealIpLayer` ändert daran **nichts**. Es fügt eine separate `RealIp`-Extension ein und schreibt `ConnectInfo` nie um; keiner der beiden Limiter liest diese Extension. Diese Seite empfahl früher, beide zu kombinieren — das tat nichts.
+> Mounte `RealIpLayer` **und sag ihm, welchen Hops er glauben soll**:
 >
-> Verdrahte die beiden auch nicht selbst. `RealIpLayer` nimmt den linkesten `X-Forwarded-For`-Eintrag, einen vom Client setzbaren Header ohne Trusted-Proxy-Prüfung — einen Limiter darauf zu schlüsseln macht aus „das Limit ist zu grob" ein „das Limit lässt sich per Header umgehen". Das ist der schlimmere der beiden Fehler.
+> ```rust
+> use rustango::real_ip::{HeaderStrategy, RealIpLayer, RealIpRouterExt};
 >
-> Bis das behoben ist: limitiere auf etwas, das du kontrollierst — `KeyBy::Header` auf einen authentifizierten API-Key, oder ein Limit pro Route im Proxy selbst, der die echte Client-Adresse ohnehin kennt.
+> app.rate_limit(RateLimitLayer::per_ip(60, Duration::from_secs(60)))
+>    .real_ip(
+>        RealIpLayer::new(HeaderStrategy::XForwardedFor)
+>            .trust_proxies(["10.0.0.0/8"])?,   // dein Ingress, nicht das Internet
+>    );
+> ```
+>
+> **Die Reihenfolge ist entscheidend und scheitert lautlos.** Layer werden von außen nach innen zuletzt angewandt, `real_ip` muss also *nach* `rate_limit` hinzugefügt werden, um *davor* zu laufen. Andersherum sieht der Limiter keine aufgelöste Adresse und schlüsselt still wieder auf den Socket — er warnt einmal, wenn ein Forwarding-Header ohne aufgelöste Adresse eintrifft.
+>
+> **`trust_proxies` ist keine optionale Dekoration.** `X-Forwarded-For` setzt, wer ihn sendet. Ohne deklarierte Proxy-Liste ist der Header nur eine Behauptung, also ignoriert ihn der Limiter vollständig und schlüsselt auf den Socket — absichtlich. Täte er es nicht, könnte jeder Client durch Variieren eines Headers pro Anfrage einen frischen Bucket erzeugen und aus „das Limit ist zu grob" würde „es gibt kein Limit". `RealIp` (die Behauptung) ist für Logging in Ordnung; nur `TrustedRealIp`, das erscheint, wenn der Peer zu `trust_proxies` passt, schlüsselt einen Limiter.
+>
+> Benenne die Adressen, von denen dein Ingress tatsächlich verbindet. Einen weiteren Bereich zu vertrauen, reicht den Bypass an jeden darin weiter.
 
 `RateLimitLayer` ist **prozesslokal** — es zählt Anfragen nur innerhalb einer laufenden Instanz, was in Ordnung ist, wenn du eine einzelne Instanz betreibst. Wenn du mehrere Instanzen (Replicas) hinter einem Load Balancer betreibst, würde jede ihre eigene Zählung führen, sodass sich das reale Limit vervielfacht. Um eine Zählung über alle Replicas hinweg zu teilen, nutze `rate_limit_cache::CacheRateLimitLayer`, das an eine beliebige `cache::Cache`-Implementierung delegiert (kombiniere es mit `cache::RedisCache` für einen gemeinsamen Zähler, der atomar per Redis `INCRBY` inkrementiert wird):
 
@@ -231,7 +247,11 @@ let app = Router::new()
 
 **Collector-Endpunkte ausnehmen.** `CsrfConfig::exempt_prefix("/path")` (wiederholbar) überspringt die CSRF-Durchsetzung für unsichere Methoden bei Anfragen, deren Pfad mit dem angegebenen Präfix beginnt. Das ist für Append-only-, zustandslose Endpunkte gedacht, die per `navigator.sendBeacon` angesprochen werden — z. B. ein Analytics-Collector — die keinen `X-CSRF-Token`-Header setzen können und, wenn die Seite aus einem CDN-Cache ausgeliefert wird, der `Set-Cookie` entfernt, möglicherweise gar kein CSRF-Cookie mitführen. Halte Präfixe eng und nimm niemals etwas aus, das Auth-Zustand liest oder schreibt.
 
-Der Auto-Admin aktiviert CSRF standardmäßig bei jeder Mutation, und es gibt keine Möglichkeit, sich davon abzumelden.
+**Der Auto-Admin.** Sobald du `.with_session_auth(...)` aufrufst, wird CSRF automatisch auf jede Admin-Mutation gelegt — anlegen, ändern, löschen, Bulk-Aktionen, Audit-Cleanup — und jedes Admin-Formular rendert seinen Token selbst. Es gibt nichts zu verdrahten und keine Möglichkeit, sich davon abzumelden.
+
+Die Bedingung ist Absicht, kein Zufall: CSRF schützt Credentials, die der Browser von sich aus mitschickt, also ist es das Session-Cookie, das es überhaupt sinnvoll macht. Ein Admin ohne `with_session_auth` hat kein von rustango verwaltetes Credential, mit dem sich fälschen ließe, und seine Mutationen sind für jeden direkt erreichbar, der die Route erreicht — das ist eine Authentifizierungslücke, keine CSRF-Lücke, und CSRF würde sie nicht verkleinern. Wer eine eigene Cookie-Auth davorsetzt, hängt `csrf::layer()` selbst ein.
+
+Bis [#1395](https://github.com/ujeenet/rustango/issues/1395) behauptete dieser Absatz, der Schutz sei bedingungslos — geschützt war allein `POST /login`. Jede andere Admin-Mutation akzeptierte ein Cross-Site-POST auf der Session des Administrators, Audit-Cleanup eingeschlossen, sodass dieselbe Anfrageklasse ihre eigene Spur löschen konnte.
 
 ---
 
@@ -650,7 +670,7 @@ Immer aktive Prüfungen (laufen mit oder ohne `--deploy`):
 
 Zusätzliche `--deploy`-Prüfungen (Produktionshärtung):
 - ✅ `RUSTANGO_ENV` ist `prod` oder `production`
-- ✅ `RUSTANGO_SESSION_SECRET` gesetzt und ≥ 32 Bytes (der HMAC-Schlüssel für Cookie- + JWT-Signierung — `SECRET_KEY` wird vom Framework **nicht** gelesen), ohne verbliebenen Scaffolder-Platzhalter
+- ✅ `RUSTANGO_SESSION_SECRET` gesetzt und **dekodiert** ≥ 32 Bytes (der HMAC-Schlüssel für Cookie- + JWT-Signierung — `SECRET_KEY` wird vom Framework **nicht** gelesen), ohne verbliebenen Scaffolder-Platzhalter. Es ist base64: `openssl rand -base64 32` liefert 44 Zeichen. Ein Secret mit 32 *Zeichen* hat nur 24 Bytes und wird abgelehnt — seit [#1396](https://github.com/ujeenet/rustango/issues/1396) von `check --deploy` und der Laufzeit gleichermaßen; genau darum geht es, denn die Prüfung maß früher die kodierte Zeichenkette und ließ einen Wert durch, den die App dann ablehnte
 - ✅ `DATABASE_URL` gesetzt (und warnt, wenn es auf localhost zeigt)
 - ⚠️ `RUSTANGO_APEX_DOMAIN` / `RUSTANGO_BIND` Plausibilitätswarnungen für Tenancy + Nicht-Loopback-Binding
 

@@ -80,6 +80,29 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
+`JwtBackend` acepta los tokens de acceso que emite `JwtLifecycle` y rechaza sus
+tokens de refresco — ambos son idénticos en el cable salvo por `typ`, así que un
+token de refresco presentado como bearer sería una credencial de acceso con días
+de vida en lugar de minutos.
+
+**La revocación es opcional y está desactivada por defecto.** Un `JwtBackend`
+sin más nunca consulta una lista negra, de modo que un token revocado por
+`/api/auth/logout` sigue autenticando a través de este backend hasta que expire
+por su cuenta. Comparte un almacén entre el ciclo de vida y el backend para que
+el cierre de sesión surta efecto:
+
+```rust
+use rustango::jti_store::{InMemoryJtiStore, JtiStore};
+
+let shared: Arc<dyn JtiStore> = Arc::new(InMemoryJtiStore::new()); // Redis en producción
+let lifecycle = JwtLifecycle::new(secret.clone()).with_jti_store(Arc::clone(&shared));
+let backend = JwtBackend::new(secret).with_jti_store(Arc::clone(&shared));
+```
+
+Debe ser el *mismo* almacén. Conectar dos instancias parece configurado y no
+aplica nada: el cierre de sesión escribe en uno y la verificación lee el otro.
+Consulta [revocación y el almacén de JTI](auth-jwt-api.md#revocación-y-el-almacén-de-jti).
+
 Escribe un backend personalizado implementando el trait (un único método async
 que inspecciona los `Parts` de la petición y devuelve `Option<AuthUser>`):
 

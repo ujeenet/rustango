@@ -40,12 +40,11 @@
 //!     );
 //! ```
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Request};
+use axum::extract::Request;
 use axum::http::{header, HeaderValue, Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
@@ -131,14 +130,7 @@ impl CacheRateLimitLayer {
 
     fn extract_key(&self, req: &Request<Body>) -> String {
         match &self.key_by {
-            KeyBy::Ip => req
-                .extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|ci| ci.ip().to_string())
-                .unwrap_or_else(|| {
-                    warn_missing_discriminator("IP (ConnectInfo missing)");
-                    "<no-ip>".to_owned()
-                }),
+            KeyBy::Ip => crate::rate_limit::client_ip_key(req),
             // Hash the header value, never store it raw (#1252). Keyed by
             // `authorization` / `x-api-key`, the raw value is a live
             // secret; this counter lives in a shared cache (Redis), so a

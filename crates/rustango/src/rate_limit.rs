@@ -52,6 +52,65 @@ fn warn_missing_discriminator(what: &str) {
     }
 }
 
+/// Warn (once) that a forwarding header arrived but no [`TrustedRealIp`]
+/// did, so the limiter is keying on the connecting socket and every
+/// client behind that proxy shares one bucket (#1398). Either
+/// `RealIpLayer` is not mounted, it is mounted *after* the limiter so its
+/// extension does not exist yet, or no proxies were declared trusted.
+///
+/// [`TrustedRealIp`]: crate::real_ip::TrustedRealIp
+fn warn_forwarded_but_unresolved(req: &Request<Body>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+
+    let forwarded =
+        req.headers().contains_key("x-forwarded-for") || req.headers().contains_key("x-real-ip");
+    if forwarded && !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            target: "rustango::rate_limit",
+            "per-IP rate limiting saw a forwarding header but no trusted client \
+             address, so it is keying on the connecting address and EVERY client \
+             behind that proxy shares ONE bucket. Mount `real_ip::RealIpLayer` \
+             ahead of the limiter (layers apply outermost-last, so add it after) \
+             AND name your proxies with `.trust_proxies([...])` — without that \
+             the header is only a claim and is deliberately ignored here.",
+        );
+    }
+}
+
+/// The client IP the limiters key on: the forwarded address when it
+/// arrived over a **trusted** proxy, otherwise the connecting socket
+/// (#1398).
+///
+/// Deliberately [`TrustedRealIp`] and not [`RealIp`]. `RealIp` is only a
+/// claim made by whoever sent the header — keying a limiter on that would
+/// turn "the limit is too coarse behind a proxy" into "the limit is
+/// bypassable by sending a header", which is the worse of the two
+/// failures. Only [`RealIpLayer::trust_proxies`] can produce the trusted
+/// form, so the operator names the hops and nothing is inferred.
+///
+/// Header parsing lives entirely in `RealIpLayer`; the limiters never
+/// read `X-Forwarded-For` themselves.
+///
+/// [`TrustedRealIp`]: crate::real_ip::TrustedRealIp
+/// [`RealIp`]: crate::real_ip::RealIp
+/// [`RealIpLayer::trust_proxies`]: crate::real_ip::RealIpLayer::trust_proxies
+pub(crate) fn client_ip_key(req: &Request<Body>) -> String {
+    if let Some(ip) = req.extensions().get::<crate::real_ip::TrustedRealIp>() {
+        return ip.0.to_string();
+    }
+    match req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        Some(ci) => {
+            warn_forwarded_but_unresolved(req);
+            ci.ip().to_string()
+        }
+        None => {
+            warn_missing_discriminator("IP (ConnectInfo missing)");
+            "<no-ip>".to_owned()
+        }
+    }
+}
+
 /// Strategy for picking the bucket key per request.
 #[derive(Clone, Debug)]
 pub enum KeyBy {
@@ -163,14 +222,7 @@ impl RateLimitLayer {
 
     fn extract_key(&self, req: &Request<Body>) -> String {
         match &self.key_by {
-            KeyBy::Ip => req
-                .extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|ci| ci.ip().to_string())
-                .unwrap_or_else(|| {
-                    warn_missing_discriminator("IP (ConnectInfo missing)");
-                    "<no-ip>".to_owned()
-                }),
+            KeyBy::Ip => client_ip_key(req),
             // Unlike the cache-backed limiter, this store is a
             // process-local `HashMap` that never leaves memory, so the
             // header value is not persisted anywhere an attacker could

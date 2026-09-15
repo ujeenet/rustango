@@ -259,6 +259,16 @@ impl CorsLayer {
     /// Returns `None` when the origin should be rejected.
     fn resolve_origin(&self, request_origin: Option<&str>) -> Option<String> {
         match (&self.allow_origin, request_origin) {
+            // Never echo a concrete origin while credentials are on (#1394).
+            //
+            // Browsers refuse `Access-Control-Allow-Origin: *` together with
+            // credentials, but they *accept* a reflected concrete origin — so
+            // echoing here turned "any origin" into "every origin, with
+            // cookies", readable by any site the victim visits. Answering `*`
+            // is what this page's own documentation already claimed happened,
+            // and the browser then blocks the request, which is correct: a
+            // wildcard and credentials are not a combination anyone can have.
+            (AllowOrigin::Any, _) if self.allow_credentials => Some("*".to_owned()),
             (AllowOrigin::Any, Some(o)) => Some(o.to_owned()),
             (AllowOrigin::Any, None) => Some("*".to_owned()),
             (AllowOrigin::List(list), Some(o)) => {
@@ -371,7 +381,12 @@ fn attach_cors_headers(
         }
     }
 
-    if cfg.allow_credentials {
+    // Not alongside a wildcard (#1394). `resolve_origin` answers `*` rather
+    // than echoing when credentials are on, and pairing the two is a
+    // combination no browser honours — emitting it would only describe an
+    // intent the response cannot carry. The warning at configure time is
+    // where a misconfigured deployment is told.
+    if cfg.allow_credentials && allow_origin != "*" {
         headers.insert(
             ACCESS_CONTROL_ALLOW_CREDENTIALS,
             HeaderValue::from_static("true"),
@@ -403,6 +418,76 @@ mod tests {
     fn resolve_any_without_origin_returns_wildcard() {
         let l = CorsLayer::new().allow_any_origin();
         assert_eq!(l.resolve_origin(None).as_deref(), Some("*"));
+    }
+
+    /// #1394 — the credentialed wildcard hole.
+    ///
+    /// Echoing the request's origin is safe without credentials and is a
+    /// universal read-any-response hole with them, because browsers reject
+    /// `*` + credentials but accept a *reflected* concrete origin. The
+    /// asymmetry is the whole bug, so both halves are pinned here.
+    #[test]
+    fn any_origin_never_echoes_while_credentials_are_on() {
+        let evil = "https://evil.example";
+
+        let safe = CorsLayer::new().allow_any_origin();
+        assert_eq!(
+            safe.resolve_origin(Some(evil)).as_deref(),
+            Some(evil),
+            "without credentials, echoing is fine and stays"
+        );
+
+        let holed = CorsLayer::new().allow_any_origin().allow_credentials(true);
+        assert_eq!(
+            holed.resolve_origin(Some(evil)).as_deref(),
+            Some("*"),
+            "with credentials the origin must NOT be echoed — a reflected \
+             concrete origin is what browsers accept, and is the hole"
+        );
+    }
+
+    /// The other half: `*` and `Access-Control-Allow-Credentials: true` must
+    /// never ship together, whatever the origin resolved to.
+    #[test]
+    fn wildcard_response_carries_no_credentials_header() {
+        let cfg = CorsLayer::new().allow_any_origin().allow_credentials(true);
+        let mut res = Response::new(Body::empty());
+        attach_cors_headers(&cfg, Some("https://evil.example"), None, &mut res);
+
+        let h = res.headers();
+        assert_eq!(
+            h.get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .map(|v| v.to_str().unwrap()),
+            Some("*")
+        );
+        assert!(
+            h.get(ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none(),
+            "a wildcard response must not claim credentials: got {:?}",
+            h.get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
+        );
+    }
+
+    /// An explicit allowlist is the supported way to do credentialed CORS,
+    /// and it keeps working — the fix must not break the correct usage.
+    #[test]
+    fn allowlisted_origin_still_gets_credentials() {
+        let cfg = CorsLayer::new()
+            .allow_origins(vec!["https://app.example.com"])
+            .allow_credentials(true);
+        let mut res = Response::new(Body::empty());
+        attach_cors_headers(&cfg, Some("https://app.example.com"), None, &mut res);
+
+        let h = res.headers();
+        assert_eq!(
+            h.get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                .map(|v| v.to_str().unwrap()),
+            Some("https://app.example.com")
+        );
+        assert_eq!(
+            h.get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .map(|v| v.to_str().unwrap()),
+            Some("true")
+        );
     }
 
     #[test]

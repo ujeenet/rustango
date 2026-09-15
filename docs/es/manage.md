@@ -455,12 +455,41 @@ cargo run -- make:form ContactForm
 
 ### `make:job <Name>`
 
-Genera un esqueleto de trabajo en segundo plano (trabajo que se ejecuta fuera
-del request, como una tarea de Celery o un job de Laravel), con un ejemplo
-comentado de cómo programarlo.
+Genera un `jobs::Job` — una struct de payload más la implementación del trait,
+con `NAME`, `MAX_ATTEMPTS` y `async fn run(&self)`. Es trabajo que encolas desde
+un handler y que un worker ejecuta después.
+
+`run` recibe **solo la payload**: ni pool, ni tenant, ni contexto de request.
+Lleva en sus campos todo lo que el job necesite.
 
 ```bash
 cargo run -- make:job EmailDigestJob
+```
+
+### `make:scheduled <Name>`
+
+Genera una tarea de intervalo fijo para `scheduler::Scheduler` — la forma que
+`make:job` emitía antes de generar un job de verdad.
+
+```bash
+cargo run -- make:scheduled NightlySweep
+```
+
+### `make:worker <Name>`
+
+Genera un binario de worker independiente para `src/bin/` — un proceso que vacía
+la cola de trabajos y no sirve HTTP. Ejecútalo junto al proceso web, o como su
+propio contenedor.
+
+La forma es corta y fácil de escribir mal de un modo que solo aparece en
+producción: un worker que espera `tokio::signal::ctrl_c()` atiende SIGINT pero
+**no** SIGTERM, que es lo que envían `docker stop`, Kubernetes y systemd.
+Entonces el vaciado nunca se ejecuta, el contenedor muere al agotarse su periodo
+de gracia, y los trabajos en vuelo se pierden sin que se registre nada. El worker
+generado espera `shutdown::shutdown_signal()`, que atiende ambas señales.
+
+```bash
+cargo run -- make:worker JobsWorker
 ```
 
 ### `make:notification <Name>`
@@ -551,7 +580,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.57.1
+rustango 0.57.5
 ```
 
 ### `about`
@@ -563,7 +592,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.57.1
+  version:        0.57.5
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1395,14 +1424,19 @@ construcción por tenant registran un `tracing::warn!` pero no abortan el bucle.
 
 ### Tracing
 
-`crate::tenancy::pools::tenant_pool_init` es un `tracing::info_span!` que envuelve
-la construcción del pool en la ruta fría. Suscríbete a él para ver la latencia de
+`tenant_pool_init` es un `tracing::info_span!` que envuelve la
+construcción del pool en la ruta fría, y los eventos que contiene llevan
+el target `rustango::tenancy::pools`. Suscríbete para ver la latencia de
 construcción por tenant:
 
 ```text
-INFO crate::tenancy::pools: tenant pool connected (database mode)
+INFO rustango::tenancy::pools: tenant pool connected (database mode)
      slug=acme elapsed_ms=42 min_conn=1 max_conn=4
 ```
+
+Actívalo con `RUST_LOG=rustango::tenancy::pools=info`. Un filtro sobre
+`crate::tenancy::pools` no casa nada — un target es una cadena, no una
+ruta; ver [Logging](logging.md#targets-nombrar-el-subsistema).
 
 ### Trampa de configuración — TLDs `.local` de macOS
 
@@ -1472,7 +1506,7 @@ alcanzan mediante `Cli::tenancy()`.
 |---|---|
 | `startapp <name>` | Crea un módulo de aplicación |
 | `make:viewset` / `make:serializer` / `make:form` | Genera un ViewSet, Serializer o Form |
-| `make:job` / `make:middleware` / `make:notification` / `make:test` | Genera un job, middleware, notificación o test |
+| `make:job` / `make:scheduled` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Genera un job de cola, una tarea de intervalo, un binario de worker, middleware, notificación o test |
 | `make:api_routes <app> [--tenant]` | Genera el módulo de rutas API de una app |
 
 ### Caché, sesiones y correo

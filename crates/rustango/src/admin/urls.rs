@@ -732,10 +732,28 @@ impl Builder {
             // the rest of the admin surface.
             let protected = protected
                 .merge(super::login_view::protected_router(state.clone()))
+                // #1395 — CSRF on every admin mutation, which is what
+                // `docs/security.md` has always claimed happened. Before
+                // this the only protected route was `POST /login`; create,
+                // update, delete, bulk actions and audit cleanup all
+                // accepted a cross-site POST riding the session cookie,
+                // and audit cleanup meant the same request class could
+                // erase its own trace.
+                //
+                // Order matters and is the reverse of how it reads:
+                // `route_layer` applies outermost-last, so `csrf_context`
+                // runs *first*, minting the token and scoping the
+                // task-local that `chrome_context` reads, then
+                // `CsrfLayer` validates, then `require_session`
+                // authenticates. The token has to exist before any
+                // template renders, and validation has to happen whether
+                // or not the session is valid.
                 .route_layer(axum::middleware::from_fn_with_state(
                     gate,
                     super::login_view::require_session,
-                ));
+                ))
+                .route_layer(crate::forms::csrf::layer())
+                .route_layer(axum::middleware::from_fn(super::csrf_context::csrf_context));
             // Public login routes (form + logout), plus the per-provider SSO
             // routes (admin-sso). Providers are configured in the DB
             // (`SsoProvider`); the routes mount whenever session auth is on

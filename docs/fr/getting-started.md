@@ -4,7 +4,7 @@ Ce guide vous accompagne depuis un répertoire vide jusqu'à un blog déployé :
 
 > **Durée :** ~45 minutes pour la visite complète, ~10 minutes si vous voulez juste la voir fonctionner.
 >
-> **Version exécutable :** chaque étape ci-dessous est reproduite dans un exemple testé et compilable disponible dans [`crates/rustango/examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog). Si une étape vous semble incorrecte, comparez-la à cet exemple.
+> **Version exécutable :** chaque étape ci-dessous est reproduite dans un exemple testé et compilable disponible dans [`crates/rustango/examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/develop/crates/rustango/examples/getting_started_blog). Si une étape vous semble incorrecte, comparez-la à cet exemple.
 
 [![Construire un blog avec Rustango : générer la migration, l'appliquer, démarrer le serveur, et interroger l'API JSON — tout depuis un seul binaire](../img/getting-started.png)](../img/getting-started.png)
 
@@ -173,7 +173,7 @@ Ceci ajoute globalement la sous-commande `cargo rustango ...`. Vérifiez qu'elle
 cargo rustango --help
 ```
 
-La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.57.1`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
+La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.57.5`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
 
 ---
 
@@ -896,15 +896,15 @@ Assurez-vous que votre proxy inverse :
 
 | Sujet | Doc |
 |---|---|
-| Version exécutable de ce guide | [`examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog) |
+| Version exécutable de ce guide | [`examples/getting_started_blog`](https://github.com/ujeenet/rustango/tree/develop/crates/rustango/examples/getting_started_blog) |
 | Chaque sous-commande `manage` | [`docs/manage.md`](manage.md) |
 | Recueil de recettes ORM (filtres avancés, agrégations, M2M, suppression douce) | [`docs/orm.md`](orm.md) |
 | Middleware (le catalogue complet des couches + ordonnancement) | [`docs/middleware.md`](middleware.md) |
 | Benchmarks de performance (vs Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | Conventions d'API (nommage, patrons de construction, feature gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Fonctionnalités de sécurité en détail | [`docs/security.md`](security.md) |
-| Audit de parité avec Django | [`docs/django-parity-audit-2026-05-21.md`](https://github.com/ujeenet/rustango/blob/main/docs/django-parity-audit-2026-05-21.md) |
-| Multi-tenancy | [README — section Multi-tenancy](https://github.com/ujeenet/rustango/blob/main/README.md#multi-tenancy) |
+| Audit de parité avec Django | [`docs/django-parity-audit-2026-05-21.md`](https://github.com/ujeenet/rustango/blob/develop/docs/django-parity-audit-2026-05-21.md) |
+| Multi-tenancy | [README — section Multi-tenancy](https://github.com/ujeenet/rustango/blob/develop/README.md#multi-tenancy) |
 | Documentation de l'API | <https://docs.rs/rustango> |
 
 Si vous rencontrez quelque chose qui ne fonctionne pas ou qui n'est pas clair, ouvrez un ticket.

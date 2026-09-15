@@ -285,8 +285,7 @@ pub use page::Page;
 mod pg_on;
 #[cfg(feature = "postgres")]
 pub use pg_on::{
-    bulk_insert_on, delete_on, insert_on, insert_returning_on, select_one_row_on, select_rows_on,
-    update_on,
+    bulk_insert_on, delete_on, insert_on, insert_returning_on, select_rows_on, update_on,
 };
 
 mod row_to_json;
@@ -726,19 +725,58 @@ impl<T: Model + Send> UpdaterPool<T> for UpdateBuilder<T> {
     }
 }
 
+/// A NULL with no type attached, so PostgreSQL infers one from the
+/// column it lands in (#1450).
+///
+/// [`SqlValue::Null`] used to bind `None::<String>`, which sends the
+/// parameter with the **text** OID. Postgres then refuses it anywhere but
+/// a text column:
+///
+/// ```text
+/// column "uploaded_by_id" is of type bigint but expression is of type text
+/// ```
+///
+/// So writing NULL to any non-text column failed — media upload was
+/// broken outright, and 50-odd other sites shared the expression. MySQL
+/// and SQLite type parameters loosely enough not to care, which is why
+/// only Postgres ever showed it, and why the two tri-dialect binders
+/// below are left alone.
+///
+/// OID 0 is the wire protocol's "unspecified": the server resolves the
+/// type from context during Parse.
+#[cfg(feature = "postgres")]
+struct UntypedNull;
+
+#[cfg(feature = "postgres")]
+impl sqlx::Type<sqlx::Postgres> for UntypedNull {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl sqlx::Encode<'_, sqlx::Postgres> for UntypedNull {
+    fn encode_by_ref(
+        &self,
+        _buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        Ok(sqlx::encode::IsNull::Yes)
+    }
+}
+
 /// Match on `SqlValue` and bind to a sqlx query builder. Used twice below for
 /// `Query` and `QueryAs`, which don't share a bind trait. PG-only — the
 /// macro depends on `sqlx::types::Json` round-tripping through
 /// `PgArguments` and `SqlValue::Array` binding as a typed PG array,
 /// neither of which exists on MySQL / SQLite. The bi-directional
 /// counterparts are `bind_match_mysql!` + `bind_match_sqlite!`.
+///
 // Macros are made visible to sibling modules below via `pub(super) use`.
 #[cfg(feature = "postgres")]
 macro_rules! bind_match {
     ($q:expr, $value:expr) => {
         match $value {
-            // `None::<String>` produces a typed NULL Postgres accepts in any context.
-            SqlValue::Null => $q.bind(None::<String>),
+            SqlValue::Null => $q.bind($crate::sql::executor::UntypedNull),
             SqlValue::I16(v) => $q.bind(v),
             SqlValue::I32(v) => $q.bind(v),
             SqlValue::I64(v) => $q.bind(v),
@@ -935,29 +973,6 @@ pub(super) fn bind_query(
 }
 
 // ------------------------------------------------------------------ bulk UPDATE
-
-// ------------------------------------------------------------------ raw SQL escape hatch
-
-/// Like [`raw_query`] but accepts any sqlx executor.
-///
-/// # Errors
-/// As [`raw_query`].
-#[cfg(feature = "postgres")]
-pub async fn raw_query_on<'c, T, E>(
-    sql: &str,
-    binds: Vec<SqlValue>,
-    executor: E,
-) -> Result<Vec<T>, ExecError>
-where
-    T: for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> = sqlx::query_as(sql);
-    for b in binds {
-        q = bind_query_as(q, b);
-    }
-    Ok(q.fetch_all(executor).await?)
-}
 
 // ------------------------------------------------------------------ aggregate
 
@@ -1425,7 +1440,23 @@ pub async fn run_ddl_idempotent(pool: &Pool, ddl: &str) -> Result<(), sqlx::Erro
         match execute_pool(pool, stmt, Vec::new()).await {
             Ok(_) => {}
             Err(crate::sql::ExecError::Driver(err)) => {
-                if !crate::sql::is_mysql_dup_index_error(&err) {
+                // Two ways an idempotent DDL statement can fail while
+                // still having done its job:
+                //
+                //  * MySQL has no `CREATE INDEX IF NOT EXISTS`, so a
+                //    second run raises ER_DUP_KEYNAME.
+                //  * Postgres *has* the syntax but it is **not atomic**
+                //    (#1458): two sessions can both pass the existence
+                //    check and race on the catalogue insert. The loser
+                //    errors even though the object now exists — which
+                //    is exactly what a web and a worker process do when
+                //    they start together and both call
+                //    `ensure_table_pool`.
+                //
+                // Either way the post-condition holds, so continue.
+                if !crate::sql::is_mysql_dup_index_error(&err)
+                    && !crate::sql::is_pg_dup_object_error(&err)
+                {
                     return Err(err);
                 }
             }

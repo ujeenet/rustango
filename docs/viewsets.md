@@ -509,8 +509,15 @@ A trailing slash on the mount prefix is optional. These six verbs are wired,
 plus an RFC 10008 `QUERY` collection action whenever the `admin` feature is on.
 The routes are built with `axum::routing::get`, so axum answers `HEAD` from the
 `GET` handler automatically; `OPTIONS` is not wired. **Bulk create** is free: `POST` a JSON
-*array* and every element is inserted in order, validated atomically (one bad
-element rejects the whole batch).
+*array* and every element is inserted in order, inside one transaction. One bad
+element rejects the whole batch and **leaves nothing behind** — whether it is
+caught by validation or by the database.
+
+> That second half was not true until [#1403](https://github.com/ujeenet/rustango/issues/1403).
+> Validation was atomic; the writes were one `INSERT` each with no transaction,
+> so a unique or foreign-key violation on element 5 committed elements 0–4,
+> returned `400 bulk entry 5`, and named none of the rows it had created.
+> Constraint violations are exactly the class validation cannot decide up front.
 
 ---
 
@@ -562,7 +569,7 @@ Every method on `ViewSet::for_model(SCHEMA)` (each returns `Self`):
 | `pk_param(name)` | Rename the path parameter used for detail routes. |
 | `read_only()` | GET-only. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Per-action codename gates (the latter on tenancy). |
-| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). |
+| `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). Any totally-ordered column: integer, timestamp, date, uuid or string. |
 | `limit_offset_pagination()` | `?limit=&offset=` windowing. |
 | `pagination(PaginationStyle::…)` | Set the style explicitly. |
 | `filter_backend(closure)` | Add custom `WHERE` predicates beyond `filter_fields`. |
@@ -617,7 +624,11 @@ Three styles; page-number is the default. The list envelope differs per style:
 ```
 
 **Cursor** — `.cursor_pagination("id")` (or `_desc`); skips `COUNT(*)`, ideal
-for very large tables. `?cursor=<token>&page_size=20`:
+for very large tables. The field must be **totally ordered**: an integer,
+timestamp, date, uuid or string. `"id"` is the usual choice; a `created_at`
+timestamp is the other, and is what you want on an append-only table. A float,
+bool, json or blob column panics at build time rather than failing per request.
+`?cursor=<token>&page_size=20`:
 
 ```json
 { "page_size": 20, "next": "<opaque-cursor-or-null>", "results": [ … ] }

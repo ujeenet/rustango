@@ -104,7 +104,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `startapp <name>` | Scaffold an app module |
 | `make:viewset` / `make:serializer` / `make:form` | Generate a ViewSet, Serializer or Form |
-| `make:job` / `make:middleware` / `make:notification` / `make:test` | Generate a job, middleware, notification or test |
+| `make:job` / `make:scheduled` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Generate a queue job, a timer task, a worker binary, middleware, notification or test |
 | `make:api_routes <app> [--tenant]` | Generate an app's API route module |
 
 ### Cache, sessions and mail
@@ -569,12 +569,44 @@ cargo run -- make:form ContactForm
 
 ### `make:job <Name>`
 
-Generates a background-job skeleton (work that runs outside the
-request, like a Celery task or a Laravel job), with a commented example
-of how to schedule it.
+Generates a `jobs::Job` — a payload struct plus the trait impl, with
+`NAME`, `MAX_ATTEMPTS` and `async fn run(&self)`. This is work you
+enqueue from a handler and a worker executes later.
+
+`run` receives **only the payload**: no pool, no tenant, no request
+context. Carry what the job needs in its fields.
 
 ```bash
-cargo run -- make:job EmailDigestJob
+cargo run -- make:job SendReceipt
+```
+
+For work that runs on a timer rather than from a queue, see
+`make:scheduled`.
+
+### `make:scheduled <Name>`
+
+Generates a fixed-interval task for `scheduler::Scheduler` — the shape
+`make:job` used to emit before it scaffolded an actual job.
+
+```bash
+cargo run -- make:scheduled NightlySweep
+```
+
+### `make:worker <Name>`
+
+Generates a standalone worker binary for `src/bin/` — a process that
+drains the job queue and serves no HTTP. Run it beside the web process,
+or as its own container.
+
+The shape is short and easy to get wrong in a way that only appears in
+production: a worker that awaits `tokio::signal::ctrl_c()` handles
+SIGINT but **not** SIGTERM, which is what `docker stop`, Kubernetes and
+systemd send. The drain then never runs, the container is killed after
+its grace period, and in-flight jobs are lost with nothing logged. The
+generated worker awaits `shutdown::shutdown_signal()`, which takes both.
+
+```bash
+cargo run -- make:worker JobsWorker
 ```
 
 ### `make:notification <Name>`
@@ -664,7 +696,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.57.1
+rustango 0.57.5
 ```
 
 ### `about`
@@ -676,7 +708,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.57.1
+  version:        0.57.5
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1504,14 +1536,19 @@ build failures log a `tracing::warn!` but don't abort the loop.
 
 ### Tracing
 
-`crate::tenancy::pools::tenant_pool_init` is a `tracing::info_span!`
-that wraps the cold-path pool build. Subscribe to it to see
-per-tenant build latency:
+`tenant_pool_init` is a `tracing::info_span!` that wraps the cold-path
+pool build, and the events inside it carry the
+`rustango::tenancy::pools` target. Subscribe to see per-tenant build
+latency:
 
 ```text
-INFO crate::tenancy::pools: tenant pool connected (database mode)
+INFO rustango::tenancy::pools: tenant pool connected (database mode)
      slug=acme elapsed_ms=42 min_conn=1 max_conn=4
 ```
+
+Turn it on with `RUST_LOG=rustango::tenancy::pools=info`. A filter on
+`crate::tenancy::pools` matches nothing — a target is a string, not a
+path; see [Logging](logging.md#targets--naming-the-subsystem).
 
 ### Setup gotcha — macOS `.local` TLDs
 

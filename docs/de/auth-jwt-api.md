@@ -47,7 +47,7 @@ Projekt sonst neu schreibt:
 |---|---|---|---|
 | POST | `/api/auth/login` | `{username, password}` | `{access, refresh, user}` |
 | POST | `/api/auth/refresh` | `{refresh}` | `{access, refresh}` |
-| POST | `/api/auth/logout` | `Authorization: Bearer <access>` | `204` (widerruft die JTI) |
+| POST | `/api/auth/logout` | `Authorization: Bearer <access>` + optional `{refresh}` | `204` (widerruft beide JTIs) |
 | GET | `/api/auth/me` | `Authorization: Bearer <access>` | `{user_id, username, is_superuser}` |
 
 Login verifiziert das Passwort mit [argon2id](auth-passwords.md) und stellt dann
@@ -153,6 +153,24 @@ assert!(jwt.revoke(&pair.access).await);
 assert!(jwt.verify_access(&pair.access).await.is_none());
 ```
 
+### Den Refresh-Token an `/logout` senden
+
+Nur den Bearer zu widerrufen beendet einen Token, der ohnehin in Minuten
+abgelaufen wäre. Der Refresh-Token ist derjenige mit tagelanger Lebensdauer und
+kann während seiner gesamten TTL neue Access-Token ausstellen — ein Logout, das
+ihn am Leben lässt, beendet die Sitzung also nicht, es verschiebt sie nur:
+
+```jsonc
+POST /api/auth/logout
+Authorization: Bearer <access>
+{ "refresh": "<refresh>" }        // widerruft auch die langlebige Hälfte
+```
+
+Der Body ist optional, sodass Clients, die gegen den älteren Endpunkt
+geschrieben wurden, unverändert weiterlaufen — sie widerrufen einfach weniger.
+Senden Sie ihn. Beide Hälften sind an den aufrufenden Mandanten gebunden, sodass
+eine Subdomain den Token einer anderen nicht widerrufen kann.
+
 Die Sperrliste liegt in einem austauschbaren `JtiStore`. Der Standard
 `InMemoryJtiStore` ist **einprozessig und verliert Widerrufe beim Neustart** —
 in Ordnung für eine einzelne Instanz. Jede Multi-Replica-Bereitstellung MUSS
@@ -249,6 +267,19 @@ Benutzerdefinierte Claims überleben `refresh` (werden auf das neue Paar
   `Authorization: Bearer`-Header zu authentifizieren.
 - **HS256-Signierung**, 32-Byte-Schlüssel-Untergrenze — derselbe Algorithmus und
   dieselben Einschränkungen wie beim [eigenständigen JWT](auth-jwt.md#sicherheitsmodell).
+- **Die Tokens sind gewöhnliche JWTs**, also kann alles, was ein JWT prüft, auch
+  diese prüfen: `jwt.io`, die Standardbibliothek deiner Plattform, ein
+  API-Gateway, ein anderer Dienst, dem du ein Token gibst. Drei Segmente, ein
+  JOSE-Header `{"alg":"HS256","typ":"JWT"}`, signiert über `header.payload`.
+
+  Bis [#1397](https://github.com/ujeenet/rustango/issues/1397) waren es zwei
+  Segmente ohne Header, signiert nur über die Payload — lesbar von nichts außer
+  rustango und sogar von `rustango::jwt::decode` abgelehnt. Wer dafür einen
+  eigenen Verifier geschrieben hat, kann ihn wegwerfen.
+
+  Vor dem Fix ausgestellte Tokens werden beim Verifizieren weiterhin akzeptiert,
+  damit ein Upgrade niemanden ausloggt. Dieser Kompatibilitätspfad entfällt in
+  0.58, wenn jedes Token der alten Form längst abgelaufen ist.
 
 
 ---

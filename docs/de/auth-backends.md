@@ -82,6 +82,30 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
+`JwtBackend` akzeptiert die Access-Token, die `JwtLifecycle` ausstellt, und
+weist dessen Refresh-Token zurück — beide sind bis auf `typ` auf der Leitung
+identisch, ein als Bearer vorgelegter Refresh-Token wäre also ein
+Zugangsnachweis mit Tagen statt Minuten Lebensdauer.
+
+**Widerruf ist optional und standardmäßig aus.** Ein einfaches `JwtBackend`
+konsultiert nie eine Sperrliste, ein von `/api/auth/logout` widerrufener Token
+authentifiziert sich über dieses Backend also weiter, bis er von selbst
+abläuft. Teilen Sie einen Speicher zwischen Lifecycle und Backend, damit Logout
+wirksam wird:
+
+```rust
+use rustango::jti_store::{InMemoryJtiStore, JtiStore};
+
+let shared: Arc<dyn JtiStore> = Arc::new(InMemoryJtiStore::new()); // in Produktion Redis
+let lifecycle = JwtLifecycle::new(secret.clone()).with_jti_store(Arc::clone(&shared));
+let backend = JwtBackend::new(secret).with_jti_store(Arc::clone(&shared));
+```
+
+Es muss *derselbe* Speicher sein. Zwei Instanzen zu verdrahten sieht
+konfiguriert aus und erzwingt nichts: Logout schreibt in den einen, die
+Verifikation liest den anderen. Siehe
+[Widerruf und der JTI-Speicher](auth-jwt-api.md#widerruf-und-der-jti-speicher).
+
 Schreiben Sie ein eigenes Backend, indem Sie den Trait implementieren (eine
 einzige async-Methode, die die `Parts` der Anfrage inspiziert und
 `Option<AuthUser>` zurückgibt):

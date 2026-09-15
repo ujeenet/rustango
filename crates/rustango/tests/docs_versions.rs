@@ -272,7 +272,7 @@ fn the_docs_manifest_publishes_under_the_shipping_version() {
         .expect("docs/index.toml declares a `version`");
 
     // The manifest labels a doc *series*, not a point release, so it
-    // carries major.minor: 0.57.1 still publishes under /0.57.
+    // carries major.minor: 0.57.5 still publishes under /0.57.
     let expected: String = CURRENT.rsplit_once('.').map_or_else(
         || CURRENT.to_owned(),
         |(major_minor, _patch)| major_minor.to_owned(),

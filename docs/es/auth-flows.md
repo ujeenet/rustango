@@ -87,25 +87,62 @@ let url = PasswordReset::issue(
 mailer.send(&Email::new().to(addr).subject("Reset your password").body(&url)).await?;
 
 // 2. User clicks + submits a new password → verify + rotate the hash.
-let user_id = confirm_password_reset_pool_into(
+let user_id = confirm_password_reset_pool(
     &pool, &url, "a-brand-new-strong-password", secret,
-    "rustango_users", "id", "password_hash",  // table, pk col, password col
 ).await?;
 ```
 
-El asistente de confirmación exige una longitud mínima, aplica argon2id al nuevo password y lo
-escribe — rechazando entradas débiles, caducadas, manipuladas o con el secreto equivocado sin tocar
-la fila:
+> **Usa esta forma para `rustango_users`.** También marca
+> `password_changed_at`, que es lo que termina las sesiones emitidas antes del
+> restablecimiento ([#1449](https://github.com/ujeenet/rustango/issues/1449)).
+> `_into` acepta una tabla arbitraria y no puede suponer que exista una columna
+> de rotación, así que solo escribe la contraseña — un restablecimiento por ahí
+> deja válida toda sesión existente, incluida la de un atacante. Eso importa
+> precisamente porque un restablecimiento es lo que alguien hace cuando cree que
+> su cuenta está comprometida.
+
+El asistente de confirmación aplica la [política de contraseñas](auth-passwords.md#comprobaciones-de-robustez),
+aplica argon2id al nuevo password y lo escribe — rechazando entradas débiles, caducadas,
+manipuladas o con el secreto equivocado sin tocar la fila:
 
 ```rust
 // valid token + strong pw → hash rotated (starts "$argon2…")
-// "short"                  → Err(WeakPassword), nothing written
+// "12345678"               → Err(WeakPassword), nothing written
 // user_id tampered         → Err(InvalidSignature), nothing written
 ```
 
-> `confirm_password_reset_pool` es la forma cómoda que asume los valores por defecto
-> `rustango_users` / `id` / `password_hash`; usa `_into` para apuntar a tu propia
-> tabla/columnas.
+Es el mismo `passwords::strength_score` que usa el resto del framework, así que una contraseña
+rechazada en el registro no puede establecerse restableciéndola (#1399).
+
+> `_into` apunta a tu propia tabla/columnas — por ejemplo un `app_users` de
+> inquilino. Si tiene un equivalente de `password_changed_at`, márcalo tú mismo
+> en la misma transacción, o el restablecimiento no terminará las sesiones
+> existentes.
+
+### Haz que el enlace sea de un solo uso
+
+Los asistentes anteriores solo verifican firma y caducidad, así que **el enlace sigue siendo
+utilizable durante todo su TTL** — incluso después de cambiar la contraseña. Una copia del correo
+en un buzón compartido, un mensaje reenviado o un ticket de soporte con el correo pegado es una
+toma de control de la cuenta en funcionamiento hasta que el token caduque, en un momento en que el
+usuario legítimo ya ha terminado y no tiene motivo para sospechar.
+
+Pasa una caché y el token se consume en el primer uso:
+
+```rust
+use rustango::auth_flows::confirm_password_reset_single_use;
+
+let user_id = confirm_password_reset_single_use(
+    &pool, &url, "a-brand-new-strong-password", secret, &cache,
+).await?;                      // una repetición → Err(AuthFlowError::AlreadyUsed)
+```
+
+`_single_use_into` toma la misma tabla/columnas que `_into`. La política de contraseñas se
+comprueba *antes* de consumir el token, de modo que una contraseña rechazada no le cuesta el
+enlace al usuario.
+
+La marca de usado vive en la caché, no en el token, así que todas las réplicas deben compartir una
+caché — dos instancias significan dos listas negras y ninguna aplicación.
 
 ---
 

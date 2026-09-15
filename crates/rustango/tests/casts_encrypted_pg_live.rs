@@ -30,7 +30,10 @@ pub struct Patient {
 async fn pool() -> Option<Pool> {
     std::env::set_var("RUSTANGO_SECRET_KEY", "pg-live-secret");
     let url = std::env::var("DATABASE_URL").ok()?;
-    let pool: Pool = sqlx::PgPool::connect(&url).await.ok()?.into();
+    let pool: Pool = sqlx::PgPool::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("DATABASE_URL is set but unreachable ({url}): {e}"))
+        .into();
     let pg = pool.as_postgres().unwrap();
     sqlx::query(r#"DROP TABLE IF EXISTS "cast_pg_patient" CASCADE"#)
         .execute(pg)

@@ -133,12 +133,20 @@ pub fn startapp(
     // urls.rs. Conservative regex anchors with bail-out: if the file
     // doesn't have the expected aggregator pattern, we skip the edit
     // and surface a "add this manually" hint via report.manual_steps.
+    // `lib.rs` first, deliberately. A scaffolded project has both, and
+    // the app's modules live in the library so that binaries under
+    // `src/bin/` — a worker from `manage make:worker` — can reach them.
+    // Registering the new app in `main.rs` would put `mod <app>;` in the
+    // binary, where the library's `urls.rs` aggregator cannot see it.
+    //
+    // Projects predating the library target have only `main.rs` and are
+    // still handled.
     let main_path = project_root.join(&base_dir).join("main.rs");
     let lib_path = project_root.join(&base_dir).join("lib.rs");
-    let entry_path = if main_path.exists() {
-        Some(main_path)
-    } else if lib_path.exists() {
+    let entry_path = if lib_path.exists() {
         Some(lib_path)
+    } else if main_path.exists() {
+        Some(main_path)
     } else {
         None
     };
@@ -152,8 +160,15 @@ pub fn startapp(
             EntryEditOutcome::Patched => report.patched.push(rel),
             EntryEditOutcome::AlreadyRegistered => {} // silent — idempotent
             EntryEditOutcome::CouldNotFindAnchor => {
+                // Match the spelling the patcher would have used, so a
+                // hand-applied step lands the app where urls.rs can see it.
+                let vis = if path.file_name().is_some_and(|f| f == "lib.rs") {
+                    "pub mod"
+                } else {
+                    "mod"
+                };
                 report.manual_steps.push(format!(
-                    "{rel}: add `mod {};` near the other `mod` declarations",
+                    "{rel}: add `{vis} {};` near the other `mod` declarations",
                     opts.app_name
                 ));
             }
@@ -231,18 +246,29 @@ fn try_register_app_in_entry(
     app_name: &str,
 ) -> Result<EntryEditOutcome, MigrateError> {
     let body = std::fs::read_to_string(path)?;
-    let needle = format!("mod {app_name};");
-    let needle_pub = format!("pub mod {app_name};");
-    if body.contains(&needle) || body.contains(&needle_pub) {
+    // In a library the app module must be `pub`: binaries (`src/main.rs`
+    // and anything under `src/bin/`) reach it as `my_app::<name>`, and a
+    // private module is invisible to them. Inside the binary-only layout
+    // a plain `mod` is right.
+    let is_lib = path.file_name().is_some_and(|f| f == "lib.rs");
+    let needle = if is_lib {
+        format!("pub mod {app_name};")
+    } else {
+        format!("mod {app_name};")
+    };
+    if body.contains(&format!("mod {app_name};")) {
         return Ok(EntryEditOutcome::AlreadyRegistered);
     }
 
     let lines: Vec<&str> = body.lines().collect();
-    // Find the last contiguous run of `mod foo;` lines and insert
-    // after it.
-    let mod_anchor = lines
-        .iter()
-        .rposition(|l| l.trim_start().starts_with("mod ") && l.trim_end().ends_with(';'));
+    // Find the last contiguous run of `mod foo;` / `pub mod foo;` lines
+    // and insert after it. Both spellings, because the generated
+    // `lib.rs` uses `pub mod` throughout — anchoring on `mod ` alone
+    // missed every line in it and fell through to the docstring branch.
+    let mod_anchor = lines.iter().rposition(|l| {
+        let t = l.trim_start();
+        (t.starts_with("mod ") || t.starts_with("pub mod ")) && l.trim_end().ends_with(';')
+    });
     let insert_at = if let Some(idx) = mod_anchor {
         idx + 1
     } else {
@@ -602,6 +628,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// A library's app module must be `pub`, or `src/urls.rs` and the
+    /// binaries under `src/bin/` cannot see it.
+    #[test]
+    fn registering_into_lib_rs_uses_pub_mod() {
+        let root = fresh_root("reg_lib");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "//! probe\n\npub mod settings;\npub mod urls;\n",
+        )
+        .unwrap();
+
+        startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "blog".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let body = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        assert!(
+            body.contains("pub mod blog;"),
+            "a private `mod blog;` in lib.rs is invisible to src/bin/: {body}"
+        );
+        // The anchor must be the existing `pub mod` run, not the
+        // docstring fallback — that is what put it above them before.
+        assert!(
+            body.find("pub mod blog;") > body.find("pub mod settings;"),
+            "the new module should join the existing `pub mod` run: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A binary-only project (no lib.rs) keeps the plain `mod`.
+    #[test]
+    fn registering_into_main_rs_uses_plain_mod() {
+        let root = fresh_root("reg_main");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "//! probe\n\nmod urls;\n\nfn main() {}\n",
+        )
+        .unwrap();
+
+        startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "blog".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let body = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+        assert!(body.contains("mod blog;"), "{body}");
+        assert!(
+            !body.contains("pub mod blog;"),
+            "a binary crate has nothing to export to: {body}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Re-running must not add a second declaration, whichever
+    /// spelling is already there.
+    #[test]
+    fn registering_twice_is_idempotent_across_both_spellings() {
+        for (entry, existing) in [
+            ("src/lib.rs", "//! probe\n\npub mod blog;\n"),
+            ("src/main.rs", "//! probe\n\nmod blog;\n\nfn main() {}\n"),
+        ] {
+            let root = fresh_root("reg_idem");
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(root.join(entry), existing).unwrap();
+
+            startapp(
+                &root,
+                &StartAppOptions {
+                    app_name: "blog".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            let body = std::fs::read_to_string(root.join(entry)).unwrap();
+            assert_eq!(
+                body.matches("mod blog;").count(),
+                1,
+                "{entry} gained a duplicate declaration: {body}"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[test]
