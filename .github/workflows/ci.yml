@@ -48,12 +48,25 @@ on:
 # superseded run is not interesting — it describes a commit nobody will
 # merge.
 #
-# `main` and tags are excluded from cancellation deliberately: those runs
-# are the record for a released commit, and cancelling one leaves a
-# release with no green build behind it.
+# `main`, `develop` and tags are excluded from cancellation deliberately:
+# those runs are the record for a commit that is already merged, and
+# cancelling one leaves that commit with no build behind it.
+#
+# `develop` matters more than it looks, because PRs into it are ungated.
+# An unlabelled PR merges with only the cheap checks; the post-merge push
+# run is the first time the live matrix sees that code at all. Cancelling
+# it on the next merge means a commit can reach the branch everyone
+# builds on having never completed a single test run — which is the hole
+# the gate was supposed to leave open only until merge, not past it.
+#
+# Feature branches and pull requests still cancel, which is where the
+# waste actually was.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: >-
+    ${{ github.ref != 'refs/heads/main'
+        && github.ref != 'refs/heads/develop'
+        && !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -884,7 +897,7 @@ jobs:
       # #559 — dropping a CHECK or a composite FK. MySQL takes no
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.
-      - run: cargo test -p rustango --features mysql,testkit --test migrate_drop_constraint_tri
+      - run: cargo test -p rustango --features mysql,testkit --test migrate_ddl_tri
       # #1403 — bulk create must roll back on a constraint violation.
       # `--all-features` so the MySQL arm of the tri-dialect guard is
       # compiled in; the sqlite arm runs everywhere, this is the one that
