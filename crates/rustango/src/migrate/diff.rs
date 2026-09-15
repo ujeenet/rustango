@@ -873,9 +873,19 @@ fn render_changes_split_inner(
                     ));
                 }
             }
+            // Both renames are genuinely portable — MySQL and SQLite
+            // (3.25+) support them — so unlike the `AlterColumn*` arms
+            // above there is nothing to guard. What they need is the
+            // dialect's quoting, which they did not have: the literal
+            // `"` here is a string delimiter on MySQL, so
+            // `ALTER TABLE "post" RENAME TO "article"` is `ERROR 1064`,
+            // the same failure as #1461 two arms further down this same
+            // match (#559).
             SchemaChange::RenameTable { old_name, new_name } => {
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{old_name}" RENAME TO "{new_name}""#,
+                    "ALTER TABLE {} RENAME TO {}",
+                    dialect.quote_ident(old_name),
+                    dialect.quote_ident(new_name),
                 ));
             }
             SchemaChange::RenameColumn {
@@ -884,7 +894,10 @@ fn render_changes_split_inner(
                 new_column,
             } => {
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" RENAME COLUMN "{old_column}" TO "{new_column}""#,
+                    "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                    dialect.quote_ident(table),
+                    dialect.quote_ident(old_column),
+                    dialect.quote_ident(new_column),
                 ));
             }
             SchemaChange::CreateIndex {
