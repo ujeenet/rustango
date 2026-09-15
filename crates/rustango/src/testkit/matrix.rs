@@ -413,11 +413,26 @@ mod tests {
                 checked += 1;
             }
         }
+        // SQLite needs no configuration, so when it is compiled in there
+        // is no honest way to check nothing. Without it, a build with
+        // only `postgres` and no `DATABASE_URL` legitimately has no
+        // backend — that is a skip, not a failure. Demanding a pool
+        // unconditionally made this fail on `--features tenancy`, which
+        // is the feature set the pre-push hook uses.
+        #[cfg(feature = "sqlite")]
         assert!(
             checked > 0,
-            "no backend was available at all — even SQLite, which needs no \
-             configuration, so this test proved nothing"
+            "SQLite is compiled in and needs no configuration, so at least \
+             one backend must have been checked — a zero here means the \
+             loop is not reaching `Backend::pool` at all"
         );
+        #[cfg(not(feature = "sqlite"))]
+        if checked == 0 {
+            eprintln!(
+                "no backend configured on this build (sqlite not compiled in, \
+                 no DATABASE_URL / MYSQL_TEST_URL) — nothing to check"
+            );
+        }
     }
 
     /// `by_dialect!` selects the arm for the pool it is given, and hands
