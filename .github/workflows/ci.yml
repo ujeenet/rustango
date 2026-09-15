@@ -659,7 +659,7 @@ jobs:
             --test admin_list_display_jsonpath_sqlite_live \
             --test audit_pool_sqlite_live \
             --test bulk_update_api_sqlite_live \
-            --test bulk_upsert_sqlite_live \
+            --test bulk_upsert_tri \
             --test count_distinct_sqlite_live \
             --test database_pools_sqlite_file_live \
             --test database_pools_sqlite_live \
@@ -857,7 +857,7 @@ jobs:
       # one guards the FK-ordering regression.
       - run: cargo test -p rustango --all-features --test mysql_live
       - run: cargo test -p rustango --features mysql,testkit --test explain_pool_tri
-      - run: cargo test -p rustango --features mysql --test bulk_upsert_mysql_live
+      - run: cargo test -p rustango --features mysql,testkit --test bulk_upsert_tri
       # #1403 — bulk create must roll back on a constraint violation.
       # `--all-features` so the MySQL arm of the tri-dialect guard is
       # compiled in; the sqlite arm runs everywhere, this is the one that
