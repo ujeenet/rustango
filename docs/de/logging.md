@@ -134,6 +134,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::request_timeout` | Request-Timeout |
 | `rustango::scheduler` | Cron / geplante Tasks |
 | `rustango::server` | Serverstart und -shutdown |
+| `rustango::shutdown` | Signalbehandlung und Shutdown-Hooks |
 | `rustango::sql` | Query-Ausführung |
 | `rustango::sql::lock` | Row-Lock-Klauseln |
 | `rustango::template_views` | Template-basierte Views |
@@ -145,7 +146,6 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::tenancy::provision` | Mandanten-Provisionierung |
 | `rustango::tenancy::provision_webhook` | Provisionierungs-Webhooks |
 | `rustango::tenancy::resolver` | Mandanten-Auflösung |
-| `rustango::tenancy::server` | Tenancy-Server-Verdrahtung |
 | `rustango::tenancy::sso` | Mandanten-SSO |
 | `rustango::tenancy::sweep` | Aufbewahrungs-Sweeps |
 

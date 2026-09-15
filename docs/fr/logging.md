@@ -136,6 +136,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::request_timeout` | Délai par requête |
 | `rustango::scheduler` | Cron / tâches planifiées |
 | `rustango::server` | Démarrage et arrêt du serveur |
+| `rustango::shutdown` | Gestion des signaux et hooks d'arrêt |
 | `rustango::sql` | Exécution des requêtes |
 | `rustango::sql::lock` | Clauses de verrou de ligne |
 | `rustango::template_views` | Vues adossées à des templates |
@@ -147,7 +148,6 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::tenancy::provision` | Provisionnement de locataires |
 | `rustango::tenancy::provision_webhook` | Webhooks de provisionnement |
 | `rustango::tenancy::resolver` | Résolution de locataire |
-| `rustango::tenancy::server` | Câblage du serveur multi-tenant |
 | `rustango::tenancy::sso` | SSO de locataire |
 | `rustango::tenancy::sweep` | Balayages de rétention |
 
