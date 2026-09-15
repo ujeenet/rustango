@@ -153,11 +153,64 @@ async fn not_regex_excludes_matches(pool: &Pool) {
     expect_regex(rows, want.value).await;
 }
 
+/// Negated `iregex` — the fourth corner of the operator table.
+///
+/// Restored: the conversion carried three of `regex_live.rs`'s five
+/// scenarios across and dropped this one, which left `not_iregex` with
+/// no live coverage on any backend. On PostgreSQL it is the only test of
+/// `!~*`, and it is the one arm where PG and MySQL agree while `regex`
+/// and `not_regex` disagree — so dropping it removed the scenario that
+/// distinguishes them.
+async fn not_iregex_excludes_both_cases(pool: &Pool) {
+    let want = by_dialect! { pool,
+        postgres => Some(vec!["Alice-2", "Bob-3", "alice", "bob"]),
+            because "`!~*` is case-insensitive, so both `admin` and `ADMIN-root` go",
+        mysql => Some(vec!["Alice-2", "Bob-3", "alice", "bob"]),
+            because "same answer as `not_regex` on a case-insensitive collation — this \
+                     is the arm where PG and MySQL agree and `not_regex` does not",
+        sqlite => None,
+            because "no regexp function to negate",
+    };
+
+    let rows = User::objects()
+        .where_(User::name.not_iregex("^admin"))
+        .fetch(pool)
+        .await;
+    expect_regex(rows, want.value).await;
+}
+
+/// The string lookup `name__iregex`, resolved at runtime.
+///
+/// Also restored. This is a different code path from `User::name.iregex`:
+/// the typed column builds the operator directly, while `filter()` parses
+/// the `__iregex` suffix out of a string and routes it. A regression in
+/// the lookup table would leave the typed tests green.
+async fn filter_string_iregex_routes_at_runtime(pool: &Pool) {
+    let want = by_dialect! { pool,
+        postgres => Some(vec!["Bob-3", "bob"]),
+            because "the `__iregex` suffix must resolve to the same `~*` the typed \
+                     column builds",
+        mysql => Some(vec!["Bob-3", "bob"]),
+            because "resolves to the same collation-driven REGEXP",
+        sqlite => None,
+            because "routes to the same unregistered `regexp()` function; what is \
+                     pinned is that it fails at resolution, not at the lookup parser",
+    };
+
+    let rows = User::objects()
+        .filter("name__iregex", "^bob")
+        .fetch(pool)
+        .await;
+    expect_regex(rows, want.value).await;
+}
+
 tri_dialect_test! {
     setup: seeded,
     scenarios: [
         regex_is_case_sensitive_where_the_backend_allows_it,
         iregex_matches_both_cases,
         not_regex_excludes_matches,
+        not_iregex_excludes_both_cases,
+        filter_string_iregex_routes_at_runtime,
     ],
 }

@@ -116,9 +116,12 @@ async fn analyze_flag_is_accepted(pool: &Pool) {
     let timings = by_dialect! { pool,
         postgres => true,
             because "EXPLAIN ANALYZE executes the plan and prints `actual time=` per node",
-        mysql => false,
-            because "EXPLAIN ANALYZE exists from 8.0.18 but the framework does not opt in, \
-                     so the flag is accepted and the plan stays an estimate",
+        mysql => true,
+            because "the framework does opt in, and MySQL 8.0.18+ executes the query and \
+                     reports `actual time=..` per node just as PostgreSQL does. This arm \
+                     claimed the opposite — that the plan stayed an estimate — and said so \
+                     for as long as the assertion was wrapped in a one-sided `if` that \
+                     skipped the check whenever the arm selected false (#1461)",
         sqlite => false,
             because "SQLite has no ANALYZE form of EXPLAIN; the documented behaviour is to \
                      ignore the flag, not to reject it",
@@ -141,14 +144,25 @@ async fn analyze_flag_is_accepted(pool: &Pool) {
         !plan.is_empty(),
         "expected a plan even with backend-specific flags set"
     );
-    if timings.value {
-        assert!(
-            plan.contains("actual time="),
-            "ANALYZE should report real timings on {} — {}\n{plan}",
-            pool.dialect().name(),
-            timings.why
-        );
-    }
+
+    // Both directions, deliberately. This was a one-sided `if`, so the
+    // MySQL and SQLite arms of the `by_dialect!` above selected `false`
+    // and then asserted nothing at all — the macro named all three
+    // backends and two of them bought no coverage, which is the
+    // averaging-away it exists to prevent.
+    //
+    // The negative arm is the load-bearing one here: it is what would
+    // notice a backend quietly starting to execute the query on
+    // `analyze: true`, which is a behaviour change, not an improvement.
+    assert_eq!(
+        plan.contains("actual time="),
+        timings.value,
+        "ANALYZE timings on {}: expected present={}, got present={} — {}\n{plan}",
+        pool.dialect().name(),
+        timings.value,
+        plan.contains("actual time="),
+        timings.why
+    );
 }
 
 tri_dialect_test! {

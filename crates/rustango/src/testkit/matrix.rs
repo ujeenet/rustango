@@ -120,12 +120,26 @@ impl Backend {
     }
 }
 
-/// Serializes tests that share a live server.
+/// Serializes the tests **within one suite** that share a live server.
 ///
-/// Every converted file gets the same lock rather than one each: two
-/// suites running concurrently against one PostgreSQL will drop each
-/// other's tables, and the per-file `OnceLock<Mutex>` each of these
-/// files used to declare only protected it from itself.
+/// ## What this does not do
+///
+/// It does not serialize across suites, and an earlier version of this
+/// doc claimed it did. Cargo compiles each file in `tests/` into its own
+/// binary and runs those binaries as separate processes, so this
+/// `static` is a different `Mutex` in each one. Two suites running
+/// concurrently against the same PostgreSQL can still drop each other's
+/// tables, exactly as before.
+///
+/// What it does buy is one lock per suite instead of one per file that
+/// remembered to declare one — the per-file `OnceLock<Mutex>` these
+/// files used to carry protected a suite from itself, and so does this,
+/// with less to forget.
+///
+/// Cross-suite isolation needs something a lock cannot provide:
+/// per-suite table names (which `fresh_table::<M>` already gives, since
+/// every converted suite names its own model's table), or a per-suite
+/// schema or database. Table naming is why this has not bitten.
 #[must_use]
 pub fn live_lock() -> &'static tokio::sync::Mutex<()> {
     static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -350,9 +364,14 @@ macro_rules! tri_dialect_test {
             scenarios = [$($name),*]);
     };
 
-    // A model, but SQLite must be file-backed. `sqlite::memory:` is
-    // per-connection, so any suite whose workers need to see each
-    // other's rows has to say so.
+    // A model, but SQLite must be file-backed — for WAL journalling,
+    // file locking, or a second *process*.
+    //
+    // Not for cross-connection visibility: sqlx shares an in-memory
+    // database across a pool's connections, measured with a barrier
+    // forcing eight simultaneous ones. `sqlite_file_pool`'s own doc says
+    // so; this comment used to assert the opposite, which is the premise
+    // 29 suites were written on and which does not hold.
     (model: $model:ty, sqlite: file, scenarios: [ $($name:ident),* $(,)? ] $(,)?) => {
         $crate::tri_dialect_test!(@build
             sqlite_pool = $crate::testkit::matrix::sqlite_file_pool(),
@@ -659,9 +678,9 @@ mod tests {
             Row::objects().count(&pool).await.expect("count"),
             N as i64,
             "all {N} writers held their own connection at once and must still \
-             share one database — a short count means the connections are \
-             separate in-memory databases, which is what `:memory:` gives and \
-             why this helper exists"
+             share one database — a short count would mean each connection got \
+             its own, which is what `:memory:` was assumed to do and measurably \
+             does not"
         );
     }
 
