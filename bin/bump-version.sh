@@ -123,6 +123,10 @@ fi
 #   version:     X       the `manage about` transcript
 #   --version X          the `cargo install cargo-rustango` line
 #   rustango X           the `manage version` transcript, at line start
+#   rustango = "X"       a bare dependency pin, in a doc or a scaffolded
+#                        Cargo.toml. Restricted to this workspace's own
+#                        crate names: a third-party dep sitting at the
+#                        same version by coincidence is not our claim.
 #
 # Anything else is left alone and reported below for you to check.
 for f in "${FILES[@]}"; do
@@ -133,6 +137,7 @@ for f in "${FILES[@]}"; do
     s/(version:\s+)\Q$o\E(?![0-9.])/$1$n/g;
     s/(--version\s+"?)\Q$o\E(?![0-9.])/$1$n/g;
     s/^(rustango\s+)\Q$o\E(?![0-9.])/$1$n/gm;
+    s/^((?:cargo-)?rustango[a-z-]*\s*=\s*")\Q$o\E(?![0-9.])/$1$n/gm;
   ' "$OLD" "$NEW" "$f"
 done
 
@@ -140,14 +145,31 @@ done
 # are prose, and prose about an old release is supposed to keep its number —
 # but a genuine claim in a shape this script does not know would also land
 # here, so they are printed rather than assumed correct.
+#
+# This list is the ONLY thing standing between an unrecognised claim shape and
+# a silently stale version. The verification below deliberately checks the five
+# shapes the rewriter handles, so by construction it cannot catch a sixth. That
+# is why this is a stop-and-read rather than a log line: the earlier version
+# printed the list and then exited 1 on it, which was wrong but at least loud.
+# Dropping straight through to "clean" would have been the worse failure.
 LEFT=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|$)" -- . \
   ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' 2>/dev/null || true)
 if [ -n "$LEFT" ]; then
   echo
   echo "left alone — these name $OLD in prose, which is usually right."
-  echo "check none of them is a version claim this script failed to match:"
+  echo "READ THEM. A version claim in a shape this script does not know looks"
+  echo "exactly like prose from here, and nothing downstream will catch it:"
   printf '%s\n' "$LEFT" | sed 's/^/  /' | cut -c1-140
   echo
+  if $ASSUME_YES; then
+    echo "(--yes: continuing without asking)"
+  else
+    read -r -p "none of those is a stale claim? [y/N] " reply
+    case "$reply" in
+      [yY]|[yY][eE][sS]) ;;
+      *) echo "aborted — the files are rewritten; fix the claim and re-run" >&2; exit 1 ;;
+    esac
+  fi
 fi
 
 echo "regenerating lockfiles"
@@ -172,7 +194,7 @@ echo "verifying nothing still claims $OLD"
 # narrower question the rewrite asks: does any *claim about the current
 # version* still say OLD? The alternation below is the same five shapes the
 # perl pass rewrites, and nothing else.
-CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+)'
+CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+|^(cargo-)?rustango[a-z-]*[[:space:]]*=[[:space:]]*")'
 stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \
   ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true)
 
