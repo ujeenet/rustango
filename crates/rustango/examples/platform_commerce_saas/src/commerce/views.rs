@@ -17,6 +17,13 @@ use super::models::Product;
 /// page cache is pointed at, and a cache that only ever serves JSON to
 /// a load generator proves less than one serving the page a browser
 /// would get.
+///
+/// The cache itself is a `CachePageLayer` wrapped around this route in
+/// `urls.rs`, built from `[cache]` in the config tiers. Nothing here
+/// knows about it — which is the point, and also why the claim above
+/// went unnoticed while it was false: for several commits this app
+/// carried the `cache-redis` feature, ran a Redis container, and cached
+/// nothing at all.
 pub async fn storefront(t: Tenant<DefaultTenantDb>) -> Html<String> {
     let products = Product::objects()
         .filter("active", true)

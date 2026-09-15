@@ -24,10 +24,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
-use rustango::core::SqlValue;
+use rustango::core::{Column as _, F};
 use rustango::jobs::{Job, JobError};
-use rustango::sql::Pool;
+use rustango::sql::{Auto, ForeignKey, Pool, UpdaterPool as _};
 use serde::{Deserialize, Serialize};
+
+use super::models::{InventoryItem, ShipmentEvent};
 
 /// The slug the single-tenant app files everything under.
 ///
@@ -52,6 +54,26 @@ pub fn register_pool(slug: &str, pool: Pool) {
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .insert(slug.to_owned(), pool);
+}
+
+/// Drop a tenant's pool when its queue is retired, returning it so the
+/// caller can close it.
+///
+/// Without this the map grows for the life of the process: a tenant
+/// deactivated at 09:00 still has a live pool holding connections at
+/// midnight, and if its database was dropped every one of them is
+/// broken. Unused in the single-tenant twin, which keeps this file
+/// byte-identical to the SaaS one.
+#[allow(dead_code)]
+pub fn unregister_pool(slug: &str) -> Option<Pool> {
+    let removed = registry()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(slug);
+    if removed.is_some() {
+        tracing::info!(tenant = %slug, "job pool unregistered");
+    }
+    removed
 }
 
 /// Slugs currently registered — the worker's stranded-row detector
@@ -84,35 +106,30 @@ async fn record_event(
     slug: &str,
     detail: Option<String>,
 ) -> Result<(), JobError> {
-    let d = pool.dialect();
-    // The timestamp is bound from Rust rather than written as a SQL
-    // `NOW()` / `CURRENT_TIMESTAMP` / `datetime('now')`, which is three
-    // different spellings across the three dialects.
-    let sql = format!(
-        "INSERT INTO commerce_shipment_event (order_id, kind, tenant_slug, detail, at) \
-         VALUES ({}, {}, {}, {}, {})",
-        d.placeholder(1),
-        d.placeholder(2),
-        d.placeholder(3),
-        d.placeholder(4),
-        d.placeholder(5),
-    );
-    rustango::sql::raw_execute_pool(
-        pool,
-        &sql,
-        vec![
-            SqlValue::I64(order_id),
-            SqlValue::String(kind.to_owned()),
-            SqlValue::String(slug.to_owned()),
-            // `detail` is a nullable TEXT column, so this NULL was never
-            // the #1450 case — text is what the old binder assumed.
-            // `Order::assigned_picker_id` is the one that mattered.
-            detail.map_or(SqlValue::Null, SqlValue::String),
-            SqlValue::DateTime(chrono::Utc::now()),
-        ],
-    )
-    .await
-    .map_err(|e| JobError::Retryable(e.to_string()))?;
+    // `save` on the model, not hand-written SQL. The ORM emits the
+    // dialect's own placeholders and binds through the same path the
+    // ViewSets use, so this exercises the code a reader would actually
+    // write — and `at` is `#[rustango(auto_now_add)]`, so the framework
+    // stamps it rather than the job choosing between `NOW()`,
+    // `CURRENT_TIMESTAMP` and `datetime('now')`.
+    //
+    // `detail` is a nullable TEXT column, so its NULL was never the
+    // #1450 case — text is what the old binder assumed.
+    // `Order::assigned_picker_id` is the one that mattered.
+    let mut event = ShipmentEvent {
+        id: Auto::Unset,
+        order_id: ForeignKey::unloaded(order_id),
+        kind: kind.to_owned(),
+        tenant_slug: slug.to_owned(),
+        detail,
+        at: Auto::Unset,
+    };
+    // `save_pool`, not `save`: the bare name is Postgres-typed, and this
+    // app runs on all three dialects.
+    event
+        .save_pool(pool)
+        .await
+        .map_err(|e| JobError::Retryable(e.to_string()))?;
     Ok(())
 }
 
@@ -159,12 +176,24 @@ impl Job for InventoryReconciliation {
             tenant = %self.tenant, product = self.product_id, "reconciling inventory"
         );
         let pool = pool_for(&self.tenant)?;
-        let sql = format!(
-            "UPDATE commerce_inventory SET on_hand = on_hand - 1 WHERE product_id = {} \
-             AND on_hand > 0",
-            pool.dialect().placeholder(1)
-        );
-        rustango::sql::raw_execute_pool(&pool, &sql, vec![SqlValue::I64(self.product_id)])
+        // `F("on_hand") - 1` in the UPDATE, not a read-modify-write: the
+        // decrement happens inside the statement, so two workers
+        // reconciling the same product cannot both read 5 and both
+        // write 4. `gt("on_hand", 0)` keeps it from going negative,
+        // which is also what the table's CHECK constraint enforces —
+        // the guard is here so a contended row is a no-op rather than a
+        // constraint violation.
+        //
+        // The ORM emits each dialect's own placeholder and arithmetic;
+        // this file previously built the statement by hand, which meant
+        // the example demonstrated string formatting rather than the
+        // framework.
+        InventoryItem::objects()
+            .filter("product_id", self.product_id)
+            .where_(InventoryItem::on_hand.gt(0_i64))
+            .update()
+            .set_expr("on_hand", F("on_hand") - 1_i64)
+            .execute_pool(&pool)
             .await
             // Retryable: a lock timeout or serialization failure is exactly
             // what a backoff is for.

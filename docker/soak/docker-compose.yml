@@ -42,6 +42,32 @@ x-app-env: &app-env
   # 5s. The 30s negative-cache TTL is not tunable, so a newly
   # provisioned tenant still takes ~35s to become routable.
   RUSTANGO_HOST_GEN_CHECK_SECS: "2"
+  # `config/prod_settings.toml` sets `[cache] backend = "redis"`; the URL
+  # is deployment-specific, so it comes through the `RUSTANGO__*`
+  # override the layered loader reads (section, then key, double
+  # underscore between). Without it the apps refuse to boot rather than
+  # quietly each keeping their own in-memory cache — which is what the
+  # `cache-redis` feature and this redis service amounted to for several
+  # commits.
+  RUSTANGO__CACHE__REDIS_URL: redis://redis:6379
+  # #1456. Twenty tenants x 16 connections x (web + worker) is 640, and
+  # PG below is raised to 600 — but raising the server is the blunt
+  # half. This is the half that was impossible until 0.57.5 added
+  # `Cli::with_tenant_pools`: 6 connections per tenant pool, which is
+  # enough for the `Tenant` extractor's pinned connection plus handler
+  # work, and 20 x 6 x 2 = 240.
+  TENANT_POOL_MAX_CONNECTIONS: "6"
+  TENANT_POOL_MIN_CONNECTIONS: "1"
+  # 20 tenants at boot plus headroom for ones provisioned mid-soak. The
+  # cache has no eviction and errors hard when full, so this is a
+  # ceiling to set deliberately rather than discover.
+  TENANT_POOL_CACHE_MAX: "48"
+  # Unlocks `POST /_soak/tenants/{slug}/active`, which is the only way
+  # to make a tenant *stop* being active — and therefore the only way to
+  # observe the supervisor retiring its queue. Off by default in the
+  # app; an example does not mount a tenant-deactivating endpoint just
+  # because a harness finds it convenient.
+  SOAK_ALLOW_TENANT_MUTATION: "1"
   SOAK_FAIL_RATIO_PCT: "${SOAK_FAIL_RATIO_PCT:-2}"
   # INFO is the default and tells the story: what each instance is, which
   # tenant queues started, every order queued and every job completed.
@@ -74,9 +100,14 @@ services:
       POSTGRES_PASSWORD: rustango
       POSTGRES_DB: commerce
     # 20 tenants x 16 connections x (web + worker) = 640, against a
-    # stock limit of 100. `TenantPoolsConfig` is unreachable from
-    # `manage::Cli` and reads no env vars (#1456), so the database
-    # server's own limit is the only lever there is.
+    # stock limit of 100. That was the arithmetic when `TenantPoolsConfig`
+    # was unreachable from `manage::Cli` (#1456) and the server's own
+    # limit was the only lever there was.
+    #
+    # 0.57.5 added `Cli::with_tenant_pools`, and `TENANT_POOL_*` above
+    # now sizes the app side down to ~240. This stays high anyway: a
+    # ceiling well above the expected draw means a pool-exhaustion
+    # failure in the soak report is the app's, not this file's.
     command:
       - postgres
       - -c
@@ -243,6 +274,7 @@ services:
     image: rustango-soak/commerce:all
     depends_on:
       bootstrap-single-pg: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
     environment:
       <<: *app-env
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce
@@ -253,6 +285,7 @@ services:
     image: rustango-soak/commerce:all
     depends_on:
       bootstrap-single-my: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
     environment:
       <<: *app-env
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce
@@ -263,6 +296,7 @@ services:
     image: rustango-soak/commerce:all
     depends_on:
       bootstrap-single-sq: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
     environment:
       <<: *app-env
       DATABASE_URL: sqlite:///data/single.db?mode=rwc
@@ -279,6 +313,7 @@ services:
     image: rustango-soak/saas:postgres
     depends_on:
       bootstrap-saas-pg: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
     environment:
       <<: *app-env
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce_saas_pg
@@ -290,6 +325,7 @@ services:
     image: rustango-soak/saas:mysql
     depends_on:
       bootstrap-saas-my: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
     environment:
       <<: *app-env
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce_saas_my
@@ -301,6 +337,7 @@ services:
     image: rustango-soak/saas:sqlite
     depends_on:
       bootstrap-saas-sq: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
     environment:
       <<: *app-env
       DATABASE_URL: sqlite:///data/registry.db?mode=rwc
@@ -324,6 +361,7 @@ services:
       disable: true
     depends_on:
       bootstrap-single-pg: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
     environment:
       <<: *app-env
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce
@@ -339,6 +377,7 @@ services:
       disable: true
     depends_on:
       bootstrap-single-my: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
     environment:
       <<: *app-env
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce

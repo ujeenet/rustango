@@ -35,7 +35,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // per dialect.
     let typed = rustango::sql::sqlx::Pool::<DefaultTenantDb>::connect(&url).await?;
     let registry = Pool::from(typed.clone());
-    let pools = Arc::new(TenantPools::<DefaultTenantDb>::new(typed));
+    // The same sizing the server uses (#1456). Read from the library so
+    // the two cannot disagree: a worker tier sized differently from the
+    // web tier is how a fleet exhausts a database while every process
+    // looks correctly configured on its own.
+    let pools = Arc::new(
+        TenantPools::<DefaultTenantDb>::new(typed).config(supervisor::pool_config_from_env()),
+    );
 
     let queues = supervisor::boot(&registry, &pools)
         .await

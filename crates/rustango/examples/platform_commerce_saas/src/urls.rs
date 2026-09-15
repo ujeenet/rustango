@@ -15,11 +15,20 @@ use crate::views;
 use platform_commerce_saas::commerce::supervisor::QueueMap;
 
 #[must_use]
-pub fn api(queues: Arc<QueueMap>, fail_ratio_pct: u8) -> Router<()> {
+pub fn api(
+    queues: Arc<QueueMap>,
+    fail_ratio_pct: u8,
+    pool_cfg: rustango::tenancy::TenantPoolsConfig,
+    cache: rustango::cache::BoxedCache,
+    registry: rustango::sql::Pool,
+) -> Router<()> {
     Router::new()
         .merge(platform_commerce_saas::commerce::urls::api(
             queues,
             fail_ratio_pct,
+            pool_cfg,
+            cache,
+            registry,
         ))
         .route("/", get(views::index))
         .route("/healthz", get(views::healthz))

@@ -23,3 +23,14 @@ hsts_max_age_secs = 31536000
 
 [audit]
 retention_days = 365
+
+[cache]
+# The storefront page cache. `redis` is the only backend that is shared
+# across processes, which is the point: six app instances behind one
+# fleet must hit the same cache or each just warms its own.
+#
+# `redis_url` has no default and `cache::from_settings_async` errors
+# rather than quietly falling back to memory, so a misconfigured
+# deployment fails at boot instead of silently losing the cache. The
+# soak sets it from the environment as `RUSTANGO__CACHE__REDIS_URL`.
+backend = "redis"
