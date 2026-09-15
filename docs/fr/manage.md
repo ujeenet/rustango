@@ -477,12 +477,24 @@ cargo run -- make:form ContactForm
 
 ### `make:job <Name>`
 
-Génère un squelette de tâche en arrière-plan (travail qui s'exécute hors
-de la requête, comme une tâche Celery ou un job Laravel), avec un exemple
-commenté montrant comment la planifier.
+Génère un `jobs::Job` — une struct de payload plus l'implémentation du trait,
+avec `NAME`, `MAX_ATTEMPTS` et `async fn run(&self)`. C'est du travail que vous
+mettez en file depuis un handler et qu'un worker exécute ensuite.
+
+`run` ne reçoit **que la payload** : pas de pool, pas de tenant, pas de contexte
+de requête. Portez dans ses champs tout ce dont la tâche a besoin.
 
 ```bash
 cargo run -- make:job EmailDigestJob
+```
+
+### `make:scheduled <Name>`
+
+Génère une tâche à intervalle fixe pour `scheduler::Scheduler` — la forme que
+`make:job` émettait avant de générer un véritable job.
+
+```bash
+cargo run -- make:scheduled NightlySweep
 ```
 
 ### `make:worker <Name>`
@@ -1560,7 +1572,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 |---|---|
 | `startapp <name>` | Génère un module d'application |
 | `make:viewset` / `make:serializer` / `make:form` | Génère un ViewSet, un Serializer ou un Form |
-| `make:job` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Génère un job, un binaire de worker, un middleware, une notification ou un test |
+| `make:job` / `make:scheduled` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Génère un job de file, une tâche à intervalle, un binaire de worker, un middleware, une notification ou un test |
 | `make:api_routes <app> [--tenant]` | Génère le module de routes API d'une application |
 
 ### Cache, sessions et courriel

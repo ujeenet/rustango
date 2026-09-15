@@ -2342,16 +2342,21 @@ fn api_routes_template_pool(app: &str, crate_root: &str) -> String {
 //!
 //! API routing for the `{app}` app. Composes per-model viewsets
 //! into a single `Router<()>`. Each viewset captures the supplied
-//! `PgPool` at mount time.
+//! pool at mount time.
+//!
+//! The pool is `sql::Pool`, not a driver-typed one: it dispatches on
+//! the `DATABASE_URL` scheme, so this file compiles and runs on all
+//! three backends. A `PgPool` here would pin the whole app to
+//! Postgres — `ViewSet::router_pool` takes exactly this type.
 //!
 //! Adding a resource:
 //!   1. Run `manage make:viewset <Name> --model <Model>`.
 //!   2. Add one `.merge(...)` line below.
 
 use axum::Router;
-use {crate_root}::sql::sqlx::PgPool;
+use {crate_root}::sql::Pool;
 
-pub fn api(pool: PgPool) -> Router<()> {{
+pub fn api(pool: Pool) -> Router<()> {{
     let _pool = pool;
     Router::new()
         // .merge(super::viewsets::<snake>::router("/api/<snake>", _pool.clone()))
@@ -2367,15 +2372,27 @@ fn make_serializer_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:serializer {name}`.
 
+use {crate_root}::sql::Auto;
 use {crate_root}::Serializer;
 
 #[derive(Serializer, serde::Deserialize, Default)]
 #[serializer(model = {model})]
 pub struct {name} {{
-    pub id: i64,
+    // A serializer field must match its model field's type **exactly**.
+    // The scaffolders emit `pub id: Auto<i64>` for a primary key, so
+    // `pub id: i64` here does not compile — it fails inside the derive
+    // with `expected &i64, found &Auto<i64>`, which does not obviously
+    // point back to this line.
+    //
+    // `read_only` keeps it out of the writable set while still
+    // returning it, which is what you want: drop the field entirely and
+    // the API answers a create with no identifier, so the client cannot
+    // address what it just made.
+    #[serializer(read_only)]
+    pub id: Auto<i64>,
     // pub title: String,
-    // #[serializer(read_only)]
-    // pub created_at: chrono::DateTime<chrono::Utc>,
+    // #[serializer(source = "body")]   // publish under a different name
+    // pub content: String,
 }}
 "#
     );

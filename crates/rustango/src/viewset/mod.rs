@@ -2222,7 +2222,27 @@ async fn handle_list_cursor(
     let next_cursor = if has_more {
         // Read the cursor field value from the last JSON row.
         let last = page_rows.last().expect("non-empty page");
-        cursor_value_of(last, cursor_schema.name).map(|v| encode_cursor(&v))
+        match cursor_value_of(last, cursor_schema.name) {
+            Some(v) => Some(encode_cursor(&v)),
+            // The cursor column is not in the rendered row — almost
+            // always `.fields([...])` (or a serializer) projecting it
+            // away. Answering `next: null` here would be **silent
+            // truncation**: `has_more` is true, the caller sees a page
+            // with no continuation token, and pagination stops at page
+            // one with nothing reporting an error. Say so instead.
+            None => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!(
+                        "cursor field `{}` is not present in the rendered rows, so no \
+                         `next` token can be issued and pagination would silently stop \
+                         after one page. Include it in `.fields([..])` / the \
+                         serializer, or paginate on a field that is projected.",
+                        cursor_schema.name
+                    ),
+                );
+            }
+        }
     } else {
         None
     };

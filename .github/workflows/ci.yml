@@ -262,10 +262,30 @@ jobs:
         run: cargo check --locked --no-default-features --features ${{ matrix.backend }} --all-targets
       - name: Unit tests (no database needed)
         working-directory: crates/rustango/examples/platform_commerce
-        run: cargo test --locked --no-default-features --features ${{ matrix.backend }} --bins
+        # `--lib --bins`, not `--bins`. Every test in these examples lives
+        # under `src/commerce/`, which is reachable only from `src/lib.rs`
+        # — neither binary declares `mod commerce` and neither contains a
+        # `#[test]`. With `--bins` alone these six steps compiled two
+        # empty test binaries and reported `0 passed`, three times over.
+        #
+        # The tests *were* in the bin target before the examples grew a
+        # library (the worker binary needs one to reach the same job
+        # types the server dispatches), and this command was not re-run
+        # after that move.
+        run: cargo test --locked --no-default-features --features ${{ matrix.backend }} --lib --bins
       - name: Unit tests (no database needed) — saas
         working-directory: crates/rustango/examples/platform_commerce_saas
-        run: cargo test --locked --no-default-features --features ${{ matrix.backend }} --bins
+        # `--lib --bins`, not `--bins`. Every test in these examples lives
+        # under `src/commerce/`, which is reachable only from `src/lib.rs`
+        # — neither binary declares `mod commerce` and neither contains a
+        # `#[test]`. With `--bins` alone these six steps compiled two
+        # empty test binaries and reported `0 passed`, three times over.
+        #
+        # The tests *were* in the bin target before the examples grew a
+        # library (the worker binary needs one to reach the same job
+        # types the server dispatches), and this command was not re-run
+        # after that move.
+        run: cargo test --locked --no-default-features --features ${{ matrix.backend }} --lib --bins
 
   # Trivy security scan — the non-bypassable "detect vulnerabilities
   # before releases" gate. Complements `deny` (RustSec advisories) with

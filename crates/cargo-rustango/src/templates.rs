@@ -19,6 +19,27 @@ pub fn cargo_toml(
 ) -> String {
     let rustango_dep = template.rustango_dep(rustango_path, features);
     let default_backend = backend.feature();
+
+    // `rustango::jobs::Job` is an async trait, so a project that
+    // implements one needs `#[async_trait]`. rustango depends on
+    // async-trait itself (behind `_async_trait`) but does not re-export
+    // the attribute macro, so the project must name it directly.
+    //
+    // Without this, `manage make:job` emits a file that does not
+    // compile, and the only remedy is a comment inside it — generated
+    // code carrying its own bug report. `batteries` pulls `jobs` in, so
+    // the check covers the templates that get jobs implicitly as well as
+    // an explicit `--features jobs`.
+    let wants_jobs = template.base_features().iter().any(|f| *f == "batteries")
+        || features
+            .iter()
+            .any(|f| f == "jobs" || f == "jobs-postgres" || f == "batteries");
+    let async_trait_dep = if wants_jobs {
+        "\n# `rustango::jobs::Job` is an async trait — implementing one needs this.\n\
+         async-trait = \"0.1\""
+    } else {
+        ""
+    };
     format!(
         r#"[package]
 name = "{name}"
@@ -46,7 +67,7 @@ serde_json = "1"
 chrono = {{ version = "0.4", default-features = false, features = ["serde", "clock"] }}
 tracing = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
-dotenvy = "0.15"
+dotenvy = "0.15"{async_trait_dep}
 
 [dev-dependencies]
 tokio = {{ version = "1", features = ["macros", "rt-multi-thread"] }}
@@ -105,8 +126,33 @@ RUSTANGO_APEX_DOMAIN=localhost
 
 // ---------------- .gitignore ----------------
 
+/// What a generated project must never commit.
+///
+/// `var/` is the one that matters and was missing. When
+/// `RUSTANGO_SESSION_SECRET` is unset, the server generates a signing
+/// key and writes it to `./var/.rustango_session.key` — plus
+/// `.rustango_tenant_session.key` and `.rustango_operator_session.key`
+/// on a tenancy project. So `cargo run` followed by `git add .`
+/// committed a session signing key, on the very first run, in a
+/// three-line `.gitignore` that did not mention the directory.
+///
+/// `*.db*` for the same reason in a different register: a
+/// sqlite-backend project otherwise commits its development database.
+/// (The generated `.dockerignore` already excluded those and this file
+/// did not, which is the asymmetry that made it easy to miss.)
 pub const GITIGNORE: &str = "/target
 /.env
+
+# Runtime state. The server writes generated session signing keys here
+# when RUSTANGO_SESSION_SECRET is unset — never commit them.
+/var/
+
+# Local databases (sqlite backend, test fixtures).
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
 *.log
 ";
 

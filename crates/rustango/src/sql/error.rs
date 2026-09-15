@@ -397,18 +397,103 @@ pub fn is_mysql_dup_index_error(_e: &crate::sql::sqlx::Error) -> bool {
 #[must_use]
 pub fn is_pg_dup_object_error(e: &crate::sql::sqlx::Error) -> bool {
     if let crate::sql::sqlx::Error::Database(db) = e {
-        return match db.code().as_deref() {
-            // Concurrent CREATE TABLE/INDEX IF NOT EXISTS: the object
-            // exists now, which is all the caller wanted.
-            Some("42P07") => true,
-            // Narrowed to the catalogue index deliberately. A bare
-            // `23505` is an ordinary unique violation — swallowing that
-            // would hide real data errors.
-            Some("23505") => db.message().contains("pg_class_relname_nsp_index"),
-            _ => false,
-        };
+        return pg_dup_object_decision(db.code().as_deref(), &db.message());
     }
     false
+}
+
+/// The decision, separated from the driver type so it can be tested.
+///
+/// The predicate above needs a `sqlx::Error::Database`, which cannot be
+/// constructed outside the driver — so a test of the *narrowing* had to
+/// go through a live query, and the obvious one (`raw_execute_pool` with
+/// a duplicate key) never reaches this code at all: `run_ddl_idempotent`
+/// is the only caller. The narrowing was therefore untested, and
+/// widening `23505` to `true` would have gone unnoticed.
+///
+/// Which catalogue indexes matter is not obvious, and getting it wrong
+/// leaves half the race unfixed:
+///
+/// * `pg_class_relname_nsp_index` — the relation row. Raised by a racing
+///   `CREATE INDEX IF NOT EXISTS`, and by `CREATE TABLE` for the table
+///   itself.
+/// * `pg_type_typname_nsp_index` — Postgres creates a composite **type**
+///   for every table, so a racing `CREATE TABLE IF NOT EXISTS` can lose
+///   on the type row instead of the relation row. Omitting this leaves
+///   the table half of the race crashing exactly as before.
+/// * `pg_namespace_nspname_index` — the schema row, for a racing
+///   `CREATE SCHEMA IF NOT EXISTS`. Tenant provisioning in schema mode
+///   issues one per tenant.
+///
+/// Everything else under `23505` stays an error: a bare unique violation
+/// is ordinary application data, and swallowing those would hide real
+/// bugs — a worse failure than the one being fixed.
+pub(crate) fn pg_dup_object_decision(code: Option<&str>, message: &str) -> bool {
+    match code {
+        // duplicate_table / duplicate_object — the non-racing spelling
+        // of "it already exists", which is the whole post-condition.
+        Some("42P07" | "42710") => true,
+        Some("23505") => [
+            "pg_class_relname_nsp_index",
+            "pg_type_typname_nsp_index",
+            "pg_namespace_nspname_index",
+        ]
+        .iter()
+        .any(|idx| message.contains(idx)),
+        _ => false,
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod pg_dup_object_tests {
+    use super::pg_dup_object_decision as decide;
+
+    /// Every shape the concurrent-DDL race actually produces.
+    #[test]
+    fn the_race_shapes_are_swallowed() {
+        assert!(decide(
+            Some("42P07"),
+            "relation \"rustango_jobs\" already exists"
+        ));
+        assert!(decide(Some("42710"), "object already exists"));
+        assert!(decide(
+            Some("23505"),
+            "duplicate key value violates unique constraint \
+             \"pg_class_relname_nsp_index\""
+        ));
+        // The table half of the race, which the first version missed.
+        assert!(
+            decide(
+                Some("23505"),
+                "duplicate key value violates unique constraint \
+                 \"pg_type_typname_nsp_index\""
+            ),
+            "a racing CREATE TABLE can lose on the composite-type row rather than \
+             the relation row; missing it leaves half of #1458 unfixed"
+        );
+        assert!(decide(
+            Some("23505"),
+            "duplicate key value violates unique constraint \
+             \"pg_namespace_nspname_index\""
+        ));
+    }
+
+    /// The narrowing. This is the assertion that was missing: flip the
+    /// `23505` arm to an unconditional `true` and this fails.
+    #[test]
+    fn an_ordinary_unique_violation_is_not_swallowed() {
+        assert!(
+            !decide(
+                Some("23505"),
+                "duplicate key value violates unique constraint \"users_email_key\""
+            ),
+            "a unique violation on application data must stay an error — swallowing \
+             it would hide real bugs, which is worse than the race being fixed"
+        );
+        assert!(!decide(Some("23503"), "foreign key violation"));
+        assert!(!decide(Some("42P01"), "relation does not exist"));
+        assert!(!decide(None, "pg_class_relname_nsp_index"));
+    }
 }
 
 /// `cfg(not(postgres))` stub — see the documented variant above.

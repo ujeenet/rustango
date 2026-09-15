@@ -198,6 +198,17 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// The tenant pools this builder will hand the server.
+    ///
+    /// Read access, mirroring [`TenantPools::pool_config`]. Useful for
+    /// asserting that a [`Builder::tenant_pools`] call actually reached
+    /// the pools — a setter that stores a value nothing reads is the
+    /// shape of #1456, so being able to check is worth the method.
+    #[must_use]
+    pub fn pools(&self) -> &Arc<TenantPools<DB>> {
+        &self.pools
+    }
+
     /// Size the per-tenant connection pools (#1456).
     ///
     /// `from_pool` builds `TenantPools` with
@@ -223,17 +234,6 @@ impl<DB: Database> Builder<DB> {
     /// })
     /// # }
     /// ```
-    /// The tenant pools this builder will hand the server.
-    ///
-    /// Read access, mirroring [`TenantPools::pool_config`]. Useful for
-    /// asserting that a [`Builder::tenant_pools`] call actually reached
-    /// the pools — a setter that stores a value nothing reads is the
-    /// shape of #1456, so being able to check is worth the method.
-    #[must_use]
-    pub fn pools(&self) -> &Arc<TenantPools<DB>> {
-        &self.pools
-    }
-
     #[must_use]
     pub fn tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
         // `TenantPools` is behind an `Arc` by this point, so rebuild

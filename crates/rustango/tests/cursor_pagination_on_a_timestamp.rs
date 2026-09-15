@@ -149,6 +149,50 @@ async fn the_timestamp_cursor_actually_walks_the_table() {
     );
 }
 
+/// Projecting the cursor column away must be loud, not silent.
+///
+/// `.fields([..])` (or a serializer) can omit the cursor column. The
+/// row then carries no value to encode, and answering `next: null`
+/// while `has_more` is true stops pagination at page one with nothing
+/// reporting an error — a caller iterating `next` sees three rows and
+/// concludes that is the table.
+#[tokio::test]
+async fn projecting_the_cursor_column_away_is_reported() {
+    let pool = seeded_pool().await;
+    let app = ViewSet::for_model(Event::SCHEMA)
+        .cursor_pagination("occurred_at")
+        .fields(&["id", "label"]) // occurred_at deliberately absent
+        .page_size(3)
+        .router_pool("/events", pool.clone());
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("request");
+    let status = res.status();
+    let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .expect("body");
+    let text = String::from_utf8_lossy(&body);
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a cursor column that is projected away must be reported, not silently \
+         truncate pagination to one page. Got {status}: {text}"
+    );
+    assert!(
+        text.contains("occurred_at"),
+        "the error must name the missing cursor column so the fix is obvious: {text}"
+    );
+}
+
 /// A bad cursor is the caller's fault: 400, not 500.
 #[tokio::test]
 async fn a_malformed_cursor_is_a_client_error() {
