@@ -22,12 +22,14 @@
 //! multi-tenant app.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use rustango::core::{Column as _, F};
 use rustango::jobs::{Job, JobError};
 use rustango::sql::{Auto, ForeignKey, Pool, UpdaterPool as _};
 use serde::{Deserialize, Serialize};
+use tracing::Instrument as _;
 
 use super::models::{InventoryItem, ShipmentEvent};
 
@@ -38,6 +40,36 @@ use super::models::{InventoryItem, ShipmentEvent};
 /// purpose, so the constant stays rather than the two drifting apart.
 #[allow(dead_code)]
 pub const SINGLE: &str = "__single__";
+
+/// Run a job body with its tenant published to the logging layer.
+///
+/// `rustango::tenant_log` gives a request an ambient tenant: the
+/// resolver calls `record`, and everything logged under that request —
+/// the access log, the ORM, anything — carries `tenant=`. Its scope is
+/// per-task and `tokio::spawn` does not inherit it, which is exactly
+/// what a queue worker is. So a job got `tenant=-` on every line the
+/// framework emitted, and only the ones this file hand-annotated named
+/// a tenant at all. The framework's own docs mark this as out of scope
+/// (issues #1229 / #1223); the payload is the tenant context a job has,
+/// so this is where it becomes ambient.
+///
+/// The span declares `tenant` as an empty field because `Span::record`
+/// only writes fields the metadata already declares — omit it and
+/// `record` silently does nothing to the span half.
+async fn with_tenant<F, T>(slug: &str, job: &'static str, fut: F) -> T
+where
+    F: Future<Output = T>,
+{
+    let span = tracing::info_span!("job", job, tenant = tracing::field::Empty);
+    rustango::tenant_log::scope(
+        async {
+            rustango::tenant_log::record(slug, None);
+            fut.await
+        }
+        .instrument(span),
+    )
+    .await
+}
 
 /// Pools reachable from a job handler, by tenant slug.
 static POOLS: OnceLock<RwLock<HashMap<String, Pool>>> = OnceLock::new();
@@ -145,14 +177,20 @@ impl Job for OrderConfirmation {
     const NAME: &'static str = "commerce:order_confirmation";
 
     async fn run(&self) -> Result<(), JobError> {
-        // DEBUG for the per-job trace, INFO for the outcome. At soak
-        // volumes DEBUG is thousands of lines a minute, which is why it
-        // is off unless `RUST_LOG` asks for it.
-        tracing::debug!(tenant = %self.tenant, order = self.order_id, "confirming order");
-        let pool = pool_for(&self.tenant)?;
-        record_event(&pool, self.order_id, "confirmed", &self.tenant, None).await?;
-        tracing::info!(tenant = %self.tenant, order = self.order_id, "order confirmed");
-        Ok(())
+        // `tenant` is on the span now, not repeated per line — which is
+        // the point: everything logged inside, including the ORM's own
+        // events, carries it without this file annotating anything.
+        with_tenant(&self.tenant, Self::NAME, async {
+            // DEBUG for the per-job trace, INFO for the outcome. At soak
+            // volumes DEBUG is thousands of lines a minute, which is why
+            // it is off unless `RUST_LOG` asks for it.
+            tracing::debug!(order = self.order_id, "confirming order");
+            let pool = pool_for(&self.tenant)?;
+            record_event(&pool, self.order_id, "confirmed", &self.tenant, None).await?;
+            tracing::info!(order = self.order_id, "order confirmed");
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -172,9 +210,8 @@ impl Job for InventoryReconciliation {
     const MAX_ATTEMPTS: u32 = 3;
 
     async fn run(&self) -> Result<(), JobError> {
-        tracing::debug!(
-            tenant = %self.tenant, product = self.product_id, "reconciling inventory"
-        );
+        with_tenant(&self.tenant, Self::NAME, async {
+        tracing::debug!(product = self.product_id, "reconciling inventory");
         let pool = pool_for(&self.tenant)?;
         // `F("on_hand") - 1` in the UPDATE, not a read-modify-write: the
         // decrement happens inside the statement, so two workers
@@ -200,10 +237,12 @@ impl Job for InventoryReconciliation {
             .map_err(|e| JobError::Retryable(e.to_string()))?;
         record_event(&pool, self.order_id, "reconciled", &self.tenant, None).await?;
         tracing::info!(
-            tenant = %self.tenant, order = self.order_id, product = self.product_id,
+            order = self.order_id, product = self.product_id,
             "inventory reconciled"
         );
         Ok(())
+        })
+        .await
     }
 }
 
@@ -249,22 +288,26 @@ impl Job for FlakyPaymentCapture {
     const MAX_ATTEMPTS: u32 = 4;
 
     async fn run(&self) -> Result<(), JobError> {
-        let pool = pool_for(&self.tenant)?;
-        if Self::always_fails(self.order_id, self.fail_ratio_pct) {
-            // One line per *attempt*, so the 1s/2s/4s backoff sequence
-            // is visible in the log rather than only its dead-letter.
-            tracing::debug!(
-                tenant = %self.tenant, order = self.order_id,
-                "payment declined (injected failure) — will retry"
-            );
-            return Err(JobError::Retryable(format!(
-                "payment gateway declined order {}",
-                self.order_id
-            )));
-        }
-        record_event(&pool, self.order_id, "captured", &self.tenant, None).await?;
-        tracing::info!(tenant = %self.tenant, order = self.order_id, "payment captured");
-        Ok(())
+        with_tenant(&self.tenant, Self::NAME, async {
+            let pool = pool_for(&self.tenant)?;
+            if Self::always_fails(self.order_id, self.fail_ratio_pct) {
+                // One line per *attempt*, so the 1s/2s/4s backoff
+                // sequence is visible in the log rather than only its
+                // dead-letter.
+                tracing::debug!(
+                    order = self.order_id,
+                    "payment declined (injected failure) — will retry"
+                );
+                return Err(JobError::Retryable(format!(
+                    "payment gateway declined order {}",
+                    self.order_id
+                )));
+            }
+            record_event(&pool, self.order_id, "captured", &self.tenant, None).await?;
+            tracing::info!(order = self.order_id, "payment captured");
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -281,10 +324,15 @@ impl Job for FatalProbe {
     const NAME: &'static str = "commerce:fatal_probe";
 
     async fn run(&self) -> Result<(), JobError> {
-        Err(JobError::Fatal(format!(
-            "unrecoverable by construction (order {})",
-            self.order_id
-        )))
+        // Wrapped like the rest even though it only errors: the queue
+        // logs the failure, and that line should name the tenant too.
+        with_tenant(&self.tenant, Self::NAME, async {
+            Err(JobError::Fatal(format!(
+                "unrecoverable by construction (order {})",
+                self.order_id
+            )))
+        })
+        .await
     }
 }
 
