@@ -893,7 +893,58 @@ impl Cli {
         Ok(())
     }
 
-    async fn runserver(self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Everything between "the pool is open" and "bind the socket":
+    /// welcome page, health endpoints, static dirs, CSRF, the settings
+    /// layers, and the pool extension.
+    ///
+    /// One function, because `runserver` has **three** serving paths —
+    /// a non-Postgres build, a Postgres build on a `postgres://` URL,
+    /// and a multi-backend build on a non-PG URL (#560) — and each used
+    /// to assemble its own router from the same list of steps.
+    ///
+    /// That duplication *was* #1457. One copy never read
+    /// `health_endpoints`, so `/health` 404'd; the fix corrected two of
+    /// the three, and the third — the one the soak fleet's own
+    /// `--features postgres,mysql,sqlite` image takes on a `sqlite://`
+    /// URL — went on answering 404. Three copies of a list of steps is
+    /// a list of steps that will drift again, so there is one now.
+    ///
+    /// Generic over the pool type because the Postgres path extends a
+    /// `PgPool` (handlers taking `Extension<PgPool>` predate the `Pool`
+    /// enum) while the other two extend `crate::sql::Pool`.
+    fn assemble_app<P>(&mut self, pool: P) -> Router
+    where
+        P: Clone + Send + Sync + 'static,
+        P: Into<crate::sql::Pool>,
+    {
+        let api = std::mem::take(&mut self.api);
+        #[cfg(feature = "admin")]
+        let api = if self.welcome_page {
+            try_mount_welcome(api)
+        } else {
+            api
+        };
+        // `crate::health` is gated on `admin` rather than on a backend
+        // (#1208), so the merge is too — but it is now the only one.
+        #[cfg(feature = "admin")]
+        let api = if self.health_endpoints {
+            api.merge(crate::health::health_router(pool.clone()))
+        } else {
+            api
+        };
+        #[cfg(feature = "admin")]
+        let api = mount_static_dirs(api, &self.static_dirs);
+        #[cfg(feature = "csrf")]
+        let api = match self.csrf.take() {
+            Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
+            None => api,
+        };
+        #[cfg(feature = "config")]
+        let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        api.layer(axum::Extension(pool))
+    }
+
+    async fn runserver(mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Logging install lives in `run()` (the outermost dispatch
         // point) so the WorkerGuard outlives every runserver +
         // management-verb path uniformly.
@@ -916,7 +967,7 @@ impl Cli {
             })?;
             let pool = crate::sql::Pool::connect(&url).await?;
             let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
-            if let Some(seed) = self.seed {
+            if let Some(seed) = self.seed.take() {
                 // The seed hook's error is now `Send + Sync` (so a seed can
                 // hold an error across an `.await` without the future losing
                 // `Send`); coerce to this fn's `Box<dyn Error>` at the boundary.
@@ -924,40 +975,7 @@ impl Cli {
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
-            let api = self.api;
-            #[cfg(feature = "admin")]
-            let api = if self.welcome_page {
-                try_mount_welcome(api)
-            } else {
-                api
-            };
-            // #1457 — this arm never read `health_endpoints`, so
-            // `Cli::with_health()` was a silent no-op on every SQLite and
-            // MySQL build: `/health` and `/ready` answered 404 while the
-            // identical call on Postgres served them. A load balancer or
-            // container HEALTHCHECK pointed at `/health` then reported the
-            // service permanently unhealthy, with nothing in the logs to
-            // explain it.
-            //
-            // `health_router` takes `impl Into<Pool>` and `crate::health`
-            // is gated on `admin` rather than on a backend, so the merge is
-            // the same one the Postgres arm does.
-            #[cfg(feature = "admin")]
-            let api = if self.health_endpoints {
-                api.merge(crate::health::health_router(pool.clone()))
-            } else {
-                api
-            };
-            #[cfg(feature = "admin")]
-            let api = mount_static_dirs(api, &self.static_dirs);
-            #[cfg(feature = "csrf")]
-            let api = match self.csrf {
-                Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
-                None => api,
-            };
-            #[cfg(feature = "config")]
-            let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-            let app = api.layer(axum::Extension(pool));
+            let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
             axum::serve(
@@ -991,28 +1009,12 @@ impl Cli {
                 // `#[cfg]` blocks at the top of the fn.
                 let pool = crate::sql::Pool::connect(&url).await?;
                 let _ = crate::migrate::migrate_pool(&pool, &self.migrations_dir).await?;
-                if let Some(seed) = self.seed {
+                if let Some(seed) = self.seed.take() {
                     seed(&pool)
                         .await
                         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
                 }
-                let api = self.api;
-                #[cfg(feature = "admin")]
-                let api = if self.welcome_page {
-                    try_mount_welcome(api)
-                } else {
-                    api
-                };
-                #[cfg(feature = "admin")]
-                let api = mount_static_dirs(api, &self.static_dirs);
-                #[cfg(feature = "csrf")]
-                let api = match self.csrf {
-                    Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
-                    None => api,
-                };
-                #[cfg(feature = "config")]
-                let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-                let app = api.layer(axum::Extension(pool));
+                let app = self.assemble_app(pool);
                 let listener = tokio::net::TcpListener::bind(&self.bind).await?;
                 eprintln!("server listening on http://{}", listener.local_addr()?);
                 axum::serve(
@@ -1026,37 +1028,12 @@ impl Cli {
             }
             let pool = crate::sql::Pool::connect_postgres(&url).await?;
             let _ = crate::migrate::migrate(&pool, &self.migrations_dir).await?;
-            if let Some(seed) = self.seed {
+            if let Some(seed) = self.seed.take() {
                 seed(&crate::sql::Pool::from(pool.clone()))
                     .await
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
-            let api = self.api;
-            #[cfg(feature = "admin")]
-            let api = if self.welcome_page {
-                try_mount_welcome(api)
-            } else {
-                api
-            };
-            // `crate::health` is `#[cfg(feature = "admin")]`, so the merge has
-            // to be too (#1208) — it was unconditional, which broke every
-            // admin-less build.
-            #[cfg(feature = "admin")]
-            let api = if self.health_endpoints {
-                api.merge(crate::health::health_router(pool.clone()))
-            } else {
-                api
-            };
-            #[cfg(feature = "admin")]
-            let api = mount_static_dirs(api, &self.static_dirs);
-            #[cfg(feature = "csrf")]
-            let api = match self.csrf {
-                Some(cfg) => api.layer(crate::forms::csrf::with_config(cfg)),
-                None => api,
-            };
-            #[cfg(feature = "config")]
-            let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-            let app = api.layer(axum::Extension(pool));
+            let app = self.assemble_app(pool);
             let listener = tokio::net::TcpListener::bind(&self.bind).await?;
             eprintln!("server listening on http://{}", listener.local_addr()?);
             // v0.30.16 — `into_make_service_with_connect_info` is what
@@ -1081,7 +1058,7 @@ impl Cli {
     // `axum::serve`. The non-PG runserver_tenancy fallback below
     // mirrors that for symmetry.
     #[cfg(all(feature = "tenancy", feature = "postgres"))]
-    async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn runserver_tenancy(mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Taken before `self` is picked apart below, so the hook still
         // runs on this path too (#1409) — the tenancy server drains via
         // its own `shutdown_signal`, and dropping the hook here would
@@ -1119,7 +1096,7 @@ impl Cli {
         if let Some(cfg) = self.tenant_pools.clone() {
             builder = builder.tenant_pools(cfg);
         }
-        if let Some(seed) = self.seed {
+        if let Some(seed) = self.seed.take() {
             // Tenancy Builder's seed_with takes (Arc<TenantPools>, PgPool,
             // String); we forward the registry pool and discard the rest.
             builder = builder
@@ -1134,7 +1111,7 @@ impl Cli {
     }
 
     #[cfg(all(feature = "tenancy", not(feature = "postgres")))]
-    async fn runserver_tenancy(self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn runserver_tenancy(mut self) -> Result<(), Box<dyn std::error::Error>> {
         // v0.38 slice 24 — `server::Builder<DB>` is generic. On non-PG
         // single-backend builds, `DefaultTenantDb` resolves to whichever
         // sqlx backend the feature flags picked (sqlite first, mysql
@@ -1190,7 +1167,7 @@ impl Cli {
         if let Some(cfg) = self.tenant_pools.clone() {
             builder = builder.tenant_pools(cfg);
         }
-        if let Some(seed) = self.seed {
+        if let Some(seed) = self.seed.take() {
             // Mirror the PG arm above (line 828) so sqlite/mysql tenancy
             // projects get their `Cli::seed` hook fired on boot too.
             builder = builder
@@ -1879,5 +1856,69 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
+    }
+}
+
+/// `Cli::with_health()` must reach every serving path (#1457).
+///
+/// Tested on the assembled router rather than on the source text of one
+/// `runserver` arm. The source-slicing guard this replaces was wrong
+/// three times — it matched the fix's own explanatory comment, then it
+/// matched the *Postgres* arm, then it could not see the third serving
+/// path at all — because each version checked a proxy for the property
+/// instead of the property, which is that a request gets a 200.
+#[cfg(all(
+    test,
+    feature = "admin",
+    feature = "sqlite",
+    feature = "runserver",
+    feature = "manage"
+))]
+mod assemble_app_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    async fn status(app: &Router, path: &str) -> StatusCode {
+        app.clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .expect("request")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn with_health_mounts_both_endpoints() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new().with_health().assemble_app(pool);
+
+        assert_eq!(
+            status(&app, "/health").await,
+            StatusCode::OK,
+            "`with_health()` set its flag and /health still 404s — that is #1457, \
+             and it reaches every serving path because they all assemble here"
+        );
+        assert_eq!(status(&app, "/ready").await, StatusCode::OK);
+    }
+
+    /// The other direction. Without this, the test above would pass even
+    /// if the endpoints were mounted unconditionally — which would make
+    /// it evidence of nothing.
+    #[tokio::test]
+    async fn without_with_health_they_are_absent() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let app = Cli::new().assemble_app(pool);
+
+        assert_eq!(
+            status(&app, "/health").await,
+            StatusCode::NOT_FOUND,
+            "health endpoints must be opt-in; mounting them always would make \
+             the positive test above vacuous"
+        );
     }
 }

@@ -72,17 +72,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return rustango::manage::Cli::new().run().await;
     }
 
-    let url = std::env::var("DATABASE_URL").map_err(|_| {
-        "missing env var 'DATABASE_URL'. Set it in your shell, or copy '.env.example' to '.env'."
-    })?;
-    let pool = Pool::connect(&url).await?;
-
+    // Settings first, and specifically *before* any pool is opened: the
+    // framework warns that a pool built earlier is running on
+    // environment defaults, because `[database]` sizing cannot be
+    // applied retroactively. The first run of this after wiring the
+    // config tiers up printed exactly that warning.
+    //
     // `config/default.toml`, then `config/<RUSTANGO_ENV>_settings.toml`,
     // then `RUSTANGO__*` env overrides. Nothing read these files before:
     // they shipped with every generated project and were inert, which is
     // worse than not shipping them.
     let settings = rustango::config::Settings::load_from_env()
         .map_err(|e| -> Box<dyn std::error::Error> { format!("loading config: {e}").into() })?;
+
+    let url = std::env::var("DATABASE_URL").map_err(|_| {
+        "missing env var 'DATABASE_URL'. Set it in your shell, or copy '.env.example' to '.env'."
+    })?;
+    let pool = Pool::connect(&url).await?;
 
     // The storefront page cache. `from_settings_async`, not
     // `from_settings`: the sync one panics for `backend = "redis"`

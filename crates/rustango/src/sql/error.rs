@@ -428,6 +428,11 @@ pub fn is_pg_dup_object_error(e: &crate::sql::sqlx::Error) -> bool {
 /// Everything else under `23505` stays an error: a bare unique violation
 /// is ordinary application data, and swallowing those would hide real
 /// bugs — a worse failure than the one being fixed.
+// Its only non-test caller is the Postgres error path, so a
+// SQLite- or MySQL-only build sees it as dead. Kept compiled there
+// anyway: the unit tests that pin these SQLSTATEs must run on every
+// build, not only the one that can reach the caller.
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))]
 pub(crate) fn pg_dup_object_decision(code: Option<&str>, message: &str) -> bool {
     match code {
         // duplicate_table / duplicate_object — the non-racing spelling

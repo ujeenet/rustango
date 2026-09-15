@@ -18,6 +18,7 @@
 //! created rows with no identifier, so a client cannot address what it
 //! just made. That is how the soak driver first failed here.
 
+use chrono::{DateTime, Utc};
 use rustango::sql::{Auto, ForeignKey};
 use rustango::Serializer;
 
@@ -77,4 +78,15 @@ pub struct OrderSerializer {
     pub note: Option<String>,
     pub status: String,
     pub total_cents: i64,
+    /// The cursor column, and it has to be **published** to be usable as
+    /// one: the ViewSet builds the `next` token from the rendered row,
+    /// so a serializer that omits it leaves nothing to encode. Leaving
+    /// it out made `/api/v1/orders` answer 500 on every request across
+    /// all six instances — found by the soak, not by any unit test,
+    /// because a unit test points the cursor at a column it also
+    /// projects.
+    ///
+    /// `read_only`, because `auto_now_add` means the database sets it.
+    #[serializer(read_only)]
+    pub placed_at: Auto<DateTime<Utc>>,
 }

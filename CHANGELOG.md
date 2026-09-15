@@ -196,13 +196,21 @@ run them together against real infrastructure. Three of the six are only
 reachable that way.
 
 - **`Cli::with_health()` did nothing on SQLite and MySQL builds** (#1457).
-  `runserver` has two arms and only the Postgres one read the flag. On any
-  other backend the builder method set its boolean, returned `self`, the server
-  started, and `/health` and `/ready` answered **404** — identical code, 200 on
-  Postgres. A load balancer or container `HEALTHCHECK` aimed at `/health`
-  reported the service permanently unhealthy, with nothing logged to say why.
-  The existing test asserted the setter flips its own boolean, which was true
-  throughout.
+  `runserver` has **three** serving paths — a non-Postgres build, a Postgres
+  build on a `postgres://` URL, and a multi-backend build on a non-PG URL — and
+  only the Postgres one read the flag. On any other backend the builder method
+  set its boolean, returned `self`, the server started, and `/health` and
+  `/ready` answered **404** — identical code, 200 on Postgres. A load balancer
+  or container `HEALTHCHECK` aimed at `/health` reported the service
+  permanently unhealthy, with nothing logged to say why. The existing test
+  asserted the setter flips its own boolean, which was true throughout.
+
+  The first fix reached two of the three paths and a review caught the third
+  still 404ing, on exactly the `--features postgres,mysql,sqlite` build the
+  soak fleet ships. Three copies of the same router assembly is what let that
+  happen, so there is now one: every serving path goes through
+  `Cli::assemble_app`, and the guard is a request against the assembled router
+  rather than a search of one arm's source text.
 
 - **Two processes calling `ensure_table_pool` at once could crash one of them**
   (#1458). `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` are
@@ -212,8 +220,12 @@ reachable that way.
   so that error propagated and killed the caller. This is the documented web +
   worker topology — both call it at boot — and under a restart policy the only
   evidence was a restart count. Now matched by a narrow predicate: `42P07`, and
-  `23505` **only** on `pg_class_relname_nsp_index`, so an ordinary unique
-  violation is still an error.
+  `23505` **only** on the three catalogue indexes a racing `CREATE` can lose on
+  — `pg_class_relname_nsp_index` (the relation row), `pg_type_typname_nsp_index`
+  (the composite type Postgres creates for every table), and
+  `pg_namespace_nspname_index` (a racing `CREATE SCHEMA IF NOT EXISTS`, one per
+  tenant in schema mode) — plus `42710`. An ordinary unique violation is still
+  an error.
 
 - **Tenant pool sizing was unconfigurable** (#1456). `TenantPoolsConfig` was
   public and documented, but every route to a running server built
