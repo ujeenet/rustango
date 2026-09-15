@@ -1,3 +1,4 @@
+#![cfg(all(feature = "sqlite", feature = "openapi"))]
 //! `ViewSet::pk_param` — rename the detail-route capture (#1194).
 //!
 //! axum permits only one capture name per path position across a router, so a
