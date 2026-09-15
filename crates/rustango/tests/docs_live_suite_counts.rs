@@ -89,15 +89,24 @@ fn measured(root: &Path) -> BTreeMap<String, usize> {
         // `(none)`. The SQLite arm does still run with nothing set; the
         // page says so in prose rather than in a count, because a reader
         // uses this table to decide which servers to start.
-        if name.ends_with("_tri.rs") {
+        // A `_tri` suite is credited to both server variables for the
+        // reasons above — but it still has to go through the scan below,
+        // not `continue` past it.
+        //
+        // The `continue` that used to be here took the `MYSQL_URL`
+        // tripwire out of service for every tri file. That entry exists
+        // so a suite reading the wrong variable name appears in the
+        // measured set with no row to match and fails loudly; #1415 was
+        // exactly that bug, found exactly that way. Skipping the loop
+        // meant a converted suite could reintroduce it invisibly.
+        let mut gated = name.ends_with("_tri.rs");
+        if gated {
             *counts.entry("DATABASE_URL".to_owned()).or_default() += 1;
             *counts.entry("MYSQL_TEST_URL".to_owned()).or_default() += 1;
-            continue;
         }
 
         // A suite is counted under every gating variable it reads; one
         // that reads none is counted as needing nothing.
-        let mut gated = false;
         for var in GATING_VARS {
             if text.contains(&format!("env::var(\"{var}\")")) {
                 gated = true;

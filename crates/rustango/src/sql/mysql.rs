@@ -320,23 +320,23 @@ impl Dialect for MySql {
     /// knowing: this is **not** idempotent. Dropping a constraint that
     /// is already gone raises 3821, where the PostgreSQL form is a
     /// no-op.
-    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> String {
-        format!(
+    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
             "ALTER TABLE {} DROP CHECK {}",
             self.quote_ident(table),
             self.quote_ident(name)
-        )
+        ))
     }
 
     /// MySQL spells this `DROP FOREIGN KEY`, and takes no `IF EXISTS`.
     ///
     /// Not idempotent either: dropping an absent FK raises 1091.
-    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> String {
-        format!(
+    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
             "ALTER TABLE {} DROP FOREIGN KEY {}",
             self.quote_ident(table),
             self.quote_ident(name)
-        )
+        ))
     }
 
     /// MySQL has no `ON CONFLICT`. The semantic equivalent is

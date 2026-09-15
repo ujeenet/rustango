@@ -1020,20 +1020,23 @@ fn render_changes_split_inner(
                 ));
             }
             SchemaChange::DropCheckConstraint { name, table } => {
-                if dialect.name() == "sqlite" {
+                // The dialect owns both halves: whether it can drop a
+                // constraint at all, and how it spells it. `None` is
+                // SQLite saying it has no `ALTER TABLE DROP CONSTRAINT`.
+                //
+                // This arm used to test `dialect.name() == "sqlite"`
+                // itself and then hand-write the statement — which is
+                // how it came to send PostgreSQL syntax to MySQL (#559).
+                let Some(sql) = dialect.drop_check_constraint_sql(table, name) else {
                     return Err(format!(
                         "DropCheckConstraint for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE DROP CONSTRAINT` \
+                         dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
                          syntax. Workaround: emit a hand-written `Operation::Data` (RunSQL) \
-                         that rebuilds the table without the CHECK. Tracked in #559."
+                         that rebuilds the table without the CHECK. Tracked in #559.",
+                        dialect.name()
                     ));
-                }
-                // The dialect owns the spelling: `DROP CHECK` on MySQL,
-                // `DROP CONSTRAINT IF EXISTS` elsewhere. Emitting it
-                // here by hand is how this arm came to send Postgres
-                // syntax to MySQL in the first place (#559).
-                out.immediate
-                    .push(dialect.drop_check_constraint_sql(table, name));
+                };
+                out.immediate.push(sql);
             }
             SchemaChange::AddExclusionConstraint {
                 name,
@@ -1175,17 +1178,17 @@ fn render_changes_split_inner(
                 ));
             }
             SchemaChange::DropCompositeFk { table, name } => {
-                if dialect.name() == "sqlite" {
+                // Same single owner as the CHECK arm above.
+                let Some(sql) = dialect.drop_foreign_key_sql(table, name) else {
                     return Err(format!(
                         "DropCompositeFk for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE DROP CONSTRAINT` \
+                         dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
                          syntax. Workaround: emit a hand-written `Operation::Data` (RunSQL) \
-                         that rebuilds the table without the FK. Tracked in #559."
+                         that rebuilds the table without the FK. Tracked in #559.",
+                        dialect.name()
                     ));
-                }
-                // Same single owner as the CHECK arm above.
-                out.immediate
-                    .push(dialect.drop_foreign_key_sql(table, name));
+                };
+                out.immediate.push(sql);
             }
         }
     }
