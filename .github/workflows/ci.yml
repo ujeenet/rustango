@@ -676,7 +676,7 @@ jobs:
             --test inspectdb_sqlite_live \
             --test inspectdb_views_sqlite_live \
             --test jobs_sqlite_live \
-            --test json_path_sqlite_live \
+            --test json_path_tri \
             --test lock_sqlite_warning \
             --test m2m_sqlite_live \
             --test media_sqlite_live \
@@ -896,7 +896,7 @@ jobs:
       - run: cargo test -p rustango --features mysql --test fixtures_mysql_live
       - run: cargo test -p rustango --features mysql --test inspectdb_mysql_live
       - run: cargo test -p rustango --features mysql --test funcs_batch1_mysql_live
-      - run: cargo test -p rustango --features mysql --test json_path_mysql_live
+      - run: cargo test -p rustango --features mysql,testkit --test json_path_tri
       # Django 6.0 ORM parity execution-verification suite (audit §26).
       # Shared scenario bodies; the mysql cfg-mod runs here, the sqlite
       # and PG mods are compiled out.
