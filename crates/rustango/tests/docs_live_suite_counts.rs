@@ -58,13 +58,7 @@ fn measured(root: &Path) -> BTreeMap<String, usize> {
 
     for entry in std::fs::read_dir(&dir).expect("read tests dir").flatten() {
         let name = entry.file_name().into_string().unwrap_or_default();
-        // `_live` is the old per-dialect suffix; `_tri` is a suite that
-        // runs its body on every configured backend (#1461). Both are
-        // counted, or a converted file drops out of the accounting
-        // entirely — which is what happened to the first one: retiring
-        // three `_live` files for one `_tri` file showed up here as a
-        // net loss of coverage that had not occurred.
-        if !name.ends_with("_live.rs") && !name.ends_with("_tri.rs") {
+        if !name.ends_with("_live.rs") {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(entry.path()) else {
