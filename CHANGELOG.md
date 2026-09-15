@@ -6,8 +6,106 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [0.57.6] — unreleased
 
-Nothing yet. Opened alongside the `release/v0.57.6` branch so entries land
-here as they are merged, rather than being reconstructed at tag time.
+The tri-dialect train. The theme is a single question: **does this behaviour
+work on all three databases, or only on the one somebody tested?**
+
+Of ~192 `*_sqlite_live.rs` suites, 188 had no MySQL or PostgreSQL counterpart —
+not because the behaviour was SQLite-specific, but because the second and third
+copy cost more by hand than they returned. Three single-dialect failures in
+0.57.x reached users through that gap (#1450, #1457, #1464), each in code that
+looked correct and had passing tests.
+
+### Added
+
+- **A tri-dialect test harness** (`testkit::matrix`, feature `testkit`).
+  `tri_dialect_test!` fans one scenario list into one test per compiled-in
+  backend; `fresh_table::<M>` builds the table from `M::SCHEMA` through the real
+  DDL emitter rather than a hand-written guess; `Backend::pool()` owns the #1440
+  policy in one place (unset skips, set-but-unreachable panics).
+
+  `by_dialect!` is the part that carries the weight: **every backend must be
+  named, each with a `because`, and omitting one is a compile error.** It exists
+  so a genuine difference cannot be flattened into an assertion all three
+  satisfy — the move that makes a suite quieter while looking greener.
+
+### Fixed
+
+- **[#559](https://github.com/ujeenet/rustango/issues/559) — MySQL could not
+  parse the `DROP CONSTRAINT` the migration writer emitted.** `DropCheckConstraint`
+  and `DropCompositeFk` special-cased SQLite and let everything else fall through
+  to the PostgreSQL shape, so MySQL received
+  `ALTER TABLE … DROP CONSTRAINT IF EXISTS …` and answered `ERROR 1064`. MySQL
+  accepts `DROP CONSTRAINT` from 8.0.19 but takes no `IF EXISTS` on any form.
+  Every MySQL migration that dropped a check constraint or a composite foreign
+  key failed. Now `DROP CHECK` and `DROP FOREIGN KEY`, matching what
+  `ddl::drop_constraints_sql_with_dialect` already did for per-field FKs.
+
+  Two unit tests asserted the unparseable string and held it in place. Both
+  were named `…_uses_backticks` and both did check the quoting; the statement
+  around the quoting was simply never run against a server. **The MySQL drop is
+  not idempotent** — error 3821 when the constraint is absent — where the
+  PostgreSQL one is.
+
+- **`bin/bump-version.sh` could not complete a bump.** The rewriting pass was
+  narrowed to anchored version *claims* so that prose about an old release keeps
+  its number, but the final verification still ran a bare `git grep` for the old
+  version and exited 1 on every prose hit — including the script's own usage
+  examples. It rewrote the files, regenerated the lockfiles, printed the lines
+  it had deliberately left alone, and then died naming those same lines. The
+  verification now checks the five claim shapes the rewrite handles.
+
+- **The live-suite table counted every tri suite as needing no server.**
+  `docs/testing.md` and its three translations classify a suite by the
+  environment variable its source reads; a `_tri` suite reads none, because the
+  lookup moved into `Backend::pool()`. So each conversion *lowered* the
+  published MySQL and PostgreSQL counts and raised "Nothing — always run", in a
+  release whose headline is adding MySQL coverage. The guard passed throughout,
+  because it measured the same wrong thing the page printed.
+
+### Changed
+
+- **CI spends the matrix where it decides something.** A `concurrency` group per
+  ref cancels superseded runs except on `main` and tags; `push` now covers
+  release branches; and the expensive jobs sit behind one `gate` job that fires
+  for non-PR events, PRs into `main`, or a PR carrying the `ci` label.
+
+  `fmt`, `clippy`, `deny`, `deny-examples`, `lockfiles` and `trivy` are **not**
+  gated and run on every pull request. Gating them was a mistake in the first
+  cut: it meant a feature PR into `develop` merged with no signal whatsoever,
+  including no dependency-advisory or container scan, when the intent was only
+  to defer the live matrix.
+
+- **Six suites converted to one body across three dialects** — `bulk_upsert`,
+  `values`, `regex`, `json_path`, `explain_pool`, plus the harness's own forms.
+  The value is the coverage the split was hiding: `values_list_flat::<bool>` was
+  PostgreSQL-only, and `bool` is the least portable column type in the suite;
+  PostgreSQL had no JSON-path suite at all; the two `regex` files tested
+  *opposite things* and both claims are now kept side by side with the reason.
+
+### Testing
+
+- **Two MySQL suites had never run anywhere.**
+  `migrate_fake_initial_mysql_live.rs` and `migrate_reconcile_mysql_live.rs`
+  were written, committed, and named in no workflow. `MYSQL_TEST_URL` is unset
+  outside the `mysql_live` job and an unset URL is a silent skip, so both
+  reported `ok` for as long as they existed — [#1437](https://github.com/ujeenet/rustango/issues/1437)
+  repeating. `every_mysql_arm_runs_in_ci` now fails when a `tests/*_mysql_live.rs`
+  or `tests/*_tri.rs` is missing from that job.
+
+  The `_tri` half is the sharper edge: such a suite with no CI line keeps running
+  its PostgreSQL and SQLite arms and reports a healthy pass count while the MySQL
+  arm — the reason it was converted — never runs. `values_tri`, `regex_tri` and
+  `testkit_matrix_forms_tri` had all shipped in that state.
+
+- **`explain_pool_tri` asserted nothing on two of three backends.** The ANALYZE
+  check sat inside a one-sided `if`, so the arms selecting `false` bought no
+  coverage. Making it two-sided immediately showed the MySQL arm's stated reason
+  was false: it claimed the framework does not opt into `EXPLAIN ANALYZE` and
+  that the plan stays an estimate, and MySQL 8.0.46 reports real `actual time=`
+  measurements. The claim is corrected.
+
+- `regex_tri` regained `not_iregex` and the runtime `__iregex` lookup, which the
+  conversion dropped and which no live suite covered afterwards.
 
 Carried forward from 0.57.5 as known and unfixed:
 
