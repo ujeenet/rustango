@@ -25,7 +25,44 @@ docker compose -f docker/soak/docker-compose.yml --profile driver up driver
 profile so bringing the stack up does not start a 30-minute run.
 
 Knobs: `SOAK_DURATION_SECS` (1800), `SOAK_CONCURRENCY` (24),
-`SOAK_TENANTS` (20), `SOAK_FAIL_RATIO_PCT` (10).
+`SOAK_TENANTS` (20), `SOAK_FAIL_RATIO_PCT` (2).
+
+## Reading the log
+
+`INFO` is the default and tells the story — what each instance is,
+which tenant queues started, every order queued, every job completed:
+
+```
+web-saas-pg   INFO platform_commerce_saas: starting tenants=20 fail_ratio_pct=2
+web-saas-pg   INFO supervisor: tenant queue started tenant=t01 workers=2
+web-saas-pg   INFO urls: order queued for fulfilment order=8123 tenant=t07
+worker-pg     INFO jobs: order confirmed tenant=t07 order=8123
+```
+
+`WARN` is for failures the soak **injected on purpose** — they carry
+`expected=true`, and they are how the run proves `MAX_ATTEMPTS` is a
+total-attempt ceiling (`attempts=4`) and that `JobError::Fatal` bypasses
+retry (`attempts=1`).
+
+`ERROR` is reserved for a failure nobody asked for. If the log has one,
+that is the finding.
+
+That split is deliberate. At a 10% injection rate and ERROR severity the
+fleet produced **6308 ERROR lines in five minutes** — every one an
+assertion passing, and a real failure in that stream would have been
+invisible. A soak whose output cannot be read is worse at its job than
+no soak.
+
+For per-attempt detail — each retry of an injected failure, each
+storefront render, each supervisor tick:
+
+```bash
+RUST_LOG='info,platform_commerce=debug,platform_commerce_saas=debug' \
+  docker compose -f docker/soak/docker-compose.yml up -d
+```
+
+`sqlx=warn` stays set: at these volumes sqlx's own DEBUG is a line per
+statement and drowns everything else.
 
 The report lands in the `soak-results` volume as `report.json` and is
 printed. **Exit code is non-zero only on FAIL.** NOT-COVERED does not

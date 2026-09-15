@@ -42,7 +42,18 @@ x-app-env: &app-env
   # 5s. The 30s negative-cache TTL is not tunable, so a newly
   # provisioned tenant still takes ~35s to become routable.
   RUSTANGO_HOST_GEN_CHECK_SECS: "2"
-  SOAK_FAIL_RATIO_PCT: "${SOAK_FAIL_RATIO_PCT:-10}"
+  SOAK_FAIL_RATIO_PCT: "${SOAK_FAIL_RATIO_PCT:-2}"
+  # INFO is the default and tells the story: what each instance is, which
+  # tenant queues started, every order queued and every job completed.
+  #
+  # For the per-attempt detail — each retry of an injected failure, each
+  # storefront render, each supervisor tick — turn the apps up:
+  #
+  #   RUST_LOG='info,platform_commerce=debug,platform_commerce_saas=debug' \
+  #     docker compose -f docker/soak/docker-compose.yml up -d
+  #
+  # `sqlx=warn` stays: at soak volumes sqlx's own DEBUG is one line per
+  # statement and drowns everything else.
   RUST_LOG: ${RUST_LOG:-info,rustango=info,sqlx=warn}
 
 x-app-common: &app-common
