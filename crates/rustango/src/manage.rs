@@ -941,7 +941,63 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let api = self.mount_observability(api);
         api.layer(axum::Extension(pool))
+    }
+
+    /// The per-request span and the access log.
+    ///
+    /// Mounted here, unconditionally, rather than inside
+    /// `apply_settings_layers` — which is where the access log used to
+    /// live, and which only runs when the app calls
+    /// `.with_settings_from_env()`. No scaffolder template calls it, so
+    /// the multi-tenant project shape — the one where the tenant field
+    /// is the entire point — got no access log and never logged a
+    /// tenant (#1480).
+    ///
+    /// `TracingLayer` had a worse version of the same problem: it built
+    /// a correct span carrying tenant, method, path and status, and
+    /// nothing in the framework ever mounted it. A `tracing::info!` in a
+    /// handler therefore had no enclosing span, so no tenant and no
+    /// correlation — which is exactly the "logs arrive as loose traces"
+    /// symptom.
+    ///
+    /// Order matters. The span is applied last so it is **outermost**:
+    /// every layer below it, the access log included, runs inside it,
+    /// and `tenant_log::record` can fill the span's `tenant` field once
+    /// the tenancy middleware resolves one. A handler's own events then
+    /// inherit it for free.
+    fn mount_observability(&self, api: Router) -> Router {
+        use crate::access_log::AccessLogRouterExt as _;
+
+        if !self.access_log_enabled() {
+            return api;
+        }
+
+        let log_layer = crate::access_log::AccessLogLayer::default();
+        #[cfg(feature = "config")]
+        let log_layer = match self.settings_for_layers.as_ref() {
+            Some(s) => log_layer.with_audit_settings(&s.audit),
+            None => log_layer,
+        };
+
+        api.access_log(log_layer)
+            .layer(crate::tracing_layer::TracingLayer::new())
+    }
+
+    /// `[logging] access_log = false` turns the request log off.
+    ///
+    /// Default on: a server that logs no requests is a server you cannot
+    /// debug, and the previous default — off unless you found the right
+    /// builder call — was not a decision anyone made on purpose.
+    fn access_log_enabled(&self) -> bool {
+        #[cfg(feature = "config")]
+        {
+            if let Some(s) = self.settings_for_layers.as_ref() {
+                return s.logging.access_log.unwrap_or(true);
+            }
+        }
+        true
     }
 
     async fn runserver(mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1339,7 +1395,6 @@ fn warn_if_settings_inert() {
 
 #[cfg(feature = "config")]
 fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
-    use crate::access_log::{AccessLogLayer, AccessLogRouterExt as _};
     use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
     use crate::cors::{CorsLayer, CorsRouterExt as _};
     use crate::request_timeout::{RequestTimeoutLayer, RequestTimeoutRouterExt as _};
@@ -1361,11 +1416,13 @@ fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
         app = app.body_limit(layer);
     }
 
-    // access_log — extends the redact list with project additions
-    // from `[audit] redact_query_params`. Defaults are sensible so
-    // the layer mounts unconditionally.
-    let log_layer = AccessLogLayer::default().with_audit_settings(&s.audit);
-    app = app.access_log(log_layer);
+    // access_log is NOT mounted here any more. It lives in
+    // `Cli::mount_observability`, which runs whether or not the app
+    // calls `.with_settings_from_env()` — mounting it here made the
+    // request log, and with it the tenant field, conditional on a
+    // builder call no scaffolder template makes (#1480). The redact
+    // list from `[audit] redact_query_params` still reaches the layer;
+    // `mount_observability` reads the same settings.
 
     // CORS — opt-in (returns None when no origins configured).
     if let Some(cors) = CorsLayer::from_settings(&s.security) {
