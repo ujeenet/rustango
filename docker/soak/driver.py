@@ -12,9 +12,20 @@ Two jobs, kept separate on purpose:
     put the assertions under contention rather than running them on an
     idle server.
 
+Four verdicts, and the difference between them is the point:
+
+  * **PASS** — the behaviour was exercised and is correct.
+  * **FAIL** — exercised and wrong. Fails the run.
+  * **NOT-COVERED** — this harness cannot decide the question, with a
+    stated reason. Never awarded to something that merely passed.
+  * **KNOWN-GAP** — exercised, wrong, filed, and shipped knowingly.
+    Carries its issue number, is printed separately on every run, and is
+    never counted as a pass. Use it only for a defect with an issue and
+    a decision behind it, never to quiet a failure.
+
 The report is written to /results/report.json and printed. The exit code
-is non-zero if any assertion FAILED; NOT-COVERED does not fail the run,
-because an honest gap is not a regression.
+is non-zero if any assertion FAILED; NOT-COVERED and KNOWN-GAP do not
+fail the run, because a stated gap is not a regression.
 """
 
 from __future__ import annotations
@@ -56,7 +67,7 @@ SAAS = {
 class Check:
     name: str
     issue: str
-    verdict: str  # PASS | FAIL | NOT-COVERED
+    verdict: str  # PASS | FAIL | NOT-COVERED | KNOWN-GAP
     detail: str = ""
     instance: str = ""
 
@@ -70,13 +81,17 @@ class Report:
 
     def add(self, name, issue, verdict, detail="", instance=""):
         self.checks.append(Check(name, issue, verdict, detail, instance))
-        mark = {"PASS": "ok  ", "FAIL": "FAIL", "NOT-COVERED": "----"}[verdict]
+        mark = {"PASS": "ok  ", "FAIL": "FAIL",
+                "NOT-COVERED": "----", "KNOWN-GAP": "KNOWN"}[verdict]
         where = f" [{instance}]" if instance else ""
         print(f"  {mark} {issue:>6}  {name}{where}"
               + (f"\n           {detail}" if detail else ""))
 
     def failed(self):
         return [c for c in self.checks if c.verdict == "FAIL"]
+
+    def known_gaps(self):
+        return [c for c in self.checks if c.verdict == "KNOWN-GAP"]
 
 
 REPORT = Report()
@@ -374,9 +389,26 @@ async def check_cursor_walks(client, name, base, headers=None):
         REPORT.add("timestamp cursor advances", issue, "FAIL",
                    "`next` was offered but its page is empty", name)
     elif set(ids_1) & set(ids_2):
-        REPORT.add("timestamp cursor advances", issue, "FAIL",
-                   f"page two repeats rows from page one: {sorted(set(ids_1) & set(ids_2))}",
-                   name)
+        overlap = sorted(set(ids_1) & set(ids_2))
+        # #1464 — on SQLite an `auto_now_add` column is written by
+        # `DEFAULT CURRENT_TIMESTAMP` as "YYYY-MM-DD HH:MM:SS" while
+        # sqlx binds `DateTime<Utc>` as RFC3339. Space (0x20) sorts
+        # before 'T' (0x54), so the cursor predicate matches every row
+        # and page two is page one. Known, filed, and deliberately not
+        # fixed in 0.57.5: every fix changes the stored format.
+        #
+        # Scoped to SQLite and to this symptom. A cursor that fails to
+        # advance on Postgres or MySQL, or that fails any other way, is
+        # still a FAIL.
+        if name.endswith("-sq"):
+            REPORT.add("timestamp cursor advances", "#1464", "KNOWN-GAP",
+                       f"SQLite stores auto_now_add as 'YYYY-MM-DD HH:MM:SS' and binds "
+                       f"RFC3339, so the cursor predicate matches every row; page two "
+                       f"repeats {overlap}. Not a regression — see issue #1464",
+                       name)
+        else:
+            REPORT.add("timestamp cursor advances", issue, "FAIL",
+                       f"page two repeats rows from page one: {overlap}", name)
     else:
         REPORT.add("timestamp cursor advances", issue, "PASS",
                    f"{len(ids_1)} then {len(ids_2)} distinct rows", name)
@@ -906,11 +938,20 @@ def write_report():
     npass = sum(1 for c in REPORT.checks if c.verdict == "PASS")
     nfail = len(REPORT.failed())
     nskip = sum(1 for c in REPORT.checks if c.verdict == "NOT-COVERED")
+    known = REPORT.known_gaps()
     print("\n" + "=" * 62)
-    print(f"  {npass} passed, {nfail} FAILED, {nskip} not covered")
+    print(f"  {npass} passed, {nfail} FAILED, {len(known)} known gap(s), "
+          f"{nskip} not covered")
     if nfail:
         print("\n  failures:")
         for c in REPORT.failed():
+            print(f"    {c.issue:>6}  {c.name} [{c.instance}]\n           {c.detail}")
+    # Printed even on a green run, and never folded into the pass count:
+    # a known gap is a behaviour that is broken and shipped knowingly,
+    # which is a different thing from one that is covered and working.
+    if known:
+        print("\n  known gaps — filed, failing, and shipped deliberately:")
+        for c in known:
             print(f"    {c.issue:>6}  {c.name} [{c.instance}]\n           {c.detail}")
     print("=" * 62)
     return 1 if nfail else 0

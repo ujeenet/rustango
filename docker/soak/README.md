@@ -164,3 +164,31 @@ the exact failure this release was about.
   available is `--locked` resolving, which `lockfiles` already does.
 - **#1440** is best proven by pointing a suite at a dead port, which is
   a test-suite property rather than an application one.
+
+## Known gaps
+
+A `KNOWN-GAP` verdict is a behaviour that was exercised, is **wrong**,
+has an issue, and is being shipped anyway on purpose. It is printed in
+its own block on every run and never counted as a pass — the point of a
+fourth verdict is that "broken and known" and "working" must not look
+alike in a report.
+
+- **[#1464](https://github.com/ujeenet/rustango/issues/1464) — SQLite
+  `auto_now_add` columns cannot be compared against a Rust-bound
+  `DateTime`.** `DEFAULT CURRENT_TIMESTAMP` writes
+  `2026-09-15 02:53:25`; sqlx binds `DateTime<Utc>` as RFC3339
+  `2026-09-15T02:53:25+00:00`. Lexically `' '` (0x20) sorts before `'T'`
+  (0x54), so `WHERE placed_at < $cursor` is true for *every* row and
+  cursor pagination serves page one forever. Both SQLite legs report it;
+  Postgres and MySQL page correctly.
+
+  Not fixed in 0.57.5 because every available fix changes SQLite's
+  stored datetime format, which wants its own release and a migration
+  for databases that already hold both formats. The framework has hit
+  this once before and patched it at a single call site (`audit.rs`,
+  citing #560) rather than centrally, which is why it was still here to
+  find.
+
+  The scoping is deliberate: only this check, only on `*-sq` instances,
+  only for the repeat-rows symptom. A cursor that fails to advance on
+  Postgres or MySQL, or fails any other way, is still a `FAIL`.
