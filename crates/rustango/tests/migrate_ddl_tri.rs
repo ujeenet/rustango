@@ -1,5 +1,10 @@
-//! Dropping a CHECK constraint and a composite FK, executed against
-//! every backend — one body, three dialects (#559, #1461).
+//! Migration DDL executed against every backend — one body, three
+//! dialects (#559, #1461).
+//!
+//! Covers dropping a CHECK constraint, dropping a composite FK, and
+//! renaming a table and a column. Every one of those was emitted as
+//! PostgreSQL-shaped SQL to all three engines at some point, and every
+//! one was pinned by an emission test that could not notice.
 //!
 //! ## Why this file exists
 //!
@@ -56,7 +61,7 @@ use rustango::{by_dialect, tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "dc_tri_widget")]
-#[rustango(app = "migrate_drop_constraint_tri")]
+#[rustango(app = "migrate_ddl_tri")]
 #[allow(dead_code)]
 pub struct Widget {
     #[rustango(primary_key)]
@@ -68,7 +73,7 @@ pub struct Widget {
 /// legal thing for a composite foreign key to reference.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "dc_tri_parent")]
-#[rustango(app = "migrate_drop_constraint_tri")]
+#[rustango(app = "migrate_ddl_tri")]
 #[rustango(unique_together = "region, code")]
 #[allow(dead_code)]
 pub struct Parent {
@@ -81,7 +86,7 @@ pub struct Parent {
 
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "dc_tri_child")]
-#[rustango(app = "migrate_drop_constraint_tri")]
+#[rustango(app = "migrate_ddl_tri")]
 #[allow(dead_code)]
 pub struct Child {
     #[rustango(primary_key)]
@@ -160,15 +165,33 @@ async fn run(pool: &Pool, stmts: &[String]) {
     }
 }
 
-async fn insert_widget(pool: &Pool, n: i64) -> Result<u64, rustango::sql::ExecError> {
-    let d = pool.dialect();
-    let sql = format!(
-        "INSERT INTO {} ({}) VALUES ({})",
-        d.quote_ident("dc_tri_widget"),
-        d.quote_ident("n"),
-        if d.name() == "postgres" { "$1" } else { "?" },
-    );
-    raw_execute_pool(pool, &sql, vec![rustango::core::SqlValue::I64(n)]).await
+/// Insert a widget through the ORM.
+///
+/// This hand-wrote its own `INSERT`, including a
+/// `if d.name() == "postgres" { "$1" } else { "?" }` placeholder branch
+/// — a fourth copy of a rule the dialect already owns, inside the file
+/// whose subject is that exact class of mistake. `insert_pool` picks the
+/// placeholder, quotes the identifiers and binds the value.
+async fn insert_widget(pool: &Pool, n: i64) -> Result<(), rustango::sql::ExecError> {
+    let mut w = Widget {
+        id: Auto::default(),
+        n,
+    };
+    w.insert_pool(pool).await.map(|()| ())
+}
+
+/// Insert a child row through the ORM.
+async fn insert_child(
+    pool: &Pool,
+    region: &str,
+    code: i64,
+) -> Result<(), rustango::sql::ExecError> {
+    let mut c = Child {
+        id: Auto::default(),
+        region: region.to_owned(),
+        code,
+    };
+    c.insert_pool(pool).await.map(|()| ())
 }
 
 /// A CHECK constraint: add it, prove it bites, drop it, prove it stopped.
@@ -266,31 +289,100 @@ async fn composite_fk_can_be_added_and_dropped(pool: &Pool) {
 
     run(pool, &render(pool, add).expect("render ADD FK")).await;
 
-    let d = pool.dialect();
-    let orphan = format!(
-        "INSERT INTO {} ({}, {}) VALUES ({}, {})",
-        d.quote_ident("dc_tri_child"),
-        d.quote_ident("region"),
-        d.quote_ident("code"),
-        if d.name() == "postgres" { "$1" } else { "?" },
-        if d.name() == "postgres" { "$2" } else { "?" },
-    );
-    let binds = || {
-        vec![
-            rustango::core::SqlValue::String("nowhere".into()),
-            rustango::core::SqlValue::I64(999),
-        ]
-    };
     assert!(
-        raw_execute_pool(pool, &orphan, binds()).await.is_err(),
+        insert_child(pool, "nowhere", 999).await.is_err(),
         "the FK is added, so a row with no parent must be rejected on {}",
-        d.name()
+        pool.dialect().name()
     );
 
     run(pool, &render(pool, drop).expect("render DROP FK")).await;
-    raw_execute_pool(pool, &orphan, binds())
+    insert_child(pool, "nowhere", 999)
         .await
         .expect("the FK was dropped, so the orphan row must now be accepted");
+}
+
+/// Renaming a table, executed.
+///
+/// `RenameTable` emitted `ALTER TABLE "old" RENAME TO "new"` with the
+/// double quotes written into the format string — no `quote_ident`, no
+/// dialect guard. On MySQL `"` delimits a string, so this is
+/// `ERROR 1064`, exactly the failure #1461 fixed two arms further down
+/// the same `match`. Every neighbouring `AlterColumn*` arm calls
+/// `guard_alter_column_dialect`; these two never did, and unlike those
+/// arms they do not need a guard — both renames are portable, they just
+/// needed the dialect's quoting.
+///
+/// Asserted by using the new name through the ORM: a rename that emitted
+/// nothing would leave the old table in place and the query would fail.
+async fn a_table_can_be_renamed(pool: &Pool) {
+    run(
+        pool,
+        &render(
+            pool,
+            SchemaChange::RenameTable {
+                old_name: "dc_tri_widget".into(),
+                new_name: "dc_tri_widget_renamed".into(),
+            },
+        )
+        .expect("render RENAME TABLE"),
+    )
+    .await;
+
+    let d = pool.dialect();
+    // Read through the renamed table. `Widget::objects()` still points at
+    // the old name, so this is the one place a literal name is needed —
+    // and it is a SELECT the test owns, not emitted DDL.
+    let sql = format!(
+        "SELECT COUNT(*) FROM {}",
+        d.quote_ident("dc_tri_widget_renamed")
+    );
+    raw_execute_pool(pool, &sql, Vec::new())
+        .await
+        .unwrap_or_else(|e| panic!("the renamed table should exist on {}: {e}", d.name()));
+
+    // And put it back, so the scenario is order-independent.
+    run(
+        pool,
+        &render(
+            pool,
+            SchemaChange::RenameTable {
+                old_name: "dc_tri_widget_renamed".into(),
+                new_name: "dc_tri_widget".into(),
+            },
+        )
+        .expect("render RENAME TABLE back"),
+    )
+    .await;
+    insert_widget(pool, 1)
+        .await
+        .expect("the table is back under its original name");
+}
+
+/// Renaming a column, executed. Same bug, same arm neighbourhood.
+async fn a_column_can_be_renamed(pool: &Pool) {
+    run(
+        pool,
+        &render(
+            pool,
+            SchemaChange::RenameColumn {
+                table: "dc_tri_widget".into(),
+                old_column: "n".into(),
+                new_column: "renamed_n".into(),
+            },
+        )
+        .expect("render RENAME COLUMN"),
+    )
+    .await;
+
+    let d = pool.dialect();
+    let sql = format!(
+        "SELECT {} FROM {}",
+        d.quote_ident("renamed_n"),
+        d.quote_ident("dc_tri_widget"),
+    );
+    raw_execute_pool(pool, &sql, Vec::new())
+        .await
+        .unwrap_or_else(|e| panic!("the renamed column should exist on {}: {e}", d.name()));
 }
 
 tri_dialect_test! {
@@ -298,5 +390,7 @@ tri_dialect_test! {
     scenarios: [
         check_constraint_can_be_added_and_dropped,
         composite_fk_can_be_added_and_dropped,
+        a_table_can_be_renamed,
+        a_column_can_be_renamed,
     ],
 }
