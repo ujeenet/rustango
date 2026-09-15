@@ -160,8 +160,20 @@ done
 echo
 echo "verifying nothing still claims $OLD"
 
-# Prose and manifests: no bare occurrence of the old version left anywhere.
-stale=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|\$)" -- . \
+# Check the CLAIM SHAPES, not bare occurrences.
+#
+# This used to run the byte-identical grep that produces the "left alone"
+# list above, so the script printed those lines as deliberately kept and
+# then exited 1 naming the same lines — after it had already rewritten the
+# files and regenerated the lockfiles. A bump could not complete.
+#
+# Prose naming an old release is supposed to keep its number; that is the
+# whole reason the rewrite is anchored. So the verification has to ask the
+# narrower question the rewrite asks: does any *claim about the current
+# version* still say OLD? The alternation below is the same five shapes the
+# perl pass rewrites, and nothing else.
+CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+)'
+stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \
   ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true)
 
 # Lockfiles need a *narrower* check, not the same one. A third-party crate can
