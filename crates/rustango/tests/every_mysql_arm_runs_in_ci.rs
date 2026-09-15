@@ -112,6 +112,19 @@ fn run_commands(block: &str) -> Vec<String> {
     let code: String = block
         .lines()
         .filter(|l| !l.trim_start().starts_with('#'))
+        // A step may be written `- name: …` on one line and `run:` on
+        // the next — `mysql_live` has one already. Splitting only on
+        // `- run:` skipped those entirely, so a `--test` target added to
+        // a named step would be invisible to this guard. Normalising the
+        // bare `run:` key to the list form makes both shapes one shape.
+        .map(|l| {
+            let t = l.trim_start();
+            if t.starts_with("run:") {
+                format!("      - {t}")
+            } else {
+                l.to_owned()
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -338,6 +351,8 @@ jobs:
       - run: cargo test -p rustango --features sqlite --test delta_mysql_live
       - run: cargo test -p rustango --features mysqlish --test epsilon_mysql_live
       # - run: cargo test -p rustango --features mysql --test zeta_mysql_live
+      - name: a step whose run: is on the next line
+        run: cargo test -p rustango --features mysql --test eta_mysql_live
   deny-examples:
     runs-on: ubuntu-latest
     steps:
@@ -401,6 +416,22 @@ jobs:
             Some(&false),
             "`mysqlish` is not `mysql`; the feature must match as a whole token: \
              {found:?}"
+        );
+    }
+
+    /// A step written `- name:` / `run:` still counts.
+    ///
+    /// `mysql_live` already contains one such step. Splitting only on
+    /// `- run:` missed the shape entirely, so a suite added to a named
+    /// step would have been invisible to the guard — the guard's own
+    /// blind spot, in the same family as the one it exists to catch.
+    #[test]
+    fn a_step_with_run_on_its_own_line_counts() {
+        let found = named_test_targets(&job_block(SAMPLE, "mysql_live"));
+        assert_eq!(
+            found.get("eta_mysql_live"),
+            Some(&true),
+            "a `- name:` + `run:` step was not seen: {found:?}"
         );
     }
 

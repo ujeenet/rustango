@@ -154,6 +154,22 @@ done
 # Dropping straight through to "clean" would have been the worse failure.
 LEFT=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|$)" -- . \
   ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' 2>/dev/null || true)
+
+# Lockfiles FIRST, before the list is shown and before anything can stop.
+#
+# The confirmation used to sit here, between the rewrite and this loop, which
+# meant every path that declined — including a non-interactive `read` hitting
+# EOF, which returns non-zero and falls straight to the `*)` arm — left bumped
+# manifests beside stale lockfiles. A Makefile, a CI step or any wrapper
+# invoking this without a tty produced exactly the half-applied tree the
+# script exists to avoid.
+echo "regenerating lockfiles"
+for lock in "${LOCKS[@]}"; do
+  manifest="${lock%Cargo.lock}Cargo.toml"
+  cargo metadata --format-version 1 --manifest-path "$manifest" >/dev/null
+  printf '  %s\n' "$lock"
+done
+
 if [ -n "$LEFT" ]; then
   echo
   echo "left alone — these name $OLD in prose, which is usually right."
@@ -161,23 +177,21 @@ if [ -n "$LEFT" ]; then
   echo "exactly like prose from here, and nothing downstream will catch it:"
   printf '%s\n' "$LEFT" | sed 's/^/  /' | cut -c1-140
   echo
+  # Ask only when there is someone to ask. `-t 0` is not enough on its own:
+  # stdin can be a pipe while a terminal is still attached, so prefer
+  # /dev/tty and fall back to "say it loudly and continue".
   if $ASSUME_YES; then
     echo "(--yes: continuing without asking)"
-  else
-    read -r -p "none of those is a stale claim? [y/N] " reply
+  elif [ -r /dev/tty ] && [ -t 1 ]; then
+    read -r -p "none of those is a stale claim? [y/N] " reply </dev/tty
     case "$reply" in
       [yY]|[yY][eE][sS]) ;;
-      *) echo "aborted — the files are rewritten; fix the claim and re-run" >&2; exit 1 ;;
+      *) echo "aborted — the bump is fully applied; fix the claim and commit" >&2; exit 1 ;;
     esac
+  else
+    echo "(no terminal to ask — the list above is the warning; check it before committing)" >&2
   fi
 fi
-
-echo "regenerating lockfiles"
-for lock in "${LOCKS[@]}"; do
-  manifest="${lock%Cargo.lock}Cargo.toml"
-  cargo metadata --format-version 1 --manifest-path "$manifest" >/dev/null
-  printf '  %s\n' "$lock"
-done
 
 echo
 echo "verifying nothing still claims $OLD"

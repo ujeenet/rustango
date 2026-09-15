@@ -82,6 +82,21 @@ impl Dialect for Sqlite {
         true
     }
 
+    /// SQLite has no `ALTER TABLE … DROP CONSTRAINT`, so there is no
+    /// statement to return. `None` rather than the inherited PostgreSQL
+    /// default, which SQLite cannot parse — the workaround is to rebuild
+    /// the table without the constraint (#559).
+    fn drop_check_constraint_sql(&self, _table: &str, _name: &str) -> Option<String> {
+        None
+    }
+
+    /// Same as [`Sqlite::drop_check_constraint_sql`]; SQLite names no
+    /// foreign key it can later drop, because they are inlined into
+    /// `CREATE TABLE`.
+    fn drop_foreign_key_sql(&self, _table: &str, _name: &str) -> Option<String> {
+        None
+    }
+
     /// `SQLITE_MAX_VARIABLE_NUMBER` — 32766 since SQLite 3.32 (it was
     /// 999 before). sqlx bundles a modern build, so 32766 is right
     /// here; a host linking an ancient system SQLite would need the

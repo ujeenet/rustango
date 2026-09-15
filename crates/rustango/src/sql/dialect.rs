@@ -315,12 +315,17 @@ pub trait Dialect: Send + Sync {
     /// emitted the PostgreSQL form to MySQL, which is `ERROR 1064`
     /// (#559). A caller that cannot spell the statement itself cannot
     /// spell it wrongly.
-    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> String {
-        format!(
+    /// `None` means this dialect has no `ALTER TABLE … DROP CONSTRAINT`
+    /// at all — SQLite. Returning a `String` unconditionally meant the
+    /// default handed SQLite PostgreSQL syntax it cannot parse, safe
+    /// only because every current caller happens to reject SQLite
+    /// before asking. The next caller would not have known to.
+    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
             "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
             self.quote_ident(table),
             self.quote_ident(name)
-        )
+        ))
     }
 
     /// `ALTER TABLE <table> DROP ...` for a named foreign key.
@@ -328,12 +333,14 @@ pub trait Dialect: Send + Sync {
     /// Same story as [`Dialect::drop_check_constraint_sql`]: the default
     /// is PostgreSQL's idempotent `DROP CONSTRAINT IF EXISTS`, and MySQL
     /// overrides it with `DROP FOREIGN KEY`, which is not idempotent.
-    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> String {
-        format!(
+    /// `None` on dialects with no `ALTER TABLE … DROP CONSTRAINT`, as
+    /// for [`Dialect::drop_check_constraint_sql`].
+    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
             "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
             self.quote_ident(table),
             self.quote_ident(name)
-        )
+        ))
     }
 
     /// Whether `CREATE [UNIQUE] INDEX ... WHERE <expr>` partial-index

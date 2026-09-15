@@ -61,8 +61,25 @@ on:
 #
 # Feature branches and pull requests still cancel, which is where the
 # waste actually was.
+# The group is per-COMMIT on a push and per-ref everywhere else.
+#
+# Excluding a branch from cancellation is not enough to guarantee a build
+# per merged commit. With `cancel-in-progress: false` GitHub queues the
+# newcomer instead of cancelling the running job — but it keeps only the
+# most recent *pending* run in a group and cancels any earlier one. So
+# with a per-ref group, merging A, B and C in quick succession runs A,
+# queues B, and then discards B when C arrives. B is a commit on
+# `develop` that never got a build.
+#
+# Keying push runs by SHA gives every commit its own group, so none of
+# them can evict another. Pull requests and manual dispatches stay
+# per-ref, which is where superseding is the point: a new push to a PR
+# should cancel the run describing the code it replaced.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: >-
+    ci-${{ github.workflow }}-${{ github.event_name == 'push'
+      && github.sha
+      || github.ref }}
   cancel-in-progress: >-
     ${{ github.ref != 'refs/heads/main'
         && github.ref != 'refs/heads/develop'
