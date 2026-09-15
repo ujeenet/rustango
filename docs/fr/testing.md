@@ -168,7 +168,7 @@ couverture.
 | Variable | Suites | Ce dont elles ont besoin |
 |---|---:|---|
 | *(aucune)* | 216 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
-| `DATABASE_URL` | 90 | Un serveur PostgreSQL joignable. |
+| `DATABASE_URL` | 89 | Un serveur PostgreSQL joignable. |
 | `MYSQL_TEST_URL` | 19 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis joignable. |
 
