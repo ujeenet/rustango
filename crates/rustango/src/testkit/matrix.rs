@@ -232,7 +232,20 @@ pub async fn sqlite_file_pool() -> Pool {
     ));
     // A leftover from a previous run with the same pid would otherwise
     // be inherited, schema and rows included.
-    let _ = std::fs::remove_file(&path);
+    //
+    // The `-wal` and `-shm` sidecars have to go with it. sqlx opens
+    // file-backed SQLite in WAL mode, so committed rows can live in the
+    // write-ahead log rather than the database file: removing only the
+    // `.db` and leaving a `-wal` behind lets SQLite replay the previous
+    // run's transactions into what this call just promised was a fresh
+    // database. pids are recycled, so that is a real collision and not
+    // a theoretical one — and it would surface as rows appearing in a
+    // suite that never inserted them.
+    for suffix in ["", "-wal", "-shm"] {
+        let mut p = path.clone().into_os_string();
+        p.push(suffix);
+        let _ = std::fs::remove_file(std::path::PathBuf::from(p));
+    }
 
     let url = format!("sqlite://{}?mode=rwc", path.display());
     Pool::connect(&url)

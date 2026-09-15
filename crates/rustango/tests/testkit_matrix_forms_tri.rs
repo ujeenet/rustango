@@ -7,9 +7,15 @@
 //! * **`setup:`** — the suite builds its own tables. The job queue calls
 //!   `ensure_table_pool`; a migration suite runs migrations. There is no
 //!   single model whose schema describes the state they need.
-//! * **`sqlite: file`** — `sqlite::memory:` is per-*connection*, so two
-//!   connections to it are two separate databases. Any suite whose
-//!   workers must see each other's rows tests nothing against it.
+//! * **`sqlite: file`** — for WAL journalling, file locking, or a second
+//!   *process*. **Not** for cross-connection visibility: that was the
+//!   stated reason those 29 suites reach for a temp file, and it is
+//!   false. sqlx shares an in-memory database across a pool's
+//!   connections, measured with a barrier forcing eight simultaneous
+//!   ones (`sqlite_file_pool`'s doc carries the measurement). This
+//!   header asserted the per-connection premise for three commits after
+//!   the file that defines the form had already recorded its refutation
+//!   — which is how a premise survives being disproved.
 //!
 //! Without a test at this level those two forms are only proven by the
 //! suites that will later depend on them, which is backwards.
@@ -71,14 +77,39 @@ async fn the_custom_setup_ran(pool: &Pool) {
 
 /// Each test gets a fresh database, so the seed is exactly one row —
 /// never two from a previous scenario in the same file.
-async fn setup_runs_per_scenario_not_once(pool: &Pool) {
+/// Each of the two scenarios below writes a row and then requires the
+/// table to hold exactly two: the seed, plus its own.
+///
+/// The writing is what makes the assertion capable of failing. An
+/// earlier version asserted only `count == 1` and wrote nothing, so a
+/// setup hoisted to run once for the whole suite satisfied it in every
+/// scenario — the test named the property and then checked something
+/// that holds either way.
+///
+/// With per-scenario setup both see 2. With one shared setup, whichever
+/// runs second sees 3.
+async fn insert_and_expect_only_our_own(pool: &Pool, label: &str) {
+    let mut mine = Row {
+        id: Auto::Unset,
+        label: label.into(),
+    };
+    mine.save_pool(pool).await.expect("write our own row");
+
     assert_eq!(
         Row::objects().count(pool).await.expect("count"),
-        1,
-        "a second scenario must start from its own setup, not inherit the first's \
-         rows — a shared database across scenarios is how order-dependent suites \
-         start passing for the wrong reason"
+        2,
+        "expected the seed plus this scenario's own row. More means the setup ran \
+         once for the whole suite and scenarios are sharing a database, which is \
+         how order-dependent suites start passing for the wrong reason"
     );
+}
+
+async fn setup_runs_per_scenario_not_once(pool: &Pool) {
+    insert_and_expect_only_our_own(pool, "from-scenario-a").await;
+}
+
+async fn and_again_for_the_following_scenario(pool: &Pool) {
+    insert_and_expect_only_our_own(pool, "from-scenario-b").await;
 }
 
 tri_dialect_test! {
@@ -87,5 +118,6 @@ tri_dialect_test! {
     scenarios: [
         the_custom_setup_ran,
         setup_runs_per_scenario_not_once,
+        and_again_for_the_following_scenario,
     ],
 }

@@ -104,14 +104,23 @@ fn job_block(yaml: &str, job: &str) -> String {
 /// several of them mention `--features mysql` in prose, which would
 /// otherwise vouch for the step that follows.
 fn run_commands(block: &str) -> Vec<String> {
-    block
-        .split("- run:")
+    // Commented-out steps are not steps. Splitting the raw text on
+    // `- run:` matched inside `# - run: cargo test …` too, so disabling
+    // a step by commenting it out left the guard satisfied by a line
+    // that runs nothing — a suite could be switched off and stay
+    // "covered". Strip comment lines before splitting.
+    let code: String = block
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    code.split("- run:")
         .skip(1)
         .map(|chunk| {
             let mut cmd = String::new();
             for line in chunk.lines() {
-                let t = line.trim_start();
-                if t.starts_with('#') || t.starts_with("- ") {
+                if line.trim_start().starts_with("- ") {
                     break;
                 }
                 cmd.push_str(line);
@@ -328,6 +337,7 @@ jobs:
       # a comment mentioning --features mysql must not vouch for the next step
       - run: cargo test -p rustango --features sqlite --test delta_mysql_live
       - run: cargo test -p rustango --features mysqlish --test epsilon_mysql_live
+      # - run: cargo test -p rustango --features mysql --test zeta_mysql_live
   deny-examples:
     runs-on: ubuntu-latest
     steps:
@@ -391,6 +401,21 @@ jobs:
             Some(&false),
             "`mysqlish` is not `mysql`; the feature must match as a whole token: \
              {found:?}"
+        );
+    }
+
+    /// A commented-out step runs nothing, so it must not count.
+    ///
+    /// Splitting the raw block on `- run:` matched inside
+    /// `# - run: …` as well, so switching a suite off by commenting its
+    /// line out left the guard green — the guard would have vouched for
+    /// a step that does not exist.
+    #[test]
+    fn a_commented_out_step_does_not_count() {
+        let found = named_test_targets(&job_block(SAMPLE, "mysql_live"));
+        assert!(
+            !found.contains_key("zeta_mysql_live"),
+            "a commented-out `- run:` was counted as covering the suite: {found:?}"
         );
     }
 
