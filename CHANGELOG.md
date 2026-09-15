@@ -188,6 +188,18 @@ sets no CORS — so the notes below are for hand-written apps.
 
 ### Fixed
 
+Known gap, filed rather than fixed:
+[#1464](https://github.com/ujeenet/rustango/issues/1464) — on SQLite an
+`auto_now_add` column is written by `DEFAULT CURRENT_TIMESTAMP` as
+`"YYYY-MM-DD HH:MM:SS"` while sqlx binds `DateTime<Utc>` as RFC3339, and
+`' '` sorts before `'T'`. Every comparison against such a column is
+therefore true, and cursor pagination on one serves page one forever.
+Postgres and MySQL are unaffected. Every fix changes SQLite's stored
+datetime format, so it wants its own release and a migration for
+databases already holding both shapes; the framework hit this once
+before and patched a single call site (`audit.rs`, citing #560) instead
+of the binder, which is why it survived to be found again.
+
 The first six items were found by a soak test built for this release — two
 commerce applications, single- and multi-tenant, across PostgreSQL, MySQL and
 SQLite, under load in Docker (`docker/soak/`). Every fix in this release had
