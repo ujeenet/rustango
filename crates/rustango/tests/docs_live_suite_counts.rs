@@ -71,6 +71,30 @@ fn measured(root: &Path) -> BTreeMap<String, usize> {
             continue;
         };
 
+        // A `_tri` suite reads no variable itself — the lookup lives in
+        // `Backend::pool()` — so a text scan sees nothing and files it
+        // under "needs nothing, always runs". That is the worst possible
+        // answer: a tri suite wants BOTH servers, and its whole purpose
+        // is the two arms that do not run without them.
+        //
+        // Left unhandled, every conversion made the table worse in the
+        // direction of its own headline: retiring a `*_mysql_live.rs`
+        // for a `*_tri.rs` dropped the MySQL count by one and raised
+        // `(none)` by one, so a series of PRs adding MySQL coverage
+        // published a table showing MySQL coverage falling. The guard
+        // passed throughout, because it measured the same wrong thing
+        // the page printed.
+        //
+        // So they are credited to both server variables and kept out of
+        // `(none)`. The SQLite arm does still run with nothing set; the
+        // page says so in prose rather than in a count, because a reader
+        // uses this table to decide which servers to start.
+        if name.ends_with("_tri.rs") {
+            *counts.entry("DATABASE_URL".to_owned()).or_default() += 1;
+            *counts.entry("MYSQL_TEST_URL".to_owned()).or_default() += 1;
+            continue;
+        }
+
         // A suite is counted under every gating variable it reads; one
         // that reads none is counted as needing nothing.
         let mut gated = false;
