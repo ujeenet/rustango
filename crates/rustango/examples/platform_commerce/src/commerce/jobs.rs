@@ -47,6 +47,7 @@ fn registry() -> &'static RwLock<HashMap<String, Pool>> {
 /// Make a pool reachable from `run()`. Call once per tenant at boot,
 /// and again whenever a tenant is provisioned.
 pub fn register_pool(slug: &str, pool: Pool) {
+    tracing::info!(tenant = %slug, dialect = pool.dialect().name(), "job pool registered");
     registry()
         .write()
         .unwrap_or_else(|e| e.into_inner())
@@ -127,8 +128,14 @@ impl Job for OrderConfirmation {
     const NAME: &'static str = "commerce:order_confirmation";
 
     async fn run(&self) -> Result<(), JobError> {
+        // DEBUG for the per-job trace, INFO for the outcome. At soak
+        // volumes DEBUG is thousands of lines a minute, which is why it
+        // is off unless `RUST_LOG` asks for it.
+        tracing::debug!(tenant = %self.tenant, order = self.order_id, "confirming order");
         let pool = pool_for(&self.tenant)?;
-        record_event(&pool, self.order_id, "confirmed", &self.tenant, None).await
+        record_event(&pool, self.order_id, "confirmed", &self.tenant, None).await?;
+        tracing::info!(tenant = %self.tenant, order = self.order_id, "order confirmed");
+        Ok(())
     }
 }
 
@@ -148,6 +155,9 @@ impl Job for InventoryReconciliation {
     const MAX_ATTEMPTS: u32 = 3;
 
     async fn run(&self) -> Result<(), JobError> {
+        tracing::debug!(
+            tenant = %self.tenant, product = self.product_id, "reconciling inventory"
+        );
         let pool = pool_for(&self.tenant)?;
         let sql = format!(
             "UPDATE commerce_inventory SET on_hand = on_hand - 1 WHERE product_id = {} \
@@ -159,7 +169,12 @@ impl Job for InventoryReconciliation {
             // Retryable: a lock timeout or serialization failure is exactly
             // what a backoff is for.
             .map_err(|e| JobError::Retryable(e.to_string()))?;
-        record_event(&pool, self.order_id, "reconciled", &self.tenant, None).await
+        record_event(&pool, self.order_id, "reconciled", &self.tenant, None).await?;
+        tracing::info!(
+            tenant = %self.tenant, order = self.order_id, product = self.product_id,
+            "inventory reconciled"
+        );
+        Ok(())
     }
 }
 
@@ -207,12 +222,20 @@ impl Job for FlakyPaymentCapture {
     async fn run(&self) -> Result<(), JobError> {
         let pool = pool_for(&self.tenant)?;
         if Self::always_fails(self.order_id, self.fail_ratio_pct) {
+            // One line per *attempt*, so the 1s/2s/4s backoff sequence
+            // is visible in the log rather than only its dead-letter.
+            tracing::debug!(
+                tenant = %self.tenant, order = self.order_id,
+                "payment declined (injected failure) — will retry"
+            );
             return Err(JobError::Retryable(format!(
                 "payment gateway declined order {}",
                 self.order_id
             )));
         }
-        record_event(&pool, self.order_id, "captured", &self.tenant, None).await
+        record_event(&pool, self.order_id, "captured", &self.tenant, None).await?;
+        tracing::info!(tenant = %self.tenant, order = self.order_id, "payment captured");
+        Ok(())
     }
 }
 

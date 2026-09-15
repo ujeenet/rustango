@@ -208,7 +208,7 @@ impl<DB: Database> Builder<DB> {
     /// variables. Connection counts multiply by tenant *and* by
     /// process — 20 database-mode tenants at the default 16 across a
     /// web and a worker process is 640 connections, against a stock
-    /// PostgreSQL limit of 100 — so the only available lever was the
+    /// `PostgreSQL` limit of 100 — so the only available lever was the
     /// database server's own `max_connections`, which is the wrong
     /// place to size an application's pools and often not the
     /// operator's to change.

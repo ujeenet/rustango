@@ -113,6 +113,7 @@ async fn ensure_queue(
     })
     .await;
     q.start().await;
+    tracing::info!(tenant = %org.slug, workers = 2, "tenant queue started");
     map.insert(org.slug.clone(), q);
     Ok(true)
 }
@@ -156,6 +157,7 @@ pub fn spawn_refresh(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
+            tracing::debug!("tenant refresh tick");
             let orgs: Vec<Org> = match Org::objects().filter("active", true).fetch(&registry).await
             {
                 Ok(o) => o,

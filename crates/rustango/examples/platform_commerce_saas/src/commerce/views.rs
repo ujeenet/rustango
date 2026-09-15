@@ -26,6 +26,7 @@ pub async fn storefront(t: Tenant<DefaultTenantDb>) -> Html<String> {
         .await
         .unwrap_or_default();
 
+    tracing::debug!(tenant = %t.org.slug, products = products.len(), "rendering storefront");
     let mut body = format!(
         "<!doctype html>\n<title>Commerce — {}</title>\n<h1>Catalogue — {}</h1>\n<ul>\n",
         t.org.slug, t.org.slug

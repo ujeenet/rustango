@@ -95,9 +95,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .on_dead_letter(|dl| async move { commerce::jobs::log_dead_letter(None, &dl) })
         .await;
 
+    tracing::info!(
+        dialect = pool.dialect().name(),
+        fail_ratio_pct = fail_ratio_pct(),
+        inline_workers = inline_workers(),
+        "platform_commerce starting"
+    );
+    tracing::debug!(registered = ?commerce::jobs::registered_job_names(), "job types");
+
     if inline_workers() {
         queue.start().await;
-        tracing::info!("workers running in-process (SOAK_INLINE_WORKERS=1)");
+        tracing::info!(
+            workers = 4,
+            "workers running in-process (SOAK_INLINE_WORKERS=1)"
+        );
     } else {
         tracing::info!("dispatch-only; a separate worker container drains the queue");
     }

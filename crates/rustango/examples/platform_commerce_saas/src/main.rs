@@ -92,6 +92,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&pools),
     );
 
+    tracing::info!(
+        tenants = queues.slugs().len(),
+        fail_ratio_pct = fail_ratio_pct(),
+        "platform_commerce_saas starting"
+    );
+    tracing::debug!(queues = ?queues.slugs(), "tenant queues");
+
     let drain = Arc::clone(&queues);
     rustango::manage::Cli::new()
         .tenancy()

@@ -692,21 +692,62 @@ impl ViewSet {
         self
     }
 
-    /// Switch to cursor-based pagination on `field`. The cursor field
-    /// should be a stable, monotonically-ordered column (typically `"id"`).
-    /// This skips the `COUNT(*)` query that page-number pagination runs,
-    /// so it scales well for large tables.
+    /// Switch to cursor-based pagination on `field`. This skips the
+    /// `COUNT(*)` query that page-number pagination runs, so it scales
+    /// well for large tables.
+    ///
+    /// The field must be a **totally ordered** column: an integer,
+    /// timestamp, date, uuid or string. `"id"` is the usual choice; a
+    /// `created_at` timestamp is the other common one, and is what you
+    /// want on an append-only table.
+    ///
+    /// # Panics
+    ///
+    /// If `field` is not on the model, or is of a type that cannot be a
+    /// cursor (a float, bool, json or blob). This is a programming
+    /// error and it is caught here rather than per request: until
+    /// #1459 an unusable field was accepted silently and then returned
+    /// **500 on every request**, so a misconfigured ViewSet built fine,
+    /// started fine, passed its health check, and served nothing.
     #[must_use]
     pub fn cursor_pagination(mut self, field: &'static str) -> Self {
+        self.assert_cursor_field(field);
         self.pagination = PaginationStyle::Cursor { field, desc: false };
         self
     }
 
-    /// Cursor pagination, descending order.
+    /// Cursor pagination, descending order. Same constraints and same
+    /// panics as [`Self::cursor_pagination`].
     #[must_use]
     pub fn cursor_pagination_desc(mut self, field: &'static str) -> Self {
+        self.assert_cursor_field(field);
         self.pagination = PaginationStyle::Cursor { field, desc: true };
         self
+    }
+
+    /// Fail where the mistake is, not once per request (#1459).
+    fn assert_cursor_field(&self, field: &'static str) {
+        let table = self.schema.table;
+        let Some(f) = self.schema.field(field) else {
+            let known: Vec<&str> = self
+                .schema
+                .fields
+                .iter()
+                .filter(|f| cursor_field_supported(f.ty))
+                .map(|f| f.name)
+                .collect();
+            panic!(
+                "cursor_pagination(\"{field}\"): `{table}` has no field `{field}`. \
+                 Usable cursor fields on this model: {known:?}"
+            );
+        };
+        assert!(
+            cursor_field_supported(f.ty),
+            "cursor_pagination(\"{field}\"): `{table}.{field}` is {:?}, which cannot \
+             be a cursor — the value has to round-trip through a token and order \
+             totally. Use an integer, timestamp, date, uuid or string column.",
+            f.ty
+        );
     }
 
     /// Switch to DRF-shape limit/offset pagination — `?limit=&offset=`.
@@ -2108,19 +2149,27 @@ async fn handle_list_cursor(
             &format!("cursor field `{cursor_field}` not found on model"),
         );
     };
-    if !matches!(
-        cursor_schema.ty,
-        FieldType::I16 | FieldType::I32 | FieldType::I64
-    ) {
+    if !cursor_field_supported(cursor_schema.ty) {
+        // Still a 500, because it is a server-side misconfiguration
+        // rather than anything the caller did — but the set of usable
+        // types is much wider now, and `cursor_pagination()` panics at
+        // build time on an unusable one, so reaching this at request
+        // time takes a `pagination(PaginationStyle::Cursor { .. })`
+        // constructed by hand (#1459).
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "cursor pagination requires an integer field (i16/i32/i64)",
+            &format!(
+                "cursor pagination needs a totally-ordered column; `{cursor_field}` is \
+                 {:?}, which does not round-trip through a cursor token. Use an \
+                 integer, timestamp, date, uuid or string column.",
+                cursor_schema.ty
+            ),
         );
     }
 
     // Decode the incoming cursor (if any)
-    let cursor_val: Option<i64> = match params.get("cursor") {
-        Some(c) if !c.is_empty() => match decode_cursor(c) {
+    let cursor_val: Option<SqlValue> = match params.get("cursor") {
+        Some(c) if !c.is_empty() => match decode_cursor(c, cursor_schema.ty) {
             Some(v) => Some(v),
             None => return json_error(StatusCode::BAD_REQUEST, "invalid cursor"),
         },
@@ -2134,7 +2183,7 @@ async fn handle_list_cursor(
             let cursor_pred = WhereExpr::Predicate(Filter {
                 column: cursor_schema.column,
                 op,
-                value: SqlValue::I64(v),
+                value: v,
             });
             match where_clause {
                 WhereExpr::And(v) if v.is_empty() => cursor_pred,
@@ -2173,11 +2222,7 @@ async fn handle_list_cursor(
     let next_cursor = if has_more {
         // Read the cursor field value from the last JSON row.
         let last = page_rows.last().expect("non-empty page");
-        let val: i64 = last
-            .get(cursor_schema.name)
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        Some(encode_cursor(val))
+        cursor_value_of(last, cursor_schema.name).map(|v| encode_cursor(&v))
     } else {
         None
     };
@@ -2190,20 +2235,85 @@ async fn handle_list_cursor(
     }))
 }
 
-/// Encode an i64 cursor value as URL-safe base64 of its decimal string.
-fn encode_cursor(value: i64) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string().as_bytes())
+/// Can this column be a cursor?
+///
+/// Cursor pagination needs a **totally ordered** column whose value
+/// round-trips through a string. Integers qualify, and so do timestamps,
+/// dates, UUIDs and strings — the last two because monotonic ids
+/// (`UUIDv7`, ULID) are a common cursor and sort correctly in SQL.
+///
+/// What is excluded is excluded for a reason: floats do not round-trip
+/// exactly, `Json` / `Binary` / `Array` have no useful total order, and
+/// `Bool` has too few values to page by.
+///
+/// Before #1459 this list was `I16 | I32 | I64` only, and a
+/// non-integer field was not rejected where it was *configured* — it
+/// was accepted by `cursor_pagination()` and then returned 500 on every
+/// request, forever, while the docs described "a stable,
+/// monotonically-ordered column (typically `id`)". A `TIMESTAMPTZ
+/// created_at` is exactly that, and is the canonical cursor in the DRF
+/// API this one is shaped after.
+pub(crate) fn cursor_field_supported(ty: FieldType) -> bool {
+    matches!(
+        ty,
+        FieldType::I16
+            | FieldType::I32
+            | FieldType::I64
+            | FieldType::DateTime
+            | FieldType::Date
+            | FieldType::Uuid
+            | FieldType::String
+    )
 }
 
-/// Decode a cursor token. Returns `None` for malformed input.
-fn decode_cursor(token: &str) -> Option<i64> {
+/// Encode a cursor value as URL-safe base64 of its string form.
+///
+/// Integers render as their decimal string, so tokens issued before
+/// #1459 decode identically — a client mid-pagination across an upgrade
+/// keeps working.
+fn encode_cursor(value: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.as_bytes())
+}
+
+/// Decode a cursor token into a bind value of the cursor column's type.
+///
+/// Returns `None` for malformed input, which the caller turns into a
+/// 400 — a bad cursor is the client's, unlike the 500 a misconfigured
+/// cursor *field* used to produce.
+fn decode_cursor(token: &str, ty: FieldType) -> Option<SqlValue> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token.as_bytes())
         .ok()?;
     let s = std::str::from_utf8(&bytes).ok()?;
-    s.parse::<i64>().ok()
+    match ty {
+        FieldType::I16 | FieldType::I32 | FieldType::I64 => {
+            s.parse::<i64>().ok().map(SqlValue::I64)
+        }
+        FieldType::DateTime => chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| SqlValue::DateTime(dt.with_timezone(&chrono::Utc))),
+        FieldType::Date => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .ok()
+            .map(SqlValue::Date),
+        FieldType::Uuid => s.parse::<uuid::Uuid>().ok().map(SqlValue::Uuid),
+        FieldType::String => Some(SqlValue::String(s.to_owned())),
+        _ => None,
+    }
+}
+
+/// The string form of a rendered row's cursor column, for the `next`
+/// token.
+///
+/// Reads the JSON the list endpoint already produced rather than
+/// re-querying: an integer arrives as a number, everything else as a
+/// string, and the two cases are the whole of it.
+fn cursor_value_of(row: &Value, field_name: &str) -> Option<String> {
+    let v = row.get(field_name)?;
+    v.as_i64()
+        .map(|n| n.to_string())
+        .or_else(|| v.as_str().map(std::borrow::ToOwned::to_owned))
 }
 
 async fn handle_retrieve(
@@ -2785,36 +2895,117 @@ fn json_object_to_form(obj: &serde_json::Map<String, Value>) -> HashMap<String, 
 
 #[cfg(test)]
 mod cursor_tests {
-    use super::{decode_cursor, encode_cursor};
+    use super::{cursor_field_supported, decode_cursor, encode_cursor, FieldType, SqlValue};
+
+    fn int_token(v: i64) -> String {
+        encode_cursor(&v.to_string())
+    }
 
     #[test]
     fn cursor_roundtrip_positive() {
-        let token = encode_cursor(12345);
-        assert_eq!(decode_cursor(&token), Some(12345));
+        let token = int_token(12345);
+        assert_eq!(
+            decode_cursor(&token, FieldType::I64),
+            Some(SqlValue::I64(12345))
+        );
     }
 
     #[test]
     fn cursor_roundtrip_zero() {
-        let token = encode_cursor(0);
-        assert_eq!(decode_cursor(&token), Some(0));
+        let token = int_token(0);
+        assert_eq!(
+            decode_cursor(&token, FieldType::I64),
+            Some(SqlValue::I64(0))
+        );
     }
 
     #[test]
     fn cursor_roundtrip_max() {
-        let token = encode_cursor(i64::MAX);
-        assert_eq!(decode_cursor(&token), Some(i64::MAX));
+        let token = int_token(i64::MAX);
+        assert_eq!(
+            decode_cursor(&token, FieldType::I64),
+            Some(SqlValue::I64(i64::MAX))
+        );
     }
 
     #[test]
     fn cursor_decode_invalid_base64_returns_none() {
-        assert!(decode_cursor("not!valid!base64@@").is_none());
+        assert!(decode_cursor("not!valid!base64@@", FieldType::I64).is_none());
     }
 
     #[test]
     fn cursor_decode_non_numeric_payload_returns_none() {
         use base64::Engine;
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("not_a_number");
-        assert!(decode_cursor(&token).is_none());
+        assert!(decode_cursor(&token, FieldType::I64).is_none());
+    }
+
+    /// Tokens issued before #1459 must still decode. An integer cursor
+    /// is base64 of its decimal string in both the old and the new
+    /// encoder, so a client paginating across an upgrade keeps working.
+    #[test]
+    fn integer_tokens_are_unchanged_by_the_generalisation() {
+        use base64::Engine;
+        let legacy = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"4242");
+        assert_eq!(int_token(4242), legacy);
+        assert_eq!(
+            decode_cursor(&legacy, FieldType::I64),
+            Some(SqlValue::I64(4242))
+        );
+    }
+
+    /// The case that 500'd on every request before #1459.
+    #[test]
+    fn timestamp_cursors_round_trip() {
+        let iso = "2026-09-14T22:41:59Z";
+        let token = encode_cursor(iso);
+        let decoded = decode_cursor(&token, FieldType::DateTime);
+        match decoded {
+            Some(SqlValue::DateTime(dt)) => {
+                assert_eq!(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true), iso);
+            }
+            other => panic!("expected a DateTime cursor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uuid_and_string_cursors_round_trip() {
+        let u = "0199c1f4-0000-7000-8000-000000000000";
+        assert!(matches!(
+            decode_cursor(&encode_cursor(u), FieldType::Uuid),
+            Some(SqlValue::Uuid(_))
+        ));
+        assert_eq!(
+            decode_cursor(&encode_cursor("01J8Z"), FieldType::String),
+            Some(SqlValue::String("01J8Z".into()))
+        );
+    }
+
+    /// The supported set is a decision, not an accident — floats do not
+    /// round-trip exactly and JSON/binary have no total order, so they
+    /// stay out.
+    #[test]
+    fn only_totally_ordered_types_are_accepted() {
+        for ok in [
+            FieldType::I16,
+            FieldType::I32,
+            FieldType::I64,
+            FieldType::DateTime,
+            FieldType::Date,
+            FieldType::Uuid,
+            FieldType::String,
+        ] {
+            assert!(cursor_field_supported(ok), "{ok:?} should be usable");
+        }
+        for bad in [
+            FieldType::F32,
+            FieldType::F64,
+            FieldType::Bool,
+            FieldType::Json,
+            FieldType::Binary,
+        ] {
+            assert!(!cursor_field_supported(bad), "{bad:?} must not be usable");
+        }
     }
 }
 

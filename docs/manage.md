@@ -104,7 +104,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `startapp <name>` | Scaffold an app module |
 | `make:viewset` / `make:serializer` / `make:form` | Generate a ViewSet, Serializer or Form |
-| `make:job` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Generate a job, worker binary, middleware, notification or test |
+| `make:job` / `make:scheduled` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Generate a queue job, a timer task, a worker binary, middleware, notification or test |
 | `make:api_routes <app> [--tenant]` | Generate an app's API route module |
 
 ### Cache, sessions and mail
@@ -569,12 +569,27 @@ cargo run -- make:form ContactForm
 
 ### `make:job <Name>`
 
-Generates a background-job skeleton (work that runs outside the
-request, like a Celery task or a Laravel job), with a commented example
-of how to schedule it.
+Generates a `jobs::Job` — a payload struct plus the trait impl, with
+`NAME`, `MAX_ATTEMPTS` and `async fn run(&self)`. This is work you
+enqueue from a handler and a worker executes later.
+
+`run` receives **only the payload**: no pool, no tenant, no request
+context. Carry what the job needs in its fields.
 
 ```bash
-cargo run -- make:job EmailDigestJob
+cargo run -- make:job SendReceipt
+```
+
+For work that runs on a timer rather than from a queue, see
+`make:scheduled`.
+
+### `make:scheduled <Name>`
+
+Generates a fixed-interval task for `scheduler::Scheduler` — the shape
+`make:job` used to emit before it scaffolded an actual job.
+
+```bash
+cargo run -- make:scheduled NightlySweep
 ```
 
 ### `make:worker <Name>`

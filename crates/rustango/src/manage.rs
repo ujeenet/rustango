@@ -280,7 +280,7 @@ impl Cli {
     /// It matters because connections multiply by tenant *and* by
     /// process. Twenty database-mode tenants at the default 16
     /// connections, across a web and a worker process, is 640 — against
-    /// a stock PostgreSQL limit of 100. With no way to lower it, the
+    /// a stock `PostgreSQL` limit of 100. With no way to lower it, the
     /// only lever was the database server's own `max_connections`,
     /// which is the wrong place to size an application's pools and is
     /// frequently not the operator's to change.
