@@ -88,11 +88,18 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
-  # Does the matrix run for this event?
+  # Does the *expensive* half run for this event?
   #
-  # Every other job is `needs: gate`, so this is the single place the
-  # answer lives. Twenty copies of the same `if:` would drift, which is
-  # the failure this repo keeps paying for elsewhere.
+  # Every job that needs a server, a container, or a full workspace build
+  # is `needs: gate`, so this is the single place the answer lives.
+  # Copies of the same `if:` would drift, which is the failure this repo
+  # keeps paying for elsewhere.
+  #
+  # What is NOT gated: `fmt`, `clippy`, `deny`, `deny-examples`,
+  # `lockfiles`, `trivy`. Those run on every pull request, always. Gating
+  # them was a mistake — it meant a feature PR into `develop` merged with
+  # no signal whatsoever, including no dependency-advisory or container
+  # scan, when the intent was only to defer the live matrix.
   #
   # It runs when:
   #   * the event is not a pull request — a push to `main`, `develop` or
@@ -113,8 +120,13 @@ jobs:
           echo "event=${{ github.event_name }} base=${{ github.base_ref }}"
           echo "Add the ci label to a pull request to run this matrix on it."
 
+  # Ungated, along with `clippy`, `deny`, `deny-examples`, `lockfiles`
+  # and `trivy`. These are minutes, not the matrix, and two of them are
+  # security checks — gating them meant an ordinary PR into `develop`
+  # merged with no signal at all, not merely without the live suites.
+  # The `ci` label buys the expensive jobs; it should not be what buys
+  # `cargo fmt --check`.
   fmt:
-    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -124,7 +136,6 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
-    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -216,7 +227,6 @@ jobs:
       - run: cargo doc --workspace --no-deps
 
   deny:
-    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -231,7 +241,6 @@ jobs:
   # carry no `license` field, so `check licenses` fails them as
   # `unlicensed` for reasons that have nothing to do with security.
   deny-examples:
-    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -262,7 +271,6 @@ jobs:
   #
   # `cargo metadata` only resolves, so this is seconds and no compile.
   lockfiles:
-    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -360,7 +368,6 @@ jobs:
   # HIGH/CRITICAL (fixable only); misconfig is report-only so a
   # pre-existing finding never silently blocks a release.
   trivy:
-    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
