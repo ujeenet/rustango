@@ -1991,11 +1991,18 @@ fn write_generated<W: Write>(
     }
     std::fs::write(&path, contents)?;
     writeln!(w, "wrote {}", path.display())?;
-    writeln!(
-        w,
-        "  add `mod {};` to src/main.rs (or `pub mod ...;` to src/lib.rs)",
-        file_name.trim_end_matches(".rs")
-    )?;
+    // Lead with whichever entry the project actually has. A scaffolded
+    // project keeps its modules in the library so that binaries under
+    // `src/bin/` can reach them — `mod` there would hide it from them.
+    let module = file_name.trim_end_matches(".rs");
+    if std::path::Path::new("src/lib.rs").exists() {
+        writeln!(w, "  add `pub mod {module};` to src/lib.rs")?;
+    } else {
+        writeln!(
+            w,
+            "  add `mod {module};` to src/main.rs (or `pub mod ...;` to src/lib.rs)"
+        )?;
+    }
     Ok(())
 }
 
@@ -2181,6 +2188,49 @@ fn project_uses_tenancy() -> bool {
     has_inline || has_table_block
 }
 
+/// The project's own crate name, as a Rust path segment.
+///
+/// A file under `src/bin/` is its own crate: `crate::jobs::X` written
+/// there names the *binary*, not the project, so a worker reaching into
+/// the app must spell it `my_app::jobs::X`. Falls back to `your_app`
+/// when there is no readable Cargo.toml — an obvious placeholder beats
+/// a plausible-looking wrong path.
+fn project_crate_name() -> String {
+    std::fs::read_to_string("Cargo.toml")
+        .ok()
+        .as_deref()
+        .and_then(package_name_from_cargo_toml)
+        .unwrap_or_else(|| "your_app".to_string())
+}
+
+/// Pure half of [`project_crate_name`]: the `name` key of `[package]`,
+/// hyphens folded to underscores the way cargo derives a crate name.
+fn package_name_from_cargo_toml(src: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        // `name = "my-app"`, tolerating whitespace around the `=`.
+        if let Some(value) = trimmed
+            .strip_prefix("name")
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            let name = value.trim().trim_matches('"');
+            if !name.is_empty() {
+                return Some(name.replace('-', "_"));
+            }
+        }
+    }
+    None
+}
+
 /// `manage make:api_routes <app> [--tenant]` — emit
 /// `src/<app>/api_routes.rs`, the per-app composer that merges
 /// every viewset's router into a single `Router<()>` (#82).
@@ -2233,7 +2283,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
             writeln!(w, "  extractor).")?;
             writeln!(
                 w,
-                "  --crate <name> overrides the emitted `use …::sql::sqlx::PgPool;`"
+                "  --crate <name> overrides the emitted `use …::sql::Pool;`"
             )?;
             writeln!(w, "  crate root (default: `rustango`).")?;
             return Ok(());
@@ -2550,6 +2600,10 @@ impl {name} {{
 fn make_worker_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let (name, _, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
+    // `src/bin/*.rs` is its own crate, so job types must be named
+    // through the project's library — `crate::` here would resolve to
+    // the worker binary itself and never compile.
+    let app_crate = project_crate_name();
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:worker {name}`.
 //!
@@ -2586,7 +2640,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     // row is then stranded until a `reclaim_stuck_jobs_pool` sweep, and
     // it does not show up in `pending_count()`.
     //
-    //   queue.register::<crate::jobs::WelcomeEmail>().await;
+    // Note the crate name: this file is its own binary crate, so `crate::`
+    // would mean *this* worker. Job types live in the library, and
+    // `manage make:job WelcomeEmail` writes `src/welcome_email.rs`.
+    //
+    //   queue.register::<{app_crate}::welcome_email::WelcomeEmail>().await;
 
     queue.start().await;
     tracing::info!("{snake}: draining jobs");
@@ -5633,7 +5691,7 @@ mod gen_tests {
     #[test]
     fn api_routes_template_pool_threads_renamed_crate_root() {
         let body = api_routes_template_pool("blog", "rustango_orm");
-        assert!(body.contains("use rustango_orm::sql::sqlx::PgPool;"));
+        assert!(body.contains("use rustango_orm::sql::Pool;"));
         assert!(!body.contains("use rustango::"));
     }
 
@@ -5697,6 +5755,42 @@ mod gen_tests {
     fn cwd_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// `make:worker` puts this name into the generated binary, so a
+    /// wrong answer is a path that cannot compile.
+    #[test]
+    fn package_name_reads_the_package_table() {
+        let manifest = r#"[package]
+name = "my-shop"
+version = "0.1.0"
+
+[dependencies]
+name = "not-this-one"
+rustango = { version = "0.57", features = ["batteries"] }
+"#;
+        assert_eq!(
+            package_name_from_cargo_toml(manifest).as_deref(),
+            // Hyphens become underscores: cargo's crate name, not the
+            // package name, is what a `use` path needs.
+            Some("my_shop"),
+            "must read [package].name and fold hyphens, ignoring `name` keys \
+             in any other table"
+        );
+    }
+
+    #[test]
+    fn package_name_tolerates_spacing_and_missing_tables() {
+        assert_eq!(
+            package_name_from_cargo_toml("[package]\n  name   =   \"probe\"\n").as_deref(),
+            Some("probe")
+        );
+        assert_eq!(
+            package_name_from_cargo_toml("[dependencies]\nname = \"x\"\n"),
+            None,
+            "no [package] table → no name to report"
+        );
+        assert_eq!(package_name_from_cargo_toml(""), None);
     }
 
     /// `project_uses_tenancy` reads Cargo.toml from CWD and looks for
@@ -5834,25 +5928,37 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
     }
 
-    /// Default template threads `PgPool` so per-model derived
-    /// viewsets have something to capture at mount time.
+    /// Default template threads the dialect-agnostic `sql::Pool` so
+    /// per-model viewsets have something to capture at mount time.
+    ///
+    /// It threaded `PgPool` until 0.57.5, which pinned every generated
+    /// project to Postgres at the one place three backends are meant to
+    /// be interchangeable — `ViewSet::router_pool` takes `sql::Pool`.
     #[test]
-    fn api_routes_template_pool_threads_pgpool() {
+    fn api_routes_template_pool_threads_a_dialect_agnostic_pool() {
         let body = api_routes_template_pool("blog", "rustango");
         assert!(
-            body.contains("pub fn api(pool: PgPool) -> Router<()>"),
+            body.contains("pub fn api(pool: Pool) -> Router<()>"),
             "expected pool-arg api fn, got: {body}"
         );
-        // Phase 2b of #145 — default `--crate` argument keeps emit
-        // bit-identical to the pre-#145 shape so existing call sites
-        // (the api / fullstack scaffolder templates) are unaffected.
         assert!(
-            body.contains("use rustango::sql::sqlx::PgPool;"),
-            "default crate root must emit `use rustango::sql::sqlx::PgPool;`, got: {body}"
+            body.contains("use rustango::sql::Pool;"),
+            "default crate root must emit `use rustango::sql::Pool;`, got: {body}"
         );
+        // Comments stripped first: the template's own header explains
+        // why a `PgPool` would be wrong here, and a raw substring search
+        // matches that prose rather than the code it warns about.
+        let code: String = body
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            body.contains("use rustango::sql::sqlx::PgPool;"),
-            "expected PgPool import, got: {body}"
+            !code.contains("PgPool"),
+            "a generated project must not be pinned to Postgres here, got: {code}"
         );
     }
 
