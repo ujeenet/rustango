@@ -1015,11 +1015,25 @@ fn render_changes_split_inner(
                          that rebuilds the table without the CHECK. Tracked in #559."
                     ));
                 }
-                out.immediate.push(format!(
-                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-                    dialect.quote_ident(table),
-                    dialect.quote_ident(name),
-                ));
+                // MySQL spells this `DROP CHECK`, and accepts no `IF
+                // EXISTS` on any drop-constraint form — `DROP CONSTRAINT
+                // IF EXISTS` is error 1064 there. So the drop is
+                // idempotent on Postgres and not on MySQL (3821 if the
+                // constraint is absent); same shape as `DROP FOREIGN KEY`
+                // in `ddl::drop_constraints_sql_with_dialect`.
+                out.immediate.push(if dialect.name() == "mysql" {
+                    format!(
+                        "ALTER TABLE {} DROP CHECK {}",
+                        dialect.quote_ident(table),
+                        dialect.quote_ident(name),
+                    )
+                } else {
+                    format!(
+                        "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+                        dialect.quote_ident(table),
+                        dialect.quote_ident(name),
+                    )
+                });
             }
             SchemaChange::AddExclusionConstraint {
                 name,
@@ -1169,11 +1183,24 @@ fn render_changes_split_inner(
                          that rebuilds the table without the FK. Tracked in #559."
                     ));
                 }
-                out.immediate.push(format!(
-                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-                    dialect.quote_ident(table),
-                    dialect.quote_ident(name),
-                ));
+                // MySQL spells this `DROP FOREIGN KEY` and has no `IF
+                // EXISTS` form, exactly as
+                // `ddl::drop_constraints_sql_with_dialect` already does
+                // for per-field FKs. Emitting the Postgres shape here was
+                // error 1064 on every MySQL migration that dropped one.
+                out.immediate.push(if dialect.name() == "mysql" {
+                    format!(
+                        "ALTER TABLE {} DROP FOREIGN KEY {}",
+                        dialect.quote_ident(table),
+                        dialect.quote_ident(name),
+                    )
+                } else {
+                    format!(
+                        "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+                        dialect.quote_ident(table),
+                        dialect.quote_ident(name),
+                    )
+                });
             }
         }
     }
@@ -1857,9 +1884,24 @@ mod sql_type_tests {
         assert!(err.contains("sqlite"));
     }
 
+    /// MySQL spells a check drop `DROP CHECK`, with no `IF EXISTS`.
+    ///
+    /// This test previously asserted
+    /// `` ALTER TABLE `t` DROP CONSTRAINT IF EXISTS `ck_x` ``, which
+    /// MySQL 8.0.46 rejects outright:
+    ///
+    /// ```text
+    /// ERROR 1064 (42000): ... right syntax to use near 'IF EXISTS `ck_x`'
+    /// ```
+    ///
+    /// It was named `..._uses_backticks` and it did check the quoting —
+    /// the statement around the quoting was simply never run against a
+    /// server. That is the whole hazard of an emission test: it proves
+    /// the writer emitted what its author intended, never that the
+    /// server accepts it (#1461).
     #[cfg(feature = "mysql")]
     #[test]
-    fn drop_check_constraint_mysql_uses_backticks() {
+    fn drop_check_constraint_mysql_uses_drop_check() {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropCheckConstraint {
             name: "ck_x".into(),
@@ -1868,7 +1910,27 @@ mod sql_type_tests {
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
         assert_eq!(
             out.immediate,
-            vec!["ALTER TABLE `t` DROP CONSTRAINT IF EXISTS `ck_x`".to_string()]
+            vec!["ALTER TABLE `t` DROP CHECK `ck_x`".to_string()]
+        );
+        assert!(
+            !out.immediate[0].contains("IF EXISTS"),
+            "MySQL parses no `IF EXISTS` on a constraint drop"
+        );
+    }
+
+    /// Postgres keeps the idempotent form; only the MySQL arm changed.
+    #[test]
+    fn drop_check_constraint_postgres_keeps_if_exists() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropCheckConstraint {
+            name: "ck_x".into(),
+            table: "t".into(),
+        }];
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec![r#"ALTER TABLE "t" DROP CONSTRAINT IF EXISTS "ck_x""#.to_string()]
         );
     }
 
@@ -1950,9 +2012,16 @@ mod sql_type_tests {
         );
     }
 
+    /// MySQL spells an FK drop `DROP FOREIGN KEY`, with no `IF EXISTS`.
+    ///
+    /// Same story as `drop_check_constraint_mysql_uses_drop_check`: this
+    /// asserted the Postgres shape, which is error 1064 on MySQL. The
+    /// correct branch already existed one module away, in
+    /// `ddl::drop_constraints_sql_with_dialect`, and `diff.rs` did not
+    /// use it (#1461).
     #[cfg(feature = "mysql")]
     #[test]
-    fn drop_composite_fk_mysql_uses_backticks() {
+    fn drop_composite_fk_mysql_uses_drop_foreign_key() {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropCompositeFk {
             table: "child".into(),
@@ -1961,7 +2030,11 @@ mod sql_type_tests {
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
         assert_eq!(
             out.immediate,
-            vec!["ALTER TABLE `child` DROP CONSTRAINT IF EXISTS `fk_x`".to_string()]
+            vec!["ALTER TABLE `child` DROP FOREIGN KEY `fk_x`".to_string()]
+        );
+        assert!(
+            !out.immediate[0].contains("IF EXISTS"),
+            "MySQL parses no `IF EXISTS` on a constraint drop"
         );
     }
 
