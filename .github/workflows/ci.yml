@@ -95,11 +95,15 @@ jobs:
   # Copies of the same `if:` would drift, which is the failure this repo
   # keeps paying for elsewhere.
   #
-  # What is NOT gated: `fmt`, `clippy`, `deny`, `deny-examples`,
+  # What is NOT gated: `fmt`, `clippy`, `doc`, `deny`, `deny-examples`,
   # `lockfiles`, `trivy`. Those run on every pull request, always. Gating
   # them was a mistake — it meant a feature PR into `develop` merged with
   # no signal whatsoever, including no dependency-advisory or container
   # scan, when the intent was only to defer the live matrix.
+  #
+  # The test for whether a job belongs here is not "is it fast" but "does
+  # its absence let a defect reach `develop` unseen". All seven are
+  # minutes; together they are a fraction of one live job.
   #
   # It runs when:
   #   * the event is not a pull request — a push to `main`, `develop` or
@@ -212,8 +216,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
+  # Ungated too. At ~62s it is two billed minutes, and the reasoning that
+  # ungated `fmt` and `clippy` applies unchanged: a broken intra-doc link
+  # merged into `develop` unnoticed is exactly the signal the gate was
+  # never meant to remove.
   doc:
-    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
