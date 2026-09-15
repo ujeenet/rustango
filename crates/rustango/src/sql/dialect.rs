@@ -301,6 +301,41 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// `ALTER TABLE <table> DROP ...` for a named CHECK constraint.
+    ///
+    /// Default is the PostgreSQL form, `DROP CONSTRAINT IF EXISTS`,
+    /// which is idempotent. MySQL overrides it: it spells this
+    /// `DROP CHECK` and accepts **no `IF EXISTS`** on any
+    /// drop-constraint form, so the statement errors (3821) when the
+    /// constraint is absent rather than doing nothing.
+    ///
+    /// This lives on the dialect rather than in the migration writer
+    /// because it had drifted into four hand-written copies — two in
+    /// `migrate/diff.rs` and two in `migrate/ddl.rs` — and two of them
+    /// emitted the PostgreSQL form to MySQL, which is `ERROR 1064`
+    /// (#559). A caller that cannot spell the statement itself cannot
+    /// spell it wrongly.
+    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> String {
+        format!(
+            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+            self.quote_ident(table),
+            self.quote_ident(name)
+        )
+    }
+
+    /// `ALTER TABLE <table> DROP ...` for a named foreign key.
+    ///
+    /// Same story as [`Dialect::drop_check_constraint_sql`]: the default
+    /// is PostgreSQL's idempotent `DROP CONSTRAINT IF EXISTS`, and MySQL
+    /// overrides it with `DROP FOREIGN KEY`, which is not idempotent.
+    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> String {
+        format!(
+            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+            self.quote_ident(table),
+            self.quote_ident(name)
+        )
+    }
+
     /// Whether `CREATE [UNIQUE] INDEX ... WHERE <expr>` partial-index
     /// syntax is supported. PG and SQLite (3.8+) both ship it natively;
     /// MySQL has no equivalent (the migration writer drops the WHERE
