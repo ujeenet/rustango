@@ -47,6 +47,20 @@ TENANTS = int(os.environ.get("SOAK_TENANTS", "20"))
 FAIL_RATIO = int(os.environ.get("SOAK_FAIL_RATIO_PCT", "10"))
 RESULTS = os.environ.get("SOAK_RESULTS", "/results")
 
+# A nonce for every value that lands in a `unique` column.
+#
+# The load seed below is fixed on purpose — the same run shape every
+# time. But `sku` and `email` are unique, and a fixed seed means run two
+# generates run one's values: against a database that persists between
+# runs, nearly every insert then collides and comes back 400. Four
+# consecutive runs against one Postgres volume showed 80% of customer
+# POSTs and 29% of product POSTs rejected, which reads like a server
+# fault and is not one.
+#
+# So: deterministic *choices*, unique *values*. Override to replay a
+# specific run's data.
+RUN_ID = os.environ.get("SOAK_RUN_ID") or f"{time.time_ns():x}"
+
 # name -> base URL. The SaaS entries are reached with a Host override.
 SINGLE = {
     "single-pg": "http://web-single-pg:8080",
@@ -747,7 +761,7 @@ async def load_worker(client, counters: Counters, targets, until, rng):
                 r = await client.get(f"{base}/shop/products", headers=headers)
             elif roll < 0.7:
                 r = await client.post(f"{base}/api/v1/products", headers=headers, json={
-                    "sku": f"LOAD-{rng.getrandbits(48):x}", "name": "Load item",
+                    "sku": f"LOAD-{RUN_ID}-{rng.getrandbits(32):x}", "name": "Load item",
                     "blurb": None, "price_cents": rng.randint(100, 9999),
                     "active": True})
             elif roll < 0.85:
@@ -755,7 +769,7 @@ async def load_worker(client, counters: Counters, targets, until, rng):
             else:
                 # Order + confirm: this is what dispatches jobs.
                 cu = await client.post(f"{base}/api/v1/customers", headers=headers, json={
-                    "contact_email": f"load-{rng.getrandbits(48):x}@example.test",
+                    "contact_email": f"load-{RUN_ID}-{rng.getrandbits(32):x}@example.test",
                     "full_name": "Load buyer", "loyalty_tier": "bronze"})
                 if cu.status_code not in (200, 201):
                     counters.record(cu.status_code)
@@ -771,14 +785,14 @@ async def load_worker(client, counters: Counters, targets, until, rng):
                 # `assigned_picker_id` as `picker_id`.
                 if rng.random() < 0.5:
                     o = await client.post(f"{base}/api/v1/orders", headers=headers, json={
-                        "ref_code": f"LOAD-{rng.getrandbits(48):x}",
+                        "ref_code": f"LOAD-{RUN_ID}-{rng.getrandbits(32):x}",
                         "customer_id": cu.json().get("id"),
                         "picker_id": None,
                         "status": "pending", "total_cents": rng.randint(100, 50000),
                         "note": None})
                 else:
                     o = await client.post(f"{base}/api/v1/orders-raw", headers=headers, json={
-                        "reference": f"LOAD-{rng.getrandbits(48):x}",
+                        "reference": f"LOAD-{RUN_ID}-{rng.getrandbits(32):x}",
                         "customer_id": cu.json().get("id"),
                         "status": "pending", "total_cents": rng.randint(100, 50000),
                         "note": None})
@@ -888,6 +902,42 @@ async def main():
         REPORT.requests = {"ok": counters.ok, "err": counters.err,
                            "by_status": counters.by_status,
                            "orders_confirmed": counters.confirmed}
+
+        # The load phase sends only well-formed requests, so its own
+        # error rate is a signal and nothing was reading it. A fixed RNG
+        # seed against a persistent database had 80% of customer POSTs
+        # and 29% of product POSTs coming back 400 on duplicate keys,
+        # across four runs, and the report showed the number without
+        # anyone having to agree it was acceptable.
+        #
+        # 5xx is held at zero separately: a 4xx under load can be a
+        # legitimate collision, a 5xx never is.
+        total = counters.ok + counters.err
+        by = counters.by_status
+        server_errors = sum(v for k, v in by.items() if 500 <= int(k) < 600)
+        if server_errors:
+            REPORT.add("no server errors under load", "—", "FAIL",
+                       f"{server_errors} 5xx response(s): "
+                       f"{ {k: v for k, v in by.items() if 500 <= int(k) < 600} }")
+        else:
+            REPORT.add("no server errors under load", "—", "PASS",
+                       f"0 of {total} responses were 5xx")
+
+        rate = (counters.err / total * 100) if total else 0.0
+        if total < 100:
+            REPORT.add("load error rate is sane", "—", "NOT-COVERED",
+                       f"only {total} request(s) — too few to judge")
+        elif rate <= 5.0:
+            REPORT.add("load error rate is sane", "—", "PASS",
+                       f"{rate:.1f}% 4xx ({counters.err} of {total})")
+        else:
+            worst = sorted(((v, k) for k, v in by.items() if int(k) >= 400),
+                           reverse=True)[:3]
+            REPORT.add("load error rate is sane", "—", "FAIL",
+                       f"{rate:.1f}% of load requests failed ({counters.err} of "
+                       f"{total}); the load phase sends only well-formed requests, "
+                       f"so this is the app or the fixture, not the traffic. "
+                       f"Top statuses: {[(k, v) for v, k in worst]}")
         print(f"  {counters.ok} ok, {counters.err} error, "
               f"{counters.confirmed} orders confirmed")
 
