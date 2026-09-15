@@ -174,6 +174,58 @@ pub async fn fresh_table<M: crate::core::Model>(pool: &Pool) {
         });
 }
 
+/// A **file-backed** SQLite pool, for suites that need more than one
+/// connection to see the same data.
+///
+/// 29 of the 192 SQLite suites reach for a temp file, citing in-memory
+/// databases being per-connection. **That premise does not hold here**:
+/// sqlx shares an in-memory database across a pool's connections, and a
+/// barrier-forced test with eight simultaneous connections passes
+/// against `sqlite::memory:` as readily as against a file. So this
+/// helper is not the unlock those suites thought it was.
+///
+/// It is kept because a real file still differs in ways in-memory cannot
+/// emulate — WAL journalling, file locking, and anything a second
+/// *process* must open — and because converting those 29 suites should
+/// not also change their storage under them. Whether they still need it
+/// is worth checking, one at a time, with evidence.
+///
+/// The path is built from `std` rather than the `tempfile` crate, which
+/// is a **dev-dependency** here — `testkit` compiles into the library, so
+/// it cannot reach one.
+///
+/// The file is deliberately not cleaned up. A temp handle dropped at the
+/// end of setup takes the database with it while the pool is still open,
+/// and that surfaces much later as unrelated `disk I/O error` rows. The
+/// suites this replaces leaked it too, via `mem::forget`; leaking a few
+/// KB into the OS temp directory per run is the cheaper mistake.
+///
+/// # Panics
+///
+/// If the pool cannot be opened.
+#[cfg(feature = "sqlite")]
+pub async fn sqlite_file_pool() -> Pool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    // pid + a counter: two suites in one process must not share a file,
+    // and two processes must not either.
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "rustango-testkit-{}-{}.db",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    // A leftover from a previous run with the same pid would otherwise
+    // be inherited, schema and rows included.
+    let _ = std::fs::remove_file(&path);
+
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    Pool::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("file-backed SQLite at {url}: {e}"))
+}
+
 /// Pick a value per backend, with every backend spelled out.
 ///
 /// This is the answer to the one real risk in sharing a test body across
@@ -289,11 +341,51 @@ impl<T> Divergence<T> {
 /// than tests that skip.
 #[macro_export]
 macro_rules! tri_dialect_test {
+    // The common case: tables come from a model's schema, SQLite is
+    // in-memory.
     (model: $model:ty, scenarios: [ $($name:ident),* $(,)? ] $(,)?) => {
-        // The three blocks are written out rather than generated from a
-        // list: `#[cfg(feature = ...)]` takes a string literal, and a
-        // macro cannot build one from an interpolated identifier.
+        $crate::tri_dialect_test!(@build
+            sqlite_pool = $crate::testkit::matrix::Backend::Sqlite.pool(),
+            setup = $crate::testkit::matrix::fresh_table::<$model>,
+            scenarios = [$($name),*]);
+    };
 
+    // A model, but SQLite must be file-backed. `sqlite::memory:` is
+    // per-connection, so any suite whose workers need to see each
+    // other's rows has to say so.
+    (model: $model:ty, sqlite: file, scenarios: [ $($name:ident),* $(,)? ] $(,)?) => {
+        $crate::tri_dialect_test!(@build
+            sqlite_pool = $crate::testkit::matrix::sqlite_file_pool(),
+            setup = $crate::testkit::matrix::fresh_table::<$model>,
+            scenarios = [$($name),*]);
+    };
+
+    // No model: the suite builds its own tables — `ensure_table_pool`
+    // for the job queue, a migration run, whatever it is. `setup` is an
+    // `async fn(&Pool)`.
+    (setup: $setup:path, scenarios: [ $($name:ident),* $(,)? ] $(,)?) => {
+        $crate::tri_dialect_test!(@build
+            sqlite_pool = $crate::testkit::matrix::Backend::Sqlite.pool(),
+            setup = $setup,
+            scenarios = [$($name),*]);
+    };
+
+    (setup: $setup:path, sqlite: file, scenarios: [ $($name:ident),* $(,)? ] $(,)?) => {
+        $crate::tri_dialect_test!(@build
+            sqlite_pool = $crate::testkit::matrix::sqlite_file_pool(),
+            setup = $setup,
+            scenarios = [$($name),*]);
+    };
+
+    // The one place the three modules are written. Everything above
+    // normalizes into this so the bodies cannot drift — which is the
+    // failure this whole harness exists to stop, and it would be a poor
+    // joke to reintroduce it inside the macro.
+    (@build
+        sqlite_pool = $sqlite_pool:expr,
+        setup = $setup:expr,
+        scenarios = [ $($name:ident),* ]
+    ) => {
         #[cfg(feature = "postgres")]
         mod tri_postgres {
             use super::*;
@@ -301,7 +393,6 @@ macro_rules! tri_dialect_test {
             $(
                 #[tokio::test]
                 async fn $name() {
-                    // Live backends share one server, so they serialize.
                     let _guard = $crate::testkit::matrix::live_lock().lock().await;
                     let Some(pool) =
                         $crate::testkit::matrix::Backend::Postgres.pool().await
@@ -312,7 +403,7 @@ macro_rules! tri_dialect_test {
                         );
                         return;
                     };
-                    $crate::testkit::matrix::fresh_table::<$model>(&pool).await;
+                    ($setup)(&pool).await;
                     super::$name(&pool).await;
                 }
             )*
@@ -335,7 +426,7 @@ macro_rules! tri_dialect_test {
                         );
                         return;
                     };
-                    $crate::testkit::matrix::fresh_table::<$model>(&pool).await;
+                    ($setup)(&pool).await;
                     super::$name(&pool).await;
                 }
             )*
@@ -348,22 +439,46 @@ macro_rules! tri_dialect_test {
             $(
                 #[tokio::test]
                 async fn $name() {
-                    // No lock: every SQLite test gets its own private
-                    // `sqlite::memory:`, so there is nothing to contend
-                    // over. Taking the shared lock here would serialize
-                    // the 192 SQLite suites against each other for no
-                    // reason.
-                    let Some(pool) =
-                        $crate::testkit::matrix::Backend::Sqlite.pool().await
-                    else {
-                        unreachable!("in-memory SQLite is always available")
+                    // No lock for the in-memory case: each test gets its
+                    // own private database, so there is nothing to
+                    // contend over, and taking the shared lock would
+                    // serialize 192 suites for no reason. A file-backed
+                    // pool is also per-test — a fresh path each call —
+                    // so the same holds.
+                    let pool = $sqlite_pool.await;
+                    let Some(pool) = Into::<Option<$crate::sql::Pool>>::into(
+                        $crate::testkit::matrix::IntoPoolOption(pool)
+                    ) else {
+                        unreachable!("SQLite is always available")
                     };
-                    $crate::testkit::matrix::fresh_table::<$model>(&pool).await;
+                    ($setup)(&pool).await;
                     super::$name(&pool).await;
                 }
             )*
         }
     };
+}
+
+/// Lets the macro accept either `Pool` or `Option<Pool>` for the SQLite
+/// arm without knowing which it got.
+///
+/// `Backend::Sqlite.pool()` yields `Option<Pool>` for symmetry with the
+/// live backends; `sqlite_file_pool()` yields a bare `Pool`, because
+/// there is nothing to be absent. Rather than force one shape on both
+/// and make the common case awkward, the macro wraps whatever it has.
+#[doc(hidden)]
+pub struct IntoPoolOption<T>(pub T);
+
+impl From<IntoPoolOption<Pool>> for Option<Pool> {
+    fn from(w: IntoPoolOption<Pool>) -> Self {
+        Some(w.0)
+    }
+}
+
+impl From<IntoPoolOption<Option<Pool>>> for Option<Pool> {
+    fn from(w: IntoPoolOption<Option<Pool>>) -> Self {
+        w.0
+    }
 }
 
 #[cfg(test)]
@@ -484,6 +599,70 @@ mod tests {
         id: crate::sql::Auto<i64>,
         #[rustango(max_length = 32)]
         label: String,
+    }
+
+    /// A file-backed pool is one database across *simultaneous*
+    /// connections.
+    ///
+    /// The barrier is load-bearing: without it eight spawned inserts
+    /// finish fast enough to be served by one pooled connection —
+    /// measured `max_connections=10` with `size=1` — so they prove
+    /// nothing about sharing. Holding every connection open until all
+    /// eight exist forces the pool to open eight.
+    ///
+    /// **What this does not show.** It was written to prove a file
+    /// differs from `sqlite::memory:`, and it does not: the same test
+    /// passes against `:memory:`. sqlx shares an in-memory database
+    /// across a pool's connections, so the premise behind 29 suites
+    /// reaching for a temp file — `jobs_sqlite_live` says in-memory
+    /// "defeats the multi-worker test" — does not hold here, at least
+    /// for connection sharing. Those suites may be simplifiable; that
+    /// is a separate question and wants its own evidence.
+    ///
+    /// The invariant asserted is still worth holding: concurrent
+    /// writers on distinct connections land in one database.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_file_backed_pool_is_one_database_across_connections() {
+        use crate::sql::CounterPool as _;
+        use std::sync::Arc;
+
+        const N: usize = 8;
+        let pool = sqlite_file_pool().await;
+        fresh_table::<Row>(&pool).await;
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(N));
+        let mut tasks = Vec::new();
+        for i in 0..N {
+            let pool = pool.clone();
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                let crate::sql::Pool::Sqlite(sq) = &pool else {
+                    unreachable!("sqlite_file_pool returns a SQLite pool")
+                };
+                // Hold a connection, and do not let go until every task
+                // holds one too.
+                let mut conn = sq.acquire().await.expect("acquire");
+                barrier.wait().await;
+                sqlx::query("INSERT INTO matrix_selftest_row (label) VALUES (?)")
+                    .bind(format!("row-{i}"))
+                    .execute(&mut *conn)
+                    .await
+                    .expect("insert on a held connection");
+            }));
+        }
+        for t in tasks {
+            t.await.expect("writer task");
+        }
+
+        assert_eq!(
+            Row::objects().count(&pool).await.expect("count"),
+            N as i64,
+            "all {N} writers held their own connection at once and must still \
+             share one database — a short count means the connections are \
+             separate in-memory databases, which is what `:memory:` gives and \
+             why this helper exists"
+        );
     }
 
     /// `fresh_table` builds from `M::SCHEMA` and leaves a table the ORM
