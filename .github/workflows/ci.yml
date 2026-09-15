@@ -858,6 +858,19 @@ jobs:
       - run: cargo test -p rustango --all-features --test mysql_live
       - run: cargo test -p rustango --features mysql,testkit --test explain_pool_tri
       - run: cargo test -p rustango --features mysql,testkit --test bulk_upsert_tri
+      # #1461 — the rest of the tri-dialect suites. A `_tri` file runs its
+      # PostgreSQL and SQLite arms for free in `postgres_test`, so a
+      # missing line here costs only the MySQL arm and the suite still
+      # looks covered. These three shipped that way;
+      # `every_mysql_arm_runs_in_ci` now fails when a `*_tri` or
+      # `*_mysql_live` target is absent from this job.
+      - run: cargo test -p rustango --features mysql,testkit --test values_tri
+      - run: cargo test -p rustango --features mysql,testkit --test regex_tri
+      - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
+      # #559 — dropping a CHECK or a composite FK. MySQL takes no
+      # `IF EXISTS` on either, so this is the arm that was failing with
+      # error 1064 while the emission tests stayed green.
+      - run: cargo test -p rustango --features mysql,testkit --test migrate_drop_constraint_tri
       # #1403 — bulk create must roll back on a constraint violation.
       # `--all-features` so the MySQL arm of the tri-dialect guard is
       # compiled in; the sqlite arm runs everywhere, this is the one that
