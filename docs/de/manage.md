@@ -464,12 +464,24 @@ cargo run -- make:form ContactForm
 
 ### `make:job <Name>`
 
-Generiert ein Hintergrund-Job-Gerüst (Arbeit, die außerhalb des Requests läuft,
-wie eine Celery-Task oder ein Laravel-Job), mit einem auskommentierten Beispiel,
-wie man es einplant.
+Generiert einen `jobs::Job` — eine Payload-Struktur plus die Trait-Implementierung
+mit `NAME`, `MAX_ATTEMPTS` und `async fn run(&self)`. Das ist Arbeit, die Sie aus
+einem Handler in die Queue stellen und ein Worker später ausführt.
+
+`run` erhält **nur die Payload**: keinen Pool, keinen Tenant, keinen
+Request-Kontext. Tragen Sie alles Nötige in den Feldern.
 
 ```bash
 cargo run -- make:job EmailDigestJob
+```
+
+### `make:scheduled <Name>`
+
+Generiert eine Aufgabe mit festem Intervall für `scheduler::Scheduler` — die Form,
+die `make:job` emittierte, bevor dieser einen echten Job erzeugte.
+
+```bash
+cargo run -- make:scheduled NightlySweep
 ```
 
 ### `make:worker <Name>`
@@ -1520,7 +1532,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 |---|---|
 | `startapp <name>` | Legt ein App-Modul an |
 | `make:viewset` / `make:serializer` / `make:form` | Erzeugt ein ViewSet, einen Serializer oder ein Form |
-| `make:job` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Erzeugt einen Job, ein Worker-Binary, eine Middleware, eine Notification oder einen Test |
+| `make:job` / `make:scheduled` / `make:worker` / `make:middleware` / `make:notification` / `make:test` | Erzeugt einen Queue-Job, eine Intervall-Aufgabe, ein Worker-Binary, eine Middleware, eine Notification oder einen Test |
 | `make:api_routes <app> [--tenant]` | Erzeugt das API-Routen-Modul einer App |
 
 ### Cache, Sessions und Mail
