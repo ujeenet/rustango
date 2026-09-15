@@ -49,11 +49,24 @@ const SECRET: &[u8] = b"owned_by_bearer_test_secret_32byte!!";
 /// `OnceLock` inside `auth_routes`, so the first call in the process wins —
 /// every test has to go through here first.
 fn install_secret() {
+    use base64::Engine as _;
+
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        // **Base64**, not the raw bytes. `auth_routes` reads this through
+        // `SessionSecret::from_b64` (#1396 made that the one definition),
+        // and `owned_by_bearer_test_secret_32byte!!` is not valid base64 —
+        // `!` is outside the alphabet. It decoded to nothing, the key came
+        // back 0 bytes, and the fail-closed assert fired.
+        //
+        // It went unnoticed because this file is named in no CI job: it is
+        // only ever built by the `--all-features` run, where the test that
+        // passes an explicit `Config::session_secret` happened to
+        // initialise the process-wide `OnceLock` first. Whoever gets there
+        // first wins, so the outcome depended on test order.
         std::env::set_var(
             "RUSTANGO_SESSION_SECRET",
-            std::str::from_utf8(SECRET).expect("utf8 secret"),
+            base64::engine::general_purpose::STANDARD.encode(SECRET),
         );
     });
 }
