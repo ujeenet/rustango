@@ -1,5 +1,5 @@
-//! Every `tests/*_mysql_live.rs` must be named in the `mysql_live` CI
-//! job (#1461).
+//! Every suite with a MySQL arm — `tests/*_mysql_live.rs` and
+//! `tests/*_tri.rs` — must be named in the `mysql_live` CI job (#1461).
 //!
 //! ## Why this needs a guard at all
 //!
@@ -29,6 +29,19 @@
 //! the suites need different feature sets (`tenancy`, `mcp`,
 //! `jobs-postgres`), so the list has to stay explicit. What can be
 //! automated is noticing when the list falls behind the directory.
+//!
+//! ## The `_tri` half is the sharper edge
+//!
+//! A `*_mysql_live.rs` suite with no CI line does nothing at all, which
+//! at least shows up as a suspiciously fast `0 passed`. A `*_tri.rs`
+//! suite with no CI line still runs its PostgreSQL and SQLite arms in
+//! `postgres_test` and reports a healthy pass count — while the one arm
+//! it was converted to gain never executes.
+//!
+//! `values_tri`, `regex_tri` and `testkit_matrix_forms_tri` shipped
+//! exactly that way: three suites whose entire purpose is to run on all
+//! three backends, running on two, looking green. So the guard watches
+//! both families.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -100,18 +113,36 @@ fn named_test_targets(block: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Every integration-test target whose name ends in `mysql_live`.
+/// Does a suite with this target name have a MySQL arm to run?
 ///
-/// Catches both `mysql_live` itself and the `<thing>_mysql_live` family.
+/// Two families do:
+///
+/// * `mysql_live` and the `<thing>_mysql_live` family — MySQL-only
+///   suites, which do nothing at all without the URL.
+/// * the `<thing>_tri` family — tri-dialect suites, whose PostgreSQL and
+///   SQLite arms run for free in `postgres_test` but whose `tri_mysql`
+///   arm needs `MYSQL_TEST_URL` and therefore needs this job.
+///
+/// The `_tri` half is not hypothetical either. When this guard was first
+/// written it watched only `mysql_live`, and `values_tri`, `regex_tri`
+/// and `testkit_matrix_forms_tri` had already shipped with no MySQL line
+/// — three converted suites whose whole purpose is to run on all three
+/// backends, running on two.
+fn has_a_mysql_arm(stem: &str) -> bool {
+    stem.ends_with("mysql_live") || stem.ends_with("_tri")
+}
+
+/// Every integration-test target that has a MySQL arm.
+///
 /// Only top-level `.rs` files, which is exactly Cargo's auto-target rule.
-fn mysql_live_suites_on_disk() -> BTreeSet<String> {
+fn suites_with_a_mysql_arm() -> BTreeSet<String> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
         .map(|e| e.expect("directory entry").path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("rs"))
         .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
-        .filter(|stem| stem.ends_with("mysql_live"))
+        .filter(|stem| has_a_mysql_arm(stem))
         .collect()
 }
 
@@ -124,8 +155,8 @@ fn mysql_live_job() -> String {
 
 /// The guard.
 #[test]
-fn every_mysql_live_suite_is_named_in_the_ci_job() {
-    let on_disk = mysql_live_suites_on_disk();
+fn every_suite_with_a_mysql_arm_is_named_in_the_ci_job() {
+    let on_disk = suites_with_a_mysql_arm();
     let block = mysql_live_job();
     let named = named_test_targets(&block);
 
@@ -133,8 +164,8 @@ fn every_mysql_live_suite_is_named_in_the_ci_job() {
     // and this file becomes the thing it exists to prevent.
     assert!(
         !on_disk.is_empty(),
-        "found no `tests/*mysql_live.rs` files — the directory scan is broken, \
-         so a pass here would mean nothing"
+        "found no `tests/*mysql_live.rs` or `tests/*_tri.rs` files — the directory \
+         scan is broken, so a pass here would mean nothing"
     );
     assert!(
         !named.is_empty(),
@@ -145,10 +176,14 @@ fn every_mysql_live_suite_is_named_in_the_ci_job() {
     let missing: Vec<&String> = on_disk.difference(&named).collect();
     assert!(
         missing.is_empty(),
-        "these MySQL suites exist but are named in no CI step, so they compile, \
-         skip on an unset MYSQL_TEST_URL, and report green without ever running:\
-         \n\n  {}\n\nAdd a `- run: cargo test -p rustango --features mysql,<...> \
-         --test <name>` line to the `mysql_live` job in .github/workflows/ci.yml.",
+        "these suites have a MySQL arm that is named in no CI step, so it skips on \
+         an unset MYSQL_TEST_URL and reports green without ever running:\
+         \n\n  {}\n\nA `*_mysql_live` suite does nothing at all without the URL; a \
+         `*_tri` suite still runs its PostgreSQL and SQLite arms in `postgres_test`, \
+         which is what makes a missing line here so easy to overlook — the suite \
+         looks covered.\n\nAdd a `- run: cargo test -p rustango --features \
+         mysql,<...> --test <name>` line to the `mysql_live` job in \
+         .github/workflows/ci.yml.",
         missing
             .iter()
             .map(|s| s.as_str())
@@ -164,14 +199,14 @@ fn every_mysql_live_suite_is_named_in_the_ci_job() {
 /// job, which reads like an infrastructure problem. Naming it here makes
 /// a rename obvious at the point it happens.
 #[test]
-fn every_named_mysql_live_target_still_exists() {
-    let on_disk = mysql_live_suites_on_disk();
+fn every_named_target_with_a_mysql_arm_still_exists() {
+    let on_disk = suites_with_a_mysql_arm();
     let block = mysql_live_job();
     let named = named_test_targets(&block);
 
     let dangling: Vec<&String> = named
         .iter()
-        .filter(|n| n.ends_with("mysql_live"))
+        .filter(|n| has_a_mysql_arm(n))
         .filter(|n| !on_disk.contains(*n))
         .collect();
     assert!(
