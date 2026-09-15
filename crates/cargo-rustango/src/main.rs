@@ -647,7 +647,11 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
 
     fs::create_dir_all(root.join("migrations")).map_err(|e| format!("create migrations/: {e}"))?;
 
-    write(root, "src/main.rs", templates::main_rs(template))?;
+    // The library target is where the app lives; the binary uses it.
+    // A `src/bin/*.rs` (a worker from `manage make:worker`, say) is its
+    // own crate and can reach the app only through this.
+    write(root, "src/lib.rs", &templates::lib_rs(name))?;
+    write(root, "src/main.rs", &templates::main_rs(template, name))?;
     write(root, "src/models.rs", &templates::models_rs(template))?;
     write(root, "src/views.rs", templates::VIEWS_RS)?;
     write(root, "src/urls.rs", &templates::urls_rs(template))?;
@@ -891,7 +895,7 @@ mod tests {
     #[test]
     fn every_main_template_mounts_with_welcome() {
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
-            let body = templates::main_rs(template);
+            let body = templates::main_rs(template, "my_app");
             assert!(
                 body.contains(".with_welcome()"),
                 "template {template:?} src/main.rs should chain `.with_welcome()` \
