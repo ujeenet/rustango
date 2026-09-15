@@ -167,9 +167,9 @@ couverture.
 
 | Variable | Suites | Ce dont elles ont besoin |
 |---|---:|---|
-| *(aucune)* | 215 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
-| `DATABASE_URL` | 93 | Un serveur PostgreSQL joignable. |
-| `MYSQL_TEST_URL` | 21 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
+| *(aucune)* | 216 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
+| `DATABASE_URL` | 89 | Un serveur PostgreSQL joignable. |
+| `MYSQL_TEST_URL` | 18 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis joignable. |
 
 Une suite qui lit deux variables est comptée sous les deux ; la colonne ne
