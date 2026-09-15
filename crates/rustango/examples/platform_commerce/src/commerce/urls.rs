@@ -87,9 +87,32 @@ fn storefront(cache: rustango::cache::BoxedCache) -> Router<AppState> {
         .layer(
             rustango::cache_page::CachePageLayer::new(cache)
                 .timeout(std::time::Duration::from_secs(30))
-                .key_prefix("commerce.storefront")
+                .key_prefix(&cache_namespace())
                 .vary_on(["host"]),
         )
+}
+
+/// The page cache's key prefix, namespaced per deployment.
+///
+/// `vary_on(["host"])` separates tenants. It does **not** separate
+/// *deployments*, and a shared Redis needs both: the soak fleet runs six
+/// app instances — two apps across three dialects, each with its own
+/// database — against one Redis, and `/shop/products` is the same path
+/// on every one of them. With a bare literal prefix they all shared a
+/// key per Host, and a single-tenant instance's catalogue was served to
+/// the multi-tenant one under the same tenant hostname. Found by running
+/// the fleet and reading the page.
+///
+/// That is not a soak artifact. Any two deployments pointed at one cache
+/// — blue/green, a staging tier sharing prod's Redis, two services
+/// behind one hostname — collide the same way, and the symptom is the
+/// wrong page rather than an error.
+///
+/// The crate name separates the two apps; `RUSTANGO_CACHE_NAMESPACE`
+/// separates instances of the same app.
+fn cache_namespace() -> String {
+    let instance = std::env::var("RUSTANGO_CACHE_NAMESPACE").unwrap_or_else(|_| "default".into());
+    format!("{}.{instance}.storefront", env!("CARGO_PKG_NAME"))
 }
 
 /// Limit/offset pagination, filtering and search.
@@ -124,14 +147,15 @@ fn orders(pool: &Pool) -> Router<AppState> {
         .with_state(())
 }
 
-/// The #1450 endpoint: the same model with **no serializer**.
+/// The same model with **no serializer** — the control for `/orders`.
 ///
-/// It exists because a serializer cannot carry a foreign-key column —
-/// `ForeignKey<T>` implements neither `Deserialize` nor `Default` nor
-/// `OpenApiSchema`, so no serializer field can name `assigned_picker_id`
-/// (see `serializers.rs`). Without a serializer the ViewSet writes the
-/// model's own columns, which is the only route from HTTP to the
-/// nullable-`bigint` binder.
+/// This route existed because it had to: until #1454 a serializer could
+/// not declare a foreign-key field at all (`ForeignKey<T>` implemented
+/// neither `Deserialize` nor `Default` nor `OpenApiSchema`), so a
+/// serializer-less ViewSet was the only route from HTTP to the
+/// nullable-`bigint` binder. It is kept now that `OrderSerializer`
+/// carries the FK, because the two together distinguish "the binder
+/// works" from "the serializer happens to hide the column".
 ///
 /// `POST` an order with `assigned_picker_id` absent, and `PATCH` one
 /// with it explicitly `null`: two separate binder call sites, both of

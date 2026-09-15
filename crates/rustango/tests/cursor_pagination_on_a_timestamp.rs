@@ -149,19 +149,54 @@ async fn the_timestamp_cursor_actually_walks_the_table() {
     );
 }
 
-/// Projecting the cursor column away must be loud, not silent.
+/// Projecting the cursor column away must be loud, not silent — and
+/// now it is loud at **build** time.
 ///
-/// `.fields([..])` (or a serializer) can omit the cursor column. The
-/// row then carries no value to encode, and answering `next: null`
-/// while `has_more` is true stops pagination at page one with nothing
-/// reporting an error — a caller iterating `next` sees three rows and
-/// concludes that is the table.
+/// `.fields([..])` can omit the cursor column. The row then carries no
+/// value to encode, and answering `next: null` while `has_more` is true
+/// stops pagination at page one with nothing reporting an error: a
+/// caller iterating `next` sees three rows and concludes that is the
+/// table.
+///
+/// The first fix made that a 500 per request. This makes it a panic at
+/// the call that creates it, which is the same move #1459 made for an
+/// unusable cursor *type* — the field list and the cursor column are
+/// both static properties of the builder.
+#[test]
+#[should_panic(expected = "projected away")]
+fn projecting_the_cursor_column_away_is_refused_at_build_time() {
+    let _ = ViewSet::for_model(Event::SCHEMA)
+        .cursor_pagination("occurred_at")
+        .fields(&["id", "label"]); // occurred_at deliberately absent
+}
+
+/// And in the other order: the projection can be narrowed after the
+/// cursor is chosen. Without the check on both builder methods, one
+/// ordering would be caught and the other would not.
+#[test]
+#[should_panic(expected = "projected away")]
+fn the_check_does_not_depend_on_builder_order() {
+    let _ = ViewSet::for_model(Event::SCHEMA)
+        .fields(&["id", "label"])
+        .cursor_pagination("occurred_at");
+}
+
+/// The primary key is required too — it breaks ties.
+#[test]
+#[should_panic(expected = "primary key")]
+fn projecting_the_primary_key_away_is_refused() {
+    let _ = ViewSet::for_model(Event::SCHEMA)
+        .cursor_pagination("occurred_at")
+        .fields(&["label", "occurred_at"]); // no `id`
+}
+
+/// A projection that keeps both is fine.
 #[tokio::test]
-async fn projecting_the_cursor_column_away_is_reported() {
+async fn a_projection_containing_the_cursor_and_pk_still_serves() {
     let pool = seeded_pool().await;
     let app = ViewSet::for_model(Event::SCHEMA)
         .cursor_pagination("occurred_at")
-        .fields(&["id", "label"]) // occurred_at deliberately absent
+        .fields(&["id", "label", "occurred_at"])
         .page_size(3)
         .router_pool("/events", pool.clone());
 
@@ -175,21 +210,14 @@ async fn projecting_the_cursor_column_away_is_reported() {
         )
         .await
         .expect("request");
-    let status = res.status();
+    assert_eq!(res.status(), StatusCode::OK);
     let body = axum::body::to_bytes(res.into_body(), 1 << 20)
         .await
         .expect("body");
-    let text = String::from_utf8_lossy(&body);
-
-    assert_eq!(
-        status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "a cursor column that is projected away must be reported, not silently \
-         truncate pagination to one page. Got {status}: {text}"
-    );
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(
-        text.contains("occurred_at"),
-        "the error must name the missing cursor column so the fix is obvious: {text}"
+        json["next"].is_string(),
+        "a projection that keeps the cursor and the pk must still issue a token: {json}"
     );
 }
 
@@ -214,4 +242,178 @@ fn a_float_column_is_refused_at_build_time() {
 #[should_panic(expected = "has no field")]
 fn an_unknown_column_is_refused_at_build_time() {
     let _ = ViewSet::for_model(Event::SCHEMA).cursor_pagination("no_such_column");
+}
+
+// ---------------------------------------------------------------------
+// Ties. The fixture above seeds seven timestamps a day apart, which is
+// the shape that hides this: with every value distinct, a strict `>` on
+// the cursor column alone is correct.
+//
+// A real append-only table is not like that. `bulk_insert` writes a run
+// of rows with one timestamp; on Postgres every row in a transaction
+// shares `now()`. When a page boundary lands inside such a run, asking
+// for `occurred_at > v` skips every remaining row with that value —
+// silently, because the response is a well-formed page with a
+// well-formed `next`.
+// ---------------------------------------------------------------------
+
+/// Nine rows, three timestamps, three rows each. Page size 2 guarantees
+/// boundaries fall *inside* a tie group rather than between groups.
+async fn tied_pool() -> Pool {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");
+    rustango::sql::raw_execute_pool(&pool, DDL, Vec::new())
+        .await
+        .expect("create");
+    for i in 0..9 {
+        let sql = format!(
+            "INSERT INTO cursor_ts_event (label, occurred_at, score) \
+             VALUES ('e{i}', '2026-09-1{}T10:00:00+00:00', {i}.5)",
+            i / 3 + 1
+        );
+        rustango::sql::raw_execute_pool(&pool, &sql, Vec::new())
+            .await
+            .expect("insert");
+    }
+    pool
+}
+
+/// Walk the whole table two rows at a time and demand every row once.
+///
+/// This is the assertion that matters, and it is on the property rather
+/// than on a page: paginating to exhaustion must visit all nine labels,
+/// no more and no fewer. Before the tiebreaker it yields three.
+#[tokio::test]
+async fn paging_through_tied_timestamps_visits_every_row() {
+    let pool = tied_pool().await;
+
+    let page = |uri: String| {
+        let pool = pool.clone();
+        async move {
+            let app = ViewSet::for_model(Event::SCHEMA)
+                .cursor_pagination("occurred_at")
+                .page_size(2)
+                .router_pool("/events", pool);
+            let res = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("request");
+            let status = res.status();
+            let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        }
+    };
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut uri = "/events".to_string();
+    // Bounded so a cursor that fails to advance ends the test rather
+    // than the process.
+    for _ in 0..20 {
+        let (status, body) = page(uri.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for row in body["results"].as_array().expect("results") {
+            seen.push(row["label"].as_str().unwrap_or_default().to_owned());
+        }
+        match body["next"].as_str() {
+            Some(t) => uri = format!("/events?cursor={t}"),
+            None => break,
+        }
+    }
+
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        9,
+        "paging to exhaustion must visit all nine rows; three timestamps x three \
+         rows means every page boundary lands inside a tie group, and a strict \
+         `occurred_at > v` skips the rest of the group. Saw {} row(s): {seen:?}",
+        unique.len()
+    );
+    assert_eq!(
+        seen.len(),
+        9,
+        "and must visit each exactly once — a non-strict `>=` would repeat the \
+         boundary row forever instead. Saw: {seen:?}"
+    );
+}
+
+/// The same, descending — the `Lt` arm is a separate branch.
+#[tokio::test]
+async fn paging_descending_through_ties_visits_every_row() {
+    let pool = tied_pool().await;
+    let mut seen: Vec<String> = Vec::new();
+    let mut uri = "/events".to_string();
+
+    for _ in 0..20 {
+        let app = ViewSet::for_model(Event::SCHEMA)
+            .cursor_pagination_desc("occurred_at")
+            .page_size(2)
+            .router_pool("/events", pool.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for row in body["results"].as_array().expect("results") {
+            seen.push(row["label"].as_str().unwrap_or_default().to_owned());
+        }
+        match body["next"].as_str() {
+            Some(t) => uri = format!("/events?cursor={t}"),
+            None => break,
+        }
+    }
+
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        9,
+        "descending must also visit all nine: {seen:?}"
+    );
+    assert_eq!(seen.len(), 9, "exactly once each: {seen:?}");
+}
+
+/// A pre-#1459 token — a bare base64 value with no tiebreaker — must
+/// still be accepted, because a client can be mid-pagination across the
+/// upgrade that introduced the composite form.
+#[tokio::test]
+async fn a_legacy_single_value_token_is_still_accepted() {
+    use base64::Engine as _;
+    let pool = seeded_pool().await;
+    let legacy =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"2026-09-13T10:00:00+00:00");
+
+    let (status, body) = get(&pool, &format!("/events?cursor={legacy}")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a token issued before the tiebreaker must not 400: {body}"
+    );
+    assert!(
+        body["results"].as_array().is_some_and(|r| !r.is_empty()),
+        "and must still return the rows after it: {body}"
+    );
 }

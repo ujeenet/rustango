@@ -103,9 +103,32 @@ fn storefront(cache: rustango::cache::BoxedCache) -> Router<AppState> {
     Router::new().route("/shop/products", get(views::storefront)).layer(
         rustango::cache_page::CachePageLayer::new(cache)
             .timeout(std::time::Duration::from_secs(30))
-            .key_prefix("commerce.storefront")
+            .key_prefix(&cache_namespace())
             .vary_on(["host"]),
     )
+}
+
+/// The page cache's key prefix, namespaced per deployment.
+///
+/// `vary_on(["host"])` separates tenants. It does **not** separate
+/// *deployments*, and a shared Redis needs both: the soak fleet runs six
+/// app instances — two apps across three dialects, each with its own
+/// database — against one Redis, and `/shop/products` is the same path
+/// on every one of them. With a bare literal prefix they all shared a
+/// key per Host, and a single-tenant instance's catalogue was served to
+/// the multi-tenant one under the same tenant hostname. Found by running
+/// the fleet and reading the page.
+///
+/// That is not a soak artifact. Any two deployments pointed at one cache
+/// — blue/green, a staging tier sharing prod's Redis, two services
+/// behind one hostname — collide the same way, and the symptom is the
+/// wrong page rather than an error.
+///
+/// The crate name separates the two apps; `RUSTANGO_CACHE_NAMESPACE`
+/// separates instances of the same app.
+fn cache_namespace() -> String {
+    let instance = std::env::var("RUSTANGO_CACHE_NAMESPACE").unwrap_or_else(|_| "default".into());
+    format!("{}.{instance}.storefront", env!("CARGO_PKG_NAME"))
 }
 
 fn products() -> Router<AppState> {

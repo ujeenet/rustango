@@ -196,6 +196,15 @@ services:
 
   bootstrap-single-pg: &bootstrap-single
     image: rustango-soak/commerce:all
+    # The only `build:` for this image; the web and worker services just
+    # reference the tag. Context is the repo root because both examples
+    # depend on `crates/rustango` by path.
+    build:
+      context: ../..
+      dockerfile: docker/soak/Dockerfile
+      args:
+        APP: platform_commerce
+        FEATURES: postgres,mysql,sqlite
     restart: "no"
     depends_on:
       pg: {condition: service_healthy}
@@ -225,6 +234,15 @@ services:
 
   bootstrap-saas-pg: &bootstrap-saas
     image: rustango-soak/saas:postgres
+    # One image per dialect for the SaaS app: `DefaultTenantDb` resolves
+    # to `sqlx::Postgres` whenever the `postgres` feature is on, so a
+    # tenancy build's registry dialect is fixed at compile time.
+    build:
+      context: ../..
+      dockerfile: docker/soak/Dockerfile
+      args:
+        APP: platform_commerce_saas
+        FEATURES: postgres
     restart: "no"
     depends_on:
       pg: {condition: service_healthy}
@@ -241,6 +259,12 @@ services:
   bootstrap-saas-my:
     <<: *bootstrap-saas
     image: rustango-soak/saas:mysql
+    build:
+      context: ../..
+      dockerfile: docker/soak/Dockerfile
+      args:
+        APP: platform_commerce_saas
+        FEATURES: mysql
     depends_on:
       my: {condition: service_healthy}
     environment:
@@ -256,6 +280,12 @@ services:
   bootstrap-saas-sq:
     <<: *bootstrap-saas
     image: rustango-soak/saas:sqlite
+    build:
+      context: ../..
+      dockerfile: docker/soak/Dockerfile
+      args:
+        APP: platform_commerce_saas
+        FEATURES: sqlite
     depends_on: {}
     environment:
       <<: *app-env
@@ -277,6 +307,7 @@ services:
       redis: {condition: service_healthy}
     environment:
       <<: *app-env
+      RUSTANGO_CACHE_NAMESPACE: single-pg
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce
     ports: ["18081:8080"]
 
@@ -288,6 +319,7 @@ services:
       redis: {condition: service_healthy}
     environment:
       <<: *app-env
+      RUSTANGO_CACHE_NAMESPACE: single-my
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce
     ports: ["18082:8080"]
 
@@ -299,6 +331,7 @@ services:
       redis: {condition: service_healthy}
     environment:
       <<: *app-env
+      RUSTANGO_CACHE_NAMESPACE: single-sq
       DATABASE_URL: sqlite:///data/single.db?mode=rwc
       # SQLite runs its workers in-process. Two containers on one SQLite
       # file would need POSIX advisory locks plus WAL shared memory
@@ -316,6 +349,7 @@ services:
       redis: {condition: service_healthy}
     environment:
       <<: *app-env
+      RUSTANGO_CACHE_NAMESPACE: saas-pg
       DATABASE_URL: postgres://rustango:rustango@pg:5432/commerce_saas_pg
       RUSTANGO_APEX_DOMAIN: soak.localhost
     ports: ["18084:8080"]
@@ -328,6 +362,7 @@ services:
       redis: {condition: service_healthy}
     environment:
       <<: *app-env
+      RUSTANGO_CACHE_NAMESPACE: saas-my
       DATABASE_URL: mysql://rustango:rustango@my:3306/commerce_saas_my
       RUSTANGO_APEX_DOMAIN: soak.localhost
     ports: ["18085:8080"]
@@ -340,6 +375,7 @@ services:
       redis: {condition: service_healthy}
     environment:
       <<: *app-env
+      RUSTANGO_CACHE_NAMESPACE: saas-sq
       DATABASE_URL: sqlite:///data/registry.db?mode=rwc
       RUSTANGO_APEX_DOMAIN: soak.localhost
     volumes: [sq-saas:/data]

@@ -450,6 +450,48 @@ async def check_page_cache_is_per_tenant(client, name, base):
                    f"could not identify the tenant in the response: {body[:160]}", name)
 
 
+async def check_page_cache_does_not_cross_apps(client, live_single, live_saas):
+    """Two applications sharing one Redis must not share cache entries.
+
+    `vary_on(["host"])` separates tenants; it does not separate
+    *deployments*. Both apps used the literal prefix `commerce.storefront`
+    and `/shop/products` is the same path on all six instances, so with
+    one Redis they collided on Host alone — the single-tenant catalogue
+    came back from the multi-tenant instance under a tenant hostname.
+
+    Found by reading the page, not by an error: the response was a
+    well-formed 200 with the wrong body. The single-tenant storefront
+    renders a bare `Catalogue`, the multi-tenant one `Catalogue — <slug>`,
+    which is what makes the two distinguishable here at all.
+    """
+    if not live_single or not live_saas:
+        REPORT.add("page cache does not cross applications", "—", "NOT-COVERED",
+                   "needs one instance of each app up", "")
+        return
+    host = tenant_host(1)
+
+    # Warm the single-tenant instance under a tenant hostname — the
+    # collision needs the same Host on both.
+    single_name, single_base = next(iter(live_single.items()))
+    saas_name, saas_base = next(iter(live_saas.items()))
+    await client.get(f"{single_base}/shop/products", headers={"Host": host})
+    await client.get(f"{single_base}/shop/products", headers={"Host": host})
+
+    r = await client.get(f"{saas_base}/shop/products", headers={"Host": host})
+    body = r.text
+    if r.status_code != 200:
+        REPORT.add("page cache does not cross applications", "—", "NOT-COVERED",
+                   f"{saas_name} storefront answered {r.status_code}", saas_name)
+    elif "Catalogue —" not in body:
+        REPORT.add("page cache does not cross applications", "—", "FAIL",
+                   f"{saas_name} served a page with no tenant heading after "
+                   f"{single_name} warmed the same Host — the two apps share a "
+                   f"cache key: {body[:200]}", saas_name)
+    else:
+        REPORT.add("page cache does not cross applications", "—", "PASS",
+                   "each deployment has its own key namespace", saas_name)
+
+
 async def check_soak_info(client, name, base, headers=None, expect_tenant=None):
     r = await client.get(f"{base}/_soak/info", headers=headers)
     if r.status_code != 200:
@@ -686,11 +728,28 @@ async def load_worker(client, counters: Counters, targets, until, rng):
                 if cu.status_code not in (200, 201):
                     counters.record(cu.status_code)
                     continue
-                o = await client.post(f"{base}/api/v1/orders-raw", headers=headers, json={
-                    "reference": f"LOAD-{rng.getrandbits(48):x}",
-                    "customer_id": cu.json().get("id"),
-                    "status": "pending", "total_cents": rng.randint(100, 50000),
-                    "note": None})
+                # Half the writes through the serializer, half through
+                # the raw ViewSet. Every order used to go through
+                # `orders-raw`, so the serializer write path — the newest
+                # surface on this branch, and the one #1454 made possible
+                # at all — never saw a single request under load.
+                #
+                # The two bodies differ because that is the point: the
+                # serializer publishes `reference` as `ref_code` and
+                # `assigned_picker_id` as `picker_id`.
+                if rng.random() < 0.5:
+                    o = await client.post(f"{base}/api/v1/orders", headers=headers, json={
+                        "ref_code": f"LOAD-{rng.getrandbits(48):x}",
+                        "customer_id": cu.json().get("id"),
+                        "picker_id": None,
+                        "status": "pending", "total_cents": rng.randint(100, 50000),
+                        "note": None})
+                else:
+                    o = await client.post(f"{base}/api/v1/orders-raw", headers=headers, json={
+                        "reference": f"LOAD-{rng.getrandbits(48):x}",
+                        "customer_id": cu.json().get("id"),
+                        "status": "pending", "total_cents": rng.randint(100, 50000),
+                        "note": None})
                 counters.record(o.status_code)
                 if o.status_code in (200, 201):
                     oid = o.json().get("id")
@@ -721,7 +780,11 @@ async def main():
                 live_single[name] = base
                 print(f"  up   {name}")
             else:
-                REPORT.add("instance reachable", "—", "NOT-COVERED",
+                # FAIL, not NOT-COVERED. NOT-COVERED means "this harness
+                # cannot decide the question"; an instance that never
+                # came up is the fleet answering it. Scoring it as a skip
+                # let the run exit 0 with a third of the matrix dead.
+                REPORT.add("instance reachable", "—", "FAIL",
                            "never became ready", name)
                 print(f"  DOWN {name}")
 
@@ -734,7 +797,7 @@ async def main():
                 live_saas[name] = base
                 print(f"  up   {name}")
             else:
-                REPORT.add("instance reachable", "—", "NOT-COVERED",
+                REPORT.add("instance reachable", "—", "FAIL",
                            "never became ready", name)
                 print(f"  DOWN {name}")
 
@@ -770,6 +833,7 @@ async def main():
             await check_registered_host(client, name, base)
             await check_apex_does_not_serve_app(client, name, base)
 
+        await check_page_cache_does_not_cross_apps(client, live_single, live_saas)
         report_uncoverable(live_single, live_saas)
 
         targets = [(n, b, None) for n, b in live_single.items()]
