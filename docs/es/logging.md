@@ -134,6 +134,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::request_timeout` | Timeout por petición |
 | `rustango::scheduler` | Cron / tareas programadas |
 | `rustango::server` | Arranque y apagado del servidor |
+| `rustango::shutdown` | Manejo de señales y hooks de apagado |
 | `rustango::sql` | Ejecución de consultas |
 | `rustango::sql::lock` | Cláusulas de bloqueo de fila |
 | `rustango::template_views` | Vistas basadas en plantillas |
@@ -145,7 +146,6 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::tenancy::provision` | Aprovisionamiento de inquilinos |
 | `rustango::tenancy::provision_webhook` | Webhooks de aprovisionamiento |
 | `rustango::tenancy::resolver` | Resolución de inquilino |
-| `rustango::tenancy::server` | Cableado del servidor multi-tenant |
 | `rustango::tenancy::sso` | SSO de inquilino |
 | `rustango::tenancy::sweep` | Barridos de retención |
 

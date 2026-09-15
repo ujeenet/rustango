@@ -131,6 +131,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::request_timeout` | Per-request timeout |
 | `rustango::scheduler` | Cron / scheduled tasks |
 | `rustango::server` | Server boot and shutdown |
+| `rustango::shutdown` | Signal handling and shutdown hooks |
 | `rustango::sql` | Query execution |
 | `rustango::sql::lock` | Row-lock clauses |
 | `rustango::template_views` | Template-backed views |
@@ -142,7 +143,6 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::tenancy::provision` | Tenant provisioning |
 | `rustango::tenancy::provision_webhook` | Provisioning webhooks |
 | `rustango::tenancy::resolver` | Tenant resolution |
-| `rustango::tenancy::server` | Tenancy server wiring |
 | `rustango::tenancy::sso` | Tenant SSO |
 | `rustango::tenancy::sweep` | Retention sweeps |
 
