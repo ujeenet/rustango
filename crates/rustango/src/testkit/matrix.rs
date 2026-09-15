@@ -4,11 +4,17 @@
 //! ## Why this exists
 //!
 //! The integration suite is shaped by dialect rather than by feature
-//! (#1461). 30 feature stems have a near-duplicate file per backend, and
-//! 167 SQLite files have no MySQL or PG counterpart at all — not because
-//! those features are SQLite-only, but because writing the second and
-//! third copy by hand costs more than it returns. The `django6_*` files
-//! already solved this for eight features; nothing generalized it.
+//! (#1461). Of 188 `*_sqlite_live.rs` files, 12 stems have a sibling
+//! file for another backend and **176 have no MySQL or PG counterpart at
+//! all** — not because those features are SQLite-only, but because
+//! writing the second and third copy by hand costs more than it returns.
+//! The `django6_*` files already solved this for eight features; nothing
+//! generalized it.
+//!
+//! Those two numbers are checked by `docs_live_suite_counts`, because
+//! the first draft of this comment said 30 and 167 against a tree that
+//! held 12 and 176 — counts written once and never recomputed, which is
+//! the same defect this module's own guard exists to catch elsewhere.
 //!
 //! Each of those files carries ~55 lines of per-dialect module that is
 //! the same everywhere: a `OnceLock<Mutex>`, a `fresh_pool` that reads an
@@ -52,7 +58,7 @@ pub enum Backend {
     /// which names the Postgres server in every CI job that sets both.
     MySql,
     /// `sqlite::memory:`. Needs no server and is always available, which
-    /// is why 192 files chose it and stopped there.
+    /// is why most of the live suite chose it and stopped there.
     Sqlite,
 }
 
@@ -191,7 +197,7 @@ pub async fn fresh_table<M: crate::core::Model>(pool: &Pool) {
 /// A **file-backed** SQLite pool, for suites that need more than one
 /// connection to see the same data.
 ///
-/// 29 of the 192 SQLite suites reach for a temp file, citing in-memory
+/// 31 SQLite suites reach for a temp file, citing in-memory
 /// databases being per-connection. **That premise does not hold here**:
 /// sqlx shares an in-memory database across a pool's connections, and a
 /// barrier-forced test with eight simultaneous connections passes
@@ -474,7 +480,7 @@ macro_rules! tri_dialect_test {
                     // No lock for the in-memory case: each test gets its
                     // own private database, so there is nothing to
                     // contend over, and taking the shared lock would
-                    // serialize 192 suites for no reason. A file-backed
+                    // serialize the whole suite for no reason. A file-backed
                     // pool is also per-test — a fresh path each call —
                     // so the same holds.
                     let pool = $sqlite_pool.await;

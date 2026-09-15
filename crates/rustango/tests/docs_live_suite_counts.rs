@@ -89,16 +89,13 @@ fn measured(root: &Path) -> BTreeMap<String, usize> {
         // `(none)`. The SQLite arm does still run with nothing set; the
         // page says so in prose rather than in a count, because a reader
         // uses this table to decide which servers to start.
-        // A `_tri` suite is credited to both server variables for the
-        // reasons above — but it still has to go through the scan below,
-        // not `continue` past it.
         //
-        // The `continue` that used to be here took the `MYSQL_URL`
-        // tripwire out of service for every tri file. That entry exists
-        // so a suite reading the wrong variable name appears in the
-        // measured set with no row to match and fails loudly; #1415 was
-        // exactly that bug, found exactly that way. Skipping the loop
-        // meant a converted suite could reintroduce it invisibly.
+        // The credit is applied *without* skipping the scan below. A
+        // `continue` here took the `MYSQL_URL` tripwire out of service
+        // for every tri file — that entry exists so a suite reading the
+        // wrong variable name lands in the measured set with no row to
+        // match and fails loudly, which is how #1415 was found. Skipping
+        // the loop would let a converted suite reintroduce it unseen.
         let mut gated = name.ends_with("_tri.rs");
         if gated {
             *counts.entry("DATABASE_URL".to_owned()).or_default() += 1;
@@ -209,5 +206,67 @@ fn the_live_suite_table_matches_the_test_tree() {
          translation — these pages are the only copy of the numbers, which is \
          why they can be checked.",
         problems.join("\n  "),
+    );
+}
+
+/// `testkit/matrix.rs`'s header states two counts that motivate the
+/// whole harness. They are checked here for the same reason the table
+/// above is: the first draft said 30 stems and 167 unpaired files
+/// against a tree holding 12 and 176, and nothing noticed.
+///
+/// A number written once in a doc comment and never recomputed is the
+/// defect this file exists to catch. It applies to the module that
+/// makes the argument just as much as to the page that publishes it.
+#[test]
+fn the_matrix_header_counts_match_the_test_tree() {
+    let root = repo_root();
+    let dir = root.join("crates/rustango/tests");
+
+    let stems: Vec<String> = std::fs::read_dir(&dir)
+        .expect("read tests dir")
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().into_string().ok()?;
+            n.strip_suffix("_sqlite_live.rs").map(str::to_owned)
+        })
+        .collect();
+
+    let has = |s: &str, suffix: &str| dir.join(format!("{s}{suffix}")).exists();
+    let paired = stems
+        .iter()
+        .filter(|s| has(s, "_mysql_live.rs") || has(s, "_pg_live.rs"))
+        .count();
+    let unpaired = stems
+        .iter()
+        .filter(|s| !has(s, "_mysql_live.rs") && !has(s, "_pg_live.rs") && !has(s, "_tri.rs"))
+        .count();
+
+    let header = std::fs::read_to_string(root.join("crates/rustango/src/testkit/matrix.rs"))
+        .expect("read matrix.rs");
+
+    let claims = [
+        (
+            format!("Of {} `*_sqlite_live.rs` files", stems.len()),
+            "total",
+        ),
+        (format!("{paired} stems have a sibling"), "paired stems"),
+        (
+            format!("**{unpaired} have no MySQL or PG counterpart"),
+            "unpaired",
+        ),
+    ];
+    let wrong: Vec<&str> = claims
+        .iter()
+        .filter(|(text, _)| !header.contains(text.as_str()))
+        .map(|(_, what)| *what)
+        .collect();
+
+    assert!(
+        wrong.is_empty(),
+        "testkit/matrix.rs's header counts are stale: {}\n\nMeasured now: {} \
+         `*_sqlite_live.rs` files, {paired} stems with a sibling for another \
+         backend, {unpaired} with no counterpart at all.",
+        wrong.join(", "),
+        stems.len(),
     );
 }
