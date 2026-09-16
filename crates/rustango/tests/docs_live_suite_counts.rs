@@ -96,8 +96,9 @@ fn measured(root: &Path) -> BTreeMap<String, usize> {
         // wrong variable name lands in the measured set with no row to
         // match and fails loudly, which is how #1415 was found. Skipping
         // the loop would let a converted suite reintroduce it unseen.
-        let mut gated = name.ends_with("_tri.rs");
-        if gated {
+        let is_tri = name.ends_with("_tri.rs");
+        let mut gated = is_tri;
+        if is_tri {
             *counts.entry("DATABASE_URL".to_owned()).or_default() += 1;
             *counts.entry("MYSQL_TEST_URL".to_owned()).or_default() += 1;
         }
@@ -105,6 +106,19 @@ fn measured(root: &Path) -> BTreeMap<String, usize> {
         // A suite is counted under every gating variable it reads; one
         // that reads none is counted as needing nothing.
         for var in GATING_VARS {
+            // A tri suite was already credited to both server variables
+            // above. Counting them again because the body happens to
+            // mention one would double-count it, and the guard would then
+            // force the docs page to publish that wrong number — a guard
+            // that makes the page worse is worse than no guard.
+            //
+            // Keyed on `is_tri`, not on `gated`: `gated` is also set by
+            // this loop, so testing it here would start skipping
+            // `DATABASE_URL` for an ordinary suite as soon as any earlier
+            // variable matched.
+            if is_tri && matches!(*var, "DATABASE_URL" | "MYSQL_TEST_URL") {
+                continue;
+            }
             if text.contains(&format!("env::var(\"{var}\")")) {
                 gated = true;
                 // `MYSQL_URL` is counted under its own name rather than
@@ -249,7 +263,12 @@ fn the_matrix_header_counts_match_the_test_tree() {
             format!("Of {} `*_sqlite_live.rs` files", stems.len()),
             "total",
         ),
-        (format!("{paired} stems have a sibling"), "paired stems"),
+        // Anchored on the comma. `contains("12 stems have a sibling")`
+        // is satisfied by a header saying 112, and `contains("2 …")` by
+        // one saying 12 — a dropped or gained leading digit is the one
+        // shape of staleness this guard exists for, and unanchored
+        // `contains` is blind to exactly it.
+        (format!(", {paired} stems have a sibling"), "paired stems"),
         (
             format!("**{unpaired} have no MySQL or PG counterpart"),
             "unpaired",

@@ -147,7 +147,7 @@ done
 # here, so they are printed rather than assumed correct.
 #
 # This list is the ONLY thing standing between an unrecognised claim shape and
-# a silently stale version. The verification below deliberately checks the five
+# a silently stale version. The verification below deliberately checks the same
 # shapes the rewriter handles, so by construction it cannot catch a sixth. That
 # is why this is a stop-and-read rather than a log line: the earlier version
 # printed the list and then exited 1 on it, which was wrong but at least loud.
@@ -158,9 +158,10 @@ LEFT=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|$)" -- . \
 # Lockfiles FIRST, before the list is shown and before anything can stop.
 #
 # The confirmation used to sit here, between the rewrite and this loop, which
-# meant every path that declined — including a non-interactive `read` hitting
-# EOF, which returns non-zero and falls straight to the `*)` arm — left bumped
-# manifests beside stale lockfiles. A Makefile, a CI step or any wrapper
+# meant every path that declined left bumped manifests beside stale lockfiles.
+# A non-interactive `read` hitting EOF is one such path, and under `set -e` it
+# does not even reach the `*)` arm — the failing `read` exits the script on the
+# spot, so nothing is printed about why. A Makefile, a CI step or any wrapper
 # invoking this without a tty produced exactly the half-applied tree the
 # script exists to avoid.
 echo "regenerating lockfiles"
@@ -183,7 +184,12 @@ if [ -n "$LEFT" ]; then
   if $ASSUME_YES; then
     echo "(--yes: continuing without asking)"
   elif [ -r /dev/tty ] && [ -t 1 ]; then
-    read -r -p "none of those is a stale claim? [y/N] " reply </dev/tty
+    # `|| reply=""` is load-bearing under `set -e`: a failing `read` —
+    # Ctrl-D at the prompt — would otherwise kill the script on the spot,
+    # before the `case` runs, so the abort message never printed and the
+    # operator saw a silent non-zero exit. Treat EOF as "no".
+    reply=""
+    read -r -p "none of those is a stale claim? [y/N] " reply </dev/tty || reply=""
     case "$reply" in
       [yY]|[yY][eE][sS]) ;;
       *) echo "aborted — the bump is fully applied; fix the claim and commit" >&2; exit 1 ;;
@@ -206,7 +212,7 @@ echo "verifying nothing still claims $OLD"
 # Prose naming an old release is supposed to keep its number; that is the
 # whole reason the rewrite is anchored. So the verification has to ask the
 # narrower question the rewrite asks: does any *claim about the current
-# version* still say OLD? The alternation below is the same five shapes the
+# version* still say OLD? The alternation below is the same six shapes the
 # perl pass rewrites, and nothing else.
 CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+|^(cargo-)?rustango[a-z-]*[[:space:]]*=[[:space:]]*")'
 stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \

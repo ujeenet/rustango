@@ -107,9 +107,11 @@ async fn returns_plan_json(pool: &Pool) {
 /// `analyze` must never be an error, and on PostgreSQL it must actually
 /// do something.
 ///
-/// The flag is PG-shaped: `EXPLAIN ANALYZE` there runs the query and
-/// reports real timings. SQLite has no equivalent and the framework
-/// promises to ignore the flag rather than reject it. Asserting only
+/// PostgreSQL and MySQL both execute the plan on `EXPLAIN ANALYZE` and
+/// report real timings — the MySQL arm below used to claim otherwise,
+/// and the claim survived because the assertion sat in a one-sided `if`
+/// that skipped it. SQLite has no equivalent and the framework promises
+/// to ignore the flag rather than reject it. Asserting only
 /// "did not error" would let a silent PG regression through, which is why
 /// the timing marker is per-dialect rather than dropped.
 async fn analyze_flag_is_accepted(pool: &Pool) {

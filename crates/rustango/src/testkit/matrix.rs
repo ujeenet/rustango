@@ -197,7 +197,7 @@ pub async fn fresh_table<M: crate::core::Model>(pool: &Pool) {
 /// A **file-backed** SQLite pool, for suites that need more than one
 /// connection to see the same data.
 ///
-/// 31 SQLite suites reach for a temp file, citing in-memory
+/// A good number of SQLite suites reach for a temp file, citing in-memory
 /// databases being per-connection. **That premise does not hold here**:
 /// sqlx shares an in-memory database across a pool's connections, and a
 /// barrier-forced test with eight simultaneous connections passes
@@ -206,8 +206,9 @@ pub async fn fresh_table<M: crate::core::Model>(pool: &Pool) {
 ///
 /// It is kept because a real file still differs in ways in-memory cannot
 /// emulate — WAL journalling, file locking, and anything a second
-/// *process* must open — and because converting those 29 suites should
-/// not also change their storage under them. Whether they still need it
+/// *process* must open — and because converting the suites that were
+/// written on that premise should not also change their storage under
+/// them. Whether they still need it
 /// is worth checking, one at a time, with evidence.
 ///
 /// The path is built from `std` rather than the `tempfile` crate, which
@@ -390,7 +391,7 @@ macro_rules! tri_dialect_test {
     // database across a pool's connections, measured with a barrier
     // forcing eight simultaneous ones. `sqlite_file_pool`'s own doc says
     // so; this comment used to assert the opposite, which is the premise
-    // 29 suites were written on and which does not hold.
+    // those suites were written on and which does not hold.
     (model: $model:ty, sqlite: file, scenarios: [ $($name:ident),* $(,)? ] $(,)?) => {
         $crate::tri_dialect_test!(@build
             sqlite_pool = $crate::testkit::matrix::sqlite_file_pool(),
@@ -651,7 +652,7 @@ mod tests {
     /// **What this does not show.** It was written to prove a file
     /// differs from `sqlite::memory:`, and it does not: the same test
     /// passes against `:memory:`. sqlx shares an in-memory database
-    /// across a pool's connections, so the premise behind 29 suites
+    /// across a pool's connections, so the premise behind those suites
     /// reaching for a temp file — `jobs_sqlite_live` says in-memory
     /// "defeats the multi-worker test" — does not hold here, at least
     /// for connection sharing. Those suites may be simplifiable; that
