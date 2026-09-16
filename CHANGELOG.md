@@ -9,7 +9,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 The tri-dialect train. The theme is a single question: **does this behaviour
 work on all three databases, or only on the one somebody tested?**
 
-Of 188 `*_sqlite_live.rs` suites, 176 had no MySQL or PostgreSQL counterpart —
+Of 188 `*_sqlite_live.rs` suites, 172 had no MySQL or PostgreSQL counterpart —
 not because the behaviour was SQLite-specific, but because the second and third
 copy cost more by hand than they returned. Three single-dialect failures in
 0.57.x reached users through that gap (#1450, #1457, #1464), each in code that

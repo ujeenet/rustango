@@ -624,7 +624,7 @@ mod tests {
     /// Colour: `never` off, `always` on, `auto` decided by the terminal.
     #[cfg(all(feature = "runtime", feature = "config"))]
     #[test]
-    fn color_setting_maps_and_never_colours_a_pipe() {
+    fn color_setting_maps_and_no_color_suppresses() {
         let of = |v: Option<&str>| {
             Setup::from_settings(&crate::config::LoggingSettings {
                 color: v.map(str::to_owned),
@@ -640,13 +640,39 @@ mod tests {
 
         assert!(Color::Always.should_colour());
         assert!(!Color::Never.should_colour());
-        // Under `cargo test` stdout is captured, so `Auto` must resolve
-        // to false here. If this ever fails, tty detection is reading
-        // something other than the real stdout.
+
+        // `Auto` is deliberately NOT asserted against a fixed value.
+        //
+        // This used to read `assert!(!Color::Auto.should_colour())` on
+        // the stated premise that "under `cargo test` stdout is
+        // captured, so Auto must resolve to false". That premise is
+        // false: libtest captures `print!` through a thread-local, while
+        // `should_colour` asks `std::io::stdout().is_terminal()` about
+        // file descriptor 1 — which is still the terminal. So the test
+        // failed for every contributor running `cargo test` from a
+        // terminal, and passed in CI only because runners have no tty.
+        // A test whose result depends on who is watching cannot be a
+        // gate, and this one was green in exactly the place that could
+        // not see it.
+        //
+        // What *is* deterministic is the `NO_COLOR` contract, which is
+        // the part with a specification behind it.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("NO_COLOR");
+        std::env::set_var("NO_COLOR", "1");
         assert!(
             !Color::Auto.should_colour(),
-            "auto must not colour when stdout is not a terminal"
+            "NO_COLOR=1 must suppress colour regardless of tty state"
         );
+        std::env::set_var("NO_COLOR", "");
+        // Per the spec, an *empty* NO_COLOR does not mean "no colour",
+        // so Auto falls through to the tty question — whose answer
+        // depends on the environment and so is not asserted here.
+        let _ = Color::Auto.should_colour();
+        match previous {
+            Some(v) => std::env::set_var("NO_COLOR", v),
+            None => std::env::remove_var("NO_COLOR"),
+        }
     }
 
     #[cfg(feature = "runtime")]

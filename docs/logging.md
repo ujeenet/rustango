@@ -404,13 +404,23 @@ the *span*, every event emitted during the request — including the ORM's —
 carries them in span context, with no subsystem knowing what a tenant is.
 
 **`Cli` installs it for you**, on every serving path, together with the access
-log. Set `[logging] access_log = false` to turn both off. Before #1480 nothing
-in the framework mounted it, so a `tracing::info!` in a handler had no
-enclosing span — no tenant, no correlation — which is what made handler logs
-read as loose, context-free lines.
+log. Before #1480 nothing in the framework mounted it, so a `tracing::info!` in
+a handler had no enclosing span — no tenant, no correlation — which is what
+made handler logs read as loose, context-free lines.
 
-Building a server directly through `server::Builder` still mounts nothing;
-add the layer yourself as shown above.
+`[logging] access_log = false` turns off **the access log only**. The request
+span and the `X-Request-Id` header stay mounted. That setting names the log,
+and the service it exists for — one logging requests at the edge — is precisely
+the one that still wants trace context and request correlation. (An earlier
+version of this page said it turned both off, and an earlier version of the
+code did; both were wrong for the same reason.)
+
+`server::Builder` mounts them too when `Cli` hands it the configuration, which
+it does on the tenancy serving paths — the tenant admin and the operator
+console are behind a Host dispatch the api router never sees, so the layers go
+on the outermost router rather than on the one you pass in. Building a
+`server::Builder` entirely by hand mounts nothing until you call
+`.observability(..)`.
 
 ## Logging in tests
 

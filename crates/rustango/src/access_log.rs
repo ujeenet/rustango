@@ -190,6 +190,74 @@ impl AccessLogLayer {
     }
 }
 
+/// Mount request observability on `router` — the span, the request id,
+/// and the access log when one is configured.
+///
+/// **One definition, deliberately.** There are two serving topologies
+/// (`Cli::assemble_app` layers the router it serves; the tenancy paths
+/// hand theirs to `server::Builder`, which layers the outermost router
+/// after merging and dispatching), and each grew its own copy of these
+/// three rules. The copies had already drifted into *opposite* relative
+/// order — one wrapped the access log around the request id, the other
+/// the reverse — while `every_serving_path_is_observable` enforced
+/// presence rather than equivalence, so it structurally could not see
+/// it. Extracting the body is what removes the surface; the guard then
+/// only has to check that both sites call this.
+///
+/// Order is the whole design, and `.layer()` wraps, so the LAST call is
+/// outermost and runs FIRST on the way in:
+///
+/// ```text
+///   TracingLayer   outermost — opens the span
+///     access_log   inside it, so its line inherits the span
+///       request_id innermost — runs with the span current, so
+///                  `record` lands on it
+///       handler
+/// ```
+///
+/// `access_log: None` means `[logging] access_log = false`: the log
+/// line goes away and **the span and request id stay**. That setting
+/// names the log, and a service logging at the edge still wants trace
+/// context and `X-Request-Id`.
+///
+/// The span redacts with the access log's *configured* key list, not the
+/// defaults — redacting a project's own key in the event while the span
+/// renders it in cleartext on the same line is the bug this redaction
+/// exists to remove, just narrowed to project-specific names.
+/// Gated to its callers. `Cli::mount_observability` needs `manage` and
+/// `server::Builder` needs `tenancy`; a build with `admin` but neither
+/// — `postgres,admin`, which `feature_combos` checks — has no caller,
+/// and `-D warnings` makes dead code a build failure there. Same shape
+/// as #1485, caught the same way.
+#[cfg(any(feature = "manage", feature = "tenancy"))]
+#[must_use]
+pub(crate) fn mount_observability(router: Router, access_log: Option<AccessLogLayer>) -> Router {
+    #[cfg(feature = "admin")]
+    {
+        use crate::request_id::RequestIdRouterExt as _;
+        let span = match access_log.as_ref() {
+            Some(l) => {
+                crate::tracing_layer::TracingLayer::new().redact(l.redact_query_params.clone())
+            }
+            None => crate::tracing_layer::TracingLayer::new(),
+        };
+        let router = router.request_id(crate::request_id::RequestIdLayer::default());
+        let router = match access_log {
+            Some(l) => router.access_log(l),
+            None => router,
+        };
+        return router.layer(span);
+    }
+
+    // Without `admin` there is no span and no request id — the access
+    // log still mounts, because it carries `tenant` itself.
+    #[cfg(not(feature = "admin"))]
+    match access_log {
+        Some(l) => router.access_log(l),
+        None => router,
+    }
+}
+
 /// Extension trait — `.access_log(layer)` on Router.
 pub trait AccessLogRouterExt {
     #[must_use]
@@ -634,5 +702,116 @@ mod tests {
         let before = AccessLogLayer::new();
         let after = AccessLogLayer::new().with_audit_settings(&s);
         assert_eq!(before.redact_query_params, after.redact_query_params);
+    }
+}
+
+#[cfg(all(test, any(feature = "manage", feature = "tenancy")))]
+mod observability_mount_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt as _;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// Tracing's callsite interest cache is process-global, so two
+    /// tests installing subscribers concurrently flake.
+    fn lock() -> &'static std::sync::Mutex<()> {
+        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Drive one request through `mount_observability` and return what
+    /// a handler's own `tracing::info!` rendered.
+    #[cfg(feature = "admin")]
+    async fn captured_handler_line(access_log: Option<AccessLogLayer>) -> (StatusCode, String) {
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        let app = mount_observability(
+            Router::new().route(
+                "/",
+                get(|| async {
+                    tracing::info!("in handler");
+                    "ok"
+                }),
+            ),
+            access_log,
+        );
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .expect("router answers");
+        let status = resp.status();
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        (status, out)
+    }
+
+    /// `[logging] access_log = false` must not take the **span** with it.
+    ///
+    /// Behavioural, and it asserts the right observable — which took two
+    /// attempts. A source scan for `None => router,` passed with the
+    /// regression reintroduced, because that substring also lives in the
+    /// non-`admin` arm. Then an `X-Request-Id` check passed too, because
+    /// `request_id` is applied *before* the branch: only the span is
+    /// lost. The span is the thing to assert, so this greps the rendered
+    /// handler line for its context.
+    ///
+    /// Verified by reintroducing the early return and watching this fail.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn turning_off_the_access_log_keeps_the_request_span() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (status, out) = captured_handler_line(None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            out.contains("in handler"),
+            "the handler's own event never rendered, so this proves nothing:\n{out}"
+        );
+        assert!(
+            out.contains("http.request"),
+            "`access_log = false` stripped the request span: a handler event rendered \
+             with no span context, so it carries no method, path, tenant or request \
+             id. That setting names the log, not the trace context.\n{out}"
+        );
+    }
+
+    /// With a log configured, the span is there too — the control.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn the_normal_path_mounts_the_span_as_well() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (status, out) = captured_handler_line(Some(AccessLogLayer::default())).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            out.contains("http.request"),
+            "no span context on the normal path either:\n{out}"
+        );
     }
 }

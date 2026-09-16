@@ -1015,64 +1015,13 @@ impl Cli {
     /// combinations.
     #[allow(unused_variables, clippy::needless_pass_by_value)]
     fn mount_observability(&self, api: Router) -> Router {
+        // Delegates: the mount itself lives in one place, shared with
+        // `server::Builder`. The two used to carry near-verbatim copies
+        // of the same three ordering rules and had already drifted into
+        // opposite relative order.
         #[cfg(any(feature = "admin", feature = "tenancy"))]
         {
-            use crate::access_log::AccessLogRouterExt as _;
-
-            // `access_log = false` turns off the access log and nothing
-            // else. It used to `return api` here, which silently also
-            // removed the request span, the `request_id` span field and
-            // the `X-Request-Id` response header — none of which that
-            // setting claims to control, and all of which the setting's
-            // own documented use case ("a service that logs requests at
-            // the edge") still wants. Trace context and request
-            // correlation are not the request log.
-            let log_layer = self.access_log_layer();
-
-            // Order is the whole design here, and `.layer()` wraps, so
-            // the LAST call is outermost and runs FIRST on the way in:
-            //
-            //   TracingLayer   outermost — opens the span
-            //     access_log   inside it, so its line inherits the span
-            //       request_id innermost — runs with the span current,
-            //                  so `record` lands on it
-            //       handler
-            //
-            // Putting `request_id` outside the span would leave it
-            // recording onto whatever span happened to be current,
-            // which is usually none — the id would reach the response
-            // header and nothing else.
-            //
-            // The span and the request id are `admin`-only. On a
-            // tenancy-without-admin build the access log still mounts —
-            // it carries `tenant` itself — but there is no span for
-            // handler events to inherit.
-            #[cfg(feature = "admin")]
-            {
-                use crate::request_id::RequestIdRouterExt as _;
-                // The span redacts with the access log's *configured*
-                // list, not the defaults: a project that added
-                // `client_secret` to `[audit] redact_query_params` would
-                // otherwise get it redacted in the event and rendered in
-                // cleartext by the span on the same line.
-                let span = match log_layer.as_ref() {
-                    Some(l) => crate::tracing_layer::TracingLayer::new()
-                        .redact(l.redact_query_params.clone()),
-                    None => crate::tracing_layer::TracingLayer::new(),
-                };
-                let api = api.request_id(crate::request_id::RequestIdLayer::default());
-                let api = match log_layer {
-                    Some(l) => api.access_log(l),
-                    None => api,
-                };
-                return api.layer(span);
-            }
-
-            #[cfg(not(feature = "admin"))]
-            return match log_layer {
-                Some(l) => api.access_log(l),
-                None => api,
-            };
+            return crate::access_log::mount_observability(api, self.access_log_layer());
         }
 
         #[cfg(not(any(feature = "admin", feature = "tenancy")))]
