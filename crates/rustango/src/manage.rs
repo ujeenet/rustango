@@ -1967,6 +1967,28 @@ mod assemble_app_tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt as _;
 
+    /// Serializes this module's tests.
+    ///
+    /// `tracing` caches per callsite whether any subscriber is
+    /// interested, and that cache is process-global. The two health
+    /// tests issue requests with no subscriber installed, so whichever
+    /// reaches `tracing_layer`'s `info_span!` first can cache it as
+    /// "nobody cares" — and the request-id test below then finds the
+    /// span silently absent. Alone it passed; with the module it failed
+    /// every run, and rebuilding the cache was not enough on its own
+    /// because a sibling can poison it again a moment later.
+    fn global_tracing_state() -> &'static std::sync::Mutex<()> {
+        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Take the lock, ignoring poisoning from an unrelated failure.
+    fn serialized() -> std::sync::MutexGuard<'static, ()> {
+        global_tracing_state()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     async fn status(app: &Router, path: &str) -> StatusCode {
         app.clone()
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
@@ -1989,6 +2011,7 @@ mod assemble_app_tests {
     /// reaching the *log*.
     #[test]
     fn a_handler_log_carries_the_request_id_without_asking() {
+        let _serial = serialized();
         use std::io::Write;
         use std::sync::{Arc, Mutex};
         use tracing_subscriber::layer::SubscriberExt as _;
@@ -2046,6 +2069,18 @@ mod assemble_app_tests {
         );
 
         let sent = "test-request-id-42";
+        // Rebuild the interest cache before issuing the request.
+        //
+        // `tracing` caches, per callsite, whether any subscriber cares.
+        // The sibling tests in this module issue requests too, and they
+        // run with no subscriber at all — so whichever of them reaches
+        // the `info_span!` in `tracing_layer` first gets it cached as
+        // "nobody is interested", and this test then finds the span
+        // silently absent. Alone it passes; with the module it failed
+        // every time. A thread-local default does not invalidate that
+        // cache on its own.
+        tracing::callsite::rebuild_interest_cache();
+
         let response = tracing::subscriber::with_default(subscriber, || {
             rt.block_on(
                 app.oneshot(
@@ -2084,6 +2119,7 @@ mod assemble_app_tests {
 
     #[tokio::test]
     async fn with_health_mounts_both_endpoints() {
+        let _serial = serialized();
         let pool = crate::sql::Pool::connect("sqlite::memory:")
             .await
             .expect("sqlite");
@@ -2103,6 +2139,7 @@ mod assemble_app_tests {
     /// it evidence of nothing.
     #[tokio::test]
     async fn without_with_health_they_are_absent() {
+        let _serial = serialized();
         let pool = crate::sql::Pool::connect("sqlite::memory:")
             .await
             .expect("sqlite");
