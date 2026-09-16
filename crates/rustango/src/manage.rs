@@ -979,6 +979,7 @@ impl Cli {
     /// inherit it for free.
     fn mount_observability(&self, api: Router) -> Router {
         use crate::access_log::AccessLogRouterExt as _;
+        use crate::request_id::RequestIdRouterExt as _;
 
         if !self.access_log_enabled() {
             return api;
@@ -991,7 +992,20 @@ impl Cli {
             None => log_layer,
         };
 
-        api.access_log(log_layer)
+        // Order is the whole design here, and `.layer()` wraps, so the
+        // LAST call is outermost and runs FIRST on the way in:
+        //
+        //   TracingLayer   outermost — opens the span
+        //     access_log   inside it, so its line inherits the span
+        //       request_id innermost — runs with the span current, so
+        //                  `record` lands on it
+        //       handler
+        //
+        // Putting `request_id` outside the span would leave it recording
+        // onto whatever span happened to be current, which is usually
+        // none — the id would reach the response header and nothing else.
+        api.request_id(crate::request_id::RequestIdLayer::default())
+            .access_log(log_layer)
             .layer(crate::tracing_layer::TracingLayer::new())
     }
 
@@ -1959,6 +1973,113 @@ mod assemble_app_tests {
             .await
             .expect("request")
             .status()
+    }
+
+    /// A handler's own log event carries the request id, with the
+    /// handler doing nothing to put it there.
+    ///
+    /// This is the property `request_id` existed for and never had:
+    /// `RequestIdLayer` was mounted nowhere, and the module's docs told
+    /// you to write `req_id = %id.0` on every call site by hand — which
+    /// is both tedious and silently misses every event you did not write,
+    /// the ORM's included (#1480).
+    ///
+    /// Asserted on captured output rather than on the extension, because
+    /// the extension was always there. What was missing is the id
+    /// reaching the *log*.
+    #[test]
+    fn a_handler_log_carries_the_request_id_without_asking() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock").extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        // A plain `#[test]` driving its own runtime, not `#[tokio::test]`.
+        //
+        // `set_default` installs a thread-local subscriber, and holding
+        // that across an `.await` in an async test proved racy: the
+        // events reached the test's subscriber while the *span* did not,
+        // so the captured lines had no span context maybe one run in six.
+        // Driving the whole request inside `with_default` keeps one
+        // subscriber current for span creation and every poll alike.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let pool = rt
+            .block_on(crate::sql::Pool::connect("sqlite::memory:"))
+            .expect("sqlite");
+        // A handler that logs and says nothing about request ids.
+        let app = Cli::new()
+            .api(Router::new().route(
+                "/thing",
+                axum::routing::get(|| async {
+                    tracing::info!("handler ran");
+                    "ok"
+                }),
+            ))
+            .assemble_app(pool);
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(buf.clone()),
+        );
+
+        let sent = "test-request-id-42";
+        let response = tracing::subscriber::with_default(subscriber, || {
+            rt.block_on(
+                app.oneshot(
+                    Request::builder()
+                        .uri("/thing")
+                        .header("x-request-id", sent)
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+            )
+        })
+        .expect("request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok()),
+            Some(sent),
+            "the inbound id should be echoed back"
+        );
+
+        let out = String::from_utf8(buf.0.lock().expect("lock").clone()).expect("utf8");
+        assert!(
+            out.contains("handler ran"),
+            "the handler's event was not captured at all: {out}"
+        );
+        assert!(
+            out.contains(sent),
+            "the handler's event does not carry the request id. It is on the \
+             request span, so every event under the span should show it without \
+             the handler naming it:\n{out}"
+        );
     }
 
     #[tokio::test]

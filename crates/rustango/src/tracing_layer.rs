@@ -158,6 +158,13 @@ fn build_request_span(req: &Request<Body>) -> tracing::Span {
         // apps and on apex / operator-console requests.
         "tenant" = field::Empty,
         "org_id" = field::Empty,
+        // The `X-Request-Id` value, recorded by `request_id::record`
+        // from the layer mounted inside this span. Carrying it here
+        // rather than making handlers write `req_id = %id.0` on every
+        // event is the whole point: a field on the span reaches every
+        // event under it, including the ORM's, without any of them
+        // knowing a request id exists (#1480).
+        "request_id" = field::Empty,
         // Distributed-tracing fields populated when traceparent is present.
         "trace_id" = field::Empty,
         "parent_span_id" = field::Empty,
