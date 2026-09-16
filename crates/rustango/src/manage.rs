@@ -1032,6 +1032,12 @@ impl Cli {
     /// Default on: a server that logs no requests is a server you cannot
     /// debug, and the previous default — off unless you found the right
     /// builder call — was not a decision anyone made on purpose.
+    ///
+    /// Gated to match its only caller. Once `mount_observability`'s body
+    /// became conditional, this was dead code on a build with neither
+    /// feature — and `feature_combos` compiles with `-D warnings`, so
+    /// dead code is a build failure there rather than a lint.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
     fn access_log_enabled(&self) -> bool {
         #[cfg(feature = "config")]
         {
