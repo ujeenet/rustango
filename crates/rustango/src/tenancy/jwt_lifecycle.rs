@@ -137,10 +137,15 @@ impl JwtLifecycle {
     /// forgeable by anyone. Audit A-06.
     #[must_use]
     pub fn new(secret: Vec<u8>) -> Self {
+        // The message deliberately does NOT carry `secret.len()`.
+        // CodeQL's `rust/cleartext-logging` flags the length as a value
+        // derived from a secret reaching a log sink, and it is right to:
+        // a panic message lands in logs and crash reports, and the exact
+        // length of a key is information about that key. `jwt.rs`'s
+        // equivalent check already words it this way.
         assert!(
             secret.len() >= 32,
-            "JwtLifecycle signing key is {} bytes; need >= 32 (a shorter key is forgeable)",
-            secret.len(),
+            "JwtLifecycle signing key is too short; need >= 32 bytes (a shorter key is forgeable)",
         );
         Self {
             secret,

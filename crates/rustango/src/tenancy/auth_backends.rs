@@ -408,10 +408,12 @@ impl JwtBackend {
     /// weak key. Matches the 32-byte floor on `auth_routes::build_jwt`.
     #[must_use]
     pub fn new(secret: Vec<u8>) -> Self {
+        // No `secret.len()` in the message — same reason as
+        // `JwtLifecycle::new`: a panic message reaches logs and crash
+        // reports, and the length of a key is information about it.
         assert!(
             secret.len() >= 32,
-            "JwtBackend signing key is {} bytes; need >= 32 (a shorter key is forgeable)",
-            secret.len(),
+            "JwtBackend signing key is too short; need >= 32 bytes (a shorter key is forgeable)",
         );
         Self {
             secret,
