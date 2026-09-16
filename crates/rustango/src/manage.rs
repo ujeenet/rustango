@@ -945,20 +945,48 @@ impl Cli {
         api.layer(axum::Extension(pool))
     }
 
+    /// The configured access-log layer, or `None` when
+    /// `[logging] access_log = false`.
+    ///
+    /// Split out of [`Self::mount_observability`] because the
+    /// multi-tenant path cannot mount here: it hands its router to
+    /// `server::Builder`, which merges the tenant admin in afterwards
+    /// and dispatches the operator console on a sibling branch. Layers
+    /// applied to the api router never reach either (axum: "routes
+    /// added after `layer` is called will not have the middleware
+    /// added"). The builder takes this layer and applies it to the
+    /// outermost router instead, where every branch inherits it.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    fn access_log_layer(&self) -> Option<crate::access_log::AccessLogLayer> {
+        if !self.access_log_enabled() {
+            return None;
+        }
+        let log_layer = crate::access_log::AccessLogLayer::default();
+        #[cfg(feature = "config")]
+        let log_layer = match self.settings_for_layers.as_ref() {
+            Some(s) => log_layer.with_audit_settings(&s.audit),
+            None => log_layer,
+        };
+        Some(log_layer)
+    }
+
     /// The per-request span and the access log.
     ///
-    /// Called from **every** serving path: `assemble_app` (the three
-    /// single-tenant paths) and both `runserver_tenancy` variants, which
-    /// do not go through `assemble_app` at all — they build a
-    /// `server::Builder` directly.
+    /// Called from the `assemble_app` serving paths. The two
+    /// `runserver_tenancy` variants do **not** call this: they hand
+    /// their router to `server::Builder`, which merges the tenant admin
+    /// in afterwards and dispatches the operator console on a sibling
+    /// branch, so a layer applied here would reach neither. Those paths
+    /// pass [`Self::access_log_layer`] to `Builder::observability`,
+    /// which applies it to the outermost router instead.
     ///
-    /// That distinction was missed on the first cut, and it mattered
-    /// most exactly where it was missed. This replaced the access log's
-    /// old home inside `apply_settings_layers`, so a multi-tenant app
-    /// that called `.with_settings_from_env()` went from having a
-    /// request log to having none — a regression in the one project
-    /// shape #1480 was opened about. `every_serving_path_is_observable`
-    /// pins it now.
+    /// That five-paths-not-one distinction was missed on the first cut,
+    /// and it mattered most exactly where it was missed. This replaced
+    /// the access log's old home inside `apply_settings_layers`, so a
+    /// multi-tenant app that called `.with_settings_from_env()` went
+    /// from having a request log to having none — a regression in the
+    /// one project shape #1480 was opened about.
+    /// `every_serving_path_is_observable` pins it now.
     ///
     /// Mounting here rather than in the settings layers is still the
     /// point: that path only runs when the app calls
@@ -972,41 +1000,62 @@ impl Cli {
     /// correlation — which is exactly the "logs arrive as loose traces"
     /// symptom.
     ///
-    /// Order matters. The span is applied last so it is **outermost**:
-    /// every layer below it, the access log included, runs inside it,
-    /// and `tenant_log::record` can fill the span's `tenant` field once
-    /// the tenancy middleware resolves one. A handler's own events then
-    /// inherit it for free.
+    /// # Feature gates
+    ///
+    /// `access_log` needs `admin` **or** `tenancy`; `tracing_layer` and
+    /// `request_id` need `admin`. A build with neither — `sqlite,manage`
+    /// is the one CI checks — has no layers to mount, and this returns
+    /// the router untouched.
+    ///
+    /// The gate is on the *body*, not the function, so every caller
+    /// keeps one shape and no call site grows a `#[cfg]`. Leaving it off
+    /// entirely is what broke `feature_combos (sqlite,manage)` and
+    /// `(postgres,manage)`: the mount referenced modules that were
+    /// configured out, so the crate did not compile at all on those
+    /// combinations.
+    #[allow(unused_variables, clippy::needless_pass_by_value)]
     fn mount_observability(&self, api: Router) -> Router {
-        use crate::access_log::AccessLogRouterExt as _;
-        use crate::request_id::RequestIdRouterExt as _;
+        #[cfg(any(feature = "admin", feature = "tenancy"))]
+        {
+            use crate::access_log::AccessLogRouterExt as _;
 
-        if !self.access_log_enabled() {
-            return api;
+            let Some(log_layer) = self.access_log_layer() else {
+                return api;
+            };
+
+            // Order is the whole design here, and `.layer()` wraps, so
+            // the LAST call is outermost and runs FIRST on the way in:
+            //
+            //   TracingLayer   outermost — opens the span
+            //     access_log   inside it, so its line inherits the span
+            //       request_id innermost — runs with the span current,
+            //                  so `record` lands on it
+            //       handler
+            //
+            // Putting `request_id` outside the span would leave it
+            // recording onto whatever span happened to be current,
+            // which is usually none — the id would reach the response
+            // header and nothing else.
+            //
+            // The span and the request id are `admin`-only. On a
+            // tenancy-without-admin build the access log still mounts —
+            // it carries `tenant` itself — but there is no span for
+            // handler events to inherit.
+            #[cfg(feature = "admin")]
+            {
+                use crate::request_id::RequestIdRouterExt as _;
+                return api
+                    .request_id(crate::request_id::RequestIdLayer::default())
+                    .access_log(log_layer)
+                    .layer(crate::tracing_layer::TracingLayer::new());
+            }
+
+            #[cfg(not(feature = "admin"))]
+            return api.access_log(log_layer);
         }
 
-        let log_layer = crate::access_log::AccessLogLayer::default();
-        #[cfg(feature = "config")]
-        let log_layer = match self.settings_for_layers.as_ref() {
-            Some(s) => log_layer.with_audit_settings(&s.audit),
-            None => log_layer,
-        };
-
-        // Order is the whole design here, and `.layer()` wraps, so the
-        // LAST call is outermost and runs FIRST on the way in:
-        //
-        //   TracingLayer   outermost — opens the span
-        //     access_log   inside it, so its line inherits the span
-        //       request_id innermost — runs with the span current, so
-        //                  `record` lands on it
-        //       handler
-        //
-        // Putting `request_id` outside the span would leave it recording
-        // onto whatever span happened to be current, which is usually
-        // none — the id would reach the response header and nothing else.
-        api.request_id(crate::request_id::RequestIdLayer::default())
-            .access_log(log_layer)
-            .layer(crate::tracing_layer::TracingLayer::new())
+        #[cfg(not(any(feature = "admin", feature = "tenancy")))]
+        api
     }
 
     /// `[logging] access_log = false` turns the request log off.
@@ -1014,6 +1063,12 @@ impl Cli {
     /// Default on: a server that logs no requests is a server you cannot
     /// debug, and the previous default — off unless you found the right
     /// builder call — was not a decision anyone made on purpose.
+    ///
+    /// Gated to match its only caller. Once `mount_observability`'s body
+    /// became conditional, this was dead code on a build with neither
+    /// feature — and `feature_combos` compiles with `-D warnings`, so
+    /// dead code is a build failure there rather than a lint.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
     fn access_log_enabled(&self) -> bool {
         #[cfg(feature = "config")]
         {
@@ -1161,8 +1216,14 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-        let api = self.mount_observability(api);
+        // Not `mount_observability` here: this router is about to be
+        // merged with the tenant admin and dispatched beside the
+        // operator console, and layers applied now would reach neither.
+        // The builder applies them to the outermost router instead.
         let mut builder = crate::server::Builder::from_env().await?.api(api);
+        if let Some(log_layer) = self.access_log_layer() {
+            builder = builder.observability(log_layer);
+        }
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1218,7 +1279,8 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-        let api = self.mount_observability(api);
+        // Not `mount_observability` — see the dispatch path above. The
+        // builder applies these to the outermost router.
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         let registry_url =
             std::env::var("DATABASE_URL")
@@ -1237,6 +1299,9 @@ impl Cli {
             apex,
         )
         .api(api);
+        if let Some(log_layer) = self.access_log_layer() {
+            builder = builder.observability(log_layer);
+        }
         if self.health_endpoints {
             builder = builder.with_health();
         }

@@ -5,7 +5,11 @@ A multi-tenant project has two kinds of administrator, and they never mix:
 - **Operators** run the *deployment*. They live in the registry, sign in at the apex domain, and can reach every tenant.
 - **Tenant users** run *one tenant*. They live in that tenant's database and never see the console.
 
-The operator console is the web interface for the first kind — provisioning tenants, binding hostnames, managing operators, reading the audit trail, and taking a tenant out of service. Everything here is also a [`manage` verb](manage.md#tenancy-commands), because an action that exists on only one surface cannot be automated, and one that exists only in a shell cannot be delegated.
+The operator console is the web interface for the first kind — provisioning tenants, binding hostnames, managing operators, reading the audit trail, and taking a tenant out of service. Nearly everything here is also a [`manage` verb](manage.md#tenancy-commands), because an action that exists on only one surface cannot be automated, and one that exists only in a shell cannot be delegated.
+
+The gap worth knowing about: the console can migrate **one** tenant
+(`POST /orgs/{slug}/migrate`), while the CLI's `migrate-tenants` takes no slug
+and runs the whole registry. There is no per-tenant migrate on the command line.
 
 [![The operator console's tenant list — every tenant in the registry, with its storage mode, host pattern and active state, plus actions to provision, migrate and pre-warm](img/operator-console.png)](img/operator-console.png)
 

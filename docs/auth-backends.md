@@ -16,7 +16,9 @@ the `CurrentUser` extractor to read the result.
 > `ApiKeyBackend`, `JwtBackend`, `AuthUser`, `AuthError`) and
 > `rustango::tenancy::{RouterAuthExt, CurrentUser}` — behind the `tenancy`
 > feature. A portable, DB-agnostic registry also lives at
-> `rustango::auth_backends` (always compiled).
+> `rustango::auth_backends`, which needs the internal `_async_trait`
+> feature — pulled in by `cache`, `email`, `jobs` and `oauth2`, so most
+> builds have it, but a minimal one does not.
 >
 > **Runnable version:** every snippet is copied from
 > [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)

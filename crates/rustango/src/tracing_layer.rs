@@ -55,7 +55,6 @@
 
 use std::convert::Infallible;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -77,24 +76,23 @@ impl TracingLayer {
 impl<S> tower::Layer<S> for TracingLayer {
     type Service = TracingService<S>;
     fn layer(&self, inner: S) -> Self::Service {
-        TracingService {
-            inner: Arc::new(tokio::sync::Mutex::new(inner)),
-        }
+        TracingService { inner }
     }
 }
 
-/// The wrapped service. Internal `Arc<Mutex<S>>` so we can safely
-/// `clone()` per-request without requiring `S: Clone`.
+/// The wrapped service.
+///
+/// This held an `Arc<tokio::sync::Mutex<S>>` until the layer was first
+/// actually mounted. The stated reason was to `clone()` per request
+/// "without requiring `S: Clone`" — but the `Service` impl below
+/// requires `S: Clone` regardless, so the mutex bought nothing and put
+/// one contended async lock in front of the entire application on
+/// every request. Holding the plain service and using tower's
+/// ready-clone is the standard shape and needs neither the lock nor an
+/// `Arc`.
+#[derive(Clone)]
 pub struct TracingService<S> {
-    inner: Arc<tokio::sync::Mutex<S>>,
-}
-
-impl<S> Clone for TracingService<S> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
+    inner: S,
 }
 
 impl<S> Service<Request<Body>> for TracingService<S>
@@ -110,20 +108,21 @@ where
     type Future =
         Pin<Box<dyn std::future::Future<Output = Result<Response<Body>, Infallible>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Always ready — we lock the inner service per-call.
-        Poll::Ready(Ok(()))
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
-        let inner = Arc::clone(&self.inner);
+        // tower's ready-clone: the clone is not necessarily ready, so
+        // swap it for the original — which `poll_ready` above has
+        // readied — and keep the fresh clone for next time.
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
         let span = build_request_span(&req);
         Box::pin(
             async move {
                 let started = Instant::now();
-                let mut svc = inner.lock().await.clone();
-                drop(inner);
-                let resp = svc.call(req).await?;
+                let resp = inner.call(req).await?;
                 record_response(&resp, started);
                 Ok(resp)
             }

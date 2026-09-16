@@ -7,10 +7,13 @@ snippets are copied from a compiled, CI-tested file here:
 
 | Doc | Backing test |
 |-----|--------------|
-| `docs/auth-passwords.md` | `tests/auth_passwords.rs` |
-| `docs/auth-sessions.md`  | `tests/auth_sessions.rs`  |
+| `docs/auth-passwords.md`  | `tests/auth_passwords.rs`  |
+| `docs/auth-sessions.md`   | `tests/auth_sessions.rs`   |
+| `docs/auth-jwt.md`        | `tests/auth_jwt.rs`        |
+| `docs/auth-jwt-api.md`    | `tests/auth_jwt_api.rs`    |
+| `docs/auth-decorators.md` | `tests/auth_decorators.rs` |
 
-More flows (JWT, API keys, OAuth2, TOTP, passkey, …) land in later batches.
+More flows (API keys, OAuth2, TOTP, passkey, …) land in later batches.
 
 ## Run
 
@@ -19,7 +22,6 @@ More flows (JWT, API keys, OAuth2, TOTP, passkey, …) land in later batches.
 cargo test --test auth_passwords
 
 # everything (what CI runs)
-cargo run -- migrate        # apply migrations (needs DATABASE_URL → Postgres)
 cargo test
 
 # under SQLite (no server; pure/in-memory tests don't need a DB)

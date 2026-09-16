@@ -288,7 +288,7 @@ Migrations create your database tables, same idea as `php artisan migrate` or `r
 cargo run -- migrate
 ```
 
-The first compile takes ~2 minutes (Rust builds everything from source). A fresh project ships no migration files yet, so you'll see `nothing to migrate (already up to date)` — `migrate` still sets up the framework's audit-log table so audited models work the moment you add them. You generate your first real migration in Step 9.
+The first compile takes ~2 minutes (Rust builds everything from source). A fresh project ships no migration files of its own yet, but `migrate` is not a no-op: it first generates the framework's own migrations from the compiled models and applies them, so you'll see a few `applied …` lines rather than `nothing to migrate`. (That message appears only once everything — framework and project — is already up to date.) It also creates the audit-log table, so audited models work the moment you add them. You generate your first project migration in Step 9.
 
 Check the migration state:
 

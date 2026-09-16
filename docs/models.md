@@ -351,8 +351,15 @@ Declared on the **model**:
   `.where_(Post::author_id.eq(42))` for compile-checked filters.
 - **Finders** — `find(pk, &pool)` → `Option<Self>`; `find_or_fail(pk, &pool)` →
   `Self` (errors if absent); `find_many(pks, &pool)`; `find_or_insert(...)`.
-- **Writers** — `save`/`save_pool`, `save_partial(&["title"], &pool)` (update
-  only some columns), `insert_pool` (explicit insert), `delete`.
+- **Writers** — `save_pool` (insert-or-update), `insert_pool` (explicit insert),
+  `delete_pool`, and `save_partial(&["title"], &pool)` (update only some
+  columns). The bare `save` / `insert` / `delete` are **not** aliases of these:
+  they take a driver-specific `sqlx::PgPool` and are `#[cfg(feature = "postgres")]`,
+  so on a `sqlite` or `mysql` build they do not exist at all. The `_pool` family
+  takes `rustango::sql::Pool` and works on all three — write those unless you
+  know you are on Postgres. The inverted naming is tracked in
+  [#1293](https://github.com/ujeenet/rustango/issues/1293); see
+  [api-conventions](api-conventions.md#functions).
 - **Soft delete** (when enabled) — `soft_delete`, `restore`, `force_delete`;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -419,10 +426,15 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `default` | `"sql literal"` | column DEFAULT |
 | `null` | flag | nullable (or use `Option<T>`) |
 | `unique` | flag | unique constraint |
+| `index` / `index(...)` | flag, or `unique`, `name`, `method` | single-column index on this field |
 | `choices` | `"v:Label, …"` | enumerated values |
 | `min` / `max` | number | range validation |
 | `blank` | flag | allow empty in forms/admin |
 | `editable` | `true`/`false` | form/admin editability |
+| `verbose_name` | `"Label"` | human label for the field in forms/admin |
+| `help_text` | `"…"` | help string rendered under the form/admin widget |
+| `validators` | `"name, name"` | named validators to run on this field |
+| `related_name` | `"posts"` | reverse-accessor name on the FK's target |
 | `auto_now` | flag | set to now on every save |
 | `auto_now_add` | flag | set to now on insert |
 | `auto_uuid` | flag | Rust-side UUID v4 (on `Auto<Uuid>`) |

@@ -207,7 +207,14 @@ tables, whenever you run `migrate` / provision a tenant. There is no lazy
 > the system-migration ledger *without* re-running its `CREATE TABLE`, and your
 > existing rows are left untouched. **No manual step is required** — the upgrade
 > that would otherwise fail with `relation already exists` / `table already exists`
-> now just works. (Introduced in 0.51.1; see the CHANGELOG.)
+> now just works.
+>
+> **Upgrade to 0.51.2 or later, not 0.51.1.** 0.51.0 moved the media tables onto
+> system migrations and 0.51.1 claimed this reconcile — cross-version testing
+> against real 0.46–0.50 databases showed neither worked, and **both are yanked**.
+> The reconcile guard demanded a migration be purely `CreateTable`, while a
+> generated initial migration is tables *and* indexes, so it bailed on every real
+> one. 0.51.2 is the release where this actually fires (#1167).
 
 ---
 

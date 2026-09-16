@@ -13,6 +13,7 @@ gedacht, während du vorankommst.
 - [Grundlagen der Web-APIs](#grundlagen-der-web-apis) — was eine API ist, in alltäglichen Worten
 - [Rustango-Bausteine](#rustango-bausteine) — die Teile, die du zusammensetzt
 - [Daten und die Datenbank](#daten-und-die-datenbank)
+- [Mandantenfähigkeit (multi-tenancy)](#mandantenfähigkeit-multi-tenancy) — nur wenn du mehrere Kunden aus einem Deployment bedienst
 - [Ein paar Rust-Wörter](#ein-paar-rust-wörter) — damit die Codeblöcke nicht angsteinflößend sind
 - [Frameworks, mit denen wir vergleichen](#frameworks-mit-denen-wir-vergleichen)
 
@@ -161,6 +162,44 @@ auf einen `Author` zeigt. So referenzieren sich Zeilen gegenseitig.
 **Tri-Dialekt (tri-dialect)** — „funktioniert gleich auf allen drei unterstützten Datenbanken" —
 PostgreSQL, MySQL und SQLite. Wenn ein Feature tri-dialektfähig ist, kannst du die
 Datenbank wechseln, ohne deinen Code zu ändern.
+
+---
+
+## Mandantenfähigkeit (multi-tenancy)
+
+Hinter dem `tenancy`-Feature. Überspringe diesen Abschnitt, wenn du eine
+gewöhnliche App für einen einzelnen Kunden baust — dann trifft nichts davon zu.
+
+**Mandantenfähigkeit (multi-tenancy)** — ein Deployment betreiben, das mehrere
+Kunden bedient, von denen jeder nur die eigenen Daten sieht. Rustango löst aus
+dem Hostnamen auf, zu welchem Kunden eine Anfrage gehört, und leitet sie für den
+Rest der Anfrage auf dessen Daten.
+
+**Mandant / Tenant (oder Org)** — ein Kunde in einem solchen Deployment. Ein
+Mandant hat einen Slug (`acme`), ein Host-Muster (`acme.example.com`) und eigene
+Benutzer. `Org` ist die Registry-Zeile; „Mandant" ist das, was sie beschreibt.
+
+**Registry** — die kleine Datenbank, die die Mandanten auflistet: wer sie sind,
+wo ihre Daten liegen, ob sie aktiv sind. Getrennt von den Daten jedes Mandanten
+und die eine Datenbank, die das Framework immer braucht.
+
+**Storage-Modus** — wie die Daten eines Mandanten von denen der Nachbarn
+getrennt werden: eine eigene Datenbank oder ein eigenes Schema in einer
+gemeinsamen. Pro Mandant beim Provisionieren gewählt.
+
+**Operator** — ein Administrator des *Deployments*, nicht eines Mandanten.
+Operatoren legen Mandanten an und binden Hostnamen; sie sind keine Benutzer
+eines Mandanten und leben in der Registry. Siehe
+[Operator-Konsole](operator-console.md).
+
+**Operator-Konsole** — die Weboberfläche, die Operatoren benutzen: Mandanten
+provisionieren, Hostnamen binden, weitere Operatoren verwalten, den Audit-Trail
+lesen. Fast jede Aktion darin ist auch ein `manage`-Verb, lässt sich also
+skripten.
+
+**Provisionieren (provisioning)** — einen Mandanten anlegen: seine Datenbank
+oder sein Schema erzeugen, Migrationen hineinlaufen lassen und ihn in der
+Registry eintragen.
 
 ---
 

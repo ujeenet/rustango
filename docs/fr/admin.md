@@ -142,9 +142,9 @@ détail.
 | `readonly_fields` | `"created_at"` | Champs affichés en texte (sans saisie) sur le formulaire de modification. |
 | `raw_id_fields` | `"author_id"` | Champs FK édités via une saisie d'id brut + un lien de recherche (bien adapté aux grandes tables cibles). |
 | `autocomplete_fields` | `"author_id"` | Champs FK édités via un typeahead Ajax adossé à l'endpoint `__autocomplete` de la cible. |
-| `prepopulated_fields` | `"slug:title"` | Remplit automatiquement un champ en slugifiant un autre au fur et à mesure de la saisie (`cible:source` ; combinez les sources avec `+`). |
+| `prepopulated_fields` | `"slug:title"` | Remplit automatiquement un champ en slugifiant un autre au fur et à mesure de la saisie (`target:source` ; combinez les sources avec `+`). |
 | `list_select_related` | `"all"` / `"none"` / `"author_id"` | Contrôle la JOIN automatique des colonnes FK dans la requête de liste. `"all"` (par défaut) joint chaque FK ; `"none"` désactive ; une liste CSV restreint aux FK nommées. |
-| `formfield_overrides` | `"status:textarea"` | Remplace le widget de formulaire d'un champ (`champ:widget`) — voir le [tableau des widgets](#widgets-de-formulaire). |
+| `formfield_overrides` | `"status:textarea"` | Remplace le widget de formulaire d'un champ (`field:widget`) — voir le [tableau des widgets](#widgets-de-formulaire). |
 | `actions_on_top` | `true` | Affiche la barre d'actions groupées au-dessus de la liste (par défaut `true`). |
 | `actions_on_bottom` | `false` | Affiche une seconde barre d'actions sous la liste (par défaut `false`). |
 
@@ -210,7 +210,7 @@ Chaque champ affiche une saisie correspondant à son type par défaut —
 `<input type="number">` pour les entiers, `type="date"`/`datetime-local` pour
 les dates, `type="checkbox"` pour les booléens, un `<textarea>` pour les
 chaînes longues, un `<select>` pour les colonnes FK, et ainsi de suite.
-Remplacez-le par champ avec `formfield_overrides = "champ:widget"` :
+Remplacez-le par champ avec `formfield_overrides = "field:widget"` :
 
 | Widget | S'applique à | Affiche |
 |---|---|---|
@@ -499,6 +499,7 @@ sauf indication contraire) :
 | `with_user_perms([codenames])` | Conditionne les tables sur `{table}.view/add/change/delete`. |
 | `register_action(table, name, handler)` | Enregistre un gestionnaire d'action groupée. |
 | `with_session_auth(secret)` | Exige une connexion par cookie (`/login` + `/logout`). |
+| `logout_url(u)` | Cible POST du bouton Déconnexion de la barre latérale. Par défaut `{admin_prefix}/logout` ; les admins de tenant la pointent vers leur route de déconnexion tenancy. |
 | `secure_cookies(bool)` | Définit le drapeau `Secure` (HTTPS uniquement) sur le cookie de session. |
 | `theme_mode(m)` | `"light"` / `"dark"` / `"auto"`. |
 | `brand_logo_url(url)` | Logo au-dessus du titre. |

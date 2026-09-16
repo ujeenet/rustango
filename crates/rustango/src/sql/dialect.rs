@@ -320,13 +320,16 @@ pub trait Dialect: Send + Sync {
     /// default handed SQLite PostgreSQL syntax it cannot parse, safe
     /// only because every current caller happens to reject SQLite
     /// before asking. The next caller would not have known to.
-    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
-        Some(format!(
-            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-            self.quote_ident(table),
-            self.quote_ident(name)
-        ))
-    }
+    ///
+    /// **No default body, deliberately.** A default returning the
+    /// PostgreSQL form is how #559 happened: MySQL inherited
+    /// `DROP CONSTRAINT IF EXISTS` and emitted SQL its parser rejects.
+    /// Leaving the default in place after fixing it would mean a fourth
+    /// dialect inherits the same wrong answer silently — the failure
+    /// this method exists to remove. `by_dialect!` refuses to compile
+    /// when a dialect is unaccounted for; this is that rule for the
+    /// trait.
+    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String>;
 
     /// `ALTER TABLE <table> DROP ...` for a named foreign key.
     ///
@@ -334,14 +337,9 @@ pub trait Dialect: Send + Sync {
     /// is PostgreSQL's idempotent `DROP CONSTRAINT IF EXISTS`, and MySQL
     /// overrides it with `DROP FOREIGN KEY`, which is not idempotent.
     /// `None` on dialects with no `ALTER TABLE … DROP CONSTRAINT`, as
-    /// for [`Dialect::drop_check_constraint_sql`].
-    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
-        Some(format!(
-            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-            self.quote_ident(table),
-            self.quote_ident(name)
-        ))
-    }
+    /// for [`Dialect::drop_check_constraint_sql`] — including its
+    /// reason for having no default body.
+    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String>;
 
     /// Whether `CREATE [UNIQUE] INDEX ... WHERE <expr>` partial-index
     /// syntax is supported. PG and SQLite (3.8+) both ship it natively;

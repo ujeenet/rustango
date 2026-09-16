@@ -49,7 +49,13 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
 fn compile_with_capture<F: FnOnce()>(f: F) -> String {
     let buf: CaptureWriter = CaptureWriter::default();
     let buf_clone = buf.clone();
+    // `with_ansi(false)`: enabling the `ansi` feature (#1480) made
+    // `fmt` colour by default, and escape codes land *between* the
+    // characters a substring assertion looks for — `tenant=acme`
+    // becomes `\x1b[3mtenant\x1b[0m\x1b[2m=\x1b[0macme`. A test that
+    // reads rendered output must ask for plain text.
     let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_writer(move || buf_clone.clone())
         .with_max_level(tracing::Level::WARN)
         .with_target(true)
