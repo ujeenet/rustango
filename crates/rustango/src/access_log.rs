@@ -13,9 +13,14 @@
 //! Emits one `tracing::info!` event per completed request:
 //!
 //! ```text
-//! INFO http.request.method=GET url.path=/api/posts http.response.status_code=200
-//!      duration_ms=12 client.address=192.0.2.1 tenant=acme
+//! INFO http.request.method=GET url.path=/api/posts url.query=page=2
+//!      http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
 //! ```
+//!
+//! `url.path` is the path alone and `url.query` the redacted query
+//! string, per OpenTelemetry — not one concatenated value. Grouping by a
+//! `url.path` that carried the query would give a collector unbounded
+//! cardinality under a name that promises the opposite.
 //!
 //! Field names are the OpenTelemetry HTTP semantic conventions, shared
 //! with [`crate::tracing_layer`]. Before #1480 the two layers named
@@ -207,14 +212,22 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
     let started = Instant::now();
     let method = req.method().clone();
     let raw_query = req.uri().query();
-    let path = match raw_query {
-        Some(q) => format!(
-            "{}?{}",
-            req.uri().path(),
-            redact_query(q, &cfg.redact_query_params),
-        ),
-        None => req.uri().path().to_owned(),
-    };
+    // Path and query are separate fields, because OpenTelemetry defines
+    // `url.path` as the path component alone.
+    //
+    // They used to be concatenated into one `path` value, which was
+    // harmless while the field was called `path` and became wrong the
+    // moment it was renamed `url.path`: a collector grouping by that
+    // field would mix `/api/posts` with `/api/posts?page=2` and every
+    // other query string, giving the access log unbounded cardinality
+    // under a name that promises the opposite. `tracing_layer` had it
+    // right all along — path only, `url.query` separate — so this is
+    // also what makes the two layers agree on the *value* and not just
+    // the spelling.
+    let path = req.uri().path().to_owned();
+    let query = raw_query
+        .map(|q| redact_query(q, &cfg.redact_query_params))
+        .unwrap_or_default();
     let ip = if cfg.include_ip {
         resolve_client_ip(&req, cfg.trust_proxy_headers)
     } else {
@@ -262,6 +275,7 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
         tracing::warn!(
             "http.request.method" = %method,
             "url.path" = %path,
+            "url.query" = %query,
             "http.response.status_code" = status,
             duration_ms,
             "client.address" = client_address,
@@ -272,6 +286,7 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
         tracing::warn!(
             "http.request.method" = %method,
             "url.path" = %path,
+            "url.query" = %query,
             "http.response.status_code" = status,
             duration_ms,
             "client.address" = client_address,
@@ -281,6 +296,7 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
         tracing::info!(
             "http.request.method" = %method,
             "url.path" = %path,
+            "url.query" = %query,
             "http.response.status_code" = status,
             duration_ms,
             "client.address" = client_address,

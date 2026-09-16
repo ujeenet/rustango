@@ -187,8 +187,8 @@ Quellpositionen (nützlich in der Entwicklung, laut in Produktion), und
 `.without_targets()` blendet die Target-Spalte aus — tun Sie das nur, wenn Sie
 das Filtern danach aufgegeben haben.
 
-> `format = "compact"` wird in den Settings akzeptiert, rendert aktuell aber wie
-> `pretty`; der Wert ist reserviert. Das ist kein Fehler und warnt nicht.
+> Jeder Format-Wert erreicht seinen eigenen Formatter. `compact` wurde früher
+> akzeptiert und dann wie der Default gerendert — das ist behoben (#1480).
 
 ## Logging aus den Settings konfigurieren
 
@@ -216,7 +216,9 @@ file_rotation = "daily"
 | Schlüssel | Typ | Default | Hinweise |
 |---|---|---|---|
 | `level` | String | `info,sqlx=warn` | `RUST_LOG`-Syntax. Nur genutzt, wenn `RUST_LOG` fehlt |
-| `format` | String | `pretty` | `pretty` / `json` / `compact`. Unbekannte Werte fallen mit einem `warn` auf `pretty` zurück |
+| `format` | String | `full` | `full` / `pretty` / `compact` / `json`. Unbekannte Werte fallen mit einem `warn` auf `full` zurück |
+| `color` | String | `auto` | `auto` / `always` / `never`. `auto` färbt nur ein Terminal und respektiert `NO_COLOR` |
+| `access_log` | bool | `true` | Eine Zeile pro Request, plus die Span, die `tenant` in Handler-Events trägt |
 | `with_thread_ids` | bool | `false` | Thread-ID an jedem Event |
 | `with_line_numbers` | bool | `false` | Quellzeile an jedem Event |
 | `without_targets` | bool | `false` | Target-Spalte ausblenden |
@@ -311,7 +313,7 @@ let app = router.access_log(AccessLogLayer::default());
 ```
 
 ```text
-INFO rustango::access_log: method=GET path=/api/posts status=200 duration_ms=12 ip=192.0.2.1 tenant=acme
+INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
 ```
 
 Das Level trägt Bedeutung, Alarmierung kann also daran ansetzen:

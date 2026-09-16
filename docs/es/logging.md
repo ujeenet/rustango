@@ -187,8 +187,8 @@ posición en el código (útil en desarrollo, ruidoso en producción), y
 `.without_targets()` oculta la columna de target — hazlo solo si has renunciado
 a filtrar por ella.
 
-> `format = "compact"` se acepta en los ajustes pero hoy se renderiza como
-> `pretty`; el valor está reservado. No es un error y no avisa.
+> Cada valor de formato llega a su propio formateador. `compact` se aceptaba y
+> luego se renderizaba como el valor por defecto — corregido (#1480).
 
 ## Configurar el logging desde los ajustes
 
@@ -216,7 +216,9 @@ file_rotation = "daily"
 | Clave | Tipo | Por defecto | Notas |
 |---|---|---|---|
 | `level` | cadena | `info,sqlx=warn` | Sintaxis de `RUST_LOG`. Solo se usa si `RUST_LOG` no está definida |
-| `format` | cadena | `pretty` | `pretty` / `json` / `compact`. Un valor desconocido cae en `pretty` con un `warn` |
+| `format` | cadena | `full` | `full` / `pretty` / `compact` / `json`. Un valor desconocido cae en `full` con un `warn` |
+| `color` | cadena | `auto` | `auto` / `always` / `never`. `auto` colorea solo una terminal y respeta `NO_COLOR` |
+| `access_log` | bool | `true` | Una línea por petición, más el span que lleva `tenant` a los eventos del handler |
 | `with_thread_ids` | bool | `false` | ID de hilo en cada evento |
 | `with_line_numbers` | bool | `false` | Línea de código en cada evento |
 | `without_targets` | bool | `false` | Ocultar la columna de target |
@@ -307,7 +309,7 @@ let app = router.access_log(AccessLogLayer::default());
 ```
 
 ```text
-INFO rustango::access_log: method=GET path=/api/posts status=200 duration_ms=12 ip=192.0.2.1 tenant=acme
+INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
 ```
 
 El nivel tiene significado, así que las alertas pueden basarse en él:

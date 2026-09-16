@@ -162,8 +162,26 @@ the rows above.
 
 | Format | Use for | How |
 |---|---|---|
-| `pretty` | Development — colour, multi-line, readable | default |
+| `full` | The default — one line per event, with span context | default |
+| `pretty` | Development — multi-line, one field per line, source location | `.with_format(Format::Pretty)` |
+| `compact` | Development — terser single line, span fields at the end | `.with_format(Format::Compact)` |
 | `json` | Production — one object per event, for Loki / CloudWatch / Datadog | `.json()` |
+
+All four render differently, which has not always been true: before
+#1480 `install()` called neither `.pretty()` nor `.compact()`, so both
+values produced `full` output.
+
+### Colour
+
+Colour is on when stdout is a terminal, and off when it is not — piping
+to a file or running under CI needs no configuration. `NO_COLOR` is
+honoured. `json` and the file sink are never coloured.
+
+| `color` | Behaviour |
+|---|---|
+| `auto` | Colour iff stdout is a terminal and `NO_COLOR` is unset. The default |
+| `always` | Colour even when piped |
+| `never` | Never colour |
 
 ```rust,ignore
 rustango::logging::Setup::new()
@@ -183,8 +201,8 @@ Two display knobs are worth knowing: `.with_line_numbers()` adds source
 locations (useful in dev, noisy in prod), and `.without_targets()` hides the
 target column — do that only if you have given up on filtering by it.
 
-> `format = "compact"` is accepted in settings but currently renders as
-> `pretty`; the value is reserved. It is not an error and does not warn.
+> Each format value reaches its own formatter. `compact` used to be
+> accepted and then render as the default — that is fixed (#1480).
 
 ## Configuring logging from settings
 
@@ -196,6 +214,7 @@ without a rebuild. The section is `[logging]`:
 [logging]
 level             = "info,sqlx=warn"
 format            = "pretty"
+color             = "auto"
 with_line_numbers = true
 ```
 
@@ -212,7 +231,9 @@ file_rotation = "daily"
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `level` | string | `info,sqlx=warn` | `RUST_LOG` syntax. Used only when `RUST_LOG` is unset |
-| `format` | string | `pretty` | `pretty` / `json` / `compact`. Unknown values fall back to `pretty` with a `warn` |
+| `format` | string | `full` | `full` / `pretty` / `compact` / `json`. Unknown values fall back to `full` with a `warn` |
+| `color` | string | `auto` | `auto` / `always` / `never`. `auto` colours only a terminal, and honours `NO_COLOR` |
+| `access_log` | bool | `true` | One line per request, plus the span that carries `tenant` into handler events |
 | `with_thread_ids` | bool | `false` | Thread id on every event |
 | `with_line_numbers` | bool | `false` | Source line on every event |
 | `without_targets` | bool | `false` | Hide the target column |
@@ -300,7 +321,7 @@ let app = router.access_log(AccessLogLayer::default());
 ```
 
 ```text
-INFO rustango::access_log: method=GET path=/api/posts status=200 duration_ms=12 ip=192.0.2.1 tenant=acme
+INFO rustango::access_log: http.request.method=GET url.path=/api/posts url.query=page=2 http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
 ```
 
 The level carries meaning, so alerting can key on it:
@@ -378,11 +399,18 @@ The span carries `http.request.method`, `url.path`, `url.query`,
 recorded too, which is what a `tracing-opentelemetry` layer picks up to join
 the trace.
 
-This layer is worth installing for the tenant field alone: because the fields
-sit on the *span*, every event emitted during the request — including the
-ORM's — carries them in span context, with no subsystem knowing what a tenant
-is. It is **not** installed by default; nothing in `server::Builder`, `Cli` or
-the scaffolder adds it.
+This layer earns its keep through the tenant field: because the fields sit on
+the *span*, every event emitted during the request — including the ORM's —
+carries them in span context, with no subsystem knowing what a tenant is.
+
+**`Cli` installs it for you**, on every serving path, together with the access
+log. Set `[logging] access_log = false` to turn both off. Before #1480 nothing
+in the framework mounted it, so a `tracing::info!` in a handler had no
+enclosing span — no tenant, no correlation — which is what made handler logs
+read as loose, context-free lines.
+
+Building a server directly through `server::Builder` still mounts nothing;
+add the layer yourself as shown above.
 
 ## Logging in tests
 
