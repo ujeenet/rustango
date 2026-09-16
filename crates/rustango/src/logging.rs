@@ -90,8 +90,13 @@ struct FileSink {
 /// Split out because `json` used to be a `bool` and `pretty`/`compact`
 /// were strings the installer ignored — three documented values, two
 /// behaviours, and no type that said so (#1480).
+/// `#[non_exhaustive]` for the same reason [`crate::config::LoggingSettings`]
+/// is: a variant added later would otherwise break every downstream
+/// `match`. Both were introduced in the release that learned this the
+/// hard way, so both get it now rather than one of them later.
 #[cfg(feature = "runtime")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Format {
     /// Single-line, the default. `tracing_subscriber`'s `Full`.
     #[default]
@@ -105,8 +110,24 @@ pub enum Format {
 }
 
 /// When to emit ANSI colour.
+/// # `always` does not reach `#[rustango::main]`
+///
+/// That macro installs a subscriber before your `main` body runs, using
+/// `try_init` so a second installer does not panic — which means a
+/// later `Setup::install()` is a **no-op**, and this setting with it.
+/// The macro applies the [`Color::Auto`] rule unconditionally: colour
+/// on a terminal, never under `NO_COLOR`, never into a redirected file.
+///
+/// So `color = "always"` and `color = "never"` take effect only when
+/// you install the subscriber yourself — `rustango::logging::setup()`
+/// or `Setup::new()…install()` from a `main` that is not the macro.
+/// This is a known gap rather than a design: the macro has no access to
+/// `[logging]` at the point it installs. Tracked as a follow-up.
+///
+/// `#[non_exhaustive]` — see [`Format`].
 #[cfg(feature = "runtime")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Color {
     /// Colour only when stdout is a terminal. The default.
     #[default]

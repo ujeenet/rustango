@@ -50,9 +50,18 @@ looked correct and had passing tests.
   `duration_ms=0` on every sub-millisecond request.
 
 - **`LoggingSettings` gained `color` and `access_log`, and is now
-  `#[non_exhaustive]`.** A struct literal naming every field no longer
-  compiles; use `..Default::default()`. The `#[non_exhaustive]` is so this is
-  the *last* release in which adding a logging setting breaks a caller.
+  `#[non_exhaustive]`.** A struct literal no longer compiles. Build the default
+  and assign — the fields are `pub`:
+
+  ```rust
+  let mut logging = rustango::config::LoggingSettings::default();
+  logging.level = Some("debug".into());
+  ```
+
+  Note **`..Default::default()` does not work either**: `#[non_exhaustive]`
+  forbids every struct expression outside the defining crate, functional update
+  syntax included (`error[E0639]`). The `#[non_exhaustive]` is so this is the
+  *last* release in which adding a logging setting breaks a caller at all.
 
 - **`Dialect` gained `drop_check_constraint_sql` and `drop_foreign_key_sql`.**
   Both have default bodies that `unimplemented!` rather than falling through to
