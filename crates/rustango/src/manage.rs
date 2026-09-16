@@ -991,20 +991,38 @@ impl Cli {
     /// configured out, so the crate did not compile at all on those
     /// combinations.
     #[allow(unused_variables, clippy::needless_pass_by_value)]
+    /// The configured access-log layer, or `None` when
+    /// `[logging] access_log = false`.
+    ///
+    /// Split out of [`Self::mount_observability`] because the
+    /// multi-tenant path cannot mount here: it hands its router to
+    /// `server::Builder`, which merges the tenant admin in afterwards
+    /// and dispatches the operator console on a sibling branch. Layers
+    /// applied to the api router never reach either (axum: "routes
+    /// added after `layer` is called will not have the middleware
+    /// added"). The builder takes this layer and applies it to the
+    /// outermost router instead, where every branch inherits it.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    fn access_log_layer(&self) -> Option<crate::access_log::AccessLogLayer> {
+        if !self.access_log_enabled() {
+            return None;
+        }
+        let log_layer = crate::access_log::AccessLogLayer::default();
+        #[cfg(feature = "config")]
+        let log_layer = match self.settings_for_layers.as_ref() {
+            Some(s) => log_layer.with_audit_settings(&s.audit),
+            None => log_layer,
+        };
+        Some(log_layer)
+    }
+
     fn mount_observability(&self, api: Router) -> Router {
         #[cfg(any(feature = "admin", feature = "tenancy"))]
         {
             use crate::access_log::AccessLogRouterExt as _;
 
-            if !self.access_log_enabled() {
+            let Some(log_layer) = self.access_log_layer() else {
                 return api;
-            }
-
-            let log_layer = crate::access_log::AccessLogLayer::default();
-            #[cfg(feature = "config")]
-            let log_layer = match self.settings_for_layers.as_ref() {
-                Some(s) => log_layer.with_audit_settings(&s.audit),
-                None => log_layer,
             };
 
             let api = api.access_log(log_layer);
@@ -1185,8 +1203,14 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-        let api = self.mount_observability(api);
+        // Not `mount_observability` here: this router is about to be
+        // merged with the tenant admin and dispatched beside the
+        // operator console, and layers applied now would reach neither.
+        // The builder applies them to the outermost router instead.
         let mut builder = crate::server::Builder::from_env().await?.api(api);
+        if let Some(log_layer) = self.access_log_layer() {
+            builder = builder.observability(log_layer);
+        }
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1242,7 +1266,8 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
-        let api = self.mount_observability(api);
+        // Not `mount_observability` — see the dispatch path above. The
+        // builder applies these to the outermost router.
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         let registry_url =
             std::env::var("DATABASE_URL")
@@ -1261,6 +1286,9 @@ impl Cli {
             apex,
         )
         .api(api);
+        if let Some(log_layer) = self.access_log_layer() {
+            builder = builder.observability(log_layer);
+        }
         if self.health_endpoints {
             builder = builder.with_health();
         }

@@ -61,6 +61,18 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// before the admin fallback so they take precedence over the
     /// admin's catch-all.
     static_dirs: Vec<(String, std::path::PathBuf)>,
+    /// Access-log layer to apply to the **outermost** router, set by
+    /// [`Builder::observability`]. `None` leaves the server unlogged.
+    ///
+    /// It has to be applied here rather than by the caller. `Cli` used
+    /// to layer its api router before handing it over, but this builder
+    /// then merges the tenant admin into that router and dispatches the
+    /// operator console on a sibling branch — and axum's own rule is
+    /// that "routes added after `layer` is called will not have the
+    /// middleware added". So the entire tenant-admin surface and the
+    /// whole operator console served with no access log and no request
+    /// span, on the multi-tenant path #1480 was opened about.
+    observability: Option<crate::access_log::AccessLogLayer>,
     _phantom: PhantomData<DB>,
 }
 
@@ -121,6 +133,7 @@ impl<DB: Database> Builder<DB> {
             health_endpoints: false,
             provisioning_dir: None,
             static_dirs: Vec::new(),
+            observability: None,
             _phantom: PhantomData,
         }
     }
@@ -137,6 +150,25 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn with_health(mut self) -> Self {
         self.health_endpoints = true;
+        self
+    }
+
+    /// Log every request this server answers, on every serving branch.
+    ///
+    /// Applied to the **outermost** router in [`Self::into_router`], so
+    /// the tenant app, the tenant admin merged into it, the operator
+    /// console on the apex branch and the health endpoints all inherit
+    /// it. Layering the api router before handing it here does not do
+    /// that — the admin is merged in afterwards and the operator
+    /// console is a sibling — which is how the multi-tenant path ended
+    /// up with the two surfaces that most need attribution being the
+    /// two that had none (#1480).
+    ///
+    /// `Cli` calls this for you from `[logging]`; call it directly only
+    /// when building the server by hand.
+    #[must_use]
+    pub fn observability(mut self, layer: crate::access_log::AccessLogLayer) -> Self {
+        self.observability = Some(layer);
         self
     }
 
@@ -646,6 +678,31 @@ impl<DB: Database> Builder<DB> {
                 }
             }
         }));
+
+        // Observability goes on the OUTERMOST router, after both
+        // branches are behind the Host dispatch, so tenant app, tenant
+        // admin, operator console and the health endpoints all carry
+        // it. Anything layered on the api router before it reached this
+        // builder covered only the api router (#1480).
+        let app = match self.observability {
+            Some(log_layer) => {
+                use crate::access_log::AccessLogRouterExt as _;
+                let app = app.access_log(log_layer);
+                // The span and the request id are `admin`-only, matching
+                // `Cli::mount_observability`: a tenancy-without-admin
+                // build still gets the access log, which carries
+                // `tenant` itself, but has no span for handler events to
+                // inherit.
+                #[cfg(feature = "admin")]
+                let app = {
+                    use crate::request_id::RequestIdRouterExt as _;
+                    app.request_id(crate::request_id::RequestIdLayer::default())
+                        .layer(crate::tracing_layer::TracingLayer::new())
+                };
+                app
+            }
+            None => app,
+        };
 
         Ok(app)
     }
