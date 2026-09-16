@@ -139,12 +139,20 @@ use rustango::test_db::with_rollback;
 
 #[tokio::test]
 async fn creating_a_post_persists_it() {
-    with_rollback(&pool, |tx| async move {
+    with_rollback(&pool, |tx| Box::pin(async move {
         // ... insert + assert against `tx` ...
         // everything here is rolled back when the closure returns
-    }).await;
+        Ok(())
+    })).await.unwrap();
 }
 ```
+
+The `Box::pin` is required, not stylistic: the bound is
+`for<'tx> FnOnce(&'tx mut PoolTx<'_>) -> Pin<Box<dyn Future<…> + Send + 'tx>>`,
+which is how the closure gets to borrow `tx` across its own await points. The
+closure returns `Result<T, ExecError>`, and so does `with_rollback` — the
+rollback happens either way, so the `unwrap` is about your assertions, not
+about cleanup.
 
 For SQLite, the `*_sqlite_live.rs` tests throughout this repo use an in-memory
 database per test instead — also fully isolated, with zero external setup.

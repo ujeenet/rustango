@@ -32,12 +32,16 @@ cd crates/rustango/examples/tenant_user_extension
 # Sanity check (no DB)
 cargo test --test bootstrap_migration
 
-# Materialize the bootstrap migration with AppUser's schema —
-# `migrations/` ships empty so the verb writes both 0001 JSONs.
-cargo run -- init-tenancy
-
-# Apply registry + tenant migrations to the configured DB
+# Export the URL first. Every verb below opens a pool — only `help`,
+# `version`, `docs`, `startapp`, `showurls` and `showmodels` are
+# pool-free, so anything else fails with `missing env var 'DATABASE_URL'`
+# before it does any work.
 export DATABASE_URL=postgres://rustango:rustango@localhost:5432/rustango_demo
+
+# Apply registry + tenant migrations. The framework tables are generated
+# from the models and applied here — there is no separate materialize
+# step any more (`init-tenancy` is now a no-op kept so old scripts keep
+# working).
 cargo run -- migrate
 
 # Provision a tenant + user
