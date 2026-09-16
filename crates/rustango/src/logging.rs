@@ -806,7 +806,6 @@ mod rendered {
     use super::*;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
-    use tracing_subscriber::layer::SubscriberExt as _;
 
     #[derive(Clone, Default)]
     struct Buf(Arc<Mutex<Vec<u8>>>);
