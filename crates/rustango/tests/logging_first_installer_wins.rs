@@ -67,7 +67,13 @@ fn the_second_installer_is_discarded_without_a_word() {
     let second = CaptureWriter::default();
 
     let w = first.clone();
+    // `with_ansi(false)`: enabling the `ansi` feature (#1480) made
+    // `fmt` colour by default, and escape codes land *between* the
+    // characters a substring assertion looks for — `tenant=acme`
+    // becomes `\x1b[3mtenant\x1b[0m\x1b[2m=\x1b[0macme`. A test that
+    // reads rendered output must ask for plain text.
     let _ = tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_writer(move || w.clone())
         .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
         .try_init();
@@ -77,6 +83,7 @@ fn the_second_installer_is_discarded_without_a_word() {
     // install it. The API gives back no signal that it didn't take.
     let w = second.clone();
     let _ = tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_writer(move || w.clone())
         .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
         .try_init();
