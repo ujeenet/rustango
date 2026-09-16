@@ -1019,9 +1019,15 @@ impl Cli {
         {
             use crate::access_log::AccessLogRouterExt as _;
 
-            let Some(log_layer) = self.access_log_layer() else {
-                return api;
-            };
+            // `access_log = false` turns off the access log and nothing
+            // else. It used to `return api` here, which silently also
+            // removed the request span, the `request_id` span field and
+            // the `X-Request-Id` response header — none of which that
+            // setting claims to control, and all of which the setting's
+            // own documented use case ("a service that logs requests at
+            // the edge") still wants. Trace context and request
+            // correlation are not the request log.
+            let log_layer = self.access_log_layer();
 
             // Order is the whole design here, and `.layer()` wraps, so
             // the LAST call is outermost and runs FIRST on the way in:
@@ -1044,14 +1050,19 @@ impl Cli {
             #[cfg(feature = "admin")]
             {
                 use crate::request_id::RequestIdRouterExt as _;
-                return api
-                    .request_id(crate::request_id::RequestIdLayer::default())
-                    .access_log(log_layer)
-                    .layer(crate::tracing_layer::TracingLayer::new());
+                let api = api.request_id(crate::request_id::RequestIdLayer::default());
+                let api = match log_layer {
+                    Some(l) => api.access_log(l),
+                    None => api,
+                };
+                return api.layer(crate::tracing_layer::TracingLayer::new());
             }
 
             #[cfg(not(feature = "admin"))]
-            return api.access_log(log_layer);
+            return match log_layer {
+                Some(l) => api.access_log(l),
+                None => api,
+            };
         }
 
         #[cfg(not(any(feature = "admin", feature = "tenancy")))]
@@ -1221,9 +1232,7 @@ impl Cli {
         // operator console, and layers applied now would reach neither.
         // The builder applies them to the outermost router instead.
         let mut builder = crate::server::Builder::from_env().await?.api(api);
-        if let Some(log_layer) = self.access_log_layer() {
-            builder = builder.observability(log_layer);
-        }
+        builder = builder.observability(self.access_log_layer());
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1299,9 +1308,7 @@ impl Cli {
             apex,
         )
         .api(api);
-        if let Some(log_layer) = self.access_log_layer() {
-            builder = builder.observability(log_layer);
-        }
+        builder = builder.observability(self.access_log_layer());
         if self.health_endpoints {
             builder = builder.with_health();
         }

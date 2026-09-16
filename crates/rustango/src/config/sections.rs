@@ -753,8 +753,20 @@ pub struct AuditSettings {
 /// builder users construct manually for ad-hoc setups; installing
 /// via Settings + [`crate::manage::Cli::with_logging`] just
 /// removes the boilerplate.
+/// # Constructing one by hand
+///
+/// Use `..Default::default()`; the struct is `#[non_exhaustive]`.
+///
+/// This release added `color` and `access_log`, and a struct literal
+/// naming every field stopped compiling — a SemVer-major change shipped
+/// in a patch. Marking it now means that is the *last* time: a field
+/// added later cannot break a caller who spreads the default, and the
+/// compiler points at the construction site rather than leaving it to a
+/// changelog nobody reads. The struct is deserialized from `[logging]`
+/// in practice, so this costs almost nobody anything.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct LoggingSettings {
     /// `RUST_LOG`-style env filter applied when the actual
     /// `RUST_LOG` env var isn't set. Examples: `"info"`,

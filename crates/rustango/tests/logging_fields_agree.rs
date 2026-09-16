@@ -110,7 +110,15 @@ fn field_names(body: &str) -> BTreeSet<String> {
 
 fn access_log_fields() -> BTreeSet<String> {
     let s = src("access_log.rs");
-    field_names(&macro_bodies(&s, &["tracing::info!", "tracing::warn!"]))
+    // `tracing::$level!` too: the three emit sites live inside a local
+    // `macro_rules! emit` so the "query present / absent" branch is not
+    // six hand-maintained copies. Without this needle the scan finds
+    // nothing — which the `parsed 0 fields` assertion below caught the
+    // moment that refactor landed, and is exactly what it is for.
+    field_names(&macro_bodies(
+        &s,
+        &["tracing::info!", "tracing::warn!", "tracing::$level!"],
+    ))
 }
 
 fn tracing_layer_fields() -> BTreeSet<String> {

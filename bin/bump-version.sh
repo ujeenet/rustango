@@ -102,7 +102,15 @@ if $DRY; then
 fi
 
 if ! $ASSUME_YES; then
-  read -r -p "rewrite the files above? [y/N] " reply
+  # `</dev/tty || reply=""` for the reason spelled out at the lockfile
+  # loop below, which had the same bug and was fixed alone: without it a
+  # non-interactive `read` hits EOF, returns non-zero, and under
+  # `set -euo pipefail` the script exits right there — the `*)` arm
+  # never runs, so a `make release` or CI step without a tty died with a
+  # bare exit 1 and no explanation. Reading from the tty also means a
+  # piped stdin cannot answer the prompt by accident.
+  reply=""
+  read -r -p "rewrite the files above? [y/N] " reply </dev/tty || reply=""
   case "$reply" in [yY]|[yY][eE][sS]) ;; *) echo "aborted"; exit 1 ;; esac
 fi
 

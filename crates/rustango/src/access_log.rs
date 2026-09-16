@@ -283,37 +283,53 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
     // what gets shipped to a collector, and renaming at the edge is
     // work every deployment would repeat.
     let client_address = ip.as_deref().unwrap_or("-");
+
+    // `url.query` is emitted only when the request actually had one.
+    //
+    // It used to go out as `url.query=` on every query-less request,
+    // while `tracing_layer`'s span omits the field entirely in that
+    // case — so the two layers this module exists to align still
+    // disagreed about how "absent" looks. OTel says `url.query` SHOULD
+    // be omitted when there is none, and a collector that types it as a
+    // keyword can reject the empty string outright.
+    //
+    // A single event callsite cannot drop one of its fields, so the
+    // presence branch has to be part of the macro invocation. The
+    // macro below keeps that from becoming six hand-maintained copies
+    // that drift apart one edit at a time.
+    macro_rules! emit {
+        ($level:ident $(, $msg:literal)?) => {
+            if query.is_empty() {
+                tracing::$level!(
+                    "http.request.method" = %method,
+                    "url.path" = %path,
+                    "http.response.status_code" = status,
+                    duration_ms,
+                    "client.address" = %client_address,
+                    tenant = %tenant,
+                    $($msg,)?
+                );
+            } else {
+                tracing::$level!(
+                    "http.request.method" = %method,
+                    "url.path" = %path,
+                    "url.query" = %query,
+                    "http.response.status_code" = status,
+                    duration_ms,
+                    "client.address" = %client_address,
+                    tenant = %tenant,
+                    $($msg,)?
+                );
+            }
+        };
+    }
+
     if is_slow {
-        tracing::warn!(
-            "http.request.method" = %method,
-            "url.path" = %path,
-            "url.query" = %query,
-            "http.response.status_code" = status,
-            duration_ms,
-            "client.address" = %client_address,
-            tenant = %tenant,
-            "slow request",
-        );
+        emit!(warn, "slow request");
     } else if is_error {
-        tracing::warn!(
-            "http.request.method" = %method,
-            "url.path" = %path,
-            "url.query" = %query,
-            "http.response.status_code" = status,
-            duration_ms,
-            "client.address" = %client_address,
-            tenant = %tenant,
-        );
+        emit!(warn);
     } else {
-        tracing::info!(
-            "http.request.method" = %method,
-            "url.path" = %path,
-            "url.query" = %query,
-            "http.response.status_code" = status,
-            duration_ms,
-            "client.address" = %client_address,
-            tenant = %tenant,
-        );
+        emit!(info);
     }
 
     response
@@ -384,7 +400,7 @@ fn resolve_client_ip(req: &Request, trust_proxy: bool) -> Option<String> {
 }
 
 /// Default list of query-param names whose values get redacted.
-fn default_redact_params() -> Vec<String> {
+pub(crate) fn default_redact_params() -> Vec<String> {
     vec![
         "password".into(),
         "passwd".into(),
@@ -400,7 +416,13 @@ fn default_redact_params() -> Vec<String> {
 }
 
 /// Replace values of redacted params with `[redacted]` in a raw query string.
-fn redact_query(raw: &str, redact_keys: &[String]) -> String {
+///
+/// `pub(crate)` so [`crate::tracing_layer`] can apply the same
+/// redaction to the span's `url.query`. It used to be private, and the
+/// span recorded the raw string — which put the credentials back on the
+/// very line this function had just cleaned, because the span context
+/// renders alongside the event fields.
+pub(crate) fn redact_query(raw: &str, redact_keys: &[String]) -> String {
     raw.split('&')
         .map(|pair| match pair.split_once('=') {
             Some((k, _)) if redact_keys.iter().any(|r| r.eq_ignore_ascii_case(k)) => {

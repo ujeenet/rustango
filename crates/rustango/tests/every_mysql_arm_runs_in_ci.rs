@@ -139,7 +139,16 @@ fn run_commands(block: &str) -> Vec<String> {
             // than the script it follows, so compare columns.
             let mut cmd = String::new();
             let mut script_indent: Option<usize> = None;
-            for line in chunk.lines() {
+            // `enumerate` because line 0 is the *tail of the `- run:`
+            // line itself* (`" cargo test …"`), whose indent is 1. Using
+            // it as the script's base made every real step afterwards
+            // (indent 6) look like nested script content, so the
+            // "stop at the next step" branch could never fire and a
+            // chunk ran on into the following steps — silently
+            // attributing their `--test` targets to the wrong
+            // `--features`. The base has to come from the first line
+            // *after* the run line.
+            for (n, line) in chunk.lines().enumerate() {
                 let indent = line.len() - line.trim_start().len();
                 let t = line.trim_start();
                 if t.starts_with("- ") {
@@ -149,7 +158,7 @@ fn run_commands(block: &str) -> Vec<String> {
                         Some(base) if indent > base => {}
                         _ => break,
                     }
-                } else if !t.is_empty() && script_indent.is_none() {
+                } else if n > 0 && !t.is_empty() && script_indent.is_none() {
                     script_indent = Some(indent);
                 }
                 cmd.push_str(line);
@@ -562,6 +571,38 @@ jobs:
                 .any(|c| c.contains("delta_mysql_live") && enables_mysql(c)),
             "the preceding comment's `--features mysql` vouched for a step that \
              builds sqlite: {cmds:?}"
+        );
+    }
+
+    /// A chunk must stop at the next step, not swallow it.
+    ///
+    /// With `script_indent` taken from the run-line tail (indent 1),
+    /// every real step at indent 6 counted as nested script, so one
+    /// chunk ran on through the rest of the job — and a target named in
+    /// a later step was attributed to an earlier step's `--features`.
+    /// Here the sqlite step would be read as part of the mysql command.
+    #[test]
+    fn a_command_does_not_swallow_the_following_step() {
+        const JOB: &str = "
+  mysql_live:
+    steps:
+      - run: cargo test -p rustango --features mysql --test alpha_tri
+      - run: cargo test -p rustango --features sqlite --test beta_tri
+";
+        let cmds = run_commands(&job_block(JOB, "mysql_live"));
+        let first = cmds
+            .iter()
+            .find(|c| c.contains("alpha_tri"))
+            .expect("the mysql step went missing");
+        assert!(
+            !first.contains("beta_tri"),
+            "the mysql command swallowed the next step, so `beta_tri` \
+             would be credited to `--features mysql`: {first:?}"
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("beta_tri") && !enables_mysql(c)),
+            "the sqlite step should stand alone and not build mysql: {cmds:?}"
         );
     }
 

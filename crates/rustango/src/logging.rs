@@ -588,7 +588,8 @@ mod tests {
     /// `pretty` and `compact` were both accepted and both discarded, so
     /// three documented values produced two behaviours (#1480). Asserting
     /// the mapping is the cheap half; the expensive half — that the
-    /// output actually differs — is in `logging_formats_differ.rs`.
+    /// output actually differs — is the `rendered` module at the foot of
+    /// this file.
     #[cfg(all(feature = "runtime", feature = "config"))]
     #[test]
     fn every_format_value_maps_to_a_distinct_formatter() {
@@ -617,7 +618,7 @@ mod tests {
         // `Format::Compact` to build a `Full` layer leaves every test in
         // this module green. That is exactly where the original bug was,
         // so it is checked by capturing real output in
-        // `tests/logging_formats_differ.rs`.
+        // the `rendered` module below.
     }
 
     /// Colour: `never` off, `always` on, `auto` decided by the terminal.
@@ -851,10 +852,67 @@ mod rendered {
     /// how the first version of this test stayed green while
     /// `Format::Compact` was pointed at the `Full` formatter.
     fn shape(s: &str) -> String {
-        s.split_whitespace()
-            .filter(|t| !(t.len() > 20 && t.starts_with("20") && t.ends_with('Z')))
-            .collect::<Vec<_>>()
-            .join(" ")
+        // Strip any RFC3339-looking run wherever it appears, not just
+        // whole whitespace-separated tokens.
+        //
+        // The token filter alone could not see JSON's timestamp: JSON
+        // renders as one whitespace-free blob starting `{` and ending
+        // `}`, so `starts_with("20") && ends_with('Z')` never matched
+        // and a clock reading survived into every comparison. Each
+        // `assert_ne!` pair involving `Format::Json` then passed because
+        // the two runs happened at different microseconds — regardless
+        // of what `fmt_layer` did with the format. That is the exact
+        // vacuity this test was rewritten to remove, one level in.
+        let mut out = String::with_capacity(s.len());
+        let b = s.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            // `2026-09-16T19:03:15.520524Z` — date, `T`, time, `Z`.
+            let looks_like_ts = b[i] == b'2'
+                && i + 20 <= b.len()
+                && b[i + 1].is_ascii_digit()
+                && b[i + 4] == b'-'
+                && b[i + 7] == b'-'
+                && b[i + 10] == b'T';
+            if looks_like_ts {
+                let mut j = i + 10;
+                while j < b.len() && b[j] != b'Z' {
+                    j += 1;
+                }
+                if j < b.len() {
+                    out.push_str("<ts>");
+                    i = j + 1;
+                    continue;
+                }
+            }
+            out.push(b[i] as char);
+            i += 1;
+        }
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// `shape()` must actually remove the clock.
+    ///
+    /// This is the control for `format_variants_render_differently`.
+    /// Two renders of the **same** format differ only by timestamp, so
+    /// if `shape()` works they compare equal — and if it does not, the
+    /// `assert_ne!` pairs in that test pass because of the clock rather
+    /// than because of the formatter. JSON is the case that was broken:
+    /// it renders as one whitespace-free blob, so a token-level filter
+    /// never saw its embedded timestamp.
+    #[test]
+    fn shape_removes_the_timestamp_for_every_format() {
+        for f in [Format::Full, Format::Pretty, Format::Compact, Format::Json] {
+            let a = render(f, false);
+            let b = render(f, false);
+            assert_ne!(a, b, "{f:?}: two renders should differ by timestamp");
+            assert_eq!(
+                shape(&a),
+                shape(&b),
+                "{f:?}: shape() left a clock reading in, so every comparison \
+                 using it can pass for the wrong reason:\n{a}\n{b}"
+            );
+        }
     }
 
     /// No two formats render the same shape.

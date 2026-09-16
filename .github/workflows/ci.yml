@@ -81,9 +81,24 @@ on:
 # per-ref, which is where superseding is the point: a new push to a PR
 # should cancel the run describing the code it replaced.
 concurrency:
+  # Three keyings, not two. A `labeled` event gets its **own** group.
+  #
+  # Excluding it from cancellation was not enough on its own: with
+  # `cancel-in-progress: false` the label run landed in the same per-ref
+  # group as the run already going, so GitHub *queued* it behind that
+  # run instead of starting it — and a second label event would evict it
+  # from the pending slot entirely. The comment below used to claim the
+  # opposite ("it starts the matrix without waiting for a push"), which
+  # holds only when nothing is already running on the ref.
+  #
+  # Its own group means adding `ci` starts the matrix immediately and
+  # discards nothing; cancellation inside that group is then correct,
+  # because a second label event really does supersede the first.
   group: >-
     ci-${{ github.workflow }}-${{ github.event_name == 'push'
       && github.sha
+      || github.event.action == 'labeled'
+      && format('{0}-labeled', github.ref)
       || github.ref }}
   # Keyed on the same thing the group is, or the pair disagrees.
   #
@@ -99,16 +114,14 @@ concurrency:
   # worth cancelling. Everything else is per-ref, where cancelling is the
   # point.
   #
-  # `labeled` is excluded, and it is not a detail. The trigger fires on
-  # *every* label event, not just `ci` — sixteen labels exist on this
-  # repo, and Dependabot adds `dependencies` on its own. So labelling a
-  # PR that already had a run in flight cancelled it and started over;
-  # on a `ci`-labelled PR that is up to twenty jobs discarded for adding
-  # the word "bug". The label event still triggers a run (that is why
-  # `labeled` is in `types:` — it starts the matrix without waiting for
-  # a push); it just no longer kills the one already going.
-  cancel-in-progress: >-
-    ${{ github.event_name != 'push' && github.event.action != 'labeled' }}
+  # The trigger fires on *every* label event, not just `ci` — sixteen
+  # labels exist on this repo and Dependabot adds `dependencies` on its
+  # own. Labelling a PR with a run in flight used to cancel it and start
+  # over: up to twenty jobs discarded for adding the word "bug". The
+  # separate group above is what stops that, so this can stay keyed on
+  # the one thing it is about — a push run is per-commit and has no
+  # superseded sibling to cancel.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -1008,7 +1021,7 @@ jobs:
       # workflow at all. MySQL is the strict dialect for migrations: a
       # re-run `CREATE TABLE` is error 1050 and `ALTER` rejects shapes
       # PG accepts, so a broken reconcile bites here first and nowhere
-      # else. `every_mysql_live_suite_runs_in_ci` now fails if a
+      # else. `every_mysql_arm_runs_in_ci` now fails if a
       # `tests/*_mysql_live.rs` is missing from this list.
       - run: cargo test -p rustango --features mysql,tenancy --test migrate_fake_initial_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test migrate_reconcile_mysql_live
