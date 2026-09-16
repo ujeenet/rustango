@@ -977,22 +977,54 @@ impl Cli {
     /// and `tenant_log::record` can fill the span's `tenant` field once
     /// the tenancy middleware resolves one. A handler's own events then
     /// inherit it for free.
+    /// # Feature gates
+    ///
+    /// `access_log` needs `admin` **or** `tenancy`; `tracing_layer` and
+    /// `request_id` need `admin`. A build with neither — `sqlite,manage`
+    /// is the one CI checks — has no layers to mount, and this returns
+    /// the router untouched.
+    ///
+    /// The gate is on the *body*, not the function, so every caller
+    /// keeps one shape and no call site grows a `#[cfg]`. Leaving it off
+    /// entirely is what broke `feature_combos (sqlite,manage)` and
+    /// `(postgres,manage)`: the mount referenced modules that were
+    /// configured out, so the crate did not compile at all on those
+    /// combinations.
+    #[allow(unused_variables, clippy::needless_pass_by_value)]
     fn mount_observability(&self, api: Router) -> Router {
-        use crate::access_log::AccessLogRouterExt as _;
+        #[cfg(any(feature = "admin", feature = "tenancy"))]
+        {
+            use crate::access_log::AccessLogRouterExt as _;
 
-        if !self.access_log_enabled() {
+            if !self.access_log_enabled() {
+                return api;
+            }
+
+            let log_layer = crate::access_log::AccessLogLayer::default();
+            #[cfg(feature = "config")]
+            let log_layer = match self.settings_for_layers.as_ref() {
+                Some(s) => log_layer.with_audit_settings(&s.audit),
+                None => log_layer,
+            };
+
+            let api = api.access_log(log_layer);
+
+            // The span and the request id are `admin`-only. On a
+            // tenancy-without-admin build the access log still mounts —
+            // it carries `tenant` itself — but there is no span for
+            // handler events to inherit.
+            #[cfg(feature = "admin")]
+            let api = {
+                use crate::request_id::RequestIdRouterExt as _;
+                api.request_id(crate::request_id::RequestIdLayer::default())
+                    .layer(crate::tracing_layer::TracingLayer::new())
+            };
+
             return api;
         }
 
-        let log_layer = crate::access_log::AccessLogLayer::default();
-        #[cfg(feature = "config")]
-        let log_layer = match self.settings_for_layers.as_ref() {
-            Some(s) => log_layer.with_audit_settings(&s.audit),
-            None => log_layer,
-        };
-
-        api.access_log(log_layer)
-            .layer(crate::tracing_layer::TracingLayer::new())
+        #[cfg(not(any(feature = "admin", feature = "tenancy")))]
+        api
     }
 
     /// `[logging] access_log = false` turns the request log off.
