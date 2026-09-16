@@ -504,6 +504,11 @@ mod tests {
     /// Reproduced live first: the span context and the access-log event
     /// render on one line, so a raw `url.query` put the cleartext
     /// password directly next to `url.query=password=[redacted]`.
+    // `runtime` gates `tracing_subscriber`, which this needs to capture
+    // rendered output. Without the gate it broke
+    // `feature_combos (sqlite,admin)` — a build that has the span layer
+    // but not the subscriber.
+    #[cfg(feature = "runtime")]
     #[test]
     fn the_span_redacts_credentials_in_the_query_string() {
         use std::io::Write;
