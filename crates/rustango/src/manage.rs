@@ -947,13 +947,23 @@ impl Cli {
 
     /// The per-request span and the access log.
     ///
-    /// Mounted here, unconditionally, rather than inside
-    /// `apply_settings_layers` — which is where the access log used to
-    /// live, and which only runs when the app calls
-    /// `.with_settings_from_env()`. No scaffolder template calls it, so
-    /// the multi-tenant project shape — the one where the tenant field
-    /// is the entire point — got no access log and never logged a
-    /// tenant (#1480).
+    /// Called from **every** serving path: `assemble_app` (the three
+    /// single-tenant paths) and both `runserver_tenancy` variants, which
+    /// do not go through `assemble_app` at all — they build a
+    /// `server::Builder` directly.
+    ///
+    /// That distinction was missed on the first cut, and it mattered
+    /// most exactly where it was missed. This replaced the access log's
+    /// old home inside `apply_settings_layers`, so a multi-tenant app
+    /// that called `.with_settings_from_env()` went from having a
+    /// request log to having none — a regression in the one project
+    /// shape #1480 was opened about. `every_serving_path_is_observable`
+    /// pins it now.
+    ///
+    /// Mounting here rather than in the settings layers is still the
+    /// point: that path only runs when the app calls
+    /// `.with_settings_from_env()`, which no scaffolder template does,
+    /// so the tenant field was unreachable by default (#1480).
     ///
     /// `TracingLayer` had a worse version of the same problem: it built
     /// a correct span carrying tenant, method, path and status, and
@@ -1120,8 +1130,10 @@ impl Cli {
         // its own `shutdown_signal`, and dropping the hook here would
         // have left `on_shutdown` working on one path and silently not
         // on the other.
-        let on_shutdown = self.on_shutdown;
-        let api = self.api;
+        let on_shutdown = self.on_shutdown.take();
+        // `take` rather than a move: `mount_observability` below needs
+        // `&self`, and moving the field out would partially move `self`.
+        let api = std::mem::take(&mut self.api);
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
@@ -1135,6 +1147,7 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let api = self.mount_observability(api);
         let mut builder = crate::server::Builder::from_env().await?.api(api);
         if self.health_endpoints {
             builder = builder.with_health();
@@ -1174,8 +1187,10 @@ impl Cli {
         // otherwise). Database-mode tenants work out of the box;
         // schema-mode tenants return `TenancyError::Validation` at
         // request time (schema-mode is PG-only by language).
-        let on_shutdown = self.on_shutdown;
-        let api = self.api;
+        let on_shutdown = self.on_shutdown.take();
+        // `take` rather than a move: `mount_observability` below needs
+        // `&self`, and moving the field out would partially move `self`.
+        let api = std::mem::take(&mut self.api);
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
@@ -1189,6 +1204,7 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let api = self.mount_observability(api);
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         let registry_url =
             std::env::var("DATABASE_URL")

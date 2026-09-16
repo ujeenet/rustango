@@ -121,17 +121,84 @@ pub enum Color {
 impl Color {
     /// Should the stdout layer emit escape codes?
     ///
-    /// `Auto` asks the OS rather than guessing from env vars: piping to
-    /// a file, or running under a CI runner that captures output, both
-    /// report "not a terminal" and both want plain text.
+    /// `Auto` honours [`NO_COLOR`](https://no-color.org) first, then asks
+    /// the OS whether stdout is a terminal — piping to a file, or a CI
+    /// runner capturing output, reports "not a terminal" and wants plain
+    /// text.
+    ///
+    /// The `NO_COLOR` check has to be explicit here. `tracing-subscriber`
+    /// consults it in its own default, but every layer built below calls
+    /// `.with_ansi(..)`, which replaces that default outright — so
+    /// turning the `ansi` feature on and then setting the flag by hand
+    /// would have *removed* `NO_COLOR` support that was otherwise about
+    /// to arrive for free.
+    ///
+    /// Per the spec any non-empty value means "no colour"; `NO_COLOR=`
+    /// set but empty does not.
     #[must_use]
     pub fn should_colour(self) -> bool {
         use std::io::IsTerminal as _;
         match self {
             Color::Always => true,
             Color::Never => false,
-            Color::Auto => std::io::stdout().is_terminal(),
+            Color::Auto => {
+                let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+                !no_color && std::io::stdout().is_terminal()
+            }
         }
+    }
+}
+
+/// A `fmt` layer with its concrete formatter type erased.
+///
+/// `Vec<Box<dyn Layer<S>>>` is itself a `Layer<S>`, which is what lets
+/// the sinks be collected before the registry is built. Chaining
+/// `.with()` per layer changes the subscriber's type at every step, so
+/// an erased layer built for `Registry` would not fit after the first.
+#[cfg(feature = "runtime")]
+type Erased = Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
+
+/// The one place a [`Format`] becomes a formatter.
+///
+/// Extracted from `install` so it can be exercised directly. The mapping
+/// is where the original bug lived — `Pretty` and `Compact` both fell
+/// through to `Full` — and settings-to-enum tests cannot see it: they
+/// pass unchanged if this function sends every variant to the same
+/// formatter. `format_variants_render_differently` renders through
+/// *this* function rather than a copy of its match.
+///
+/// `ansi` is caller-resolved and already false for a file sink: escape
+/// codes written into a rotating log file corrupt every downstream grep.
+#[cfg(feature = "runtime")]
+fn fmt_layer<W>(
+    format: Format,
+    ansi: bool,
+    targets: bool,
+    thread_ids: bool,
+    line_numbers: bool,
+    writer: Option<W>,
+) -> Erased
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Clone + Send + Sync + 'static,
+{
+    use tracing_subscriber::Layer as _;
+    macro_rules! sink {
+        ($l:expr) => {
+            match writer.clone() {
+                Some(w) => $l.with_writer(w).boxed(),
+                None => $l.boxed(),
+            }
+        };
+    }
+    let base = tracing_subscriber::fmt::layer()
+        .with_target(targets)
+        .with_thread_ids(thread_ids)
+        .with_line_number(line_numbers);
+    match format {
+        Format::Json => sink!(base.json()),
+        Format::Pretty => sink!(base.pretty().with_ansi(ansi)),
+        Format::Compact => sink!(base.compact().with_ansi(ansi)),
+        Format::Full => sink!(base.with_ansi(ansi)),
     }
 }
 
@@ -419,31 +486,16 @@ impl Setup {
         // obvious alternative — chaining `.with()` per layer — changes
         // the subscriber's type at every step, so an erased layer built
         // for `Registry` no longer fits after the first one.
-        use tracing_subscriber::Layer as _;
-        type Erased =
-            Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>;
-
         let build = |writer: Option<tracing_appender::non_blocking::NonBlocking>| -> Erased {
             let to_file = writer.is_some();
-            macro_rules! sink {
-                ($l:expr) => {
-                    match writer.clone() {
-                        Some(w) => $l.with_writer(w).boxed(),
-                        None => $l.boxed(),
-                    }
-                };
-            }
-            let base = tracing_subscriber::fmt::layer()
-                .with_target(self.with_targets)
-                .with_thread_ids(self.with_thread_ids)
-                .with_line_number(self.with_line_numbers);
-            let ansi = ansi && !to_file;
-            match self.format {
-                Format::Json => sink!(base.json()),
-                Format::Pretty => sink!(base.pretty().with_ansi(ansi)),
-                Format::Compact => sink!(base.compact().with_ansi(ansi)),
-                Format::Full => sink!(base.with_ansi(ansi)),
-            }
+            fmt_layer(
+                self.format,
+                ansi && !to_file,
+                self.with_targets,
+                self.with_thread_ids,
+                self.with_line_numbers,
+                writer,
+            )
         };
 
         let mut layers: Vec<Erased> = vec![build(Some(file_writer))];
@@ -554,15 +606,18 @@ mod tests {
         assert_eq!(of(None), Format::Full, "absent means full");
         assert_eq!(of(Some("nonsense")), Format::Full, "unknown falls back");
 
-        // The four are distinct values, not aliases. A future edit that
-        // makes two of them the same enum variant fails here rather than
-        // silently reinstating the bug.
-        let all = [Format::Json, Format::Pretty, Format::Compact, Format::Full];
-        for (i, a) in all.iter().enumerate() {
-            for b in &all[i + 1..] {
-                assert_ne!(a, b, "two formats collapsed into one variant");
-            }
-        }
+        // NOTE: this deliberately does NOT loop `assert_ne!` over the
+        // variants. An earlier version did, and it could not fail:
+        // `assert_ne!` on distinct fieldless enum variants is a
+        // tautology. It read like a distinctness check and asserted
+        // nothing.
+        //
+        // What actually needs pinning is enum -> formatter, which lives
+        // in `install()` and cannot be reached from here — changing
+        // `Format::Compact` to build a `Full` layer leaves every test in
+        // this module green. That is exactly where the original bug was,
+        // so it is checked by capturing real output in
+        // `tests/logging_formats_differ.rs`.
     }
 
     /// Colour: `never` off, `always` on, `auto` decided by the terminal.
@@ -737,5 +792,140 @@ mod tests {
         let s = Setup::from_settings(&cfg);
         assert!(s.file_sink.is_some());
         assert!(!s.keep_stdout);
+    }
+}
+
+/// Rendered-output tests for the format mapping.
+///
+/// Everything else about formats is asserted at the enum level, which
+/// cannot see the bug these exist for: `install()` sending two variants
+/// to the same formatter. These render a real event through
+/// [`fmt_layer`] — the same function `install` uses — and compare bytes.
+#[cfg(all(test, feature = "runtime"))]
+mod rendered {
+    use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("buffer lock").extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Emit one event through `fmt_layer` and return what was written.
+    fn render(format: Format, ansi: bool) -> String {
+        let buf = Buf::default();
+        let layer = fmt_layer(format, ansi, true, false, false, Some(buf.clone()));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            // Inside a span, and with a target: `Compact` differs from
+            // `Full` precisely in how it renders span context and the
+            // target, so a bare event cannot tell them apart.
+            let span = tracing::info_span!("req", route = "/x");
+            let _g = span.enter();
+            tracing::info!(target: "demo::target", answer = 42, "hello");
+        });
+        let bytes = buf.0.lock().expect("buffer lock").clone();
+        String::from_utf8(bytes).expect("utf8")
+    }
+
+    /// Strip the RFC3339 timestamp, which is different on every render.
+    ///
+    /// Without this, comparing two renders is comparing two clocks:
+    /// `assert_ne!` passes no matter what the formatters did, which is
+    /// how the first version of this test stayed green while
+    /// `Format::Compact` was pointed at the `Full` formatter.
+    fn shape(s: &str) -> String {
+        s.split_whitespace()
+            .filter(|t| !(t.len() > 20 && t.starts_with("20") && t.ends_with('Z')))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// No two formats render the same shape.
+    ///
+    /// This is the assertion the enum-level test could not make. Point
+    /// `Format::Compact` at `base.with_ansi(ansi)` and this fails;
+    /// every other logging test stays green.
+    #[test]
+    fn format_variants_render_differently() {
+        let all = [
+            (Format::Full, render(Format::Full, false)),
+            (Format::Pretty, render(Format::Pretty, false)),
+            (Format::Compact, render(Format::Compact, false)),
+            (Format::Json, render(Format::Json, false)),
+        ];
+        for (f, out) in &all {
+            assert!(!out.is_empty(), "{f:?} rendered nothing");
+            assert!(out.contains("hello"), "{f:?} lost the message: {out:?}");
+        }
+        for (i, (fa, a)) in all.iter().enumerate() {
+            for (fb, b) in &all[i + 1..] {
+                assert_ne!(
+                    shape(a),
+                    shape(b),
+                    "{fa:?} and {fb:?} render identically once the timestamp is \
+                     removed:\n{a}"
+                );
+            }
+        }
+    }
+
+    /// The shapes are what their names claim.
+    #[test]
+    fn each_format_has_its_documented_shape() {
+        let json = render(Format::Json, false);
+        assert!(
+            json.trim_start().starts_with('{') && json.contains("\"answer\":42"),
+            "json should be one object per event: {json}"
+        );
+        // Pretty puts fields on their own lines; Full and Compact do not.
+        assert!(
+            render(Format::Pretty, false).lines().count()
+                > render(Format::Full, false).lines().count(),
+            "pretty should be multi-line where full is not"
+        );
+    }
+
+    /// Colour is observed, not merely configured.
+    ///
+    /// Nothing asserted this before: the `ansi` feature could have been
+    /// left off and every test still passed, which is how colour came to
+    /// be compiled out while the docs advertised it (#1480).
+    #[test]
+    fn ansi_produces_escape_codes_and_its_absence_does_not() {
+        const ESC: char = '\u{1b}';
+        for f in [Format::Full, Format::Pretty, Format::Compact] {
+            assert!(
+                render(f, true).contains(ESC),
+                "{f:?} with ansi=true emitted no escape codes — the `ansi` feature \
+                 is not compiled in"
+            );
+            assert!(
+                !render(f, false).contains(ESC),
+                "{f:?} with ansi=false still emitted escape codes"
+            );
+        }
+        assert!(
+            !render(Format::Json, true).contains(ESC),
+            "JSON must never be coloured — escape codes inside a JSON string break \
+             every consumer"
+        );
     }
 }
