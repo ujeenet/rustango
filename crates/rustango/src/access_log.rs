@@ -705,7 +705,16 @@ mod tests {
     }
 }
 
-#[cfg(all(test, any(feature = "manage", feature = "tenancy")))]
+// `runtime` too: these capture rendered output through
+// `tracing_subscriber`, which only `runtime` pulls in. Without it the
+// module still compiled under `--all-features` and broke
+// `feature_combos (sqlite,admin)` — a combination that has the layers
+// but not the subscriber.
+#[cfg(all(
+    test,
+    feature = "runtime",
+    any(feature = "manage", feature = "tenancy")
+))]
 mod observability_mount_tests {
     use super::*;
     use axum::body::Body;

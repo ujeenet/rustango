@@ -243,8 +243,35 @@ impl SessionSecret {
 
     /// Construct from raw bytes — useful for tests + callers that
     /// load the key from a custom source.
+    ///
+    /// # Panics
+    /// If `bytes` is shorter than 32. HMAC accepts any key length —
+    /// `sign` below says so inline, right before relying on it — but a
+    /// short key is guessable, and guessing this one forges the session
+    /// cookie that authenticates the admin, the operator console and
+    /// every tenant member session. Fail closed rather than sign with
+    /// it.
+    ///
+    /// This floor already existed on [`Self::from_b64`] and
+    /// `from_env_or_disk`; it was missing on exactly the constructor
+    /// whose doc points at production — "callers that load the key from
+    /// a custom source" is Vault, KMS, a secrets manager. So the casual
+    /// path (paste base64 into an env var) was checked and the
+    /// deliberate one was not.
+    ///
+    /// Same reasoning, and the same 32-byte floor, as
+    /// [`crate::tenancy::jwt_lifecycle::JwtLifecycle::new`] (audit
+    /// A-06). That audit hardened the JWT signing family and left this
+    /// one alone, though a forged session cookie on the operator
+    /// console is a strictly larger blast radius than a forged JWT.
+    ///
+    /// Use [`Self::from_b64`] when you want a `Result` instead.
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        assert!(
+            bytes.len() >= 32,
+            "SessionSecret is too short; need >= 32 bytes (a shorter key is forgeable)"
+        );
         Self(bytes)
     }
 
@@ -394,6 +421,25 @@ pub fn sign(secret: &SessionSecret, msg: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A short key is refused, not signed with.
+    ///
+    /// The same floor and the same reasoning as `JwtLifecycle::new`
+    /// (audit A-06). `sign` builds its HMAC with
+    /// `expect("HMAC accepts any key length")` — true, and precisely
+    /// why the caller has to be the one that refuses.
+    #[test]
+    #[should_panic(expected = "need >= 32")]
+    fn a_short_session_secret_is_refused() {
+        let _ = SessionSecret::from_bytes(b"too-short".to_vec());
+    }
+
+    /// And the boundary is inclusive — exactly 32 is accepted.
+    #[test]
+    fn a_thirty_two_byte_secret_is_accepted() {
+        let s = SessionSecret::from_bytes(vec![0u8; 32]);
+        assert_eq!(s.key().len(), 32);
+    }
 
     #[test]
     fn sign_is_deterministic_per_key() {
