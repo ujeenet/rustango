@@ -286,6 +286,41 @@ pub async fn sqlite_file_pool() -> Pool {
 /// };
 /// assert_eq!(got, want.value, "{}", want.why);
 /// ```
+///
+/// Omitting a dialect does not compile, and this is the guard for that.
+/// The claim has already been false once — an earlier draft looked the
+/// arms up at runtime while documenting itself as compile-time enforced
+/// (see the note inside the macro) — so it is pinned by a test rather
+/// than by prose. `compile_fail` doctests run under `postgres_test`'s
+/// `cargo test --workspace --all-features`, so this executes.
+///
+/// ```compile_fail
+/// # use rustango::by_dialect;
+/// # fn f(pool: &rustango::sql::Pool) {
+/// // No `sqlite` arm: a macro match failure, not a runtime panic on
+/// // whichever CI leg happens to run SQLite.
+/// let _ = by_dialect! { pool,
+///     postgres => 1, because "pg",
+///     mysql    => 1, because "my",
+/// };
+/// # }
+/// ```
+///
+/// A missing `because` is the same kind of error:
+///
+/// ```compile_fail
+/// # use rustango::by_dialect;
+/// # fn f(pool: &rustango::sql::Pool) {
+/// let _ = by_dialect! { pool,
+///     postgres => 1, because "pg",
+///     mysql    => 1, because "my",
+///     sqlite   => 1,
+/// };
+/// # }
+/// ```
+///
+/// The positive control — all three arms with their reasons — is the
+/// `ignore` example above, and every `*_tri.rs` suite in the tree.
 #[macro_export]
 macro_rules! by_dialect {
     // All three backends, in a fixed order, each with its reason.

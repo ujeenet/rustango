@@ -250,7 +250,19 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
     })
     .await;
     let status = response.status().as_u16();
-    let duration_ms = started.elapsed().as_millis() as u64;
+    let elapsed = started.elapsed();
+    // Microsecond precision as `f64`, matching `tracing_layer`'s span
+    // field of the same name. Two reasons, and the first is the one
+    // that bites: `duration_ms` was `u64` here and `f64` there, so a
+    // collector that saw both got two types under one name —
+    // Elasticsearch/OpenSearch rejects a document whose field type
+    // conflicts with the established mapping. The second is that
+    // `as_millis() as u64` reported `0` for every sub-millisecond
+    // request, which is most of them on a local pool.
+    let duration_ms = (elapsed.as_micros() as f64) / 1000.0;
+    // The slow-request threshold stays integer milliseconds — it is a
+    // configured whole-millisecond value, not a measurement.
+    let is_slow = elapsed.as_millis() as u64 >= cfg.slow_threshold_ms;
 
     let is_error = status >= 400;
     if !cfg.log_success && !is_error {
@@ -271,14 +283,14 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
     // what gets shipped to a collector, and renaming at the edge is
     // work every deployment would repeat.
     let client_address = ip.as_deref().unwrap_or("-");
-    if duration_ms >= cfg.slow_threshold_ms {
+    if is_slow {
         tracing::warn!(
             "http.request.method" = %method,
             "url.path" = %path,
             "url.query" = %query,
             "http.response.status_code" = status,
             duration_ms,
-            "client.address" = client_address,
+            "client.address" = %client_address,
             tenant = %tenant,
             "slow request",
         );
@@ -289,7 +301,7 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
             "url.query" = %query,
             "http.response.status_code" = status,
             duration_ms,
-            "client.address" = client_address,
+            "client.address" = %client_address,
             tenant = %tenant,
         );
     } else {
@@ -299,7 +311,7 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
             "url.query" = %query,
             "http.response.status_code" = status,
             duration_ms,
-            "client.address" = client_address,
+            "client.address" = %client_address,
             tenant = %tenant,
         );
     }
