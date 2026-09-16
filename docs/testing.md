@@ -13,10 +13,10 @@ Rust.
 > **New to a term here?** *router*, *handler*, *fixture*, *rollback* — see the
 > [glossary](glossary.md).
 
-> **Source:** `rustango::test_client` (`TestClient`, `TestResponse`),
-> `rustango::test_assertions` (`assert_status_2xx`, `assert_redirects`,
-> `assert_cookie_set`, …), and `rustango::test_db` (`with_rollback`) — always
-> compiled.
+> **Source:** `rustango::test_client` (`TestClient`, `TestResponse`) — needs
+> the `admin` feature, because it wraps an `axum::Router`. `rustango::test_assertions`
+> (`assert_status_2xx`, `assert_redirects`, `assert_cookie_set`, …) and
+> `rustango::test_db` (`with_rollback`) are ungated.
 >
 > **Runnable version:** the snippets below *are* a passing test —
 > [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
