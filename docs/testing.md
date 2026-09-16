@@ -165,13 +165,20 @@ you read a green result as coverage.
 
 | Variable | Suites | What they need |
 |---|---:|---|
-| *(none)* | 215 | Nothing — an in-memory or temp-file SQLite. Always run. |
-| `DATABASE_URL` | 93 | A reachable PostgreSQL server. |
-| `MYSQL_TEST_URL` | 21 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
+| *(none)* | 210 | Nothing — an in-memory or temp-file SQLite. Always run. |
+| `DATABASE_URL` | 96 | A reachable PostgreSQL server. |
+| `MYSQL_TEST_URL` | 25 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | A reachable Redis. |
 
 A suite reading two variables is counted under both, so the column does not sum
 to the number of files.
+
+The `*_tri.rs` suites are counted under both server variables. They read no
+variable themselves — `Backend::pool()` does the lookup — and they run their
+SQLite arm with nothing set, so counting them as needing nothing would be
+technically survivable and practically wrong: the two arms that need a server
+are the reason those suites exist. Start both servers, or a tri suite reports
+a healthy pass count having exercised one backend of three.
 
 MySQL is the one that catches people: it reads its own variable, so a shell with
 only `DATABASE_URL` set runs the Postgres suites and silently skips every MySQL

@@ -15,13 +15,85 @@ on:
     # everyone builds on had no post-merge gate. Only `main` (release)
     # was covered. PRs were checked, which hides the gap right up until
     # a squash-merge combination behaves differently from its PR.
-    branches: [main, develop]
+    #
+    # Release branches are named here too. They used to be covered only
+    # through their PR, so a push straight to a release branch — which is
+    # the one place this repo allows it — ran nothing. The glob is loose
+    # on purpose: `release/v0.57.6`, `releases/x`, `hotfix-release` all
+    # match, because the cost of missing a release branch is a tagged
+    # build nobody checked.
+    branches:
+      - main
+      - develop
+      - '**release**'
+      - '**Release**'
+  # Every PR reaches the workflow; the `gate` job below decides whether
+  # the matrix actually runs. `labeled` is in the list so adding the
+  # opt-in label to an open PR starts a run immediately, rather than
+  # waiting for the next push.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   # Lets a run be triggered by hand against any branch, without
   # inventing a no-op commit or opening a throwaway PR — useful for
   # re-checking a branch after an advisory lands, since `deny` can go
-  # red with no code change at all.
+  # red with no code change at all. With PR runs narrowed above, this is
+  # also how you check a feature branch before merging it.
   workflow_dispatch:
+
+# One run per ref at a time; a new push cancels the one it supersedes.
+#
+# This is where the CI time was going. Nothing cancelled anything, so
+# pushing three commits to an open PR left three full 20-job matrices
+# running, two of them against code already replaced. The result of a
+# superseded run is not interesting — it describes a commit nobody will
+# merge.
+#
+# `main`, `develop` and tags are excluded from cancellation deliberately:
+# those runs are the record for a commit that is already merged, and
+# cancelling one leaves that commit with no build behind it.
+#
+# `develop` matters more than it looks, because PRs into it are ungated.
+# An unlabelled PR merges with only the cheap checks; the post-merge push
+# run is the first time the live matrix sees that code at all. Cancelling
+# it on the next merge means a commit can reach the branch everyone
+# builds on having never completed a single test run — which is the hole
+# the gate was supposed to leave open only until merge, not past it.
+#
+# Feature branches and pull requests still cancel, which is where the
+# waste actually was.
+# The group is per-COMMIT on a push and per-ref everywhere else.
+#
+# Excluding a branch from cancellation is not enough to guarantee a build
+# per merged commit. With `cancel-in-progress: false` GitHub queues the
+# newcomer instead of cancelling the running job — but it keeps only the
+# most recent *pending* run in a group and cancels any earlier one. So
+# with a per-ref group, merging A, B and C in quick succession runs A,
+# queues B, and then discards B when C arrives. B is a commit on
+# `develop` that never got a build.
+#
+# Keying push runs by SHA gives every commit its own group, so none of
+# them can evict another. Pull requests and manual dispatches stay
+# per-ref, which is where superseding is the point: a new push to a PR
+# should cancel the run describing the code it replaced.
+concurrency:
+  group: >-
+    ci-${{ github.workflow }}-${{ github.event_name == 'push'
+      && github.sha
+      || github.ref }}
+  # Keyed on the same thing the group is, or the pair disagrees.
+  #
+  # This used to test the *ref* while the group keyed on the SHA, which
+  # left one way for a push run to be cancelled after all: two pushes of
+  # the same commit to different refs share a group, and the ref test
+  # would say "cancel" for whichever ref was neither `main` nor
+  # `develop`. `git push origin develop:release/v0.57.7` — a release-flow
+  # push of develop's tip — is exactly that, and it would have cancelled
+  # develop's own post-merge run.
+  #
+  # A push group is per-commit, so there is never a superseded run in it
+  # worth cancelling. Everything else is per-ref, where cancelling is the
+  # point.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -56,6 +128,48 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+  # Does the *expensive* half run for this event?
+  #
+  # Every job that needs a server, a container, or a full workspace build
+  # is `needs: gate`, so this is the single place the answer lives.
+  # Copies of the same `if:` would drift, which is the failure this repo
+  # keeps paying for elsewhere.
+  #
+  # What is NOT gated: `fmt`, `clippy`, `doc`, `deny`, `deny-examples`,
+  # `lockfiles`, `trivy`. Those run on every pull request, always. Gating
+  # them was a mistake — it meant a feature PR into `develop` merged with
+  # no signal whatsoever, including no dependency-advisory or container
+  # scan, when the intent was only to defer the live matrix.
+  #
+  # The test for whether a job belongs here is not "is it fast" but "does
+  # its absence let a defect reach `develop` unseen". All seven are
+  # minutes; together they are a fraction of one live job.
+  #
+  # It runs when:
+  #   * the event is not a pull request — a push to `main`, `develop` or
+  #     a release branch, or a manual `workflow_dispatch`;
+  #   * the PR targets `main`, which is the release promote;
+  #   * the PR carries the `ci` label. **That is the manual trigger for
+  #     an ordinary feature PR**: add the label and the full matrix runs
+  #     against the merge result; remove it and later pushes go quiet.
+  gate:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request'
+      || github.base_ref == 'main'
+      || contains(github.event.pull_request.labels.*.name, 'ci')
+    steps:
+      - name: Why this run is happening
+        run: |
+          echo "event=${{ github.event_name }} base=${{ github.base_ref }}"
+          echo "Add the ci label to a pull request to run this matrix on it."
+
+  # Ungated, along with `clippy`, `deny`, `deny-examples`, `lockfiles`
+  # and `trivy`. These are minutes, not the matrix, and two of them are
+  # security checks — gating them meant an ordinary PR into `develop`
+  # merged with no signal at all, not merely without the live suites.
+  # The `ci` label buys the expensive jobs; it should not be what buys
+  # `cargo fmt --check`.
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -89,6 +203,7 @@ jobs:
   # so each dialect has an explicitly-named job: `postgres_test`,
   # `mysql_live`, `sqlite_live`.
   postgres_test:
+    needs: gate
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -141,6 +256,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
+  # Ungated too. At ~62s it is two billed minutes, and the reasoning that
+  # ungated `fmt` and `clippy` applies unchanged: a broken intra-doc link
+  # merged into `develop` unnoticed is exactly the signal the gate was
+  # never meant to remove.
   doc:
     runs-on: ubuntu-latest
     steps:
@@ -238,6 +357,7 @@ jobs:
   # `--all-targets` is load-bearing — it pulls in `tests/`, which is
   # where drift actually shows up first.
   platform_examples:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -339,6 +459,7 @@ jobs:
   # for everyone else. The tests pass `--rustango-path`, so they validate this
   # commit rather than the last published release.
   scaffolded_projects:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -370,6 +491,7 @@ jobs:
   # exactly where cfg'd-out code leaves unused imports and unconstructed
   # variants behind, and a warning is the only signal that a gate is wrong.
   feature_combos:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -418,6 +540,7 @@ jobs:
   # reasons unrelated to the PR. Drop it once a few runs are green; the
   # job is useless as a gate until then, but its output is not.
   windows_test:
+    needs: gate
     runs-on: windows-latest
     continue-on-error: true
     steps:
@@ -434,6 +557,7 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
 
   sqlite_litmus:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -563,6 +687,7 @@ jobs:
   # #1363 the whole suite compiles under `--no-default-features`, and
   # `sqlite_litmus` asserts that with `--no-run`.
   sqlite_live:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -588,12 +713,12 @@ jobs:
             --test admin_list_display_jsonpath_sqlite_live \
             --test audit_pool_sqlite_live \
             --test bulk_update_api_sqlite_live \
-            --test bulk_upsert_sqlite_live \
+            --test bulk_upsert_tri \
             --test count_distinct_sqlite_live \
             --test database_pools_sqlite_file_live \
             --test database_pools_sqlite_live \
             --test database_tenant_sqlite_live \
-            --test explain_pool_sqlite_live \
+            --test explain_pool_tri \
             --test first_last_sqlite_live \
             --test fixtures_sqlite_live \
             --test foreign_key_sqlite_live \
@@ -605,7 +730,7 @@ jobs:
             --test inspectdb_sqlite_live \
             --test inspectdb_views_sqlite_live \
             --test jobs_sqlite_live \
-            --test json_path_sqlite_live \
+            --test json_path_tri \
             --test lock_sqlite_warning \
             --test m2m_sqlite_live \
             --test media_sqlite_live \
@@ -642,6 +767,7 @@ jobs:
   # The matrix is the point: run the SAME suite against 6 and 7. A
   # 7-only job passes on the broken code and proves nothing.
   redis_live:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -685,6 +811,7 @@ jobs:
   # is not an official library image so that mirror has no copy; quay is
   # MinIO's own registry.
   s3_live:
+    needs: gate
     runs-on: ubuntu-latest
     services:
       # The media suites store rows in `rustango_media` alongside the
@@ -747,6 +874,7 @@ jobs:
   # query strings that PG/SQLite accept (e.g. `LIMIT` vs `FOR UPDATE
   # SKIP LOCKED` order in v0.38's jobs pickup).
   mysql_live:
+    needs: gate
     runs-on: ubuntu-latest
     services:
       mysql:
@@ -782,8 +910,21 @@ jobs:
       # unnoticed. Keep both: the narrow run guards the common config, this
       # one guards the FK-ordering regression.
       - run: cargo test -p rustango --all-features --test mysql_live
-      - run: cargo test -p rustango --features mysql --test explain_pool_mysql_live
-      - run: cargo test -p rustango --features mysql --test bulk_upsert_mysql_live
+      - run: cargo test -p rustango --features mysql,testkit --test explain_pool_tri
+      - run: cargo test -p rustango --features mysql,testkit --test bulk_upsert_tri
+      # #1461 — the rest of the tri-dialect suites. A `_tri` file runs its
+      # PostgreSQL and SQLite arms for free in `postgres_test`, so a
+      # missing line here costs only the MySQL arm and the suite still
+      # looks covered. These three shipped that way;
+      # `every_mysql_arm_runs_in_ci` now fails when a `*_tri` or
+      # `*_mysql_live` target is absent from this job.
+      - run: cargo test -p rustango --features mysql,testkit --test values_tri
+      - run: cargo test -p rustango --features mysql,testkit --test regex_tri
+      - run: cargo test -p rustango --features mysql,testkit --test testkit_matrix_forms_tri
+      # #559 — dropping a CHECK or a composite FK. MySQL takes no
+      # `IF EXISTS` on either, so this is the arm that was failing with
+      # error 1064 while the emission tests stayed green.
+      - run: cargo test -p rustango --features mysql,testkit --test migrate_ddl_tri
       # #1403 — bulk create must roll back on a constraint violation.
       # `--all-features` so the MySQL arm of the tri-dialect guard is
       # compiled in; the sqlite arm runs everywhere, this is the one that
@@ -803,6 +944,14 @@ jobs:
       - run: cargo test -p rustango --features mysql,tenancy --test tenancy_manage_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test permissions_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy,testkit --test database_pools_mysql_live
+      # #1461 — these two were written, committed, and then run by no
+      # workflow at all. MySQL is the strict dialect for migrations: a
+      # re-run `CREATE TABLE` is error 1050 and `ALTER` rejects shapes
+      # PG accepts, so a broken reconcile bites here first and nowhere
+      # else. `every_mysql_live_suite_runs_in_ci` now fails if a
+      # `tests/*_mysql_live.rs` is missing from this list.
+      - run: cargo test -p rustango --features mysql,tenancy --test migrate_fake_initial_mysql_live
+      - run: cargo test -p rustango --features mysql,tenancy --test migrate_reconcile_mysql_live
       # #1281 — the MySQL arm of DatabaseCache::add is bespoke SQL
       # (INSERT IGNORE + conditional UPDATE, since ON DUPLICATE KEY
       # UPDATE takes no WHERE). It is also positional-`?`, so a bind
@@ -822,7 +971,7 @@ jobs:
       - run: cargo test -p rustango --features mysql --test fixtures_mysql_live
       - run: cargo test -p rustango --features mysql --test inspectdb_mysql_live
       - run: cargo test -p rustango --features mysql --test funcs_batch1_mysql_live
-      - run: cargo test -p rustango --features mysql --test json_path_mysql_live
+      - run: cargo test -p rustango --features mysql,testkit --test json_path_tri
       # Django 6.0 ORM parity execution-verification suite (audit §26).
       # Shared scenario bodies; the mysql cfg-mod runs here, the sqlite
       # and PG mods are compiled out.
@@ -856,6 +1005,7 @@ jobs:
   # namespace image (not on the AWS ECR `library/` mirror), so it's
   # pulled straight from Docker Hub.
   postgis_live:
+    needs: gate
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -891,6 +1041,7 @@ jobs:
   # one-of-three backend feature selector; the matrix flips it per
   # row so the binary's `runserver` picks the right Pool constructor.
   e2e:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -984,6 +1135,7 @@ jobs:
   # getting_started_blog runs `migrate` first to create its schema;
   # orm_cookbook resets the `public` schema inside the test itself.
   doc_examples:
+    needs: gate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

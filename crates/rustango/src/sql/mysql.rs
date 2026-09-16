@@ -312,6 +312,33 @@ impl Dialect for MySql {
         false
     }
 
+    /// MySQL spells this `DROP CHECK`, and takes no `IF EXISTS`.
+    ///
+    /// `ALTER TABLE t DROP CONSTRAINT IF EXISTS c` is a parse error here
+    /// — `ERROR 1064 ... near 'IF EXISTS'` — even though plain
+    /// `DROP CONSTRAINT` is accepted from 8.0.19. Consequence worth
+    /// knowing: this is **not** idempotent. Dropping a constraint that
+    /// is already gone raises 3821, where the PostgreSQL form is a
+    /// no-op.
+    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {} DROP CHECK {}",
+            self.quote_ident(table),
+            self.quote_ident(name)
+        ))
+    }
+
+    /// MySQL spells this `DROP FOREIGN KEY`, and takes no `IF EXISTS`.
+    ///
+    /// Not idempotent either: dropping an absent FK raises 1091.
+    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {} DROP FOREIGN KEY {}",
+            self.quote_ident(table),
+            self.quote_ident(name)
+        ))
+    }
+
     /// MySQL has no `ON CONFLICT`. The semantic equivalent is
     /// `ON DUPLICATE KEY UPDATE <col> = <col>` — a no-op write
     /// against an existing row that satisfies MySQL's requirement

@@ -941,7 +941,73 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let api = self.mount_observability(api);
         api.layer(axum::Extension(pool))
+    }
+
+    /// The per-request span and the access log.
+    ///
+    /// Called from **every** serving path: `assemble_app` (the three
+    /// single-tenant paths) and both `runserver_tenancy` variants, which
+    /// do not go through `assemble_app` at all — they build a
+    /// `server::Builder` directly.
+    ///
+    /// That distinction was missed on the first cut, and it mattered
+    /// most exactly where it was missed. This replaced the access log's
+    /// old home inside `apply_settings_layers`, so a multi-tenant app
+    /// that called `.with_settings_from_env()` went from having a
+    /// request log to having none — a regression in the one project
+    /// shape #1480 was opened about. `every_serving_path_is_observable`
+    /// pins it now.
+    ///
+    /// Mounting here rather than in the settings layers is still the
+    /// point: that path only runs when the app calls
+    /// `.with_settings_from_env()`, which no scaffolder template does,
+    /// so the tenant field was unreachable by default (#1480).
+    ///
+    /// `TracingLayer` had a worse version of the same problem: it built
+    /// a correct span carrying tenant, method, path and status, and
+    /// nothing in the framework ever mounted it. A `tracing::info!` in a
+    /// handler therefore had no enclosing span, so no tenant and no
+    /// correlation — which is exactly the "logs arrive as loose traces"
+    /// symptom.
+    ///
+    /// Order matters. The span is applied last so it is **outermost**:
+    /// every layer below it, the access log included, runs inside it,
+    /// and `tenant_log::record` can fill the span's `tenant` field once
+    /// the tenancy middleware resolves one. A handler's own events then
+    /// inherit it for free.
+    fn mount_observability(&self, api: Router) -> Router {
+        use crate::access_log::AccessLogRouterExt as _;
+
+        if !self.access_log_enabled() {
+            return api;
+        }
+
+        let log_layer = crate::access_log::AccessLogLayer::default();
+        #[cfg(feature = "config")]
+        let log_layer = match self.settings_for_layers.as_ref() {
+            Some(s) => log_layer.with_audit_settings(&s.audit),
+            None => log_layer,
+        };
+
+        api.access_log(log_layer)
+            .layer(crate::tracing_layer::TracingLayer::new())
+    }
+
+    /// `[logging] access_log = false` turns the request log off.
+    ///
+    /// Default on: a server that logs no requests is a server you cannot
+    /// debug, and the previous default — off unless you found the right
+    /// builder call — was not a decision anyone made on purpose.
+    fn access_log_enabled(&self) -> bool {
+        #[cfg(feature = "config")]
+        {
+            if let Some(s) = self.settings_for_layers.as_ref() {
+                return s.logging.access_log.unwrap_or(true);
+            }
+        }
+        true
     }
 
     async fn runserver(mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1064,8 +1130,10 @@ impl Cli {
         // its own `shutdown_signal`, and dropping the hook here would
         // have left `on_shutdown` working on one path and silently not
         // on the other.
-        let on_shutdown = self.on_shutdown;
-        let api = self.api;
+        let on_shutdown = self.on_shutdown.take();
+        // `take` rather than a move: `mount_observability` below needs
+        // `&self`, and moving the field out would partially move `self`.
+        let api = std::mem::take(&mut self.api);
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
@@ -1079,6 +1147,7 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let api = self.mount_observability(api);
         let mut builder = crate::server::Builder::from_env().await?.api(api);
         if self.health_endpoints {
             builder = builder.with_health();
@@ -1118,8 +1187,10 @@ impl Cli {
         // otherwise). Database-mode tenants work out of the box;
         // schema-mode tenants return `TenancyError::Validation` at
         // request time (schema-mode is PG-only by language).
-        let on_shutdown = self.on_shutdown;
-        let api = self.api;
+        let on_shutdown = self.on_shutdown.take();
+        // `take` rather than a move: `mount_observability` below needs
+        // `&self`, and moving the field out would partially move `self`.
+        let api = std::mem::take(&mut self.api);
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
@@ -1133,6 +1204,7 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let api = self.mount_observability(api);
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         let registry_url =
             std::env::var("DATABASE_URL")
@@ -1339,7 +1411,6 @@ fn warn_if_settings_inert() {
 
 #[cfg(feature = "config")]
 fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
-    use crate::access_log::{AccessLogLayer, AccessLogRouterExt as _};
     use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
     use crate::cors::{CorsLayer, CorsRouterExt as _};
     use crate::request_timeout::{RequestTimeoutLayer, RequestTimeoutRouterExt as _};
@@ -1361,11 +1432,13 @@ fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
         app = app.body_limit(layer);
     }
 
-    // access_log — extends the redact list with project additions
-    // from `[audit] redact_query_params`. Defaults are sensible so
-    // the layer mounts unconditionally.
-    let log_layer = AccessLogLayer::default().with_audit_settings(&s.audit);
-    app = app.access_log(log_layer);
+    // access_log is NOT mounted here any more. It lives in
+    // `Cli::mount_observability`, which runs whether or not the app
+    // calls `.with_settings_from_env()` — mounting it here made the
+    // request log, and with it the tenant field, conditional on a
+    // builder call no scaffolder template makes (#1480). The redact
+    // list from `[audit] redact_query_params` still reaches the layer;
+    // `mount_observability` reads the same settings.
 
     // CORS — opt-in (returns None when no origins configured).
     if let Some(cors) = CorsLayer::from_settings(&s.security) {

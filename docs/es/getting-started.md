@@ -171,7 +171,7 @@ Esto añade el subcomando `cargo rustango ...` de forma global. Confirma que est
 cargo rustango --help
 ```
 
-La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.57.5`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
+La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.57.6`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
 
 ---
 

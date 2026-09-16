@@ -13,8 +13,19 @@
 //! Emits one `tracing::info!` event per completed request:
 //!
 //! ```text
-//! INFO method=GET path=/api/posts status=200 duration_ms=12 ip=192.0.2.1 tenant=acme
+//! INFO http.request.method=GET url.path=/api/posts url.query=page=2
+//!      http.response.status_code=200 duration_ms=12 client.address=192.0.2.1 tenant=acme
 //! ```
+//!
+//! `url.path` is the path alone and `url.query` the redacted query
+//! string, per OpenTelemetry — not one concatenated value. Grouping by a
+//! `url.path` that carried the query would give a collector unbounded
+//! cardinality under a name that promises the opposite.
+//!
+//! Field names are the OpenTelemetry HTTP semantic conventions, shared
+//! with [`crate::tracing_layer`]. Before #1480 the two layers named
+//! every field differently except `duration_ms` and `tenant`, so an app
+//! running both emitted the same request under two schemas.
 //!
 //! Filter via tracing-subscriber's env-filter (e.g. `RUST_LOG=rustango::access_log=info`).
 //!
@@ -201,14 +212,22 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
     let started = Instant::now();
     let method = req.method().clone();
     let raw_query = req.uri().query();
-    let path = match raw_query {
-        Some(q) => format!(
-            "{}?{}",
-            req.uri().path(),
-            redact_query(q, &cfg.redact_query_params),
-        ),
-        None => req.uri().path().to_owned(),
-    };
+    // Path and query are separate fields, because OpenTelemetry defines
+    // `url.path` as the path component alone.
+    //
+    // They used to be concatenated into one `path` value, which was
+    // harmless while the field was called `path` and became wrong the
+    // moment it was renamed `url.path`: a collector grouping by that
+    // field would mix `/api/posts` with `/api/posts?page=2` and every
+    // other query string, giving the access log unbounded cardinality
+    // under a name that promises the opposite. `tracing_layer` had it
+    // right all along — path only, `url.query` separate — so this is
+    // also what makes the two layers agree on the *value* and not just
+    // the spelling.
+    let path = req.uri().path().to_owned();
+    let query = raw_query
+        .map(|q| redact_query(q, &cfg.redact_query_params))
+        .unwrap_or_default();
     let ip = if cfg.include_ip {
         resolve_client_ip(&req, cfg.trust_proxy_headers)
     } else {
@@ -240,32 +259,47 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
 
     let tenant = tenant_label(cfg.tenant_field, tenant);
 
+    // Field names follow the OpenTelemetry HTTP semantic conventions,
+    // which is what `tracing_layer` already emitted. The two layers used
+    // to disagree on every field but `duration_ms` and `tenant` —
+    // `method`/`path`/`status` here against
+    // `http.request.method`/`url.path`/`http.response.status_code`
+    // there — so an app running both logged the same request twice under
+    // two different schemas (#1480).
+    //
+    // OTel was chosen over the shorter names because these lines are
+    // what gets shipped to a collector, and renaming at the edge is
+    // work every deployment would repeat.
+    let client_address = ip.as_deref().unwrap_or("-");
     if duration_ms >= cfg.slow_threshold_ms {
         tracing::warn!(
-            method = %method,
-            path = %path,
-            status,
+            "http.request.method" = %method,
+            "url.path" = %path,
+            "url.query" = %query,
+            "http.response.status_code" = status,
             duration_ms,
-            ip = ip.as_deref().unwrap_or("-"),
+            "client.address" = client_address,
             tenant = %tenant,
             "slow request",
         );
     } else if is_error {
         tracing::warn!(
-            method = %method,
-            path = %path,
-            status,
+            "http.request.method" = %method,
+            "url.path" = %path,
+            "url.query" = %query,
+            "http.response.status_code" = status,
             duration_ms,
-            ip = ip.as_deref().unwrap_or("-"),
+            "client.address" = client_address,
             tenant = %tenant,
         );
     } else {
         tracing::info!(
-            method = %method,
-            path = %path,
-            status,
+            "http.request.method" = %method,
+            "url.path" = %path,
+            "url.query" = %query,
+            "http.response.status_code" = status,
             duration_ms,
-            ip = ip.as_deref().unwrap_or("-"),
+            "client.address" = client_address,
             tenant = %tenant,
         );
     }
