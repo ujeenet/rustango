@@ -46,6 +46,18 @@ looked correct and had passing tests.
   not idempotent** — error 3821 when the constraint is absent — where the
   PostgreSQL one is.
 
+- **[#559](https://github.com/ujeenet/rustango/issues/559) — `RenameTable` and
+  `RenameColumn` emitted hardcoded double quotes to every dialect.** The
+  migration writer wrote its identifiers straight into the format string:
+  `ALTER TABLE "post" RENAME TO "article"`. On MySQL `"` delimits a string, so
+  both were `ERROR 1064` and every rename migration failed there. SQLite accepts
+  double-quoted identifiers, which is why only MySQL saw it.
+
+  Both renames are portable (MySQL 8.0, SQLite 3.25+), so unlike the
+  neighbouring `ALTER COLUMN` arms they needed no capability guard — only the
+  dialect's quoting, which they now use. Found two arms away from the
+  `DROP CONSTRAINT` fix above, in the same `match`.
+
 - **`bin/bump-version.sh` could not complete a bump.** The rewriting pass was
   narrowed to anchored version *claims* so that prose about an old release keeps
   its number, but the final verification still ran a bare `git grep` for the old
@@ -64,16 +76,21 @@ looked correct and had passing tests.
 
 ### Changed
 
-- **CI spends the matrix where it decides something.** A `concurrency` group per
-  ref cancels superseded runs except on `main` and tags; `push` now covers
-  release branches; and the expensive jobs sit behind one `gate` job that fires
-  for non-PR events, PRs into `main`, or a PR carrying the `ci` label.
+- **CI spends the matrix where it decides something.** `push` now covers release
+  branches, and the expensive jobs sit behind one `gate` job that fires for
+  non-PR events, PRs into `main`, or a PR carrying the `ci` label.
 
-  `fmt`, `clippy`, `deny`, `deny-examples`, `lockfiles` and `trivy` are **not**
-  gated and run on every pull request. Gating them was a mistake in the first
-  cut: it meant a feature PR into `develop` merged with no signal whatsoever,
-  including no dependency-advisory or container scan, when the intent was only
-  to defer the live matrix.
+  Concurrency is keyed **per commit on a push** and per ref everywhere else, and
+  push runs are never cancelled. Excluding a branch from cancellation is not
+  enough on its own: GitHub keeps only the most recent *pending* run in a group
+  and discards earlier ones, so merging three commits in quick succession left
+  the middle one with no build at all.
+
+  `fmt`, `clippy`, `doc`, `deny`, `deny-examples`, `lockfiles` and `trivy` are
+  **not** gated and run on every pull request. Gating them was a mistake in the
+  first cut: it meant a feature PR into `develop` merged with no signal
+  whatsoever, including no dependency-advisory or container scan, when the
+  intent was only to defer the live matrix.
 
 - **Six suites converted to one body across three dialects** — `bulk_upsert`,
   `values`, `regex`, `json_path`, `explain_pool`, plus the harness's own forms.

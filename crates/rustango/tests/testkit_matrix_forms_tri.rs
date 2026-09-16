@@ -75,8 +75,6 @@ async fn the_custom_setup_ran(pool: &Pool) {
     );
 }
 
-/// Each test gets a fresh database, so the seed is exactly one row —
-/// never two from a previous scenario in the same file.
 /// Each of the two scenarios below writes a row and then requires the
 /// table to hold exactly two: the seed, plus its own.
 ///

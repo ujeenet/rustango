@@ -80,10 +80,20 @@ concurrency:
     ci-${{ github.workflow }}-${{ github.event_name == 'push'
       && github.sha
       || github.ref }}
-  cancel-in-progress: >-
-    ${{ github.ref != 'refs/heads/main'
-        && github.ref != 'refs/heads/develop'
-        && !startsWith(github.ref, 'refs/tags/') }}
+  # Keyed on the same thing the group is, or the pair disagrees.
+  #
+  # This used to test the *ref* while the group keyed on the SHA, which
+  # left one way for a push run to be cancelled after all: two pushes of
+  # the same commit to different refs share a group, and the ref test
+  # would say "cancel" for whichever ref was neither `main` nor
+  # `develop`. `git push origin develop:release/v0.57.7` — a release-flow
+  # push of develop's tip — is exactly that, and it would have cancelled
+  # develop's own post-merge run.
+  #
+  # A push group is per-commit, so there is never a superseded run in it
+  # worth cancelling. Everything else is per-ref, where cancelling is the
+  # point.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   CARGO_TERM_COLOR: always

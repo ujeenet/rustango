@@ -115,6 +115,13 @@ pub struct Child {
 /// the DDL coming from the framework's own emitter rather than a
 /// hand-written guess.
 async fn setup(pool: &Pool) {
+    // The rename scenario moves `dc_tri_widget` aside and back. A panic
+    // between those two steps leaves the intermediate name behind on a
+    // persistent server, and every later run then dies on its first
+    // statement with an error pointing at a rename that is correct.
+    // Nothing else drops this, because no model is named for it.
+    rustango::testkit::matrix::drop_table(pool, "dc_tri_widget_renamed").await;
+
     fresh_table::<Widget>(pool).await;
     fresh_table::<Child>(pool).await;
     fresh_table::<Parent>(pool).await;

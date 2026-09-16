@@ -131,10 +131,26 @@ fn run_commands(block: &str) -> Vec<String> {
     code.split("- run:")
         .skip(1)
         .map(|chunk| {
+            // Stop at the next *step*, not at any line that happens to
+            // begin with `- `. A `run: |` block is shell, and shell
+            // contains such lines — a heredoc, an `echo` of a bullet
+            // list. Truncating there cut the command short and lost any
+            // `--test` after it. A step starts at a shallower indent
+            // than the script it follows, so compare columns.
             let mut cmd = String::new();
+            let mut script_indent: Option<usize> = None;
             for line in chunk.lines() {
-                if line.trim_start().starts_with("- ") {
-                    break;
+                let indent = line.len() - line.trim_start().len();
+                let t = line.trim_start();
+                if t.starts_with("- ") {
+                    // A list item at or above the step's own indent ends
+                    // this command; one nested deeper is script content.
+                    match script_indent {
+                        Some(base) if indent > base => {}
+                        _ => break,
+                    }
+                } else if !t.is_empty() && script_indent.is_none() {
+                    script_indent = Some(indent);
                 }
                 cmd.push_str(line);
                 cmd.push('\n');
@@ -152,14 +168,24 @@ fn enables_mysql(cmd: &str) -> bool {
     if cmd.contains("--all-features") {
         return true;
     }
-    cmd.match_indices("--features ").any(|(i, m)| {
-        cmd[i + m.len()..]
-            .chars()
-            .take_while(|c| !c.is_whitespace())
-            .collect::<String>()
-            .split(',')
-            .any(|f| f == "mysql")
-    })
+    // `--features` and its short form `-F`, and the list may be quoted:
+    // `--features "mysql,testkit"` is the same thing as the bare form,
+    // and reading the quotes as part of the feature name made a correct
+    // workflow look like a missing MySQL arm. These fail *closed* —
+    // reporting a gap that is not there — which is the safer direction
+    // but still a false alarm someone has to chase.
+    ["--features ", "--features=", "-F ", "-F="]
+        .iter()
+        .flat_map(|flag| cmd.match_indices(flag).map(|(i, m)| i + m.len()))
+        .any(|start| {
+            cmd[start..]
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .filter(|c| !matches!(c, '"' | '\''))
+                .collect::<String>()
+                .split(',')
+                .any(|f| f == "mysql")
+        })
 }
 
 /// Every `--test <target>` in the block, and whether the command naming
@@ -353,6 +379,12 @@ jobs:
       # - run: cargo test -p rustango --features mysql --test zeta_mysql_live
       - name: a step whose run: is on the next line
         run: cargo test -p rustango --features mysql --test eta_mysql_live
+      - run: cargo test -p rustango --features \"mysql,testkit\" --test theta_mysql_live
+      - run: cargo test -p rustango -F mysql --test iota_mysql_live
+      - run: |
+          echo 'a shell line that looks like a list item:'
+          echo '- not a step'
+          cargo test -p rustango --features mysql --test kappa_mysql_live
   deny-examples:
     runs-on: ubuntu-latest
     steps:
@@ -417,6 +449,32 @@ jobs:
             "`mysqlish` is not `mysql`; the feature must match as a whole token: \
              {found:?}"
         );
+    }
+
+    /// Spellings of `--features` that all mean "mysql is compiled in".
+    ///
+    /// Each of these read as *not* enabling mysql, so a correct workflow
+    /// would have been reported as having a missing MySQL arm. They fail
+    /// closed rather than open, which is the safer direction — but a
+    /// guard that cries wolf on correct input gets ignored, which is the
+    /// same end state as one that misses.
+    #[test]
+    fn every_spelling_of_the_feature_flag_is_understood() {
+        let found = named_test_targets(&job_block(SAMPLE, "mysql_live"));
+        for (target, how) in [
+            ("theta_mysql_live", "a quoted feature list"),
+            ("iota_mysql_live", "the short `-F` form"),
+            (
+                "kappa_mysql_live",
+                "a `run: |` block containing a `- ` line",
+            ),
+        ] {
+            assert_eq!(
+                found.get(target),
+                Some(&true),
+                "{how} was not understood as enabling mysql: {found:?}"
+            );
+        }
     }
 
     /// A step written `- name:` / `run:` still counts.
