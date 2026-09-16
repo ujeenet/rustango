@@ -348,6 +348,45 @@ fn every_named_target_with_a_mysql_arm_still_exists() {
     );
 }
 
+/// Naming a suite, and building the `mysql` feature, still is not
+/// running it: both jobs need their database URL in `env:`.
+///
+/// This is the same failure the rest of this file exists to catch, one
+/// level up from where it was looking. Delete the two `env:` lines from
+/// `mysql_live` and every other guard here stays green — each named
+/// suite skips, the `*_mysql_live` files by their own skip branch and
+/// the `*_tri` files by `Backend::pool()` returning `None` on an unset
+/// var — and the job reports green having executed nothing (#1437,
+/// #1440).
+///
+/// `DATABASE_URL` in `postgres_test` matters more, not less: it is the
+/// single source of every tri-dialect PostgreSQL arm in the tree.
+#[test]
+fn the_live_jobs_set_the_url_their_suites_read() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+
+    for (job, var) in [
+        ("mysql_live", "MYSQL_TEST_URL:"),
+        ("postgres_test", "DATABASE_URL:"),
+    ] {
+        let block = job_block(&yaml, job);
+        assert!(
+            !block.is_empty(),
+            "no `{job}` job found in ci.yml — this guard is reading the wrong text, \
+             so a pass would mean nothing"
+        );
+        assert!(
+            block.contains(var),
+            "the `{job}` job does not set `{var}` anywhere in its block, so every \
+             suite it names skips on the unset variable and the job reports green \
+             having run nothing. That is exactly #1440's policy working against you: \
+             unset is a skip, and a skip is a pass.\n\n{block}"
+        );
+    }
+}
+
 /// Tests for the parse above, so a green guard means the parse worked
 /// rather than that it matched nothing.
 mod parser_tests {
