@@ -1050,12 +1050,22 @@ impl Cli {
             #[cfg(feature = "admin")]
             {
                 use crate::request_id::RequestIdRouterExt as _;
+                // The span redacts with the access log's *configured*
+                // list, not the defaults: a project that added
+                // `client_secret` to `[audit] redact_query_params` would
+                // otherwise get it redacted in the event and rendered in
+                // cleartext by the span on the same line.
+                let span = match log_layer.as_ref() {
+                    Some(l) => crate::tracing_layer::TracingLayer::new()
+                        .redact(l.redact_query_params.clone()),
+                    None => crate::tracing_layer::TracingLayer::new(),
+                };
                 let api = api.request_id(crate::request_id::RequestIdLayer::default());
                 let api = match log_layer {
                     Some(l) => api.access_log(l),
                     None => api,
                 };
-                return api.layer(crate::tracing_layer::TracingLayer::new());
+                return api.layer(span);
             }
 
             #[cfg(not(feature = "admin"))]

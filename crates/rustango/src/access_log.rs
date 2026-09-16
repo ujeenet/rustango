@@ -412,6 +412,19 @@ pub(crate) fn default_redact_params() -> Vec<String> {
         "refresh_token".into(),
         "signature".into(),
         "auth".into(),
+        // OAuth2 / OIDC. The framework ships `oauth2::providers` and
+        // `tenancy::sso`, so these land in this repo's own callback
+        // URLs — `/sso/callback?code=…&state=…` put an authorization
+        // code in the log with none of the names above matching it.
+        // Matching is exact, not substring, so `access_token` above
+        // does not cover `id_token`.
+        "code".into(),
+        "client_secret".into(),
+        "id_token".into(),
+        "code_verifier".into(),
+        "state".into(),
+        "assertion".into(),
+        "session_state".into(),
     ]
 }
 

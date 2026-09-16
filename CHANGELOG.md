@@ -28,6 +28,74 @@ looked correct and had passing tests.
   so a genuine difference cannot be flattened into an assertion all three
   satisfy — the move that makes a suite quieter while looking greener.
 
+### Changed — **breaking for anything consuming rustango's logs**
+
+- **The access log's field names are now the OpenTelemetry HTTP semantic
+  conventions.** `method` → `http.request.method`, `path` → `url.path`,
+  `status` → `http.response.status_code`, `ip` → `client.address`. `url.path`
+  is also the path *alone* now; the query string moved to its own `url.query`
+  field, so grouping by `url.path` no longer has unbounded cardinality.
+
+  **Every dashboard, alert and collector mapping keyed on the old names stops
+  matching.** The rename is the fix for #1480 — an app running both request
+  layers logged the same request twice under two different schemas — and OTel
+  was chosen over the shorter names because these lines are what ships to a
+  collector, where renaming at the edge is work every deployment repeats.
+
+- **`duration_ms` is now `f64` with microsecond precision, not `u64`
+  milliseconds.** The two layers disagreed on the type of a field they both
+  emitted, which Elasticsearch/OpenSearch rejects outright once a mapping is
+  established. Anyone already ingesting the `u64` needs the mapping updated —
+  this trades an existing conflict for a one-time migration. It also fixes
+  `duration_ms=0` on every sub-millisecond request.
+
+- **`LoggingSettings` gained `color` and `access_log`, and is now
+  `#[non_exhaustive]`.** A struct literal naming every field no longer
+  compiles; use `..Default::default()`. The `#[non_exhaustive]` is so this is
+  the *last* release in which adding a logging setting breaks a caller.
+
+- **`Dialect` gained `drop_check_constraint_sql` and `drop_foreign_key_sql`.**
+  Both have default bodies that `unimplemented!` rather than falling through to
+  the PostgreSQL form, so a downstream `impl Dialect` still compiles — but a
+  dialect that does not implement them will panic naming the method rather than
+  silently emitting PostgreSQL DDL, which is what #559 was.
+
+- **The request span and `X-Request-Id` are now mounted by default** on every
+  serving path (#1480). Apps that mounted neither will see a new header on
+  every response and span context on every log line. `[logging] access_log =
+  false` turns off the *log*; the span and the request id stay, because a
+  service logging at the edge still wants trace context.
+
+### Security
+
+- **The request span rendered query-string credentials in cleartext.**
+  `AccessLogLayer` redacts `password`, `token`, `secret` and friends out of
+  `url.query`; `TracingLayer` recorded the raw string. That was dormant while
+  nothing mounted the span layer — and this release mounts it by default. Since
+  the span's context renders on the same line as the access-log event, one
+  request produced both halves at once:
+
+  ```
+  http.request{… url.query="password=hunter2&token=abc123"}:
+    rustango::access_log: … url.query=password=[redacted]&token=[redacted]
+  ```
+
+  The span now redacts with the access log's **configured** list, so a project
+  that added its own key is covered too. The default list gained the OAuth2 /
+  OIDC names — `code`, `client_secret`, `id_token`, `code_verifier`, `state`,
+  `assertion`, `session_state` — which this framework's own `oauth2::providers`
+  and `tenancy::sso` callbacks put in the URL, and which exact-match redaction
+  never covered (`access_token` does not match `id_token`).
+
+- **`JwtLifecycle::new` accepted any signing key, including a two-byte one.**
+  HMAC takes any length, so the tokens were perfectly valid — and forgeable by
+  anyone. It now refuses a key under 32 bytes, the floor `JwtBackend::new` and
+  `auth_routes::build_jwt` already enforced. Audit A-06.
+
+- **The key-floor panic no longer names the key's length.** CodeQL
+  `rust/cleartext-logging`: a panic message reaches logs and crash reports, and
+  the length of a signing key is information about it.
+
 ### Fixed
 
 - **[#559](https://github.com/ujeenet/rustango/issues/559) — MySQL could not

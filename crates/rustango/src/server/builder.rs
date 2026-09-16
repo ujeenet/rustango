@@ -700,6 +700,14 @@ impl<DB: Database> Builder<DB> {
             // three things it does not name.
             #[allow(unused_mut)]
             let mut app = app;
+            // Same list for both layers — see `Cli::mount_observability`.
+            #[cfg(feature = "admin")]
+            let span = match self.access_log.as_ref() {
+                Some(l) => {
+                    crate::tracing_layer::TracingLayer::new().redact(l.redact_query_params.clone())
+                }
+                None => crate::tracing_layer::TracingLayer::new(),
+            };
             if let Some(log_layer) = self.access_log {
                 use crate::access_log::AccessLogRouterExt as _;
                 app = app.access_log(log_layer);
@@ -712,7 +720,7 @@ impl<DB: Database> Builder<DB> {
             let app = {
                 use crate::request_id::RequestIdRouterExt as _;
                 app.request_id(crate::request_id::RequestIdLayer::default())
-                    .layer(crate::tracing_layer::TracingLayer::new())
+                    .layer(span)
             };
             app
         } else {
