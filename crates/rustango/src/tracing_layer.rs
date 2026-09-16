@@ -170,7 +170,28 @@ fn build_request_span(req: &Request<Body>) -> tracing::Span {
         "trace_flags" = field::Empty,
     );
     if !query.is_empty() {
-        span.record("url.query", query);
+        // Redacted, with the same default key list the access log uses.
+        //
+        // This recorded the raw string until the layer was first mounted
+        // by default. The span's context renders on the same line as the
+        // access-log event, so a request to
+        // `/reset?password=hunter2&token=abc123` produced:
+        //
+        //   http.request{… url.query="password=hunter2&token=abc123"}:
+        //     rustango::access_log: … url.query=password=[redacted]&token=[redacted]
+        //
+        // — the cleartext credential sitting beside the redaction that
+        // was supposed to remove it. Reproduced against a live instance,
+        // not reasoned about.
+        //
+        // The default list is used rather than `AccessLogLayer`'s
+        // configured one because the span layer holds no config; a
+        // project that adds its own key to `redact_query_params` still
+        // gets it redacted in the event, and the defaults already cover
+        // the credential-bearing names.
+        let redacted =
+            crate::access_log::redact_query(query, &crate::access_log::default_redact_params());
+        span.record("url.query", redacted.as_str());
     }
     if let Some(tp) = parse_traceparent(req.headers()) {
         span.record("trace_id", tp.trace_id);
@@ -391,5 +412,77 @@ mod tests {
         // current subscriber; with no subscriber it's disabled, so
         // accept either — the contract is "doesn't panic").
         // No assertion needed beyond reaching this line.
+    }
+
+    /// The span must not carry credentials the access log redacts.
+    ///
+    /// Asserts on **rendered output**, not on the redaction helper. The
+    /// helper being correct was never in doubt; what broke was that the
+    /// span recorded the raw string beside it. So this captures a real
+    /// line and greps it, which is the only form of this test that
+    /// could have failed before the fix.
+    ///
+    /// Reproduced live first: the span context and the access-log event
+    /// render on one line, so a raw `url.query` put the cleartext
+    /// password directly next to `url.query=password=[redacted]`.
+    #[test]
+    fn the_span_redacts_credentials_in_the_query_string() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let req = Request::builder()
+                .uri("/reset?password=hunter2&token=abc123XYZ&page=2")
+                .body(Body::empty())
+                .unwrap();
+            let span = build_request_span(&req);
+            let _e = span.enter();
+            // Any event inside the span renders the span's context,
+            // which is where the leak appeared.
+            tracing::info!("handled");
+        });
+
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.contains("url.query"),
+            "the span did not render url.query at all, so this proves nothing:\n{out}"
+        );
+        assert!(
+            !out.contains("hunter2"),
+            "the span leaked a password into the log line:\n{out}"
+        );
+        assert!(
+            !out.contains("abc123XYZ"),
+            "the span leaked a token into the log line:\n{out}"
+        );
+        assert!(
+            out.contains("page=2"),
+            "a non-credential query param must survive:\n{out}"
+        );
     }
 }

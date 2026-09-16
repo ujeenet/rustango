@@ -384,7 +384,7 @@ fn resolve_client_ip(req: &Request, trust_proxy: bool) -> Option<String> {
 }
 
 /// Default list of query-param names whose values get redacted.
-fn default_redact_params() -> Vec<String> {
+pub(crate) fn default_redact_params() -> Vec<String> {
     vec![
         "password".into(),
         "passwd".into(),
@@ -400,7 +400,13 @@ fn default_redact_params() -> Vec<String> {
 }
 
 /// Replace values of redacted params with `[redacted]` in a raw query string.
-fn redact_query(raw: &str, redact_keys: &[String]) -> String {
+///
+/// `pub(crate)` so [`crate::tracing_layer`] can apply the same
+/// redaction to the span's `url.query`. It used to be private, and the
+/// span recorded the raw string — which put the credentials back on the
+/// very line this function had just cleaned, because the span context
+/// renders alongside the event fields.
+pub(crate) fn redact_query(raw: &str, redact_keys: &[String]) -> String {
     raw.split('&')
         .map(|pair| match pair.split_once('=') {
             Some((k, _)) if redact_keys.iter().any(|r| r.eq_ignore_ascii_case(k)) => {
