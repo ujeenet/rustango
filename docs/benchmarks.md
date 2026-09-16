@@ -11,8 +11,13 @@ more robust runtime: **Django** on **gunicorn** (WSGI) and on **Hypercorn**
 (ASGI); **Laravel** on **php-fpm + nginx** and on **Octane** (Swoole). Rustango
 and Go are each a single resident binary, so there is one of each.
 
-Every number below is **measured and reproducible**, from one consistent run of a
-one-command harness (see [Reproduce](#reproduce)). Nothing here is hand-waved.
+Every number below was **measured**, from one consistent run of a one-command
+harness (see [Reproduce](#reproduce)). Nothing here is hand-waved.
+
+One caveat the numbers themselves cannot carry: **the run is not dated and the
+rustango version is not recorded**, so you cannot tell from this page whether a
+figure describes 0.30 or 0.57. Treat the *relative* picture as the durable part
+and re-run the harness against your own version before quoting an absolute.
 
 > **TL;DR.** On identical hardware serving identical rendered-HTML pages, the two
 > **compiled, native** runtimes — **Rustango** and **Go** — leave the interpreted
