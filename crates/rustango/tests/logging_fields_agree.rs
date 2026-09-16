@@ -202,6 +202,13 @@ fn neither_layer_emits_a_field_outside_the_agreed_set() {
         "trace_flags",              // tracing_layer: W3C traceparent
         "user_agent.original",      // tracing_layer: request header
         "network.protocol.version", // tracing_layer: HTTP version
+        // tracing_layer only, and deliberately not duplicated into the
+        // access log's callsite. `request_id::record` fills it on the
+        // span, so every event under that span carries it — the access
+        // log line and the ORM's events included — without either
+        // naming the field. Declaring it on the access log too would
+        // render it twice on the same line.
+        "request_id",
     ];
     let allowed: BTreeSet<&str> = SHARED.iter().chain(PER_LAYER.iter()).copied().collect();
 
