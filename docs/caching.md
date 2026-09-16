@@ -148,6 +148,28 @@ assert_eq!(cache.get("flash").await?, None);   // expired
 `InMemoryCache::with_default_ttl(d)` sets a default TTL applied when you pass
 `None`.
 
+### A TTL is an upper bound, not a guarantee
+
+`InMemoryCache` is **size-bounded by default** — 256 MiB or 100 000 entries,
+whichever it hits first — with approximate-LRU eviction. A flood of unique keys
+cannot grow the process without limit, but it does mean **an entry can vanish
+before its TTL expires** if it is the least recently used when the budget is
+reached. Eviction drops already-expired entries first, then the least-recently
+used, until both budgets are met.
+
+So treat a cache read as "may be absent" even inside the TTL. That is true of
+every cache backend, but here it has a cause you can reason about and tune:
+
+```rust
+InMemoryCache::new()
+    .with_max_bytes(512 * 1024 * 1024)   // raise the budget
+    .with_max_entries(0)                 // 0 = unbounded (pre-bounding behaviour)
+```
+
+TTL itself is enforced lazily, on read — there is no background eviction
+thread, so an expired entry still occupies its slot until something asks for it
+or eviction reaches it.
+
 ---
 
 ## Swapping backends

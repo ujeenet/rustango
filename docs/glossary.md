@@ -13,6 +13,7 @@ up as you go.
 - [Web API basics](#web-api-basics) — what an API is, in everyday terms
 - [Rustango building blocks](#rustango-building-blocks) — the pieces you assemble
 - [Data and the database](#data-and-the-database)
+- [Multi-tenancy](#multi-tenancy) — only if you serve several customers from one deployment
 - [A few Rust words](#a-few-rust-words) — so the code blocks aren't scary
 - [Frameworks we compare to](#frameworks-we-compare-to)
 
@@ -169,6 +170,41 @@ at an `Author`. It's how rows reference each other.
 **Tri-dialect** — "works the same on all three supported databases" —
 PostgreSQL, MySQL, and SQLite. When a feature is tri-dialect you can switch
 databases without changing your code.
+
+---
+
+## Multi-tenancy
+
+Behind the `tenancy` feature. Skip this section if you are building an
+ordinary single-customer app — none of it applies.
+
+**Multi-tenancy** — running one deployment that serves several customers, each
+seeing only their own data. Rustango resolves which customer a request belongs
+to from its hostname, then routes it to that customer's data for the rest of
+the request.
+
+**Tenant (or org)** — one customer in such a deployment. A tenant has a slug
+(`acme`), a host pattern (`acme.example.com`) and its own users. `Org` is the
+registry row; "tenant" is the thing it describes.
+
+**Registry** — the small database that lists the tenants: who they are, where
+their data lives, whether they are active. Distinct from any tenant's own data,
+and the one database the framework always needs.
+
+**Storage mode** — how a tenant's data is kept apart from its neighbours':
+a separate database, or a separate schema inside a shared one. Chosen per
+tenant at provisioning time.
+
+**Operator** — an administrator of the *deployment* rather than of a tenant.
+Operators create tenants and bind hostnames; they are not users of any tenant
+and live in the registry. See [operator console](operator-console.md).
+
+**Operator console** — the web interface operators use: provisioning tenants,
+binding hostnames, managing other operators, reading the audit trail. Nearly
+every action in it is also a `manage` verb, so it can be scripted.
+
+**Provisioning** — creating a tenant: making its database or schema, running
+migrations into it, and recording it in the registry.
 
 ---
 
