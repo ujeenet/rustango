@@ -148,6 +148,30 @@ assert_eq!(cache.get("flash").await?, None);   // expired
 `InMemoryCache::with_default_ttl(d)` setzt ein Standard-TTL, das angewendet wird,
 wenn du `None` übergibst.
 
+### Ein TTL ist eine Obergrenze, keine Garantie
+
+`InMemoryCache` ist standardmäßig **größenbegrenzt** — 256 MiB oder 100 000
+Einträge, je nachdem, was zuerst erreicht wird — mit annähernder LRU-Verdrängung.
+Eine Flut eindeutiger Schlüssel kann den Prozess so nicht unbegrenzt wachsen
+lassen, bedeutet aber auch: **ein Eintrag kann vor Ablauf seines TTL
+verschwinden**, wenn er beim Erreichen des Budgets der am längsten unbenutzte
+ist. Die Verdrängung entfernt zuerst bereits abgelaufene Einträge, dann die am
+längsten unbenutzten, bis beide Budgets eingehalten sind.
+
+Behandle einen Cache-Read also auch innerhalb des TTL als „kann fehlen". Das gilt
+für jedes Cache-Backend, hier hat es aber eine Ursache, über die du nachdenken
+und an der du drehen kannst:
+
+```rust
+InMemoryCache::new()
+    .with_max_bytes(512 * 1024 * 1024)   // Budget anheben
+    .with_max_entries(0)                 // 0 = unbegrenzt (Verhalten vor der Begrenzung)
+```
+
+Das TTL selbst wird faul beim Lesen durchgesetzt — es gibt keinen
+Hintergrund-Thread zur Verdrängung, ein abgelaufener Eintrag belegt seinen Platz
+also weiter, bis etwas ihn abfragt oder die Verdrängung ihn erreicht.
+
 ---
 
 ## Backends tauschen

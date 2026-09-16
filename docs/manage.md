@@ -474,11 +474,24 @@ Writes:
   .gitignore
   rust-toolchain.toml
   docker-compose.yml
+  Dockerfile                                (deploy image — multi-stage, release, non-root)
+  Dockerfile.dev                            (cargo-watch image docker-compose.yml builds)
+  .dockerignore
   README.md
+  config/default.toml                       (shared knobs)
+  config/{dev,staging,prod}_settings.toml   (per-tier overrides)
   migrations/                               (your app's migrations)
   system/migrations/                        (tenant template — framework tables, generated)
-  src/{main,models,views,urls}.rs
+  src/{lib,main,models,views,urls}.rs
 ```
+
+The `config/` tier is the settings source: `default.toml` holds what every
+environment shares and one `<env>_settings.toml` overrides it, selected at
+runtime by **`RUSTANGO_ENV`** (default `dev`), so a fresh `cargo run` works with
+no TOML edits. Between them they carry `[database]` pool tuning, `[admin]`,
+`[mcp]` and the `secure_cookies` policy — and they are what
+[`check --deploy`](#check---deploy)'s settings audit reads. See
+[Scaffolding](scaffolding.md) for the per-tier contents.
 
 The tenant template ships an **empty** `system/migrations/` folder. The
 framework's own tables (`rustango_orgs`, `rustango_users`,
@@ -529,17 +542,23 @@ for `make:test`) and:
 - Won't overwrite an existing file.
 - Reminds you to add `pub mod X;` to your `lib.rs`.
 
-### `make:viewset <Name> [--model <Model>]`
+### `make:viewset <Name> [--model <Model>] [--tenant | --no-tenant] [--crate <path>]`
 
-Generates a `#[derive(ViewSet)]` struct — a REST endpoint for a model,
-like a Django REST Framework ViewSet. The field lists come pre-stubbed
-for you to fill in.
+Generates a REST endpoint for a model, like a Django REST Framework ViewSet.
+
+**Two templates, chosen for you.** The single-pool `#[derive(ViewSet)]` captures
+one pool at mount time, which is wrong for a tenancy project, so the generator
+picks between two shapes. Resolution order: `--no-tenant` wins, then `--tenant`,
+then **auto-detection** — `tenancy` in the `rustango` dep's feature list in
+`Cargo.toml` — and otherwise the pool template. When auto-detection picks tenant
+mode it says so on stdout and names `--no-tenant` as the override.
 
 ```bash
 cargo run -- make:viewset PostViewSet --model Post
+cargo run -- make:viewset PostViewSet --model Post --no-tenant   # force pool shape
 ```
 
-Generated `src/post_view_set.rs`:
+Pool template — generated `src/post_view_set.rs`:
 
 ```rust
 #[derive(ViewSet)]
@@ -548,6 +567,20 @@ pub struct PostViewSet;
 ```
 
 Mount with: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
+
+Tenant template — **not a derive**. It emits a `pub fn router() -> Router<()>`
+built from `ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, with
+the whole builder chain (`fields` / `filter_fields` / `search_fields` /
+`ordering` / `page_size` / `permissions_for_model` / `read_only`) stubbed out as
+commented lines. The connection is resolved per request through the `Tenant`
+extractor rather than captured once at mount time, so one `router()` serves every
+tenant.
+
+Mount with: `.merge(crate::viewsets::post::router())` — **not** the
+`PostViewSet::router(path, pool)` line above.
+
+`--crate <path>` renames the framework crate in the generated `use` lines, for
+projects that import `rustango` under a different name.
 
 ### `make:serializer <Name> [--model <Model>]`
 

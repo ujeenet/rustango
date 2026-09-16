@@ -383,11 +383,25 @@ cargo rustango new shop --template tenant          # multi-tenancy
   .gitignore
   rust-toolchain.toml
   docker-compose.yml
+  Dockerfile                                (deploy image — multi-stage, release, non-root)
+  Dockerfile.dev                            (cargo-watch image docker-compose.yml builds)
+  .dockerignore
   README.md
+  config/default.toml                       (shared knobs)
+  config/{dev,staging,prod}_settings.toml   (per-tier overrides)
   migrations/                               (your app's migrations)
   system/migrations/                        (tenant template — framework tables, generated)
-  src/{main,models,views,urls}.rs
+  src/{lib,main,models,views,urls}.rs
 ```
+
+Le niveau `config/` est la source des réglages : `default.toml` contient ce que
+tous les environnements partagent et un `<env>_settings.toml` le surcharge,
+sélectionné à l'exécution par **`RUSTANGO_ENV`** (`dev` par défaut) — un
+`cargo run` tout neuf fonctionne donc sans aucune retouche TOML. Ensemble, ils
+portent le réglage du pool `[database]`, `[admin]`, `[mcp]` et la politique
+`secure_cookies` — et ce sont eux que lit l'audit de réglages de
+[`check --deploy`](#check---deploy). Le contenu par niveau est détaillé dans
+[Scaffolding](scaffolding.md).
 
 Le modèle tenant fournit un dossier `system/migrations/` **vide**. Les
 propres tables du framework (`rustango_orgs`, `rustango_users`,
@@ -437,17 +451,25 @@ Ceux-ci créent des fichiers de démarrage pour des briques courantes —
 - Ne remplace pas un fichier existant.
 - Vous rappelle d'ajouter `pub mod X;` à votre `lib.rs`.
 
-### `make:viewset <Name> [--model <Model>]`
+### `make:viewset <Name> [--model <Model>] [--tenant | --no-tenant] [--crate <path>]`
 
-Génère une structure `#[derive(ViewSet)]` — un point d'accès REST pour
-un modèle, comme un ViewSet de Django REST Framework. Les listes de
-champs sont pré-ébauchées pour que vous les complétiez.
+Génère un point d'accès REST pour un modèle, comme un ViewSet de Django REST
+Framework.
+
+**Deux modèles, choisis pour vous.** Le `#[derive(ViewSet)]` à pool unique
+capture un seul pool au moment du montage, ce qui est faux pour un projet
+tenancy — le générateur choisit donc entre deux formes. Ordre de résolution :
+`--no-tenant` l'emporte, puis `--tenant`, puis la **détection automatique** —
+`tenancy` dans la liste de features de la dépendance `rustango` du `Cargo.toml` —
+et sinon le modèle à pool. Quand la détection automatique retient le mode
+tenant, elle l'annonce sur stdout et nomme `--no-tenant` comme override.
 
 ```bash
 cargo run -- make:viewset PostViewSet --model Post
+cargo run -- make:viewset PostViewSet --model Post --no-tenant   # forcer la forme à pool
 ```
 
-`src/post_view_set.rs` généré :
+Modèle à pool — `src/post_view_set.rs` généré :
 
 ```rust
 #[derive(ViewSet)]
@@ -456,6 +478,21 @@ pub struct PostViewSet;
 ```
 
 Montez-le avec : `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
+
+Modèle tenant — **pas un derive**. Il émet un `pub fn router() -> Router<()>`
+construit à partir de
+`ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, avec toute la
+chaîne du builder (`fields` / `filter_fields` / `search_fields` / `ordering` /
+`page_size` / `permissions_for_model` / `read_only`) ébauchée en lignes
+commentées. La connexion est résolue par requête via l'extracteur `Tenant` au
+lieu d'être capturée une fois au montage, donc un seul `router()` sert tous les
+tenants.
+
+Montez-le avec : `.merge(crate::viewsets::post::router())` — et **non** avec la
+ligne `PostViewSet::router(path, pool)` ci-dessus.
+
+`--crate <path>` renomme la crate du framework dans les lignes `use` générées,
+pour les projets qui importent `rustango` sous un autre nom.
 
 ### `make:serializer <Name> [--model <Model>]`
 

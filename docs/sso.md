@@ -12,8 +12,8 @@ built-in presets.
 SSO is **link-to-existing** for the admin: the verified email the IdP
 returns must match an existing admin user. It authenticates the person;
 it never creates accounts and never grants access on its own. An unknown
-or unverified email is refused. (The member flow, below, may opt into
-auto-provisioning.)
+or unverified email is refused. (The member flow, below, auto-provisions
+by default; see below to turn it off.)
 
 > **Source:** the admin-independent core `rustango::sso` (`SsoProvider`,
 > `build_provider`, `verified_email`, `ResolvedSso`, `SsoError`), the
@@ -212,7 +212,12 @@ with Apple isn't a preset; it needs id_token/JWKS verification.)
 - **Secrets encrypted at rest** (`RUSTANGO_SECRET_KEY`), decrypted only
   in memory at login; edit forms mask the stored secret.
 - The flow cookie is short-lived (10 min), `HttpOnly`, `SameSite=Lax`,
-  and `Secure` on HTTPS; the handshake carries PKCE + a signed `state`.
+  and `Secure` per configuration — **not** per request scheme. Precedence
+  is `security.secure_cookies` (default `true` on the `manage` path, so
+  it fails closed), falling back to "secure on the prod tier" from
+  `RUSTANGO_ENV` when nothing is set. Nothing inspects whether the
+  request actually arrived over HTTPS. The handshake carries PKCE + a
+  signed `state`.
 - SSO sessions are the ordinary admin session — rotating or deactivating
   the linked user invalidates them through the existing live gate.
 - Trust model is `/userinfo` over TLS (the id_token isn't independently

@@ -36,4 +36,5 @@ DATABASE_URL=postgres://rustango:rustango@localhost:5432/cookbook_blog \
 ```
 
 Test files mirror the cookbook chapters (`tests/cookbook_chapter01_*.rs`
-… `tests/cookbook_chapter12_*.rs`).
+… `tests/cookbook_chapter21_*.rs`) — 30 files across 21 chapters, since
+some chapters split into more than one.

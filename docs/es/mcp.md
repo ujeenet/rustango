@@ -198,8 +198,24 @@ grant_skill_pool(&pool, "acme", "calc-bot", "calculator").await?;
 El cliente intercambia su credencial por un **JWT fijado al tenant y con alcance
 limitado** en `POST /mcp/token` (o mediante el flujo OAuth `client_credentials` en
 `/mcp/oauth/token`). El servidor resuelve la concesión en los claims `skills` +
-`tools` del token; cada petición lo reverifica. El efecto, verificado de extremo
-a extremo:
+`tools` del token; cada petición lo reverifica.
+
+**O sáltate el intercambio por completo:** la credencial en bruto
+`prefix.secret` se acepta como token Bearer — pega la clave que se muestra una
+sola vez directamente en cualquier cliente MCP:
+
+```bash
+claude mcp add --transport http my-app https://acme.example/mcp \
+  --header "Authorization: Bearer 3f9c1a2b.7d…"
+```
+
+En la ruta de clave en bruto el servidor verifica el secreto (argon2, con una
+caché local al proceso de corta vida para no recalcular el hash en cada
+petición), vuelve a comprobar la vigencia y resuelve las concesiones **en cada
+petición** — una clave propiedad de un usuario siempre refleja el RBAC vigente
+de su dueño, y la revocación se aplica de inmediato en lugar de esperar al TTL
+de un JWT. En producción, establece `[mcp] rate_limit_per_minute` para acotar el
+trabajo de verificación. El efecto, verificado de extremo a extremo:
 
 ```rust
 // tools/list returns ONLY the granted tool, with its JSON Schema:
@@ -362,6 +378,8 @@ enable_sse            = true     # serve the GET {prefix} SSE stream
 allowed_origins       = []       # CORS allow-list (empty = same-origin only)
 rate_limit_per_minute = 0        # per-IP cap (0/unset = unlimited)
 max_tools_listed      = 0        # tools/list page size (0/unset = unlimited)
+max_body_bytes        = 1048576  # JSON-RPC body cap — raise for tools that
+                                 # accept inline payloads (base64 uploads)
 ```
 
 ---

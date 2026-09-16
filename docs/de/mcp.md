@@ -201,8 +201,24 @@ grant_skill_pool(&pool, "acme", "calc-bot", "calculator").await?;
 Der Client tauscht sein Credential gegen ein **tenant-gepinntes, scoped JWT** an
 `POST /mcp/token` (oder über den OAuth-`client_credentials`-Flow an
 `/mcp/oauth/token`). Der Server löst die Gewährung in die `skills` + `tools`
-Claims des Tokens auf; jede Anfrage verifiziert es erneut. Der Effekt, von Ende
-zu Ende verifiziert:
+Claims des Tokens auf; jede Anfrage verifiziert es erneut.
+
+**Oder überspringen Sie den Austausch ganz:** das rohe `prefix.secret`-Credential
+wird selbst als Bearer-Token akzeptiert — fügen Sie den nur einmal angezeigten
+Schlüssel direkt in einen beliebigen MCP-Client ein:
+
+```bash
+claude mcp add --transport http my-app https://acme.example/mcp \
+  --header "Authorization: Bearer 3f9c1a2b.7d…"
+```
+
+Auf dem Rohschlüssel-Pfad verifiziert der Server das Secret (argon2, mit einem
+kurzlebigen prozesslokalen Cache, damit der Hash nicht pro Anfrage neu berechnet
+wird), prüft die Gültigkeit erneut und löst die Gewährungen **bei jeder Anfrage**
+auf — ein benutzereigener Schlüssel spiegelt stets das aktuelle RBAC seines
+Besitzers wider, und ein Widerruf greift sofort, statt die TTL eines JWT
+abzuwarten. Setzen Sie in Produktion `[mcp] rate_limit_per_minute`, um den
+Verifizierungsaufwand zu begrenzen. Der Effekt, von Ende zu Ende verifiziert:
 
 ```rust
 // tools/list returns ONLY the granted tool, with its JSON Schema:
@@ -366,6 +382,8 @@ enable_sse            = true     # serve the GET {prefix} SSE stream
 allowed_origins       = []       # CORS allow-list (empty = same-origin only)
 rate_limit_per_minute = 0        # per-IP cap (0/unset = unlimited)
 max_tools_listed      = 0        # tools/list page size (0/unset = unlimited)
+max_body_bytes        = 1048576  # JSON-RPC body cap — raise for tools that
+                                 # accept inline payloads (base64 uploads)
 ```
 
 ---

@@ -1,4 +1,8 @@
-//! Cookbook Chapter 9b — `ViewSet::serializer::<S>()` wiring.
+//! Cookbook Chapter 9 — `ViewSet::serializer::<S>()` wiring.
+//!
+//! Chapter 9b is Template views, backed by
+//! `cookbook_chapter09c_template_views.rs`; this file backs the
+//! serializer-marriage recipes in Chapter 9 and Chapter 7.
 //!
 //! When set, list / retrieve / create / update responses run every
 //! row through `S::from_model` + `to_value` instead of the default

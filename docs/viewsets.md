@@ -69,7 +69,7 @@ Same model underneath; what differs is what comes out and who's calling.
 | Sends back | **JSON data** | a **server-rendered HTML page** |
 | Built for | SPAs, mobile, other services | browsers, server-rendered sites, admin-style CRUD |
 | A "create" | `POST` JSON → `201` + the object | `POST` a form → `303` redirect (Post/Redirect/Get) |
-| On bad input | `400` + a field-keyed JSON error map | re-render the form with the errors shown |
+| On bad input | `400` — field-keyed from a serializer, `{"error": "…"}` otherwise ([shapes](#error-response-shapes)) | re-render the form with the errors shown |
 | A "list" is | a paginated JSON envelope | a loop over rows in your template |
 | Usually authed by | tokens / JWT / API keys | session cookies |
 | Django analogue | DRF `ModelViewSet` | generic class-based views |
@@ -672,6 +672,27 @@ Independently of a serializer, the write path always enforces the **schema**:
 So even without a serializer you get type + required + DB-constraint validation;
 wire a serializer to get declarative length/range/choice checks (auto-inherited)
 plus your own per-field and cross-field rules.
+
+### Error response shapes
+
+There is no single error envelope — a client parsing one shape will fail on the
+others. **Three** ship, and which one you get depends on the path that failed:
+
+| Shape | Emitted by | Body |
+|---|---|---|
+| **DRF field map** | serializer validation only | `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}` |
+| **Plain message** | every other ViewSet failure | `{"error": "<human-readable message>"}` |
+| **`ApiError`** | your own handlers returning `rustango::api_errors::ApiError` | `{"error": "<machine code>", "message": …, "status": …, "details": …}` |
+
+The first two both come out of a ViewSet, so the distinction matters: the
+type-coercion, required/NOT NULL and database-constraint `400`s listed above are
+**not** field-keyed maps — they are `{"error": "…"}`. Only the serializer's own
+validators produce the DRF map.
+
+Note also that `error` means two different things across the table: a
+human-readable sentence in the ViewSet shape, and a stable machine code in
+`ApiError` (which carries the sentence in `message`). Branch on the HTTP status
+and on whether the body has a `message` key, not on `error` alone.
 
 ---
 
