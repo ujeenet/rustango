@@ -252,7 +252,11 @@ Type constructors: `string` · `integer` / `int32` · `number` · `boolean` ·
 ## Notes and limits
 
 - **It's OpenAPI 3.1** (`"openapi": "3.1.0"`), which aligns with JSON Schema
-  2020-12 — most modern tooling consumes it directly.
+  2020-12 — most modern tooling consumes it directly. **Adding a QUERY
+  operation bumps the spec to `3.2.0`**, because that is the version which
+  defines the method: `PathItem::query` sets it on the whole document. If your
+  tooling only reads 3.1, that is the one thing that will change the version
+  out from under it — see [query-method](query-method.md).
 - **The viewer router needs the `admin` feature** (for axum); `openapi` alone is
   enough to *build* and serialize a spec (`spec.to_json()`).
 - **Viewers load from a CDN** — fine for internal/dev docs; self-host the assets
