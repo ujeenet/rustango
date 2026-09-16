@@ -56,7 +56,7 @@ cargo run
 # In another terminal: log in (sets session cookie), then read the extras.
 curl -sc /tmp/c.txt -H "Host: acme.localhost" \
      -d "username=alice&password=tenantpw" \
-     http://127.0.0.1:8080/__login >/dev/null
+     http://127.0.0.1:8080/login >/dev/null
 curl -sb /tmp/c.txt -H "Host: acme.localhost" http://127.0.0.1:8080/users/alice
 # → {"id":1,"username":"alice","display_name":"","timezone":"UTC","is_superuser":true}
 ```
@@ -68,7 +68,7 @@ through your own admin / form / API — they're application data.
 
 ### Admin
 
-Browse to <http://acme.localhost:8080/__admin/> after logging in. The
+Browse to <http://acme.localhost:8080/admin/> after logging in. The
 sidebar shows `Project → AppUser`; clicking through renders
 `AppUser`'s `list_display` (with `display_name` and `timezone`
 columns) and the detail view exposes every column on the row. The
