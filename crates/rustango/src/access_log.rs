@@ -283,37 +283,53 @@ async fn handle(cfg: Arc<AccessLogLayer>, req: Request<Body>, next: Next) -> Res
     // what gets shipped to a collector, and renaming at the edge is
     // work every deployment would repeat.
     let client_address = ip.as_deref().unwrap_or("-");
+
+    // `url.query` is emitted only when the request actually had one.
+    //
+    // It used to go out as `url.query=` on every query-less request,
+    // while `tracing_layer`'s span omits the field entirely in that
+    // case — so the two layers this module exists to align still
+    // disagreed about how "absent" looks. OTel says `url.query` SHOULD
+    // be omitted when there is none, and a collector that types it as a
+    // keyword can reject the empty string outright.
+    //
+    // A single event callsite cannot drop one of its fields, so the
+    // presence branch has to be part of the macro invocation. The
+    // macro below keeps that from becoming six hand-maintained copies
+    // that drift apart one edit at a time.
+    macro_rules! emit {
+        ($level:ident $(, $msg:literal)?) => {
+            if query.is_empty() {
+                tracing::$level!(
+                    "http.request.method" = %method,
+                    "url.path" = %path,
+                    "http.response.status_code" = status,
+                    duration_ms,
+                    "client.address" = %client_address,
+                    tenant = %tenant,
+                    $($msg,)?
+                );
+            } else {
+                tracing::$level!(
+                    "http.request.method" = %method,
+                    "url.path" = %path,
+                    "url.query" = %query,
+                    "http.response.status_code" = status,
+                    duration_ms,
+                    "client.address" = %client_address,
+                    tenant = %tenant,
+                    $($msg,)?
+                );
+            }
+        };
+    }
+
     if is_slow {
-        tracing::warn!(
-            "http.request.method" = %method,
-            "url.path" = %path,
-            "url.query" = %query,
-            "http.response.status_code" = status,
-            duration_ms,
-            "client.address" = %client_address,
-            tenant = %tenant,
-            "slow request",
-        );
+        emit!(warn, "slow request");
     } else if is_error {
-        tracing::warn!(
-            "http.request.method" = %method,
-            "url.path" = %path,
-            "url.query" = %query,
-            "http.response.status_code" = status,
-            duration_ms,
-            "client.address" = %client_address,
-            tenant = %tenant,
-        );
+        emit!(warn);
     } else {
-        tracing::info!(
-            "http.request.method" = %method,
-            "url.path" = %path,
-            "url.query" = %query,
-            "http.response.status_code" = status,
-            duration_ms,
-            "client.address" = %client_address,
-            tenant = %tenant,
-        );
+        emit!(info);
     }
 
     response

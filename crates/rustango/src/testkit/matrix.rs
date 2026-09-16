@@ -368,7 +368,13 @@ macro_rules! by_dialect {
 pub struct Divergence<T> {
     /// The expectation for the dialect the pool is on.
     pub value: T,
-    /// The `because` string for that arm; empty when none was given.
+    /// The `because` string for that arm.
+    ///
+    /// Never empty: `by_dialect!` has one rule and `because` is
+    /// mandatory on all three arms, so an omitted one is a compile
+    /// error rather than an empty string. The doc used to say "empty
+    /// when none was given", which contradicted the macro’s own
+    /// `compile_fail` doctest and invited a dead `if why.is_empty()`.
     pub why: &'static str,
 }
 

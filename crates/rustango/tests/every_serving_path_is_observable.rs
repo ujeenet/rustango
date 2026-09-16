@@ -55,14 +55,58 @@ fn builder_src() -> String {
 }
 
 /// Drop `//` comments so a search sees code, not prose about code.
+///
+/// String-aware. A naive `l.find("//")` also truncates at the `//`
+/// inside a literal — and `manage.rs` carries `"postgres://offline"`
+/// and `"postgres://"` on the very paths this file audits. Everything
+/// after such a literal became invisible to the scan, so a mount or a
+/// hand-off written there would be reported missing (crying wolf) or
+/// silently dropped from the list of paths to audit (going blind).
+/// Which of the two you get depends only on where the next edit lands.
 fn code_only(src: &str) -> String {
     src.lines()
-        .map(|l| match l.find("//") {
-            Some(i) => &l[..i],
-            None => l,
+        .map(|l| {
+            let b = l.as_bytes();
+            let mut in_str = false;
+            let mut i = 0;
+            while i < b.len() {
+                match b[i] {
+                    b'\\' if in_str => i += 1, // skip the escaped char
+                    b'"' => in_str = !in_str,
+                    b'/' if !in_str && i + 1 < b.len() && b[i + 1] == b'/' => {
+                        return &l[..i];
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            l
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn the_comment_stripper_respects_string_literals() {
+    // The exact shape that defeated the naive version: a `//` inside a
+    // literal, with load-bearing code after it on the same line.
+    let line =
+        r#"        let url = var("DATABASE_URL").unwrap_or("postgres://offline".into()); // note"#;
+    let out = code_only(line);
+    assert!(
+        out.contains("postgres://offline"),
+        "the literal was truncated at its own `//`: {out}"
+    );
+    assert!(
+        out.contains("unwrap_or"),
+        "code after the literal was lost: {out}"
+    );
+    assert!(
+        !out.contains("note"),
+        "the real trailing comment survived: {out}"
+    );
+    // And a plain comment is still removed.
+    assert_eq!(code_only("let a = 1; // gone").trim_end(), "let a = 1;");
 }
 
 /// The two topologies that correctly make a router observable: layer it

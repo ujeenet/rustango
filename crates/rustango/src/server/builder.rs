@@ -61,8 +61,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// before the admin fallback so they take precedence over the
     /// admin's catch-all.
     static_dirs: Vec<(String, std::path::PathBuf)>,
-    /// Access-log layer to apply to the **outermost** router, set by
-    /// [`Builder::observability`]. `None` leaves the server unlogged.
+    /// Whether to mount request observability at all, set by
+    /// [`Builder::observability`].
     ///
     /// It has to be applied here rather than by the caller. `Cli` used
     /// to layer its api router before handing it over, but this builder
@@ -72,7 +72,13 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// middleware added". So the entire tenant-admin surface and the
     /// whole operator console served with no access log and no request
     /// span, on the multi-tenant path #1480 was opened about.
-    observability: Option<crate::access_log::AccessLogLayer>,
+    ///
+    /// Separate from `access_log` on purpose: `[logging] access_log =
+    /// false` turns off the log, not the trace context.
+    observability: bool,
+    /// The access-log layer, when request logging is on. `None` with
+    /// `observability == true` means "span and request id, no log line".
+    access_log: Option<crate::access_log::AccessLogLayer>,
     _phantom: PhantomData<DB>,
 }
 
@@ -133,7 +139,8 @@ impl<DB: Database> Builder<DB> {
             health_endpoints: false,
             provisioning_dir: None,
             static_dirs: Vec::new(),
-            observability: None,
+            observability: false,
+            access_log: None,
             _phantom: PhantomData,
         }
     }
@@ -167,8 +174,9 @@ impl<DB: Database> Builder<DB> {
     /// `Cli` calls this for you from `[logging]`; call it directly only
     /// when building the server by hand.
     #[must_use]
-    pub fn observability(mut self, layer: crate::access_log::AccessLogLayer) -> Self {
-        self.observability = Some(layer);
+    pub fn observability(mut self, access_log: Option<crate::access_log::AccessLogLayer>) -> Self {
+        self.observability = true;
+        self.access_log = access_log;
         self
     }
 
@@ -684,24 +692,31 @@ impl<DB: Database> Builder<DB> {
         // admin, operator console and the health endpoints all carry
         // it. Anything layered on the api router before it reached this
         // builder covered only the api router (#1480).
-        let app = match self.observability {
-            Some(log_layer) => {
+        let app = if self.observability {
+            // The access log is optional here; the span is not. Gating
+            // both on the log meant `[logging] access_log = false` also
+            // removed the request span, the `request_id` field and the
+            // `X-Request-Id` header — a setting silently controlling
+            // three things it does not name.
+            #[allow(unused_mut)]
+            let mut app = app;
+            if let Some(log_layer) = self.access_log {
                 use crate::access_log::AccessLogRouterExt as _;
-                let app = app.access_log(log_layer);
-                // The span and the request id are `admin`-only, matching
-                // `Cli::mount_observability`: a tenancy-without-admin
-                // build still gets the access log, which carries
-                // `tenant` itself, but has no span for handler events to
-                // inherit.
-                #[cfg(feature = "admin")]
-                let app = {
-                    use crate::request_id::RequestIdRouterExt as _;
-                    app.request_id(crate::request_id::RequestIdLayer::default())
-                        .layer(crate::tracing_layer::TracingLayer::new())
-                };
-                app
+                app = app.access_log(log_layer);
             }
-            None => app,
+            // The span and the request id are `admin`-only, matching
+            // `Cli::mount_observability`: a tenancy-without-admin build
+            // still gets the access log, which carries `tenant` itself,
+            // but has no span for handler events to inherit.
+            #[cfg(feature = "admin")]
+            let app = {
+                use crate::request_id::RequestIdRouterExt as _;
+                app.request_id(crate::request_id::RequestIdLayer::default())
+                    .layer(crate::tracing_layer::TracingLayer::new())
+            };
+            app
+        } else {
+            app
         };
 
         Ok(app)

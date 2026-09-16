@@ -330,6 +330,24 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     input.block = syn::parse2(quote! {{
         {
             use #root::__private_runtime::tracing_subscriber::{self, EnvFilter};
+            // Colour only when stdout is a terminal, and never under
+            // `NO_COLOR`. The same rule `logging::Color::Auto` applies,
+            // inlined because `rustango::logging` is gated on
+            // `admin` + `tenancy` and this macro expands in every app.
+            //
+            // Without it this subscriber inherits tracing-subscriber's
+            // default, which is `cfg!(feature = "ansi")` — true since
+            // the framework turned that feature on. `./app > app.log`
+            // and every container that redirects stdout then collected
+            // escape codes in the log file. The careful `Color::Auto`
+            // check added alongside covers `Setup::install` only, and
+            // `#[rustango::main]` is the default entrypoint.
+            let __ansi = {
+                use ::std::io::IsTerminal as _;
+                let __no_color = ::std::env::var_os("NO_COLOR")
+                    .is_some_and(|v| !v.is_empty());
+                !__no_color && ::std::io::stdout().is_terminal()
+            };
             // `try_init` so duplicate installers (e.g. tests already
             // holding a subscriber) don't panic.
             let _ = tracing_subscriber::fmt()
@@ -337,6 +355,7 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
                     EnvFilter::try_from_default_env()
                         .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn")),
                 )
+                .with_ansi(__ansi)
                 .try_init();
         }
         let __rt = #builder_call

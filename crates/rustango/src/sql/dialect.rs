@@ -321,15 +321,31 @@ pub trait Dialect: Send + Sync {
     /// only because every current caller happens to reject SQLite
     /// before asking. The next caller would not have known to.
     ///
-    /// **No default body, deliberately.** A default returning the
-    /// PostgreSQL form is how #559 happened: MySQL inherited
-    /// `DROP CONSTRAINT IF EXISTS` and emitted SQL its parser rejects.
-    /// Leaving the default in place after fixing it would mean a fourth
-    /// dialect inherits the same wrong answer silently — the failure
-    /// this method exists to remove. `by_dialect!` refuses to compile
-    /// when a dialect is unaccounted for; this is that rule for the
-    /// trait.
-    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String>;
+    /// **The default body refuses rather than guessing.** A default
+    /// returning the PostgreSQL form is how #559 happened: MySQL
+    /// inherited `DROP CONSTRAINT IF EXISTS` and emitted SQL its parser
+    /// rejects. Keeping that default after fixing it would let a fourth
+    /// dialect inherit the same wrong answer silently.
+    ///
+    /// Removing the default outright was the first attempt, and it is a
+    /// SemVer-major change: this trait is a documented extension point
+    /// (see the module header), so every downstream `impl Dialect`
+    /// would stop compiling on a patch bump. Panicking instead keeps
+    /// source compatibility and still refuses to emit the wrong SQL —
+    /// the message names the method and the dialect, so a new backend
+    /// finds out on its first migration rather than on a server's
+    /// syntax error. All three in-tree dialects override it.
+    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
+        let _ = (table, name);
+        unimplemented!(
+            "Dialect::drop_check_constraint_sql is not implemented for `{}`. \
+             Implement it: return the dialect's own `ALTER TABLE … DROP …` \
+             spelling, or `None` if it has none. There is deliberately no \
+             fallback — inheriting PostgreSQL's form is what shipped invalid \
+             SQL to MySQL in #559.",
+            self.name()
+        )
+    }
 
     /// `ALTER TABLE <table> DROP ...` for a named foreign key.
     ///
@@ -338,8 +354,16 @@ pub trait Dialect: Send + Sync {
     /// overrides it with `DROP FOREIGN KEY`, which is not idempotent.
     /// `None` on dialects with no `ALTER TABLE … DROP CONSTRAINT`, as
     /// for [`Dialect::drop_check_constraint_sql`] — including its
-    /// reason for having no default body.
-    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String>;
+    /// reason for refusing rather than defaulting to the PG form.
+    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
+        let _ = (table, name);
+        unimplemented!(
+            "Dialect::drop_foreign_key_sql is not implemented for `{}`. \
+             Implement it: return the dialect's own `ALTER TABLE … DROP …` \
+             spelling, or `None` if it has none.",
+            self.name()
+        )
+    }
 
     /// Whether `CREATE [UNIQUE] INDEX ... WHERE <expr>` partial-index
     /// syntax is supported. PG and SQLite (3.8+) both ship it natively;
