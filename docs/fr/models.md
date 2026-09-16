@@ -351,8 +351,16 @@ Déclarés sur le **modèle** :
   `.where_(Post::author_id.eq(42))` pour des filtres vérifiés à la compilation.
 - **Des chercheurs (finders)** — `find(pk, &pool)` → `Option<Self>` ; `find_or_fail(pk, &pool)` →
   `Self` (erreur si absent) ; `find_many(pks, &pool)` ; `find_or_insert(...)`.
-- **Des écrivains (writers)** — `save`/`save_pool`, `save_partial(&["title"], &pool)` (met à jour
-  seulement certaines colonnes), `insert_pool` (insertion explicite), `delete`.
+- **Des écrivains (writers)** — `save_pool` (INSERT ou UPDATE), `insert_pool`
+  (insertion explicite), `delete_pool`, et `save_partial(&["title"], &pool)`
+  (met à jour seulement certaines colonnes). Les `save` / `insert` / `delete`
+  nus n'en sont **pas** des alias : ils prennent un `sqlx::PgPool` spécifique au
+  pilote et sont `#[cfg(feature = "postgres")]`, donc sur un build `sqlite` ou
+  `mysql` ils n'existent tout simplement pas. La famille `_pool` prend
+  `rustango::sql::Pool` et fonctionne sur les trois — écrivez celle-là sauf si
+  vous savez être sur Postgres. Ce nommage inversé est suivi dans
+  [#1293](https://github.com/ujeenet/rustango/issues/1293) ; voir
+  [api-conventions](api-conventions.md#fonctions).
 - **La suppression logique** (si activée) — `soft_delete`, `restore`, `force_delete` ;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -419,10 +427,15 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `default` | `"sql literal"` | DEFAULT de colonne |
 | `null` | indicateur | nullable (ou utilisez `Option<T>`) |
 | `unique` | indicateur | contrainte d'unicité |
+| `index` / `index(...)` | indicateur, ou `unique`, `name`, `method` | index mono-colonne sur ce champ |
 | `choices` | `"v:Label, …"` | valeurs énumérées |
 | `min` / `max` | nombre | validation de plage |
 | `blank` | indicateur | autorise le vide dans les formulaires/admin |
 | `editable` | `true`/`false` | éditabilité formulaire/admin |
+| `verbose_name` | `"Label"` | libellé lisible du champ dans les formulaires/admin |
+| `help_text` | `"…"` | texte d'aide rendu sous le widget de formulaire/admin |
+| `validators` | `"name, name"` | validateurs nommés à exécuter sur ce champ |
+| `related_name` | `"posts"` | nom de l'accesseur inverse sur la cible de la FK |
 | `auto_now` | indicateur | réglé à l'heure actuelle à chaque save |
 | `auto_now_add` | indicateur | réglé à l'heure actuelle à l'insertion |
 | `auto_uuid` | indicateur | UUID v4 côté Rust (sur `Auto<Uuid>`) |
