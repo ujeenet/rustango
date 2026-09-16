@@ -48,9 +48,14 @@ on:
 # superseded run is not interesting — it describes a commit nobody will
 # merge.
 #
-# `main`, `develop` and tags are excluded from cancellation deliberately:
-# those runs are the record for a commit that is already merged, and
-# cancelling one leaves that commit with no build behind it.
+# Push runs — `main`, `develop` and the release branches — are excluded
+# from cancellation deliberately: those runs are the record for a commit
+# that is already merged, and cancelling one leaves that commit with no
+# build behind it.
+#
+# (An earlier version of this comment said "and tags". It never applied:
+# `on: push:` names `branches:` with no `tags:` key, so a tag push does
+# not trigger this workflow at all.)
 #
 # `develop` matters more than it looks, because PRs into it are ungated.
 # An unlabelled PR merges with only the cheap checks; the post-merge push
@@ -93,7 +98,17 @@ concurrency:
   # A push group is per-commit, so there is never a superseded run in it
   # worth cancelling. Everything else is per-ref, where cancelling is the
   # point.
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  #
+  # `labeled` is excluded, and it is not a detail. The trigger fires on
+  # *every* label event, not just `ci` — sixteen labels exist on this
+  # repo, and Dependabot adds `dependencies` on its own. So labelling a
+  # PR that already had a run in flight cancelled it and started over;
+  # on a `ci`-labelled PR that is up to twenty jobs discarded for adding
+  # the word "bug". The label event still triggers a run (that is why
+  # `labeled` is in `types:` — it starts the matrix without waiting for
+  # a push); it just no longer kills the one already going.
+  cancel-in-progress: >-
+    ${{ github.event_name != 'push' && github.event.action != 'labeled' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -194,7 +209,52 @@ jobs:
       # (doc_markdown, too_many_lines, items_after_statements)
       # that the pre-push hook treats as warnings only. Real
       # errors still surface in the `postgres_test` job via rustc.
-      - run: cargo clippy -p rustango --features tenancy --lib --no-deps
+      # `--all-targets` rather than `--lib`: on an unlabelled PR this is
+      # the only job that compiles `crates/rustango/tests/**` at all, so
+      # `--lib` meant a test file that does not build merged green and
+      # broke on the post-merge push run. Still `-p rustango`, which is
+      # what keeps the macros crate's ~70 pedantic findings out of it —
+      # the crate scope was doing that work, not `--lib`.
+      - run: cargo clippy -p rustango --features tenancy --all-targets --no-deps
+
+  # Ungated, deliberately: these are the structural guards, and gating
+  # them put them out of reach of the pull requests that need them most.
+  #
+  # Every other test in this repo runs in exactly one place —
+  # `postgres_test`'s `cargo test --workspace --all-features` — and that
+  # job is `needs: gate`. So on an unlabelled PR into `develop`, a change
+  # that adds a `*_tri.rs` or `*_mysql_live.rs` without the matching
+  # `ci.yml` line passed everything it ran and merged; the guard written
+  # to catch exactly that first fired post-merge, on develop's push run.
+  # That is #1437's failure mode relocated from the suite to the guard.
+  #
+  # These eight need no database and no service container — they read the
+  # source tree and the workflow file — so they cost seconds and can run
+  # on every PR. `--features tenancy` matches `clippy` above so the two
+  # jobs share a build.
+  #
+  # A guard that needs a live database does NOT belong here; it belongs
+  # in `postgres_test` with the rest.
+  guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      # No DATABASE_URL / MYSQL_TEST_URL is set here on purpose: under
+      # the #1440 policy an unset var is a skip, and these guards must
+      # not depend on one. If a guard added here starts needing a
+      # database it will fail closed rather than skip silently.
+      - run: |
+          cargo test -p rustango --features tenancy \
+            --test docs_links \
+            --test docs_contract \
+            --test docs_versions \
+            --test docs_inventories \
+            --test docs_live_suite_counts \
+            --test every_mysql_arm_runs_in_ci \
+            --test every_serving_path_is_observable \
+            --test logging_fields_agree
 
   # Primary PG test job — runs the full workspace with `--all-features`
   # against a real PostgreSQL service. Covers every PG-typed live test

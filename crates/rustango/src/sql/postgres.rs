@@ -46,6 +46,29 @@ impl Dialect for Postgres {
         format!("${n}")
     }
 
+    // PostgreSQL drops any constraint — CHECK, FOREIGN KEY, UNIQUE —
+    // through the one ANSI spelling, and supports `IF EXISTS` on it, so
+    // both of these are idempotent and identical. MySQL needs
+    // `DROP CHECK` / `DROP FOREIGN KEY` and rejects `IF EXISTS` there;
+    // SQLite has no `ALTER TABLE … DROP CONSTRAINT` at all and returns
+    // `None`. These were the trait's default body until it became clear
+    // that defaulting to the PG form is what shipped #559 to MySQL.
+    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+            self.quote_ident(table),
+            self.quote_ident(name)
+        ))
+    }
+
+    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+            self.quote_ident(table),
+            self.quote_ident(name)
+        ))
+    }
+
     fn column_comment_statement(&self, table: &str, column: &str, comment: &str) -> Option<String> {
         let escaped = comment.replace('\'', "''");
         Some(format!(
