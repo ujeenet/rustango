@@ -693,28 +693,10 @@ impl<DB: Database> Builder<DB> {
         // it. Anything layered on the api router before it reached this
         // builder covered only the api router (#1480).
         let app = if self.observability {
-            // The access log is optional here; the span is not. Gating
-            // both on the log meant `[logging] access_log = false` also
-            // removed the request span, the `request_id` field and the
-            // `X-Request-Id` header — a setting silently controlling
-            // three things it does not name.
-            #[allow(unused_mut)]
-            let mut app = app;
-            if let Some(log_layer) = self.access_log {
-                use crate::access_log::AccessLogRouterExt as _;
-                app = app.access_log(log_layer);
-            }
-            // The span and the request id are `admin`-only, matching
-            // `Cli::mount_observability`: a tenancy-without-admin build
-            // still gets the access log, which carries `tenant` itself,
-            // but has no span for handler events to inherit.
-            #[cfg(feature = "admin")]
-            let app = {
-                use crate::request_id::RequestIdRouterExt as _;
-                app.request_id(crate::request_id::RequestIdLayer::default())
-                    .layer(crate::tracing_layer::TracingLayer::new())
-            };
-            app
+            // One definition, shared with `Cli::mount_observability` —
+            // see `access_log::mount_observability` for the ordering
+            // rules and why they live in one place.
+            crate::access_log::mount_observability(app, self.access_log)
         } else {
             app
         };

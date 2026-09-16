@@ -63,20 +63,53 @@ use axum::http::{header, HeaderMap, Request, Response, Version};
 use tower::Service;
 use tracing::{field, info_span, Instrument};
 
-#[derive(Clone, Default, Debug)]
-pub struct TracingLayer;
+#[derive(Clone, Debug)]
+pub struct TracingLayer {
+    /// Query-parameter names whose values are redacted out of
+    /// `url.query` on the span.
+    ///
+    /// Defaults to the same list [`crate::access_log`] uses. It is a
+    /// field rather than a constant because a project can *extend* that
+    /// list via `[audit] redact_query_params`, and the span has to
+    /// honour the same set: redacting `client_secret` in the event
+    /// while the span renders it in cleartext on the same line is the
+    /// exact bug this redaction exists to remove, just narrowed to
+    /// project-specific keys.
+    redact_query_params: std::sync::Arc<Vec<String>>,
+}
+
+impl Default for TracingLayer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TracingLayer {
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            redact_query_params: std::sync::Arc::new(crate::access_log::default_redact_params()),
+        }
+    }
+
+    /// Redact these query-parameter names instead of the defaults.
+    ///
+    /// Pass `AccessLogLayer::redact_query_params` so both layers agree;
+    /// `Cli::mount_observability` and `server::Builder` do exactly that.
+    #[must_use]
+    pub fn redact(mut self, params: Vec<String>) -> Self {
+        self.redact_query_params = std::sync::Arc::new(params);
+        self
     }
 }
 
 impl<S> tower::Layer<S> for TracingLayer {
     type Service = TracingService<S>;
     fn layer(&self, inner: S) -> Self::Service {
-        TracingService { inner }
+        TracingService {
+            inner,
+            redact_query_params: std::sync::Arc::clone(&self.redact_query_params),
+        }
     }
 }
 
@@ -93,6 +126,7 @@ impl<S> tower::Layer<S> for TracingLayer {
 #[derive(Clone)]
 pub struct TracingService<S> {
     inner: S,
+    redact_query_params: std::sync::Arc<Vec<String>>,
 }
 
 impl<S> Service<Request<Body>> for TracingService<S>
@@ -118,7 +152,7 @@ where
         // readied — and keep the fresh clone for next time.
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
-        let span = build_request_span(&req);
+        let span = build_request_span(&req, &self.redact_query_params);
         Box::pin(
             async move {
                 let started = Instant::now();
@@ -131,7 +165,7 @@ where
     }
 }
 
-fn build_request_span(req: &Request<Body>) -> tracing::Span {
+fn build_request_span(req: &Request<Body>, redact: &[String]) -> tracing::Span {
     let method = req.method().as_str();
     let path = req.uri().path();
     let query = req.uri().query().unwrap_or_default();
@@ -189,8 +223,7 @@ fn build_request_span(req: &Request<Body>) -> tracing::Span {
         // project that adds its own key to `redact_query_params` still
         // gets it redacted in the event, and the defaults already cover
         // the credential-bearing names.
-        let redacted =
-            crate::access_log::redact_query(query, &crate::access_log::default_redact_params());
+        let redacted = crate::access_log::redact_query(query, redact);
         span.record("url.query", redacted.as_str());
     }
     if let Some(tp) = parse_traceparent(req.headers()) {
@@ -400,7 +433,7 @@ mod tests {
             .header(header::USER_AGENT, "test-ua/1.0")
             .body(Body::empty())
             .unwrap();
-        let span = build_request_span(&req);
+        let span = build_request_span(&req, &crate::access_log::default_redact_params());
         let _enter = span.enter();
         let resp: Response<Body> = Response::builder()
             .status(StatusCode::CREATED)
@@ -412,6 +445,52 @@ mod tests {
         // current subscriber; with no subscriber it's disabled, so
         // accept either — the contract is "doesn't panic").
         // No assertion needed beyond reaching this line.
+    }
+
+    /// A key the *project* configured must be redacted on the span too.
+    ///
+    /// The first cut of this fix redacted with `default_redact_params()`
+    /// rather than the layer's configured list, and called that
+    /// acceptable. It is not: the bug being fixed is "the span renders
+    /// cleartext on the same line as the redaction", and for a project
+    /// that added `client_secret` to `[audit] redact_query_params` that
+    /// bug was entirely unchanged.
+    #[test]
+    fn a_project_configured_key_is_redacted_on_the_span() {
+        let redact = vec!["client_secret".to_owned()];
+        let req = Request::builder()
+            .uri("/cb?client_secret=shhh&page=2")
+            .body(Body::empty())
+            .unwrap();
+        let span = build_request_span(&req, &redact);
+        drop(span);
+
+        let out = crate::access_log::redact_query("client_secret=shhh&page=2", &redact);
+        assert!(!out.contains("shhh"), "configured key not redacted: {out}");
+        assert!(out.contains("page=2"), "non-credential param lost: {out}");
+    }
+
+    /// OAuth callbacks carry credentials under names the original
+    /// default list did not have.
+    ///
+    /// `/sso/callback?code=…&state=…` is a URL this framework's own
+    /// `oauth2::providers` and `tenancy::sso` produce, and matching is
+    /// exact — `access_token` never covered `id_token`.
+    #[test]
+    fn the_defaults_cover_the_oauth_parameters_this_framework_emits() {
+        let raw = "code=AUTHCODE&state=STATEVAL&id_token=IDTOK&code_verifier=VERIFIER\
+&client_secret=CS&page=2";
+        let out = crate::access_log::redact_query(raw, &crate::access_log::default_redact_params());
+        for leaked in ["AUTHCODE", "STATEVAL", "IDTOK", "VERIFIER", "CS"] {
+            assert!(
+                !out.contains(leaked),
+                "`{leaked}` survived the default redaction: {out}"
+            );
+        }
+        assert!(
+            out.contains("page=2"),
+            "a plain param must pass through: {out}"
+        );
     }
 
     /// The span must not carry credentials the access log redacts.
@@ -460,7 +539,7 @@ mod tests {
                 .uri("/reset?password=hunter2&token=abc123XYZ&page=2")
                 .body(Body::empty())
                 .unwrap();
-            let span = build_request_span(&req);
+            let span = build_request_span(&req, &crate::access_log::default_redact_params());
             let _e = span.enter();
             // Any event inside the span renders the span's context,
             // which is where the leak appeared.

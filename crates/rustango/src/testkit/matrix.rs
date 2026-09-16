@@ -4,8 +4,8 @@
 //! ## Why this exists
 //!
 //! The integration suite is shaped by dialect rather than by feature
-//! (#1461). Of 188 `*_sqlite_live.rs` files, 12 stems have a sibling
-//! file for another backend and **176 have no MySQL or PG counterpart at
+//! (#1461). Of 188 `*_sqlite_live.rs` files, 16 stems have a sibling
+//! file for another backend and **172 have no MySQL or PG counterpart at
 //! all** — not because those features are SQLite-only, but because
 //! writing the second and third copy by hand costs more than it returns.
 //! The `django6_*` files already solved this for eight features; nothing
@@ -98,6 +98,12 @@ impl Backend {
             #[cfg(feature = "postgres")]
             Backend::Postgres => {
                 let url = std::env::var("DATABASE_URL").ok()?;
+                assert_scheme(
+                    self,
+                    "DATABASE_URL",
+                    &url,
+                    &["postgres://", "postgresql://"],
+                );
                 Some(
                     Pool::connect(&url).await.unwrap_or_else(|e| {
                         panic!("DATABASE_URL is set but unreachable ({url}): {e}")
@@ -107,6 +113,7 @@ impl Backend {
             #[cfg(feature = "mysql")]
             Backend::MySql => {
                 let url = std::env::var("MYSQL_TEST_URL").ok()?;
+                assert_scheme(self, "MYSQL_TEST_URL", &url, &["mysql://", "mariadb://"]);
                 Some(Pool::connect(&url).await.unwrap_or_else(|e| {
                     panic!("MYSQL_TEST_URL is set but unreachable ({url}): {e}")
                 }))
@@ -124,6 +131,35 @@ impl Backend {
             _ => None,
         }
     }
+}
+
+/// The URL for a backend must actually name that backend.
+///
+/// `Pool::connect` dispatches on the scheme, so
+/// `DATABASE_URL=sqlite://dev.db` — a supported configuration for an
+/// app — hands the *Postgres* arm a SQLite pool. Every `tri_postgres`
+/// test then runs against SQLite and reports `ok`, which is the #1440
+/// failure this module exists to close, arriving through the one door
+/// it had left open: unset is a skip and unreachable is a panic, but
+/// "set to a different engine" was silently accepted.
+///
+/// # Panics
+///
+/// When the scheme does not match the backend. That is a misconfigured
+/// environment, not an absent one, and reporting it as a pass is the
+/// whole problem.
+#[cfg_attr(not(any(feature = "postgres", feature = "mysql")), allow(dead_code))]
+fn assert_scheme(backend: Backend, var: &str, url: &str, expected: &[&str]) {
+    assert!(
+        expected.iter().any(|p| url.starts_with(p)),
+        "{var} is set to `{url}`, which is not a {} URL — expected one of {expected:?}.\n\n\
+         `Pool::connect` dispatches on the scheme, so this would have run every \
+         {} arm against a different engine and reported `ok`. Point {var} at a real \
+         {} server, or unset it to skip that arm.",
+        backend.dialect_name(),
+        backend.dialect_name(),
+        backend.dialect_name(),
+    );
 }
 
 /// Serializes the tests **within one suite** that share a live server.
@@ -410,8 +446,8 @@ impl<T> Divergence<T> {
 /// }
 /// ```
 ///
-/// generates `postgres::returns_plan_text`, `mysql::returns_plan_text`,
-/// `sqlite::returns_plan_text`, and so on — each gated on its backend's
+/// generates `tri_postgres::returns_plan_text`, `tri_mysql::returns_plan_text`,
+/// `tri_sqlite::returns_plan_text`, and so on — each gated on its backend's
 /// feature, so a build without `mysql` simply has no MySQL tests rather
 /// than tests that skip.
 #[macro_export]

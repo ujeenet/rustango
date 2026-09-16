@@ -154,8 +154,14 @@ fn run_commands(block: &str) -> Vec<String> {
                 if t.starts_with("- ") {
                     // A list item at or above the step's own indent ends
                     // this command; one nested deeper is script content.
+                    // `>=`, not `>`. A script line at the script's *own*
+                    // base indent beginning with `- ` — a heredoc line,
+                    // an `echo` of a bullet list — is exactly the case
+                    // the comment above claims to protect, and `>` broke
+                    // the chunk on it. A real next step is always
+                    // strictly shallower than the script it follows.
                     match script_indent {
-                        Some(base) if indent > base => {}
+                        Some(base) if indent >= base => {}
                         _ => break,
                     }
                 } else if n > 0 && !t.is_empty() && script_indent.is_none() {
@@ -603,6 +609,41 @@ jobs:
             cmds.iter()
                 .any(|c| c.contains("beta_tri") && !enables_mysql(c)),
             "the sqlite step should stand alone and not build mysql: {cmds:?}"
+        );
+    }
+
+    /// A multi-line script whose own lines start with `- ` stays whole.
+    ///
+    /// This is the case the chunker's comment says it protects and the
+    /// `indent > base` comparison did not: a bullet line at the
+    /// script's own indent ended the command early, losing any
+    /// `--test` target after it. No workflow has one today, so the bug
+    /// was latent — and the earlier parser tests only covered
+    /// single-line `run:` steps, which cannot reach it.
+    #[test]
+    fn a_bullet_line_inside_a_script_does_not_end_the_command() {
+        const JOB: &str = "
+  mysql_live:
+    steps:
+      - run: |
+          echo \"steps:\"
+          - not a step, just shell output
+          cargo test -p rustango --features mysql --test late_tri
+      - run: cargo test -p rustango --features sqlite --test other_tri
+";
+        let cmds = run_commands(&job_block(JOB, "mysql_live"));
+        let script = cmds
+            .iter()
+            .find(|c| c.contains("echo"))
+            .expect("the heredoc step went missing");
+        assert!(
+            script.contains("late_tri"),
+            "the bullet line ended the command early, so the `--test` after it was \
+             lost — that target would be reported as named in no CI step: {script:?}"
+        );
+        assert!(
+            !script.contains("other_tri"),
+            "and it must still stop at the real next step: {script:?}"
         );
     }
 

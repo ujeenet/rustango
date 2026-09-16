@@ -246,13 +246,19 @@ fn the_matrix_header_counts_match_the_test_tree() {
         .collect();
 
     let has = |s: &str, suffix: &str| dir.join(format!("{s}{suffix}")).exists();
-    let paired = stems
-        .iter()
-        .filter(|s| has(s, "_mysql_live.rs") || has(s, "_pg_live.rs"))
-        .count();
+    // `_live.rs` counts as a PostgreSQL sibling, and it is the repo's
+    // *dominant* PG naming — `admin_live.rs`, `foreign_key_live.rs`,
+    // `media_live.rs` and two others all read `DATABASE_URL`. Matching
+    // only `_pg_live.rs` missed every one of them, so the guard pinned
+    // 12/176 where the tree says 16/172 and then forced that wrong pair
+    // into `matrix.rs` and the CHANGELOG. A counter that is confidently
+    // wrong is worse than none: it makes the number look checked.
+    let sibling =
+        |s: &String| has(s, "_mysql_live.rs") || has(s, "_pg_live.rs") || has(s, "_live.rs");
+    let paired = stems.iter().filter(|s| sibling(s)).count();
     let unpaired = stems
         .iter()
-        .filter(|s| !has(s, "_mysql_live.rs") && !has(s, "_pg_live.rs") && !has(s, "_tri.rs"))
+        .filter(|s| !sibling(s) && !has(s, "_tri.rs"))
         .count();
 
     let header = std::fs::read_to_string(root.join("crates/rustango/src/testkit/matrix.rs"))

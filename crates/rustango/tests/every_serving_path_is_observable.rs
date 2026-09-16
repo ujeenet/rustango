@@ -54,6 +54,10 @@ fn builder_src() -> String {
     include_str!("../src/server/builder.rs").to_owned()
 }
 
+fn access_log_src() -> String {
+    include_str!("../src/access_log.rs").to_owned()
+}
+
 /// Drop `//` comments so a search sees code, not prose about code.
 ///
 /// String-aware. A naive `l.find("//")` also truncates at the `//`
@@ -213,11 +217,10 @@ fn every_builder_handoff_passes_the_layer() {
 /// And the builder applies what it is handed to the **outermost**
 /// router.
 ///
-/// This is the half the guard was missing. `manage.rs` could hand the
-/// layer over correctly and the builder could still apply it to one
-/// branch — which is the bug being fixed, one level down. The outermost
-/// router is the one built from `fallback_service`, so the application
-/// has to come after it.
+/// `manage.rs` could hand the layer over correctly and the builder
+/// could still reintroduce the bug one level down by layering a branch.
+/// The outermost router is the one built from `fallback_service`, so
+/// the mount has to come after it.
 #[test]
 fn the_builder_applies_observability_to_the_outermost_router() {
     let src = code_only(&builder_src());
@@ -226,18 +229,49 @@ fn the_builder_applies_observability_to_the_outermost_router() {
         "no `fallback_service` in server/builder.rs — the Host dispatch has moved and \
          this guard can no longer tell inner from outer",
     );
-    let apply = src.find(".access_log(").expect(
-        "server/builder.rs never calls `.access_log(...)`, so nothing it serves is \
-         logged — the tenancy paths hand it a layer it drops on the floor",
+    let apply = src.find("mount_observability(").expect(
+        "server/builder.rs never mounts observability, so nothing it serves is logged \
+         — the tenancy paths hand it a layer it drops on the floor",
     );
 
     assert!(
         apply > dispatch,
-        "server/builder.rs applies the access log at byte {apply}, before the Host \
+        "server/builder.rs mounts observability at byte {apply}, before the Host \
          dispatch at {dispatch}. It has to go on the router built from \
          `fallback_service` — the outermost one — or it reaches only the branch it \
-         was applied to, which is the bug (#1480): the tenant app carried the log \
-         while the tenant admin merged in after it and the operator console on the \
-         apex branch carried nothing."
+         was applied to, which is the bug (#1480)."
     );
+}
+
+/// Both serving topologies mount through the **same function**.
+///
+/// Presence was never the hard part. `manage.rs` and `server/builder.rs`
+/// each carried their own copy of the same three ordering rules, and the
+/// copies had already drifted into opposite relative order — one wrapped
+/// the access log around the request id, the other the reverse — while
+/// this file happily accepted either. A guard that enforces presence
+/// cannot see equivalence, so the fix is to leave only one definition
+/// and check that nobody grows a second.
+#[test]
+fn neither_serving_path_hand_rolls_its_own_layer_order() {
+    for (name, src) in [
+        ("manage.rs", code_only(&manage_src())),
+        ("server/builder.rs", code_only(&builder_src())),
+    ] {
+        assert!(
+            src.contains("mount_observability("),
+            "{name} no longer calls the shared `mount_observability` — this guard is \
+             reading the wrong text, so a pass would prove nothing"
+        );
+        // The layer constructors belong to the shared function alone.
+        for hand_rolled in ["TracingLayer::new()", "RequestIdLayer::default()"] {
+            assert!(
+                !src.contains(hand_rolled),
+                "{name} constructs `{hand_rolled}` itself instead of going through \
+                 `access_log::mount_observability`. That is how the two sites drifted \
+                 into opposite layer order last time, with this guard green throughout: \
+                 it checked that each path mounted *something*, never that they agreed."
+            );
+        }
+    }
 }

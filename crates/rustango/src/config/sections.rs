@@ -755,15 +755,28 @@ pub struct AuditSettings {
 /// removes the boilerplate.
 /// # Constructing one by hand
 ///
-/// Use `..Default::default()`; the struct is `#[non_exhaustive]`.
+/// Build the default and assign — the fields are `pub`:
+///
+/// ```ignore
+/// let mut logging = rustango::config::LoggingSettings::default();
+/// logging.level = Some("debug".into());
+/// ```
+///
+/// **Not** `LoggingSettings { level, ..Default::default() }`. This
+/// struct is `#[non_exhaustive]`, and that attribute forbids *every*
+/// struct expression outside the defining crate — functional update
+/// syntax included. An earlier version of this doc recommended exactly
+/// that form; it fails with `error[E0639]: cannot create
+/// non-exhaustive struct using struct expression`, which is a
+/// particularly bad thing to get wrong here, because the reader is
+/// looking at it *because* their struct literal just broke.
 ///
 /// This release added `color` and `access_log`, and a struct literal
 /// naming every field stopped compiling — a SemVer-major change shipped
-/// in a patch. Marking it now means that is the *last* time: a field
-/// added later cannot break a caller who spreads the default, and the
-/// compiler points at the construction site rather than leaving it to a
-/// changelog nobody reads. The struct is deserialized from `[logging]`
-/// in practice, so this costs almost nobody anything.
+/// in a patch. Marking it `#[non_exhaustive]` now means that is the
+/// *last* time: a field added later cannot break a caller at all. The
+/// struct is deserialized from `[logging]` in practice, so this costs
+/// almost nobody anything.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 #[non_exhaustive]

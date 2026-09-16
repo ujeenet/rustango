@@ -954,3 +954,49 @@ pub trait Dialect: Send + Sync {
     /// [`SqlError::MissingPrimaryKey`] if `model` has no PK.
     fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError>;
 }
+
+#[cfg(test)]
+mod every_dialect_overrides_the_drop_constraint_methods {
+    //! The in-tree net for `Dialect`'s two `unimplemented!` defaults.
+    //!
+    //! Those defaults exist so a downstream `impl Dialect` still
+    //! compiles on a patch bump — a deliberate trade of a build error
+    //! for a loud runtime panic. The trade is fine; what it removed is
+    //! the guarantee the bare signatures used to give *in this crate*.
+    //!
+    //! Without this, deleting `drop_foreign_key_sql` from `mysql.rs`
+    //! leaves the crate building clean and moves the failure to a panic
+    //! mid-migration, with a half-applied schema. Checked by doing
+    //! exactly that and watching this fail.
+
+    use super::Dialect;
+
+    /// Every compiled-in dialect answers both, one way or the other.
+    ///
+    /// `None` is a legitimate answer — SQLite has no
+    /// `ALTER TABLE … DROP CONSTRAINT` at all. What is not legitimate
+    /// is inheriting the default, which panics.
+    #[test]
+    fn no_dialect_falls_through_to_the_panicking_default() {
+        let dialects: Vec<&dyn Dialect> = vec![
+            #[cfg(feature = "postgres")]
+            &crate::sql::postgres::Postgres,
+            #[cfg(feature = "mysql")]
+            &crate::sql::mysql::MySql,
+            #[cfg(feature = "sqlite")]
+            &crate::sql::sqlite::Sqlite,
+        ];
+
+        assert!(
+            !dialects.is_empty(),
+            "no dialect features are on, so this guard checked nothing"
+        );
+
+        for d in dialects {
+            // Reaching the default body panics; returning either
+            // `Some(sql)` or `None` means the dialect decided.
+            let _ = d.drop_check_constraint_sql("t", "c");
+            let _ = d.drop_foreign_key_sql("t", "fk");
+        }
+    }
+}
