@@ -156,6 +156,19 @@ async fn deleting_a_collection_takes_its_subtree_with_it() {
 
     mgr.delete_collection(pid).await.expect("delete parent");
 
+    // The collection the caller *named*, asserted first and separately.
+    //
+    // The original version of this test checked only that the child was
+    // gone and the media orphaned — so when a bind-order bug put the
+    // first id into `deleted_at` and the timestamp into the `IN` list,
+    // the named collection silently survived on SQLite and MySQL and
+    // this suite stayed green. `collect_descendant_ids` returns the root
+    // first, so the named row is precisely the one that broke.
+    assert!(
+        mgr.get_collection(pid).await.expect("get parent").is_none(),
+        "the collection that was named is still live after delete_collection —          the one row the caller explicitly asked to delete"
+    );
+
     let visible: Vec<String> = mgr
         .list_collections()
         .await
@@ -185,3 +198,104 @@ async fn deleting_a_collection_takes_its_subtree_with_it() {
          deleted collection"
     );
 }
+
+/// A collection with no children is the case that broke.
+///
+/// With one id in the list, a bind-order error is total: the single id
+/// goes into `deleted_at` and the timestamp into `IN (…)`, so the
+/// `UPDATE` matches nothing. On SQLite that is a silent no-op — the row
+/// stays live while its media has already been orphaned, which is worse
+/// than either outcome alone. On MySQL it is `ERROR 1292, Incorrect
+/// datetime value: '1' for column 'deleted_at'`.
+#[tokio::test]
+async fn deleting_a_childless_collection_deletes_it() {
+    let mgr = manager().await;
+    let c = mgr
+        .create_collection("Leaf", "leaf", None, "")
+        .await
+        .expect("leaf");
+    let cid = match c.id {
+        Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    let inside = seed(&mgr, Some(cid)).await;
+
+    mgr.delete_collection(cid).await.expect("delete leaf");
+
+    assert!(
+        mgr.get_collection(cid).await.expect("get").is_none(),
+        "a childless collection was not deleted"
+    );
+    let live: Vec<String> = mgr
+        .list_collections()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|c| c.slug)
+        .collect();
+    assert!(
+        !live.contains(&"leaf".to_owned()),
+        "a childless collection is still listed after deletion: {live:?}"
+    );
+    // And the media it held was still orphaned, so the two halves agree.
+    assert_eq!(
+        mgr.get(id_of(&inside))
+            .await
+            .expect("get media")
+            .and_then(|m| m.collection_id),
+        None,
+        "media was not orphaned"
+    );
+}
+
+/// Deep tree: every level goes, and the root is not special-cased away.
+#[tokio::test]
+async fn a_deep_subtree_is_deleted_at_every_level() {
+    let mgr = manager().await;
+    let mut parent: Option<i64> = None;
+    let mut ids = Vec::new();
+    for i in 0..6 {
+        let c = mgr
+            .create_collection(format!("L{i}"), format!("l{i}"), parent, "")
+            .await
+            .expect("level");
+        let id = match c.id {
+            Auto::Set(v) => v,
+            _ => panic!("no id"),
+        };
+        ids.push(id);
+        parent = Some(id);
+    }
+    let deepest = seed(&mgr, Some(*ids.last().unwrap())).await;
+
+    mgr.delete_collection(ids[0]).await.expect("delete root");
+
+    let live: Vec<String> = mgr
+        .list_collections()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|c| c.slug)
+        .collect();
+    assert!(
+        live.is_empty(),
+        "levels survived a subtree delete: {live:?} — the root is the CTE anchor and \
+         is the level most likely to be mishandled"
+    );
+    assert!(
+        mgr.get(id_of(&deepest)).await.expect("get").is_some(),
+        "media five levels down was destroyed; the contract is that it is orphaned"
+    );
+}
+
+// `purge_pending` is fixed the same way as `purge` — links first — but
+// has **no test here, deliberately**. Creating a Pending row needs
+// `begin_upload`, which calls `presigned_put_url`; `InMemoryStorage`
+// does not implement it, so the call fails before inserting and the
+// row cannot exist in this suite. A test would skip, and a skipping
+// test that prints `ok` is what this whole PR stack exists to stop.
+//
+// Covered instead by: the statement shape executed against a live
+// MySQL 8 and SQLite, and by symmetry with `purge` above, which is
+// tested. That `InMemoryStorage` cannot reach the upload-ticket path at
+// all is a coverage hole of its own, recorded on #1548.

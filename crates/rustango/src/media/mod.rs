@@ -684,6 +684,27 @@ impl MediaManager {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
         let p = self.pool.dialect().placeholder(1);
+        // Links first, same as `purge` — `rustango_media_tag_links`
+        // carries no foreign key on `media_id`, so a hard delete of the
+        // media row leaves them behind with nothing to reclaim them. A
+        // Pending row can carry tags: `set_tags` accepts any media id.
+        //
+        // The subquery reads `rustango_media` while deleting from
+        // `rustango_media_tag_links` — different tables, so MySQL's
+        // "can't reopen the delete target" restriction does not apply.
+        let unlink_sql = format!(
+            "DELETE FROM rustango_media_tag_links \
+              WHERE media_id IN ( \
+                    SELECT id FROM rustango_media \
+                     WHERE status = 'pending' AND uploaded_at < {p})"
+        );
+        crate::sql::raw_execute_pool(
+            &self.pool,
+            &unlink_sql,
+            vec![crate::core::SqlValue::DateTime(cutoff)],
+        )
+        .await
+        .map_err(media_err_from_exec)?;
         let sql =
             format!("DELETE FROM rustango_media WHERE status = 'pending' AND uploaded_at < {p}");
         crate::sql::raw_execute_pool(
@@ -909,13 +930,26 @@ impl MediaManager {
             .map_err(media_err_from_exec)?;
 
         // Bind `Utc::now()` from Rust so the SQL is portable.
-        let p_now = d.placeholder(ids.len() + 1);
+        //
+        // The timestamp binds **first**, because it appears first in the
+        // statement. `Dialect::placeholder(n)` ignores `n` and returns a
+        // positional `?` on every dialect except PostgreSQL, so for
+        // SQLite and MySQL the bind vector has to follow the order the
+        // placeholders appear in the text, not the order the numbers
+        // suggest. Getting this backwards put the first collection id
+        // into `deleted_at` and the timestamp into the `IN` list — and
+        // because `collect_descendant_ids` returns the root first (it is
+        // the CTE anchor), the collection the caller *named* was the one
+        // that silently survived.
+        let p_now = d.placeholder(1);
+        let id_placeholders: Vec<String> = (2..=ids.len() + 1).map(|i| d.placeholder(i)).collect();
+        let id_list = id_placeholders.join(", ");
         let soft_delete_sql = format!(
             "UPDATE rustango_media_collections SET deleted_at = {p_now} \
-              WHERE id IN ({in_list})"
+              WHERE id IN ({id_list})"
         );
-        let mut del_binds = binds;
-        del_binds.push(crate::core::SqlValue::DateTime(Utc::now()));
+        let mut del_binds = vec![crate::core::SqlValue::DateTime(Utc::now())];
+        del_binds.extend(ids.iter().copied().map(crate::core::SqlValue::I64));
         crate::sql::raw_execute_pool(&self.pool, &soft_delete_sql, del_binds)
             .await
             .map_err(media_err_from_exec)?;
