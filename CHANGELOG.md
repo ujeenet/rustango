@@ -234,6 +234,41 @@ exploitable?" answered honestly — including where the answer is no.
 
 ### Fixed
 
+- **Three write-path regressions this release introduced**, found by a
+  crew review of the assembled branch. 0.57.6 had none of them.
+
+  **`purge_pending` lost the predicate from its destructive statement.**
+  0.57.6 was one statement, `DELETE … WHERE status = 'pending' AND
+  uploaded_at < ?`. It became a SELECT resolving ids plus a transaction
+  deleting **by bare id** — and the SELECT runs on a different
+  connection, with `transaction_pool` then acquiring one, so a
+  `finalize_upload` committing in that window meant a **Ready** row with
+  a real storage object was hard-deleted while its client held a 200
+  naming that id. Nothing else records the storage key, so the object
+  leaked permanently. Capturing the ids is what makes the two statements
+  agree about which rows they mean; it was never a licence to delete by
+  id alone, and the predicate is back.
+
+  **`purge_pending` bound every pending row into one `IN (…)`.** Past
+  the backend's parameter ceiling the statement is rejected before
+  execution, nothing is purged, and the next run re-selects the same
+  backlog — so the sweep **wedged permanently** instead of degrading.
+  Measured: 33 000 pending rows purged 0 on SQLite, and kept purging 0.
+  It chunks on `Dialect::max_bind_params` now, which already encodes
+  every ceiling and which `bulk_insert` already chunks on.
+
+  **`INSERT IGNORE` defeated the transaction it sat inside.** `tag` and
+  `set_tags` branched by hand to `INSERT IGNORE` on MySQL, which
+  downgrades *every* row-level error to a warning — measured on MySQL
+  8.0: a missing NOT NULL default (1364), a `CHECK` violation (3819),
+  and the `tag_id` foreign-key violation PostgreSQL and SQLite raise. So
+  the atomicity contract documented for `set_tags` below held on two
+  backends and silently dropped a tag on the third. Both sites route
+  through `Dialect::insert_on_conflict_skip` now — the narrow `ON
+  DUPLICATE KEY UPDATE` on MySQL, `ON CONFLICT (media_id, tag_id) DO
+  NOTHING` elsewhere — which is one helper in place of a hand-rolled
+  branch that had been copied twice.
+
 - **A failed `set_tags` left the row with neither tag set** (#1551 B5).
   It was a bare `DELETE FROM rustango_media_tag_links` followed by
   `tag()`. Anything failing in between — a driver error, a slug that
