@@ -4,6 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.57.7] — unreleased
+
+The security pass. A review of `develop` at v0.57.6 produced 20 findings,
+every one traced to the code that implements it, with "is this currently
+exploitable?" answered honestly — including where the answer is no.
+
 ## [0.57.6] — 2026-09-16
 
 The tri-dialect train. The theme is a single question: **does this behaviour
