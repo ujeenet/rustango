@@ -218,13 +218,20 @@ permission codenames the admin already uses — `rustango_media.view` to read,
 **inside** `require_auth`, which is what injects the identity it reads;
 without that every request is a `401`. Superusers skip the check.
 
-Two things it does not do:
+Three things it does not do:
 
 - **Row-level decisions.** A grant of `rustango_media.view` reads *any* media
   row by id. `MediaManager` holds one pool, so a multi-tenant deployment
   scopes rows itself — implement `MediaAuthorizer` for that. `MediaTarget`
   names the row (`Media(id)`, `Collection(id)`, `CollectionSubtree(id)`, …)
   precisely so a per-row policy can be written.
+- **Scope the object store.** `disk` is caller-supplied on
+  `POST /uploads/begin` and the `StorageRegistry` is process-wide, so
+  pool-per-tenant isolates the database and not the bucket: a bare
+  `rustango_media.add` grant writes into any disk the process knows about.
+  Say which ones with `MediaPerms::new(pool).allow_disks(["user-uploads"])`.
+  Prefixes within a disk still need `MediaAuthorizer`, which is handed
+  `key_prefix`.
 - **Guess what a new route means.** Both `MediaAction` and `MediaTarget` are
   `#[non_exhaustive]`, so end a hand-written policy on `_ => false` and a
   route added in a later release arrives denied rather than allowed.

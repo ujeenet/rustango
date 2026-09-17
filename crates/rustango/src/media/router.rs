@@ -39,7 +39,7 @@
 //! | POST   | `/collections`                    | Create: body `{name, slug, parent_id?, description?}`. Authorized as `Add(NewCollection)`. |
 //! | GET    | `/collections`                    | List every non-deleted collection. |
 //! | GET    | `/collections/{id}`               | Single collection. |
-//! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` to include sub-folders. |
+//! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` to include sub-folders. Authorized as `Read(CollectionContents)` — media rows, not a collection read. |
 //! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside orphaned, NOT deleted). Authorized as `Delete(CollectionSubtree)`, not `Delete(Collection)`. |
 //! | POST   | `/tags`                           | Create / upsert: body `{slug}`. Authorized as `Add(NewTag)` — a different decision from creating a collection. |
 //! | GET    | `/tags`                           | All tags. |
@@ -111,8 +111,24 @@ const DEFAULT_PRESIGN_TTL_SECS: u64 = 3600;
 pub enum MediaTarget {
     /// One media row, by id.
     Media(i64),
-    /// One collection, by id.
+    /// One collection row, by id — `GET /collections/{id}`.
     Collection(i64),
+    /// The **media inside** one collection — `GET
+    /// /collections/{id}/contents` without `?recursive`.
+    ///
+    /// Separate from [`Self::Collection`] because the two routes return
+    /// different tables. This one answers `Vec<MediaResponse>`: media
+    /// rows, each carrying a presigned GET URL. Classifying it as a
+    /// collection read meant a policy granting "may browse folders" —
+    /// `rustango_media_collections.view` under [`MediaPerms`] — read
+    /// every media row in the library one collection at a time, and
+    /// harvested a signed download link for each.
+    ///
+    /// The id still names a collection, so a policy that scopes
+    /// collections by owner can use it exactly as it uses
+    /// [`Self::Collection`]. What changed is that granting it is also a
+    /// decision about media.
+    CollectionContents(i64),
     /// A collection **and everything under it** — what
     /// `DELETE /collections/{id}` actually reaches.
     ///
@@ -421,8 +437,22 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
     Some(match action {
         // `GET /tags/{slug}/media` returns **media** rows, so it is a
         // media read. The tag is the filter, not the subject.
+        //
+        // `Read(Collection(id))` is two routes, and they are not the
+        // same decision: `GET /collections/{id}` returns the collection
+        // row, while `GET /collections/{id}/contents` returns
+        // `Vec<MediaResponse>` — media rows, each carrying a presigned
+        // GET URL. Both used to take the collection codename alone, so
+        // "may browse folders" read the library. They are separate
+        // targets now; see [`MediaTarget::CollectionContents`].
         A::Read(T::Media(_) | T::Tag(_)) => &["rustango_media.view"],
         A::Read(T::Collection(_)) => &["rustango_media_collections.view"],
+        // The listing is of media, so it takes the media permission —
+        // and the collection permission too, because the id names a
+        // collection the caller must be allowed to open at all.
+        A::Read(T::CollectionContents(_)) => {
+            &["rustango_media_collections.view", "rustango_media.view"]
+        }
         // `Listing` spans three tables — `GET /collections`, `GET
         // /tags`, `GET /tags/popular` and a `?recursive` contents
         // listing. The recursive one is the widest of the four, so the
@@ -505,6 +535,7 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
 #[cfg(feature = "tenancy")]
 pub struct MediaPerms {
     pool: crate::sql::Pool,
+    allowed_disks: Option<Vec<String>>,
 }
 
 #[cfg(feature = "tenancy")]
@@ -515,9 +546,61 @@ impl MediaPerms {
     /// registry's — it is where `rustango_user_permissions` and
     /// `rustango_user_roles` are read from, so the wrong pool means the
     /// wrong tenant's grants.
+    ///
+    /// Every disk in the [`crate::storage::StorageRegistry`] is
+    /// writable by anyone holding `rustango_media.add` until you call
+    /// [`Self::allow_disks`]. See that method — on a multi-tenant
+    /// deployment it is the difference between "may upload" and "may
+    /// upload into any tenant's bucket".
     #[must_use]
     pub fn new(pool: crate::sql::Pool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            allowed_disks: None,
+        }
+    }
+
+    /// Restrict `POST /uploads/begin` to these disks.
+    ///
+    /// `disk` is caller-supplied and goes straight into
+    /// `StorageRegistry::disk`, and the registry is **process-wide**:
+    /// pool-per-tenant isolates the database, not the object store. So
+    /// on a multi-tenant deployment a bare `rustango_media.add` grant
+    /// mints a presigned `PUT` into *any* registered bucket, which is
+    /// what [`MediaTarget::NewUpload`]'s own docs call "write anywhere
+    /// in any bucket".
+    ///
+    /// A codename cannot express "this disk" — that is why this is a
+    /// list here rather than a permission. It is checked **in addition
+    /// to** `rustango_media.add`, never instead of it.
+    ///
+    /// ```ignore
+    /// MediaPerms::new(pool).allow_disks(["user-uploads"])
+    /// ```
+    ///
+    /// Leave it unset only where one disk serves everyone. Prefixes
+    /// within a disk are still not expressible here — for
+    /// "your own prefix on a shared bucket", implement
+    /// [`MediaAuthorizer`], which is handed `key_prefix` for exactly
+    /// that.
+    #[must_use]
+    pub fn allow_disks<I, S>(mut self, disks: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_disks = Some(disks.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// `true` when `disk` may be written to. Unset means every disk,
+    /// which is the documented default and the reason
+    /// [`Self::allow_disks`] exists.
+    fn disk_allowed(&self, disk: &str) -> bool {
+        match &self.allowed_disks {
+            Some(allowed) => allowed.iter().any(|d| d == disk),
+            None => true,
+        }
     }
 }
 
@@ -544,6 +627,25 @@ impl MediaAuthorizer for MediaPerms {
         }
         // A variant with no mapping is a route added after this policy
         // was written. Denying it is the point.
+        // `/uploads/begin` mints a presigned PUT for a disk and key
+        // prefix the caller chooses, and `StorageRegistry` is
+        // process-wide — pool-per-tenant isolates the database, not the
+        // object store. A codename cannot express "this disk", so a
+        // codename check alone is the grant `MediaTarget::NewUpload`'s
+        // own docs call "write anywhere in any bucket". Whatever
+        // `allowed_disks` says is applied on top of the codename, never
+        // instead of it.
+        if let MediaAction::Add(MediaTarget::NewUpload { disk, .. }) = &action {
+            if !self.disk_allowed(disk) {
+                tracing::debug!(
+                    target: "rustango::media::auth",
+                    disk = %disk,
+                    user_id = auth.id,
+                    "MediaPerms: upload ticket refused — disk not in the allow-list"
+                );
+                return MediaDecision::Forbidden;
+            }
+        }
         let Some(codenames) = required_codenames(&action) else {
             tracing::debug!(
                 target: "rustango::media::auth",
@@ -552,6 +654,18 @@ impl MediaAuthorizer for MediaPerms {
             );
             return MediaDecision::Forbidden;
         };
+        // An empty slice would fall straight through the loop to
+        // `Allow`. Nothing in `required_codenames` returns one today,
+        // and this is what keeps that true tomorrow: a mapping that
+        // requires nothing is a mistake, not a grant.
+        if codenames.is_empty() {
+            tracing::warn!(
+                target: "rustango::media::auth",
+                ?action,
+                "MediaPerms: empty codename list — refusing rather than allowing"
+            );
+            return MediaDecision::Forbidden;
+        }
         for cn in codenames {
             match crate::tenancy::permissions::has_perm_pool(auth.id, cn, &self.pool).await {
                 Ok(true) => {}
@@ -680,9 +794,26 @@ fn classify(
 
     // Presence, not value: the handler rejects a non-boolean, and a
     // caller who names the parameter at all is asking to widen.
+    //
+    // The **key is decoded first**, with form semantics, because that is
+    // what the handler's `Query` extractor does — `serde_urlencoded`
+    // goes through `form_urlencoded::parse`, which percent-decodes the
+    // key and turns `+` into a space. Matching the raw bytes here let
+    // `?%72ecursive=true` reach the handler as a subtree walk while the
+    // gate classified it as a read of the one collection named, which is
+    // the same disagreement `percent_decode_path` was introduced to
+    // close on the path segments. The query side was left raw.
+    //
+    // Presence still wins over value, so a bare `?recursive` is treated
+    // as widening even though the handler answers 400 to it. The gate
+    // being *stricter* than the handler is the safe direction, and
+    // loosening this to match the handler exactly would reopen the gap
+    // from the other side.
     let recursive = query.is_some_and(|q| {
-        q.split('&')
-            .any(|p| p == "recursive" || p.starts_with("recursive="))
+        q.split('&').any(|p| {
+            let key = p.split('=').next().unwrap_or(p);
+            crate::url_codec::url_decode(key) == "recursive"
+        })
     });
 
     match (m, s.as_slice()) {
@@ -720,8 +851,15 @@ fn classify(
         (&Method::GET, ["collections", _, "contents"]) if recursive => {
             Some(MediaAction::Read(MediaTarget::Listing))
         }
-        (&Method::GET, ["collections", raw] | ["collections", raw, "contents"]) => {
+        // The collection row itself.
+        (&Method::GET, ["collections", raw]) => {
             Some(MediaAction::Read(MediaTarget::Collection(id(raw)?)))
+        }
+        // The media inside it — a different table, and a presigned URL
+        // per row. Sharing `Collection` with the arm above is what let
+        // `rustango_media_collections.view` read the library.
+        (&Method::GET, ["collections", raw, "contents"]) => {
+            Some(MediaAction::Read(MediaTarget::CollectionContents(id(raw)?)))
         }
         // Not `Collection` — this route deletes the whole subtree and
         // orphans the media under every level of it. Naming one id in a

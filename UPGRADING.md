@@ -186,13 +186,35 @@ Mount it inside `require_auth` (or `optional_auth`) — that middleware is
 what injects the `AuthenticatedUser` it reads. Without it every request
 is a `401`, which is the symptom naming its own cause.
 
-Two things to know before you rely on it. The codenames are seeded by
-`auto_create_permissions`, which runs during provisioning and on
-migrate; an app upgrading into this can re-seed without a migrate cycle
-with the `seed-permissions` manage command. And it is **table-level, not
-row-level**: `rustango_media.view` grants reading *any* media row by id,
-so a multi-tenant deployment still scopes rows in its own
-`MediaAuthorizer`. `MediaPerms` is the floor.
+Reading a collection's **contents** needs
+`rustango_media_collections.view` *and* `rustango_media.view`, because
+that route answers media rows with a presigned download URL each — it
+is a media read that happens to be addressed by collection id.
+
+Three things to know before you rely on it.
+
+The codenames are seeded by `auto_create_permissions`, which runs during
+provisioning and on migrate; an app upgrading into this can re-seed
+without a migrate cycle with the `seed-permissions` manage command.
+
+It is **table-level, not row-level**: `rustango_media.view` grants
+reading *any* media row by id, so a multi-tenant deployment still scopes
+rows in its own `MediaAuthorizer`. `MediaPerms` is the floor.
+
+And **every registered disk is writable until you say otherwise**.
+`disk` is caller-supplied on `POST /uploads/begin` and the
+`StorageRegistry` is process-wide, so pool-per-tenant isolates the
+database and *not* the object store — a bare `rustango_media.add` grant
+mints a presigned `PUT` into any bucket the process knows about. A
+codename cannot express "this disk", so the allow-list is a builder:
+
+```rust
+MediaPerms::new(pool).allow_disks(["user-uploads"])
+```
+
+Set it on any deployment with more than one disk. Prefixes *within* a
+disk are still not expressible — for "your own prefix on a shared
+bucket", implement `MediaAuthorizer`, which is handed `key_prefix`.
 
 Write the trait impl when you need per-row decisions:
 

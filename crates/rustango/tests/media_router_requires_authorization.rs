@@ -453,7 +453,13 @@ async fn the_whole_route_table_reaches_the_gate_correctly() {
         ("POST", "/collections", "Add(NewCollection)"),
         ("GET", "/collections", "Read(Listing)"),
         ("GET", "/collections/7", "Read(Collection(7))"),
-        ("GET", "/collections/7/contents", "Read(Collection(7))"),
+        // The contents route returns media rows with presigned URLs, so
+        // it is not the same decision as reading the collection row.
+        (
+            "GET",
+            "/collections/7/contents",
+            "Read(CollectionContents(7))",
+        ),
         ("DELETE", "/collections/7", "Delete(CollectionSubtree(7))"),
         ("POST", "/tags", "Add(NewTag)"),
         ("GET", "/tags", "Read(Listing)"),
@@ -533,7 +539,7 @@ async fn a_recursive_listing_is_not_a_single_collection_read() {
     let (plain, _) = action_for("/collections/7/contents", "GET").await;
     assert_eq!(
         plain,
-        vec![MediaAction::Read(MediaTarget::Collection(7))],
+        vec![MediaAction::Read(MediaTarget::CollectionContents(7))],
         "a non-recursive contents read names one collection"
     );
 
@@ -541,6 +547,16 @@ async fn a_recursive_listing_is_not_a_single_collection_read() {
         "/collections/7/contents?recursive=true",
         "/collections/7/contents?recursive=1",
         "/collections/7/contents?limit=5&recursive=true",
+        // Percent-encoded spellings. The handler's `Query` extractor
+        // decodes the key before it deserializes, so these reach it as
+        // `recursive=true` — the gate has to decode too or it is
+        // classifying a different request than the one being served.
+        "/collections/7/contents?%72ecursive=true",
+        "/collections/7/contents?%72%65cursive=true",
+        "/collections/7/contents?limit=5&%72ecursive=true",
+        // `+` is a space under form semantics, so this is the key
+        // `recursive` only if the decoder is the form one.
+        "/collections/7/contents?%72ecursive=1",
     ] {
         let (seen, _) = action_for(uri, "GET").await;
         assert_eq!(

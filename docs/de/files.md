@@ -219,13 +219,19 @@ eines Ordners und so weiter. Hänge es **innerhalb** von `require_auth` ein,
 das die Identität injiziert, die es liest; ohne das ist jede Anfrage ein
 `401`. Superuser überspringen die Prüfung.
 
-Zwei Dinge, die es nicht leistet:
+Drei Dinge, die es nicht leistet:
 
 - **Entscheidungen auf Zeilenebene.** Ein `rustango_media.view` liest *jede*
   Media-Zeile per id. `MediaManager` hält einen Pool, ein mandantenfähiges
   Deployment grenzt Zeilen also selbst ein — dafür implementierst du
   `MediaAuthorizer`. `MediaTarget` benennt die Zeile (`Media(id)`,
   `Collection(id)`, `CollectionSubtree(id)`, …) genau dafür.
+- **Den Objektspeicher eingrenzen.** `disk` kommt bei `POST /uploads/begin` vom
+  Aufrufer, und die `StorageRegistry` ist prozessweit — Pool-pro-Mandant trennt
+  die Datenbank, nicht den Bucket: ein bloßes `rustango_media.add` schreibt in
+  jede Disk, die der Prozess kennt. Grenze sie mit
+  `MediaPerms::new(pool).allow_disks(["user-uploads"])` ein. Präfixe innerhalb
+  einer Disk brauchen weiterhin `MediaAuthorizer`, dem `key_prefix` übergeben wird.
 - **Raten, was eine neue Route bedeutet.** `MediaAction` und `MediaTarget`
   sind `#[non_exhaustive]`; beende eine selbst geschriebene Policy mit
   `_ => false`, dann kommt eine später ergänzte Route abgelehnt statt
