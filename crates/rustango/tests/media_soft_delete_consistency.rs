@@ -558,3 +558,101 @@ async fn purging_from_an_unregistered_disk_is_not_a_silent_success() {
     .expect("read back");
     assert_eq!(row.len(), 1, "the row went with the unreachable disk");
 }
+
+// =====================================================================
+// A failed `set_tags` left the row with neither tag set
+// =====================================================================
+
+/// `set_tags` was a bare `DELETE` followed by `tag()`. Anything failing
+/// in between stripped every tag and put none back — and
+/// `POST /media/{id}/tags` is the API-reachable caller, so a driver
+/// blip mid-request destroyed a tag set nobody asked to clear.
+///
+/// Same shape as `a_failed_collection_delete_orphans_nothing` above:
+/// the first statement had already committed when the second failed.
+#[tokio::test]
+async fn a_failed_set_tags_leaves_the_old_tags_in_place() {
+    let (mgr, pool) = manager_with_pool().await;
+    let m = seed(&mgr, None).await;
+    let id = id_of(&m);
+    mgr.tag(id, &["alpha", "beta"]).await.expect("seed tags");
+
+    let before = {
+        let mut v: Vec<String> = mgr
+            .tags_for(id)
+            .await
+            .expect("tags_for")
+            .into_iter()
+            .map(|t| t.slug)
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        before,
+        vec!["alpha".to_owned(), "beta".to_owned()],
+        "control: both tags must be set before the failure is simulated"
+    );
+
+    // Fail the *insert* half specifically. `ensure_tag` writes to
+    // `rustango_media_tags`, a different table, so it still succeeds —
+    // which is the realistic shape: the new tag exists, the link does
+    // not.
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "CREATE TRIGGER fail_link_insert \
+         BEFORE INSERT ON rustango_media_tag_links \
+         BEGIN SELECT RAISE(ABORT, 'simulated failure'); END",
+        Vec::new(),
+    )
+    .await
+    .expect("install trigger");
+
+    let err = mgr.set_tags(id, &["gamma"]).await;
+    assert!(
+        err.is_err(),
+        "control: the insert must fail, or this test proves nothing"
+    );
+
+    let after = {
+        let mut v: Vec<String> = mgr
+            .tags_for(id)
+            .await
+            .expect("tags_for")
+            .into_iter()
+            .map(|t| t.slug)
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        after, before,
+        "a failed `set_tags` left the row with {after:?} — neither the old set nor \
+         the new one. The delete had already committed when the insert failed, so \
+         a tag set nobody asked to clear was destroyed by a driver error"
+    );
+}
+
+/// …and it still replaces the set when nothing fails.
+#[tokio::test]
+async fn set_tags_still_replaces_the_whole_set() {
+    let mgr = manager().await;
+    let m = seed(&mgr, None).await;
+    let id = id_of(&m);
+    mgr.tag(id, &["old-one", "old-two"]).await.expect("seed");
+
+    mgr.set_tags(id, &["new-one"]).await.expect("set_tags");
+
+    let after: Vec<String> = mgr
+        .tags_for(id)
+        .await
+        .expect("tags_for")
+        .into_iter()
+        .map(|t| t.slug)
+        .collect();
+    assert_eq!(
+        after,
+        vec!["new-one".to_owned()],
+        "the transaction made `set_tags` a wall rather than a replace: {after:?}"
+    );
+}
