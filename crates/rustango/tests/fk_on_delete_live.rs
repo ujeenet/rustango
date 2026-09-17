@@ -451,3 +451,75 @@ fn a_new_snapshot_is_readable_by_the_old_shape() {
     serde_json::from_value::<OldRelation>(rel.clone())
         .expect("the previous release's three-field shape must still parse this");
 }
+
+/// A snapshot with an action survives a full JSON round trip.
+///
+/// `a_new_snapshot_is_readable_by_the_old_shape` above checks the
+/// serialize half — the key is present with the right value — and
+/// `snapshot_without_on_delete` checks that a snapshot *missing* the
+/// key still loads. Neither reads the value back into a
+/// `SchemaSnapshot`, and that is the direction that matters: snapshots
+/// are written to disk as JSON and loaded again on the next
+/// `make_migrations`, and `#[serde(default)]` means a deserialize that
+/// misses the field produces `None` **silently** — the exact shape of
+/// #1549, one release later and harder to see, because the in-memory
+/// `from_models` test would still pass.
+#[test]
+fn on_delete_survives_a_json_round_trip() {
+    let before = SchemaSnapshot::from_models(&[
+        <Author as rustango::core::Model>::SCHEMA,
+        <PostCascade as rustango::core::Model>::SCHEMA,
+        <PostSetNull as rustango::core::Model>::SCHEMA,
+        <PostDefault as rustango::core::Model>::SCHEMA,
+    ]);
+    let json = serde_json::to_string(&before).expect("serialize");
+    let after: SchemaSnapshot = serde_json::from_str(&json).expect("deserialize");
+
+    let action_of = |snap: &SchemaSnapshot, table: &str| -> Option<String> {
+        snap.table(table)?
+            .fields
+            .iter()
+            .find(|f| f.column == "author_id")?
+            .fk
+            .as_ref()?
+            .on_delete
+            .clone()
+    };
+
+    for (table, expected) in [
+        ("fkod_post_cascade", Some("CASCADE")),
+        ("fkod_post_set_null", Some("SET NULL")),
+        // No action declared — must stay absent, not become a default.
+        ("fkod_post_default", None),
+    ] {
+        assert_eq!(
+            action_of(&before, table).as_deref(),
+            expected,
+            "control: `{table}` should carry {expected:?} before serializing"
+        );
+        assert_eq!(
+            action_of(&after, table).as_deref(),
+            expected,
+            "`{table}` lost its `on_delete` in a JSON round trip. Snapshots live on \
+             disk between runs, so this is the path every existing project takes — \
+             and `#[serde(default)]` turns the loss into `None` with no error"
+        );
+    }
+}
+
+/// An absent action must stay absent in the serialized bytes.
+///
+/// `skip_serializing_if` is what keeps existing snapshot JSON
+/// byte-identical for a project that declares no action anywhere. Drop
+/// it and every such project sees a diff on its next `make_migrations`
+/// — noise that looks like a schema change and is not one.
+#[test]
+fn a_declared_nothing_writes_nothing() {
+    let snap = SchemaSnapshot::from_models(&[<PostDefault as rustango::core::Model>::SCHEMA]);
+    let json = serde_json::to_string(&snap).expect("serialize");
+    assert!(
+        !json.contains("on_delete"),
+        "a model declaring no `on_delete` still wrote the key, so every existing \
+         snapshot gains a diff on the next run that is not a schema change:\n{json}"
+    );
+}
