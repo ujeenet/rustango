@@ -40,7 +40,7 @@
 //! | GET    | `/collections`                    | List every non-deleted collection. |
 //! | GET    | `/collections/{id}`               | Single collection. |
 //! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` to include sub-folders. |
-//! | DELETE | `/collections/{id}`               | Soft-delete a collection (Media inside orphaned, NOT deleted). |
+//! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside orphaned, NOT deleted). |
 //! | POST   | `/tags`                           | Create / upsert: body `{slug}`. |
 //! | GET    | `/tags`                           | All tags. |
 //! | GET    | `/tags/popular`                   | Top tags by usage count. `?limit=N`. |

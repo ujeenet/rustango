@@ -214,6 +214,42 @@ pub async fn drop_table(pool: &Pool, table: &str) {
 /// MySQL — where the emitter produces `VARCHAR(80)`, and a hand-written
 /// `TEXT` walks into the TEXT-in-index rejection.
 ///
+/// # Do not use this on a `unique_together` model
+///
+/// It goes through [`crate::testkit::create_tables_for`], whose
+/// `emit_tables` creates the table, its FK constraints and its comments
+/// — but **not composite-unique indexes**, which `testkit/mod.rs` states
+/// outright. So a `unique_together` model built this way has no
+/// composite uniqueness at all.
+///
+/// That does not fail loudly. Measured on MySQL against
+/// `MediaTagLink`, whose `(media_id, tag_id)` unique index is what makes
+/// `MediaManager::tag` idempotent:
+///
+/// ```text
+/// after migrate_framework   composite-unique columns: 2
+/// after fresh_table         composite-unique columns: 0
+/// tagging the same slug twice -> Ok, and 2 link rows
+/// ```
+///
+/// The second `tag()` returns `Ok`. A suite converted this way runs
+/// against a schema that *cannot* enforce the property it exists to
+/// check, and passes unless it happens to count rows. The louder
+/// symptom, when it appears, is a foreign key that cannot reference the
+/// table: PostgreSQL says "no unique constraint matching given keys",
+/// MySQL answers 1822.
+///
+/// Two ways out:
+///
+/// - **Framework-managed tables** (`rustango_*`): use the `setup:` form
+///   of [`tri_dialect_test!`] and call
+///   [`crate::testkit::migrate_framework`], which builds through the
+///   real migration path and emits the index correctly on all three.
+/// - **A model the suite owns**: follow `migrate_ddl_tri.rs`, which
+///   renders the index explicitly through `CreateIndex` so the DDL still
+///   comes from the framework's emitter rather than a hand-written
+///   guess.
+///
 /// # Panics
 ///
 /// If the table cannot be created.
