@@ -873,9 +873,19 @@ fn render_changes_split_inner(
                     ));
                 }
             }
+            // Both renames are genuinely portable — MySQL and SQLite
+            // (3.25+) support them — so unlike the `AlterColumn*` arms
+            // above there is nothing to guard. What they need is the
+            // dialect's quoting, which they did not have: the literal
+            // `"` here is a string delimiter on MySQL, so
+            // `ALTER TABLE "post" RENAME TO "article"` is `ERROR 1064`,
+            // the same failure as #1461 two arms further down this same
+            // match (#559).
             SchemaChange::RenameTable { old_name, new_name } => {
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{old_name}" RENAME TO "{new_name}""#,
+                    "ALTER TABLE {} RENAME TO {}",
+                    dialect.quote_ident(old_name),
+                    dialect.quote_ident(new_name),
                 ));
             }
             SchemaChange::RenameColumn {
@@ -884,7 +894,10 @@ fn render_changes_split_inner(
                 new_column,
             } => {
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" RENAME COLUMN "{old_column}" TO "{new_column}""#,
+                    "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                    dialect.quote_ident(table),
+                    dialect.quote_ident(old_column),
+                    dialect.quote_ident(new_column),
                 ));
             }
             SchemaChange::CreateIndex {
@@ -1007,19 +1020,23 @@ fn render_changes_split_inner(
                 ));
             }
             SchemaChange::DropCheckConstraint { name, table } => {
-                if dialect.name() == "sqlite" {
+                // The dialect owns both halves: whether it can drop a
+                // constraint at all, and how it spells it. `None` is
+                // SQLite saying it has no `ALTER TABLE DROP CONSTRAINT`.
+                //
+                // This arm used to test `dialect.name() == "sqlite"`
+                // itself and then hand-write the statement — which is
+                // how it came to send PostgreSQL syntax to MySQL (#559).
+                let Some(sql) = dialect.drop_check_constraint_sql(table, name) else {
                     return Err(format!(
                         "DropCheckConstraint for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE DROP CONSTRAINT` \
+                         dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
                          syntax. Workaround: emit a hand-written `Operation::Data` (RunSQL) \
-                         that rebuilds the table without the CHECK. Tracked in #559."
+                         that rebuilds the table without the CHECK. Tracked in #559.",
+                        dialect.name()
                     ));
-                }
-                out.immediate.push(format!(
-                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-                    dialect.quote_ident(table),
-                    dialect.quote_ident(name),
-                ));
+                };
+                out.immediate.push(sql);
             }
             SchemaChange::AddExclusionConstraint {
                 name,
@@ -1161,19 +1178,17 @@ fn render_changes_split_inner(
                 ));
             }
             SchemaChange::DropCompositeFk { table, name } => {
-                if dialect.name() == "sqlite" {
+                // Same single owner as the CHECK arm above.
+                let Some(sql) = dialect.drop_foreign_key_sql(table, name) else {
                     return Err(format!(
                         "DropCompositeFk for `{table}.{name}` is not yet supported on \
-                         dialect `sqlite`. SQLite has no `ALTER TABLE DROP CONSTRAINT` \
+                         dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
                          syntax. Workaround: emit a hand-written `Operation::Data` (RunSQL) \
-                         that rebuilds the table without the FK. Tracked in #559."
+                         that rebuilds the table without the FK. Tracked in #559.",
+                        dialect.name()
                     ));
-                }
-                out.immediate.push(format!(
-                    "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-                    dialect.quote_ident(table),
-                    dialect.quote_ident(name),
-                ));
+                };
+                out.immediate.push(sql);
             }
         }
     }
@@ -1857,9 +1872,24 @@ mod sql_type_tests {
         assert!(err.contains("sqlite"));
     }
 
+    /// MySQL spells a check drop `DROP CHECK`, with no `IF EXISTS`.
+    ///
+    /// This test previously asserted
+    /// `` ALTER TABLE `t` DROP CONSTRAINT IF EXISTS `ck_x` ``, which
+    /// MySQL 8.0.46 rejects outright:
+    ///
+    /// ```text
+    /// ERROR 1064 (42000): ... right syntax to use near 'IF EXISTS `ck_x`'
+    /// ```
+    ///
+    /// It was named `..._uses_backticks` and it did check the quoting —
+    /// the statement around the quoting was simply never run against a
+    /// server. That is the whole hazard of an emission test: it proves
+    /// the writer emitted what its author intended, never that the
+    /// server accepts it (#1461).
     #[cfg(feature = "mysql")]
     #[test]
-    fn drop_check_constraint_mysql_uses_backticks() {
+    fn drop_check_constraint_mysql_uses_drop_check() {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropCheckConstraint {
             name: "ck_x".into(),
@@ -1868,7 +1898,27 @@ mod sql_type_tests {
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
         assert_eq!(
             out.immediate,
-            vec!["ALTER TABLE `t` DROP CONSTRAINT IF EXISTS `ck_x`".to_string()]
+            vec!["ALTER TABLE `t` DROP CHECK `ck_x`".to_string()]
+        );
+        assert!(
+            !out.immediate[0].contains("IF EXISTS"),
+            "MySQL parses no `IF EXISTS` on a constraint drop"
+        );
+    }
+
+    /// Postgres keeps the idempotent form; only the MySQL arm changed.
+    #[test]
+    fn drop_check_constraint_postgres_keeps_if_exists() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropCheckConstraint {
+            name: "ck_x".into(),
+            table: "t".into(),
+        }];
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec![r#"ALTER TABLE "t" DROP CONSTRAINT IF EXISTS "ck_x""#.to_string()]
         );
     }
 
@@ -1950,9 +2000,16 @@ mod sql_type_tests {
         );
     }
 
+    /// MySQL spells an FK drop `DROP FOREIGN KEY`, with no `IF EXISTS`.
+    ///
+    /// Same story as `drop_check_constraint_mysql_uses_drop_check`: this
+    /// asserted the Postgres shape, which is error 1064 on MySQL. The
+    /// correct branch already existed one module away, in
+    /// `ddl::drop_constraints_sql_with_dialect`, and `diff.rs` did not
+    /// use it (#1461).
     #[cfg(feature = "mysql")]
     #[test]
-    fn drop_composite_fk_mysql_uses_backticks() {
+    fn drop_composite_fk_mysql_uses_drop_foreign_key() {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropCompositeFk {
             table: "child".into(),
@@ -1961,7 +2018,11 @@ mod sql_type_tests {
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
         assert_eq!(
             out.immediate,
-            vec!["ALTER TABLE `child` DROP CONSTRAINT IF EXISTS `fk_x`".to_string()]
+            vec!["ALTER TABLE `child` DROP FOREIGN KEY `fk_x`".to_string()]
+        );
+        assert!(
+            !out.immediate[0].contains("IF EXISTS"),
+            "MySQL parses no `IF EXISTS` on a constraint drop"
         );
     }
 

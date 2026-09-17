@@ -13,6 +13,7 @@ consultarse sobre la marcha.
 - [Fundamentos de las API web](#fundamentos-de-las-api-web) — qué es una API, en términos cotidianos
 - [Bloques de construcción de Rustango](#bloques-de-construcción-de-rustango) — las piezas que ensamblas
 - [Los datos y la base de datos](#los-datos-y-la-base-de-datos)
+- [Multi-tenancy](#multi-tenancy) — solo si sirves a varios clientes desde un único despliegue
 - [Unas pocas palabras de Rust](#unas-pocas-palabras-de-rust) — para que los bloques de código no den miedo
 - [Frameworks con los que comparamos](#frameworks-con-los-que-comparamos)
 
@@ -161,6 +162,43 @@ campo **nullable** puede estar vacío; uno no-nullable es obligatorio.
 **Tri-dialecto (tri-dialect)** — "funciona igual en las tres bases de datos soportadas" —
 PostgreSQL, MySQL y SQLite. Cuando una feature es tri-dialecto, puedes cambiar de
 base de datos sin cambiar tu código.
+
+---
+
+## Multi-tenancy
+
+Detrás de la feature `tenancy`. Sáltate esta sección si construyes una app
+corriente de un solo cliente — nada de esto aplica.
+
+**Multi-tenancy** — ejecutar un único despliegue que sirve a varios clientes,
+cada uno viendo solo sus propios datos. Rustango resuelve a qué cliente
+pertenece una petición a partir de su nombre de host y luego la enruta a los
+datos de ese cliente durante el resto de la petición.
+
+**Tenant (u org)** — un cliente en un despliegue así. Un tenant tiene un slug
+(`acme`), un patrón de host (`acme.example.com`) y sus propios usuarios. `Org`
+es la fila del registro; «tenant» es lo que esa fila describe.
+
+**Registro (registry)** — la pequeña base de datos que lista los tenants: quiénes
+son, dónde viven sus datos, si están activos. Distinta de los datos de cualquier
+tenant, y la única base de datos que el framework siempre necesita.
+
+**Modo de almacenamiento (storage mode)** — cómo se mantienen separados los datos
+de un tenant de los de sus vecinos: una base de datos aparte, o un esquema aparte
+dentro de una compartida. Se elige por tenant al aprovisionar.
+
+**Operador (operator)** — un administrador del *despliegue*, no de un tenant. Los
+operadores crean tenants y enlazan nombres de host; no son usuarios de ningún
+tenant y viven en el registro. Consulta
+[la consola de operador](operator-console.md).
+
+**Consola de operador (operator console)** — la interfaz web que usan los
+operadores: aprovisionar tenants, enlazar nombres de host, gestionar otros
+operadores, leer el rastro de auditoría. Casi cada acción en ella es también un
+verbo `manage`, así que puede guionizarse.
+
+**Aprovisionamiento (provisioning)** — crear un tenant: fabricar su base de datos
+o esquema, aplicarle las migraciones y registrarlo en el registro.
 
 ---
 

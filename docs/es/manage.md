@@ -362,11 +362,25 @@ Escribe:
   .gitignore
   rust-toolchain.toml
   docker-compose.yml
+  Dockerfile                                (deploy image — multi-stage, release, non-root)
+  Dockerfile.dev                            (cargo-watch image docker-compose.yml builds)
+  .dockerignore
   README.md
+  config/default.toml                       (shared knobs)
+  config/{dev,staging,prod}_settings.toml   (per-tier overrides)
   migrations/                               (your app's migrations)
   system/migrations/                        (tenant template — framework tables, generated)
-  src/{main,models,views,urls}.rs
+  src/{lib,main,models,views,urls}.rs
 ```
+
+El nivel `config/` es la fuente de los ajustes: `default.toml` guarda lo que
+comparten todos los entornos y un `<env>_settings.toml` lo sobrescribe,
+seleccionado en tiempo de ejecución por **`RUSTANGO_ENV`** (`dev` por defecto),
+así que un `cargo run` recién sacado funciona sin editar ningún TOML. Entre
+ellos llevan el ajuste del pool `[database]`, `[admin]`, `[mcp]` y la política
+`secure_cookies` — y son lo que lee la auditoría de ajustes de
+[`check --deploy`](#check---deploy). El contenido por nivel está en
+[Scaffolding](scaffolding.md).
 
 La plantilla de tenant incluye una carpeta `system/migrations/` **vacía**. Las
 propias tablas del framework (`rustango_orgs`, `rustango_users`,
@@ -415,17 +429,25 @@ para `make:test`) y:
 - No sobrescribe un archivo existente.
 - Te recuerda que añadas `pub mod X;` a tu `lib.rs`.
 
-### `make:viewset <Name> [--model <Model>]`
+### `make:viewset <Name> [--model <Model>] [--tenant | --no-tenant] [--crate <path>]`
 
-Genera una estructura `#[derive(ViewSet)]` — un endpoint REST para un modelo,
-como un ViewSet de Django REST Framework. Las listas de campos vienen
-pre-esbozadas para que las rellenes.
+Genera un endpoint REST para un modelo, como un ViewSet de Django REST
+Framework.
+
+**Dos plantillas, elegidas por ti.** El `#[derive(ViewSet)]` de pool único
+captura un solo pool al montar, lo cual es incorrecto para un proyecto con
+tenancy — así que el generador elige entre dos formas. Orden de resolución:
+`--no-tenant` gana, luego `--tenant`, luego la **detección automática** —
+`tenancy` en la lista de features de la dependencia `rustango` en `Cargo.toml` —
+y si no, la plantilla de pool. Cuando la detección automática elige el modo
+tenant, lo indica por stdout y nombra `--no-tenant` como override.
 
 ```bash
 cargo run -- make:viewset PostViewSet --model Post
+cargo run -- make:viewset PostViewSet --model Post --no-tenant   # forzar la forma de pool
 ```
 
-`src/post_view_set.rs` generado:
+Plantilla de pool — `src/post_view_set.rs` generado:
 
 ```rust
 #[derive(ViewSet)]
@@ -434,6 +456,21 @@ pub struct PostViewSet;
 ```
 
 Móntalo con: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
+
+Plantilla de tenant — **no es un derive**. Emite un
+`pub fn router() -> Router<()>` construido a partir de
+`ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, con toda la
+cadena del builder (`fields` / `filter_fields` / `search_fields` / `ordering` /
+`page_size` / `permissions_for_model` / `read_only`) esbozada en líneas
+comentadas. La conexión se resuelve por petición mediante el extractor `Tenant`
+en lugar de capturarse una sola vez al montar, así que un único `router()` sirve
+a todos los tenants.
+
+Móntalo con: `.merge(crate::viewsets::post::router())` — **no** con la línea
+`PostViewSet::router(path, pool)` de arriba.
+
+`--crate <path>` renombra el crate del framework en las líneas `use` generadas,
+para proyectos que importan `rustango` con otro nombre.
 
 ### `make:serializer <Name> [--model <Model>]`
 
@@ -580,7 +617,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.57.5
+rustango 0.57.6
 ```
 
 ### `about`
@@ -592,7 +629,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.57.5
+  version:        0.57.6
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

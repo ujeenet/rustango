@@ -118,7 +118,13 @@ async fn log_line_for(host: &str, layer: AccessLogLayer) -> String {
     let (pool, _dir) = registry().await;
     let buf = CaptureWriter::default();
     let writer = buf.clone();
+    // `with_ansi(false)`: enabling the `ansi` feature (#1480) made
+    // `fmt` colour by default, and escape codes land *between* the
+    // characters a substring assertion looks for — `tenant=acme`
+    // becomes `\x1b[3mtenant\x1b[0m\x1b[2m=\x1b[0macme`. A test that
+    // reads rendered output must ask for plain text.
     let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_writer(move || writer.clone())
         .with_max_level(tracing::Level::INFO)
         .with_target(true)
@@ -229,6 +235,7 @@ async fn the_request_span_carries_the_tenant() {
     let buf = CaptureWriter::default();
     let writer = buf.clone();
     let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_writer(move || writer.clone())
         .with_max_level(tracing::Level::INFO)
         // Print the span on close, when every recorded field is set.

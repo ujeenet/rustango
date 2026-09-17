@@ -941,7 +941,112 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        let api = self.mount_observability(api);
         api.layer(axum::Extension(pool))
+    }
+
+    /// The configured access-log layer, or `None` when
+    /// `[logging] access_log = false`.
+    ///
+    /// Split out of [`Self::mount_observability`] because the
+    /// multi-tenant path cannot mount here: it hands its router to
+    /// `server::Builder`, which merges the tenant admin in afterwards
+    /// and dispatches the operator console on a sibling branch. Layers
+    /// applied to the api router never reach either (axum: "routes
+    /// added after `layer` is called will not have the middleware
+    /// added"). The builder takes this layer and applies it to the
+    /// outermost router instead, where every branch inherits it.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    fn access_log_layer(&self) -> Option<crate::access_log::AccessLogLayer> {
+        if !self.access_log_enabled() {
+            return None;
+        }
+        let log_layer = crate::access_log::AccessLogLayer::default();
+        #[cfg(feature = "config")]
+        let log_layer = match self.settings_for_layers.as_ref() {
+            Some(s) => log_layer.with_audit_settings(&s.audit),
+            None => log_layer,
+        };
+        Some(log_layer)
+    }
+
+    /// The per-request span and the access log.
+    ///
+    /// Called from the `assemble_app` serving paths. The two
+    /// `runserver_tenancy` variants do **not** call this: they hand
+    /// their router to `server::Builder`, which merges the tenant admin
+    /// in afterwards and dispatches the operator console on a sibling
+    /// branch, so a layer applied here would reach neither. Those paths
+    /// pass [`Self::access_log_layer`] to `Builder::observability`,
+    /// which applies it to the outermost router instead.
+    ///
+    /// That five-paths-not-one distinction was missed on the first cut,
+    /// and it mattered most exactly where it was missed. This replaced
+    /// the access log's old home inside `apply_settings_layers`, so a
+    /// multi-tenant app that called `.with_settings_from_env()` went
+    /// from having a request log to having none — a regression in the
+    /// one project shape #1480 was opened about.
+    /// `every_serving_path_is_observable` pins it now.
+    ///
+    /// Mounting here rather than in the settings layers is still the
+    /// point: that path only runs when the app calls
+    /// `.with_settings_from_env()`, which no scaffolder template does,
+    /// so the tenant field was unreachable by default (#1480).
+    ///
+    /// `TracingLayer` had a worse version of the same problem: it built
+    /// a correct span carrying tenant, method, path and status, and
+    /// nothing in the framework ever mounted it. A `tracing::info!` in a
+    /// handler therefore had no enclosing span, so no tenant and no
+    /// correlation — which is exactly the "logs arrive as loose traces"
+    /// symptom.
+    ///
+    /// # Feature gates
+    ///
+    /// `access_log` needs `admin` **or** `tenancy`; `tracing_layer` and
+    /// `request_id` need `admin`. A build with neither — `sqlite,manage`
+    /// is the one CI checks — has no layers to mount, and this returns
+    /// the router untouched.
+    ///
+    /// The gate is on the *body*, not the function, so every caller
+    /// keeps one shape and no call site grows a `#[cfg]`. Leaving it off
+    /// entirely is what broke `feature_combos (sqlite,manage)` and
+    /// `(postgres,manage)`: the mount referenced modules that were
+    /// configured out, so the crate did not compile at all on those
+    /// combinations.
+    #[allow(unused_variables, clippy::needless_pass_by_value)]
+    fn mount_observability(&self, api: Router) -> Router {
+        // Delegates: the mount itself lives in one place, shared with
+        // `server::Builder`. The two used to carry near-verbatim copies
+        // of the same three ordering rules and had already drifted into
+        // opposite relative order.
+        #[cfg(any(feature = "admin", feature = "tenancy"))]
+        {
+            return crate::access_log::mount_observability(api, self.access_log_layer());
+        }
+
+        #[cfg(not(any(feature = "admin", feature = "tenancy")))]
+        api
+    }
+
+    /// `[logging] access_log = false` turns the request log off.
+    ///
+    /// Default on: a server that logs no requests is a server you cannot
+    /// debug, and the previous default — off unless you found the right
+    /// builder call — was not a decision anyone made on purpose.
+    ///
+    /// Gated to match its only caller. Once `mount_observability`'s body
+    /// became conditional, this was dead code on a build with neither
+    /// feature — and `feature_combos` compiles with `-D warnings`, so
+    /// dead code is a build failure there rather than a lint.
+    #[cfg(any(feature = "admin", feature = "tenancy"))]
+    fn access_log_enabled(&self) -> bool {
+        #[cfg(feature = "config")]
+        {
+            if let Some(s) = self.settings_for_layers.as_ref() {
+                return s.logging.access_log.unwrap_or(true);
+            }
+        }
+        true
     }
 
     async fn runserver(mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1064,8 +1169,10 @@ impl Cli {
         // its own `shutdown_signal`, and dropping the hook here would
         // have left `on_shutdown` working on one path and silently not
         // on the other.
-        let on_shutdown = self.on_shutdown;
-        let api = self.api;
+        let on_shutdown = self.on_shutdown.take();
+        // `take` rather than a move: `mount_observability` below needs
+        // `&self`, and moving the field out would partially move `self`.
+        let api = std::mem::take(&mut self.api);
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
@@ -1079,7 +1186,12 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        // Not `mount_observability` here: this router is about to be
+        // merged with the tenant admin and dispatched beside the
+        // operator console, and layers applied now would reach neither.
+        // The builder applies them to the outermost router instead.
         let mut builder = crate::server::Builder::from_env().await?.api(api);
+        builder = builder.observability(self.access_log_layer());
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1118,8 +1230,10 @@ impl Cli {
         // otherwise). Database-mode tenants work out of the box;
         // schema-mode tenants return `TenancyError::Validation` at
         // request time (schema-mode is PG-only by language).
-        let on_shutdown = self.on_shutdown;
-        let api = self.api;
+        let on_shutdown = self.on_shutdown.take();
+        // `take` rather than a move: `mount_observability` below needs
+        // `&self`, and moving the field out would partially move `self`.
+        let api = std::mem::take(&mut self.api);
         #[cfg(feature = "admin")]
         let api = if self.welcome_page {
             try_mount_welcome(api)
@@ -1133,6 +1247,8 @@ impl Cli {
         };
         #[cfg(feature = "config")]
         let api = apply_settings_layers_or_warn(api, self.settings_for_layers.as_ref());
+        // Not `mount_observability` — see the dispatch path above. The
+        // builder applies these to the outermost router.
         let apex = std::env::var("RUSTANGO_APEX_DOMAIN").unwrap_or_else(|_| "localhost".into());
         let registry_url =
             std::env::var("DATABASE_URL")
@@ -1151,6 +1267,7 @@ impl Cli {
             apex,
         )
         .api(api);
+        builder = builder.observability(self.access_log_layer());
         if self.health_endpoints {
             builder = builder.with_health();
         }
@@ -1339,7 +1456,6 @@ fn warn_if_settings_inert() {
 
 #[cfg(feature = "config")]
 fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
-    use crate::access_log::{AccessLogLayer, AccessLogRouterExt as _};
     use crate::body_limit::{BodyLimitLayer, BodyLimitRouterExt as _};
     use crate::cors::{CorsLayer, CorsRouterExt as _};
     use crate::request_timeout::{RequestTimeoutLayer, RequestTimeoutRouterExt as _};
@@ -1361,11 +1477,13 @@ fn apply_settings_layers(api: Router, s: &crate::config::Settings) -> Router {
         app = app.body_limit(layer);
     }
 
-    // access_log — extends the redact list with project additions
-    // from `[audit] redact_query_params`. Defaults are sensible so
-    // the layer mounts unconditionally.
-    let log_layer = AccessLogLayer::default().with_audit_settings(&s.audit);
-    app = app.access_log(log_layer);
+    // access_log is NOT mounted here any more. It lives in
+    // `Cli::mount_observability`, which runs whether or not the app
+    // calls `.with_settings_from_env()` — mounting it here made the
+    // request log, and with it the tenant field, conditional on a
+    // builder call no scaffolder template makes (#1480). The redact
+    // list from `[audit] redact_query_params` still reaches the layer;
+    // `mount_observability` reads the same settings.
 
     // CORS — opt-in (returns None when no origins configured).
     if let Some(cors) = CorsLayer::from_settings(&s.security) {
@@ -1880,6 +1998,28 @@ mod assemble_app_tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt as _;
 
+    /// Serializes this module's tests.
+    ///
+    /// `tracing` caches per callsite whether any subscriber is
+    /// interested, and that cache is process-global. The two health
+    /// tests issue requests with no subscriber installed, so whichever
+    /// reaches `tracing_layer`'s `info_span!` first can cache it as
+    /// "nobody cares" — and the request-id test below then finds the
+    /// span silently absent. Alone it passed; with the module it failed
+    /// every run, and rebuilding the cache was not enough on its own
+    /// because a sibling can poison it again a moment later.
+    fn global_tracing_state() -> &'static std::sync::Mutex<()> {
+        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Take the lock, ignoring poisoning from an unrelated failure.
+    fn serialized() -> std::sync::MutexGuard<'static, ()> {
+        global_tracing_state()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     async fn status(app: &Router, path: &str) -> StatusCode {
         app.clone()
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
@@ -1888,8 +2028,129 @@ mod assemble_app_tests {
             .status()
     }
 
+    /// A handler's own log event carries the request id, with the
+    /// handler doing nothing to put it there.
+    ///
+    /// This is the property `request_id` existed for and never had:
+    /// `RequestIdLayer` was mounted nowhere, and the module's docs told
+    /// you to write `req_id = %id.0` on every call site by hand — which
+    /// is both tedious and silently misses every event you did not write,
+    /// the ORM's included (#1480).
+    ///
+    /// Asserted on captured output rather than on the extension, because
+    /// the extension was always there. What was missing is the id
+    /// reaching the *log*.
+    #[test]
+    fn a_handler_log_carries_the_request_id_without_asking() {
+        let _serial = serialized();
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock").extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        // A plain `#[test]` driving its own runtime, not `#[tokio::test]`.
+        //
+        // `set_default` installs a thread-local subscriber, and holding
+        // that across an `.await` in an async test proved racy: the
+        // events reached the test's subscriber while the *span* did not,
+        // so the captured lines had no span context maybe one run in six.
+        // Driving the whole request inside `with_default` keeps one
+        // subscriber current for span creation and every poll alike.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let pool = rt
+            .block_on(crate::sql::Pool::connect("sqlite::memory:"))
+            .expect("sqlite");
+        // A handler that logs and says nothing about request ids.
+        let app = Cli::new()
+            .api(Router::new().route(
+                "/thing",
+                axum::routing::get(|| async {
+                    tracing::info!("handler ran");
+                    "ok"
+                }),
+            ))
+            .assemble_app(pool);
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(buf.clone()),
+        );
+
+        let sent = "test-request-id-42";
+        // Rebuild the interest cache before issuing the request.
+        //
+        // `tracing` caches, per callsite, whether any subscriber cares.
+        // The sibling tests in this module issue requests too, and they
+        // run with no subscriber at all — so whichever of them reaches
+        // the `info_span!` in `tracing_layer` first gets it cached as
+        // "nobody is interested", and this test then finds the span
+        // silently absent. Alone it passes; with the module it failed
+        // every time. A thread-local default does not invalidate that
+        // cache on its own.
+        tracing::callsite::rebuild_interest_cache();
+
+        let response = tracing::subscriber::with_default(subscriber, || {
+            rt.block_on(
+                app.oneshot(
+                    Request::builder()
+                        .uri("/thing")
+                        .header("x-request-id", sent)
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+            )
+        })
+        .expect("request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok()),
+            Some(sent),
+            "the inbound id should be echoed back"
+        );
+
+        let out = String::from_utf8(buf.0.lock().expect("lock").clone()).expect("utf8");
+        assert!(
+            out.contains("handler ran"),
+            "the handler's event was not captured at all: {out}"
+        );
+        assert!(
+            out.contains(sent),
+            "the handler's event does not carry the request id. It is on the \
+             request span, so every event under the span should show it without \
+             the handler naming it:\n{out}"
+        );
+    }
+
     #[tokio::test]
     async fn with_health_mounts_both_endpoints() {
+        let _serial = serialized();
         let pool = crate::sql::Pool::connect("sqlite::memory:")
             .await
             .expect("sqlite");
@@ -1909,6 +2170,7 @@ mod assemble_app_tests {
     /// it evidence of nothing.
     #[tokio::test]
     async fn without_with_health_they_are_absent() {
+        let _serial = serialized();
         let pool = crate::sql::Pool::connect("sqlite::memory:")
             .await
             .expect("sqlite");

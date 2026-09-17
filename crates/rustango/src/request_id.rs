@@ -112,12 +112,36 @@ async fn handle(cfg: Arc<RequestIdLayer>, mut req: Request<Body>, next: Next) ->
             .map_or_else(generate_id, str::to_owned)
     };
 
+    // Put the id on the enclosing request span, so every event emitted
+    // during this request carries it without the handler doing anything.
+    //
+    // This layer mounts inside `tracing_layer`'s span, so `current()` is
+    // that span. Outside one — a hand-built router that mounts this and
+    // not the span layer — `record` on a disabled span is a no-op, and
+    // the extractor below still works.
+    record(&id);
+
     req.extensions_mut().insert(RequestId(id.clone()));
     let mut response = next.run(req).await;
     if let Ok(v) = HeaderValue::from_str(&id) {
         response.headers_mut().insert(HEADER_NAME, v);
     }
     response
+}
+
+/// Record `id` on the current request span.
+///
+/// Mirrors [`crate::tenant_log::record`]: the span declares
+/// `request_id` as an empty field and this fills it partway through, so
+/// the value reaches every event emitted under the span — the ORM's
+/// included — without any of them knowing a request id exists.
+///
+/// Before #1480 the module's own documentation told you to write
+/// `req_id = %id.0` on every call site by hand, which is both the
+/// tedious way and the one that silently misses the events you did not
+/// write.
+pub fn record(id: &str) {
+    tracing::Span::current().record("request_id", id);
 }
 
 /// Generate a 16-byte URL-safe random ID.

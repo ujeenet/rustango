@@ -58,17 +58,67 @@ fn measured(root: &Path) -> BTreeMap<String, usize> {
 
     for entry in std::fs::read_dir(&dir).expect("read tests dir").flatten() {
         let name = entry.file_name().into_string().unwrap_or_default();
-        if !name.ends_with("_live.rs") {
+        // `_live` is the old per-dialect suffix; `_tri` is a suite that
+        // runs its body on every configured backend (#1461). Both are
+        // counted, or a converted file drops out of the accounting
+        // entirely — which is what happened to the first one: retiring
+        // three `_live` files for one `_tri` file showed up here as a
+        // net loss of coverage that had not occurred.
+        if !name.ends_with("_live.rs") && !name.ends_with("_tri.rs") {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(entry.path()) else {
             continue;
         };
 
+        // A `_tri` suite reads no variable itself — the lookup lives in
+        // `Backend::pool()` — so a text scan sees nothing and files it
+        // under "needs nothing, always runs". That is the worst possible
+        // answer: a tri suite wants BOTH servers, and its whole purpose
+        // is the two arms that do not run without them.
+        //
+        // Left unhandled, every conversion made the table worse in the
+        // direction of its own headline: retiring a `*_mysql_live.rs`
+        // for a `*_tri.rs` dropped the MySQL count by one and raised
+        // `(none)` by one, so a series of PRs adding MySQL coverage
+        // published a table showing MySQL coverage falling. The guard
+        // passed throughout, because it measured the same wrong thing
+        // the page printed.
+        //
+        // So they are credited to both server variables and kept out of
+        // `(none)`. The SQLite arm does still run with nothing set; the
+        // page says so in prose rather than in a count, because a reader
+        // uses this table to decide which servers to start.
+        //
+        // The credit is applied *without* skipping the scan below. A
+        // `continue` here took the `MYSQL_URL` tripwire out of service
+        // for every tri file — that entry exists so a suite reading the
+        // wrong variable name lands in the measured set with no row to
+        // match and fails loudly, which is how #1415 was found. Skipping
+        // the loop would let a converted suite reintroduce it unseen.
+        let is_tri = name.ends_with("_tri.rs");
+        let mut gated = is_tri;
+        if is_tri {
+            *counts.entry("DATABASE_URL".to_owned()).or_default() += 1;
+            *counts.entry("MYSQL_TEST_URL".to_owned()).or_default() += 1;
+        }
+
         // A suite is counted under every gating variable it reads; one
         // that reads none is counted as needing nothing.
-        let mut gated = false;
         for var in GATING_VARS {
+            // A tri suite was already credited to both server variables
+            // above. Counting them again because the body happens to
+            // mention one would double-count it, and the guard would then
+            // force the docs page to publish that wrong number — a guard
+            // that makes the page worse is worse than no guard.
+            //
+            // Keyed on `is_tri`, not on `gated`: `gated` is also set by
+            // this loop, so testing it here would start skipping
+            // `DATABASE_URL` for an ordinary suite as soon as any earlier
+            // variable matched.
+            if is_tri && matches!(*var, "DATABASE_URL" | "MYSQL_TEST_URL") {
+                continue;
+            }
             if text.contains(&format!("env::var(\"{var}\")")) {
                 gated = true;
                 // `MYSQL_URL` is counted under its own name rather than
@@ -170,5 +220,78 @@ fn the_live_suite_table_matches_the_test_tree() {
          translation — these pages are the only copy of the numbers, which is \
          why they can be checked.",
         problems.join("\n  "),
+    );
+}
+
+/// `testkit/matrix.rs`'s header states two counts that motivate the
+/// whole harness. They are checked here for the same reason the table
+/// above is: the first draft said 30 stems and 167 unpaired files
+/// against a tree holding 12 and 176, and nothing noticed.
+///
+/// A number written once in a doc comment and never recomputed is the
+/// defect this file exists to catch. It applies to the module that
+/// makes the argument just as much as to the page that publishes it.
+#[test]
+fn the_matrix_header_counts_match_the_test_tree() {
+    let root = repo_root();
+    let dir = root.join("crates/rustango/tests");
+
+    let stems: Vec<String> = std::fs::read_dir(&dir)
+        .expect("read tests dir")
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().into_string().ok()?;
+            n.strip_suffix("_sqlite_live.rs").map(str::to_owned)
+        })
+        .collect();
+
+    let has = |s: &str, suffix: &str| dir.join(format!("{s}{suffix}")).exists();
+    // `_live.rs` counts as a PostgreSQL sibling, and it is the repo's
+    // *dominant* PG naming — `admin_live.rs`, `foreign_key_live.rs`,
+    // `media_live.rs` and two others all read `DATABASE_URL`. Matching
+    // only `_pg_live.rs` missed every one of them, so the guard pinned
+    // 12/176 where the tree says 16/172 and then forced that wrong pair
+    // into `matrix.rs` and the CHANGELOG. A counter that is confidently
+    // wrong is worse than none: it makes the number look checked.
+    let sibling =
+        |s: &String| has(s, "_mysql_live.rs") || has(s, "_pg_live.rs") || has(s, "_live.rs");
+    let paired = stems.iter().filter(|s| sibling(s)).count();
+    let unpaired = stems
+        .iter()
+        .filter(|s| !sibling(s) && !has(s, "_tri.rs"))
+        .count();
+
+    let header = std::fs::read_to_string(root.join("crates/rustango/src/testkit/matrix.rs"))
+        .expect("read matrix.rs");
+
+    let claims = [
+        (
+            format!("Of {} `*_sqlite_live.rs` files", stems.len()),
+            "total",
+        ),
+        // Anchored on the comma. `contains("12 stems have a sibling")`
+        // is satisfied by a header saying 112, and `contains("2 …")` by
+        // one saying 12 — a dropped or gained leading digit is the one
+        // shape of staleness this guard exists for, and unanchored
+        // `contains` is blind to exactly it.
+        (format!(", {paired} stems have a sibling"), "paired stems"),
+        (
+            format!("**{unpaired} have no MySQL or PG counterpart"),
+            "unpaired",
+        ),
+    ];
+    let wrong: Vec<&str> = claims
+        .iter()
+        .filter(|(text, _)| !header.contains(text.as_str()))
+        .map(|(_, what)| *what)
+        .collect();
+
+    assert!(
+        wrong.is_empty(),
+        "testkit/matrix.rs's header counts are stale: {}\n\nMeasured now: {} \
+         `*_sqlite_live.rs` files, {paired} stems with a sibling for another \
+         backend, {unpaired} with no counterpart at all.",
+        wrong.join(", "),
+        stems.len(),
     );
 }

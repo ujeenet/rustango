@@ -13,10 +13,10 @@ Rust.
 > **New to a term here?** *router*, *handler*, *fixture*, *rollback* — see the
 > [glossary](glossary.md).
 
-> **Source:** `rustango::test_client` (`TestClient`, `TestResponse`),
-> `rustango::test_assertions` (`assert_status_2xx`, `assert_redirects`,
-> `assert_cookie_set`, …), and `rustango::test_db` (`with_rollback`) — always
-> compiled.
+> **Source:** `rustango::test_client` (`TestClient`, `TestResponse`) — needs
+> the `admin` feature, because it wraps an `axum::Router`. `rustango::test_assertions`
+> (`assert_status_2xx`, `assert_redirects`, `assert_cookie_set`, …) and
+> `rustango::test_db` (`with_rollback`) are ungated.
 >
 > **Runnable version:** the snippets below *are* a passing test —
 > [`testing_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/testing_doc.rs)
@@ -139,12 +139,20 @@ use rustango::test_db::with_rollback;
 
 #[tokio::test]
 async fn creating_a_post_persists_it() {
-    with_rollback(&pool, |tx| async move {
+    with_rollback(&pool, |tx| Box::pin(async move {
         // ... insert + assert against `tx` ...
         // everything here is rolled back when the closure returns
-    }).await;
+        Ok(())
+    })).await.unwrap();
 }
 ```
+
+The `Box::pin` is required, not stylistic: the bound is
+`for<'tx> FnOnce(&'tx mut PoolTx<'_>) -> Pin<Box<dyn Future<…> + Send + 'tx>>`,
+which is how the closure gets to borrow `tx` across its own await points. The
+closure returns `Result<T, ExecError>`, and so does `with_rollback` — the
+rollback happens either way, so the `unwrap` is about your assertions, not
+about cleanup.
 
 For SQLite, the `*_sqlite_live.rs` tests throughout this repo use an in-memory
 database per test instead — also fully isolated, with zero external setup.
@@ -165,13 +173,20 @@ you read a green result as coverage.
 
 | Variable | Suites | What they need |
 |---|---:|---|
-| *(none)* | 215 | Nothing — an in-memory or temp-file SQLite. Always run. |
-| `DATABASE_URL` | 93 | A reachable PostgreSQL server. |
-| `MYSQL_TEST_URL` | 21 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
+| *(none)* | 210 | Nothing — an in-memory or temp-file SQLite. Always run. |
+| `DATABASE_URL` | 96 | A reachable PostgreSQL server. |
+| `MYSQL_TEST_URL` | 25 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | A reachable Redis. |
 
 A suite reading two variables is counted under both, so the column does not sum
 to the number of files.
+
+The `*_tri.rs` suites are counted under both server variables. They read no
+variable themselves — `Backend::pool()` does the lookup — and they run their
+SQLite arm with nothing set, so counting them as needing nothing would be
+technically survivable and practically wrong: the two arms that need a server
+are the reason those suites exist. Start both servers, or a tri suite reports
+a healthy pass count having exercised one backend of three.
 
 MySQL is the one that catches people: it reads its own variable, so a shell with
 only `DATABASE_URL` set runs the Postgres suites and silently skips every MySQL

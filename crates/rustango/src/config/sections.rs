@@ -753,19 +753,61 @@ pub struct AuditSettings {
 /// builder users construct manually for ad-hoc setups; installing
 /// via Settings + [`crate::manage::Cli::with_logging`] just
 /// removes the boilerplate.
+/// # Constructing one by hand
+///
+/// Build the default and assign — the fields are `pub`:
+///
+/// ```ignore
+/// let mut logging = rustango::config::LoggingSettings::default();
+/// logging.level = Some("debug".into());
+/// ```
+///
+/// **Not** `LoggingSettings { level, ..Default::default() }`. This
+/// struct is `#[non_exhaustive]`, and that attribute forbids *every*
+/// struct expression outside the defining crate — functional update
+/// syntax included. An earlier version of this doc recommended exactly
+/// that form; it fails with `error[E0639]: cannot create
+/// non-exhaustive struct using struct expression`, which is a
+/// particularly bad thing to get wrong here, because the reader is
+/// looking at it *because* their struct literal just broke.
+///
+/// This release added `color` and `access_log`, and a struct literal
+/// naming every field stopped compiling — a SemVer-major change shipped
+/// in a patch. Marking it `#[non_exhaustive]` now means that is the
+/// *last* time: a field added later cannot break a caller at all. The
+/// struct is deserialized from `[logging]` in practice, so this costs
+/// almost nobody anything.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct LoggingSettings {
     /// `RUST_LOG`-style env filter applied when the actual
     /// `RUST_LOG` env var isn't set. Examples: `"info"`,
     /// `"info,sqlx=warn"`, `"debug,hyper=warn,h2=warn"`. Default
     /// (`None`) lets `logging::Setup::new()` choose `"info,sqlx=warn"`.
     pub level: Option<String>,
-    /// Output format. Recognised values: `"pretty"` (default,
-    /// human-friendly), `"json"` (production / log aggregators),
-    /// `"compact"` (single-line, dev-friendly). Unknown values fall
-    /// back to `pretty` with a `tracing::warn!`.
+    /// Output format. Recognised values: `"full"` (default,
+    /// single-line), `"pretty"` (multi-line, one field per line),
+    /// `"compact"` (terser single-line), `"json"` (production / log
+    /// aggregators). Unknown values fall back to `full` with a
+    /// `tracing::warn!`.
+    ///
+    /// Before #1480 `"pretty"` and `"compact"` were both accepted and
+    /// both produced the `full` formatter — `install()` called neither
+    /// `.pretty()` nor `.compact()`, so two of the three documented
+    /// values were the same output.
     pub format: Option<String>,
+    /// Terminal colour: `"auto"` (default), `"always"`, `"never"`.
+    ///
+    /// `auto` colours only when stdout is a terminal, so piping to a
+    /// file or running under CI stays plain without configuration. The
+    /// file sink and JSON output are never coloured regardless — escape
+    /// codes in a log file or a JSON string help nobody.
+    ///
+    /// Before #1480 there was no colour at all: the `ansi` feature was
+    /// not compiled in, so this setting would have had nothing to
+    /// switch.
+    pub color: Option<String>,
     /// Include thread IDs in events. Default off.
     pub with_thread_ids: Option<bool>,
     /// Include source-file line numbers in events. Default off.
@@ -790,6 +832,18 @@ pub struct LoggingSettings {
     /// logs land in the file ONLY. Useful for headless workers /
     /// daemonized processes. No-op when `file_dir` is unset.
     pub file_only: Option<bool>,
+    /// One INFO line per request, plus the enclosing span that carries
+    /// `tenant` into every event a handler emits. Default `true`.
+    ///
+    /// Set `false` for a service that does its own request logging at
+    /// the edge, or one whose traffic makes per-request lines
+    /// unaffordable.
+    ///
+    /// Before #1480 this was effectively `false` for most projects and
+    /// there was no way to say so: the access log mounted only inside
+    /// the settings layers, so it depended on calling
+    /// `.with_settings_from_env()`, which no scaffolder template does.
+    pub access_log: Option<bool>,
 }
 
 /// `[i18n]` — Django-shape `LANGUAGE_CODE` / `LANGUAGES` /

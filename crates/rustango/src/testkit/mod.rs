@@ -30,6 +30,10 @@
 //! enable the helpers there with `--features testkit` (dev-only — the
 //! feature pulls in nothing and adds no runtime cost to a normal build).
 
+/// The tri-dialect harness: run one test body against every backend
+/// that is compiled in and configured (#1461).
+pub mod matrix;
+
 use crate::core::ModelSchema;
 use crate::migrate::{ddl, MigrateError};
 use crate::sql::Pool;

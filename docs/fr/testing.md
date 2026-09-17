@@ -167,13 +167,21 @@ couverture.
 
 | Variable | Suites | Ce dont elles ont besoin |
 |---|---:|---|
-| *(aucune)* | 215 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
-| `DATABASE_URL` | 93 | Un serveur PostgreSQL joignable. |
-| `MYSQL_TEST_URL` | 21 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
+| *(aucune)* | 210 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
+| `DATABASE_URL` | 96 | Un serveur PostgreSQL joignable. |
+| `MYSQL_TEST_URL` | 25 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis joignable. |
 
 Une suite qui lit deux variables est comptée sous les deux ; la colonne ne
 totalise donc pas le nombre de fichiers.
+
+Les suites `*_tri.rs` sont comptées sous les deux variables de serveur. Elles ne
+lisent aucune variable elles-mêmes — c'est `Backend::pool()` qui s'en charge — et
+leur bras SQLite tourne sans rien de configuré ; les compter comme « ne demande
+rien » serait techniquement tenable et pratiquement faux : les deux bras qui
+exigent un serveur sont la raison d'être de ces suites. Démarre les deux
+serveurs, sinon une suite tri annoncera un joli total en n'ayant éprouvé qu'un
+backend sur trois.
 
 MySQL est celle qui piège les gens : elle lit sa propre variable, donc un shell
 où seule `DATABASE_URL` est définie exécute les suites Postgres et saute

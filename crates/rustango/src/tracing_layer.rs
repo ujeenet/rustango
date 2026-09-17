@@ -55,7 +55,6 @@
 
 use std::convert::Infallible;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -64,13 +63,43 @@ use axum::http::{header, HeaderMap, Request, Response, Version};
 use tower::Service;
 use tracing::{field, info_span, Instrument};
 
-#[derive(Clone, Default, Debug)]
-pub struct TracingLayer;
+#[derive(Clone, Debug)]
+pub struct TracingLayer {
+    /// Query-parameter names whose values are redacted out of
+    /// `url.query` on the span.
+    ///
+    /// Defaults to the same list [`crate::access_log`] uses. It is a
+    /// field rather than a constant because a project can *extend* that
+    /// list via `[audit] redact_query_params`, and the span has to
+    /// honour the same set: redacting `client_secret` in the event
+    /// while the span renders it in cleartext on the same line is the
+    /// exact bug this redaction exists to remove, just narrowed to
+    /// project-specific keys.
+    redact_query_params: std::sync::Arc<Vec<String>>,
+}
+
+impl Default for TracingLayer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TracingLayer {
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            redact_query_params: std::sync::Arc::new(crate::access_log::default_redact_params()),
+        }
+    }
+
+    /// Redact these query-parameter names instead of the defaults.
+    ///
+    /// Pass `AccessLogLayer::redact_query_params` so both layers agree;
+    /// `Cli::mount_observability` and `server::Builder` do exactly that.
+    #[must_use]
+    pub fn redact(mut self, params: Vec<String>) -> Self {
+        self.redact_query_params = std::sync::Arc::new(params);
+        self
     }
 }
 
@@ -78,23 +107,26 @@ impl<S> tower::Layer<S> for TracingLayer {
     type Service = TracingService<S>;
     fn layer(&self, inner: S) -> Self::Service {
         TracingService {
-            inner: Arc::new(tokio::sync::Mutex::new(inner)),
+            inner,
+            redact_query_params: std::sync::Arc::clone(&self.redact_query_params),
         }
     }
 }
 
-/// The wrapped service. Internal `Arc<Mutex<S>>` so we can safely
-/// `clone()` per-request without requiring `S: Clone`.
+/// The wrapped service.
+///
+/// This held an `Arc<tokio::sync::Mutex<S>>` until the layer was first
+/// actually mounted. The stated reason was to `clone()` per request
+/// "without requiring `S: Clone`" — but the `Service` impl below
+/// requires `S: Clone` regardless, so the mutex bought nothing and put
+/// one contended async lock in front of the entire application on
+/// every request. Holding the plain service and using tower's
+/// ready-clone is the standard shape and needs neither the lock nor an
+/// `Arc`.
+#[derive(Clone)]
 pub struct TracingService<S> {
-    inner: Arc<tokio::sync::Mutex<S>>,
-}
-
-impl<S> Clone for TracingService<S> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
+    inner: S,
+    redact_query_params: std::sync::Arc<Vec<String>>,
 }
 
 impl<S> Service<Request<Body>> for TracingService<S>
@@ -110,20 +142,21 @@ where
     type Future =
         Pin<Box<dyn std::future::Future<Output = Result<Response<Body>, Infallible>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Always ready — we lock the inner service per-call.
-        Poll::Ready(Ok(()))
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
-        let inner = Arc::clone(&self.inner);
-        let span = build_request_span(&req);
+        // tower's ready-clone: the clone is not necessarily ready, so
+        // swap it for the original — which `poll_ready` above has
+        // readied — and keep the fresh clone for next time.
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+        let span = build_request_span(&req, &self.redact_query_params);
         Box::pin(
             async move {
                 let started = Instant::now();
-                let mut svc = inner.lock().await.clone();
-                drop(inner);
-                let resp = svc.call(req).await?;
+                let resp = inner.call(req).await?;
                 record_response(&resp, started);
                 Ok(resp)
             }
@@ -132,7 +165,7 @@ where
     }
 }
 
-fn build_request_span(req: &Request<Body>) -> tracing::Span {
+fn build_request_span(req: &Request<Body>, redact: &[String]) -> tracing::Span {
     let method = req.method().as_str();
     let path = req.uri().path();
     let query = req.uri().query().unwrap_or_default();
@@ -158,13 +191,40 @@ fn build_request_span(req: &Request<Body>) -> tracing::Span {
         // apps and on apex / operator-console requests.
         "tenant" = field::Empty,
         "org_id" = field::Empty,
+        // The `X-Request-Id` value, recorded by `request_id::record`
+        // from the layer mounted inside this span. Carrying it here
+        // rather than making handlers write `req_id = %id.0` on every
+        // event is the whole point: a field on the span reaches every
+        // event under it, including the ORM's, without any of them
+        // knowing a request id exists (#1480).
+        "request_id" = field::Empty,
         // Distributed-tracing fields populated when traceparent is present.
         "trace_id" = field::Empty,
         "parent_span_id" = field::Empty,
         "trace_flags" = field::Empty,
     );
     if !query.is_empty() {
-        span.record("url.query", query);
+        // Redacted, with the same default key list the access log uses.
+        //
+        // This recorded the raw string until the layer was first mounted
+        // by default. The span's context renders on the same line as the
+        // access-log event, so a request to
+        // `/reset?password=hunter2&token=abc123` produced:
+        //
+        //   http.request{… url.query="password=hunter2&token=abc123"}:
+        //     rustango::access_log: … url.query=password=[redacted]&token=[redacted]
+        //
+        // — the cleartext credential sitting beside the redaction that
+        // was supposed to remove it. Reproduced against a live instance,
+        // not reasoned about.
+        //
+        // The default list is used rather than `AccessLogLayer`'s
+        // configured one because the span layer holds no config; a
+        // project that adds its own key to `redact_query_params` still
+        // gets it redacted in the event, and the defaults already cover
+        // the credential-bearing names.
+        let redacted = crate::access_log::redact_query(query, redact);
+        span.record("url.query", redacted.as_str());
     }
     if let Some(tp) = parse_traceparent(req.headers()) {
         span.record("trace_id", tp.trace_id);
@@ -373,7 +433,7 @@ mod tests {
             .header(header::USER_AGENT, "test-ua/1.0")
             .body(Body::empty())
             .unwrap();
-        let span = build_request_span(&req);
+        let span = build_request_span(&req, &crate::access_log::default_redact_params());
         let _enter = span.enter();
         let resp: Response<Body> = Response::builder()
             .status(StatusCode::CREATED)
@@ -385,5 +445,128 @@ mod tests {
         // current subscriber; with no subscriber it's disabled, so
         // accept either — the contract is "doesn't panic").
         // No assertion needed beyond reaching this line.
+    }
+
+    /// A key the *project* configured must be redacted on the span too.
+    ///
+    /// The first cut of this fix redacted with `default_redact_params()`
+    /// rather than the layer's configured list, and called that
+    /// acceptable. It is not: the bug being fixed is "the span renders
+    /// cleartext on the same line as the redaction", and for a project
+    /// that added `client_secret` to `[audit] redact_query_params` that
+    /// bug was entirely unchanged.
+    #[test]
+    fn a_project_configured_key_is_redacted_on_the_span() {
+        let redact = vec!["client_secret".to_owned()];
+        let req = Request::builder()
+            .uri("/cb?client_secret=shhh&page=2")
+            .body(Body::empty())
+            .unwrap();
+        let span = build_request_span(&req, &redact);
+        drop(span);
+
+        let out = crate::access_log::redact_query("client_secret=shhh&page=2", &redact);
+        assert!(!out.contains("shhh"), "configured key not redacted: {out}");
+        assert!(out.contains("page=2"), "non-credential param lost: {out}");
+    }
+
+    /// OAuth callbacks carry credentials under names the original
+    /// default list did not have.
+    ///
+    /// `/sso/callback?code=…&state=…` is a URL this framework's own
+    /// `oauth2::providers` and `tenancy::sso` produce, and matching is
+    /// exact — `access_token` never covered `id_token`.
+    #[test]
+    fn the_defaults_cover_the_oauth_parameters_this_framework_emits() {
+        let raw = "code=AUTHCODE&state=STATEVAL&id_token=IDTOK&code_verifier=VERIFIER\
+&client_secret=CS&page=2";
+        let out = crate::access_log::redact_query(raw, &crate::access_log::default_redact_params());
+        for leaked in ["AUTHCODE", "STATEVAL", "IDTOK", "VERIFIER", "CS"] {
+            assert!(
+                !out.contains(leaked),
+                "`{leaked}` survived the default redaction: {out}"
+            );
+        }
+        assert!(
+            out.contains("page=2"),
+            "a plain param must pass through: {out}"
+        );
+    }
+
+    /// The span must not carry credentials the access log redacts.
+    ///
+    /// Asserts on **rendered output**, not on the redaction helper. The
+    /// helper being correct was never in doubt; what broke was that the
+    /// span recorded the raw string beside it. So this captures a real
+    /// line and greps it, which is the only form of this test that
+    /// could have failed before the fix.
+    ///
+    /// Reproduced live first: the span context and the access-log event
+    /// render on one line, so a raw `url.query` put the cleartext
+    /// password directly next to `url.query=password=[redacted]`.
+    // `runtime` gates `tracing_subscriber`, which this needs to capture
+    // rendered output. Without the gate it broke
+    // `feature_combos (sqlite,admin)` — a build that has the span layer
+    // but not the subscriber.
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn the_span_redacts_credentials_in_the_query_string() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let req = Request::builder()
+                .uri("/reset?password=hunter2&token=abc123XYZ&page=2")
+                .body(Body::empty())
+                .unwrap();
+            let span = build_request_span(&req, &crate::access_log::default_redact_params());
+            let _e = span.enter();
+            // Any event inside the span renders the span's context,
+            // which is where the leak appeared.
+            tracing::info!("handled");
+        });
+
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.contains("url.query"),
+            "the span did not render url.query at all, so this proves nothing:\n{out}"
+        );
+        assert!(
+            !out.contains("hunter2"),
+            "the span leaked a password into the log line:\n{out}"
+        );
+        assert!(
+            !out.contains("abc123XYZ"),
+            "the span leaked a token into the log line:\n{out}"
+        );
+        assert!(
+            out.contains("page=2"),
+            "a non-credential query param must survive:\n{out}"
+        );
     }
 }

@@ -291,7 +291,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cargo-rustango"
-version = "0.57.5"
+version = "0.57.6"
 
 [[package]]
 name = "cc"
@@ -1567,6 +1567,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2211,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "rustango"
-version = "0.57.5"
+version = "0.57.6"
 dependencies = [
  "argon2",
  "async-stream",
@@ -2262,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-macros"
-version = "0.57.5"
+version = "0.57.6"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2273,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "rustango-orm-macros"
-version = "0.57.5"
+version = "0.57.6"
 dependencies = [
  "rustango",
  "rustango-macros",
@@ -3220,6 +3229,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
  "matchers",
+ "nu-ansi-term",
  "once_cell",
  "regex-automata",
  "serde",

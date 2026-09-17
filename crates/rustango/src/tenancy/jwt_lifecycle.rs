@@ -123,8 +123,30 @@ pub struct JwtLifecycle {
 
 impl JwtLifecycle {
     /// Build a new lifecycle with default TTLs (15 min access / 7 day refresh).
+    ///
+    /// # Panics
+    /// If `secret` is shorter than 32 bytes. HMAC accepts any key length,
+    /// but a short key is guessable and would let anyone mint tokens —
+    /// fail closed rather than sign with one.
+    ///
+    /// This is the floor `JwtBackend::new` and `auth_routes::build_jwt`
+    /// already enforce. It was missing here, on the one path that
+    /// *issues* tokens rather than verifying them: a caller could sign
+    /// with a two-byte key and every verifier downstream would accept
+    /// the result, because the tokens are perfectly valid — just
+    /// forgeable by anyone. Audit A-06.
     #[must_use]
     pub fn new(secret: Vec<u8>) -> Self {
+        // The message deliberately does NOT carry `secret.len()`.
+        // CodeQL's `rust/cleartext-logging` flags the length as a value
+        // derived from a secret reaching a log sink, and it is right to:
+        // a panic message lands in logs and crash reports, and the exact
+        // length of a key is information about that key. `jwt.rs`'s
+        // equivalent check already words it this way.
+        assert!(
+            secret.len() >= 32,
+            "JwtLifecycle signing key is too short; need >= 32 bytes (a shorter key is forgeable)",
+        );
         Self {
             secret,
             access_ttl_secs: DEFAULT_ACCESS_TTL_SECS,
@@ -493,8 +515,15 @@ fn check_reserved(
 mod tests {
     use super::*;
 
+    /// 32 bytes, because that is the floor `new` enforces.
+    ///
+    /// This helper signed with an 11-byte `b"test-secret"` — a key the
+    /// framework's own verifier-side constructors have refused since
+    /// audit N5. The module's tests were the reason nobody noticed the
+    /// issuing path had no floor: they exercised it exclusively with a
+    /// key it should never have accepted.
     fn jwt() -> JwtLifecycle {
-        JwtLifecycle::new(b"test-secret".to_vec())
+        JwtLifecycle::new(b"test-secret-at-least-32-bytes-ok!".to_vec())
     }
 
     #[tokio::test]
@@ -588,7 +617,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_secret_fails_verification() {
         let j1 = jwt();
-        let j2 = JwtLifecycle::new(b"different-secret".to_vec());
+        let j2 = JwtLifecycle::new(b"a-different-secret-32-bytes-long!".to_vec());
         let pair = j1.issue_pair(5);
         assert!(j2.verify_access(&pair.access).await.is_none());
     }
@@ -605,7 +634,7 @@ mod tests {
 
     #[test]
     fn custom_ttls() {
-        let j = JwtLifecycle::new(b"k".to_vec())
+        let j = JwtLifecycle::new(b"custom-ttl-secret-32-bytes-long!!".to_vec())
             .with_access_ttl(60)
             .with_refresh_ttl(3600);
         assert_eq!(j.access_ttl_secs, 60);
@@ -804,5 +833,27 @@ mod tests {
         assert_eq!(j.blacklist_size().await, 1);
         j.revoke(&pair.refresh).await;
         assert_eq!(j.blacklist_size().await, 2);
+    }
+
+    /// A short signing key is refused, not quietly accepted.
+    ///
+    /// `JwtBackend::new` and `auth_routes::build_jwt` both enforced this
+    /// floor; the constructor that actually *signs* did not. A two-byte
+    /// key produced perfectly valid tokens that anyone could forge, and
+    /// every verifier downstream accepted them — there was nothing to
+    /// notice. Audit A-06.
+    #[test]
+    #[should_panic(expected = "need >= 32")]
+    fn a_short_signing_key_is_refused() {
+        let _ = JwtLifecycle::new(b"too-short".to_vec());
+    }
+
+    /// And exactly 32 bytes is accepted, so the boundary is `>=` rather
+    /// than `>`. A test that only checked the panic would pass with the
+    /// comparison inverted.
+    #[test]
+    fn a_thirty_two_byte_key_is_accepted() {
+        let life = JwtLifecycle::new(vec![7u8; 32]);
+        assert_eq!(life.access_ttl_secs, DEFAULT_ACCESS_TTL_SECS);
     }
 }

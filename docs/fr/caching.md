@@ -149,6 +149,30 @@ assert_eq!(cache.get("flash").await?, None);   // expired
 `InMemoryCache::with_default_ttl(d)` définit un TTL par défaut appliqué lorsque
 vous passez `None`.
 
+### Un TTL est une borne supérieure, pas une garantie
+
+`InMemoryCache` est **borné en taille par défaut** — 256 Mio ou 100 000 entrées,
+selon ce qui est atteint en premier — avec une éviction LRU approximative. Un
+afflux de clés uniques ne peut donc pas faire croître le processus sans limite,
+mais cela signifie aussi qu'**une entrée peut disparaître avant l'expiration de
+son TTL** si elle est la moins récemment utilisée au moment où le budget est
+atteint. L'éviction supprime d'abord les entrées déjà expirées, puis les moins
+récemment utilisées, jusqu'à respecter les deux budgets.
+
+Traitez donc une lecture de cache comme « peut être absente » même à l'intérieur
+du TTL. C'est vrai de tout backend de cache, mais ici la cause est
+compréhensible et réglable :
+
+```rust
+InMemoryCache::new()
+    .with_max_bytes(512 * 1024 * 1024)   // relever le budget
+    .with_max_entries(0)                 // 0 = illimité (comportement d'avant le bornage)
+```
+
+Le TTL lui-même est appliqué paresseusement, à la lecture — il n'y a pas de
+thread d'éviction en arrière-plan, donc une entrée expirée occupe encore sa place
+jusqu'à ce que quelque chose la demande ou que l'éviction l'atteigne.
+
 ---
 
 ## Changer de backend

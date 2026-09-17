@@ -201,7 +201,9 @@ async fn handler() -> Result<Json<X>, ApiError> {
 }
 ```
 
-`ApiError` implémente `IntoResponse`, si bien que le retourner produit automatiquement la forme JSON d'erreur standard.
+`ApiError` implémente `IntoResponse`, si bien que le retourner produit automatiquement sa forme JSON : `{"error": <code machine>, "message": …, "status": …, "details": …}`.
+
+**Ce n'est pas la seule forme d'erreur que le framework émet.** Un ViewSet répond `{"error": "<message lisible>"}` pour ses propres échecs, et une map DRF indexée par champ pour la validation d'un serializer — trois enveloppes au total, et `error` porte un code machine dans l'une et une phrase dans l'autre. [ViewSets — formes de réponse en erreur](viewsets.md#formes-de-réponse-en-erreur) indique quel chemin émet laquelle.
 
 ---
 

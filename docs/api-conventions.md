@@ -201,7 +201,9 @@ async fn handler() -> Result<Json<X>, ApiError> {
 }
 ```
 
-`ApiError` implements `IntoResponse`, so returning it produces the standard JSON error shape automatically.
+`ApiError` implements `IntoResponse`, so returning it produces its JSON shape automatically: `{"error": <machine code>, "message": …, "status": …, "details": …}`.
+
+**It is not the only error shape the framework emits.** A ViewSet answers with `{"error": "<human message>"}` for its own failures and with a DRF field-keyed map for serializer validation — three envelopes in total, and `error` carries a machine code in one and a sentence in another. [ViewSets — error response shapes](viewsets.md#error-response-shapes) lists which path emits which.
 
 ---
 
@@ -265,16 +267,23 @@ Use when:
 A *feature* is a Cargo build flag (`Cargo.toml`'s `[features]`) that switches a chunk of the crate on or off — similar to Laravel package discovery or Django's `INSTALLED_APPS`, but resolved at compile time. Every module that pulls in an extra dependency sits behind one. The default set is "you almost certainly want these":
 
 ```toml
-default = [
-    "postgres", "manage", "admin", "config", "forms", "serializer",
-    "cache", "signals", "email", "storage", "scheduler", "secrets", "totp",
-    "webhook", "webhook-delivery", "api_keys", "passwords", "signed_url",
-    "notifications", "casts", "jobs", "jobs-postgres", "auth_flows", "sse",
-    "websocket", "oauth2", "http-client", "compression", "openapi",
-    "csp-nonce", "sessions", "hmac-auth", "jwt", "uploads", "storage-s3",
-    "media", "runserver", "template_views",
+default = ["postgres", "batteries"]
+
+batteries = [
+    "manage", "admin", "config", "forms", "serializer", "cache", "signals",
+    "email", "storage", "scheduler", "secrets", "totp", "webhook",
+    "webhook-delivery", "api_keys", "passwords", "signed_url", "notifications",
+    "casts", "jobs", "jobs-postgres", "auth_flows", "sse", "websocket",
+    "oauth2", "http-client", "compression", "openapi", "csp-nonce", "sessions",
+    "hmac-auth", "jwt", "uploads", "storage-s3", "media", "runserver",
+    "template_views",
 ]
 ```
+
+The indirection is deliberate: `batteries` is a single name a downstream
+crate can switch off — `default-features = false, features = ["postgres"]` —
+without having to restate the list. The alternative, spelling all thirty-seven
+into `default`, means anyone opting out has to know all thirty-seven.
 
 **Off by default:** features that pull in heavy dependencies or external services:
 - `tenancy` — adds `argon2`, `hmac`, `sha2`, `cookie`, `tower` (most apps don't need it)
