@@ -10,6 +10,30 @@ The security pass. A review of `develop` at v0.57.6 produced 20 findings,
 every one traced to the code that implements it, with "is this currently
 exploitable?" answered honestly — including where the answer is no.
 
+### Security
+
+- **`media_router` served an unauthenticated, non-tenant-scoped media
+  API** (finding 01, High). Its 15 routes took no authentication,
+  authorization or tenant extractor — every handler was `State(manager)`
+  plus a path or body. An anonymous caller could `GET /media/{id}` for
+  the row **and a presigned S3 download URL**, walking the integer id
+  space to harvest signed links for the whole bucket; `DELETE
+  /media/{id}` by id with no ownership check; and `POST /uploads/begin`
+  to mint a presigned **PUT** for a caller-chosen disk and key prefix.
+  An integrator who copied the module's quick start shipped an open
+  bucket.
+
+  **`media_router` is deprecated and now refuses every request.** Build
+  the router with `media_router_with(manager, authorizer)` and supply a
+  `MediaAuthorizer`. This is a behaviour change on a patch release, and
+  it is the fail-closed direction deliberately.
+
+  A blanket `.layer(auth)` in front was never sufficient for a
+  multi-tenant deployment — no handler carried a tenant, so an
+  authenticated tenant-A user still read tenant B's row by id. The new
+  `MediaAction` carries the object id so the decision can be made per
+  row.
+
 ## [0.57.6] — 2026-09-16
 
 The tri-dialect train. The theme is a single question: **does this behaviour

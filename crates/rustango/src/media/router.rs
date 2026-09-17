@@ -1,5 +1,25 @@
 //! Axum REST router for the [`MediaManager`] surface.
 //!
+//! # This router requires an authorization policy
+//!
+//! Build it with [`media_router_with`] and supply a
+//! [`MediaAuthorizer`]. [`media_router`] is deprecated and refuses
+//! every request — it does not serve.
+//!
+//! That is a behaviour change in 0.57.7, and the reason is worth
+//! stating plainly: before it, these 15 routes took **no**
+//! authentication, authorization or tenant extractor at all. An
+//! anonymous caller could walk the integer id space collecting
+//! presigned S3 download links, delete rows by id, and mint a
+//! presigned PUT for a key prefix of their choosing. An integrator who
+//! copied the quick start below shipped an open bucket.
+//!
+//! A blanket `.layer(auth)` in front is **not** sufficient for a
+//! multi-tenant deployment: no handler carries a tenant, so an
+//! authenticated tenant-A user still reads tenant B's row by id.
+//! [`MediaAction`] carries the object id so the decision can be made
+//! per row.
+//!
 //! Mounted under any prefix you like; the conventional choice is
 //! `/media`. All responses are JSON (no auto-CSRF — you wire that
 //! at the outer router level via [`crate::forms::csrf`]).
@@ -36,8 +56,12 @@
 //!
 //! let manager = MediaManager::new(pool.clone(), registry);
 //! let app = axum::Router::new()
-//!     .nest("/media", media_router(manager));
+//!     .nest("/media", media_router_with(manager, MyAuthorizer));
 //! ```
+//!
+//! `MyAuthorizer` is yours — see [`MediaAuthorizer`]. There is no
+//! default, because the default that existed before was "allow
+//! everyone".
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,8 +81,127 @@ use super::{
 #[allow(dead_code)]
 const DEFAULT_PRESIGN_TTL_SECS: u64 = 3600;
 
+/// What a request is trying to do, handed to a [`MediaAuthorizer`].
+///
+/// `id` is the row or collection the path names, when it names one, so
+/// an authorizer can make an **object-level** decision — which is the
+/// half a blanket `.layer(auth)` in front of this router cannot do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MediaAction {
+    /// `GET` on a media row, collection, or tag listing.
+    Read { id: Option<i64> },
+    /// Anything that creates, mutates or deletes.
+    Write { id: Option<i64> },
+    /// Minting a presigned upload URL — a write primitive into storage.
+    BeginUpload,
+}
+
+/// Decides whether a request may touch the media surface.
+///
+/// **There is no default implementation, deliberately.** Before this
+/// existed, `media_router` mounted 15 routes and not one handler took
+/// an authentication, authorization or tenant extractor: an anonymous
+/// caller could walk the integer id space harvesting presigned S3
+/// download links, delete by id, and mint a presigned PUT for a
+/// caller-chosen key prefix. An integrator who copied the quick start
+/// shipped an open bucket.
+///
+/// Implement this against whatever your app uses for identity, and
+/// scope by tenant here if you are multi-tenant — [`MediaAction`]
+/// carries the object id for exactly that.
+///
+/// ```ignore
+/// struct SessionAuthorizer;
+///
+/// #[async_trait::async_trait]
+/// impl MediaAuthorizer for SessionAuthorizer {
+///     async fn authorize(&self, parts: &Parts, action: MediaAction) -> bool {
+///         let Some(user) = current_user(parts) else { return false };
+///         match action {
+///             MediaAction::Read { id: Some(id) } => user.may_read_media(id).await,
+///             MediaAction::Write { .. } | MediaAction::BeginUpload => user.is_editor(),
+///             MediaAction::Read { id: None } => true,
+///         }
+///     }
+/// }
+/// ```
+#[async_trait::async_trait]
+pub trait MediaAuthorizer: Send + Sync + 'static {
+    /// `true` to allow. Anything else is a 403.
+    async fn authorize(&self, parts: &axum::http::request::Parts, action: MediaAction) -> bool;
+}
+
+/// Refuses everything. What [`media_router`] uses.
+struct DenyAll;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for DenyAll {
+    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> bool {
+        false
+    }
+}
+
+/// Classify a request so the authorizer sees what it is deciding about.
+fn classify(method: &axum::http::Method, path: &str) -> MediaAction {
+    let id = path.split('/').find_map(|seg| seg.parse::<i64>().ok());
+    if path.starts_with("/uploads/begin") {
+        return MediaAction::BeginUpload;
+    }
+    if method == axum::http::Method::GET {
+        MediaAction::Read { id }
+    } else {
+        MediaAction::Write { id }
+    }
+}
+
+/// Build the media router with an authorization policy.
+///
+/// Every route is gated: the authorizer runs before the handler, so a
+/// refusal costs no database work and never reaches the presigning
+/// code.
+pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: A) -> Router {
+    let auth = Arc::new(authorizer);
+    media_routes(manager).layer(axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let auth = Arc::clone(&auth);
+            async move {
+                let (parts, body) = req.into_parts();
+                let action = classify(&parts.method, parts.uri.path());
+                if !auth.authorize(&parts, action).await {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({
+                            "error": "not authorized for this media operation"
+                        })),
+                    )
+                        .into_response();
+                }
+                next.run(axum::extract::Request::from_parts(parts, body))
+                    .await
+            }
+        },
+    ))
+}
+
 /// Build the media router. Pass to `axum::Router::nest("/media", ...)`.
+///
+/// # This refuses every request
+///
+/// It mounts [`DenyAll`], so every route answers `403`. That is
+/// deliberate and it is a behaviour change: this constructor used to
+/// serve the whole media surface to anyone who could reach it.
+///
+/// Use [`media_router_with`] and supply a [`MediaAuthorizer`].
+#[deprecated(
+    since = "0.57.7",
+    note = "serves nothing — every route is 403. Use `media_router_with(manager, authorizer)`             and supply a `MediaAuthorizer`; see the module docs."
+)]
 pub fn media_router(manager: MediaManager) -> Router {
+    media_router_with(manager, DenyAll)
+}
+
+fn media_routes(manager: MediaManager) -> Router {
     let state = Arc::new(manager);
     Router::new()
         .route("/uploads/begin", post(begin_upload_handler))
