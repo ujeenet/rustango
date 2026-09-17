@@ -13,7 +13,7 @@ exploitable?" answered honestly — including where the answer is no.
 ### Security
 
 - **`media_router` served an unauthenticated, non-tenant-scoped media
-  API** (finding 01, High). Its 15 routes took no authentication,
+  API** (finding 01, High). Its 16 routes took no authentication,
   authorization or tenant extractor — every handler was `State(manager)`
   plus a path or body. An anonymous caller could `GET /media/{id}` for
   the row **and a presigned S3 download URL**, walking the integer id
@@ -27,6 +27,18 @@ exploitable?" answered honestly — including where the answer is no.
   the router with `media_router_with(manager, authorizer)` and supply a
   `MediaAuthorizer`. This is a behaviour change on a patch release, and
   it is the fail-closed direction deliberately.
+
+  ```rust
+  // before — served anyone who could reach it
+  .nest("/media", media_router(manager))
+  // after
+  .nest("/media", media_router_with(manager, MyPolicy))
+  ```
+
+  [UPGRADING.md](UPGRADING.md) has the full policy example. The router
+  needs the `admin` feature as well as `media`, and
+  `rustango::media::async_trait` is re-exported so implementing the
+  trait does not add a dependency.
 
   A blanket `.layer(auth)` in front was never sufficient for a
   multi-tenant deployment — no handler carried a tenant, so an
@@ -55,6 +67,31 @@ exploitable?" answered honestly — including where the answer is no.
   than passed through. `url_codec::percent_decode_path` is the decoder:
   path semantics, so `+` stays literal rather than becoming a space the
   way the form-encoded `url_decode` does.
+
+  Review of the first cut found more, all reproduced before fixing:
+
+  - `/uploads/{id}/finalize` classified as a distinct `Upload(i64)`
+    target, but it mutates the **media row** of that id — one row
+    presented as two kinds. It is `Change(Media(id))` now, and
+    `MediaTarget::Upload` is gone.
+  - `?recursive` on a collection's contents reaches media in descendant
+    collections the policy was never asked about. It classifies as
+    `Listing`, not as a read of the one collection named.
+  - `HEAD` was refused on routes the policy allows, because axum maps
+    `HEAD` onto the `GET` handler and the gate matched `GET` only.
+  - `Arc<dyn MediaAuthorizer>` did not satisfy the constructor, so a
+    host could not pick its policy at runtime. There is a blanket impl.
+  - Both refusals now emit a `debug` tracing event naming the action, so
+    a misconfigured policy is debuggable without a debugger.
+
+- **`url_codec::percent_decode_path`** — path semantics (`%XX` only,
+  `+` left literal), for comparing a segment against what a router
+  decoded. `url_decode` keeps form semantics and is unchanged for that.
+
+- **Neither decoder treats a signed hex pair as an escape.** `%+5`
+  decoded to byte `0x05`, because `u8::from_str_radix` accepts a leading
+  sign — against the module's own documented contract. Malformed input
+  only.
 
 - **`media` no longer enables `_async_trait` redundantly** — `storage`,
   which `media` already requires, enables it.

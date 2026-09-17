@@ -65,8 +65,16 @@ pub mod tag;
 pub use collection::MediaCollection;
 pub use tag::{MediaTag, MediaTagLink};
 
+/// The REST router over this surface. Needs `admin` as well as
+/// `media` — see [`router`] for why it refuses without an authorizer.
 #[cfg(feature = "admin")]
 pub mod router;
+
+/// Re-exported so implementing [`router::MediaAuthorizer`] does not
+/// need `async-trait` in the integrator's own `Cargo.toml`, and cannot
+/// drift from the version the trait was declared with.
+#[cfg(feature = "admin")]
+pub use async_trait::async_trait;
 
 const DEFAULT_DISK_NAME: &str = "default";
 
