@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-## [0.57.6] — unreleased
+## [0.57.6] — 2026-09-16
 
 The tri-dialect train. The theme is a single question: **does this behaviour
 work on all three databases, or only on the one somebody tested?**
