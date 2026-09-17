@@ -48,7 +48,7 @@
 //! ## Quick start
 //!
 //! ```ignore
-//! use rustango::media::{Media, MediaManager, router::media_router};
+//! use rustango::media::{Media, MediaManager, router::media_router_with};
 //! use rustango::storage::StorageRegistry;
 //!
 //! // Tables come from the framework's system migrations (run during

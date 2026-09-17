@@ -7,7 +7,20 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use rustango::media::router::media_router;
+use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer};
+
+/// These tests exercise the routes, not the access check, so they mount
+/// a permissive authorizer. `media_router` itself now refuses every
+/// request (security finding 01) — the refusals are covered in
+/// `media_router_requires_authorization.rs`.
+struct AllowAll;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for AllowAll {
+    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> bool {
+        true
+    }
+}
 use rustango::media::{MediaManager, SaveOpts};
 use rustango::storage::s3::{S3Config, S3Storage};
 use rustango::storage::{BoxedStorage, StorageRegistry};
@@ -467,7 +480,7 @@ async fn router_get_media_returns_full_response() {
     };
     manager.tag(mid, &["api"]).await.unwrap();
 
-    let app = media_router(manager.clone());
+    let app = media_router_with(manager.clone(), AllowAll);
     let resp = app
         .clone()
         .oneshot(
@@ -501,7 +514,7 @@ async fn router_create_collection_then_list_and_get() {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
-    let app = media_router(manager.clone());
+    let app = media_router_with(manager.clone(), AllowAll);
 
     let resp = app
         .clone()
@@ -569,7 +582,7 @@ async fn router_begin_then_finalize_upload_via_axum() {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
-    let app = media_router(manager.clone());
+    let app = media_router_with(manager.clone(), AllowAll);
 
     // 1. POST /uploads/begin
     let begin = app
@@ -646,7 +659,7 @@ async fn router_set_tags_and_query_via_tag_endpoint() {
         rustango::sql::Auto::Set(v) => v,
         _ => unreachable!(),
     };
-    let app = media_router(manager.clone());
+    let app = media_router_with(manager.clone(), AllowAll);
 
     let resp = app
         .clone()
@@ -724,7 +737,7 @@ async fn router_collection_contents_with_recursive_query() {
         .await
         .unwrap();
 
-    let app = media_router(manager.clone());
+    let app = media_router_with(manager.clone(), AllowAll);
 
     // Non-recursive
     let resp = app
