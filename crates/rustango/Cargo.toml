@@ -283,7 +283,7 @@ uploads = ["admin", "storage", "axum/multipart"]
 # (postgres / mysql / sqlite).
 # `_async_trait` for `MediaAuthorizer`, the policy hook the media
 # router requires (0.57.7 — the router used to serve unauthenticated).
-media = ["storage", "_async_trait"]
+media = ["storage"]
 
 # S3-compatible storage backend (`rustango::storage::s3::S3Storage`).
 # Hand-rolled SigV4 over reqwest — works for AWS S3, Cloudflare R2,

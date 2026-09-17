@@ -86,6 +86,44 @@ pub fn url_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Decode one **path** segment: `%XX` only, `+` kept literal.
+///
+/// [`url_decode`] maps `+` to a space, which is the
+/// `x-www-form-urlencoded` convention and is wrong for a path — there
+/// `+` is an ordinary character. Routers decode path params this way
+/// (axum's `Path` included), so anything comparing a decoded segment
+/// against what a handler will see has to use this, not `url_decode`.
+///
+/// Getting that wrong is not cosmetic. A gate that decodes `/tags/a+b`
+/// as `a b` while the handler reads `a+b` is deciding about a different
+/// row than the one it is guarding.
+///
+/// ```ignore
+/// use rustango::url_codec::percent_decode_path;
+/// assert_eq!(percent_decode_path("%31"), "1");     // digits survive encoding
+/// assert_eq!(percent_decode_path("a+b"), "a+b");   // '+' is literal here
+/// assert_eq!(percent_decode_path("a%2Fb"), "a/b");
+/// ```
+#[must_use]
+pub fn percent_decode_path(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(b) = u8::from_str_radix(hex, 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Django-parity
 /// [`django.utils.encoding.iri_to_uri(iri)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.iri_to_uri) —
 /// convert an Internationalized Resource Identifier (IRI, per

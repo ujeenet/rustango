@@ -81,20 +81,52 @@ use super::{
 #[allow(dead_code)]
 const DEFAULT_PRESIGN_TTL_SECS: u64 = 3600;
 
+/// What a request names — the row an authorizer is deciding about.
+///
+/// The kind is part of the value on purpose. A bare `Option<i64>` is
+/// ambiguous across this route table: `/media/7` and `/collections/7`
+/// are different rows in different tables, and an authorizer handed a
+/// naked `7` cannot tell them apart. The first version of this API
+/// made exactly that mistake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MediaTarget {
+    /// One media row, by id.
+    Media(i64),
+    /// One collection, by id.
+    Collection(i64),
+    /// One tag, by slug. A slug is caller-chosen text — including
+    /// text that looks like a number — so it is never an id.
+    Tag(String),
+    /// An upload ticket, by id (`/uploads/{id}/finalize`).
+    Upload(i64),
+    /// `POST /uploads/begin`. Names no existing row: it mints a
+    /// presigned `PUT` for a caller-chosen disk and key prefix.
+    NewUpload,
+    /// A listing or a create — `GET /collections`, `GET /tags`,
+    /// `GET /tags/popular`, `POST /collections`, `POST /tags`.
+    ///
+    /// **Granting this is not harmless.** Listings enumerate, and
+    /// enumeration is what turns "guess an id" into "read the index".
+    Listing,
+}
+
 /// What a request is trying to do, handed to a [`MediaAuthorizer`].
 ///
-/// `id` is the row or collection the path names, when it names one, so
-/// an authorizer can make an **object-level** decision — which is the
-/// half a blanket `.layer(auth)` in front of this router cannot do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The four verbs line up with the `view` / `add` / `change` / `delete`
+/// codenames used everywhere else in this codebase, so a policy built
+/// on permissions maps onto them one-to-one.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MediaAction {
-    /// `GET` on a media row, collection, or tag listing.
-    Read { id: Option<i64> },
-    /// Anything that creates, mutates or deletes.
-    Write { id: Option<i64> },
-    /// Minting a presigned upload URL — a write primitive into storage.
-    BeginUpload,
+    /// Read a row or a listing.
+    Read(MediaTarget),
+    /// Create: a collection, a tag, or an upload ticket.
+    Add(MediaTarget),
+    /// Mutate an existing row — move, (un)tag, finalize an upload.
+    Change(MediaTarget),
+    /// Destroy an existing row.
+    Delete(MediaTarget),
 }
 
 /// Decides whether a request may touch the media surface.
@@ -108,8 +140,8 @@ pub enum MediaAction {
 /// shipped an open bucket.
 ///
 /// Implement this against whatever your app uses for identity, and
-/// scope by tenant here if you are multi-tenant — [`MediaAction`]
-/// carries the object id for exactly that.
+/// scope by tenant here if you are multi-tenant — [`MediaTarget`]
+/// names the row for exactly that.
 ///
 /// ```ignore
 /// struct SessionAuthorizer;
@@ -119,13 +151,28 @@ pub enum MediaAction {
 ///     async fn authorize(&self, parts: &Parts, action: MediaAction) -> bool {
 ///         let Some(user) = current_user(parts) else { return false };
 ///         match action {
-///             MediaAction::Read { id: Some(id) } => user.may_read_media(id).await,
-///             MediaAction::Write { .. } | MediaAction::BeginUpload => user.is_editor(),
-///             MediaAction::Read { id: None } => true,
+///             MediaAction::Read(t) => match t {
+///                 MediaTarget::Media(id) => user.may_read_media(id).await,
+///                 MediaTarget::Collection(id) => user.may_read_collection(id).await,
+///                 MediaTarget::Tag(slug) => user.may_read_tag(&slug).await,
+///                 // Listings enumerate the tenant's whole library, so
+///                 // they are an explicit decision, not a default.
+///                 MediaTarget::Listing => user.may_browse_library(),
+///                 _ => false,
+///             },
+///             MediaAction::Add(_) => user.is_editor(),
+///             MediaAction::Change(MediaTarget::Media(id)) => user.owns_media(id).await,
+///             MediaAction::Delete(MediaTarget::Media(id)) => user.owns_media(id).await,
+///             _ => false,
 ///         }
 ///     }
 /// }
 /// ```
+///
+/// Note the trailing `_ => false` arms. [`MediaAction`] and
+/// [`MediaTarget`] are both `#[non_exhaustive]`, so a future route
+/// reaches your policy as a variant you have not written an arm for.
+/// Ending on `false` means that arrives denied rather than allowed.
 #[async_trait::async_trait]
 pub trait MediaAuthorizer: Send + Sync + 'static {
     /// `true` to allow. Anything else is a 403.
@@ -143,15 +190,68 @@ impl MediaAuthorizer for DenyAll {
 }
 
 /// Classify a request so the authorizer sees what it is deciding about.
-fn classify(method: &axum::http::Method, path: &str) -> MediaAction {
-    let id = path.split('/').find_map(|seg| seg.parse::<i64>().ok());
-    if path.starts_with("/uploads/begin") {
-        return MediaAction::BeginUpload;
-    }
-    if method == axum::http::Method::GET {
-        MediaAction::Read { id }
-    } else {
-        MediaAction::Write { id }
+///
+/// `None` means "this does not match any route in this table", and the
+/// caller must refuse. Fail-closed is the whole point: an unrecognised
+/// shape that fell through to a permissive default is how a gate gets
+/// walked around.
+///
+/// Segments are matched **positionally** against the route table and
+/// percent-decoded first. Both matter, and the first version of this
+/// function got both wrong — it scanned for the first integer-parsable
+/// segment in the raw path, so `/media/%31` yielded no id at all while
+/// the handler served row 1, and `/tags/2024/media` yielded `2024` as
+/// if a caller-chosen tag slug were an object id.
+fn classify(method: &axum::http::Method, path: &str) -> Option<MediaAction> {
+    use axum::http::Method;
+
+    let seg: Vec<String> = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(crate::url_codec::percent_decode_path)
+        .collect();
+    let s: Vec<&str> = seg.iter().map(String::as_str).collect();
+
+    // An id that does not parse cannot name a row, so there is nothing
+    // to authorize — refuse rather than guess a target.
+    let id = |raw: &str| raw.parse::<i64>().ok();
+
+    match (method, s.as_slice()) {
+        (&Method::POST, ["uploads", "begin"]) => Some(MediaAction::Add(MediaTarget::NewUpload)),
+        (&Method::POST, ["uploads", raw, "finalize"]) => {
+            Some(MediaAction::Change(MediaTarget::Upload(id(raw)?)))
+        }
+
+        (&Method::GET, ["media", raw]) => Some(MediaAction::Read(MediaTarget::Media(id(raw)?))),
+        (&Method::DELETE, ["media", raw]) => {
+            Some(MediaAction::Delete(MediaTarget::Media(id(raw)?)))
+        }
+        // move / tag / untag all mutate the media row itself.
+        (&Method::POST, ["media", raw, "move" | "tags"])
+        | (&Method::DELETE, ["media", raw, "tags", _]) => {
+            Some(MediaAction::Change(MediaTarget::Media(id(raw)?)))
+        }
+
+        (&Method::GET, ["collections"]) => Some(MediaAction::Read(MediaTarget::Listing)),
+        (&Method::POST, ["collections"]) => Some(MediaAction::Add(MediaTarget::Listing)),
+        (&Method::GET, ["collections", raw] | ["collections", raw, "contents"]) => {
+            Some(MediaAction::Read(MediaTarget::Collection(id(raw)?)))
+        }
+        (&Method::DELETE, ["collections", raw]) => {
+            Some(MediaAction::Delete(MediaTarget::Collection(id(raw)?)))
+        }
+
+        // `popular` is a listing, and must be matched before the
+        // `{slug}` arm or a tag literally named "popular" shadows it.
+        (&Method::GET, ["tags"] | ["tags", "popular"]) => {
+            Some(MediaAction::Read(MediaTarget::Listing))
+        }
+        (&Method::POST, ["tags"]) => Some(MediaAction::Add(MediaTarget::Listing)),
+        (&Method::GET, ["tags", slug, "media"]) => {
+            Some(MediaAction::Read(MediaTarget::Tag((*slug).to_owned())))
+        }
+
+        _ => None,
     }
 }
 
@@ -167,7 +267,18 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
             let auth = Arc::clone(&auth);
             async move {
                 let (parts, body) = req.into_parts();
-                let action = classify(&parts.method, parts.uri.path());
+                // No classification means no route in this table matches
+                // (or an id that cannot be a row id). Refuse: passing an
+                // unrecognised shape through is how a gate is walked
+                // around. This also covers the router's fallback, so a
+                // probe gets 403 rather than a 404 that maps the surface.
+                let Some(action) = classify(&parts.method, parts.uri.path()) else {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({ "error": "not a recognised media operation" })),
+                    )
+                        .into_response();
+                };
                 if !auth.authorize(&parts, action).await {
                     return (
                         StatusCode::FORBIDDEN,
@@ -195,7 +306,7 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
 /// Use [`media_router_with`] and supply a [`MediaAuthorizer`].
 #[deprecated(
     since = "0.57.7",
-    note = "serves nothing — every route is 403. Use `media_router_with(manager, authorizer)`             and supply a `MediaAuthorizer`; see the module docs."
+    note = "serves nothing — every route is 403. Use `media_router_with(manager, authorizer)` and supply a `MediaAuthorizer`; see the module docs."
 )]
 pub fn media_router(manager: MediaManager) -> Router {
     media_router_with(manager, DenyAll)

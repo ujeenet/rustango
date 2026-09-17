@@ -31,8 +31,33 @@ exploitable?" answered honestly — including where the answer is no.
   A blanket `.layer(auth)` in front was never sufficient for a
   multi-tenant deployment — no handler carried a tenant, so an
   authenticated tenant-A user still read tenant B's row by id. The new
-  `MediaAction` carries the object id so the decision can be made per
+  `MediaAction` names the target row so the decision can be made per
   row.
+
+  The gate identifies that row through the new `MediaTarget`
+  (`Media(i64)` / `Collection(i64)` / `Tag(String)` / `Upload(i64)` /
+  `NewUpload` / `Listing`), and `MediaAction` splits into
+  `Read` / `Add` / `Change` / `Delete` to match the codenames used
+  elsewhere. The first cut of this API used a bare `Option<i64>`, and
+  review found three ways past it — all reproduced before fixing:
+
+  - `GET /media/%31` reached the authorizer with **no id** while the
+    handler decoded it and served row 1. Since the documented example
+    granted the no-id case (listings), copying the docs re-opened the
+    hole.
+  - `GET /tags/2024/media` handed `2024` over as an object id. A tag
+    slug is attacker-chosen, so that forged any id the policy trusted.
+  - `/collections/7` and `/media/7` were indistinguishable — one
+    integer, two tables.
+
+  Classification is now positional against the route table and
+  percent-decoded first, and an unrecognised shape is refused rather
+  than passed through. `url_codec::percent_decode_path` is the decoder:
+  path semantics, so `+` stays literal rather than becoming a space the
+  way the form-encoded `url_decode` does.
+
+- **`media` no longer enables `_async_trait` redundantly** — `storage`,
+  which `media` already requires, enables it.
 
 ## [0.57.6] — 2026-09-16
 

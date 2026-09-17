@@ -33,7 +33,7 @@ use rustango::sql::Pool;
 use rustango::storage::{InMemoryStorage, StorageRegistry};
 use tower::ServiceExt as _;
 
-use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer};
+use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer, MediaTarget};
 
 async fn manager() -> MediaManager {
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
@@ -77,6 +77,9 @@ async fn seed(mgr: &MediaManager) -> i64 {
 }
 
 /// An anonymous `GET /media/{id}` must not return the row.
+// Calls the deprecated constructor on purpose — proving it refuses is
+// the point of the test.
+#[allow(deprecated)]
 #[tokio::test]
 async fn an_anonymous_read_is_refused() {
     let mgr = manager().await;
@@ -107,6 +110,7 @@ async fn an_anonymous_read_is_refused() {
 }
 
 /// An anonymous `DELETE /media/{id}` must not destroy the row.
+#[allow(deprecated)]
 #[tokio::test]
 async fn an_anonymous_delete_is_refused() {
     let mgr = manager().await;
@@ -142,6 +146,7 @@ async fn an_anonymous_delete_is_refused() {
 ///
 /// This is the write primitive: a caller-chosen `disk` and
 /// `key_prefix`, with caller-supplied attribution.
+#[allow(deprecated)]
 #[tokio::test]
 async fn an_anonymous_upload_ticket_is_refused() {
     let mgr = manager().await;
@@ -213,6 +218,40 @@ async fn an_authorized_read_still_works() {
     );
 }
 
+/// Records every action the authorizer is handed, and allows, so the
+/// handler still runs and the two can be compared.
+struct Recorder(Arc<std::sync::Mutex<Vec<MediaAction>>>);
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for Recorder {
+    async fn authorize(&self, _: &axum::http::request::Parts, action: MediaAction) -> bool {
+        self.0.lock().unwrap().push(action);
+        true
+    }
+}
+
+/// Send `uri` through a permissive router and report what the
+/// authorizer was told, plus what the handler answered.
+async fn action_for(uri: &str, method: &str) -> (Vec<MediaAction>, StatusCode) {
+    let mgr = manager().await;
+    let _ = seed(&mgr).await;
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = media_router_with(mgr, Recorder(Arc::clone(&log)));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    let status = resp.status();
+    let seen = log.lock().unwrap().clone();
+    (seen, status)
+}
+
 /// The authorizer sees the object id, so it can decide per row.
 ///
 /// This is the half a blanket `.layer(auth)` in front of the router
@@ -220,25 +259,10 @@ async fn an_authorized_read_still_works() {
 /// tenant B's row.
 #[tokio::test]
 async fn the_authorizer_receives_the_object_id() {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    use std::sync::Arc as StdArc;
-
-    struct Recorder(StdArc<AtomicI64>);
-
-    #[async_trait::async_trait]
-    impl MediaAuthorizer for Recorder {
-        async fn authorize(&self, _: &axum::http::request::Parts, action: MediaAction) -> bool {
-            if let MediaAction::Read { id: Some(id) } = action {
-                self.0.store(id, Ordering::SeqCst);
-            }
-            true
-        }
-    }
-
     let mgr = manager().await;
     let id = seed(&mgr).await;
-    let seen = StdArc::new(AtomicI64::new(-1));
-    let app = media_router_with(mgr, Recorder(StdArc::clone(&seen)));
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = media_router_with(mgr, Recorder(Arc::clone(&log)));
 
     let _ = app
         .oneshot(
@@ -250,10 +274,108 @@ async fn the_authorizer_receives_the_object_id() {
         .await
         .expect("router answers");
 
+    let seen = log.lock().unwrap().clone();
     assert_eq!(
-        seen.load(Ordering::SeqCst),
-        id,
+        seen,
+        vec![MediaAction::Read(MediaTarget::Media(id))],
         "the authorizer was not told which row the request names, so it cannot make \
          an object-level or tenant-scoped decision"
+    );
+}
+
+// =====================================================================
+// The gate must decide about the same row the handler serves.
+//
+// Each of these three was a live bypass in the first version of this
+// fix, reproduced by running it. `classify` scanned the **raw** path
+// for the first integer-parsable segment, so the authorizer and the
+// handler disagreed about which row — and a gate that guards a
+// different row than the one served is not a gate.
+// =====================================================================
+
+/// `%31` is `1`. axum's `Path` extractor decodes it; the gate must too.
+///
+/// Measured against the first version: the authorizer was handed
+/// `Read { id: None }` while the handler returned **200 and row 1**,
+/// including its presigned download URL. The documented example
+/// mapped `id: None` to `true`, so copying the docs re-opened the
+/// exact hole this file exists to close.
+#[tokio::test]
+async fn a_percent_encoded_id_is_still_the_id() {
+    let (seen, _) = action_for("/media/%31", "GET").await;
+    assert_eq!(
+        seen,
+        vec![MediaAction::Read(MediaTarget::Media(1))],
+        "a percent-encoded id did not reach the authorizer as an id. The handler \
+         decodes it and serves the row, so the gate is deciding about something \
+         the request is not."
+    );
+}
+
+/// A tag slug is caller-chosen text, never an object id.
+#[tokio::test]
+async fn a_numeric_tag_slug_is_not_an_object_id() {
+    let (seen, _) = action_for("/tags/2024/media", "GET").await;
+    assert_eq!(
+        seen,
+        vec![MediaAction::Read(MediaTarget::Tag("2024".into()))],
+        "a numeric tag slug was handed over as an object id — an attacker picks the \
+         slug, so that forges any id the authorizer will trust"
+    );
+}
+
+/// `/collections/1` and `/media/1` are different rows in different
+/// tables. One untyped integer cannot tell a policy which.
+#[tokio::test]
+async fn a_collection_id_is_not_a_media_id() {
+    let (collection, _) = action_for("/collections/1", "GET").await;
+    let (media, _) = action_for("/media/1", "GET").await;
+    assert_eq!(
+        collection,
+        vec![MediaAction::Read(MediaTarget::Collection(1))]
+    );
+    assert_eq!(media, vec![MediaAction::Read(MediaTarget::Media(1))]);
+    assert_ne!(
+        collection, media,
+        "a collection and a media row with the same id were indistinguishable, so \
+         'may read media 1' silently authorised collection 1"
+    );
+}
+
+/// The verbs are split, so a policy can allow adding without deleting.
+#[tokio::test]
+async fn the_verb_distinguishes_read_change_and_delete() {
+    let (del, _) = action_for("/media/1", "DELETE").await;
+    assert_eq!(del, vec![MediaAction::Delete(MediaTarget::Media(1))]);
+
+    let (mv, _) = action_for("/media/1/move", "POST").await;
+    assert_eq!(mv, vec![MediaAction::Change(MediaTarget::Media(1))]);
+
+    let (begin, _) = action_for("/uploads/begin", "POST").await;
+    assert_eq!(begin, vec![MediaAction::Add(MediaTarget::NewUpload)]);
+}
+
+/// `popular` is a listing, not a tag named "popular".
+#[tokio::test]
+async fn the_popular_listing_is_not_a_tag_lookup() {
+    let (seen, _) = action_for("/tags/popular", "GET").await;
+    assert_eq!(seen, vec![MediaAction::Read(MediaTarget::Listing)]);
+}
+
+/// A shape that matches no route is refused, not passed through.
+#[tokio::test]
+async fn an_unrecognised_shape_is_refused() {
+    // Permissive authorizer: if this 403s, the refusal came from
+    // classification failing closed rather than from the policy.
+    let (seen, status) = action_for("/media/not-a-number", "GET").await;
+    assert!(
+        seen.is_empty(),
+        "an unparseable id reached the authorizer as a target: {seen:?}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an unrecognised path shape was not refused — falling through to a default \
+         is how a gate gets walked around"
     );
 }
