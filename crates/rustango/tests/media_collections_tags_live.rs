@@ -799,3 +799,101 @@ async fn migrate_framework_is_idempotent_against_running_db() {
         .await
         .expect("migrate_framework called twice");
 }
+
+/// Paging must *partition* the collection — no row twice, none missing.
+///
+/// This test lives here, on PostgreSQL, and not in the SQLite suite,
+/// because SQLite cannot observe the bug. Measured: with the tiebreaker
+/// removed, the SQLite version of this assertion **passes** — tied rows
+/// happen to come back in rowid order there — while PostgreSQL returned
+/// 197 unique of 200, with 3 duplicated across pages and 3 appearing on
+/// no page at all.
+///
+/// `ORDER BY uploaded_at DESC` alone is not a total order, and the tie
+/// is the normal case rather than the edge: `now()` is the *transaction*
+/// timestamp on PostgreSQL, so every row of one bulk import carries the
+/// identical value. A small `LIMIT` then pushes the planner to a top-N
+/// sort whose order among tied keys differs per (limit, offset) pair.
+///
+/// Asserting page *lengths* cannot see this — every count is right. Only
+/// the identities are wrong, so the assertion is that the union of the
+/// pages equals the seeded set.
+#[tokio::test]
+async fn paging_a_collection_partitions_it() {
+    use std::collections::HashSet;
+
+    let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
+        return;
+    };
+    let c = manager
+        .create_collection("Paged", "paged-partition", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+
+    let mut seeded: HashSet<i64> = HashSet::new();
+    for i in 0..60 {
+        let mut o = save_opts(&format!("page-{i}"));
+        o.collection_id = Some(cid);
+        let m = manager.save_bytes(o).await.expect("seed");
+        if let rustango::sql::Auto::Set(v) = m.id {
+            seeded.insert(v);
+        }
+    }
+
+    // Force the tie explicitly rather than hoping for one. `save_bytes`
+    // opens a transaction per call, and `now()` is the *transaction*
+    // timestamp, so seeding in a loop gives 60 distinct values and no
+    // collision at all — the first version of this test seeded that way,
+    // passed with the bug present, and proved nothing. A real bulk
+    // import (one transaction, or a backfill copying timestamps) is what
+    // produces the tie, and this is that state.
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let raw = PgPool::connect(&url).await.expect("connect");
+    sqlx::query("UPDATE rustango_media SET uploaded_at = $1 WHERE collection_id = $2")
+        .bind(chrono::Utc::now())
+        .bind(cid)
+        .execute(&raw)
+        .await
+        .expect("flatten uploaded_at");
+
+    let mut seen: Vec<i64> = Vec::new();
+    for page in 0..6 {
+        let rows = manager
+            .list_in_collection_paged(cid, false, 10, page * 10)
+            .await
+            .expect("page");
+        for m in rows {
+            if let rustango::sql::Auto::Set(v) = m.id {
+                seen.push(v);
+            }
+        }
+    }
+
+    let unique: HashSet<i64> = seen.iter().copied().collect();
+    let duplicated = seen.len() - unique.len();
+    let missing: Vec<i64> = seeded.difference(&unique).copied().collect();
+
+    assert_eq!(
+        duplicated,
+        0,
+        "{duplicated} of {} returned rows appeared on more than one page — the \
+         ordering is not total, so a row sorts differently per (limit, offset)",
+        seen.len()
+    );
+    assert!(
+        missing.is_empty(),
+        "{} rows were never returned by any page: {missing:?}. A client paging this \
+         collection to the end never sees them at all.",
+        missing.len()
+    );
+    assert_eq!(
+        unique.len(),
+        seeded.len(),
+        "the pages did not cover the set"
+    );
+}
