@@ -788,33 +788,73 @@ impl MediaManager {
             return Ok(0);
         }
 
-        let placeholders: Vec<String> = (1..=ids.len()).map(|i| d.placeholder(i)).collect();
-        let in_list = placeholders.join(", ");
-        let binds: Vec<crate::core::SqlValue> = ids
-            .iter()
-            .copied()
-            .map(crate::core::SqlValue::I64)
-            .collect();
+        // Chunk on the backend's own parameter ceiling.
+        //
+        // One bind per id in a single `IN (…)` meant the statement was
+        // rejected outright past the ceiling — and because the next run
+        // re-selects the same backlog, the sweep **wedged permanently**
+        // rather than degrading: measured at 33 000 pending rows,
+        // SQLite purged 0 and kept purging 0. `max_bind_params` already
+        // encodes every backend's limit and `bulk_insert` already
+        // chunks on it; this is the same arithmetic, minus the two
+        // binds the predicate below adds.
+        let per_chunk = (d.max_bind_params().saturating_sub(2)).max(1);
+        let mut purged = 0u64;
 
         let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
 
-        // Links first, same as `purge` — `rustango_media_tag_links`
-        // carries no foreign key on `media_id`, so a hard delete of the
-        // media row leaves them behind with nothing to reclaim them. A
-        // Pending row can carry tags: `set_tags` accepts any media id.
-        let unlink_sql =
-            format!("DELETE FROM rustango_media_tag_links WHERE media_id IN ({in_list})");
-        crate::sql::raw_execute_tx(&mut tx, &unlink_sql, binds.clone())
-            .await
-            .map_err(media_err_from_exec)?;
-        let sql = format!("DELETE FROM rustango_media WHERE id IN ({in_list})");
-        let n = crate::sql::raw_execute_tx(&mut tx, &sql, binds)
-            .await
-            .map_err(media_err_from_exec)?;
+        for chunk in ids.chunks(per_chunk) {
+            let in_list = (1..=chunk.len())
+                .map(|i| d.placeholder(i))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let id_binds: Vec<crate::core::SqlValue> = chunk
+                .iter()
+                .copied()
+                .map(crate::core::SqlValue::I64)
+                .collect();
+
+            // Links first, same as `purge` — `rustango_media_tag_links`
+            // carries no foreign key on `media_id`, so a hard delete of
+            // the media row leaves them behind with nothing to reclaim
+            // them. A Pending row can carry tags: `set_tags` accepts any
+            // media id.
+            let unlink_sql =
+                format!("DELETE FROM rustango_media_tag_links WHERE media_id IN ({in_list})");
+            crate::sql::raw_execute_tx(&mut tx, &unlink_sql, id_binds.clone())
+                .await
+                .map_err(media_err_from_exec)?;
+
+            // The predicate stays on the destructive statement.
+            //
+            // Capturing the ids is what makes the two statements agree
+            // about which rows they mean; it is not a licence to delete
+            // by id alone. The SELECT runs on a different connection
+            // and `transaction_pool` must then acquire one, so a
+            // `finalize_upload` can commit `status = 'ready'` in that
+            // window — and a delete by bare id would destroy a **Ready**
+            // row with a real storage object while its client holds a
+            // 200 naming that id. 0.57.6 was a single predicated
+            // statement and could not do this; re-checking here is what
+            // restores that guarantee without giving up the shared id
+            // set.
+            let p_cut = d.placeholder(chunk.len() + 1);
+            let sql = format!(
+                "DELETE FROM rustango_media \
+                  WHERE id IN ({in_list}) \
+                    AND status = 'pending' AND uploaded_at < {p_cut}"
+            );
+            let mut binds = id_binds;
+            binds.push(crate::core::SqlValue::DateTime(cutoff));
+            let n = crate::sql::raw_execute_tx(&mut tx, &sql, binds)
+                .await
+                .map_err(media_err_from_exec)?;
+            purged += n;
+        }
         tx.commit().await?;
-        Ok(n)
+        Ok(purged)
     }
 
     // =================================================================
@@ -1300,18 +1340,32 @@ impl MediaManager {
     pub async fn tag(&self, media_id: i64, slugs: &[&str]) -> Result<(), MediaError> {
         let d = self.pool.dialect();
         let (p1, p2) = (d.placeholder(1), d.placeholder(2));
-        // PG/SQLite: ON CONFLICT DO NOTHING; MySQL: INSERT IGNORE.
-        let sql = if d.name() == "mysql" {
-            format!(
-                "INSERT IGNORE INTO `rustango_media_tag_links` (`media_id`, `tag_id`) \
-                 VALUES ({p1}, {p2})"
-            )
-        } else {
-            format!(
-                "INSERT INTO rustango_media_tag_links (media_id, tag_id) \
-                 VALUES ({p1}, {p2}) ON CONFLICT DO NOTHING"
-            )
-        };
+        // `Dialect::insert_on_conflict_skip` rather than a hand-rolled
+        // branch, and **not** `INSERT IGNORE` on MySQL.
+        //
+        // The two MySQL forms are not equivalent. `INSERT IGNORE`
+        // downgrades every row-level error to a warning, not just the
+        // duplicate key — measured on MySQL 8.0, it swallows a missing
+        // NOT NULL default (1364), a CHECK violation (3819) and the
+        // `tag_id` foreign-key violation that PostgreSQL and SQLite
+        // raise. Inside `set_tags`' transaction, whose whole purpose is
+        // that a partial write rolls back, that meant the documented
+        // atomicity held on two backends and silently dropped a tag on
+        // the third. The dialect's own form is the narrow one:
+        // `ON DUPLICATE KEY UPDATE tag_id = tag_id`, which makes the
+        // duplicate a no-op and leaves every other error an error.
+        // The unique constraint is the composite `(media_id, tag_id)`
+        // from `MediaTagLink`'s `unique_together`, so both columns go
+        // here: PostgreSQL and SQLite reject an `ON CONFLICT` column
+        // list that matches no constraint, and naming only `tag_id`
+        // fails with "does not match any PRIMARY KEY or UNIQUE
+        // constraint". MySQL pivots on the first column, which is a
+        // no-op assignment either way.
+        let skip = d.insert_on_conflict_skip(&["media_id", "tag_id"]);
+        let sql = format!(
+            "INSERT INTO rustango_media_tag_links (media_id, tag_id) \
+             VALUES ({p1}, {p2}) {skip}"
+        );
         for slug in slugs {
             let t = self.ensure_tag(slug).await?;
             let tag_id = match t.id {
@@ -1391,18 +1445,32 @@ impl MediaManager {
         let d = self.pool.dialect();
         let (p1, p2) = (d.placeholder(1), d.placeholder(2));
         let delete_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p1}");
-        // PG/SQLite: ON CONFLICT DO NOTHING; MySQL: INSERT IGNORE.
-        let insert_sql = if d.name() == "mysql" {
-            format!(
-                "INSERT IGNORE INTO `rustango_media_tag_links` (`media_id`, `tag_id`) \
-                 VALUES ({p1}, {p2})"
-            )
-        } else {
-            format!(
-                "INSERT INTO rustango_media_tag_links (media_id, tag_id) \
-                 VALUES ({p1}, {p2}) ON CONFLICT DO NOTHING"
-            )
-        };
+        // `Dialect::insert_on_conflict_skip` rather than a hand-rolled
+        // branch, and **not** `INSERT IGNORE` on MySQL.
+        //
+        // The two MySQL forms are not equivalent. `INSERT IGNORE`
+        // downgrades every row-level error to a warning, not just the
+        // duplicate key — measured on MySQL 8.0, it swallows a missing
+        // NOT NULL default (1364), a CHECK violation (3819) and the
+        // `tag_id` foreign-key violation that PostgreSQL and SQLite
+        // raise. Inside `set_tags`' transaction, whose whole purpose is
+        // that a partial write rolls back, that meant the documented
+        // atomicity held on two backends and silently dropped a tag on
+        // the third. The dialect's own form is the narrow one:
+        // `ON DUPLICATE KEY UPDATE tag_id = tag_id`, which makes the
+        // duplicate a no-op and leaves every other error an error.
+        // The unique constraint is the composite `(media_id, tag_id)`
+        // from `MediaTagLink`'s `unique_together`, so both columns go
+        // here: PostgreSQL and SQLite reject an `ON CONFLICT` column
+        // list that matches no constraint, and naming only `tag_id`
+        // fails with "does not match any PRIMARY KEY or UNIQUE
+        // constraint". MySQL pivots on the first column, which is a
+        // no-op assignment either way.
+        let skip = d.insert_on_conflict_skip(&["media_id", "tag_id"]);
+        let insert_sql = format!(
+            "INSERT INTO rustango_media_tag_links (media_id, tag_id) \
+             VALUES ({p1}, {p2}) {skip}"
+        );
 
         let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
