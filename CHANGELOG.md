@@ -101,8 +101,37 @@ exploitable?" answered honestly — including where the answer is no.
     by remembering to check. `Read(Collection(id))` is unchanged: that
     one really is a single row.
 
+  **There is a shipped policy now** (#1546). `MediaPerms::new(pool)`,
+  behind the `tenancy` feature, checks the `{table}.{action}` permission
+  codenames the admin and `auto_create_permissions` already use — so
+  the secure path is the one-liner:
+
+  ```rust
+  .nest("/media", media_router_with(manager, MediaPerms::new(pool)))
+  ```
+
+  It matters because the fastest way back to green from a 403 is an
+  `AllowAll` trait impl, which is the original hole with extra steps.
+  Superusers short-circuit; a request with no `AuthenticatedUser`
+  extension is `401`; a failed permission lookup **refuses**, because a
+  database blip is not a grant. `Media`, `MediaCollection` and
+  `MediaTag` now carry `#[rustango(permissions)]` so the codenames are
+  seeded — a model flag, not a column, so no migration.
+
+  `required_codenames` is public and is the whole mapping. One entry is
+  worth reading twice: `Delete(CollectionSubtree)` requires
+  **`rustango_media_collections.delete` and `rustango_media.change`**,
+  because that route re-parents every media row underneath, so it
+  writes to `rustango_media`. #1558 is the same point at the target
+  level.
+
+  What it cannot do is row-level: codenames are table-level, so a grant
+  of `rustango_media.view` reads *any* media row by id, and a
+  multi-tenant deployment still scopes rows in its own
+  `MediaAuthorizer`. `MediaPerms` is the floor, not the ceiling.
+
   A fourth round sharpened the gate's vocabulary, both prerequisites for
-  the default policy in #1546:
+  that policy:
 
   - **Creating a folder and creating a tag were the same decision.**
     `POST /collections` and `POST /tags` both arrived as

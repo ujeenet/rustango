@@ -66,9 +66,20 @@
 //!     .nest("/media", media_router_with(manager, MyAuthorizer));
 //! ```
 //!
-//! `MyAuthorizer` is yours — see [`MediaAuthorizer`]. There is no
-//! default, because the default that existed before was "allow
-//! everyone".
+//! `MyAuthorizer` is yours — see [`MediaAuthorizer`]. With the
+//! **`tenancy`** feature on there is a shipped one, so the secure path
+//! is a one-liner:
+//!
+//! ```ignore
+//! use rustango::media::router::{media_router_with, MediaPerms};
+//!
+//! let app = axum::Router::new()
+//!     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+//! ```
+//!
+//! [`MediaPerms`] checks the `{table}.{action}` permission codenames
+//! the admin already uses. It is table-level, not row-level — see its
+//! docs for what that does and does not cover.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -363,6 +374,178 @@ impl MediaAuthorizer for DenyAll {
         // refuses regardless of who is asking, so telling a client to
         // authenticate would be a lie it could retry forever.
         MediaDecision::Forbidden
+    }
+}
+
+/// The permission codenames a [`MediaPerms`] request must satisfy —
+/// **all** of them, not any.
+///
+/// `None` means "this variant has no mapping", which
+/// [`MediaPerms`] treats as a refusal. That is the case a future
+/// `MediaTarget` lands in, and denying it is the point: a new route
+/// must not inherit a grant written before it existed.
+///
+/// Kept as a free function, and public, so the mapping is readable and
+/// testable without standing a router up.
+#[cfg(feature = "tenancy")]
+#[must_use]
+pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str]> {
+    use MediaAction as A;
+    use MediaTarget as T;
+    Some(match action {
+        // `GET /tags/{slug}/media` returns **media** rows, so it is a
+        // media read. The tag is the filter, not the subject.
+        A::Read(T::Media(_) | T::Tag(_)) => &["rustango_media.view"],
+        A::Read(T::Collection(_)) => &["rustango_media_collections.view"],
+        // `Listing` spans three tables — `GET /collections`, `GET
+        // /tags`, `GET /tags/popular` and a `?recursive` contents
+        // listing. The recursive one is the widest of the four, so the
+        // group takes the media permission: every listing here exists
+        // to browse the library, and requiring the widest is the
+        // fail-closed reading of a target that cannot say which.
+        //
+        // Kept separate from the `Media | Tag` arm above even though the
+        // answer coincides: these are two different reasons for the same
+        // codename, and merging them would lose the one that needs
+        // stating.
+        #[allow(clippy::match_same_arms)]
+        A::Read(T::Listing) => &["rustango_media.view"],
+        A::Add(T::NewUpload { .. }) => &["rustango_media.add"],
+        A::Add(T::NewCollection { .. }) => &["rustango_media_collections.add"],
+        A::Add(T::NewTag { .. }) => &["rustango_media_tags.add"],
+        A::Change(T::Media(_)) => &["rustango_media.change"],
+        A::Delete(T::Media(_)) => &["rustango_media.delete"],
+        // Two, and both are needed. Deleting a collection soft-deletes
+        // every descendant *and* sets `collection_id = NULL` on the
+        // media in all of them — so it writes to `rustango_media`, and
+        // a caller who may not change media rows may not do it by
+        // deleting the folder they sit in. #1558 is this same point at
+        // the target level; this is its codename.
+        A::Delete(T::CollectionSubtree(_)) => {
+            &["rustango_media_collections.delete", "rustango_media.change"]
+        }
+        _ => return None,
+    })
+}
+
+/// The default policy: permission codenames, the same
+/// `{table}.{action}` names the admin and `auto_create_permissions`
+/// already use.
+///
+/// This exists so the **secure** path is the one-liner. `media_router`
+/// refuses every request, and the fastest way back to green from those
+/// 403s is an `AllowAll` trait impl — which is the original hole with
+/// extra steps (#1546).
+///
+/// ```ignore
+/// use rustango::media::router::{media_router_with, MediaPerms};
+///
+/// let app = axum::Router::new()
+///     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+/// ```
+///
+/// Mount it **inside** [`crate::tenancy::middleware::RouterAuthExt::require_auth`]
+/// (or `optional_auth`), which is what injects the `AuthenticatedUser`
+/// this reads. Without that extension every request is
+/// [`MediaDecision::Unauthenticated`] — a `401`, so the symptom names
+/// its own cause.
+///
+/// # What it checks
+///
+/// [`required_codenames`] has the full mapping. Superusers
+/// short-circuit to allow, matching every other gate in this codebase.
+///
+/// # What it cannot check
+///
+/// **Codenames are table-level, so this is not row-level.** It cannot
+/// express "is this media row yours" or "is this collection in your
+/// tenant": a grant of `rustango_media.view` is a grant to read *any*
+/// media row by id. `MediaManager` holds a single [`crate::sql::Pool`],
+/// so a multi-tenant deployment still has to scope rows itself — that
+/// is what [`MediaAuthorizer`] is for, and this type is the floor, not
+/// the ceiling.
+///
+/// The codenames are seeded by `auto_create_permissions`, which runs
+/// during tenant provisioning and on migrate. An app upgrading into
+/// this can re-seed without a migrate cycle via the `seed-permissions`
+/// manage command — the catalog's `UNIQUE (content_type_id, codename)`
+/// makes it a no-op on a populated one.
+///
+/// # Cost
+///
+/// One indexed permission lookup per required codename, per request,
+/// on the pool handed to [`Self::new`]. A superuser pays none. The
+/// subtree delete is the only action needing two.
+#[cfg(feature = "tenancy")]
+pub struct MediaPerms {
+    pool: crate::sql::Pool,
+}
+
+#[cfg(feature = "tenancy")]
+impl MediaPerms {
+    /// Check permissions against `pool`.
+    ///
+    /// Under tenancy this should be the tenant's pool, not the
+    /// registry's — it is where `rustango_user_permissions` and
+    /// `rustango_user_roles` are read from, so the wrong pool means the
+    /// wrong tenant's grants.
+    #[must_use]
+    pub fn new(pool: crate::sql::Pool) -> Self {
+        Self { pool }
+    }
+}
+
+#[cfg(feature = "tenancy")]
+#[async_trait::async_trait]
+impl MediaAuthorizer for MediaPerms {
+    async fn authorize(
+        &self,
+        parts: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
+        let Some(auth) = parts
+            .extensions
+            .get::<crate::tenancy::middleware::AuthenticatedUser>()
+        else {
+            // No principal at all — 401, so a token client refreshes
+            // rather than treating the refusal as final (#1193). This is
+            // also what a router mounted outside `require_auth` looks
+            // like, and 401 names that mistake better than 403 would.
+            return MediaDecision::Unauthenticated;
+        };
+        if auth.is_superuser {
+            return MediaDecision::Allow;
+        }
+        // A variant with no mapping is a route added after this policy
+        // was written. Denying it is the point.
+        let Some(codenames) = required_codenames(&action) else {
+            tracing::debug!(
+                target: "rustango::media::auth",
+                ?action,
+                "MediaPerms has no codename for this action — refusing"
+            );
+            return MediaDecision::Forbidden;
+        };
+        for cn in codenames {
+            match crate::tenancy::permissions::has_perm_pool(auth.id, cn, &self.pool).await {
+                Ok(true) => {}
+                Ok(false) => return MediaDecision::Forbidden,
+                Err(e) => {
+                    // Fail closed. A driver error is not a grant, and
+                    // treating it as one would turn a database blip into
+                    // an open bucket.
+                    tracing::warn!(
+                        target: "rustango::media::auth",
+                        codename = %cn,
+                        user_id = auth.id,
+                        error = %e,
+                        "permission lookup failed — refusing"
+                    );
+                    return MediaDecision::Forbidden;
+                }
+            }
+        }
+        MediaDecision::Allow
     }
 }
 
