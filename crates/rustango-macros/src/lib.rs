@@ -331,23 +331,27 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
         {
             use #root::__private_runtime::tracing_subscriber::{self, EnvFilter};
             // Colour only when stdout is a terminal, and never under
-            // `NO_COLOR`. The same rule `logging::Color::Auto` applies,
-            // inlined because `rustango::logging` is gated on
-            // `admin` + `tenancy` and this macro expands in every app.
+            // `NO_COLOR` — `Color::Auto`'s rule, called rather than
+            // copied.
             //
-            // Without it this subscriber inherits tracing-subscriber's
-            // default, which is `cfg!(feature = "ansi")` — true since
-            // the framework turned that feature on. `./app > app.log`
-            // and every container that redirects stdout then collected
-            // escape codes in the log file. The careful `Color::Auto`
-            // check added alongside covers `Setup::install` only, and
-            // `#[rustango::main]` is the default entrypoint.
-            let __ansi = {
-                use ::std::io::IsTerminal as _;
-                let __no_color = ::std::env::var_os("NO_COLOR")
-                    .is_some_and(|v| !v.is_empty());
-                !__no_color && ::std::io::stdout().is_terminal()
-            };
+            // This was inlined at first, on a comment claiming
+            // `rustango::logging` is gated on `admin` + `tenancy`. It is
+            // not: `pub mod logging` is ungated and its contents are
+            // `runtime`-gated — the same feature that gates this macro
+            // (`pub use rustango_macros::main` is `#[cfg(feature =
+            // "runtime")]`). So wherever this expands, `Color` is
+            // reachable, and the copy was justified by a gate that does
+            // not exist. `should_colour` carries a deliberate
+            // `NO_COLOR`-set-but-empty subtlety that the inline happened
+            // to match today and nothing kept matching tomorrow.
+            //
+            // Without any of it the subscriber inherits
+            // tracing-subscriber's default, `cfg!(feature = "ansi")` —
+            // true since the framework turned that feature on — so
+            // `./app > app.log` and every container redirecting stdout
+            // collected escape codes. `Setup::install` has its own
+            // check; this is the default entrypoint and had none.
+            let __ansi = #root::logging::Color::Auto.should_colour();
             // `try_init` so duplicate installers (e.g. tests already
             // holding a subscriber) don't panic.
             let _ = tracing_subscriber::fmt()
