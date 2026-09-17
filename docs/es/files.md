@@ -191,6 +191,52 @@ También gestiona el borrado lógico y la purga de huérfanos. El flujo completo
 en `media_sqlite_live.rs`; los métodos prefirmados/de subida directa del manager están
 orientados a PostgreSQL.
 
+### El router REST necesita una política de autorización
+
+`media::router` monta 16 rutas JSON sobre el manager. **Todas están
+protegidas y no hay un valor por defecto permisivo.** Constrúyelo con
+`media_router_with` y pasa una política:
+
+```rust
+use rustango::media::router::{media_router_with, MediaPerms};
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+```
+
+`media_router(manager)` — el constructor antiguo — está obsoleto y ahora
+responde `403` en cada ruta. Es un cambio de comportamiento deliberado en
+0.57.7: antes, esas rutas no tomaban ningún extractor de autenticación,
+autorización ni tenant, así que `GET /media/{id}` devolvía la fila **y una
+URL de descarga prefirmada de S3** a cualquiera capaz de adivinar un entero,
+y `POST /uploads/begin` emitía un `PUT` prefirmado para un prefijo de clave
+elegido por quien llamaba.
+
+`MediaPerms` (necesita la feature `tenancy`) comprueba los codenames de
+permiso `{tabla}.{acción}` que el admin ya usa — `rustango_media.view` para
+leer, `rustango_media_collections.add` para crear una carpeta, etc. Móntalo
+**dentro** de `require_auth`, que es lo que inyecta la identidad que lee; sin
+eso toda petición es un `401`. Los superusuarios se saltan la comprobación.
+
+Dos cosas que no hace:
+
+- **Decisiones a nivel de fila.** Un `rustango_media.view` lee *cualquier*
+  fila de medios por id. `MediaManager` tiene un único pool, así que un
+  despliegue multi-tenant acota las filas por su cuenta — para eso
+  implementas `MediaAuthorizer`. `MediaTarget` nombra la fila (`Media(id)`,
+  `Collection(id)`, `CollectionSubtree(id)`, …) precisamente para ello.
+- **Adivinar qué significa una ruta nueva.** `MediaAction` y `MediaTarget`
+  son `#[non_exhaustive]`: termina una política propia en `_ => false` y una
+  ruta añadida más adelante llegará denegada en lugar de permitida.
+
+Conviene saberlo al escribir la tuya: `DELETE /collections/{id}` borra el
+**subárbol** completo y reasigna los medios de cada nivel, así que llega como
+`Delete(CollectionSubtree(id))` y no como `Delete(Collection(id))` — y bajo
+`MediaPerms` necesita `rustango_media.change` además de
+`rustango_media_collections.delete`, porque escribe en la tabla de medios.
+[UPGRADING.md](https://github.com/ujeenet/rustango/blob/main/UPGRADING.md)
+tiene las notas de migración.
+
 ### Cómo se crean las tablas de medios
 
 Las tablas de medios (`rustango_media`, `rustango_media_collections`,
