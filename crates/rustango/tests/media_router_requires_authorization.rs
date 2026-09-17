@@ -46,12 +46,18 @@ use tower::ServiceExt as _;
 use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer, MediaTarget};
 
 async fn manager() -> MediaManager {
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-    let url = format!("sqlite://{}?mode=rwc", tmp.path().display());
-    std::mem::forget(tmp);
+    // In-memory, not a temp file. The file version had to
+    // `std::mem::forget` its `NamedTempFile` so the guard would not
+    // delete the database out from under the pool — which leaked one
+    // file per test, 18 per run. sqlx shares a single in-memory
+    // database across the whole pool, so nothing is lost.
+    // `min_connections(2)` opens both eagerly, so a seed on one and a
+    // read on the other would fail loudly if the pool did not share a
+    // single database. `an_authorized_read_still_works` is that control.
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .min_connections(2)
         .max_connections(2)
-        .connect(&url)
+        .connect("sqlite::memory:")
         .await
         .expect("sqlite connect");
     let pool_enum = Pool::Sqlite(pool);
@@ -362,8 +368,16 @@ async fn the_verb_distinguishes_read_change_and_delete() {
     let (mv, _) = action_for("/media/1/move", "POST").await;
     assert_eq!(mv, vec![MediaAction::Change(MediaTarget::Media(1))]);
 
+    // `NewUpload` is a `#[non_exhaustive]` struct variant, so this
+    // crate can match it but cannot construct one to compare against.
     let (begin, _) = action_for("/uploads/begin", "POST").await;
-    assert_eq!(begin, vec![MediaAction::Add(MediaTarget::NewUpload)]);
+    assert!(
+        matches!(
+            begin.as_slice(),
+            [MediaAction::Add(MediaTarget::NewUpload { .. })]
+        ),
+        "minting an upload ticket was classified as {begin:?}"
+    );
 }
 
 /// `popular` is a listing, not a tag named "popular".
@@ -408,37 +422,43 @@ async fn an_unrecognised_shape_is_refused() {
 /// Every route the router mounts, and the action the gate derives.
 #[tokio::test]
 async fn the_whole_route_table_reaches_the_gate_correctly() {
-    use MediaAction::{Add, Change, Delete, Read};
-    use MediaTarget::{Collection, Listing, Media, NewUpload, Tag};
-
-    let cases: Vec<(&str, &str, MediaAction)> = vec![
-        ("POST", "/uploads/begin", Add(NewUpload)),
+    // Compared through `Debug` rather than by constructing the expected
+    // value: `MediaTarget::NewUpload` is a `#[non_exhaustive]` struct
+    // variant, so this crate (an integration test, a separate crate)
+    // can match it but cannot build one. Debug distinguishes every
+    // variant and id, which is all this table needs.
+    let cases: &[(&str, &str, &str)] = &[
+        ("POST", "/uploads/begin", "Add(NewUpload)"),
         // Finalize mutates the media row it names — same row, so a
         // `Media` target, not a kind of its own.
-        ("POST", "/uploads/7/finalize", Change(Media(7))),
-        ("GET", "/media/7", Read(Media(7))),
-        ("DELETE", "/media/7", Delete(Media(7))),
-        ("POST", "/media/7/move", Change(Media(7))),
-        ("POST", "/media/7/tags", Change(Media(7))),
-        ("DELETE", "/media/7/tags/blue", Change(Media(7))),
-        ("POST", "/collections", Add(Listing)),
-        ("GET", "/collections", Read(Listing)),
-        ("GET", "/collections/7", Read(Collection(7))),
-        ("GET", "/collections/7/contents", Read(Collection(7))),
-        ("DELETE", "/collections/7", Delete(Collection(7))),
-        ("POST", "/tags", Add(Listing)),
-        ("GET", "/tags", Read(Listing)),
-        ("GET", "/tags/popular", Read(Listing)),
-        ("GET", "/tags/9/media", Read(Tag("9".into()))),
+        ("POST", "/uploads/7/finalize", "Change(Media(7))"),
+        ("GET", "/media/7", "Read(Media(7))"),
+        ("DELETE", "/media/7", "Delete(Media(7))"),
+        ("POST", "/media/7/move", "Change(Media(7))"),
+        ("POST", "/media/7/tags", "Change(Media(7))"),
+        ("DELETE", "/media/7/tags/blue", "Change(Media(7))"),
+        ("POST", "/collections", "Add(Listing)"),
+        ("GET", "/collections", "Read(Listing)"),
+        ("GET", "/collections/7", "Read(Collection(7))"),
+        ("GET", "/collections/7/contents", "Read(Collection(7))"),
+        ("DELETE", "/collections/7", "Delete(Collection(7))"),
+        ("POST", "/tags", "Add(Listing)"),
+        ("GET", "/tags", "Read(Listing)"),
+        ("GET", "/tags/popular", "Read(Listing)"),
+        ("GET", "/tags/9/media", r#"Read(Tag("9"))"#),
     ];
 
     let mut wrong = Vec::new();
     for (method, uri, expect) in cases {
         let (seen, _) = action_for(uri, method).await;
-        if seen != vec![expect.clone()] {
+        let got = match seen.as_slice() {
+            [one] => format!("{one:?}"),
+            other => format!("{other:?}"),
+        };
+        if got != *expect {
             wrong.push(format!(
                 "{method} {uri}: the handler serves this route, the gate was told \
-                 {seen:?} — expected {expect:?}"
+                 {got} — expected {expect}"
             ));
         }
     }

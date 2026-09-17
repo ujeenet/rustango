@@ -1,5 +1,7 @@
 //! Axum REST router for the [`MediaManager`] surface.
 //!
+//! Requires the **`admin`** feature as well as `media`.
+//!
 //! # This router requires an authorization policy
 //!
 //! Build it with [`media_router_with`] and supply a
@@ -46,12 +48,9 @@
 //!
 //! ## Quick start
 //!
-//! This module needs the **`admin`** feature as well as `media` —
-//! `media` alone gives you [`MediaManager`] but not this router.
-//!
-//! Implementing [`MediaAuthorizer`] needs `async-trait` in your own
-//! `Cargo.toml`; the crate re-exports the attribute as
-//! [`crate::media::async_trait`] so the versions cannot drift.
+//! Implementing [`MediaAuthorizer`] needs the `async-trait` attribute;
+//! the crate re-exports it as [`crate::media::async_trait`] so you do
+//! not add the dependency yourself and the versions cannot drift.
 //!
 //! ```ignore
 //! use rustango::media::{MediaManager, router::media_router_with};
@@ -113,7 +112,14 @@ pub enum MediaTarget {
     /// and the caller picks the disk and key prefix. `/uploads/{id}/
     /// finalize` is *not* this — it mutates an existing row and
     /// classifies as `Change(Media(id))`.
-    NewUpload,
+    ///
+    /// Match it as `MediaTarget::NewUpload { .. }`. It is an empty
+    /// struct variant rather than a unit one so that the requested
+    /// `disk` and `key_prefix` can be added here later (#1546) without
+    /// breaking policies written today — a `#[non_exhaustive]` *unit*
+    /// variant cannot be matched outside this crate at all.
+    #[non_exhaustive]
+    NewUpload {},
     /// A listing or a create — `GET /collections`, `GET /tags`,
     /// `GET /tags/popular`, `POST /collections`, `POST /tags`.
     ///
@@ -157,7 +163,8 @@ pub enum MediaAction {
 /// ```ignore
 /// struct SessionAuthorizer;
 ///
-/// #[async_trait::async_trait]
+/// // Re-exported by the crate — no `async-trait` dependency of your own.
+/// #[rustango::media::async_trait]
 /// impl MediaAuthorizer for SessionAuthorizer {
 ///     async fn authorize(&self, parts: &Parts, action: MediaAction) -> bool {
 ///         let Some(user) = current_user(parts) else { return false };
@@ -175,7 +182,7 @@ pub enum MediaAction {
 ///             // prefix the *caller* chooses. Grant it only to accounts
 ///             // you would trust with the bucket — it is not the same
 ///             // decision as "may create a collection".
-///             MediaAction::Add(MediaTarget::NewUpload) => user.is_trusted_uploader(),
+///             MediaAction::Add(MediaTarget::NewUpload { .. }) => user.is_trusted_uploader(),
 ///             MediaAction::Add(_) => user.is_editor(),
 ///             MediaAction::Change(MediaTarget::Media(id)) => user.owns_media(id).await,
 ///             MediaAction::Delete(MediaTarget::Media(id)) => user.owns_media(id).await,
@@ -189,6 +196,23 @@ pub enum MediaAction {
 /// [`MediaTarget`] are both `#[non_exhaustive]`, so a future route
 /// reaches your policy as a variant you have not written an arm for.
 /// Ending on `false` means that arrives denied rather than allowed.
+///
+/// # Your impl runs on every request, and nothing bounds it
+///
+/// Two measured consequences worth designing around:
+///
+/// - **There is no timeout here.** A policy that hangs pins its request
+///   indefinitely. The gate itself touches no pool, so a wedged request
+///   holds no database connection — but a policy that queries holds one
+///   from its own pool for as long as it hangs. Mount
+///   [`crate::request_timeout`] on the outer router if you want a
+///   bound; it covers this layer.
+/// - **Do not hold a lock across the `.await`.** "Check a cache, else
+///   hit the database" is the natural shape and it compiles, but a
+///   `tokio::sync::Mutex` held across the await serializes the whole
+///   media surface: eight concurrent requests taking 50 ms each under
+///   one lock measured 417 ms rather than ~50 ms. Take the lock, read,
+///   drop it, then await.
 #[async_trait::async_trait]
 pub trait MediaAuthorizer: Send + Sync + 'static {
     /// `true` to allow. Anything else is a 403.
@@ -263,7 +287,7 @@ fn classify(method: &axum::http::Method, path: &str, query: Option<&str>) -> Opt
     });
 
     match (m, s.as_slice()) {
-        (&Method::POST, ["uploads", "begin"]) => Some(MediaAction::Add(MediaTarget::NewUpload)),
+        (&Method::POST, ["uploads", "begin"]) => Some(MediaAction::Add(MediaTarget::NewUpload {})),
         // Finalize mutates the media row it names — `finalize_upload`
         // loads `rustango_media` by this id — so it is a `Media`
         // target, not a kind of its own. An `Upload(i64)` variant here
@@ -379,14 +403,14 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
 ///
 /// # This refuses every request
 ///
-/// It mounts [`DenyAll`], so every route answers `403`. That is
-/// deliberate and it is a behaviour change: this constructor used to
-/// serve the whole media surface to anyone who could reach it.
+/// It mounts a refuse-everything policy, so every route answers `403`.
+/// That is deliberate and it is a behaviour change: this constructor
+/// used to serve the whole media surface to anyone who could reach it.
 ///
 /// Use [`media_router_with`] and supply a [`MediaAuthorizer`].
 #[deprecated(
     since = "0.57.7",
-    note = "serves nothing — every route is 403. Use `media_router_with(manager, authorizer)` and supply a `MediaAuthorizer`; see the module docs."
+    note = "serves nothing — every route is 403, and it is removed in 0.59.0. Use `media_router_with(manager, authorizer)` and supply a `MediaAuthorizer`; see the module docs."
 )]
 pub fn media_router(manager: MediaManager) -> Router {
     media_router_with(manager, DenyAll)

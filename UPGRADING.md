@@ -187,7 +187,7 @@ impl MediaAuthorizer for MyPolicy {
             // presigned PUT for a caller-chosen disk and key prefix.
             // Both are explicit decisions, not defaults.
             MediaAction::Read(MediaTarget::Listing) => user.may_browse_library(),
-            MediaAction::Add(MediaTarget::NewUpload) => user.is_trusted_uploader(),
+            MediaAction::Add(MediaTarget::NewUpload { .. }) => user.is_trusted_uploader(),
             MediaAction::Add(_) => user.is_editor(),
             _ => false,
         }
@@ -202,7 +202,13 @@ End on `_ => false`. `MediaAction` and `MediaTarget` are
 `#[non_exhaustive]`, so a route added later reaches your policy as a
 variant you have not written an arm for — and should arrive denied.
 
-The router needs the **`admin`** feature as well as `media`.
+Match `NewUpload` as `MediaTarget::NewUpload { .. }`, with the braces.
+It is an empty struct variant so that the requested `disk` and
+`key_prefix` can be added to it later without breaking your policy.
+
+The router needs the **`admin`** feature as well as `media`, and
+`media_router` is **removed in 0.59.0** — the deprecation is not
+open-ended.
 
 ### Not breaking, worth knowing
 

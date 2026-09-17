@@ -65,8 +65,13 @@ pub mod tag;
 pub use collection::MediaCollection;
 pub use tag::{MediaTag, MediaTagLink};
 
-/// The REST router over this surface. Needs `admin` as well as
-/// `media` — see [`router`] for why it refuses without an authorizer.
+// No outer doc comment here. An outer `///` at a module's declaration
+// site concatenates with the module's own `//!` block and resolves the
+// combined text in *this* module's scope, so every relative intra-doc
+// link inside router.rs breaks. That cost six links on the page the
+// media API is learned from, and it is invisible locally because the
+// crate already emits ~414 rustdoc warnings. The `admin` requirement is
+// stated in router.rs's own header instead.
 #[cfg(feature = "admin")]
 pub mod router;
 

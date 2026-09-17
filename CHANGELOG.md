@@ -47,8 +47,8 @@ exploitable?" answered honestly — including where the answer is no.
   row.
 
   The gate identifies that row through the new `MediaTarget`
-  (`Media(i64)` / `Collection(i64)` / `Tag(String)` / `Upload(i64)` /
-  `NewUpload` / `Listing`), and `MediaAction` splits into
+  (`Media(i64)` / `Collection(i64)` / `Tag(String)` / `NewUpload {}` /
+  `Listing`), and `MediaAction` splits into
   `Read` / `Add` / `Change` / `Delete` to match the codenames used
   elsewhere. The first cut of this API used a bare `Option<i64>`, and
   review found three ways past it — all reproduced before fixing:
