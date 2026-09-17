@@ -1516,11 +1516,15 @@ async fn execute_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u6
 // `execute_tx` is the internal building-block (private); the rest
 // are the public API consumed by macro-generated `_tx` model methods.
 
+// #431 — `insert_tx` / `update_tx` / `delete_tx` all funnel through
+// here, so one bump covers the three. `raw_execute_tx` has its own
+// match and its own bump; it does not reach this.
 async fn execute_tx(
     tx: &mut PoolTx<'_>,
     sql: &str,
     binds: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
+    crate::test_assertions::query_counter::bump();
     match tx {
         #[cfg(feature = "postgres")]
         PoolTx::Postgres(t) => {
@@ -1578,6 +1582,7 @@ pub async fn insert_returning_tx(
     tx: &mut PoolTx<'_>,
     query: &InsertQuery,
 ) -> Result<InsertReturningPool, ExecError> {
+    crate::test_assertions::query_counter::bump();
     query.validate()?;
     if query.returning.is_empty() {
         return Err(ExecError::EmptyReturning);
@@ -1664,6 +1669,7 @@ where
         + Send
         + Unpin,
 {
+    crate::test_assertions::query_counter::bump();
     let stmt = tx.dialect().compile_select(query)?;
     let aliases: Vec<&'static str> = query.joins.iter().map(|j| j.alias).collect();
     // Audit #451 — drive the stitch from leaf aliases so each FK chain
@@ -1758,6 +1764,9 @@ where
 /// [`count_rows_pool`]). Inlined per-backend so we can use the
 /// driver-specific `Row::try_get` directly.
 async fn fetch_scalar_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<i64, ExecError> {
+    // #431 — counted here rather than in `count_rows_pool` so every
+    // caller of this helper is counted, not just the one.
+    crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -1819,6 +1828,7 @@ pub async fn select_rows_pool<T>(pool: &Pool, query: &SelectQuery) -> Result<Vec
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -1940,6 +1950,7 @@ pub async fn fetch_aggregate_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_aggregate(query)?;
     match pool {
         #[cfg(feature = "postgres")]
@@ -2007,6 +2018,7 @@ pub async fn raw_query_pool<T>(
 where
     T: MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::test_assertions::query_counter::bump();
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -2316,6 +2328,7 @@ pub async fn fetch_paginated_pool<T>(
 where
     T: Model + MaybePgFromRow + MaybeMyFromRow + MaybeSqliteFromRow + Send + Unpin,
 {
+    crate::test_assertions::query_counter::bump();
     let select = qs.compile()?;
     let stmt = pool.dialect().compile_select(&select)?;
     let sql = inject_total_count(&stmt.sql);
