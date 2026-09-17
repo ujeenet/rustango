@@ -58,6 +58,8 @@ cd "$(git rev-parse --show-toplevel)"
 
 OLD=$(awk '/^\[workspace\.package\]/{f=1;next} f&&/^version[[:space:]]*=/{gsub(/[",]/,"",$3);print $3;exit}' Cargo.toml)
 [ -n "$OLD" ] || { echo "could not read [workspace.package] version from Cargo.toml" >&2; exit 1; }
+OLD_SERIES=${OLD%.*}
+NEW_SERIES=${NEW%.*}
 
 if [ "$OLD" = "$NEW" ]; then
   echo "already at $NEW — nothing to do"
@@ -74,7 +76,7 @@ echo
 # has to run there without asking anyone to install a newer one.
 FILES=()
 while IFS= read -r line; do [ -n "$line" ] && FILES+=("$line"); done < <(
-  git grep -lE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|\$)" -- . \
+  git grep -lE "(^|[^0-9.])(${OLD//./\\.}|${OLD_SERIES//./\\.})([^0-9.]|\$)" -- . \
     ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true
 )
 
@@ -84,7 +86,7 @@ else
   echo "these files claim $OLD:"
   for f in "${FILES[@]}"; do
     printf '  %s\n' "$f"
-    git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|\$)" -- "$f" \
+    git grep -nE "(^|[^0-9.])(${OLD//./\\.}|${OLD_SERIES//./\\.})([^0-9.]|\$)" -- "$f" \
       | sed "s|^$f:|      |" | cut -c1-140
   done
   echo
@@ -139,14 +141,16 @@ fi
 # Anything else is left alone and reported below for you to check.
 for f in "${FILES[@]}"; do
   perl -pi -e '
-    BEGIN { ($o, $n) = @ARGV[0,1]; splice(@ARGV, 0, 2) }
+    BEGIN { ($o, $n, $os, $ns) = @ARGV[0,1,2,3]; splice(@ARGV, 0, 4) }
     s/(version\s*=\s*")\Q$o\E(?![0-9.])/$1$n/g;
     s/("version"\s*:\s*")\Q$o\E(?![0-9.])/$1$n/g;
     s/(version:\s+)\Q$o\E(?![0-9.])/$1$n/g;
     s/(--version\s+"?)\Q$o\E(?![0-9.])/$1$n/g;
     s/^(rustango\s+)\Q$o\E(?![0-9.])/$1$n/gm;
     s/^((?:cargo-)?rustango[a-z-]*\s*=\s*")\Q$o\E(?![0-9.])/$1$n/gm;
-  ' "$OLD" "$NEW" "$f"
+    s/(\brustango\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/g;
+    s/(\brustango\s*=\s*\{[^\n]*?version\s*=\s*")\Q$os\E(?![0-9.])/$1$ns/g;
+  ' "$OLD" "$NEW" "$OLD_SERIES" "$NEW_SERIES" "$f"
 done
 
 # What still names the old version, now that the claims are rewritten. These
