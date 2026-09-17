@@ -330,3 +330,124 @@ async fn sqlite_actually_cascades_the_delete() {
 
     let _ = Pool::Sqlite(pool);
 }
+
+// =====================================================================
+// The upgrade path — #1549.
+//
+// Adding `on_delete` to `RelationSnapshot` changes what an *existing*
+// snapshot compares equal to. Every snapshot written before this release
+// has `on_delete: None`; a freshly built one has `Some("CASCADE")`. A
+// plain `pf.fk != cf.fk` therefore reports "fk changed" for every FK
+// that declares an action, and `make_migrations` rejects any non-empty
+// unsupported-change list — so an upgrade with **zero model changes**
+// fails outright.
+//
+// It reached every existing tenancy project, not just media ones:
+// eleven framework FKs declare `cascade` (ten in `tenancy`), and
+// `fold_in_framework_tables` puts them in every project's snapshot.
+//
+// Nothing in the existing migrate suite could see this, because nothing
+// simulates an old snapshot meeting new models. That is what these do.
+// =====================================================================
+
+use rustango::migrate::detect_unsupported_field_changes;
+
+/// A snapshot as the previous release wrote it: no `on_delete` key.
+fn snapshot_without_on_delete() -> SchemaSnapshot {
+    let models = [
+        <Author as rustango::core::Model>::SCHEMA,
+        <PostCascade as rustango::core::Model>::SCHEMA,
+        <PostSetNull as rustango::core::Model>::SCHEMA,
+        <PostDefault as rustango::core::Model>::SCHEMA,
+    ];
+    let current = SchemaSnapshot::from_models(&models);
+    // Round-trip through JSON with the key stripped — exactly the bytes
+    // a pre-#1549 release produced, rather than a hand-built struct that
+    // could drift from the real serialized form.
+    let mut v: serde_json::Value = serde_json::to_value(&current).expect("snapshot serializes");
+    fn strip(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                m.remove("on_delete");
+                for (_, x) in m.iter_mut() {
+                    strip(x);
+                }
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    strip(&mut v);
+    serde_json::from_value(v).expect("a pre-#1549 snapshot still deserializes")
+}
+
+/// Upgrading with no model change must not look like a schema change.
+#[test]
+fn an_upgrade_is_not_a_schema_change() {
+    let old = snapshot_without_on_delete();
+    let new = SchemaSnapshot::from_models(&[
+        <Author as rustango::core::Model>::SCHEMA,
+        <PostCascade as rustango::core::Model>::SCHEMA,
+        <PostSetNull as rustango::core::Model>::SCHEMA,
+        <PostDefault as rustango::core::Model>::SCHEMA,
+    ]);
+
+    let problems = detect_unsupported_field_changes(&old, &new);
+    assert!(
+        problems.is_empty(),
+        "an upgrade with zero model changes was reported as an unsupported schema \
+         change, which makes `make_migrations` refuse to run at all — and the advice \
+         it prints cannot be followed, because there is no AlterFk operation to \
+         author:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+/// A *real* action change is still reported.
+///
+/// Without this the fix above could be "ignore `on_delete` entirely",
+/// which would be the pre-#1549 behaviour wearing a new coat.
+#[test]
+fn a_changed_on_delete_action_is_still_detected() {
+    let base = SchemaSnapshot::from_models(&[<PostCascade as rustango::core::Model>::SCHEMA]);
+    let mut changed = base.clone();
+    let field = changed.tables[0]
+        .fields
+        .iter_mut()
+        .find(|f| f.column == "author_id")
+        .expect("author_id");
+    field.fk.as_mut().expect("fk").on_delete = Some("SET NULL".to_owned());
+
+    let problems = detect_unsupported_field_changes(&base, &changed);
+    assert!(
+        problems.iter().any(|p| p.contains("on_delete")),
+        "changing a declared action from CASCADE to SET NULL was not reported: \
+         {problems:?}"
+    );
+}
+
+/// A snapshot written by this release still loads on the previous one.
+#[test]
+fn a_new_snapshot_is_readable_by_the_old_shape() {
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct OldRelation {
+        kind: String,
+        to: String,
+        on: String,
+    }
+    let new = SchemaSnapshot::from_models(&[<PostCascade as rustango::core::Model>::SCHEMA]);
+    let json = serde_json::to_value(&new).expect("serialize");
+    let rel = &json["tables"][0]["fields"]
+        .as_array()
+        .expect("fields")
+        .iter()
+        .find(|f| f["column"] == "author_id")
+        .expect("author_id")["fk"];
+    assert_eq!(
+        rel["on_delete"], "CASCADE",
+        "the new snapshot should carry the action"
+    );
+    serde_json::from_value::<OldRelation>(rel.clone())
+        .expect("the previous release's three-field shape must still parse this");
+}

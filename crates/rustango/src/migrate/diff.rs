@@ -584,11 +584,41 @@ fn push_field_diffs(table: &str, pf: &FieldSnapshot, cf: &FieldSnapshot, out: &m
             pf.max, cf.max
         ));
     }
-    if pf.fk != cf.fk {
+    // FK identity and FK action are compared separately, because only
+    // the identity has ever been representable in a snapshot.
+    //
+    // `on_delete` was added to `RelationSnapshot` in #1549. Every
+    // snapshot written before it has `on_delete: None`, so a plain
+    // `pf.fk != cf.fk` reports "fk changed" for every FK that declares
+    // an action the moment the upgrade lands — and all three
+    // `make_migrations` entry points reject a non-empty result. An
+    // upgrade with zero model changes then fails outright, listing
+    // framework tables the user never wrote, with advice that cannot be
+    // followed: there is no `AlterField`/`AlterFk` operation to author.
+    //
+    // Eleven framework FKs declare `cascade` (ten of them in `tenancy`),
+    // and `fold_in_framework_tables` puts them in every project's
+    // snapshot, so this reached every existing tenancy app.
+    //
+    // `None → Some(_)` is therefore the upgrade, not a change. A real
+    // action change — `Some(a) → Some(b)` — is still reported, which is
+    // strictly more than was detectable before #1549, when the value was
+    // discarded and no action change was visible at all.
+    let fk_identity = |r: Option<&crate::migrate::RelationSnapshot>| {
+        r.map(|r| (r.kind.clone(), r.to.clone(), r.on.clone()))
+    };
+    if fk_identity(pf.fk.as_ref()) != fk_identity(cf.fk.as_ref()) {
         out.push(format!(
             "`{table}.{col}` fk changed: {:?} → {:?}",
             pf.fk, cf.fk
         ));
+    } else if let (Some(p), Some(c)) = (pf.fk.as_ref(), cf.fk.as_ref()) {
+        if p.on_delete.is_some() && p.on_delete != c.on_delete {
+            out.push(format!(
+                "`{table}.{col}` fk on_delete changed: {:?} → {:?}",
+                p.on_delete, c.on_delete
+            ));
+        }
     }
     if pf.auto != cf.auto {
         out.push(format!(

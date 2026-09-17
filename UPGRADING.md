@@ -148,6 +148,63 @@ untouched.
 
 ---
 
+## 0.57.7
+
+> **Not yet published.** Lives on `release/v0.57.7`. Pin a rev until it
+> lands.
+
+### `on_delete` now reaches the database — on **new** databases only
+
+Every `#[rustango(fk = "…", on_delete = "…")]` was being discarded when
+a schema snapshot was built, and system migrations render *from*
+snapshots, so the clause reached no database at all. A declared
+`cascade` arrived as `NO ACTION`, which does not merely fail to cascade
+— it makes the parent delete a hard refusal (`ERROR 1451` on MySQL).
+
+**What you need to know about upgrading:**
+
+| | |
+|---|---|
+| A **new** database, migrated from nothing | gets the correct `ON DELETE`. Nothing to do. |
+| An **existing** database | keeps the constraints it already has. `migrate` reports `nothing to migrate` and writes no file — correctly, because a changed `on_delete` is not a schema operation this release can emit. |
+
+So `migrate` exiting `0` after the upgrade does **not** mean your
+constraints were corrected. If you rely on a declared `cascade` — and
+you may not have noticed you did, because it has never worked — the
+constraint has to be rewritten by hand:
+
+```sql
+-- PostgreSQL / MySQL. Check first:
+--   PG:    SELECT conname, confdeltype FROM pg_constraint WHERE contype='f';
+--          'a' = NO ACTION, 'c' = CASCADE, 'n' = SET NULL
+--   MySQL: SELECT constraint_name, delete_rule
+--            FROM information_schema.referential_constraints;
+ALTER TABLE child DROP CONSTRAINT child_parent_id_fkey;
+ALTER TABLE child ADD CONSTRAINT child_parent_id_fkey
+  FOREIGN KEY (parent_id) REFERENCES parent (id) ON DELETE CASCADE;
+```
+
+SQLite has no `ALTER TABLE … DROP CONSTRAINT`, so correcting one there
+means rebuilding the table.
+
+This affects apps that never touched media: **eleven framework foreign
+keys declare `cascade`, ten of them in `tenancy`** (roles, permissions,
+agent skills), and `fold_in_framework_tables` puts them in every
+project's snapshot.
+
+### `ON DELETE SET NULL` can now fail your deploy on MySQL
+
+Because the clause is finally emitted, a model declaring
+`on_delete = "set_null"` on a **non-nullable** column now produces DDL
+MySQL rejects:
+
+> **`ERROR 1830 (HY000): Column 'x' cannot be NOT NULL: needed in a
+> foreign key constraint 'y' SET NULL`**
+
+Make the column `Option<…>`, or change the action. PostgreSQL and SQLite
+accept the DDL and fail at delete time instead, which is worse — so this
+is the loud one.
+
 ## 0.57.6
 
 > **Not yet published.** The newest tag is `v0.57.5`; 0.57.6 lives on
