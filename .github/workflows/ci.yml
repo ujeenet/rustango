@@ -602,6 +602,15 @@ jobs:
           - postgres,manage,admin
           - sqlite,template_views
           - sqlite,tenancy               # the pre-existing litmus
+          # The media axis had no entry at all, so a change to the media
+          # feature graph was compiled only by `--all-features`, where
+          # every optional feature is on and nothing can be observed to
+          # be missing. `media` alone gives you `MediaManager`; the REST
+          # router is behind `admin`, so both combinations are worth
+          # compiling — a file gated on one while using the other is a
+          # compile error no other job can reach.
+          - sqlite,media
+          - sqlite,media,admin
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
