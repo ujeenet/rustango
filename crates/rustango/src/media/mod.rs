@@ -1306,7 +1306,7 @@ impl MediaManager {
             &sql,
             vec![
                 crate::core::SqlValue::String(slug.to_owned()),
-                crate::core::SqlValue::I64(limit.max(1).min(1000)),
+                crate::core::SqlValue::I64(limit.clamp(1, MAX_LIST_LIMIT)),
                 crate::core::SqlValue::I64(offset.max(0)),
             ],
             &self.pool,
@@ -1316,7 +1316,8 @@ impl MediaManager {
         Ok(rows)
     }
 
-    /// Top tags by usage count, descending. Limit clamped at 1000.
+    /// Top tags by usage count, descending. Limit clamped to
+    /// `1..=`[`MAX_LIST_LIMIT`].
     pub async fn popular_tags(&self, limit: i64) -> Result<Vec<(MediaTag, i64)>, MediaError> {
         let p = self.pool.dialect().placeholder(1);
         let sql = format!(
@@ -1340,7 +1341,7 @@ impl MediaManager {
         // `use_count` aggregate column isn't part of MediaTag's schema, so
         // per-backend pair decoders (below) pull `use_count` themselves and
         // delegate the tag columns to the derived `sqlx::FromRow`.
-        let lim = limit.max(1).min(1000);
+        let lim = limit.clamp(1, MAX_LIST_LIMIT);
         match &self.pool {
             #[cfg(feature = "postgres")]
             crate::sql::Pool::Postgres(pg) => {

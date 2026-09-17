@@ -20,6 +20,12 @@ use rustango::sql::{Auto, Pool};
 use rustango::storage::{InMemoryStorage, StorageRegistry};
 
 async fn manager() -> MediaManager {
+    // `min_connections(2)` is load-bearing, not arbitrary: it opens both
+    // connections eagerly, so a seed on one and a read on the other
+    // would fail loudly if `sqlite::memory:` did not share a single
+    // database across the pool. Every test here seeds then reads back,
+    // which is the control. Dropping it to 1 would make the suite pass
+    // for a reason it does not intend.
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .min_connections(2)
         .max_connections(2)
