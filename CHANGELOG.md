@@ -47,7 +47,8 @@ exploitable?" answered honestly — including where the answer is no.
   row.
 
   The gate identifies that row through the new `MediaTarget`
-  (`Media(i64)` / `Collection(i64)` / `CollectionSubtree(i64)` /
+  (`Media(i64)` / `Collection(i64)` / `CollectionContents(i64)` /
+  `CollectionSubtree(i64)` /
   `Tag(String)` / `NewUpload { disk, key_prefix, … }` /
   `NewCollection {}` / `NewTag {}` /
   `Listing`), and `MediaAction` splits into
@@ -153,6 +154,48 @@ exploitable?" answered honestly — including where the answer is no.
   upload-ticket body is a few hundred bytes, and buffering an unbounded
   one inside an authorization layer would make the gate itself the place
   to send a server a large request. A body over the cap is refused.
+
+  **A crew review of the assembled release found three more, all
+  reproduced before fixing.** The first two are the fourth and fifth
+  ways past this gate; the third is the shipped default policy granting
+  what its own documentation said nobody intended.
+
+  - **`?%72ecursive=true` walked past the subtree check.** `classify`
+    matched `recursive` against the **raw** query string while the
+    handler's `Query` extractor percent-decodes the key, so an encoded
+    spelling was authorized as a read of the one collection named and
+    served as a walk of the whole subtree — media from every descendant,
+    with a presigned URL each. Exactly the disagreement
+    `percent_decode_path` was introduced to close on the path segments;
+    the query side had been left raw. The key is decoded with form
+    semantics now, matching `form_urlencoded`. Presence still beats
+    value, so the gate stays *stricter* than the handler for a bare
+    `?recursive` — loosening it to match exactly would reopen the gap
+    from the other side.
+  - **`rustango_media_collections.view` read the whole library.**
+    `GET /collections/{id}/contents` classified as
+    `Read(Collection(id))`, but it answers `Vec<MediaResponse>` — media
+    rows, each carrying a presigned GET URL. The mapping had been made
+    by target *kind* rather than by what the route returns, so "may
+    browse folders" harvested signed download links one collection at a
+    time. It is `Read(MediaTarget::CollectionContents(id))` now and
+    requires **both** view codenames.
+  - **`MediaPerms` ignored the `disk` it was handed.** The fields added
+    above exist so a policy can constrain where an upload lands, and
+    `required_codenames` matched them away — so `rustango_media.add`
+    minted a presigned `PUT` into any registered disk. `StorageRegistry`
+    is process-wide, so on a multi-tenant deployment that is another
+    tenant's bucket: pool-per-tenant isolates the database, not the
+    object store. `MediaPerms::new(pool).allow_disks(["user-uploads"])`
+    is the fix, checked **in addition to** the codename. Unset still
+    means every disk — the default is documented rather than changed,
+    because narrowing it silently would break every single-disk
+    deployment on a patch release.
+
+  Also hardened: an empty codename list would have fallen through
+  `MediaPerms`' loop to `Allow`. Nothing returns one today; it refuses
+  now, so a future mapping that requires nothing is a mistake rather
+  than a grant.
 
   A fourth round sharpened the gate's vocabulary, both prerequisites for
   that policy:

@@ -415,3 +415,174 @@ async fn a_failed_permission_lookup_refuses() {
          database blip must not be readable as a grant"
     );
 }
+
+// =====================================================================
+// The two grants MediaPerms handed out by accident
+// =====================================================================
+
+/// `GET /collections/{id}/contents` returns media rows, each with a
+/// presigned GET URL. It used to classify as `Read(Collection(id))`, so
+/// `rustango_media_collections.view` — "may browse folders" — read the
+/// whole library one collection at a time and harvested a signed
+/// download link for every row.
+#[tokio::test]
+async fn browsing_folders_does_not_read_the_media_inside_them() {
+    let (mgr, pool) = setup().await;
+    let c = mgr
+        .create_collection("Shared", "shared", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    let uid = make_user(&pool, "folder-browser", false).await;
+    grant(&pool, uid, "rustango_media_collections.view").await;
+    let app = app(mgr, pool, Some(principal(uid, false)));
+
+    let row = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/collections/{cid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    assert_eq!(
+        row.status(),
+        StatusCode::OK,
+        "control: the collections view codename must still read the collection row \
+         itself, or this test is measuring a policy that refuses everything"
+    );
+
+    let contents = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/collections/{cid}/contents"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    assert_eq!(
+        contents.status(),
+        StatusCode::FORBIDDEN,
+        "`rustango_media_collections.view` alone read the media inside the \
+         collection. That route answers media rows with a presigned S3 URL each, so \
+         a grant that reads as 'may browse folders' is a grant to read the library"
+    );
+}
+
+/// …and holding both codenames reads it, so the split is a gate.
+#[tokio::test]
+async fn both_view_codenames_read_the_contents() {
+    let (mgr, pool) = setup().await;
+    let c = mgr
+        .create_collection("Shared", "shared", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    let uid = make_user(&pool, "librarian", false).await;
+    grant(&pool, uid, "rustango_media_collections.view").await;
+    grant(&pool, uid, "rustango_media.view").await;
+
+    let resp = app(mgr, pool, Some(principal(uid, false)))
+        .oneshot(
+            Request::builder()
+                .uri(format!("/collections/{cid}/contents"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "holding both required codenames was still refused — the split is a wall, \
+         not a gate"
+    );
+}
+
+/// `disk` is caller-supplied and `StorageRegistry` is process-wide, so
+/// pool-per-tenant isolates the database and not the object store.
+/// `rustango_media.add` alone therefore minted a presigned PUT into any
+/// registered bucket — the grant `MediaTarget::NewUpload`'s own docs
+/// call "write anywhere in any bucket".
+#[tokio::test]
+async fn an_upload_grant_does_not_reach_every_disk() {
+    let (mgr, pool) = setup().await;
+    let uid = make_user(&pool, "uploader", false).await;
+    grant(&pool, uid, "rustango_media.add").await;
+
+    let ticket = |disk: &str| {
+        format!(
+            r#"{{"disk":"{disk}","key_prefix":"t/","mime":"text/plain",
+                "original_filename":"x.txt","size_bytes":1}}"#
+        )
+    };
+    let begin = |app: axum::Router, body: String| async move {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/uploads/begin")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers")
+        .status()
+    };
+
+    // Unrestricted: the documented default, and the reason
+    // `allow_disks` exists.
+    let open = media_router_with(mgr.clone(), MediaPerms::new(pool.clone())).layer(
+        axum::middleware::from_fn({
+            let u = principal(uid, false);
+            move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+                let u = u.clone();
+                async move {
+                    req.extensions_mut().insert(u);
+                    next.run(req).await
+                }
+            }
+        }),
+    );
+    assert_ne!(
+        begin(open, ticket("other-tenants-bucket")).await,
+        StatusCode::FORBIDDEN,
+        "control: with no allow-list every disk is writable, which is the default \
+         this test exists to let a deployment change"
+    );
+
+    let scoped = media_router_with(mgr, MediaPerms::new(pool).allow_disks(["default"])).layer(
+        axum::middleware::from_fn({
+            let u = principal(uid, false);
+            move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+                let u = u.clone();
+                async move {
+                    req.extensions_mut().insert(u);
+                    next.run(req).await
+                }
+            }
+        }),
+    );
+
+    assert_eq!(
+        begin(scoped.clone(), ticket("other-tenants-bucket")).await,
+        StatusCode::FORBIDDEN,
+        "`rustango_media.add` minted a presigned PUT into a disk outside the \
+         allow-list. The registry is process-wide, so on a multi-tenant deployment \
+         that is another tenant's bucket"
+    );
+    assert_ne!(
+        begin(scoped, ticket("default")).await,
+        StatusCode::FORBIDDEN,
+        "the allow-listed disk was refused — the list is a wall, not a gate"
+    );
+}

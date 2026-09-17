@@ -218,13 +218,20 @@ leer, `rustango_media_collections.add` para crear una carpeta, etc. Móntalo
 **dentro** de `require_auth`, que es lo que inyecta la identidad que lee; sin
 eso toda petición es un `401`. Los superusuarios se saltan la comprobación.
 
-Dos cosas que no hace:
+Tres cosas que no hace:
 
 - **Decisiones a nivel de fila.** Un `rustango_media.view` lee *cualquier*
   fila de medios por id. `MediaManager` tiene un único pool, así que un
   despliegue multi-tenant acota las filas por su cuenta — para eso
   implementas `MediaAuthorizer`. `MediaTarget` nombra la fila (`Media(id)`,
   `Collection(id)`, `CollectionSubtree(id)`, …) precisamente para ello.
+- **Acotar el almacén de objetos.** `disk` lo suministra quien llama en
+  `POST /uploads/begin` y el `StorageRegistry` es de todo el proceso, así que
+  un pool por inquilino aísla la base de datos y no el bucket: un
+  `rustango_media.add` a secas escribe en cualquier disco que el proceso
+  conozca. Indica cuáles con
+  `MediaPerms::new(pool).allow_disks(["user-uploads"])`. Los prefijos dentro de
+  un disco siguen necesitando `MediaAuthorizer`, que recibe `key_prefix`.
 - **Adivinar qué significa una ruta nueva.** `MediaAction` y `MediaTarget`
   son `#[non_exhaustive]`: termina una política propia en `_ => false` y una
   ruta añadida más adelante llegará denegada en lugar de permitida.
