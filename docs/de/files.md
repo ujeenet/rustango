@@ -191,6 +191,54 @@ Er kümmert sich außerdem um Soft-Delete und das Bereinigen von Waisen. Der vol
 in `media_sqlite_live.rs` erprobt; die vorsignierten/Direct-Upload-Methoden des Managers sind
 PostgreSQL-orientiert.
 
+### Der REST-Router braucht eine Autorisierungs-Policy
+
+`media::router` hängt 16 JSON-Routen über den Manager. **Jede einzelne davon
+ist abgesichert, und es gibt keinen freizügigen Standard.** Baue ihn mit
+`media_router_with` und übergib eine Policy:
+
+```rust
+use rustango::media::router::{media_router_with, MediaPerms};
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+```
+
+`media_router(manager)` — der alte Konstruktor — ist deprecated und antwortet
+auf jeder Route mit `403`. Das ist eine bewusste Verhaltensänderung in
+0.57.7: davor nahmen diese Routen überhaupt keinen Authentifizierungs-,
+Autorisierungs- oder Tenant-Extractor entgegen, also lieferte
+`GET /media/{id}` die Zeile **und eine vorsignierte S3-Download-URL** an
+jeden, der eine Ganzzahl raten konnte, und `POST /uploads/begin` erzeugte ein
+vorsigniertes `PUT` für ein vom Aufrufer gewähltes Key-Präfix.
+
+`MediaPerms` (braucht das `tenancy`-Feature) prüft die
+`{tabelle}.{aktion}`-Permission-Codenamen, die der Admin ohnehin verwendet —
+`rustango_media.view` zum Lesen, `rustango_media_collections.add` zum Anlegen
+eines Ordners und so weiter. Hänge es **innerhalb** von `require_auth` ein,
+das die Identität injiziert, die es liest; ohne das ist jede Anfrage ein
+`401`. Superuser überspringen die Prüfung.
+
+Zwei Dinge, die es nicht leistet:
+
+- **Entscheidungen auf Zeilenebene.** Ein `rustango_media.view` liest *jede*
+  Media-Zeile per id. `MediaManager` hält einen Pool, ein mandantenfähiges
+  Deployment grenzt Zeilen also selbst ein — dafür implementierst du
+  `MediaAuthorizer`. `MediaTarget` benennt die Zeile (`Media(id)`,
+  `Collection(id)`, `CollectionSubtree(id)`, …) genau dafür.
+- **Raten, was eine neue Route bedeutet.** `MediaAction` und `MediaTarget`
+  sind `#[non_exhaustive]`; beende eine selbst geschriebene Policy mit
+  `_ => false`, dann kommt eine später ergänzte Route abgelehnt statt
+  erlaubt an.
+
+Wichtig für eine eigene Policy: `DELETE /collections/{id}` löscht den ganzen
+**Teilbaum** und hängt die Medien auf jeder Ebene um, kommt also als
+`Delete(CollectionSubtree(id))` an, nicht als `Delete(Collection(id))` — und
+unter `MediaPerms` braucht es zusätzlich `rustango_media.change` neben
+`rustango_media_collections.delete`, weil es in die Medientabelle schreibt.
+[UPGRADING.md](https://github.com/ujeenet/rustango/blob/main/UPGRADING.md)
+enthält die Migrationshinweise.
+
 ### Wie die Medientabellen angelegt werden
 
 Die Medientabellen (`rustango_media`, `rustango_media_collections`,
