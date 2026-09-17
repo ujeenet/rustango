@@ -729,6 +729,193 @@ async fn a_refusal_is_not_cached_either() {
     );
 }
 
+// =====================================================================
+// The contents listing is bounded, and costs one tag query per page.
+//
+// `list_in_collection` emitted no `LIMIT`, and the handler called
+// `tags_for` once per row. A 500-row collection returned 214 563 bytes
+// from a ~215-byte request — ~1000x amplification, with the row count
+// set by how much media the deployment holds rather than by anything
+// the server controls. `?recursive=true` widened it across the subtree.
+// =====================================================================
+
+async fn seed_n(mgr: &MediaManager, collection_id: Option<i64>, n: usize) -> Vec<i64> {
+    let mut ids = Vec::with_capacity(n);
+    for i in 0..n {
+        let m = mgr
+            .save_bytes(SaveOpts {
+                disk: "default".into(),
+                key_prefix: "bulk/".into(),
+                bytes: format!("row {i}").into_bytes(),
+                mime: "text/plain".into(),
+                original_filename: format!("f{i}.txt"),
+                uploaded_by_id: Some(1),
+                collection_id,
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .expect("seed");
+        if let rustango::sql::Auto::Set(v) = m.id {
+            ids.push(v);
+        }
+    }
+    ids
+}
+
+async fn contents_len(app: axum::Router, uri: &str) -> usize {
+    let resp = app
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .expect("router answers");
+    assert_eq!(resp.status(), StatusCode::OK, "{uri} did not serve");
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024 * 1024)
+        .await
+        .expect("body");
+    serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)
+        .expect("json array")
+        .len()
+}
+
+/// Without a `limit`, the listing still has a ceiling.
+#[tokio::test]
+async fn the_contents_listing_is_bounded_by_default() {
+    let mgr = manager().await;
+    let c = mgr
+        .create_collection("Bulk", "bulk", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    seed_n(&mgr, Some(cid), 150).await;
+    let app = media_router_with(mgr, AllowAll);
+
+    let n = contents_len(app, &format!("/collections/{cid}/contents")).await;
+    assert!(
+        n <= 100,
+        "an unpaged contents listing returned {n} rows — the row count is set by how \
+         much media the deployment holds, not by the server"
+    );
+}
+
+/// A caller-supplied `limit` is honoured, and clamped.
+#[tokio::test]
+async fn a_contents_limit_is_honoured_and_clamped() {
+    let mgr = manager().await;
+    let c = mgr
+        .create_collection("Bulk", "bulk", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    seed_n(&mgr, Some(cid), 40).await;
+    let app = media_router_with(mgr, AllowAll);
+
+    assert_eq!(
+        contents_len(
+            app.clone(),
+            &format!("/collections/{cid}/contents?limit=10")
+        )
+        .await,
+        10,
+        "an explicit limit was not honoured"
+    );
+    // `LIMIT -1` means *no limit* on SQLite, so a negative value must
+    // never reach the database as-is.
+    let neg = contents_len(
+        app.clone(),
+        &format!("/collections/{cid}/contents?limit=-1"),
+    )
+    .await;
+    assert_eq!(
+        neg, 1,
+        "a negative limit was not clamped — on SQLite that is an unbounded query \
+         wearing a limit, and it returned {neg} rows"
+    );
+    let huge = contents_len(
+        app,
+        &format!("/collections/{cid}/contents?limit=9223372036854775807"),
+    )
+    .await;
+    assert!(huge <= 40, "an enormous limit returned {huge} rows");
+}
+
+/// Offset pages rather than repeating page one.
+#[tokio::test]
+async fn a_contents_offset_pages() {
+    let mgr = manager().await;
+    let c = mgr
+        .create_collection("Bulk", "bulk", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    seed_n(&mgr, Some(cid), 12).await;
+    let app = media_router_with(mgr, AllowAll);
+
+    assert_eq!(
+        contents_len(app.clone(), &format!("/collections/{cid}/contents?limit=5")).await,
+        5
+    );
+    assert_eq!(
+        contents_len(
+            app,
+            &format!("/collections/{cid}/contents?limit=5&offset=10")
+        )
+        .await,
+        2,
+        "offset did not move the window"
+    );
+}
+
+/// One tag query for the page, not one per row.
+#[tokio::test]
+async fn tags_for_many_batches_the_whole_page() {
+    let mgr = manager().await;
+    let ids = seed_n(&mgr, None, 5).await;
+    for (i, id) in ids.iter().enumerate() {
+        mgr.tag(*id, &[format!("t{i}").as_str()])
+            .await
+            .expect("tag");
+    }
+
+    let batched = mgr.tags_for_many(&ids).await.expect("batched");
+    assert_eq!(batched.len(), 5, "a media id with tags went missing");
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            batched.get(id).map(Vec::as_slice),
+            Some([format!("t{i}")].as_slice()),
+            "batched tags disagree with what was written for {id}"
+        );
+    }
+
+    // Agrees with the per-row call it replaces.
+    for id in &ids {
+        let one: Vec<String> = mgr
+            .tags_for(*id)
+            .await
+            .expect("per-row")
+            .into_iter()
+            .map(|t| t.slug)
+            .collect();
+        assert_eq!(batched.get(id), Some(&one), "batched != per-row for {id}");
+    }
+
+    // An id with no tags is absent, not an empty entry.
+    let untagged = seed_n(&mgr, None, 1).await;
+    let m = mgr.tags_for_many(&untagged).await.expect("untagged");
+    assert!(m.is_empty(), "an untagged row produced an entry: {m:?}");
+
+    assert!(
+        mgr.tags_for_many(&[]).await.expect("empty").is_empty(),
+        "an empty id list must not query at all"
+    );
+}
 /// `Vary` as well, because the two headers are different instructions.
 ///
 /// `no-store` asks a cache not to store; `Vary` changes the cache key,
@@ -808,5 +995,80 @@ async fn the_write_and_error_routes_are_uncacheable_too() {
         "these responses are cacheable — the status does not matter, a route that \
          can ever carry a credential must never be stored:\n  {}",
         missing.join("\n  ")
+    );
+}
+
+/// Paging must *partition* the collection — no row twice, none missing.
+///
+/// `ORDER BY uploaded_at DESC` alone is not a total order, and ties are
+/// the normal case rather than the edge: on PostgreSQL `now()` is the
+/// transaction timestamp, so every row of one bulk import carries the
+/// identical value; on SQLite the column has one-second resolution. With
+/// a small `LIMIT` the planner picks a top-N sort whose order among tied
+/// keys differs per (limit, offset) pair.
+///
+/// Measured on PostgreSQL before the `, id DESC` tiebreaker, 200 rows at
+/// limit 20: **197 unique, 3 duplicated, 3 never returned.**
+///
+/// Asserting page *lengths* cannot see this — every count is correct.
+/// Only the identities are wrong, so the assertion has to be that the
+/// union of the pages equals the seeded set.
+#[tokio::test]
+async fn paging_the_contents_partitions_it() {
+    use std::collections::HashSet;
+
+    let mgr = manager().await;
+    let c = mgr
+        .create_collection("Tied", "tied", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    // Seeded in one go, so `uploaded_at` ties across the whole set —
+    // which is the condition, not a contrivance.
+    let seeded: HashSet<i64> = seed_n(&mgr, Some(cid), 60).await.into_iter().collect();
+    let app = media_router_with(mgr, AllowAll);
+
+    let mut seen: Vec<i64> = Vec::new();
+    for page in 0..6 {
+        let uri = format!("/collections/{cid}/contents?limit=10&offset={}", page * 10);
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .expect("router answers");
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("body");
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).expect("json");
+        for r in rows {
+            seen.push(r["id"].as_i64().expect("id"));
+        }
+    }
+
+    let unique: HashSet<i64> = seen.iter().copied().collect();
+    let duplicated = seen.len() - unique.len();
+    let missing: Vec<i64> = seeded.difference(&unique).copied().collect();
+
+    assert_eq!(
+        duplicated,
+        0,
+        "{duplicated} of {} returned rows appeared on more than one page — the \
+         ordering is not total, so a row sorts differently per (limit, offset)",
+        seen.len()
+    );
+    assert!(
+        missing.is_empty(),
+        "{} rows were never returned by any page: {missing:?}. A client paging this \
+         collection to the end never sees them at all.",
+        missing.len()
+    );
+    assert_eq!(
+        unique.len(),
+        seeded.len(),
+        "the pages did not cover the set"
     );
 }

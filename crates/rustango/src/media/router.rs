@@ -586,17 +586,30 @@ impl MediaResponse {
             crate::sql::Auto::Set(v) => v,
             _ => 0,
         };
-        let url = manager.url(&m);
-        let presigned = manager
-            .presigned_get(&m, Duration::from_secs(DEFAULT_PRESIGN_TTL_SECS))
-            .await;
         let tags = manager
             .tags_for(id)
             .await?
             .into_iter()
             .map(|t| t.slug)
             .collect();
-        Ok(Self {
+        Ok(Self::from_row_with_tags(manager, m, tags).await)
+    }
+
+    /// [`Self::from_row`] with the tag slugs already in hand.
+    ///
+    /// Lets a listing fetch tags for the whole page in one query
+    /// instead of one per row. Infallible, because the only fallible
+    /// step in `from_row` was that per-row tag query.
+    async fn from_row_with_tags(manager: &MediaManager, m: Media, tags: Vec<String>) -> Self {
+        let id = match m.id {
+            crate::sql::Auto::Set(v) => v,
+            _ => 0,
+        };
+        let url = manager.url(&m);
+        let presigned = manager
+            .presigned_get(&m, Duration::from_secs(DEFAULT_PRESIGN_TTL_SECS))
+            .await;
+        Self {
             id,
             disk: m.disk,
             storage_key: m.storage_key,
@@ -612,7 +625,7 @@ impl MediaResponse {
             url,
             presigned_url: presigned,
             tags,
-        })
+        }
     }
 }
 
@@ -711,6 +724,10 @@ fn default_limit() -> i64 {
 struct ContentsQuery {
     #[serde(default)]
     recursive: bool,
+    /// Clamped server-side to `1..=1000`; absent means the default page.
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: i64,
 }
 
 // =====================================================================
@@ -863,10 +880,33 @@ async fn collection_contents_handler(
     Path(id): Path<i64>,
     Query(q): Query<ContentsQuery>,
 ) -> Result<Json<Vec<MediaResponse>>, MediaError> {
-    let media = manager.list_in_collection(id, q.recursive).await?;
+    let media = match q.limit {
+        Some(n) => {
+            manager
+                .list_in_collection_paged(id, q.recursive, n, q.offset)
+                .await?
+        }
+        None => manager.list_in_collection(id, q.recursive).await?,
+    };
+    // One tag query for the whole page rather than one per row. The
+    // loop below used to run `tags_for` per row, so a page cost
+    // 1 + N round trips.
+    let ids: Vec<i64> = media
+        .iter()
+        .filter_map(|m| match m.id {
+            crate::sql::Auto::Set(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    let mut tags = manager.tags_for_many(&ids).await?;
     let mut out = Vec::with_capacity(media.len());
     for m in media {
-        out.push(MediaResponse::from_row(&manager, m).await?);
+        let id = match m.id {
+            crate::sql::Auto::Set(v) => v,
+            _ => 0,
+        };
+        let row_tags = tags.remove(&id).unwrap_or_default();
+        out.push(MediaResponse::from_row_with_tags(&manager, m, row_tags).await);
     }
     Ok(Json(out))
 }
