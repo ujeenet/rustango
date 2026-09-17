@@ -441,7 +441,7 @@ async fn the_whole_route_table_reaches_the_gate_correctly() {
         ("GET", "/collections", "Read(Listing)"),
         ("GET", "/collections/7", "Read(Collection(7))"),
         ("GET", "/collections/7/contents", "Read(Collection(7))"),
-        ("DELETE", "/collections/7", "Delete(Collection(7))"),
+        ("DELETE", "/collections/7", "Delete(CollectionSubtree(7))"),
         ("POST", "/tags", "Add(Listing)"),
         ("GET", "/tags", "Read(Listing)"),
         ("GET", "/tags/popular", "Read(Listing)"),
@@ -1070,5 +1070,124 @@ async fn paging_the_contents_partitions_it() {
         unique.len(),
         seeded.len(),
         "the pages did not cover the set"
+    );
+}
+
+// =====================================================================
+// Deleting a collection is a decision about a subtree, not a row.
+//
+// `DELETE /collections/{id}` soft-deletes every descendant collection
+// and sets `collection_id = NULL` on the media in all of them. Gated on
+// `Delete(Collection(id))` it authorized one id and destroyed however
+// many descendants the tree held — and re-parented media rows the
+// policy was never asked about, though `Change(Media(..))` exists for
+// exactly that mutation.
+//
+// The subtree's shape is not the deleting caller's to control:
+// `POST /collections` takes `parent_id` in the body and classifies as
+// `Add(Listing)`, so anyone who may create a collection can attach one
+// under someone else's. The realistic case is a shared library, not an
+// attacker.
+// =====================================================================
+
+/// A policy that allows deleting one collection must not thereby allow
+/// deleting a subtree.
+struct MayDeleteOneCollection;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for MayDeleteOneCollection {
+    async fn authorize(&self, _: &axum::http::request::Parts, action: MediaAction) -> bool {
+        matches!(action, MediaAction::Delete(MediaTarget::Collection(_)))
+    }
+}
+
+#[tokio::test]
+async fn deleting_one_collection_does_not_authorize_a_subtree() {
+    let mgr = manager().await;
+    let parent = mgr
+        .create_collection("Parent", "p", None, "")
+        .await
+        .expect("parent");
+    let pid = match parent.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    let app = media_router_with(mgr, MayDeleteOneCollection);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/collections/{pid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a policy granting `Delete(Collection)` was allowed to delete a whole subtree. \
+         The route soft-deletes every descendant and orphans their media, so one \
+         authorized id destroys collections the policy would have refused one at a time."
+    );
+}
+
+/// The subtree grant is what the route needs, and it still works.
+///
+/// Without this the fix is a wall: a policy that intends to allow the
+/// delete must have a way to say so.
+struct MayDeleteSubtrees;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for MayDeleteSubtrees {
+    async fn authorize(&self, _: &axum::http::request::Parts, action: MediaAction) -> bool {
+        matches!(
+            action,
+            MediaAction::Delete(MediaTarget::CollectionSubtree(_))
+        )
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_subtree_grant_still_deletes() {
+    let mgr = manager().await;
+    let parent = mgr
+        .create_collection("Parent", "p", None, "")
+        .await
+        .expect("parent");
+    let pid = match parent.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    let app = media_router_with(mgr, MayDeleteSubtrees);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/collections/{pid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "an explicit CollectionSubtree grant was refused — the fix is a wall, not a gate"
+    );
+}
+
+/// A single-row read or delete of a collection is unaffected.
+#[tokio::test]
+async fn reading_one_collection_is_still_a_single_row_decision() {
+    let (seen, _) = action_for("/collections/7", "GET").await;
+    assert_eq!(
+        seen,
+        vec![MediaAction::Read(MediaTarget::Collection(7))],
+        "widening the delete must not widen the read — GET touches one row"
     );
 }

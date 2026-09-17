@@ -206,6 +206,17 @@ Match `NewUpload` as `MediaTarget::NewUpload { .. }`, with the braces.
 It is an empty struct variant so that the requested `disk` and
 `key_prefix` can be added to it later without breaking your policy.
 
+`DELETE /collections/{id}` arrives as
+`Delete(MediaTarget::CollectionSubtree(id))`, **not**
+`Delete(MediaTarget::Collection(id))` — so an arm written for the
+latter does not grant it, and the route answers 403 until you add the
+subtree arm. That is the intended reading: the route soft-deletes every
+descendant collection and orphans the media at every level, and the
+nesting is not the deleting caller's to control, since `POST
+/collections` takes `parent_id` in the body. Grant it where a caller
+owning the root may take the whole tree, and keep it on `_ => false`
+where they may not.
+
 The router needs the **`admin`** feature as well as `media`, and
 `media_router` is **removed in 0.59.0** — the deprecation is not
 open-ended.

@@ -47,7 +47,8 @@ exploitable?" answered honestly — including where the answer is no.
   row.
 
   The gate identifies that row through the new `MediaTarget`
-  (`Media(i64)` / `Collection(i64)` / `Tag(String)` / `NewUpload {}` /
+  (`Media(i64)` / `Collection(i64)` / `CollectionSubtree(i64)` /
+  `Tag(String)` / `NewUpload {}` /
   `Listing`), and `MediaAction` splits into
   `Read` / `Add` / `Change` / `Delete` to match the codenames used
   elsewhere. The first cut of this API used a bare `Option<i64>`, and
@@ -83,6 +84,22 @@ exploitable?" answered honestly — including where the answer is no.
     host could not pick its policy at runtime. There is a blanket impl.
   - Both refusals now emit a `debug` tracing event naming the action, so
     a misconfigured policy is debuggable without a debugger.
+
+  A third review round found one more, also reproduced before fixing:
+
+  - **`DELETE /collections/{id}` asked about one row and then destroyed
+    a subtree.** The gate classified it `Delete(Collection(id))`, but
+    the handler deletes every descendant collection and re-parents the
+    media underneath — rows the policy was never shown. A policy that
+    granted delete on the one collection a caller owns deleted
+    everything nested under it, and the nesting is not the deleting
+    caller's to control: `POST /collections` takes `parent_id` in the
+    body, so anyone who may create a collection may graft one under
+    someone else's. It classifies as `Delete(CollectionSubtree(id))`
+    now — a distinct target, so a policy written for single rows
+    refuses it by falling through to its `_ => false` arm rather than
+    by remembering to check. `Read(Collection(id))` is unchanged: that
+    one really is a single row.
 
 - **`url_codec::percent_decode_path`** — path semantics (`%XX` only,
   `+` left literal), for comparing a segment against what a router
