@@ -40,7 +40,7 @@
 //! | GET    | `/collections`                    | List every non-deleted collection. |
 //! | GET    | `/collections/{id}`               | Single collection. |
 //! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` to include sub-folders. |
-//! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside orphaned, NOT deleted). |
+//! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside orphaned, NOT deleted). Authorized as `Delete(CollectionSubtree)`, not `Delete(Collection)`. |
 //! | POST   | `/tags`                           | Create / upsert: body `{slug}`. |
 //! | GET    | `/tags`                           | All tags. |
 //! | GET    | `/tags/popular`                   | Top tags by usage count. `?limit=N`. |
@@ -102,6 +102,27 @@ pub enum MediaTarget {
     Media(i64),
     /// One collection, by id.
     Collection(i64),
+    /// A collection **and everything under it** — what
+    /// `DELETE /collections/{id}` actually reaches.
+    ///
+    /// Separate from [`Self::Collection`] because the two are different
+    /// decisions and the difference is not visible from the request.
+    /// Deleting a collection soft-deletes every descendant collection
+    /// and sets `collection_id = NULL` on the media in all of them, so
+    /// one authorized id can destroy a subtree of any size and re-parent
+    /// rows a per-row policy would have refused individually.
+    ///
+    /// The shape of that subtree is not under the deleting caller's
+    /// control: `POST /collections` takes `parent_id` in the body, so
+    /// anyone who may create a collection can attach one under someone
+    /// else's. The realistic case is not an attacker — it is a shared
+    /// library where a colleague parented their folder under yours, and
+    /// deleting yours takes theirs with it.
+    ///
+    /// **Granting this is not the same as granting `Delete(Collection)`.**
+    /// A policy that ends on `_ => false`, as the example below does,
+    /// denies it until someone opts in deliberately.
+    CollectionSubtree(i64),
     /// One tag, by slug. A slug is caller-chosen text — including
     /// text that looks like a number — so it is never an id.
     Tag(String),
@@ -186,6 +207,10 @@ pub enum MediaAction {
 ///             MediaAction::Add(_) => user.is_editor(),
 ///             MediaAction::Change(MediaTarget::Media(id)) => user.owns_media(id).await,
 ///             MediaAction::Delete(MediaTarget::Media(id)) => user.owns_media(id).await,
+///             // Deleting a collection takes its whole subtree and
+///             // orphans the media at every level, so it is a separate
+///             // decision from deleting one row. Left to `_ => false`
+///             // here: opt in only where you mean it.
 ///             _ => false,
 ///         }
 ///     }
@@ -316,9 +341,13 @@ fn classify(method: &axum::http::Method, path: &str, query: Option<&str>) -> Opt
         (&Method::GET, ["collections", raw] | ["collections", raw, "contents"]) => {
             Some(MediaAction::Read(MediaTarget::Collection(id(raw)?)))
         }
-        (&Method::DELETE, ["collections", raw]) => {
-            Some(MediaAction::Delete(MediaTarget::Collection(id(raw)?)))
-        }
+        // Not `Collection` — this route deletes the whole subtree and
+        // orphans the media under every level of it. Naming one id in a
+        // target that means "one row" understated it by however many
+        // descendants the tree happens to hold.
+        (&Method::DELETE, ["collections", raw]) => Some(MediaAction::Delete(
+            MediaTarget::CollectionSubtree(id(raw)?),
+        )),
 
         // `popular` is a listing, and must be matched before the
         // `{slug}` arm or a tag literally named "popular" shadows it.
