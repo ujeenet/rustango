@@ -92,7 +92,19 @@ exploitable?" answered honestly — including where the answer is no.
   - **`DELETE /collections/{id}` asked about one row and then destroyed
     a subtree.** The gate classified it `Delete(Collection(id))`, but
     the handler deletes every descendant collection and re-parents the
-    media underneath — rows the policy was never shown. A policy that
+    media underneath — rows the policy was never shown.
+
+    **That blast radius is new in this release**, and the entry above
+    read as though it were not. In 0.57.6 `delete_collection` orphaned
+    the media in *that one collection* and soft-deleted *that one row*;
+    child collections were untouched, which is the `#1551` B3 defect
+    (`collection_path` on the whole subtree became a permanent error).
+    Fixing B3 made the route recursive, and this finding is the gate
+    catching up with it. If you call `DELETE /collections/{id}` on a
+    collection with children, it now takes them — read that before you
+    upgrade, not after.
+
+    A policy that
     granted delete on the one collection a caller owns deleted
     everything nested under it, and the nesting is not the deleting
     caller's to control: `POST /collections` takes `parent_id` in the
@@ -354,6 +366,36 @@ exploitable?" answered honestly — including where the answer is no.
   it composes, so a bump per leaf double-counts — and the module docs
   now say so outright: a `0` from a block touching `_on` code means
   "not measured", not "no queries". Tracked as #1561.
+
+### Behaviour changes that had no entry
+
+Found by a crew review of the assembled release. Each is a user-visible
+change this release already shipped and did not write down — which is
+the same defect class as #1543, applied to the release notes rather than
+to a doc page.
+
+- **`GET /collections/{id}/contents` silently caps at 100 rows.**
+  `list_in_collection` was unbounded and is now `DEFAULT_LIST_CAP`, with
+  `?limit=` clamped to `1..=1000`. That is the right fix for the
+  amplification in #1551 A, but a client that previously received a
+  1 000-row collection in one response now receives 100 and no
+  indication there is more. Page with `?limit=` and `?offset=`.
+
+- **`popular_tags` counts changed meaning.** It used to count links to
+  soft-deleted media; it does not now, so every existing caller's
+  numbers drop. `GET /tags/popular` and `GET /tags` both serve it. The
+  new numbers are the correct ones — that contradiction is what #1551 B1
+  was — but a dashboard tracking them will show a step change on
+  upgrade, not a bug.
+
+- **Two doc claims contradicted the code beside them**, both corrected
+  here rather than left for a reader to trip over:
+  `OnDeleteAction::as_sql` said the shape of `ON DELETE` is "identical
+  across PG / MySQL / SQLite" when `SET NULL` and `SET DEFAULT` both
+  diverge on MySQL, and `has_perm_pool` claimed "three ORM queries …
+  ≈ 3× the CTE in latency" when its body is one round trip — which
+  anyone budgeting `MediaPerms` from that docblock would have
+  overstated threefold.
 
 ## [0.57.6] — 2026-09-16
 

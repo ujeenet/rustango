@@ -312,6 +312,26 @@ The router needs the **`admin`** feature as well as `media`, and
 `media_router` is **removed in 0.59.0** — the deprecation is not
 open-ended.
 
+### Not breaking, but your clients will notice
+
+- **`DELETE /collections/{id}` now takes the whole subtree.** In 0.57.6
+  it orphaned the media in that one collection and soft-deleted that one
+  row; children were left pointing at a deleted parent, which made
+  `collection_path` on the subtree a permanent error. Fixing that made
+  the route recursive. If anything in your app deletes a collection that
+  has children, its blast radius changed — check that before upgrading,
+  not after.
+- **`GET /collections/{id}/contents` caps at 100 rows.** It was
+  unbounded. `?limit=` is clamped to `1..=1000`, so a client that used
+  to receive a whole large collection in one response now receives a
+  page, with nothing in the body saying there is more. Page with
+  `?limit=` and `?offset=`.
+- **`popular_tags` no longer counts soft-deleted media.** `GET
+  /tags/popular` and `GET /tags` both serve it, so their numbers drop on
+  upgrade. The new numbers are the correct ones — the old ones
+  contradicted `GET /tags/{slug}/media` — but a dashboard tracking them
+  will show a step change.
+
 ### Not breaking, worth knowing
 
 - `url_codec::percent_decode_path` is new: `%XX` only, `+` left
