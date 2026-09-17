@@ -148,11 +148,81 @@ untouched.
 
 ---
 
+## 0.57.7
+
+> **Not yet published.** Lives on `release/v0.57.7`. Pin a rev until it
+> lands.
+
+The security pass. One change can break a working deployment, and it
+does so at runtime rather than at build time — read the first row even
+if you skip the rest.
+
+### Breaking, and how to tell whether it reaches you
+
+| Change | How to check |
+|---|---|
+| **`media_router` is deprecated and now refuses every request with `403`.** Build the router with `media_router_with(manager, authorizer)` and supply a `MediaAuthorizer`. | Grep for `media_router(`. You get a **deprecation warning, not an error** — `cargo build` still succeeds, so a noisy build carries this to production, where the symptom is every media route answering 403. This is deliberate: the constructor used to mount 16 routes that took no authentication, authorization or tenant extractor at all, so the alternative was leaving an open bucket open. |
+
+```rust
+// before (0.57.6) — served anyone who could reach it
+let app = axum::Router::new()
+    .nest("/media", media_router(manager));
+
+// after (0.57.7)
+use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer, MediaTarget};
+
+struct MyPolicy;
+
+#[rustango::media::async_trait]
+impl MediaAuthorizer for MyPolicy {
+    async fn authorize(
+        &self,
+        parts: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> bool {
+        let Some(user) = current_user(parts) else { return false };
+        match action {
+            MediaAction::Read(MediaTarget::Media(id)) => user.may_read_media(id).await,
+            // Listings enumerate the whole library; NewUpload mints a
+            // presigned PUT for a caller-chosen disk and key prefix.
+            // Both are explicit decisions, not defaults.
+            MediaAction::Read(MediaTarget::Listing) => user.may_browse_library(),
+            MediaAction::Add(MediaTarget::NewUpload { .. }) => user.is_trusted_uploader(),
+            MediaAction::Add(_) => user.is_editor(),
+            _ => false,
+        }
+    }
+}
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MyPolicy));
+```
+
+End on `_ => false`. `MediaAction` and `MediaTarget` are
+`#[non_exhaustive]`, so a route added later reaches your policy as a
+variant you have not written an arm for — and should arrive denied.
+
+Match `NewUpload` as `MediaTarget::NewUpload { .. }`, with the braces.
+It is an empty struct variant so that the requested `disk` and
+`key_prefix` can be added to it later without breaking your policy.
+
+The router needs the **`admin`** feature as well as `media`, and
+`media_router` is **removed in 0.59.0** — the deprecation is not
+open-ended.
+
+### Not breaking, worth knowing
+
+- `url_codec::percent_decode_path` is new: `%XX` only, `+` left
+  literal, for comparing a path segment against what a router decoded.
+  `url_decode` keeps form semantics (`+` → space) and is unchanged for
+  that use.
+- Both decoders stopped treating a **signed** hex pair as an escape.
+  `%+5` used to decode to byte `0x05`, because `u8::from_str_radix`
+  accepts a leading sign. Only affects malformed input.
+
 ## 0.57.6
 
-> **Not yet published.** The newest tag is `v0.57.5`; 0.57.6 lives on
-> `release/v0.57.6` behind [#1479](https://github.com/ujeenet/rustango/pull/1479).
-> Pin a rev until it lands.
+> Published. `rustango = "0.57.6"` resolves.
 
 ### Breaking, and how to tell whether it reaches you
 

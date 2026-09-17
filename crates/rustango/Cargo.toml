@@ -281,6 +281,9 @@ uploads = ["admin", "storage", "axum/multipart"]
 # backend (PG / MySQL 8+ / SQLite), so `media` now only requires
 # `storage` + at least one database backend feature
 # (postgres / mysql / sqlite).
+# `MediaAuthorizer`, the policy hook the media router requires since
+# 0.57.7, needs `_async_trait` — which arrives via `storage`, so it is
+# not repeated here. The router itself is behind `admin`.
 media = ["storage"]
 
 # S3-compatible storage backend (`rustango::storage::s3::S3Storage`).
