@@ -128,6 +128,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::jobs` | Hintergrund-Job-Queues |
 | `rustango::logging` | Warnungen dieses Subsystems selbst |
 | `rustango::manage` | `manage`-Verben |
+| `rustango::media::auth` | Ablehnungen der Media-Router-Autorisierung |
 | `rustango::messages` | Flash-Messages |
 | `rustango::migrate` | Migrations-Runner |
 | `rustango::rate_limit` | Rate-Limiting |
