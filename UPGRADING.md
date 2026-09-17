@@ -225,7 +225,11 @@ impl MediaAuthorizer for MyPolicy {
             // presigned PUT for a caller-chosen disk and key prefix.
             // Both are explicit decisions, not defaults.
             MediaAction::Read(MediaTarget::Listing) => user.may_browse_library(),
-            MediaAction::Add(MediaTarget::NewUpload { .. }) => user.is_trusted_uploader(),
+            MediaAction::Add(MediaTarget::NewUpload { disk, key_prefix, .. }) => {
+                user.is_trusted_uploader()
+                    && disk == "user-uploads"
+                    && key_prefix.starts_with(&user.prefix())
+            }
             MediaAction::Add(MediaTarget::NewCollection { .. }) => user.is_editor(),
             MediaAction::Add(MediaTarget::NewTag { .. }) => user.is_editor(),
             _ => false,
@@ -250,14 +254,26 @@ already computes a boolean only needs `.into()`. Return
 treating the refusal as final. A signed-in user who lacks the permission
 stays `Forbidden`.
 
-Match `NewUpload` as `MediaTarget::NewUpload { .. }`, with the braces.
-It is an empty struct variant so that the requested `disk` and
-`key_prefix` can be added to it later without breaking your policy.
-`NewCollection` and `NewTag` are the same shape, for `POST /collections`
-and `POST /tags`. Those two used to arrive as the same `Add(Listing)`,
-so "may label things" also granted "may create folders" — and
-collections nest, so it granted a foothold under someone else's tree.
-`Listing` now means a read.
+`NewUpload` carries what the caller **asked for** — `disk`,
+`key_prefix`, `collection_id`, `uploaded_by_id` — read out of the
+request body before the handler runs, so the grant can be "this disk,
+under your own prefix" rather than "anywhere in any bucket, attributed
+to anyone". They are unvalidated caller input, not facts; a body that
+does not parse arrives as empty strings and `None` rather than a `400`,
+because authorization is decided before validation is. Match it with a
+trailing `..` (`MediaTarget::NewUpload { disk, .. }`) — the variant
+stays `#[non_exhaustive]` so more of the body can be surfaced later
+without breaking your policy.
+
+The gate buffers that one body, capped at 16 KiB; nothing legitimate
+sends an upload-ticket JSON larger than that, and a request that does is
+refused. No other route's body is read.
+
+`NewCollection` and `NewTag` are empty struct variants of the same
+shape, for `POST /collections` and `POST /tags`. Those two used to
+arrive as the same `Add(Listing)`, so "may label things" also granted
+"may create folders" — and collections nest, so it granted a foothold
+under someone else's tree. `Listing` now means a read.
 
 `DELETE /collections/{id}` arrives as
 `Delete(MediaTarget::CollectionSubtree(id))`, **not**

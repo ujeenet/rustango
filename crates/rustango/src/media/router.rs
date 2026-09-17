@@ -145,13 +145,35 @@ pub enum MediaTarget {
     /// finalize` is *not* this — it mutates an existing row and
     /// classifies as `Change(Media(id))`.
     ///
-    /// Match it as `MediaTarget::NewUpload { .. }`. It is an empty
-    /// struct variant rather than a unit one so that the requested
-    /// `disk` and `key_prefix` can be added here later (#1546) without
-    /// breaking policies written today — a `#[non_exhaustive]` *unit*
-    /// variant cannot be matched outside this crate at all.
+    /// The fields are what the caller **asked for**, read out of the
+    /// request body before the handler runs — so a policy can allow-list
+    /// a disk, pin a key prefix per tenant, or refuse an upload
+    /// attributed to someone else. Without them `rustango_media.add`
+    /// means "write anywhere in any bucket", which is not a decision
+    /// anyone intended to grant.
+    ///
+    /// They are **unvalidated caller input**, not facts. A body that
+    /// does not parse arrives as empty strings and `None` rather than a
+    /// `400`, because authorization is decided before validation is —
+    /// the handler rejects a malformed body afterwards, on its own
+    /// terms.
+    ///
+    /// Match it as `MediaTarget::NewUpload { disk, .. }`, with the
+    /// trailing `..`. It stays `#[non_exhaustive]` so more of the body
+    /// can be surfaced here without breaking a policy written today.
     #[non_exhaustive]
-    NewUpload {},
+    NewUpload {
+        /// Requested `disk` — a key into the [`crate::storage::StorageRegistry`].
+        disk: String,
+        /// Requested `key_prefix`, prepended to the generated object key.
+        key_prefix: String,
+        /// Requested `collection_id`, or `None` for the library root.
+        collection_id: Option<i64>,
+        /// Requested `uploaded_by_id`. Attribution is caller-supplied on
+        /// this route, so a policy that cares should check it against
+        /// the authenticated principal rather than trust it.
+        uploaded_by_id: Option<i64>,
+    },
     /// `POST /collections`. Names no existing row: it creates one,
     /// optionally under a `parent_id` taken from the body.
     ///
@@ -293,10 +315,14 @@ impl From<bool> for MediaDecision {
 ///                 _ => false,
 ///             },
 ///             // `NewUpload` mints a presigned PUT for a disk and key
-///             // prefix the *caller* chooses. Grant it only to accounts
-///             // you would trust with the bucket — it is not the same
-///             // decision as "may create a collection".
-///             MediaAction::Add(MediaTarget::NewUpload { .. }) => user.is_trusted_uploader(),
+///             // prefix the *caller* chooses — and hands you both, so
+///             // the grant can be "this disk, under your own prefix"
+///             // rather than "anywhere in any bucket".
+///             MediaAction::Add(MediaTarget::NewUpload { disk, key_prefix, .. }) => {
+///                 user.is_trusted_uploader()
+///                     && disk == "user-uploads"
+///                     && key_prefix.starts_with(&user.prefix())
+///             }
 ///             MediaAction::Add(MediaTarget::NewCollection { .. }) => user.is_editor(),
 ///             MediaAction::Add(MediaTarget::NewTag { .. }) => user.is_editor(),
 ///             MediaAction::Change(MediaTarget::Media(id)) => user.owns_media(id).await,
@@ -549,6 +575,57 @@ impl MediaAuthorizer for MediaPerms {
     }
 }
 
+/// The slice of `POST /uploads/begin`'s body the gate reads, so the
+/// policy can see what the caller asked for.
+///
+/// Every field defaults, and a body that does not parse falls back to
+/// the whole struct's default. That is deliberate: the gate must not
+/// answer `400`. Authorization is decided first, on whatever the caller
+/// sent; the handler validates afterwards, on its own terms. A gate
+/// that rejected malformed JSON would be deciding validity before
+/// anyone had been asked whether the caller may be here at all.
+#[derive(Debug, Default, Deserialize)]
+struct UploadRequestDetail {
+    #[serde(default)]
+    disk: String,
+    #[serde(default)]
+    key_prefix: String,
+    #[serde(default)]
+    collection_id: Option<i64>,
+    #[serde(default)]
+    uploaded_by_id: Option<i64>,
+}
+
+/// The most the gate will buffer from a body it has to read.
+///
+/// An upload-ticket body is a handful of short JSON fields — a few
+/// hundred bytes. 16 KiB is far above any real one and far below
+/// anything worth calling a denial-of-service primitive, which is what
+/// buffering an unbounded body inside an authorization layer would be.
+/// Only [`wants_upload_body`] routes are read at all; everything else
+/// streams through untouched.
+const MAX_GATE_BODY_BYTES: usize = 16 * 1024;
+
+/// Does this request's body have to be read before it can be
+/// classified?
+///
+/// True for `POST /uploads/begin` alone. That route mints a presigned
+/// `PUT` for a **caller-chosen** disk and key prefix, and both live in
+/// the body — so a gate that never reads a body cannot tell a policy
+/// where the write is going.
+///
+/// Kept as its own function because the middleware has to decide
+/// whether to buffer *before* it can call [`classify`], and the route
+/// table must not be spelled twice.
+fn wants_upload_body(method: &axum::http::Method, path: &str) -> bool {
+    let seg: Vec<String> = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(crate::url_codec::percent_decode_path)
+        .collect();
+    method == axum::http::Method::POST && seg.len() == 2 && seg[0] == "uploads" && seg[1] == "begin"
+}
+
 /// Classify a request so the authorizer sees what it is deciding about.
 ///
 /// `None` means "this does not match any route in this table", and the
@@ -568,7 +645,18 @@ impl MediaAuthorizer for MediaPerms {
 /// touches more rows than the one its path names. That widening is
 /// classified as [`MediaTarget::Listing`], whose docs say plainly that
 /// granting it is not harmless.
-fn classify(method: &axum::http::Method, path: &str, query: Option<&str>) -> Option<MediaAction> {
+///
+/// `upload` carries the parsed body for the one route that needs it —
+/// see [`wants_upload_body`]. It is `None` for every other route, and a
+/// `None` on `POST /uploads/begin` yields a target with empty fields
+/// rather than no target: a body the gate could not read is still an
+/// upload request, and the policy is what should refuse it.
+fn classify(
+    method: &axum::http::Method,
+    path: &str,
+    query: Option<&str>,
+    upload: Option<UploadRequestDetail>,
+) -> Option<MediaAction> {
     use axum::http::Method;
 
     let seg: Vec<String> = path
@@ -598,7 +686,15 @@ fn classify(method: &axum::http::Method, path: &str, query: Option<&str>) -> Opt
     });
 
     match (m, s.as_slice()) {
-        (&Method::POST, ["uploads", "begin"]) => Some(MediaAction::Add(MediaTarget::NewUpload {})),
+        (&Method::POST, ["uploads", "begin"]) => {
+            let d = upload.unwrap_or_default();
+            Some(MediaAction::Add(MediaTarget::NewUpload {
+                disk: d.disk,
+                key_prefix: d.key_prefix,
+                collection_id: d.collection_id,
+                uploaded_by_id: d.uploaded_by_id,
+            }))
+        }
         // Finalize mutates the media row it names — `finalize_upload`
         // loads `rustango_media` by this id — so it is a `Media`
         // target, not a kind of its own. An `Upload(i64)` variant here
@@ -675,7 +771,47 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                     // under the prefix 404s before reaching here. Nothing
                     // is served either way; the difference is only how much
                     // an unauthenticated prober can infer.
-                    let Some(action) = classify(&parts.method, parts.uri.path(), parts.uri.query())
+                    //
+                    // One route needs its body to be classified, and it
+                    // is the one that mints a presigned PUT into
+                    // storage. Buffered under a cap and handed straight
+                    // back to the handler, so nothing downstream can
+                    // tell — except that the policy now knows which
+                    // disk and prefix it is being asked to allow.
+                    let (upload, body) = if wants_upload_body(&parts.method, parts.uri.path()) {
+                        // Over the cap, or the stream failed. Nothing
+                        // legitimate sends 16 KiB of upload-ticket JSON,
+                        // and refusing here is what keeps the gate from
+                        // being a place to make a server buffer.
+                        let Ok(bytes) = axum::body::to_bytes(body, MAX_GATE_BODY_BYTES).await
+                        else {
+                            tracing::debug!(
+                                target: "rustango::media::auth",
+                                path = %parts.uri.path(),
+                                "refused: upload request body could not be read within \
+                                 the gate's limit"
+                            );
+                            return (
+                                StatusCode::FORBIDDEN,
+                                Json(serde_json::json!({
+                                    "error": "upload request body too large to authorize"
+                                })),
+                            )
+                                .into_response();
+                        };
+                        // A body that does not parse is still an upload
+                        // request. It arrives at the policy with empty
+                        // fields rather than as a 400 — the gate decides
+                        // authorization, the handler decides validity,
+                        // in that order.
+                        let detail = serde_json::from_slice::<UploadRequestDetail>(&bytes)
+                            .unwrap_or_default();
+                        (Some(detail), axum::body::Body::from(bytes))
+                    } else {
+                        (None, body)
+                    };
+                    let Some(action) =
+                        classify(&parts.method, parts.uri.path(), parts.uri.query(), upload)
                     else {
                         tracing::debug!(
                             target: "rustango::media::auth",
