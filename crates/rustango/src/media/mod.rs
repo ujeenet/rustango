@@ -588,6 +588,19 @@ impl MediaManager {
             let _ = storage.delete(&m.storage_key).await;
         }
         let p = self.pool.dialect().placeholder(1);
+        // Links first. `rustango_media_tag_links.media_id` carries no
+        // foreign key, so deleting the media row alone left them behind
+        // forever — and since `popular_tags` counts links, the nightly
+        // `purge_orphans` sweep was manufacturing permanent phantom tag
+        // counts every time it ran.
+        let unlink_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p}");
+        crate::sql::raw_execute_pool(
+            &self.pool,
+            &unlink_sql,
+            vec![crate::core::SqlValue::I64(id)],
+        )
+        .await
+        .map_err(media_err_from_exec)?;
         let sql = format!("DELETE FROM rustango_media WHERE id = {p}");
         crate::sql::raw_execute_pool(&self.pool, &sql, vec![crate::core::SqlValue::I64(id)])
             .await
@@ -848,35 +861,64 @@ impl MediaManager {
         Ok(parts.join("/"))
     }
 
-    /// Soft-delete a collection. Media inside it is NOT deleted —
-    /// rows are orphaned (`collection_id` set to NULL) so they remain
-    /// queryable and the storage objects survive.
+    /// Soft-delete a collection **and its descendants**. Media inside
+    /// any of them is NOT deleted — rows are orphaned (`collection_id`
+    /// set to NULL) so they remain queryable and the storage objects
+    /// survive.
+    ///
+    /// The subtree goes too because leaving it behind produced children
+    /// pointing at a parent that no longer resolves: still listed by
+    /// [`Self::list_collections`], and [`Self::collection_path`] on any
+    /// of them a permanent error.
     pub async fn delete_collection(&self, id: i64) -> Result<(), MediaError> {
+        // The **whole subtree**, not just this row. Soft-deleting one
+        // collection left its children listed and pointing at a parent
+        // that no longer resolves: a tree renderer got a dangling edge,
+        // and `collection_path` on any descendant walked into
+        // `get_collection`, which filters soft-deleted, and returned
+        // "collection N not found" forever. Media inside a descendant
+        // was never orphaned either, so the documented contract held
+        // exactly one level deep.
+        //
+        // Reuses the same recursive walk `list_in_collection` uses, so
+        // the two agree about what "inside" means.
+        let mut ids = self.collect_descendant_ids(id).await?;
+        if !ids.contains(&id) {
+            // `collect_descendant_ids` filters already-deleted rows, so
+            // a re-delete would otherwise find nothing and skip the
+            // orphaning below.
+            ids.push(id);
+        }
+
         let d = self.pool.dialect();
-        let p1 = d.placeholder(1);
-        let p2 = d.placeholder(2);
-        let orphan_sql =
-            format!("UPDATE rustango_media SET collection_id = NULL WHERE collection_id = {p1}");
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &orphan_sql,
-            vec![crate::core::SqlValue::I64(id)],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| d.placeholder(i)).collect();
+        let in_list = placeholders.join(", ");
+        let binds: Vec<crate::core::SqlValue> = ids
+            .iter()
+            .copied()
+            .map(crate::core::SqlValue::I64)
+            .collect();
+
+        // Media survives, as documented — it is orphaned, not deleted.
+        let orphan_sql = format!(
+            "UPDATE rustango_media SET collection_id = NULL \
+              WHERE collection_id IN ({in_list})"
+        );
+        crate::sql::raw_execute_pool(&self.pool, &orphan_sql, binds.clone())
+            .await
+            .map_err(media_err_from_exec)?;
+
         // Bind `Utc::now()` from Rust so the SQL is portable.
-        let soft_delete_sql =
-            format!("UPDATE rustango_media_collections SET deleted_at = {p1} WHERE id = {p2}");
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &soft_delete_sql,
-            vec![
-                crate::core::SqlValue::DateTime(Utc::now()),
-                crate::core::SqlValue::I64(id),
-            ],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        let p_now = d.placeholder(ids.len() + 1);
+        let soft_delete_sql = format!(
+            "UPDATE rustango_media_collections SET deleted_at = {p_now} \
+              WHERE id IN ({in_list})"
+        );
+        let mut del_binds = binds;
+        del_binds.push(crate::core::SqlValue::DateTime(Utc::now()));
+        crate::sql::raw_execute_pool(&self.pool, &soft_delete_sql, del_binds)
+            .await
+            .map_err(media_err_from_exec)?;
         Ok(())
     }
 
@@ -1244,9 +1286,18 @@ impl MediaManager {
     pub async fn popular_tags(&self, limit: i64) -> Result<Vec<(MediaTag, i64)>, MediaError> {
         let p = self.pool.dialect().placeholder(1);
         let sql = format!(
-            "SELECT t.id, t.name, t.slug, t.created_at, COUNT(l.media_id) AS use_count \
+            // The join to `rustango_media` is what makes this agree with
+            // `list_with_tag`. Without it the count included links to
+            // soft-deleted rows, so `GET /tags/popular` and
+            // `GET /tags/{slug}/media` reported different worlds — and
+            // the number of deleted rows leaked through a listing grant.
+            // Still a LEFT JOIN chain, so a tag with no live media
+            // remains listed with a count of zero.
+            "SELECT t.id, t.name, t.slug, t.created_at, COUNT(m.id) AS use_count \
                FROM rustango_media_tags t \
                LEFT JOIN rustango_media_tag_links l ON l.tag_id = t.id \
+               LEFT JOIN rustango_media m \
+                      ON m.id = l.media_id AND m.deleted_at IS NULL \
               GROUP BY t.id, t.name, t.slug, t.created_at \
               ORDER BY use_count DESC, t.slug \
               LIMIT {p}"
