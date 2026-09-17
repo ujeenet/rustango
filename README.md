@@ -33,6 +33,8 @@ rustango = { version = "0.57", default-features = false, features = ["mysql", "t
 
 Every capability is a cargo feature you can turn off. Renaming the dep works too — `#[derive(Model)]` resolves the crate root via `proc-macro-crate`, so `orm = { package = "rustango", version = "0.57" }` needs no extra wiring.
 
+**Moving between versions?** Rustango is `0.x`, so a minor bump is allowed to break things and several have. [UPGRADING.md](UPGRADING.md) has the per-version notes and a checklist — including the two that bite regardless of version: a session secret that can stop a booting app, and a generated system migration that has to reach production.
+
 ## An app on SQLite in 30 lines
 
 ```rust

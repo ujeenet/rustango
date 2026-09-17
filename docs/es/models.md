@@ -358,8 +358,16 @@ Declarados sobre el **modelo**:
   `.where_(Post::author_id.eq(42))` para filtros verificados en compilación.
 - **Buscadores** — `find(pk, &pool)` → `Option<Self>`; `find_or_fail(pk, &pool)` →
   `Self` (error si no existe); `find_many(pks, &pool)`; `find_or_insert(...)`.
-- **Escritores** — `save`/`save_pool`, `save_partial(&["title"], &pool)` (actualiza solo
-  algunas columnas), `insert_pool` (inserción explícita), `delete`.
+- **Escritores** — `save_pool` (INSERT o UPDATE), `insert_pool` (inserción
+  explícita), `delete_pool` y `save_partial(&["title"], &pool)` (actualiza solo
+  algunas columnas). Los `save` / `insert` / `delete` a secas **no** son alias de
+  estos: toman un `sqlx::PgPool` específico del driver y son
+  `#[cfg(feature = "postgres")]`, así que en un build `sqlite` o `mysql` no
+  existen en absoluto. La familia `_pool` toma `rustango::sql::Pool` y funciona
+  en los tres — escribe esos salvo que sepas que estás en Postgres. El nombrado
+  invertido se sigue en
+  [#1293](https://github.com/ujeenet/rustango/issues/1293); consulta
+  [api-conventions](api-conventions.md#funciones).
 - **Borrado lógico** (cuando está habilitado) — `soft_delete`, `restore`,
   `force_delete`; `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -426,10 +434,15 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `default` | `"sql literal"` | DEFAULT de columna |
 | `null` | flag | nullable (o usa `Option<T>`) |
 | `unique` | flag | restricción de unicidad |
+| `index` / `index(...)` | flag, o `unique`, `name`, `method` | índice de una sola columna sobre este campo |
 | `choices` | `"v:Label, …"` | valores enumerados |
 | `min` / `max` | número | validación de rango |
 | `blank` | flag | permitir vacío en formularios/admin |
 | `editable` | `true`/`false` | editabilidad en formulario/admin |
+| `verbose_name` | `"Label"` | etiqueta legible del campo en formularios/admin |
+| `help_text` | `"…"` | texto de ayuda bajo el widget de formulario/admin |
+| `validators` | `"name, name"` | validadores con nombre a ejecutar en este campo |
+| `related_name` | `"posts"` | nombre del accesor inverso en el destino de la FK |
 | `auto_now` | flag | establecer a ahora en cada guardado |
 | `auto_now_add` | flag | establecer a ahora en la inserción |
 | `auto_uuid` | flag | UUID v4 del lado Rust (en `Auto<Uuid>`) |

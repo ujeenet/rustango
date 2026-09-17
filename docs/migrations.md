@@ -51,12 +51,19 @@ without tenancy. Non-tenancy apps that use a framework subsystem (e.g.
 
 ## Squash reconciliation — `Migration.replaces`
 
-A **squash** collapses a run of historical migrations into one freshly
-generated file that recreates the same end state — handy when a stack of
-half-finished migrations is easier to regenerate than to fix. The catch:
-the file's `CREATE TABLE`s would collide on any database that already
-applied the migrations it collapsed (a colleague's checkout, staging,
-CI).
+A **squash** collapses a run of migrations into one freshly generated file
+that recreates the same end state — handy when a stack of half-finished
+migrations is easier to regenerate than to fix.
+
+**It only ever collapses *pending* migrations.** `migrate --squash` filters
+the directory to the files the ledger has not applied, so anything already
+run on this database is left alone; with nothing pending it is a no-op. The
+word "historical" is misleading here — a squash is a dev-iteration tool for
+migrations you have not shipped yet.
+
+The catch: the generated file's `CREATE TABLE`s would still collide on any
+database that *had* applied the migrations it collapsed (a colleague's
+checkout, staging, CI).
 
 `migrate --squash` solves this by stamping the new file's **`replaces`**
 list with the names it collapsed:
@@ -131,6 +138,11 @@ repair.
 ---
 
 ## Repairing drift by hand — `migrate --fake`
+
+> **Needs the `tenancy` feature.** `--fake`, `--system` and `--all-tenants`
+> are parsed only by the tenancy dispatcher. On a single-tenant build the
+> `migrate` verb takes a positional target, `--dry-run` and `--squash`, and
+> rejects anything else with `unknown flag`.
 
 When the database is already in the target state but the ledger doesn't
 know it (a DB set up out-of-band, a dropped ledger, a partially-succeeded

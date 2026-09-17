@@ -370,11 +370,25 @@ Schreibt:
   .gitignore
   rust-toolchain.toml
   docker-compose.yml
+  Dockerfile                                (deploy image — multi-stage, release, non-root)
+  Dockerfile.dev                            (cargo-watch image docker-compose.yml builds)
+  .dockerignore
   README.md
+  config/default.toml                       (shared knobs)
+  config/{dev,staging,prod}_settings.toml   (per-tier overrides)
   migrations/                               (your app's migrations)
   system/migrations/                        (tenant template — framework tables, generated)
-  src/{main,models,views,urls}.rs
+  src/{lib,main,models,views,urls}.rs
 ```
+
+Die `config/`-Ebene ist die Settings-Quelle: `default.toml` enthält, was alle
+Umgebungen teilen, und je eine `<env>_settings.toml` überschreibt sie, zur
+Laufzeit ausgewählt über **`RUSTANGO_ENV`** (Standard `dev`) — ein frisches
+`cargo run` läuft also ohne jede TOML-Änderung. Zusammen tragen sie das
+`[database]`-Pool-Tuning, `[admin]`, `[mcp]` und die `secure_cookies`-Policy —
+und sie sind es, was das Settings-Audit von
+[`check --deploy`](#check---deploy) liest. Die Inhalte pro Ebene stehen unter
+[Scaffolding](scaffolding.md).
 
 Die Tenant-Vorlage liefert einen **leeren** `system/migrations/`-Ordner. Die
 eigenen Tabellen des Frameworks (`rustango_orgs`, `rustango_users`,
@@ -424,17 +438,25 @@ schreibt nach `src/<snake_name>.rs` (oder `tests/<snake_name>.rs` für
 - Überschreibt keine bestehende Datei.
 - Erinnert Sie daran, `pub mod X;` zu Ihrer `lib.rs` hinzuzufügen.
 
-### `make:viewset <Name> [--model <Model>]`
+### `make:viewset <Name> [--model <Model>] [--tenant | --no-tenant] [--crate <path>]`
 
-Generiert eine `#[derive(ViewSet)]`-Struktur — einen REST-Endpunkt für ein
-Modell, wie ein Django-REST-Framework-ViewSet. Die Feldlisten kommen für Sie
-vorgestubbt zum Ausfüllen.
+Generiert einen REST-Endpunkt für ein Modell, wie ein
+Django-REST-Framework-ViewSet.
+
+**Zwei Vorlagen, für Sie ausgewählt.** Das `#[derive(ViewSet)]` mit einem Pool
+fängt einen einzigen Pool beim Einbinden ein, was für ein Tenancy-Projekt falsch
+ist — der Generator wählt daher zwischen zwei Formen. Auflösungsreihenfolge:
+`--no-tenant` gewinnt, dann `--tenant`, dann die **Auto-Erkennung** — `tenancy`
+in der Feature-Liste der `rustango`-Abhängigkeit in `Cargo.toml` — und sonst die
+Pool-Vorlage. Wenn die Auto-Erkennung den Tenant-Modus wählt, sagt sie das auf
+stdout und nennt `--no-tenant` als Override.
 
 ```bash
 cargo run -- make:viewset PostViewSet --model Post
+cargo run -- make:viewset PostViewSet --model Post --no-tenant   # Pool-Form erzwingen
 ```
 
-Generierte `src/post_view_set.rs`:
+Pool-Vorlage — generierte `src/post_view_set.rs`:
 
 ```rust
 #[derive(ViewSet)]
@@ -443,6 +465,21 @@ pub struct PostViewSet;
 ```
 
 Einbinden mit: `.merge(PostViewSet::router("/api/posts", pool.clone()))`.
+
+Tenant-Vorlage — **kein Derive**. Sie erzeugt ein
+`pub fn router() -> Router<()>`, gebaut aus
+`ViewSet::for_model(Post::SCHEMA).tenant_router("/api/posts")`, mit der ganzen
+Builder-Kette (`fields` / `filter_fields` / `search_fields` / `ordering` /
+`page_size` / `permissions_for_model` / `read_only`) als auskommentierte Zeilen
+vorgestubbt. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
+aufgelöst statt einmalig beim Einbinden eingefangen — ein `router()` bedient also
+jeden Tenant.
+
+Einbinden mit: `.merge(crate::viewsets::post::router())` — **nicht** mit der
+`PostViewSet::router(path, pool)`-Zeile oben.
+
+`--crate <path>` benennt die Framework-Crate in den generierten `use`-Zeilen um,
+für Projekte, die `rustango` unter einem anderen Namen importieren.
 
 ### `make:serializer <Name> [--model <Model>]`
 
@@ -591,7 +628,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.57.5
+rustango 0.57.6
 ```
 
 ### `about`
@@ -603,7 +640,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.57.5
+  version:        0.57.6
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

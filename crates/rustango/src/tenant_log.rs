@@ -83,17 +83,40 @@ where
 /// their respective contexts, so calling this from a CLI verb or a
 /// test costs nothing and breaks nothing. First call wins.
 pub fn record(slug: &str, id: Option<i64>) {
+    // The slot is the dedupe, so it has to be consulted *first*.
+    //
+    // These two halves used to run in the other order, with the
+    // `span.record` calls above an unguarded `OnceLock::set`. "First
+    // call wins" was then true of the slot and false of the span: every
+    // resolver in `ChainResolver` that published the same tenant
+    // stamped the field again. Measured on a running app, `/healthz`
+    // rendered `tenant=` three times — and `/healthz` is usually the
+    // highest-volume endpoint in a deployment. Cosmetic in text mode; a
+    // duplicate key in JSON, which is the format that ships to a
+    // collector.
+    //
+    // `Ok(false)` means the slot was already filled — a later resolver,
+    // so nothing to do. `Err` means no scope is open (a CLI verb, a
+    // test), and there is no slot to dedupe against; record
+    // unconditionally, as before.
+    let first = TENANT
+        .try_with(|slot| {
+            slot.set(TenantLabel {
+                slug: slug.to_owned(),
+                id,
+            })
+            .is_ok()
+        })
+        .unwrap_or(true);
+    if !first {
+        return;
+    }
+
     let span = tracing::Span::current();
     span.record("tenant", slug);
     if let Some(id) = id {
         span.record("org_id", id);
     }
-    let _ = TENANT.try_with(|slot| {
-        slot.set(TenantLabel {
-            slug: slug.to_owned(),
-            id,
-        })
-    });
 }
 
 /// The tenant resolved for the current request, if any.
@@ -109,6 +132,78 @@ pub fn current() -> Option<TenantLabel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One `tenant=` per line, however many resolvers run.
+    ///
+    /// `record`'s doc says "First call wins". That holds for the slot —
+    /// `OnceLock::set` fails silently on repeat — but the two
+    /// `span.record` calls sat above that check, unguarded, and fired
+    /// on every `ChainResolver::resolve`. Paths that resolve more than
+    /// once stamped the field repeatedly: measured on a booted CMS,
+    /// `/healthz` rendered `tenant=` three times, `/` three, `/login`
+    /// twice. Cosmetic in text mode; a duplicate key in JSON, which is
+    /// what ships to a collector.
+    #[cfg(feature = "runtime")]
+    #[tokio::test]
+    async fn a_field_is_stamped_once_however_many_resolvers_run() {
+        use std::io::Write;
+        use std::sync::{Arc as StdArc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Buf(StdArc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+
+        scope(async {
+            let span = tracing::info_span!(
+                "http.request",
+                tenant = tracing::field::Empty,
+                org_id = tracing::field::Empty,
+            );
+            let _e = span.enter();
+            // Three resolvers in the chain all publish the same tenant.
+            record("acme", Some(7));
+            record("acme", Some(7));
+            record("acme", Some(7));
+            tracing::info!("handled");
+        })
+        .await;
+
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(out.contains("handled"), "nothing rendered:\n{out}");
+        assert_eq!(
+            out.matches("tenant=").count(),
+            1,
+            "tenant was stamped onto the span once per resolver instead of once \
+             per request:\n{out}"
+        );
+        assert_eq!(
+            out.matches("org_id=").count(),
+            1,
+            "org_id was stamped more than once:\n{out}"
+        );
+    }
 
     #[tokio::test]
     async fn records_and_reads_back_inside_a_scope() {

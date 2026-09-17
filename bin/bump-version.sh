@@ -102,14 +102,76 @@ if $DRY; then
 fi
 
 if ! $ASSUME_YES; then
-  read -r -p "rewrite the files above? [y/N] " reply
+  # `</dev/tty || reply=""` for the reason spelled out at the lockfile
+  # loop below, which had the same bug and was fixed alone: without it a
+  # non-interactive `read` hits EOF, returns non-zero, and under
+  # `set -euo pipefail` the script exits right there — the `*)` arm
+  # never runs, so a `make release` or CI step without a tty died with a
+  # bare exit 1 and no explanation. Reading from the tty also means a
+  # piped stdin cannot answer the prompt by accident.
+  reply=""
+  read -r -p "rewrite the files above? [y/N] " reply </dev/tty || reply=""
   case "$reply" in [yY]|[yY][eE][sS]) ;; *) echo "aborted"; exit 1 ;; esac
 fi
 
+# Only rewrite VERSION CLAIMS, never prose that happens to name a version.
+#
+# The old sweep replaced every occurrence and relied on you reading the list.
+# That is not good enough: bumping 0.57.5 -> 0.57.6 silently rewrote eleven
+# files of *history* — "Before 0.57.5, `SqlValue::Null` bound as text",
+# "until 0.57.5 added `Cli::with_tenant_pools`" — each of which became false
+# the moment it moved. A sentence about what an old release did must keep
+# naming that release forever.
+#
+# So the match has to be anchored to something that makes it a claim about
+# the CURRENT version:
+#
+#   version = "X"        manifests, and the README pin in renamed-smoke
+#   "version": "X"       the MCP serverInfo block
+#   version:     X       the `manage about` transcript
+#   --version X          the `cargo install cargo-rustango` line
+#   rustango X           the `manage version` transcript, at line start
+#   rustango = "X"       a bare dependency pin, in a doc or a scaffolded
+#                        Cargo.toml. Restricted to this workspace's own
+#                        crate names: a third-party dep sitting at the
+#                        same version by coincidence is not our claim.
+#
+# Anything else is left alone and reported below for you to check.
 for f in "${FILES[@]}"; do
-  perl -pi -e "s/(^|[^0-9.])\Q$OLD\E(?![0-9.])/\${1}$NEW/g" "$f"
+  perl -pi -e '
+    BEGIN { ($o, $n) = @ARGV[0,1]; splice(@ARGV, 0, 2) }
+    s/(version\s*=\s*")\Q$o\E(?![0-9.])/$1$n/g;
+    s/("version"\s*:\s*")\Q$o\E(?![0-9.])/$1$n/g;
+    s/(version:\s+)\Q$o\E(?![0-9.])/$1$n/g;
+    s/(--version\s+"?)\Q$o\E(?![0-9.])/$1$n/g;
+    s/^(rustango\s+)\Q$o\E(?![0-9.])/$1$n/gm;
+    s/^((?:cargo-)?rustango[a-z-]*\s*=\s*")\Q$o\E(?![0-9.])/$1$n/gm;
+  ' "$OLD" "$NEW" "$f"
 done
 
+# What still names the old version, now that the claims are rewritten. These
+# are prose, and prose about an old release is supposed to keep its number —
+# but a genuine claim in a shape this script does not know would also land
+# here, so they are printed rather than assumed correct.
+#
+# This list is the ONLY thing standing between an unrecognised claim shape and
+# a silently stale version. The verification below deliberately checks the same
+# shapes the rewriter handles, so by construction it cannot catch a sixth. That
+# is why this is a stop-and-read rather than a log line: the earlier version
+# printed the list and then exited 1 on it, which was wrong but at least loud.
+# Dropping straight through to "clean" would have been the worse failure.
+LEFT=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|$)" -- . \
+  ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' 2>/dev/null || true)
+
+# Lockfiles FIRST, before the list is shown and before anything can stop.
+#
+# The confirmation used to sit here, between the rewrite and this loop, which
+# meant every path that declined left bumped manifests beside stale lockfiles.
+# A non-interactive `read` hitting EOF is one such path, and under `set -e` it
+# does not even reach the `*)` arm — the failing `read` exits the script on the
+# spot, so nothing is printed about why. A Makefile, a CI step or any wrapper
+# invoking this without a tty produced exactly the half-applied tree the
+# script exists to avoid.
 echo "regenerating lockfiles"
 for lock in "${LOCKS[@]}"; do
   manifest="${lock%Cargo.lock}Cargo.toml"
@@ -117,11 +179,51 @@ for lock in "${LOCKS[@]}"; do
   printf '  %s\n' "$lock"
 done
 
+if [ -n "$LEFT" ]; then
+  echo
+  echo "left alone — these name $OLD in prose, which is usually right."
+  echo "READ THEM. A version claim in a shape this script does not know looks"
+  echo "exactly like prose from here, and nothing downstream will catch it:"
+  printf '%s\n' "$LEFT" | sed 's/^/  /' | cut -c1-140
+  echo
+  # Ask only when there is someone to ask. `-t 0` is not enough on its own:
+  # stdin can be a pipe while a terminal is still attached, so prefer
+  # /dev/tty and fall back to "say it loudly and continue".
+  if $ASSUME_YES; then
+    echo "(--yes: continuing without asking)"
+  elif [ -r /dev/tty ] && [ -t 1 ]; then
+    # `|| reply=""` is load-bearing under `set -e`: a failing `read` —
+    # Ctrl-D at the prompt — would otherwise kill the script on the spot,
+    # before the `case` runs, so the abort message never printed and the
+    # operator saw a silent non-zero exit. Treat EOF as "no".
+    reply=""
+    read -r -p "none of those is a stale claim? [y/N] " reply </dev/tty || reply=""
+    case "$reply" in
+      [yY]|[yY][eE][sS]) ;;
+      *) echo "aborted — the bump is fully applied; fix the claim and commit" >&2; exit 1 ;;
+    esac
+  else
+    echo "(no terminal to ask — the list above is the warning; check it before committing)" >&2
+  fi
+fi
+
 echo
 echo "verifying nothing still claims $OLD"
 
-# Prose and manifests: no bare occurrence of the old version left anywhere.
-stale=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|\$)" -- . \
+# Check the CLAIM SHAPES, not bare occurrences.
+#
+# This used to run the byte-identical grep that produces the "left alone"
+# list above, so the script printed those lines as deliberately kept and
+# then exited 1 naming the same lines — after it had already rewritten the
+# files and regenerated the lockfiles. A bump could not complete.
+#
+# Prose naming an old release is supposed to keep its number; that is the
+# whole reason the rewrite is anchored. So the verification has to ask the
+# narrower question the rewrite asks: does any *claim about the current
+# version* still say OLD? The alternation below is the same six shapes the
+# perl pass rewrites, and nothing else.
+CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+|^(cargo-)?rustango[a-z-]*[[:space:]]*=[[:space:]]*")'
+stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \
   ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true)
 
 # Lockfiles need a *narrower* check, not the same one. A third-party crate can

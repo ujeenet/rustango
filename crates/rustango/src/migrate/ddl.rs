@@ -199,21 +199,17 @@ pub fn drop_constraints_sql_with_dialect(
     if dialect.inline_fks_in_create_table() {
         return Vec::new();
     }
-    // MySQL spells it `DROP FOREIGN KEY`; Postgres `DROP CONSTRAINT`,
-    // which additionally accepts `IF EXISTS`.
-    let mysql = dialect.name() == "mysql";
+    // The spelling lives on the dialect — `DROP FOREIGN KEY` on MySQL,
+    // `DROP CONSTRAINT IF EXISTS` elsewhere. This function knew that
+    // first and `migrate/diff.rs` did not, which is how two arms there
+    // shipped Postgres syntax to MySQL (#559). One owner now.
+    // `extend` rather than `push`: the dialect returns `None` when it has
+    // no drop-constraint syntax. The early return above already excludes
+    // SQLite, so this is belt-and-braces — but it is the kind of
+    // belt-and-braces that stops a future dialect silently emitting
+    // PostgreSQL DDL.
     let mut out = Vec::new();
-    let mut push = |name: String| {
-        let mut s = String::from("ALTER TABLE ");
-        s.push_str(&dialect.quote_ident(model.table));
-        if mysql {
-            s.push_str(" DROP FOREIGN KEY ");
-        } else {
-            s.push_str(" DROP CONSTRAINT IF EXISTS ");
-        }
-        s.push_str(&dialect.quote_ident(&name));
-        out.push(s);
-    };
+    let mut push = |name: String| out.extend(dialect.drop_foreign_key_sql(model.table, &name));
     for field in model.scalar_fields() {
         if field.relation.is_some() {
             push(format!("{}_{}_fkey", model.table, field.column));

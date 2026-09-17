@@ -301,6 +301,70 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// `ALTER TABLE <table> DROP ...` for a named CHECK constraint.
+    ///
+    /// Default is the PostgreSQL form, `DROP CONSTRAINT IF EXISTS`,
+    /// which is idempotent. MySQL overrides it: it spells this
+    /// `DROP CHECK` and accepts **no `IF EXISTS`** on any
+    /// drop-constraint form, so the statement errors (3821) when the
+    /// constraint is absent rather than doing nothing.
+    ///
+    /// This lives on the dialect rather than in the migration writer
+    /// because it had drifted into four hand-written copies — two in
+    /// `migrate/diff.rs` and two in `migrate/ddl.rs` — and two of them
+    /// emitted the PostgreSQL form to MySQL, which is `ERROR 1064`
+    /// (#559). A caller that cannot spell the statement itself cannot
+    /// spell it wrongly.
+    /// `None` means this dialect has no `ALTER TABLE … DROP CONSTRAINT`
+    /// at all — SQLite. Returning a `String` unconditionally meant the
+    /// default handed SQLite PostgreSQL syntax it cannot parse, safe
+    /// only because every current caller happens to reject SQLite
+    /// before asking. The next caller would not have known to.
+    ///
+    /// **The default body refuses rather than guessing.** A default
+    /// returning the PostgreSQL form is how #559 happened: MySQL
+    /// inherited `DROP CONSTRAINT IF EXISTS` and emitted SQL its parser
+    /// rejects. Keeping that default after fixing it would let a fourth
+    /// dialect inherit the same wrong answer silently.
+    ///
+    /// Removing the default outright was the first attempt, and it is a
+    /// SemVer-major change: this trait is a documented extension point
+    /// (see the module header), so every downstream `impl Dialect`
+    /// would stop compiling on a patch bump. Panicking instead keeps
+    /// source compatibility and still refuses to emit the wrong SQL —
+    /// the message names the method and the dialect, so a new backend
+    /// finds out on its first migration rather than on a server's
+    /// syntax error. All three in-tree dialects override it.
+    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
+        let _ = (table, name);
+        unimplemented!(
+            "Dialect::drop_check_constraint_sql is not implemented for `{}`. \
+             Implement it: return the dialect's own `ALTER TABLE … DROP …` \
+             spelling, or `None` if it has none. There is deliberately no \
+             fallback — inheriting PostgreSQL's form is what shipped invalid \
+             SQL to MySQL in #559.",
+            self.name()
+        )
+    }
+
+    /// `ALTER TABLE <table> DROP ...` for a named foreign key.
+    ///
+    /// Same story as [`Dialect::drop_check_constraint_sql`]: the default
+    /// is PostgreSQL's idempotent `DROP CONSTRAINT IF EXISTS`, and MySQL
+    /// overrides it with `DROP FOREIGN KEY`, which is not idempotent.
+    /// `None` on dialects with no `ALTER TABLE … DROP CONSTRAINT`, as
+    /// for [`Dialect::drop_check_constraint_sql`] — including its
+    /// reason for refusing rather than defaulting to the PG form.
+    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
+        let _ = (table, name);
+        unimplemented!(
+            "Dialect::drop_foreign_key_sql is not implemented for `{}`. \
+             Implement it: return the dialect's own `ALTER TABLE … DROP …` \
+             spelling, or `None` if it has none.",
+            self.name()
+        )
+    }
+
     /// Whether `CREATE [UNIQUE] INDEX ... WHERE <expr>` partial-index
     /// syntax is supported. PG and SQLite (3.8+) both ship it natively;
     /// MySQL has no equivalent (the migration writer drops the WHERE
@@ -889,4 +953,50 @@ pub trait Dialect: Send + Sync {
     /// [`SqlError::EmptyUpdateSet`] if `update_columns` is empty, or
     /// [`SqlError::MissingPrimaryKey`] if `model` has no PK.
     fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError>;
+}
+
+#[cfg(test)]
+mod every_dialect_overrides_the_drop_constraint_methods {
+    //! The in-tree net for `Dialect`'s two `unimplemented!` defaults.
+    //!
+    //! Those defaults exist so a downstream `impl Dialect` still
+    //! compiles on a patch bump — a deliberate trade of a build error
+    //! for a loud runtime panic. The trade is fine; what it removed is
+    //! the guarantee the bare signatures used to give *in this crate*.
+    //!
+    //! Without this, deleting `drop_foreign_key_sql` from `mysql.rs`
+    //! leaves the crate building clean and moves the failure to a panic
+    //! mid-migration, with a half-applied schema. Checked by doing
+    //! exactly that and watching this fail.
+
+    use super::Dialect;
+
+    /// Every compiled-in dialect answers both, one way or the other.
+    ///
+    /// `None` is a legitimate answer — SQLite has no
+    /// `ALTER TABLE … DROP CONSTRAINT` at all. What is not legitimate
+    /// is inheriting the default, which panics.
+    #[test]
+    fn no_dialect_falls_through_to_the_panicking_default() {
+        let dialects: Vec<&dyn Dialect> = vec![
+            #[cfg(feature = "postgres")]
+            &crate::sql::postgres::Postgres,
+            #[cfg(feature = "mysql")]
+            &crate::sql::mysql::MySql,
+            #[cfg(feature = "sqlite")]
+            &crate::sql::sqlite::Sqlite,
+        ];
+
+        assert!(
+            !dialects.is_empty(),
+            "no dialect features are on, so this guard checked nothing"
+        );
+
+        for d in dialects {
+            // Reaching the default body panics; returning either
+            // `Some(sql)` or `None` means the dialect decided.
+            let _ = d.drop_check_constraint_sql("t", "c");
+            let _ = d.drop_foreign_key_sql("t", "fk");
+        }
+    }
 }

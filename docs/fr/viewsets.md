@@ -69,7 +69,7 @@ Le même modèle en dessous ; ce qui diffère, c'est ce qui en ressort et qui ap
 | Renvoie | **des données JSON** | une **page HTML rendue côté serveur** |
 | Conçue pour | les SPA, le mobile, les autres services | les navigateurs, les sites rendus côté serveur, le CRUD de type admin |
 | Un « create » | `POST` JSON → `201` + l'objet | `POST` d'un formulaire → redirection `303` (Post/Redirect/Get) |
-| Sur entrée invalide | `400` + une carte d'erreurs JSON indexée par champ | re-rendu du formulaire avec les erreurs affichées |
+| Sur entrée invalide | `400` — indexé par champ depuis un sérialiseur, sinon `{"error": "…"}` ([formes](#formes-de-réponse-en-erreur)) | re-rendu du formulaire avec les erreurs affichées |
 | Un « list » est | une enveloppe JSON paginée | une boucle sur les lignes dans votre template |
 | Généralement authentifiée par | tokens / JWT / clés d'API | cookies de session |
 | Équivalent Django | `ModelViewSet` de DRF | vues génériques basées sur des classes |
@@ -669,6 +669,29 @@ Indépendamment d'un sérialiseur, le chemin d'écriture applique toujours le **
 Ainsi, même sans sérialiseur, vous obtenez une validation de type + requis + contrainte-BDD ;
 branchez un sérialiseur pour obtenir les vérifications déclaratives de longueur/plage/choix (héritées automatiquement)
 plus vos propres règles par champ et inter-champs.
+
+### Formes de réponse en erreur
+
+Il n'y a pas d'enveloppe d'erreur unique — un client qui parse une forme échouera
+sur les autres. **Trois** sont livrées, et celle que vous obtenez dépend du
+chemin qui a échoué :
+
+| Forme | Émise par | Corps |
+|---|---|---|
+| **Map DRF par champ** | la validation d'un sérialiseur uniquement | `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}` |
+| **Message simple** | tout autre échec de ViewSet | `{"error": "<message lisible>"}` |
+| **`ApiError`** | vos propres handlers retournant `rustango::api_errors::ApiError` | `{"error": "<code machine>", "message": …, "status": …, "details": …}` |
+
+Les deux premières sortent toutes deux d'un ViewSet, donc la distinction compte :
+les `400` de coercition de type, de requis/NOT NULL et de contrainte de base de
+données listés ci-dessus ne sont **pas** des maps par champ — ce sont
+`{"error": "…"}`. Seuls les validateurs propres au sérialiseur produisent la map
+DRF.
+
+Notez aussi que `error` signifie deux choses différentes dans le tableau : une
+phrase lisible dans la forme ViewSet, et un code machine stable dans `ApiError`
+(qui porte la phrase dans `message`). Branchez sur le statut HTTP et sur la
+présence d'une clé `message` dans le corps, pas sur `error` seul.
 
 ---
 

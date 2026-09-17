@@ -357,8 +357,16 @@ Auf dem **Modell** deklariert:
   `.where_(Post::author_id.eq(42))` für compilergeprüfte Filter.
 - **Finder** — `find(pk, &pool)` → `Option<Self>`; `find_or_fail(pk, &pool)` →
   `Self` (Fehler, wenn nicht vorhanden); `find_many(pks, &pool)`; `find_or_insert(...)`.
-- **Writer** — `save`/`save_pool`, `save_partial(&["title"], &pool)` (nur einige Spalten
-  aktualisieren), `insert_pool` (explizites Einfügen), `delete`.
+- **Writer** — `save_pool` (INSERT oder UPDATE), `insert_pool` (explizites
+  Einfügen), `delete_pool` und `save_partial(&["title"], &pool)` (nur einige
+  Spalten aktualisieren). Die nackten `save` / `insert` / `delete` sind **keine**
+  Aliase davon: sie nehmen einen treiberspezifischen `sqlx::PgPool` und sind
+  `#[cfg(feature = "postgres")]`, existieren also in einem `sqlite`- oder
+  `mysql`-Build überhaupt nicht. Die `_pool`-Familie nimmt `rustango::sql::Pool`
+  und funktioniert auf allen dreien — schreiben Sie diese, sofern Sie nicht
+  sicher auf Postgres sind. Die vertauschte Benennung wird in
+  [#1293](https://github.com/ujeenet/rustango/issues/1293) verfolgt; siehe
+  [api-conventions](api-conventions.md#funktionen).
 - **Soft-Delete** (wenn aktiviert) — `soft_delete`, `restore`, `force_delete`;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -426,10 +434,15 @@ spezifischer.
 | `default` | `"sql literal"` | Spalten-DEFAULT |
 | `null` | Flag | nullable (oder verwende `Option<T>`) |
 | `unique` | Flag | Unique-Constraint |
+| `index` / `index(...)` | Flag, oder `unique`, `name`, `method` | Einspaltiger Index auf diesem Feld |
 | `choices` | `"v:Label, …"` | aufgezählte Werte |
 | `min` / `max` | Zahl | Bereichsvalidierung |
 | `blank` | Flag | Leereingabe in Formularen/Admin erlauben |
 | `editable` | `true`/`false` | Bearbeitbarkeit in Formular/Admin |
+| `verbose_name` | `"Label"` | Lesbare Feldbezeichnung in Formular/Admin |
+| `help_text` | `"…"` | Hilfetext unter dem Formular-/Admin-Widget |
+| `validators` | `"name, name"` | benannte Validatoren für dieses Feld |
+| `related_name` | `"posts"` | Name des Reverse-Accessors am FK-Ziel |
 | `auto_now` | Flag | bei jedem Speichern auf jetzt setzen |
 | `auto_now_add` | Flag | beim Einfügen auf jetzt setzen |
 | `auto_uuid` | Flag | Rust-seitiges UUID v4 (auf `Auto<Uuid>`) |

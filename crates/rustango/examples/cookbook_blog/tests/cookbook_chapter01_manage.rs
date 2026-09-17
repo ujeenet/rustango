@@ -143,3 +143,60 @@ fn settings_layer_resolves_env_overrides() {
         std::env::remove_var("RUSTANGO__DATABASE__POOL_MAX_SIZE");
     }
 }
+
+// §1.9 ────────────────────────────────────────────────────────────
+//
+// `#[rustango::main]` is what src/main.rs is annotated with, so this
+// binary existing at all is the "compiles" half. The "boots" half is
+// that the expanded `main` runs far enough to answer `--help`.
+#[test]
+fn main_macro_compiles_and_boots() {
+    let main_rs = std::fs::read_to_string(project_root().join("src/main.rs"))
+        .expect("src/main.rs is readable");
+    assert!(
+        main_rs.contains("#[rustango::main]"),
+        "§1.9 documents `#[rustango::main]` as the entry point, but \
+         src/main.rs does not use it:\n{main_rs}",
+    );
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_cookbook_blog"))
+        .arg("--help")
+        .output()
+        .expect("spawn cookbook_blog --help");
+    assert!(
+        out.status.success(),
+        "the `#[rustango::main]` binary should run `--help` successfully; \
+         got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+// §1.10 ───────────────────────────────────────────────────────────
+#[tokio::test]
+async fn welcome_page_renders_on_fresh_router() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    let app = rustango::welcome::welcome_router();
+    let resp = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .expect("welcome router answers GET /");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "§1.10 promises a welcome page at GET /",
+    );
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .expect("read welcome body");
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(
+        html.contains("rustango"),
+        "§1.10's welcome page should name the framework. Got:\n{html}",
+    );
+}

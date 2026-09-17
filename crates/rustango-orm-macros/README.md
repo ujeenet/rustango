@@ -17,7 +17,7 @@ The framework-only derives (`Serializer`, `ViewSet`, `Q!`, `#[rustango::main]`) 
 ```toml
 [dependencies]
 rustango-orm-macros = "0.57"
-# Until rustango-orm itself ships (issue #144), pull in `rustango` for the runtime:
+# There is no standalone `rustango-orm` runtime crate — pull in `rustango`:
 rustango = { version = "0.57", default-features = false, features = ["sqlite"] }
 ```
 
@@ -37,9 +37,11 @@ pub struct Post {
 
 ## Why a separate crate?
 
-The [orm-extract epic (#149)](https://github.com/ujeenet/rustango/issues/149) carves the rustango ORM out of the framework crate so projects that want Django-shaped models against an existing database can pull in the ORM bits without admin / tenancy / templates / auth / etc.
+The [orm-extract epic (#149)](https://github.com/ujeenet/rustango/issues/149) set out to carve the rustango ORM out of the framework crate, so projects wanting Django-shaped models against an existing database could pull in the ORM bits without admin / tenancy / templates / auth.
 
-This `rustango-orm-macros` crate is the first physical-move slice of that epic. Today it's a thin re-exporter over `rustango-macros`. Once [#144](https://github.com/ujeenet/rustango/issues/144) lands (the runtime carve-out), the proc-macro bodies migrate here and `rustango-macros` drops them — completing the split.
+**That epic is closed and the carve-out was deferred** — the runtime slice ([#144](https://github.com/ujeenet/rustango/issues/144)) is closed too, and no `rustango-orm` crate exists. The blocker is entanglement between m2m and signals/contenttypes, which cannot be split without taking those along.
+
+So this crate is what it is rather than a staging post: a thin re-exporter over `rustango-macros`, useful if you want to name the ORM macros separately. The proc-macro bodies are not migrating here.
 
 ## How proc-macro re-export works
 
