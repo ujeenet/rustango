@@ -230,6 +230,19 @@ open-ended.
 - Both decoders stopped treating a **signed** hex pair as an escape.
   `%+5` used to decode to byte `0x05`, because `u8::from_str_radix`
   accepts a leading sign. Only affects malformed input.
+- `MediaManager::purge` now **fails** when the storage object cannot be
+  deleted, instead of deleting the row and returning `Ok(())`. If your
+  scheduled `purge_orphans` starts returning an error, it is reporting a
+  storage failure it was previously hiding — check the `warn` lines,
+  which name the disk and key. The rows it could not purge stay
+  soft-deleted and are retried on the next sweep; the rest of the sweep
+  still runs. A disk missing from the `StorageRegistry` is now
+  `MediaError::UnknownDisk` rather than a silent skip.
+- `rustango::storage::async_trait` is re-exported, so implementing the
+  public `Storage` trait no longer needs `async-trait` in your own
+  `Cargo.toml`. The `media::async_trait` re-export is unchanged; it sits
+  behind the `admin` feature, which a crate implementing only `Storage`
+  may not have on.
 
 ### `on_delete` now reaches the database — on **new** databases only
 

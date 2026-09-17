@@ -115,6 +115,34 @@ exploitable?" answered honestly — including where the answer is no.
 
 ### Fixed
 
+- **`purge` reported access revoked after failing to revoke it**
+  (#1551 B). It threw away the result of the storage delete (`let _ =`),
+  behind an `if let Some(disk)` that skipped the delete entirely when
+  the disk was not registered — and then deleted the row either way,
+  returning `Ok(())`.
+
+  The row is the only record that the object exists: `orphans_older_than`
+  finds it by `deleted_at`, and nothing else stores the key. So a failed
+  delete left a live object no sweep would ever look for again, with
+  every presigned URL minted for it resolving until its TTL — while the
+  call that is documented as *the* revocation said it had succeeded.
+  `Storage::delete` is a no-op on a missing key, so an error there was
+  never a stale row.
+
+  `purge` now returns `UnknownDisk` or the `Storage` error and **leaves
+  the row in place**, so the next `purge_orphans` retries it.
+  `purge_orphans` in turn attempts every row before returning the first
+  failure, rather than stopping at it — one unreachable object used to
+  strand every orphan behind it on every future run. Each failure logs
+  at `warn` with its disk and key, and the run is summarised at `error`,
+  because the count purged does not survive the `Err`.
+
+- **`storage::async_trait`** — the macro is re-exported from `storage`
+  now, not only from `media` (where it is behind `admin`). Implementing
+  the public `Storage` trait needed `async-trait` in your own
+  `Cargo.toml`, at a version that could drift from the one the trait was
+  declared with.
+
 - **`on_delete` never reached the database** (#1549). Every declared
   `#[rustango(fk = "…", on_delete = "cascade")]` was dropped the moment
   a schema snapshot was built, because `RelationSnapshot` had no field
