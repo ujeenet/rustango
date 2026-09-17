@@ -10,6 +10,92 @@ The security pass. A review of `develop` at v0.57.6 produced 20 findings,
 every one traced to the code that implements it, with "is this currently
 exploitable?" answered honestly — including where the answer is no.
 
+### Security
+
+- **`media_router` served an unauthenticated, non-tenant-scoped media
+  API** (finding 01, High). Its 16 routes took no authentication,
+  authorization or tenant extractor — every handler was `State(manager)`
+  plus a path or body. An anonymous caller could `GET /media/{id}` for
+  the row **and a presigned S3 download URL**, walking the integer id
+  space to harvest signed links for the whole bucket; `DELETE
+  /media/{id}` by id with no ownership check; and `POST /uploads/begin`
+  to mint a presigned **PUT** for a caller-chosen disk and key prefix.
+  An integrator who copied the module's quick start shipped an open
+  bucket.
+
+  **`media_router` is deprecated and now refuses every request.** Build
+  the router with `media_router_with(manager, authorizer)` and supply a
+  `MediaAuthorizer`. This is a behaviour change on a patch release, and
+  it is the fail-closed direction deliberately.
+
+  ```rust
+  // before — served anyone who could reach it
+  .nest("/media", media_router(manager))
+  // after
+  .nest("/media", media_router_with(manager, MyPolicy))
+  ```
+
+  [UPGRADING.md](UPGRADING.md) has the full policy example. The router
+  needs the `admin` feature as well as `media`, and
+  `rustango::media::async_trait` is re-exported so implementing the
+  trait does not add a dependency.
+
+  A blanket `.layer(auth)` in front was never sufficient for a
+  multi-tenant deployment — no handler carried a tenant, so an
+  authenticated tenant-A user still read tenant B's row by id. The new
+  `MediaAction` names the target row so the decision can be made per
+  row.
+
+  The gate identifies that row through the new `MediaTarget`
+  (`Media(i64)` / `Collection(i64)` / `Tag(String)` / `NewUpload {}` /
+  `Listing`), and `MediaAction` splits into
+  `Read` / `Add` / `Change` / `Delete` to match the codenames used
+  elsewhere. The first cut of this API used a bare `Option<i64>`, and
+  review found three ways past it — all reproduced before fixing:
+
+  - `GET /media/%31` reached the authorizer with **no id** while the
+    handler decoded it and served row 1. Since the documented example
+    granted the no-id case (listings), copying the docs re-opened the
+    hole.
+  - `GET /tags/2024/media` handed `2024` over as an object id. A tag
+    slug is attacker-chosen, so that forged any id the policy trusted.
+  - `/collections/7` and `/media/7` were indistinguishable — one
+    integer, two tables.
+
+  Classification is now positional against the route table and
+  percent-decoded first, and an unrecognised shape is refused rather
+  than passed through. `url_codec::percent_decode_path` is the decoder:
+  path semantics, so `+` stays literal rather than becoming a space the
+  way the form-encoded `url_decode` does.
+
+  Review of the first cut found more, all reproduced before fixing:
+
+  - `/uploads/{id}/finalize` classified as a distinct `Upload(i64)`
+    target, but it mutates the **media row** of that id — one row
+    presented as two kinds. It is `Change(Media(id))` now, and
+    `MediaTarget::Upload` is gone.
+  - `?recursive` on a collection's contents reaches media in descendant
+    collections the policy was never asked about. It classifies as
+    `Listing`, not as a read of the one collection named.
+  - `HEAD` was refused on routes the policy allows, because axum maps
+    `HEAD` onto the `GET` handler and the gate matched `GET` only.
+  - `Arc<dyn MediaAuthorizer>` did not satisfy the constructor, so a
+    host could not pick its policy at runtime. There is a blanket impl.
+  - Both refusals now emit a `debug` tracing event naming the action, so
+    a misconfigured policy is debuggable without a debugger.
+
+- **`url_codec::percent_decode_path`** — path semantics (`%XX` only,
+  `+` left literal), for comparing a segment against what a router
+  decoded. `url_decode` keeps form semantics and is unchanged for that.
+
+- **Neither decoder treats a signed hex pair as an escape.** `%+5`
+  decoded to byte `0x05`, because `u8::from_str_radix` accepts a leading
+  sign — against the module's own documented contract. Malformed input
+  only.
+
+- **`media` no longer enables `_async_trait` redundantly** — `storage`,
+  which `media` already requires, enables it.
+
 ### Fixed
 
 - **`on_delete` never reached the database** (#1549). Every declared

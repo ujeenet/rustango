@@ -35,6 +35,7 @@ crates/rustango/examples/*/target/
 # be reached.)
 .claude/*
 !.claude/skills/
+!.claude/review/
 CLAUDE.md
 AGENTS.md
 .mcp.json
