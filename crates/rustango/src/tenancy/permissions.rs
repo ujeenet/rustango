@@ -277,11 +277,18 @@ pub async fn has_perm(uid: i64, codename: &str, pool: &PgPool) -> Result<bool, s
     has_perm_on(uid, codename, pool).await
 }
 
-/// v0.38 — tri-dialect counterpart of [`has_perm`]. Trades the single
-/// CTE round-trip for three ORM queries (user-info, explicit grant,
-/// role-via grant) — each an indexed lookup, total cost ≈ 3× the
-/// CTE in latency but portable across PG/MySQL/SQLite without
-/// dialect-specific `TRUE`/`FALSE` literals or array binding.
+/// v0.38 — tri-dialect counterpart of [`has_perm`]. **One round trip**:
+/// a single `SELECT` with four scalar subqueries (superuser, explicit
+/// denial, explicit grant, role-via grant), portable across
+/// PG/MySQL/SQLite without dialect-specific `TRUE`/`FALSE` literals or
+/// array binding.
+///
+/// This said "three ORM queries … ≈ 3× the CTE in latency" until 0.57.7.
+/// It was wrong in both halves, and it was load-bearing: `MediaPerms`
+/// costs one lookup per required codename, so anyone budgeting the gate
+/// from this docblock overstated it threefold. The backing tables carry
+/// `unique_together (user_id, codename)`, `(user_id, role_id)` and
+/// `(role_id, codename)`, so each subquery is an indexed lookup.
 ///
 /// Resolution order is identical to [`has_perm`]:
 /// 1. Superuser → true

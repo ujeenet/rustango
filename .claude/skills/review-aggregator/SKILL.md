@@ -91,7 +91,7 @@ in the background — seven separate context windows, each reading the diff thro
 Each gets the same shape of prompt:
 
 > Invoke the `review-<angle>` skill for run `<run-id>` in
-> `/Users/ievgeniisvyryd/projects/rustango`. Your brief is on the bus:
+> the repository root. Your brief is on the bus:
 > `.claude/review/bus.sh task <run-id> <angle>`. Follow that skill exactly — set your status,
 > file findings through the bus, answer your inbox, and report `done` when finished.
 > Do not edit any file outside `.claude/review/runs/<run-id>/`.
