@@ -54,10 +54,6 @@ fn builder_src() -> String {
     include_str!("../src/server/builder.rs").to_owned()
 }
 
-fn access_log_src() -> String {
-    include_str!("../src/access_log.rs").to_owned()
-}
-
 /// Drop `//` comments so a search sees code, not prose about code.
 ///
 /// String-aware. A naive `l.find("//")` also truncates at the `//`
