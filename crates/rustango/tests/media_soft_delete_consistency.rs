@@ -20,6 +20,12 @@ use rustango::sql::{Auto, Pool};
 use rustango::storage::{InMemoryStorage, StorageRegistry};
 
 async fn manager() -> MediaManager {
+    manager_with_pool().await.0
+}
+
+/// Same, but hands back the pool so a test can reach the database
+/// directly — needed to install a trigger that fails one statement.
+async fn manager_with_pool() -> (MediaManager, Pool) {
     // `min_connections(2)` is load-bearing, not arbitrary: it opens both
     // connections eagerly, so a seed on one and a read on the other
     // would fail loudly if `sqlite::memory:` did not share a single
@@ -39,7 +45,10 @@ async fn manager() -> MediaManager {
     let registry = StorageRegistry::new()
         .set("default", Arc::new(InMemoryStorage::new()))
         .with_default("default");
-    MediaManager::new_pool(pool_enum, registry)
+    (
+        MediaManager::new_pool(pool_enum.clone(), registry),
+        pool_enum,
+    )
 }
 
 async fn seed(mgr: &MediaManager, collection_id: Option<i64>) -> rustango::media::Media {
@@ -305,3 +314,67 @@ async fn a_deep_subtree_is_deleted_at_every_level() {
 // MySQL 8 and SQLite, and by symmetry with `purge` above, which is
 // tested. That `InMemoryStorage` cannot reach the upload-ticket path at
 // all is a coverage hole of its own, recorded on #1548.
+
+/// A failed collection delete must not leave the media orphaned.
+///
+/// `delete_collection` is orphan-then-soft-delete. Run as two separate
+/// statements, a failure of the second left the first committed: the
+/// collection still live, every media row under it orphaned, and the
+/// previous `collection_id` recorded nowhere. No undo, no log line, and
+/// nothing in the error saying the orphaning had already happened — so
+/// a retry "succeeds" with the association permanently gone. Any
+/// mid-request blip does it: a failover, a lock timeout, a reset
+/// connection.
+///
+/// The trigger fires on `UPDATE OF deleted_at` specifically. A cruder
+/// break — renaming the collections table — makes the call fail at
+/// `collect_descendant_ids`, which reads that same table, so the
+/// orphaning never runs and the test passes while proving nothing.
+#[tokio::test]
+async fn a_failed_collection_delete_orphans_nothing() {
+    let (mgr, pool) = manager_with_pool().await;
+    let c = mgr
+        .create_collection("Doomed", "doomed", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    let inside = seed(&mgr, Some(cid)).await;
+
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "CREATE TRIGGER fail_soft_delete \
+         BEFORE UPDATE OF deleted_at ON rustango_media_collections \
+         BEGIN SELECT RAISE(ABORT, 'simulated failure'); END",
+        Vec::new(),
+    )
+    .await
+    .expect("install trigger");
+
+    let err = mgr.delete_collection(cid).await;
+    assert!(
+        err.is_err(),
+        "control: the delete must fail, or this test proves nothing"
+    );
+
+    // The orphaning is the first statement. Without a transaction it has
+    // already committed by the time the second one fails.
+    let after = mgr
+        .get(id_of(&inside))
+        .await
+        .expect("get media")
+        .expect("media row still exists");
+    assert_eq!(
+        after.collection_id,
+        Some(cid),
+        "the delete failed but the media was already orphaned — its previous \
+         collection_id is recorded nowhere, so this is unrecoverable and a retry \
+         cannot restore it"
+    );
+    assert!(
+        mgr.get_collection(cid).await.expect("get").is_some(),
+        "control: the collection should still be live after a failed delete"
+    );
+}

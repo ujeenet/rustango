@@ -10,9 +10,10 @@
 //! ## Quick start
 //!
 //! ```ignore
-//! use rustango::media::{Media, MediaManager};
+//! use rustango::media::{MediaManager, SaveOpts};
 //! use rustango::storage::StorageRegistry;
 //! use std::sync::Arc;
+//! use std::time::Duration;
 //!
 //! // Tables come from the framework's system migrations (run during
 //! // provisioning / `migrate_framework`) — no per-boot table bootstrap.
@@ -21,7 +22,10 @@
 //!     .set("avatars", Arc::new(s3_storage))
 //!     .with_default("avatars");
 //!
-//! let manager = MediaManager::new(pool.clone(), registry);
+//! // `new_pool` takes `sql::Pool` and works on all three backends.
+//! // `MediaManager::new` is Postgres-only and takes a `PgPool` — it is
+//! // the one member of this API that is not portable.
+//! let manager = MediaManager::new_pool(pool.clone(), registry);
 //!
 //! // Server-side save (small files):
 //! let media = manager.save_bytes(SaveOpts {
@@ -31,6 +35,7 @@
 //!     mime: "image/png".into(),
 //!     original_filename: "alice.png".into(),
 //!     uploaded_by_id: Some(42),
+//!     collection_id: None,
 //!     metadata: serde_json::json!({}),
 //! }).await?;
 //!
@@ -38,9 +43,16 @@
 //! let url = manager.url(&media);                  // CDN-aware
 //! let download = manager.presigned_get(&media, Duration::from_secs(3600)).await;
 //!
-//! // Delete row + storage object via post_delete signal:
+//! // Soft-delete the row. The storage object survives, so a presigned
+//! // URL minted before this keeps working until its TTL expires —
+//! // `purge` is what actually revokes access.
 //! manager.delete(&media).await?;
 //! ```
+//!
+//! The REST router over this surface lives in [`router`] and needs the
+//! `admin` feature. It requires an authorization policy: `media_router`
+//! is deprecated and answers `403` to everything, and
+//! `router::media_router_with` takes a [`router::MediaAuthorizer`].
 //!
 //! ## Schema
 //!
@@ -574,9 +586,15 @@ impl MediaManager {
         Ok(())
     }
 
-    /// Hard-delete: remove the storage object AND the row. Use for
-    /// "I'm sure I want this gone right now" — typically called by
-    /// the post_delete signal once `delete()` has soft-deleted.
+    /// Hard-delete: remove the storage object, the row's tag links, AND
+    /// the row. Use for "I'm sure I want this gone right now" —
+    /// typically called by the post_delete signal once `delete()` has
+    /// soft-deleted.
+    ///
+    /// This is also the call that actually **revokes** access:
+    /// `delete()` only soft-deletes, so a presigned URL minted before
+    /// it keeps working until its TTL expires. The storage object has
+    /// to go for the credential to stop resolving.
     pub async fn purge(&self, m: &Media) -> Result<(), MediaError> {
         let id = match m.id {
             Auto::Set(v) => v,
@@ -683,37 +701,68 @@ impl MediaManager {
     pub async fn purge_pending(&self, older_than: Duration) -> Result<u64, MediaError> {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
-        let p = self.pool.dialect().placeholder(1);
+        let d = self.pool.dialect();
+        let p = d.placeholder(1);
+
+        // Resolve the victims **once**, then act on those ids.
+        //
+        // Two statements each re-selecting `status = 'pending'` is not
+        // equivalent, and the difference is destructive: a row that
+        // finalizes between them has its tag links deleted by the first
+        // and is then skipped by the second. The result is a live,
+        // finalized media row with every tag stripped — and the call
+        // returns `Ok(0)`, "nothing purged", so a scheduled sweep
+        // logging a clean run is indistinguishable from one that just
+        // did that.
+        //
+        // A transaction alone does not fix it, because the second
+        // statement would still re-evaluate `status` inside the
+        // transaction. Capturing the ids is what makes the two
+        // statements agree about which rows they mean; the transaction
+        // on top is what makes them atomic.
+        let select_sql = format!(
+            "SELECT id FROM rustango_media \
+              WHERE status = 'pending' AND uploaded_at < {p}"
+        );
+        let victims: Vec<(i64,)> = crate::sql::raw_query_pool(
+            &select_sql,
+            vec![crate::core::SqlValue::DateTime(cutoff)],
+            &self.pool,
+        )
+        .await
+        .map_err(media_err_from_exec)?;
+        let ids: Vec<i64> = victims.into_iter().map(|(id,)| id).collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| d.placeholder(i)).collect();
+        let in_list = placeholders.join(", ");
+        let binds: Vec<crate::core::SqlValue> = ids
+            .iter()
+            .copied()
+            .map(crate::core::SqlValue::I64)
+            .collect();
+
+        let mut tx = crate::sql::transaction_pool(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+
         // Links first, same as `purge` — `rustango_media_tag_links`
         // carries no foreign key on `media_id`, so a hard delete of the
         // media row leaves them behind with nothing to reclaim them. A
         // Pending row can carry tags: `set_tags` accepts any media id.
-        //
-        // The subquery reads `rustango_media` while deleting from
-        // `rustango_media_tag_links` — different tables, so MySQL's
-        // "can't reopen the delete target" restriction does not apply.
-        let unlink_sql = format!(
-            "DELETE FROM rustango_media_tag_links \
-              WHERE media_id IN ( \
-                    SELECT id FROM rustango_media \
-                     WHERE status = 'pending' AND uploaded_at < {p})"
-        );
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &unlink_sql,
-            vec![crate::core::SqlValue::DateTime(cutoff)],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
-        let sql =
-            format!("DELETE FROM rustango_media WHERE status = 'pending' AND uploaded_at < {p}");
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &sql,
-            vec![crate::core::SqlValue::DateTime(cutoff)],
-        )
-        .await
-        .map_err(media_err_from_exec)
+        let unlink_sql =
+            format!("DELETE FROM rustango_media_tag_links WHERE media_id IN ({in_list})");
+        crate::sql::raw_execute_tx(&mut tx, &unlink_sql, binds.clone())
+            .await
+            .map_err(media_err_from_exec)?;
+        let sql = format!("DELETE FROM rustango_media WHERE id IN ({in_list})");
+        let n = crate::sql::raw_execute_tx(&mut tx, &sql, binds)
+            .await
+            .map_err(media_err_from_exec)?;
+        tx.commit().await?;
+        Ok(n)
     }
 
     // =================================================================
@@ -920,12 +969,28 @@ impl MediaManager {
             .map(crate::core::SqlValue::I64)
             .collect();
 
+        // Both statements in one transaction. They are orphan-then-
+        // soft-delete, and run separately a failure of the second left
+        // the first committed: the collection still live, every media
+        // row under it orphaned, and the previous `collection_id`
+        // recorded nowhere. No undo, no log line, and nothing in the
+        // error saying the orphaning had already happened — a retry
+        // then "succeeds" with the association permanently gone.
+        //
+        // Any mid-request blip does that: a failover, a lock timeout, a
+        // reset connection. Both statements are database-only, with no
+        // external side effect to strand, so a transaction closes it
+        // completely.
+        let mut tx = crate::sql::transaction_pool(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+
         // Media survives, as documented — it is orphaned, not deleted.
         let orphan_sql = format!(
             "UPDATE rustango_media SET collection_id = NULL \
               WHERE collection_id IN ({in_list})"
         );
-        crate::sql::raw_execute_pool(&self.pool, &orphan_sql, binds.clone())
+        crate::sql::raw_execute_tx(&mut tx, &orphan_sql, binds.clone())
             .await
             .map_err(media_err_from_exec)?;
 
@@ -950,9 +1015,10 @@ impl MediaManager {
         );
         let mut del_binds = vec![crate::core::SqlValue::DateTime(Utc::now())];
         del_binds.extend(ids.iter().copied().map(crate::core::SqlValue::I64));
-        crate::sql::raw_execute_pool(&self.pool, &soft_delete_sql, del_binds)
+        crate::sql::raw_execute_tx(&mut tx, &soft_delete_sql, del_binds)
             .await
             .map_err(media_err_from_exec)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -983,6 +1049,13 @@ impl MediaManager {
 
     /// List media in `collection_id`. When `recursive`, descends into
     /// every nested collection.
+    ///
+    /// **Returns at most [`DEFAULT_LIST_CAP`] rows** (100). Before
+    /// 0.57.7 this emitted no `LIMIT` at all, so the row count was set
+    /// by how much media the deployment held rather than by anything
+    /// the server controlled. The signature is unchanged, so nothing
+    /// will tell a caller that relied on getting everything — use
+    /// [`Self::list_in_collection_paged`] to choose the page.
     pub async fn list_in_collection(
         &self,
         collection_id: i64,
