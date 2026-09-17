@@ -155,7 +155,10 @@ impl MediaStatus {
 /// `#[rustango(index)]` attr can't express — behavior-equivalent for
 /// correctness.
 #[derive(crate::Model, Debug, Clone)]
-#[rustango(table = "rustango_media", index("disk, storage_key"))]
+// `permissions` so `auto_create_permissions` seeds
+// `rustango_media.{add,change,delete,view}` — the codenames
+// `router::MediaPerms` checks. Not a column, so no migration.
+#[rustango(table = "rustango_media", index("disk, storage_key"), permissions)]
 pub struct Media {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

@@ -163,6 +163,39 @@ if you skip the rest.
 |---|---|
 | **`media_router` is deprecated and now refuses every request with `403`.** Build the router with `media_router_with(manager, authorizer)` and supply a `MediaAuthorizer`. | Grep for `media_router(`. You get a **deprecation warning, not an error** — `cargo build` still succeeds, so a noisy build carries this to production, where the symptom is every media route answering 403. This is deliberate: the constructor used to mount 16 routes that took no authentication, authorization or tenant extractor at all, so the alternative was leaving an open bucket open. |
 
+**The shortest fix, with the `tenancy` feature on**, is the shipped
+policy — reach for it before writing a trait impl:
+
+```rust
+use rustango::media::router::{media_router_with, MediaPerms};
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+```
+
+`MediaPerms` checks the `{table}.{action}` permission codenames the
+admin already uses: `rustango_media.view` to read a row or a listing,
+`rustango_media.add` for an upload ticket,
+`rustango_media_collections.add` / `rustango_media_tags.add` for the two
+creates, `rustango_media.change` / `.delete` for the media row. Deleting
+a collection needs **both** `rustango_media_collections.delete` and
+`rustango_media.change`, because that route re-parents every media row
+underneath it. Superusers skip the check.
+
+Mount it inside `require_auth` (or `optional_auth`) — that middleware is
+what injects the `AuthenticatedUser` it reads. Without it every request
+is a `401`, which is the symptom naming its own cause.
+
+Two things to know before you rely on it. The codenames are seeded by
+`auto_create_permissions`, which runs during provisioning and on
+migrate; an app upgrading into this can re-seed without a migrate cycle
+with the `seed-permissions` manage command. And it is **table-level, not
+row-level**: `rustango_media.view` grants reading *any* media row by id,
+so a multi-tenant deployment still scopes rows in its own
+`MediaAuthorizer`. `MediaPerms` is the floor.
+
+Write the trait impl when you need per-row decisions:
+
 ```rust
 // before (0.57.6) — served anyone who could reach it
 let app = axum::Router::new()
