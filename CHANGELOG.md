@@ -48,7 +48,8 @@ exploitable?" answered honestly — including where the answer is no.
 
   The gate identifies that row through the new `MediaTarget`
   (`Media(i64)` / `Collection(i64)` / `CollectionSubtree(i64)` /
-  `Tag(String)` / `NewUpload {}` / `NewCollection {}` / `NewTag {}` /
+  `Tag(String)` / `NewUpload { disk, key_prefix, … }` /
+  `NewCollection {}` / `NewTag {}` /
   `Listing`), and `MediaAction` splits into
   `Read` / `Add` / `Change` / `Delete` to match the codenames used
   elsewhere. The first cut of this API used a bare `Option<i64>`, and
@@ -129,6 +130,29 @@ exploitable?" answered honestly — including where the answer is no.
   of `rustango_media.view` reads *any* media row by id, and a
   multi-tenant deployment still scopes rows in its own
   `MediaAuthorizer`. `MediaPerms` is the floor, not the ceiling.
+
+  **The upload ticket's `disk` and `key_prefix` reach the policy now**
+  (#1546). `POST /uploads/begin` mints a presigned `PUT` for a disk and
+  key prefix the *caller* chooses, and both live in the body — which the
+  gate never read, so `Add(NewUpload)` carried nothing and granting it
+  meant "write anywhere in any bucket, attributed to anyone".
+  `NewUpload` now carries `disk`, `key_prefix`, `collection_id` and
+  `uploaded_by_id`, so a policy can allow-list a disk or pin a prefix
+  per tenant:
+
+  ```rust
+  MediaAction::Add(MediaTarget::NewUpload { disk, key_prefix, .. }) => {
+      disk == "user-uploads" && key_prefix.starts_with(&user.prefix())
+  }
+  ```
+
+  They are **unvalidated caller input**, not facts, and a body that does
+  not parse arrives as empty strings rather than a `400` — the gate
+  decides authorization, the handler decides validity, in that order. It
+  is the only route whose body the gate reads, capped at 16 KiB: an
+  upload-ticket body is a few hundred bytes, and buffering an unbounded
+  one inside an authorization layer would make the gate itself the place
+  to send a server a large request. A body over the cap is refused.
 
   A fourth round sharpened the gate's vocabulary, both prerequisites for
   that policy:

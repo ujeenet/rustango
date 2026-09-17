@@ -434,7 +434,14 @@ async fn the_whole_route_table_reaches_the_gate_correctly() {
     // can match it but cannot build one. Debug distinguishes every
     // variant and id, which is all this table needs.
     let cases: &[(&str, &str, &str)] = &[
-        ("POST", "/uploads/begin", "Add(NewUpload)"),
+        // These cases send no body, so the upload detail is all
+        // defaults. That the fields *are* carried when a body is
+        // present is `the_policy_sees_the_disk_and_prefix_it_is_asked_to_allow`.
+        (
+            "POST",
+            "/uploads/begin",
+            r#"Add(NewUpload { disk: "", key_prefix: "", collection_id: None, uploaded_by_id: None })"#,
+        ),
         // Finalize mutates the media row it names — same row, so a
         // `Media` target, not a kind of its own.
         ("POST", "/uploads/7/finalize", "Change(Media(7))"),
@@ -1405,5 +1412,239 @@ async fn a_bare_false_is_still_403_not_401() {
         "`false.into()` produced a 401. A bare boolean carries no information about \
          whether a principal existed, so reading 401 out of it invites the refresh \
          loop the variant exists to avoid"
+    );
+}
+
+// =====================================================================
+// The upload ticket's disk and key prefix reach the policy
+// =====================================================================
+//
+// `POST /uploads/begin` mints a presigned PUT for a disk and key prefix
+// the **caller** chooses, and both live in the body. The gate never
+// read a body, so `Add(NewUpload)` carried nothing and a grant of it
+// meant "write anywhere in any bucket" — not a decision anyone intended
+// to make. It is the only route whose body the gate reads.
+
+/// Records the `NewUpload` target it is handed, and allows.
+struct UploadRecorder(Arc<std::sync::Mutex<Vec<String>>>);
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for UploadRecorder {
+    async fn authorize(
+        &self,
+        _: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
+        self.0.lock().unwrap().push(format!("{action:?}"));
+        MediaDecision::Allow
+    }
+}
+
+async fn upload_seen(body: &str) -> String {
+    let mgr = manager().await;
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = media_router_with(mgr, UploadRecorder(Arc::clone(&log)));
+    let _ = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/uploads/begin")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    let seen = log.lock().unwrap().clone();
+    seen.join(" | ")
+}
+
+#[tokio::test]
+async fn the_policy_sees_the_disk_and_prefix_it_is_asked_to_allow() {
+    let seen = upload_seen(
+        r#"{"disk":"public-cdn","key_prefix":"tenant-9/","mime":"text/plain",
+            "original_filename":"x.txt","size_bytes":1,
+            "collection_id":4,"uploaded_by_id":77}"#,
+    )
+    .await;
+
+    for expected in [
+        r#"disk: "public-cdn""#,
+        r#"key_prefix: "tenant-9/""#,
+        "collection_id: Some(4)",
+        "uploaded_by_id: Some(77)",
+    ] {
+        assert!(
+            seen.contains(expected),
+            "the gate did not hand the policy `{expected}` — without it a grant of \
+             `Add(NewUpload)` means 'write anywhere in any bucket, attributed to \
+             anyone'. Saw: {seen}"
+        );
+    }
+}
+
+/// Which is only useful if a policy can act on it.
+struct OnlyOneDisk;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for OnlyOneDisk {
+    async fn authorize(
+        &self,
+        _: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
+        matches!(
+            action,
+            MediaAction::Add(MediaTarget::NewUpload { ref disk, ref key_prefix, .. })
+                if disk == "default" && key_prefix.starts_with("tenant-1/")
+        )
+        .into()
+    }
+}
+
+#[tokio::test]
+async fn a_policy_can_allow_list_the_disk_and_prefix() {
+    let mgr = manager().await;
+    let app = media_router_with(mgr, OnlyOneDisk);
+
+    let ticket = |disk: &str, prefix: &str| {
+        format!(
+            r#"{{"disk":"{disk}","key_prefix":"{prefix}","mime":"text/plain",
+                "original_filename":"x.txt","size_bytes":1}}"#
+        )
+    };
+
+    let allowed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/uploads/begin")
+                .header("content-type", "application/json")
+                .body(Body::from(ticket("default", "tenant-1/")))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    assert_ne!(
+        allowed.status(),
+        StatusCode::FORBIDDEN,
+        "control: the allow-listed disk and prefix must get past the gate, or the \
+         refusal below proves nothing"
+    );
+
+    for (disk, prefix, why) in [
+        ("default", "tenant-2/", "another tenant's key prefix"),
+        (
+            "private-backups",
+            "tenant-1/",
+            "a disk the policy never allowed",
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/uploads/begin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(ticket(disk, prefix)))
+                    .unwrap(),
+            )
+            .await
+            .expect("router answers");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "the gate minted a presigned PUT for {why} ({disk} / {prefix})"
+        );
+    }
+}
+
+/// A body the gate cannot parse is still an upload request.
+///
+/// Authorization is decided before validation. If the gate answered
+/// `400` here it would be ruling on the body's shape before anyone had
+/// been asked whether the caller may be on this route at all — and a
+/// refusal that leaks "this route exists and your JSON is wrong" is a
+/// worse answer than one that does not.
+#[tokio::test]
+async fn a_malformed_body_reaches_the_policy_rather_than_400ing() {
+    let seen = upload_seen("not json at all").await;
+    assert!(
+        seen.contains("NewUpload"),
+        "a malformed body never reached the policy: {seen}"
+    );
+    assert!(
+        seen.contains(r#"disk: """#),
+        "an unparseable body should arrive as empty fields, not as something \
+         invented: {seen}"
+    );
+}
+
+/// The gate buffers that body, so the size it will buffer is bounded.
+#[tokio::test]
+async fn an_oversized_upload_body_is_refused_not_buffered() {
+    let mgr = manager().await;
+    let app = media_router_with(mgr, AllowAll);
+
+    // Well past the gate's 16 KiB cap, and valid JSON, so the refusal
+    // cannot be mistaken for a parse failure.
+    let huge = format!(
+        r#"{{"disk":"default","key_prefix":"{}","mime":"text/plain",
+            "original_filename":"x.txt","size_bytes":1}}"#,
+        "a".repeat(64 * 1024)
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/uploads/begin")
+                .header("content-type", "application/json")
+                .body(Body::from(huge))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a 64 KiB upload-ticket body was accepted. The gate buffers this route's \
+         body to classify it, so an unbounded one would make the authorization \
+         layer itself the place to send a server a large request"
+    );
+}
+
+/// Every other route streams through untouched — the gate reads one
+/// body, not all of them.
+#[tokio::test]
+async fn no_other_route_has_its_body_buffered() {
+    let mgr = manager().await;
+    let id = seed(&mgr).await;
+    let app = media_router_with(mgr, AllowAll);
+
+    // Far over the gate's cap, on a route whose body it must not read.
+    // If the cap were applied here this would be refused.
+    let huge = format!(r#"{{"slugs":["{}"]}}"#, "a".repeat(64 * 1024));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/media/{id}/tags"))
+                .header("content-type", "application/json")
+                .body(Body::from(huge))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a route the gate does not need a body for was refused for its body's size, \
+         so the buffering is not confined to `/uploads/begin`"
     );
 }
