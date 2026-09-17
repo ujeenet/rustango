@@ -27,11 +27,33 @@ on:
       - develop
       - '**release**'
       - '**Release**'
-  # Every PR reaches the workflow; the `gate` job below decides whether
-  # the matrix actually runs. `labeled` is in the list so adding the
-  # opt-in label to an open PR starts a run immediately, rather than
-  # waiting for the next push.
+  # Only PRs **into** an integration branch reach the workflow.
+  #
+  # `branches:` filters on the *base*, so this is "where is it going",
+  # not "where did it come from". A PR into a feature branch — stacking
+  # work, a review split, someone's scratch base — now runs nothing at
+  # all, where before every PR in the repo pulled the ungated jobs
+  # (`fmt`, `clippy`, `guards`, `doc`, `deny`, `deny-examples`,
+  # `lockfiles`, `trivy`). Those are minutes each and were being spent
+  # on merges that cannot reach `main` without a second PR that runs
+  # them again.
+  #
+  # The globs match the `push:` list above deliberately: a branch worth
+  # a post-merge run is a branch worth checking the PR into it.
+  #
+  # Once a PR *does* reach the workflow, the `gate` job below decides
+  # whether the expensive matrix runs on top of the ungated jobs.
+  # `labeled` is in `types:` so adding the opt-in label to an open PR
+  # starts a run immediately rather than waiting for the next push.
+  #
+  # Checking a feature branch that no such PR covers: `workflow_dispatch`
+  # below, or open the PR into its real base.
   pull_request:
+    branches:
+      - main
+      - develop
+      - '**release**'
+      - '**Release**'
     types: [opened, synchronize, reopened, labeled]
   # Lets a run be triggered by hand against any branch, without
   # inventing a no-op commit or opening a throwaway PR — useful for
