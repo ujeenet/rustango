@@ -614,3 +614,199 @@ async fn a_boxed_authorizer_can_be_mounted() {
         .expect("router answers");
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+// =====================================================================
+// Presigned URLs are bearer credentials, so nothing may cache them.
+//
+// RFC 9111 §3.5 keeps a shared cache off a response whose request
+// carried `Authorization`, and says nothing about `Cookie` — while the
+// authorizer this module documents is cookie/session shaped. A 200 GET
+// with no explicit freshness is heuristically cacheable (§4.2.2), and
+// with no `Vary` the cache key is method plus URI. So a CDN in front of
+// a cookie-authenticated deployment could serve one user's signed link
+// to the next caller of the same URI.
+// =====================================================================
+
+fn cache_control(resp: &axum::http::Response<Body>) -> String {
+    header_of(resp, axum::http::header::CACHE_CONTROL)
+}
+
+fn header_of(resp: &axum::http::Response<Body>, name: axum::http::HeaderName) -> String {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("<absent>")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn a_served_media_row_is_never_cached() {
+    let mgr = manager().await;
+    let id = seed(&mgr).await;
+    let app = media_router_with(mgr, AllowAll);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+
+    assert_eq!(resp.status(), StatusCode::OK, "control: the row must serve");
+    assert_eq!(
+        cache_control(&resp),
+        "no-store",
+        "this body can carry a presigned URL — a bearer credential valid to anyone \
+         holding it. Without a directive a shared cache may store it and replay it \
+         to a different user."
+    );
+}
+
+/// Every route, not just the ones that embed a signature today.
+#[tokio::test]
+async fn the_whole_surface_is_uncacheable() {
+    let cases = [
+        ("GET", "/collections"),
+        ("GET", "/tags"),
+        ("GET", "/tags/popular"),
+        ("GET", "/collections/1/contents"),
+        ("GET", "/tags/blue/media"),
+    ];
+    let mut missing = Vec::new();
+    for (method, uri) in cases {
+        let mgr = manager().await;
+        let _ = seed(&mgr).await;
+        let app = media_router_with(mgr, AllowAll);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router answers");
+        let cc = cache_control(&resp);
+        if cc != "no-store" {
+            missing.push(format!("{method} {uri} -> {cc}"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these responses are cacheable, and a route added later must not be able to \
+         opt out silently:\n  {}",
+        missing.join("\n  ")
+    );
+}
+
+/// The refusal path too — a cached 403 is its own bug.
+#[tokio::test]
+async fn a_refusal_is_not_cached_either() {
+    let mgr = manager().await;
+    let id = seed(&mgr).await;
+    #[allow(deprecated)]
+    let app = rustango::media::router::media_router(mgr);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        cache_control(&resp),
+        "no-store",
+        "a cached 403 would outlive the policy decision that produced it"
+    );
+}
+
+/// `Vary` as well, because the two headers are different instructions.
+///
+/// `no-store` asks a cache not to store; `Vary` changes the cache key,
+/// which compels it. That matters because the deployment this defends
+/// against — a CDN in front of a cookie-authenticated app — is exactly
+/// where overriding origin directives is routine (nginx
+/// `proxy_ignore_headers Cache-Control`, Cloudflare "Cache Everything").
+/// Ignoring `Vary` takes a separate, deliberate second step.
+#[tokio::test]
+async fn a_presigned_response_varies_on_the_credential() {
+    let mgr = manager().await;
+    let id = seed(&mgr).await;
+    let app = media_router_with(mgr, AllowAll);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+
+    let vary = header_of(&resp, axum::http::header::VARY);
+    assert!(
+        vary.contains("Cookie"),
+        "no `Vary: Cookie`, so a shared cache keys on method+URI alone. \
+         `no-store` only asks; this is what compels. Got {vary:?}"
+    );
+    assert!(
+        vary.contains("Authorization"),
+        "`Vary` omits Authorization, so a bearer-authenticated deployment is \
+         keyed the same way for every caller. Got {vary:?}"
+    );
+}
+
+/// The mutating and error routes my first pass did not cover.
+///
+/// `POST /uploads/begin` is the one that most needed checking — it
+/// returns the presigned **PUT**.
+#[tokio::test]
+async fn the_write_and_error_routes_are_uncacheable_too() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("POST", "/uploads/begin", "{}"),
+        ("POST", "/uploads/1/finalize", ""),
+        ("DELETE", "/media/1", ""),
+        ("DELETE", "/collections/1", ""),
+        ("DELETE", "/media/1/tags/blue", ""),
+        ("POST", "/media/1/move", r#"{"collection_id":null}"#),
+        ("POST", "/collections", "not json at all"),
+        ("GET", "/media/999999", ""),
+    ];
+    let mut missing = Vec::new();
+    for (method, uri, body) in cases {
+        let mgr = manager().await;
+        let _ = seed(&mgr).await;
+        let app = media_router_with(mgr, AllowAll);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(*method)
+                    .uri(*uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(*body))
+                    .unwrap(),
+            )
+            .await
+            .expect("router answers");
+        let cc = cache_control(&resp);
+        if cc != "no-store" {
+            missing.push(format!("{method} {uri} -> {} / {cc}", resp.status()));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these responses are cacheable — the status does not matter, a route that \
+         can ever carry a credential must never be stored:\n  {}",
+        missing.join("\n  ")
+    );
+}

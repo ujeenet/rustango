@@ -341,62 +341,142 @@ fn classify(method: &axum::http::Method, path: &str, query: Option<&str>) -> Opt
 /// code.
 pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: A) -> Router {
     let auth = Arc::new(authorizer);
-    media_routes(manager).layer(axum::middleware::from_fn(
-        move |req: axum::extract::Request, next: axum::middleware::Next| {
-            let auth = Arc::clone(&auth);
-            async move {
-                let (parts, body) = req.into_parts();
-                // No classification means no route in this table matches
-                // (or an id that cannot be a row id). Refuse: passing an
-                // unrecognised shape through is how a gate is walked
-                // around.
-                //
-                // Mounted at the root this also covers the fallback, so
-                // a probe gets 403 instead of a 404 that maps the
-                // surface. Mounted with `nest` — which is what the
-                // quick start recommends — it does not: `nest` keeps
-                // the outer router's fallback, so an unmatched path
-                // under the prefix 404s before reaching here. Nothing
-                // is served either way; the difference is only how much
-                // an unauthenticated prober can infer.
-                let Some(action) = classify(&parts.method, parts.uri.path(), parts.uri.query())
-                else {
-                    tracing::debug!(
-                        target: "rustango::media::auth",
-                        method = %parts.method,
-                        path = %parts.uri.path(),
-                        "refused: no route in the media table matches"
-                    );
-                    return (
-                        StatusCode::FORBIDDEN,
-                        Json(serde_json::json!({ "error": "not a recognised media operation" })),
-                    )
-                        .into_response();
-                };
-                if !auth.authorize(&parts, action.clone()).await {
-                    // `debug`, so it costs nothing in production. Without
-                    // it a subtly-wrong policy is only debuggable by
-                    // instrumenting inside the integrator's own impl.
-                    tracing::debug!(
-                        target: "rustango::media::auth",
-                        ?action,
-                        method = %parts.method,
-                        path = %parts.uri.path(),
-                        "refused by the authorization policy"
-                    );
-                    return (
-                        StatusCode::FORBIDDEN,
-                        Json(serde_json::json!({
-                            "error": "not authorized for this media operation"
-                        })),
-                    )
-                        .into_response();
+    media_routes(manager)
+        .layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let auth = Arc::clone(&auth);
+                async move {
+                    let (parts, body) = req.into_parts();
+                    // No classification means no route in this table matches
+                    // (or an id that cannot be a row id). Refuse: passing an
+                    // unrecognised shape through is how a gate is walked
+                    // around.
+                    //
+                    // Mounted at the root this also covers the fallback, so
+                    // a probe gets 403 instead of a 404 that maps the
+                    // surface. Mounted with `nest` — which is what the
+                    // quick start recommends — it does not: `nest` keeps
+                    // the outer router's fallback, so an unmatched path
+                    // under the prefix 404s before reaching here. Nothing
+                    // is served either way; the difference is only how much
+                    // an unauthenticated prober can infer.
+                    let Some(action) = classify(&parts.method, parts.uri.path(), parts.uri.query())
+                    else {
+                        tracing::debug!(
+                            target: "rustango::media::auth",
+                            method = %parts.method,
+                            path = %parts.uri.path(),
+                            "refused: no route in the media table matches"
+                        );
+                        return (
+                            StatusCode::FORBIDDEN,
+                            Json(
+                                serde_json::json!({ "error": "not a recognised media operation" }),
+                            ),
+                        )
+                            .into_response();
+                    };
+                    if !auth.authorize(&parts, action.clone()).await {
+                        // `debug`, so it costs nothing in production. Without
+                        // it a subtly-wrong policy is only debuggable by
+                        // instrumenting inside the integrator's own impl.
+                        tracing::debug!(
+                            target: "rustango::media::auth",
+                            ?action,
+                            method = %parts.method,
+                            path = %parts.uri.path(),
+                            "refused by the authorization policy"
+                        );
+                        return (
+                            StatusCode::FORBIDDEN,
+                            Json(serde_json::json!({
+                                "error": "not authorized for this media operation"
+                            })),
+                        )
+                            .into_response();
+                    }
+                    next.run(axum::extract::Request::from_parts(parts, body))
+                        .await
                 }
-                next.run(axum::extract::Request::from_parts(parts, body))
-                    .await
-            }
-        },
-    ))
+            },
+        ))
+        // Outermost, so it also covers the gate's own early 403s — the
+        // last `.layer` wraps the ones before it. Applied inside the
+        // gate, a refusal returned before ever reaching this.
+        .layer(axum::middleware::from_fn(no_store))
+}
+
+/// `Cache-Control: no-store` and `Vary` on every response.
+///
+/// These routes hand out **presigned URLs** — short-lived bearer
+/// credentials, valid for anyone holding them until the TTL expires.
+/// Without a directive, a 200 `GET` with no explicit freshness is
+/// heuristically cacheable (RFC 9111 §4.2.2), and with no `Vary` the
+/// cache key is method plus URI.
+///
+/// That matters because RFC 9111 §3.5 keeps a shared cache off a
+/// response whose request carried `Authorization`, and says **nothing
+/// about `Cookie`** — while the authorizer this module documents is
+/// cookie/session shaped. A CDN in front of such a deployment could
+/// store one user's signed link and serve it to the next caller of the
+/// same URI.
+///
+/// Applied to the whole surface rather than only the routes that embed
+/// a signature today, so a route added later cannot quietly opt out.
+/// `no-store` rather than `private`: `private` still permits a browser
+/// cache to keep the credential on disk.
+///
+/// # Scope
+///
+/// This covers the JSON **carrying** a presigned URL. It says nothing
+/// about the subsequent fetch of the object through that URL, which is
+/// a different request to a different origin under its own cache rules.
+///
+/// It also cannot reach a response this router never produced. Mounted
+/// with `nest` — the quick start's shape — an unmatched path under the
+/// prefix is answered by the *outer* router's fallback and carries
+/// neither header. Nothing is served there, so no credential leaks; it
+/// is an inconsistency rather than a hole.
+///
+/// Giving this router its own `.fallback()` would close that, and was
+/// considered. Measured against axum 0.8: nested it does close it
+/// (404 → 403), and a path outside the prefix still 404s correctly.
+/// But `Router::merge` does **not** reject two fallbacks — an
+/// integrator who merges instead of nesting silently gets 403 for every
+/// unknown URL in their whole application. Trading a bodyless 404 for a
+/// silent, hard-to-debug hijack of someone else's routing is the wrong
+/// side of that deal.
+async fn no_store(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let mut resp = next.run(req).await;
+    // `insert`, not `append`. A handler that set its own `Cache-Control`
+    // would otherwise leave two directives on the response, and the
+    // weaker one could win.
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    // `Vary` as well as `Cache-Control`, because the two are not the
+    // same kind of instruction. `no-store` *asks* a cache not to store;
+    // `Vary` *compels* it, by changing the cache key rather than
+    // requesting permission.
+    //
+    // That distinction is the whole point here. The deployment this
+    // guards against — a CDN in front of a cookie-authenticated app —
+    // is exactly the population where overriding origin directives is
+    // routine: nginx `proxy_ignore_headers Cache-Control`, Cloudflare
+    // "Cache Everything", Fastly VCL setting its own TTL. In each of
+    // those `no-store` is discarded and the original bug is back.
+    // Ignoring `Vary` takes a separate, deliberate second step.
+    //
+    // The usual objection — that high-cardinality values destroy hit
+    // rate — is the intended outcome on this surface, so it inverts
+    // into an argument for it. Both header names, because the
+    // authorizer reads `Parts` and may key off either.
+    resp.headers_mut().insert(
+        axum::http::header::VARY,
+        axum::http::HeaderValue::from_static("Cookie, Authorization"),
+    );
+    resp
 }
 
 /// Build the media router. Pass to `axum::Router::nest("/media", ...)`.
