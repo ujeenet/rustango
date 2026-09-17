@@ -1328,6 +1328,11 @@ fn create_table_sql_from_snapshot_with_dialect(
                     dialect.quote_ident(&rel.to),
                     dialect.quote_ident(&rel.on),
                 );
+                // #1549 — the declared action, or the constraint lands as
+                // NO ACTION and a declared cascade becomes a refusal.
+                if let Some(action) = &rel.on_delete {
+                    let _ = write!(sql, " ON DELETE {action}");
+                }
             }
         }
     }
@@ -1359,13 +1364,19 @@ fn constraints_sql_from_snapshot(
         .filter_map(|f| {
             f.fk.as_ref().map(|rel| {
                 let constraint = format!("{}_{}_fkey", t.name, f.column);
-                format!(
+                let mut s = format!(
                     "ALTER TABLE {table_q} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
                     dialect.quote_ident(&constraint),
                     dialect.quote_ident(&f.column),
                     dialect.quote_ident(&rel.to),
                     dialect.quote_ident(&rel.on),
-                )
+                );
+                // #1549 — this is the path system migrations take, and
+                // it was silently dropping the declared action.
+                if let Some(action) = &rel.on_delete {
+                    let _ = write!(s, " ON DELETE {action}");
+                }
+                s
             })
         })
         .collect();

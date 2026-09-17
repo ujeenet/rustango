@@ -163,3 +163,170 @@ async fn cascade_deletes_dependent_rows_at_runtime() {
         .unwrap();
     assert_eq!(after, 0, "CASCADE removed both child rows");
 }
+
+// =====================================================================
+// The path deployments actually run — #1549.
+//
+// Everything above renders from a `ModelSchema`, which is the path
+// `ddl.rs` owns and which always emitted `ON DELETE` correctly. System
+// migrations and `testkit::migrate_framework` do **not** take that
+// path: they go `SchemaSnapshot::from_models` -> `detect_changes` ->
+// `render_changes_split_with_dialect`.
+//
+// `RelationSnapshot` had no field for the action, so it was dropped the
+// moment a snapshot was built and the clause never reached any
+// database. Every framework FK in a live PostgreSQL carried
+// `confdeltype='a'` (NO ACTION), and on MySQL deleting a parent row
+// raised 1451 — a declared cascade had become a hard refusal.
+//
+// These tests render from a snapshot. A guard that renders from a
+// `ModelSchema` cannot fail on this bug, which is why the old one
+// passed for months.
+// =====================================================================
+
+use rustango::migrate::{detect_changes, render_changes_split_with_dialect, SchemaSnapshot};
+
+/// Every statement a snapshot render produces for these models.
+fn snapshot_ddl(dialect: &dyn rustango::sql::Dialect) -> Vec<String> {
+    let models = [
+        <Author as rustango::core::Model>::SCHEMA,
+        <PostCascade as rustango::core::Model>::SCHEMA,
+        <PostSetNull as rustango::core::Model>::SCHEMA,
+        <PostDefault as rustango::core::Model>::SCHEMA,
+    ];
+    let current = SchemaSnapshot::from_models(&models);
+    let changes = detect_changes(&SchemaSnapshot::default(), &current);
+    let batch = render_changes_split_with_dialect(&changes, &current, dialect).expect("render");
+    let mut out = batch.immediate;
+    out.extend(batch.deferred_fks);
+    out
+}
+
+/// The declared action survives into the snapshot.
+#[test]
+fn the_snapshot_carries_the_on_delete_action() {
+    let models = [<PostCascade as rustango::core::Model>::SCHEMA];
+    let snap = SchemaSnapshot::from_models(&models);
+    let table = snap.table("fkod_post_cascade").expect("table in snapshot");
+    let field = table
+        .fields
+        .iter()
+        .find(|f| f.column == "author_id")
+        .expect("author_id column");
+    let rel = field.fk.as_ref().expect("author_id carries an fk");
+    assert_eq!(
+        rel.on_delete.as_deref(),
+        Some("CASCADE"),
+        "the declared `on_delete` was dropped when the snapshot was built, so every \
+         migration rendered from it emits a constraint with no ON DELETE clause"
+    );
+}
+
+/// …and reaches the SQL, on every dialect.
+#[test]
+fn the_snapshot_render_emits_on_delete() {
+    for (name, dialect) in dialects() {
+        let sql = snapshot_ddl(dialect).join("\n");
+        assert!(
+            sql.contains("ON DELETE CASCADE"),
+            "{name}: a snapshot render emitted no `ON DELETE CASCADE` for \
+             fkod_post_cascade. This is the path system migrations take, so the \
+             declared action never reaches the database.\n{sql}"
+        );
+        assert!(
+            sql.contains("ON DELETE SET NULL"),
+            "{name}: a snapshot render emitted no `ON DELETE SET NULL` for \
+             fkod_post_set_null.\n{sql}"
+        );
+    }
+}
+
+/// A FK with no declared action must not grow one.
+#[test]
+fn an_undeclared_action_stays_absent() {
+    for (name, dialect) in dialects() {
+        let stmts = snapshot_ddl(dialect);
+        let for_default: Vec<&String> = stmts
+            .iter()
+            .filter(|s| s.contains("fkod_post_default"))
+            .collect();
+        assert!(
+            !for_default.is_empty(),
+            "{name}: nothing rendered for fkod_post_default"
+        );
+        for s in for_default {
+            assert!(
+                !s.contains("ON DELETE"),
+                "{name}: a FK that declares no action grew one: {s}"
+            );
+        }
+    }
+}
+
+fn dialects() -> Vec<(&'static str, &'static dyn rustango::sql::Dialect)> {
+    let mut v: Vec<(&'static str, &'static dyn rustango::sql::Dialect)> = Vec::new();
+    #[cfg(feature = "sqlite")]
+    v.push(("sqlite", &rustango::sql::Sqlite));
+    #[cfg(feature = "postgres")]
+    v.push(("postgres", &rustango::sql::Postgres));
+    #[cfg(feature = "mysql")]
+    v.push(("mysql", &rustango::sql::MySql));
+    v
+}
+
+/// The database enforces it, not just the string.
+///
+/// Renders through the snapshot path, executes it against a real
+/// SQLite, then deletes a parent and checks the child went with it.
+/// An emission test proves only that the writer emitted what its author
+/// intended; this proves the server agrees.
+#[tokio::test]
+async fn sqlite_actually_cascades_the_delete() {
+    use rustango::sql::Pool;
+
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("connect");
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await
+        .expect("enable fk enforcement");
+
+    for stmt in snapshot_ddl(&Sqlite) {
+        sqlx::query(&stmt)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("apply `{stmt}`: {e}"));
+    }
+
+    sqlx::query("INSERT INTO fkod_author (id) VALUES (1)")
+        .execute(&pool)
+        .await
+        .expect("author");
+    sqlx::query("INSERT INTO fkod_post_cascade (id, author_id) VALUES (10, 1)")
+        .execute(&pool)
+        .await
+        .expect("post");
+
+    sqlx::query("DELETE FROM fkod_author WHERE id = 1")
+        .execute(&pool)
+        .await
+        .expect(
+            "the parent delete must be permitted — a dropped CASCADE arrives as \
+                 NO ACTION, which refuses this with a constraint violation",
+        );
+
+    let remaining: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM fkod_post_cascade")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(
+        remaining.0, 0,
+        "the parent was deleted but the child survived — the constraint reached the \
+         database without its ON DELETE action"
+    );
+
+    let _ = Pool::Sqlite(pool);
+}

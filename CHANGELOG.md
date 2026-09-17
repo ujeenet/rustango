@@ -10,6 +10,32 @@ The security pass. A review of `develop` at v0.57.6 produced 20 findings,
 every one traced to the code that implements it, with "is this currently
 exploitable?" answered honestly — including where the answer is no.
 
+### Fixed
+
+- **`on_delete` never reached the database** (#1549). Every declared
+  `#[rustango(fk = "…", on_delete = "cascade")]` was dropped the moment
+  a schema snapshot was built, because `RelationSnapshot` had no field
+  for it. System migrations and `testkit::migrate_framework` render
+  *from snapshots*, so the clause reached no database at all: a declared
+  `cascade` arrived as `NO ACTION`, which turns a cascading delete into
+  a hard refusal (`ERROR 1451` on MySQL).
+
+  Measured on a fresh PostgreSQL, same probe both ways —
+  `pg_constraint.confdeltype` was `a` (NO ACTION) before and is `c`
+  (CASCADE) after.
+
+  `RelationSnapshot` gains `on_delete`, skipped when absent so existing
+  snapshot JSON is byte-identical and already-written snapshots still
+  load. Both snapshot render paths emit the clause: the inline one for
+  SQLite and the post-hoc `ALTER` for PostgreSQL/MySQL.
+
+  Same bug class as `generated_as` and `db_comment`, both captured in
+  #559; `fk_on_delete` is the one that pass missed. It shipped green
+  because the guard rendered from a `ModelSchema` — the path that was
+  always correct — so it could not fail on this. There are now three
+  guards on the snapshot path, one of which executes the DDL and checks
+  the database enforces the cascade.
+
 ## [0.57.6] — 2026-09-16
 
 The tri-dialect train. The theme is a single question: **does this behaviour
