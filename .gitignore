@@ -35,17 +35,7 @@ crates/rustango/examples/*/target/
 # be reached.)
 .claude/*
 !.claude/skills/
-
-# …but only skills that are *this* project's knowledge. The `review-*`
-# crew-review skills belong to a PHP/Vue codebase — they talk about
-# PHPUnit, Quasar, Semantic UI, Elasticsearch and `ClientTestCase`, none
-# of which exist here — and arrived by way of a shared agent config.
-# Tracking them would put another project's instructions in rustango's
-# history, where they would be read as guidance for this one.
-#
-# A rustango-owned review skill is welcome; it needs a name that is not
-# `review-*`, or an explicit negation below.
-.claude/skills/review-*/
+!.claude/review/
 CLAUDE.md
 AGENTS.md
 .mcp.json
