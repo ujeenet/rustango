@@ -43,7 +43,9 @@ use rustango::sql::Pool;
 use rustango::storage::{InMemoryStorage, StorageRegistry};
 use tower::ServiceExt as _;
 
-use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer, MediaTarget};
+use rustango::media::router::{
+    media_router_with, MediaAction, MediaAuthorizer, MediaDecision, MediaTarget,
+};
 
 async fn manager() -> MediaManager {
     // In-memory, not a temp file. The file version had to
@@ -205,8 +207,8 @@ struct AllowAll;
 
 #[async_trait::async_trait]
 impl MediaAuthorizer for AllowAll {
-    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> bool {
-        true
+    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> MediaDecision {
+        MediaDecision::Allow
     }
 }
 
@@ -240,9 +242,13 @@ struct Recorder(Arc<std::sync::Mutex<Vec<MediaAction>>>);
 
 #[async_trait::async_trait]
 impl MediaAuthorizer for Recorder {
-    async fn authorize(&self, _: &axum::http::request::Parts, action: MediaAction) -> bool {
+    async fn authorize(
+        &self,
+        _: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
         self.0.lock().unwrap().push(action);
-        true
+        MediaDecision::Allow
     }
 }
 
@@ -437,12 +443,12 @@ async fn the_whole_route_table_reaches_the_gate_correctly() {
         ("POST", "/media/7/move", "Change(Media(7))"),
         ("POST", "/media/7/tags", "Change(Media(7))"),
         ("DELETE", "/media/7/tags/blue", "Change(Media(7))"),
-        ("POST", "/collections", "Add(Listing)"),
+        ("POST", "/collections", "Add(NewCollection)"),
         ("GET", "/collections", "Read(Listing)"),
         ("GET", "/collections/7", "Read(Collection(7))"),
         ("GET", "/collections/7/contents", "Read(Collection(7))"),
         ("DELETE", "/collections/7", "Delete(CollectionSubtree(7))"),
-        ("POST", "/tags", "Add(Listing)"),
+        ("POST", "/tags", "Add(NewTag)"),
         ("GET", "/tags", "Read(Listing)"),
         ("GET", "/tags/popular", "Read(Listing)"),
         ("GET", "/tags/9/media", r#"Read(Tag("9"))"#),
@@ -1096,8 +1102,12 @@ struct MayDeleteOneCollection;
 
 #[async_trait::async_trait]
 impl MediaAuthorizer for MayDeleteOneCollection {
-    async fn authorize(&self, _: &axum::http::request::Parts, action: MediaAction) -> bool {
-        matches!(action, MediaAction::Delete(MediaTarget::Collection(_)))
+    async fn authorize(
+        &self,
+        _: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
+        matches!(action, MediaAction::Delete(MediaTarget::Collection(_))).into()
     }
 }
 
@@ -1142,11 +1152,16 @@ struct MayDeleteSubtrees;
 
 #[async_trait::async_trait]
 impl MediaAuthorizer for MayDeleteSubtrees {
-    async fn authorize(&self, _: &axum::http::request::Parts, action: MediaAction) -> bool {
+    async fn authorize(
+        &self,
+        _: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
         matches!(
             action,
             MediaAction::Delete(MediaTarget::CollectionSubtree(_))
         )
+        .into()
     }
 }
 
@@ -1189,5 +1204,206 @@ async fn reading_one_collection_is_still_a_single_row_decision() {
         seen,
         vec![MediaAction::Read(MediaTarget::Collection(7))],
         "widening the delete must not widen the read — GET touches one row"
+    );
+}
+
+// =====================================================================
+// Creating a folder and creating a tag were the same decision
+// =====================================================================
+//
+// `POST /collections` and `POST /tags` both arrived as
+// `Add(MediaTarget::Listing)`, so a policy could not tell them apart —
+// the same "one value, two tables" confusion that `Media(7)` and
+// `Collection(7)` were split to remove. Granting "may label things"
+// also granted "may create folders", and collections nest, so it also
+// granted a foothold under someone else's tree.
+
+/// Allows creating tags and nothing else.
+struct MayCreateTagsOnly;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for MayCreateTagsOnly {
+    async fn authorize(
+        &self,
+        _: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
+        matches!(action, MediaAction::Add(MediaTarget::NewTag { .. })).into()
+    }
+}
+
+#[tokio::test]
+async fn creating_a_tag_does_not_authorize_creating_a_collection() {
+    let mgr = manager().await;
+    let app = media_router_with(mgr, MayCreateTagsOnly);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/collections")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"X","slug":"x"}"#))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a policy granting only `Add(NewTag)` created a collection. Collections \
+         nest and `POST /collections` takes `parent_id` in the body, so this is a \
+         foothold under someone else's tree, handed out by a grant that reads as \
+         'may label things'"
+    );
+}
+
+/// Allows creating collections and nothing else.
+struct MayCreateCollectionsOnly;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for MayCreateCollectionsOnly {
+    async fn authorize(
+        &self,
+        _: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
+        matches!(action, MediaAction::Add(MediaTarget::NewCollection { .. })).into()
+    }
+}
+
+#[tokio::test]
+async fn each_create_grant_still_creates_its_own_kind() {
+    let mgr = manager().await;
+    let app = media_router_with(mgr, MayCreateCollectionsOnly);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/collections")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"X","slug":"x"}"#))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "an explicit `Add(NewCollection)` grant was refused — the split is a wall, \
+         not a gate"
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/tags")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"slug":"blue"}"#))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "the collection grant also created a tag"
+    );
+}
+
+// =====================================================================
+// 401 and 403 are different answers
+// =====================================================================
+//
+// `authorize` returned `bool`, so every refusal was a 403 — including
+// one for a request carrying no identity at all. A token client treats
+// 401 as its cue to refresh; answering 403 means the refresh never
+// fires and the member is silently logged out. #1193 settled this for
+// ViewSets.
+
+/// 401 for anonymous, 403 for a principal without the permission —
+/// keyed off a header so the test can be either.
+struct NeedsIdentity;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for NeedsIdentity {
+    async fn authorize(&self, parts: &axum::http::request::Parts, _: MediaAction) -> MediaDecision {
+        if parts.headers.contains_key("x-test-user") {
+            MediaDecision::Forbidden
+        } else {
+            MediaDecision::Unauthenticated
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_anonymous_refusal_is_401_and_a_permission_refusal_is_403() {
+    let mgr = manager().await;
+    let id = seed(&mgr).await;
+    let app = media_router_with(mgr, NeedsIdentity);
+
+    let anon = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    assert_eq!(
+        anon.status(),
+        StatusCode::UNAUTHORIZED,
+        "a policy that said `Unauthenticated` got a 403, so a token client never \
+         refreshes and the member is silently logged out"
+    );
+
+    let known = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}"))
+                .header("x-test-user", "alice")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    assert_eq!(
+        known.status(),
+        StatusCode::FORBIDDEN,
+        "a signed-in user without the permission got a 401, which sends the client \
+         into a refresh loop that cannot succeed"
+    );
+}
+
+/// A `bool`-shaped policy keeps its old meaning exactly.
+#[tokio::test]
+async fn a_bare_false_is_still_403_not_401() {
+    let mgr = manager().await;
+    let id = seed(&mgr).await;
+    // `DenyAll` is private; `MayCreateTagsOnly` refuses a read via
+    // `matches!(..).into()`, which is the `From<bool>` path.
+    let app = media_router_with(mgr, MayCreateTagsOnly);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "`false.into()` produced a 401. A bare boolean carries no information about \
+         whether a principal existed, so reading 401 out of it invites the refresh \
+         loop the variant exists to avoid"
     );
 }

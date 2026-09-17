@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer};
+use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer, MediaDecision};
 
 /// These tests exercise the routes, not the access check, so they mount
 /// a permissive authorizer. `media_router` itself now refuses every
@@ -17,8 +17,8 @@ struct AllowAll;
 
 #[async_trait::async_trait]
 impl MediaAuthorizer for AllowAll {
-    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> bool {
-        true
+    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> MediaDecision {
+        MediaDecision::Allow
     }
 }
 use rustango::media::{MediaManager, SaveOpts};

@@ -48,7 +48,7 @@ exploitable?" answered honestly — including where the answer is no.
 
   The gate identifies that row through the new `MediaTarget`
   (`Media(i64)` / `Collection(i64)` / `CollectionSubtree(i64)` /
-  `Tag(String)` / `NewUpload {}` /
+  `Tag(String)` / `NewUpload {}` / `NewCollection {}` / `NewTag {}` /
   `Listing`), and `MediaAction` splits into
   `Read` / `Add` / `Change` / `Delete` to match the codenames used
   elsewhere. The first cut of this API used a bare `Option<i64>`, and
@@ -100,6 +100,29 @@ exploitable?" answered honestly — including where the answer is no.
     refuses it by falling through to its `_ => false` arm rather than
     by remembering to check. `Read(Collection(id))` is unchanged: that
     one really is a single row.
+
+  A fourth round sharpened the gate's vocabulary, both prerequisites for
+  the default policy in #1546:
+
+  - **Creating a folder and creating a tag were the same decision.**
+    `POST /collections` and `POST /tags` both arrived as
+    `Add(MediaTarget::Listing)` — one value, two tables, the same
+    confusion `Media(7)` and `Collection(7)` were split to remove. So a
+    grant that reads as "may label things" also created collections,
+    and since collections nest and take `parent_id` from the body, it
+    handed out a foothold under someone else's tree. They are
+    `Add(NewCollection {})` and `Add(NewTag {})` now, both empty struct
+    variants like `NewUpload {}` so body detail can be added later.
+    `Listing` means a read.
+  - **`authorize` returned `bool`, so every refusal was `403`** —
+    including one for a request carrying no identity at all. A token
+    client treats `401` as its cue to refresh, so a `403` there means
+    the refresh never fires and the member is silently logged out;
+    #1193 settled this for ViewSets. It returns `MediaDecision`
+    (`Allow` / `Unauthenticated` / `Forbidden`) now, with `From<bool>`
+    so an existing boolean policy needs only `.into()` — and `false`
+    maps to `Forbidden`, never `Unauthenticated`, because a bare
+    boolean carries no information about whether a principal existed.
 
 - **`url_codec::percent_decode_path`** — path semantics (`%XX` only,
   `+` left literal), for comparing a segment against what a router

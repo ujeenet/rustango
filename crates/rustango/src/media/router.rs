@@ -36,12 +36,12 @@
 //! | POST   | `/media/{id}/move`                | Move Media to another collection: body `{collection_id?: i64}`. |
 //! | POST   | `/media/{id}/tags`                | Replace tag set: body `{slugs: ["a","b"]}`. |
 //! | DELETE | `/media/{id}/tags/{slug}`         | Remove a single tag. |
-//! | POST   | `/collections`                    | Create: body `{name, slug, parent_id?, description?}`. |
+//! | POST   | `/collections`                    | Create: body `{name, slug, parent_id?, description?}`. Authorized as `Add(NewCollection)`. |
 //! | GET    | `/collections`                    | List every non-deleted collection. |
 //! | GET    | `/collections/{id}`               | Single collection. |
 //! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` to include sub-folders. |
 //! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside orphaned, NOT deleted). Authorized as `Delete(CollectionSubtree)`, not `Delete(Collection)`. |
-//! | POST   | `/tags`                           | Create / upsert: body `{slug}`. |
+//! | POST   | `/tags`                           | Create / upsert: body `{slug}`. Authorized as `Add(NewTag)` — a different decision from creating a collection. |
 //! | GET    | `/tags`                           | All tags. |
 //! | GET    | `/tags/popular`                   | Top tags by usage count. `?limit=N`. |
 //! | GET    | `/tags/{slug}/media`              | Media carrying the tag. `?limit=N&offset=N`. |
@@ -141,11 +141,40 @@ pub enum MediaTarget {
     /// variant cannot be matched outside this crate at all.
     #[non_exhaustive]
     NewUpload {},
-    /// A listing or a create — `GET /collections`, `GET /tags`,
-    /// `GET /tags/popular`, `POST /collections`, `POST /tags`.
+    /// `POST /collections`. Names no existing row: it creates one,
+    /// optionally under a `parent_id` taken from the body.
+    ///
+    /// That `parent_id` is why this is worth its own decision.
+    /// Collections nest, `DELETE /collections/{id}` takes a whole
+    /// subtree, and anyone who may create a collection may attach one
+    /// under someone else's — see [`Self::CollectionSubtree`].
+    ///
+    /// Match as `MediaTarget::NewCollection { .. }`, with the braces —
+    /// an empty struct variant so the requested `parent_id` and `slug`
+    /// can be added here later without breaking policies written today.
+    #[non_exhaustive]
+    NewCollection {},
+    /// `POST /tags`. Creates (or upserts) a tag by slug.
+    ///
+    /// Separate from [`Self::NewCollection`] because the two are
+    /// different tables and different decisions. They used to arrive as
+    /// the same `Add(Listing)`, so a policy could not tell "may create
+    /// a folder" from "may create a tag" — the same "one value, two
+    /// tables" confusion that `Media(7)` and `Collection(7)` were split
+    /// to remove.
+    ///
+    /// Match as `MediaTarget::NewTag { .. }`, with the braces.
+    #[non_exhaustive]
+    NewTag {},
+    /// A read that enumerates rather than naming a row — `GET
+    /// /collections`, `GET /tags`, `GET /tags/popular`, and a
+    /// `?recursive` collection listing.
     ///
     /// **Granting this is not harmless.** Listings enumerate, and
     /// enumeration is what turns "guess an id" into "read the index".
+    ///
+    /// It no longer covers creates: `POST /collections` and `POST
+    /// /tags` are [`Self::NewCollection`] and [`Self::NewTag`].
     Listing,
 }
 
@@ -165,6 +194,55 @@ pub enum MediaAction {
     Change(MediaTarget),
     /// Destroy an existing row.
     Delete(MediaTarget),
+}
+
+/// What a [`MediaAuthorizer`] decided, and therefore what the client is
+/// told.
+///
+/// Three-valued rather than `bool` because **"nobody is signed in" and
+/// "signed in, and may not do this" are different answers**, and a
+/// client acts on them differently: a token client treats `401` as its
+/// cue to refresh, so answering `403` to an anonymous request means the
+/// refresh never fires and the member is silently logged out. #1193
+/// settled this for `ViewSet`s; media answered `403` to everyone until
+/// this existed.
+///
+/// `From<bool>` is implemented, so a policy that already computes a
+/// boolean can `return allowed.into()` — `false` becomes
+/// [`Self::Forbidden`], which is the conservative reading of a bare
+/// `false` and matches the old behaviour exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MediaDecision {
+    /// Authorized — run the handler.
+    Allow,
+    /// No authenticated principal. The client is told `401` so it knows
+    /// to authenticate.
+    ///
+    /// Return this only when there is genuinely no identity. A signed-in
+    /// user who lacks the permission is [`Self::Forbidden`]: answering
+    /// `401` there sends a token client into a refresh loop that cannot
+    /// succeed.
+    Unauthenticated,
+    /// There is a principal (or the policy does not care), and the
+    /// answer is no. `403`.
+    Forbidden,
+}
+
+impl From<bool> for MediaDecision {
+    /// `true` → [`MediaDecision::Allow`], `false` →
+    /// [`MediaDecision::Forbidden`].
+    ///
+    /// Never `Unauthenticated`: a bare `false` carries no information
+    /// about whether a principal existed, and guessing `401` from it
+    /// would invite the refresh loop the variant exists to avoid.
+    fn from(allowed: bool) -> Self {
+        if allowed {
+            Self::Allow
+        } else {
+            Self::Forbidden
+        }
+    }
 }
 
 /// Decides whether a request may touch the media surface.
@@ -187,9 +265,13 @@ pub enum MediaAction {
 /// // Re-exported by the crate — no `async-trait` dependency of your own.
 /// #[rustango::media::async_trait]
 /// impl MediaAuthorizer for SessionAuthorizer {
-///     async fn authorize(&self, parts: &Parts, action: MediaAction) -> bool {
-///         let Some(user) = current_user(parts) else { return false };
-///         match action {
+///     async fn authorize(&self, parts: &Parts, action: MediaAction) -> MediaDecision {
+///         // No identity at all is 401, not 403 — the client is being
+///         // told to authenticate, not that it may never do this.
+///         let Some(user) = current_user(parts) else {
+///             return MediaDecision::Unauthenticated;
+///         };
+///         let allowed = match action {
 ///             MediaAction::Read(t) => match t {
 ///                 MediaTarget::Media(id) => user.may_read_media(id).await,
 ///                 MediaTarget::Collection(id) => user.may_read_collection(id).await,
@@ -204,7 +286,8 @@ pub enum MediaAction {
 ///             // you would trust with the bucket — it is not the same
 ///             // decision as "may create a collection".
 ///             MediaAction::Add(MediaTarget::NewUpload { .. }) => user.is_trusted_uploader(),
-///             MediaAction::Add(_) => user.is_editor(),
+///             MediaAction::Add(MediaTarget::NewCollection { .. }) => user.is_editor(),
+///             MediaAction::Add(MediaTarget::NewTag { .. }) => user.is_editor(),
 ///             MediaAction::Change(MediaTarget::Media(id)) => user.owns_media(id).await,
 ///             MediaAction::Delete(MediaTarget::Media(id)) => user.owns_media(id).await,
 ///             // Deleting a collection takes its whole subtree and
@@ -212,7 +295,8 @@ pub enum MediaAction {
 ///             // decision from deleting one row. Left to `_ => false`
 ///             // here: opt in only where you mean it.
 ///             _ => false,
-///         }
+///         };
+///         allowed.into()
 ///     }
 /// }
 /// ```
@@ -220,7 +304,9 @@ pub enum MediaAction {
 /// Note the trailing `_ => false` arms. [`MediaAction`] and
 /// [`MediaTarget`] are both `#[non_exhaustive]`, so a future route
 /// reaches your policy as a variant you have not written an arm for.
-/// Ending on `false` means that arrives denied rather than allowed.
+/// Ending on `false` means that arrives denied rather than allowed —
+/// and `false.into()` is [`MediaDecision::Forbidden`], never
+/// `Unauthenticated`.
 ///
 /// # Your impl runs on every request, and nothing bounds it
 ///
@@ -240,15 +326,29 @@ pub enum MediaAction {
 ///   drop it, then await.
 #[async_trait::async_trait]
 pub trait MediaAuthorizer: Send + Sync + 'static {
-    /// `true` to allow. Anything else is a 403.
-    async fn authorize(&self, parts: &axum::http::request::Parts, action: MediaAction) -> bool;
+    /// [`MediaDecision::Allow`] to run the handler;
+    /// [`MediaDecision::Unauthenticated`] for `401`;
+    /// [`MediaDecision::Forbidden`] for `403`.
+    ///
+    /// A policy that already computes a boolean can return
+    /// `allowed.into()` — `false` is `Forbidden`, which is exactly what
+    /// this returned before it was three-valued.
+    async fn authorize(
+        &self,
+        parts: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision;
 }
 
 /// So a host that picks its policy at runtime can pass
 /// `Arc<dyn MediaAuthorizer>`, which the bare generic bound rejects.
 #[async_trait::async_trait]
 impl<T: MediaAuthorizer + ?Sized> MediaAuthorizer for Arc<T> {
-    async fn authorize(&self, parts: &axum::http::request::Parts, action: MediaAction) -> bool {
+    async fn authorize(
+        &self,
+        parts: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
         (**self).authorize(parts, action).await
     }
 }
@@ -258,8 +358,11 @@ struct DenyAll;
 
 #[async_trait::async_trait]
 impl MediaAuthorizer for DenyAll {
-    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> bool {
-        false
+    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> MediaDecision {
+        // `Forbidden`, not `Unauthenticated`: the deprecated constructor
+        // refuses regardless of who is asking, so telling a client to
+        // authenticate would be a lie it could retry forever.
+        MediaDecision::Forbidden
     }
 }
 
@@ -332,7 +435,7 @@ fn classify(method: &axum::http::Method, path: &str, query: Option<&str>) -> Opt
         }
 
         (&Method::GET, ["collections"]) => Some(MediaAction::Read(MediaTarget::Listing)),
-        (&Method::POST, ["collections"]) => Some(MediaAction::Add(MediaTarget::Listing)),
+        (&Method::POST, ["collections"]) => Some(MediaAction::Add(MediaTarget::NewCollection {})),
         // A recursive listing reaches descendants the authorizer is
         // never asked about, so it is not a single-collection read.
         (&Method::GET, ["collections", _, "contents"]) if recursive => {
@@ -354,7 +457,7 @@ fn classify(method: &axum::http::Method, path: &str, query: Option<&str>) -> Opt
         (&Method::GET, ["tags"] | ["tags", "popular"]) => {
             Some(MediaAction::Read(MediaTarget::Listing))
         }
-        (&Method::POST, ["tags"]) => Some(MediaAction::Add(MediaTarget::Listing)),
+        (&Method::POST, ["tags"]) => Some(MediaAction::Add(MediaTarget::NewTag {})),
         (&Method::GET, ["tags", slug, "media"]) => {
             Some(MediaAction::Read(MediaTarget::Tag((*slug).to_owned())))
         }
@@ -405,23 +508,33 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                         )
                             .into_response();
                     };
-                    if !auth.authorize(&parts, action.clone()).await {
+                    let decision = auth.authorize(&parts, action.clone()).await;
+                    if decision != MediaDecision::Allow {
                         // `debug`, so it costs nothing in production. Without
                         // it a subtly-wrong policy is only debuggable by
                         // instrumenting inside the integrator's own impl.
                         tracing::debug!(
                             target: "rustango::media::auth",
                             ?action,
+                            ?decision,
                             method = %parts.method,
                             path = %parts.uri.path(),
                             "refused by the authorization policy"
                         );
-                        return (
-                            StatusCode::FORBIDDEN,
-                            Json(serde_json::json!({
-                                "error": "not authorized for this media operation"
-                            })),
-                        )
+                        // 401 means "authenticate", 403 means "you cannot do
+                        // this". A token client treats 401 as its cue to
+                        // refresh; answering 403 to an anonymous request
+                        // means the refresh never fires (#1193).
+                        let (status, message) = match decision {
+                            MediaDecision::Unauthenticated => {
+                                (StatusCode::UNAUTHORIZED, "authentication required")
+                            }
+                            _ => (
+                                StatusCode::FORBIDDEN,
+                                "not authorized for this media operation",
+                            ),
+                        };
+                        return (status, Json(serde_json::json!({ "error": message })))
                             .into_response();
                     }
                     next.run(axum::extract::Request::from_parts(parts, body))
