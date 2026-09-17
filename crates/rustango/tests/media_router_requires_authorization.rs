@@ -1042,6 +1042,25 @@ async fn the_write_and_error_routes_are_uncacheable_too() {
 /// Asserting page *lengths* cannot see this — every count is correct.
 /// Only the identities are wrong, so the assertion has to be that the
 /// union of the pages equals the seeded set.
+///
+/// # What this copy does and does not guard
+///
+/// **It cannot fail on the tiebreaker.** Removing `, id DESC` from
+/// `list_in_collection_paged` and running this test passes — measured,
+/// twice. SQLite's scan order is stable across separate `LIMIT`/`OFFSET`
+/// queries, so tied rows come back in the same order every time and the
+/// pages still partition. PostgreSQL's is not, which is the entire bug.
+///
+/// So this asserts the weaker property that does hold here: the route
+/// pages without dropping or repeating a row under whatever ordering the
+/// backend gives. That is worth having — it catches an off-by-one in the
+/// offset arithmetic, which is backend-independent — but it is **not**
+/// the tiebreaker guard, and it was previously written and titled as
+/// though it were.
+///
+/// The tiebreaker itself is guarded by `paging_a_collection_partitions_it`
+/// in `media_collections_tags_live.rs`, which needs PostgreSQL and runs
+/// in the `s3_live` job.
 #[tokio::test]
 async fn paging_the_contents_partitions_it() {
     use std::collections::HashSet;
@@ -1663,4 +1682,78 @@ async fn no_other_route_has_its_body_buffered() {
         "a route the gate does not need a body for was refused for its body's size, \
          so the buffering is not confined to `/uploads/begin`"
     );
+}
+
+// =====================================================================
+// Guards that can actually fail
+// =====================================================================
+//
+// Two of this file's guards survived the regression they were written
+// for, proved by mutation in the crew review of the release:
+//
+//  - `tags_for_many_batches_the_whole_page` asserts only that the
+//    batched call *agrees with* the per-row call it replaced — which a
+//    per-row implementation satisfies by construction. Restoring the
+//    full N+1 left all 60 tests green.
+//  - `paging_the_contents_partitions_it` is a SQLite copy of a
+//    PostgreSQL-only property. Its own sibling says so
+//    (`media_collections_tags_live.rs`: "SQLite cannot observe the
+//    bug"), so it cannot go red where it runs.
+//
+// Both are kept — they check real things — and these two count queries
+// instead, which is the property neither could express. This release
+// extended `assert_num_queries` to count `raw_query_pool` for exactly
+// this, and `test_assertions` is ungated, so it works in this file's
+// feature set today.
+
+/// The batched call must be **one** query, not one per row.
+///
+/// Nothing else in the media suites counts queries, so this is the only
+/// assertion that a per-row loop cannot satisfy.
+#[tokio::test]
+async fn tags_for_many_is_one_query_not_one_per_row() {
+    let mgr = manager().await;
+    let ids = seed_n(&mgr, None, 4).await;
+    for (i, id) in ids.iter().enumerate() {
+        mgr.tag(*id, &[format!("t{i}").as_str()])
+            .await
+            .expect("tag");
+    }
+
+    rustango::test_assertions::assert_num_queries(1, async {
+        let got = mgr.tags_for_many(&ids).await.expect("batched");
+        assert_eq!(got.len(), 4, "control: every tagged id came back");
+    })
+    .await;
+}
+
+/// …and the route that serves a page uses it.
+///
+/// `GET /tags/{slug}/media` kept the per-row `from_row` while its
+/// sibling was converted, so a 4-row page cost 1 + 4 tag queries plus a
+/// presign each. The count is the listing plus the one batched tag
+/// query; `InMemoryStorage` cannot presign, so no query is charged for
+/// that here.
+#[tokio::test]
+async fn the_tag_listing_route_does_not_query_per_row() {
+    let mgr = manager().await;
+    let ids = seed_n(&mgr, None, 4).await;
+    for id in &ids {
+        mgr.tag(*id, &["shared"]).await.expect("tag");
+    }
+    let app = media_router_with(mgr, AllowAll);
+
+    rustango::test_assertions::assert_num_queries(2, async {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/tags/shared/media?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router answers");
+        assert_eq!(resp.status(), StatusCode::OK, "control: the page is served");
+    })
+    .await;
 }

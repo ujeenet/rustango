@@ -281,6 +281,39 @@ exploitable?" answered honestly — including where the answer is no.
   NOTHING` elsewhere — which is one helper in place of a hand-rolled
   branch that had been copied twice.
 
+- **`GET /tags/{slug}/media` still ran one tag query per row.**
+  `tags_for_many` was added in this release to remove exactly that N+1
+  and was wired into the collection-contents handler fifty lines above;
+  this route kept the per-row `from_row`, so at `?limit=1000` it cost
+  ~1001 round trips plus 1000 presign operations. The fix had landed on
+  one of the two handlers that needed it.
+
+- **Two guards survived the regression they were written for**, which a
+  crew review of the release established by mutation:
+
+  - `tags_for_many_batches_the_whole_page` asserted only that the
+    batched call *agrees with* the per-row call it replaced — something
+    a per-row implementation satisfies by construction. Restoring the
+    full N+1 left all 60 tests green. Nothing in the media suites
+    counted queries, so the batching half of #1551 A was unguarded.
+  - `paging_the_contents_partitions_it` is a SQLite copy of a
+    PostgreSQL-only property. Removing the `, id DESC` tiebreaker and
+    running it passes — measured twice — because SQLite's scan order is
+    stable across separate `LIMIT`/`OFFSET` queries where PostgreSQL's
+    is not.
+
+  Two query-counting guards replace the first, using the
+  `assert_num_queries` coverage this same release added for
+  `raw_query_pool`. The second is kept for the weaker property it does
+  hold — paging without dropping or repeating a row — and its rustdoc
+  now says plainly that it cannot fail on the tiebreaker, and where the
+  guard that can lives.
+
+  Also moved: `media_collections_tags_live`'s isolation was a
+  `--test-threads=1` on the `s3_live` job's command line, so the suite
+  raced silently when run any other way. It takes a suite-wide lock now
+  and passes 17/17 under the default parallel harness.
+
 - **A failed `set_tags` left the row with neither tag set** (#1551 B5).
   It was a bare `DELETE FROM rustango_media_tag_links` followed by
   `tag()`. Anything failing in between — a driver error, a slug that

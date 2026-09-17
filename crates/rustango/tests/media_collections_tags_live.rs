@@ -29,6 +29,20 @@ use tower::ServiceExt;
 
 const DISK_NAME: &str = "media-collections-live";
 
+/// Suite-wide lock.
+///
+/// Every test here truncates the shared `rustango_media*` tables in
+/// `maybe_setup`, so two running at once destroy each other's rows. The
+/// only thing that supplied that isolation was `--test-threads=1` on the
+/// `s3_live` job's command line — so running this suite any other way,
+/// locally or from a job that forgets the flag, raced silently. The
+/// requirement belongs with the code that needs it.
+fn live_lock() -> &'static tokio::sync::Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 async fn maybe_setup() -> Option<MediaManager> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let key = std::env::var("RUSTANGO_S3_TEST_KEY").ok()?;
@@ -92,6 +106,7 @@ fn save_opts(name: &str) -> SaveOpts {
 
 #[tokio::test]
 async fn create_then_get_collection_round_trips() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -120,6 +135,7 @@ async fn create_then_get_collection_round_trips() {
 
 #[tokio::test]
 async fn collection_path_walks_parent_chain() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -154,6 +170,7 @@ async fn collection_path_walks_parent_chain() {
 
 #[tokio::test]
 async fn list_in_collection_recursive_descends_subfolders() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -203,6 +220,7 @@ async fn list_in_collection_recursive_descends_subfolders() {
 
 #[tokio::test]
 async fn delete_collection_orphans_media_not_storage() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -243,6 +261,7 @@ async fn delete_collection_orphans_media_not_storage() {
 
 #[tokio::test]
 async fn move_to_collection_updates_fk() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -287,6 +306,7 @@ async fn move_to_collection_updates_fk() {
 
 #[tokio::test]
 async fn tag_then_tags_for_round_trips() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -327,6 +347,7 @@ async fn tag_then_tags_for_round_trips() {
 
 #[tokio::test]
 async fn untag_removes_one_keeps_others() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -354,6 +375,7 @@ async fn untag_removes_one_keeps_others() {
 
 #[tokio::test]
 async fn set_tags_replaces_entire_set() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -387,6 +409,7 @@ async fn set_tags_replaces_entire_set() {
 
 #[tokio::test]
 async fn list_with_tag_returns_matching_media() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -423,6 +446,7 @@ async fn list_with_tag_returns_matching_media() {
 
 #[tokio::test]
 async fn popular_tags_orders_by_use_count() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -469,6 +493,7 @@ async fn popular_tags_orders_by_use_count() {
 
 #[tokio::test]
 async fn router_get_media_returns_full_response() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -510,6 +535,7 @@ async fn router_get_media_returns_full_response() {
 
 #[tokio::test]
 async fn router_create_collection_then_list_and_get() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -578,6 +604,7 @@ async fn router_create_collection_then_list_and_get() {
 
 #[tokio::test]
 async fn router_begin_then_finalize_upload_via_axum() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -650,6 +677,7 @@ async fn router_begin_then_finalize_upload_via_axum() {
 
 #[tokio::test]
 async fn router_set_tags_and_query_via_tag_endpoint() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -704,6 +732,7 @@ async fn router_set_tags_and_query_via_tag_endpoint() {
 
 #[tokio::test]
 async fn router_collection_contents_with_recursive_query() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -822,6 +851,7 @@ async fn migrate_framework_is_idempotent_against_running_db() {
 async fn paging_a_collection_partitions_it() {
     use std::collections::HashSet;
 
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;

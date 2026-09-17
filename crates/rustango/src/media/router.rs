@@ -1555,9 +1555,30 @@ async fn media_with_tag_handler(
     Query(q): Query<ListWithTagQuery>,
 ) -> Result<Json<Vec<MediaResponse>>, MediaError> {
     let rows = manager.list_with_tag(&slug, q.limit, q.offset).await?;
+    // One tag query for the whole page, same as the contents listing.
+    //
+    // `tags_for_many` was added in this release to remove exactly this
+    // N+1 and was wired into `collection_contents_handler` fifty lines
+    // above — this handler kept the per-row `from_row`, so at
+    // `?limit=1000` the route cost ~1001 round trips plus 1000 presign
+    // operations. The fix landed on one of the two handlers that needed
+    // it.
+    let ids: Vec<i64> = rows
+        .iter()
+        .filter_map(|m| match m.id {
+            crate::sql::Auto::Set(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    let mut tags = manager.tags_for_many(&ids).await?;
     let mut out = Vec::with_capacity(rows.len());
     for m in rows {
-        out.push(MediaResponse::from_row(&manager, m).await?);
+        let id = match m.id {
+            crate::sql::Auto::Set(v) => v,
+            _ => 0,
+        };
+        let row_tags = tags.remove(&id).unwrap_or_default();
+        out.push(MediaResponse::from_row_with_tags(&manager, m, row_tags).await);
     }
     Ok(Json(out))
 }
