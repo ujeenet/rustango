@@ -96,6 +96,49 @@ exploitable?" answered honestly — including where the answer is no.
 - **`media` no longer enables `_async_trait` redundantly** — `storage`,
   which `media` already requires, enables it.
 
+### Fixed
+
+- **`on_delete` never reached the database** (#1549). Every declared
+  `#[rustango(fk = "…", on_delete = "cascade")]` was dropped the moment
+  a schema snapshot was built, because `RelationSnapshot` had no field
+  for it. System migrations and `testkit::migrate_framework` render
+  *from snapshots*, so the clause reached no database at all: a declared
+  `cascade` arrived as `NO ACTION`, which turns a cascading delete into
+  a hard refusal (`ERROR 1451` on MySQL).
+
+  Measured on a fresh PostgreSQL, same probe both ways —
+  `pg_constraint.confdeltype` was `a` (NO ACTION) before and is `c`
+  (CASCADE) after.
+
+  **On new databases only.** An existing database keeps the constraints
+  it already has: a changed `on_delete` is not a schema operation this
+  release can emit, so `migrate` reports `nothing to migrate` and writes
+  no file. That is correct behaviour and it is also easy to misread as
+  "nothing to do" — see [UPGRADING.md](UPGRADING.md) for the `ALTER` to
+  run and how to check what you actually have. Emitting a drop/add pair
+  for a changed action is #1557.
+
+  Upgrading does **not** trip `make_migrations`. Adding the field
+  changes what an existing snapshot compares equal to, and the first
+  cut reported "fk changed" for every FK declaring an action — which
+  all three `make_migrations` entry points reject, so an upgrade with
+  zero model changes failed outright, listing framework tables the user
+  never wrote. FK identity and FK action are compared separately now:
+  `None → Some(_)` is the upgrade, while a real `Some(a) → Some(b)` is
+  still reported.
+
+  `RelationSnapshot` gains `on_delete`, skipped when absent so existing
+  snapshot JSON is byte-identical and already-written snapshots still
+  load. Both snapshot render paths emit the clause: the inline one for
+  SQLite and the post-hoc `ALTER` for PostgreSQL/MySQL.
+
+  Same bug class as `generated_as` and `db_comment`, both captured in
+  #559; `fk_on_delete` is the one that pass missed. It shipped green
+  because the guard rendered from a `ModelSchema` — the path that was
+  always correct — so it could not fail on this. There are now three
+  guards on the snapshot path, one of which executes the DDL and checks
+  the database enforces the cascade.
+
 ## [0.57.6] — 2026-09-16
 
 The tri-dialect train. The theme is a single question: **does this behaviour
