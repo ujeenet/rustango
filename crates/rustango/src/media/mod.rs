@@ -595,16 +595,34 @@ impl MediaManager {
     /// `delete()` only soft-deletes, so a presigned URL minted before
     /// it keeps working until its TTL expires. The storage object has
     /// to go for the credential to stop resolving.
+    ///
+    /// # Errors
+    /// `UnknownDisk` if `m.disk` is not registered, `Storage` if the
+    /// object could not be removed, `Db` for either delete. **The row
+    /// is left in place in every error case** — see below.
     pub async fn purge(&self, m: &Media) -> Result<(), MediaError> {
         let id = match m.id {
             Auto::Set(v) => v,
             _ => return Err(MediaError::Other("Media has no id".into())),
         };
-        // Best-effort storage delete (matches Storage::delete trait
-        // semantics — missing key is fine).
-        if let Some(storage) = self.registry.disk(&m.disk) {
-            let _ = storage.delete(&m.storage_key).await;
-        }
+        // The storage delete is what revokes access, and this row is the
+        // only record that the object exists: `orphans_older_than` finds
+        // it by `deleted_at`, and nothing else stores the key. So a
+        // failed delete must not be followed by the row delete.
+        //
+        // It used to be `let _ =`, over an `if let Some(disk)` that
+        // skipped silently when the disk was not registered. Either way
+        // the row went, leaving a live object no sweep would look for
+        // again and every presigned URL for it resolving to its TTL —
+        // while `purge` returned `Ok(())`, which is the one answer that
+        // means "revoked".
+        //
+        // `Storage::delete` is a no-op on a missing key, so an `Err`
+        // here is a real failure — credentials, network, policy — not a
+        // stale row. Leaving the row soft-deleted is what lets the next
+        // sweep retry it.
+        let storage = self.resolve_disk(&m.disk)?;
+        storage.delete(&m.storage_key).await?;
         let p = self.pool.dialect().placeholder(1);
         // Links first. `rustango_media_tag_links.media_id` carries no
         // foreign key, so deleting the media row alone left them behind
@@ -641,12 +659,43 @@ impl MediaManager {
     /// fan it out with [`crate::tenancy::for_each_tenant`] and reach for
     /// [`Self::purge_orphans_dry_run`] first when you are unsure what a
     /// pool is pointing at (#1226).
+    ///
+    /// # Errors
+    /// The first failure, **after attempting every row** — one
+    /// unreachable storage object no longer blocks the rest of the
+    /// sweep from ever being purged. Each failure is logged at `warn`
+    /// with its disk and key, and the run is summarised at `error`,
+    /// because the count purged does not survive the `Err`.
     pub async fn purge_orphans(&self, older_than: Duration) -> Result<u64, MediaError> {
         let rows = self.orphans_older_than(older_than).await?;
+        let total = rows.len();
         let mut purged = 0u64;
+        let mut first_err: Option<MediaError> = None;
         for m in rows {
-            self.purge(&m).await?;
-            purged += 1;
+            match self.purge(&m).await {
+                Ok(()) => purged += 1,
+                Err(e) => {
+                    tracing::warn!(
+                        disk = %m.disk,
+                        storage_key = %m.storage_key,
+                        error = %e,
+                        "media purge_orphans: row left in place, will retry next sweep"
+                    );
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        if let Some(e) = first_err {
+            let failed = total - purged as usize;
+            tracing::error!(
+                purged,
+                failed,
+                total,
+                "media purge_orphans: finished with failures"
+            );
+            return Err(e);
         }
         Ok(purged)
     }

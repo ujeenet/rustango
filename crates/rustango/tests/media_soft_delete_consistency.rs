@@ -12,12 +12,16 @@
 //! - `delete_collection` soft-deleted one collection and left its
 //!   children pointing at a parent that no longer resolves, which makes
 //!   `collection_path` on the whole subtree a permanent error.
+//! - `purge` threw away the result of the storage delete and dropped the
+//!   row regardless. The row is the only record of the key, so a failed
+//!   delete leaked the object permanently — and `purge` said `Ok(())`,
+//!   which is what a caller reads as "access revoked".
 
 use std::sync::Arc;
 
 use rustango::media::{MediaManager, SaveOpts};
 use rustango::sql::{Auto, Pool};
-use rustango::storage::{InMemoryStorage, StorageRegistry};
+use rustango::storage::{InMemoryStorage, StorageError, StorageRegistry};
 
 async fn manager() -> MediaManager {
     manager_with_pool().await.0
@@ -377,4 +381,180 @@ async fn a_failed_collection_delete_orphans_nothing() {
         mgr.get_collection(cid).await.expect("get").is_some(),
         "control: the collection should still be live after a failed delete"
     );
+}
+
+// =====================================================================
+// `purge` claimed to revoke access and threw the failure away
+// =====================================================================
+
+/// `InMemoryStorage`, except `delete` fails for keys under `boom/`.
+///
+/// A double rather than a real backend because the failure being
+/// guarded is the one a real backend only produces on a bad day —
+/// expired credentials, a bucket policy change, a network partition.
+struct FlakyDelete(InMemoryStorage);
+
+#[rustango::storage::async_trait]
+impl rustango::storage::Storage for FlakyDelete {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<(), StorageError> {
+        self.0.save(key, data).await
+    }
+    async fn load(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        self.0.load(key).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), StorageError> {
+        if key.starts_with("boom/") {
+            return Err(StorageError::Io("simulated delete failure".into()));
+        }
+        self.0.delete(key).await
+    }
+    async fn exists(&self, key: &str) -> Result<bool, StorageError> {
+        self.0.exists(key).await
+    }
+    fn url(&self, key: &str) -> Option<String> {
+        self.0.url(key)
+    }
+}
+
+async fn flaky_manager() -> MediaManager {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .min_connections(2)
+        .max_connections(2)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite connect");
+    let pool = Pool::Sqlite(pool);
+    rustango::testkit::migrate_framework(&pool)
+        .await
+        .expect("migrate framework media tables");
+    let registry = StorageRegistry::new()
+        .set("default", Arc::new(FlakyDelete(InMemoryStorage::new())))
+        .with_default("default");
+    MediaManager::new_pool(pool, registry)
+}
+
+async fn seed_under(mgr: &MediaManager, prefix: &str) -> rustango::media::Media {
+    mgr.save_bytes(SaveOpts {
+        disk: "default".into(),
+        key_prefix: prefix.into(),
+        bytes: b"x".to_vec(),
+        mime: "text/plain".into(),
+        original_filename: "x.txt".into(),
+        uploaded_by_id: Some(1),
+        collection_id: None,
+        metadata: serde_json::json!({}),
+    })
+    .await
+    .expect("seed")
+}
+
+/// The row is the only record that the storage object exists. Dropping
+/// it after a failed delete leaks the object permanently and leaves
+/// every presigned URL for it resolving until its TTL — while `purge`
+/// returns `Ok(())`, the one answer that means "revoked".
+#[tokio::test]
+async fn a_failed_storage_delete_does_not_take_the_row_with_it() {
+    let mgr = flaky_manager().await;
+    let doomed = seed_under(&mgr, "boom/").await;
+    let id = id_of(&doomed);
+    mgr.delete(&doomed).await.expect("soft delete");
+
+    let err = mgr.purge(&doomed).await;
+    assert!(
+        err.is_err(),
+        "purge reported success while the storage object survived — a presigned \
+         URL minted before it keeps resolving, and `Ok(())` is what a caller \
+         reads as `revoked`"
+    );
+
+    let row = rustango::sql::raw_query_pool::<(i64,)>(
+        "SELECT id FROM rustango_media WHERE id = ?",
+        vec![rustango::core::SqlValue::I64(id)],
+        mgr.pool_dyn(),
+    )
+    .await
+    .expect("read back");
+    assert_eq!(
+        row.len(),
+        1,
+        "the storage delete failed and the row was deleted anyway. The row is \
+         how `orphans_older_than` finds the key, so nothing will ever look for \
+         that object again"
+    );
+}
+
+/// One unreachable object must not strand every other orphan forever.
+#[tokio::test]
+async fn one_unreachable_object_does_not_stop_the_sweep() {
+    let mgr = flaky_manager().await;
+    let ok_a = seed_under(&mgr, "fine/").await;
+    let bad = seed_under(&mgr, "boom/").await;
+    let ok_b = seed_under(&mgr, "fine/").await;
+    for m in [&ok_a, &bad, &ok_b] {
+        mgr.delete(m).await.expect("soft delete");
+    }
+
+    assert_eq!(
+        mgr.purge_orphans_dry_run(std::time::Duration::ZERO)
+            .await
+            .expect("dry run")
+            .len(),
+        3,
+        "control: all three must be in scope for the sweep, or the assertions \
+         below are measuring an empty set"
+    );
+
+    let result = mgr.purge_orphans(std::time::Duration::ZERO).await;
+    assert!(
+        result.is_err(),
+        "a row was left in place and the sweep reported success — a scheduler \
+         logging a clean run cannot tell that from one that purged everything"
+    );
+
+    let left = mgr
+        .purge_orphans_dry_run(std::time::Duration::ZERO)
+        .await
+        .expect("dry run");
+    let keys: Vec<&str> = left.iter().map(|m| m.storage_key.as_str()).collect();
+    assert_eq!(
+        keys.len(),
+        1,
+        "the sweep stopped at the first failure and left {keys:?} unpurged. \
+         One bad object then blocks every other orphan on every future run, \
+         because the sweep meets it again each time"
+    );
+    assert!(
+        keys[0].starts_with("boom/"),
+        "the wrong row survived: {keys:?}"
+    );
+}
+
+/// An unregistered disk used to skip the storage delete silently and
+/// then drop the row — the same leak, reached without any backend
+/// failing at all.
+#[tokio::test]
+async fn purging_from_an_unregistered_disk_is_not_a_silent_success() {
+    let mgr = manager().await;
+    let m = seed(&mgr, None).await;
+    let id = id_of(&m);
+    mgr.delete(&m).await.expect("soft delete");
+
+    let mut orphaned = m.clone();
+    orphaned.disk = "retired-bucket".into();
+
+    let err = mgr.purge(&orphaned).await;
+    assert!(
+        matches!(err, Err(rustango::media::MediaError::UnknownDisk(ref d)) if d == "retired-bucket"),
+        "purging from a disk the registry does not know reported {err:?}; the \
+         object cannot have been deleted, so this is not a success"
+    );
+
+    let row = rustango::sql::raw_query_pool::<(i64,)>(
+        "SELECT id FROM rustango_media WHERE id = ?",
+        vec![rustango::core::SqlValue::I64(id)],
+        mgr.pool_dyn(),
+    )
+    .await
+    .expect("read back");
+    assert_eq!(row.len(), 1, "the row went with the unreachable disk");
 }
