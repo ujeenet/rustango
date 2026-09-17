@@ -97,7 +97,16 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b':' || b == b'/'
 }
 
-/// Every `MAJOR.MINOR.PATCH` in `line` that is *labelled* as rustango's.
+fn is_rustango_dependency(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.find("rustango").is_some_and(|start| {
+        lower[start + "rustango".len()..]
+            .trim_start()
+            .starts_with('=')
+    })
+}
+
+/// Every version in `line` that is *labelled* as rustango's.
 ///
 /// The label is the word immediately before the number, ignoring the
 /// quotes and punctuation between them — `rustango` or `version`, and
@@ -116,8 +125,8 @@ fn is_ident_byte(b: u8) -> bool {
 ///
 /// which is labelled `MySQL` and is none of this test's business.
 ///
-/// Three components on purpose: a two-component string is a dependency
-/// caret (`axum = "0.8"`) and says nothing about rustango. The
+/// Two components are accepted only when labelled `rustango`, so a dependency
+/// caret (`axum = "0.8"`) is ignored while `rustango = "0.57"` is checked. The
 /// neighbour checks drop anything inside a longer dotted run, which is
 /// how `0.0.0.0:8080` — the README's bind address — stays out.
 fn versions_in(line: &str) -> Vec<String> {
@@ -140,11 +149,12 @@ fn versions_in(line: &str) -> Vec<String> {
             end -= 1;
         }
         let s: String = b[start..end].iter().collect();
-        if s.split('.').count() == 3
-            && matches!(
-                label_before(&b, start).as_deref(),
-                Some("rustango" | "version")
-            )
+        let components = s.split('.').count();
+        let label = label_before(&b, start);
+        if (components == 3 && matches!(label.as_deref(), Some("rustango" | "version")))
+            || (components == 2
+                && is_rustango_dependency(line)
+                && matches!(label.as_deref(), Some("rustango" | "version")))
         {
             out.push(s);
         }
@@ -222,6 +232,7 @@ fn published_docs_show_the_version_that_is_shipping() {
     // quotes its own `Cargo.toml`, and had drifted three releases from
     // the file it was describing.
     pages.push("README.md".to_owned());
+    pages.push("crates/rustango/src/lib.rs".to_owned());
     pages.push("crates/rustango-renamed-smoke/README.md".to_owned());
     pages.sort();
 
@@ -231,7 +242,8 @@ fn published_docs_show_the_version_that_is_shipping() {
         };
         checked += 1;
         for (lineno, found) in claimed_versions(&text) {
-            if found != CURRENT {
+            let current_series = CURRENT.rsplit_once('.').unwrap().0;
+            if found != CURRENT && found != current_series {
                 problems.push(format!("{rel}:{lineno}: shows `{found}`"));
             }
         }
