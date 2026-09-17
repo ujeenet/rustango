@@ -139,6 +139,32 @@ exploitable?" answered honestly — including where the answer is no.
   guards on the snapshot path, one of which executes the DDL and checks
   the database enforces the cascade.
 
+- **`assert_num_queries` could not see a read** (#1561). The counter is
+  bumped per instrumented entry point in `sql::executor`. Writes all
+  funnel through `execute_pool`, which had one, and two read paths had
+  theirs — but `raw_query_pool`, `select_rows_pool`, `count_rows_pool`
+  (via `fetch_scalar_pool`), `fetch_aggregate_pool` and
+  `fetch_paginated_pool` issued their query directly and bumped nothing.
+  Same on the transaction side: `raw_execute_tx` and `raw_query_tx`
+  counted, while `insert_tx` / `update_tx` / `delete_tx` (all through
+  `execute_tx`), `insert_returning_tx` and `select_rows_tx_with_related`
+  did not.
+
+  So the framework's only N+1 detector could not see an N+1: a loop of
+  four `raw_query_pool` reads was observed as **0** queries, and
+  `assert_num_queries(1, …)` over it passed. The failure mode is a pass,
+  which is why the suite that exists to prove the counter fires "from
+  every instrumented entry point" had been green since it was written —
+  the paths it did not cover were the ones with nothing to fire.
+
+  All of them bump now, each with a guard that was run against the
+  un-bumped code first. The PostgreSQL-only `_on` family
+  (`annotate_count_children_on`, `fetch_aggregate_on`,
+  `fetch_with_prefetch`, `QuerySet::fetch_on`) is still uncounted —
+  it composes, so a bump per leaf double-counts — and the module docs
+  now say so outright: a `0` from a block touching `_on` code means
+  "not measured", not "no queries". Tracked as #1561.
+
 ## [0.57.6] — 2026-09-16
 
 The tri-dialect train. The theme is a single question: **does this behaviour
