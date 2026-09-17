@@ -169,7 +169,9 @@ let app = axum::Router::new()
     .nest("/media", media_router(manager));
 
 // after (0.57.7)
-use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer, MediaTarget};
+use rustango::media::router::{
+    media_router_with, MediaAction, MediaAuthorizer, MediaDecision, MediaTarget,
+};
 
 struct MyPolicy;
 
@@ -179,18 +181,23 @@ impl MediaAuthorizer for MyPolicy {
         &self,
         parts: &axum::http::request::Parts,
         action: MediaAction,
-    ) -> bool {
-        let Some(user) = current_user(parts) else { return false };
-        match action {
+    ) -> MediaDecision {
+        // No identity at all is 401, not 403.
+        let Some(user) = current_user(parts) else {
+            return MediaDecision::Unauthenticated;
+        };
+        let allowed = match action {
             MediaAction::Read(MediaTarget::Media(id)) => user.may_read_media(id).await,
             // Listings enumerate the whole library; NewUpload mints a
             // presigned PUT for a caller-chosen disk and key prefix.
             // Both are explicit decisions, not defaults.
             MediaAction::Read(MediaTarget::Listing) => user.may_browse_library(),
             MediaAction::Add(MediaTarget::NewUpload { .. }) => user.is_trusted_uploader(),
-            MediaAction::Add(_) => user.is_editor(),
+            MediaAction::Add(MediaTarget::NewCollection { .. }) => user.is_editor(),
+            MediaAction::Add(MediaTarget::NewTag { .. }) => user.is_editor(),
             _ => false,
-        }
+        };
+        allowed.into()
     }
 }
 
@@ -202,9 +209,22 @@ End on `_ => false`. `MediaAction` and `MediaTarget` are
 `#[non_exhaustive]`, so a route added later reaches your policy as a
 variant you have not written an arm for — and should arrive denied.
 
+`authorize` returns `MediaDecision`, not `bool`. `false.into()` is
+`Forbidden`, which is exactly the old behaviour, so a policy that
+already computes a boolean only needs `.into()`. Return
+`MediaDecision::Unauthenticated` where there is **no principal at all**
+— the client is then told `401` so a token client refreshes rather than
+treating the refusal as final. A signed-in user who lacks the permission
+stays `Forbidden`.
+
 Match `NewUpload` as `MediaTarget::NewUpload { .. }`, with the braces.
 It is an empty struct variant so that the requested `disk` and
 `key_prefix` can be added to it later without breaking your policy.
+`NewCollection` and `NewTag` are the same shape, for `POST /collections`
+and `POST /tags`. Those two used to arrive as the same `Add(Listing)`,
+so "may label things" also granted "may create folders" — and
+collections nest, so it granted a foothold under someone else's tree.
+`Listing` now means a read.
 
 `DELETE /collections/{id}` arrives as
 `Delete(MediaTarget::CollectionSubtree(id))`, **not**
