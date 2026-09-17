@@ -628,8 +628,12 @@ async fn a_boxed_authorizer_can_be_mounted() {
 // =====================================================================
 
 fn cache_control(resp: &axum::http::Response<Body>) -> String {
+    header_of(resp, axum::http::header::CACHE_CONTROL)
+}
+
+fn header_of(resp: &axum::http::Response<Body>, name: axum::http::HeaderName) -> String {
     resp.headers()
-        .get(axum::http::header::CACHE_CONTROL)
+        .get(name)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("<absent>")
         .to_owned()
@@ -722,5 +726,87 @@ async fn a_refusal_is_not_cached_either() {
         cache_control(&resp),
         "no-store",
         "a cached 403 would outlive the policy decision that produced it"
+    );
+}
+
+/// `Vary` as well, because the two headers are different instructions.
+///
+/// `no-store` asks a cache not to store; `Vary` changes the cache key,
+/// which compels it. That matters because the deployment this defends
+/// against — a CDN in front of a cookie-authenticated app — is exactly
+/// where overriding origin directives is routine (nginx
+/// `proxy_ignore_headers Cache-Control`, Cloudflare "Cache Everything").
+/// Ignoring `Vary` takes a separate, deliberate second step.
+#[tokio::test]
+async fn a_presigned_response_varies_on_the_credential() {
+    let mgr = manager().await;
+    let id = seed(&mgr).await;
+    let app = media_router_with(mgr, AllowAll);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("router answers");
+
+    let vary = header_of(&resp, axum::http::header::VARY);
+    assert!(
+        vary.contains("Cookie"),
+        "no `Vary: Cookie`, so a shared cache keys on method+URI alone. \
+         `no-store` only asks; this is what compels. Got {vary:?}"
+    );
+    assert!(
+        vary.contains("Authorization"),
+        "`Vary` omits Authorization, so a bearer-authenticated deployment is \
+         keyed the same way for every caller. Got {vary:?}"
+    );
+}
+
+/// The mutating and error routes my first pass did not cover.
+///
+/// `POST /uploads/begin` is the one that most needed checking — it
+/// returns the presigned **PUT**.
+#[tokio::test]
+async fn the_write_and_error_routes_are_uncacheable_too() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("POST", "/uploads/begin", "{}"),
+        ("POST", "/uploads/1/finalize", ""),
+        ("DELETE", "/media/1", ""),
+        ("DELETE", "/collections/1", ""),
+        ("DELETE", "/media/1/tags/blue", ""),
+        ("POST", "/media/1/move", r#"{"collection_id":null}"#),
+        ("POST", "/collections", "not json at all"),
+        ("GET", "/media/999999", ""),
+    ];
+    let mut missing = Vec::new();
+    for (method, uri, body) in cases {
+        let mgr = manager().await;
+        let _ = seed(&mgr).await;
+        let app = media_router_with(mgr, AllowAll);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(*method)
+                    .uri(*uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(*body))
+                    .unwrap(),
+            )
+            .await
+            .expect("router answers");
+        let cc = cache_control(&resp);
+        if cc != "no-store" {
+            missing.push(format!("{method} {uri} -> {} / {cc}", resp.status()));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these responses are cacheable — the status does not matter, a route that \
+         can ever carry a credential must never be stored:\n  {}",
+        missing.join("\n  ")
     );
 }

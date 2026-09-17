@@ -406,7 +406,7 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
         .layer(axum::middleware::from_fn(no_store))
 }
 
-/// `Cache-Control: no-store` on every response from this router.
+/// `Cache-Control: no-store` and `Vary` on every response.
 ///
 /// These routes hand out **presigned URLs** — short-lived bearer
 /// credentials, valid for anyone holding them until the TTL expires.
@@ -425,11 +425,56 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
 /// a signature today, so a route added later cannot quietly opt out.
 /// `no-store` rather than `private`: `private` still permits a browser
 /// cache to keep the credential on disk.
+///
+/// # Scope
+///
+/// This covers the JSON **carrying** a presigned URL. It says nothing
+/// about the subsequent fetch of the object through that URL, which is
+/// a different request to a different origin under its own cache rules.
+///
+/// It also cannot reach a response this router never produced. Mounted
+/// with `nest` — the quick start's shape — an unmatched path under the
+/// prefix is answered by the *outer* router's fallback and carries
+/// neither header. Nothing is served there, so no credential leaks; it
+/// is an inconsistency rather than a hole.
+///
+/// Giving this router its own `.fallback()` would close that, and was
+/// considered. Measured against axum 0.8: nested it does close it
+/// (404 → 403), and a path outside the prefix still 404s correctly.
+/// But `Router::merge` does **not** reject two fallbacks — an
+/// integrator who merges instead of nesting silently gets 403 for every
+/// unknown URL in their whole application. Trading a bodyless 404 for a
+/// silent, hard-to-debug hijack of someone else's routing is the wrong
+/// side of that deal.
 async fn no_store(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let mut resp = next.run(req).await;
+    // `insert`, not `append`. A handler that set its own `Cache-Control`
+    // would otherwise leave two directives on the response, and the
+    // weaker one could win.
     resp.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
+    );
+    // `Vary` as well as `Cache-Control`, because the two are not the
+    // same kind of instruction. `no-store` *asks* a cache not to store;
+    // `Vary` *compels* it, by changing the cache key rather than
+    // requesting permission.
+    //
+    // That distinction is the whole point here. The deployment this
+    // guards against — a CDN in front of a cookie-authenticated app —
+    // is exactly the population where overriding origin directives is
+    // routine: nginx `proxy_ignore_headers Cache-Control`, Cloudflare
+    // "Cache Everything", Fastly VCL setting its own TTL. In each of
+    // those `no-store` is discarded and the original bug is back.
+    // Ignoring `Vary` takes a separate, deliberate second step.
+    //
+    // The usual objection — that high-cardinality values destroy hit
+    // rate — is the intended outcome on this surface, so it inverts
+    // into an argument for it. Both header names, because the
+    // authorizer reads `Parts` and may key off either.
+    resp.headers_mut().insert(
+        axum::http::header::VARY,
+        axum::http::HeaderValue::from_static("Cookie, Authorization"),
     );
     resp
 }
