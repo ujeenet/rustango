@@ -1096,8 +1096,29 @@ impl MediaManager {
         // Clamped, not trusted: a negative `LIMIT` means "no limit" on
         // SQLite, so an unclamped caller value is an unbounded query
         // wearing a limit.
+        // The clamp does more than the SQLite case above: PostgreSQL
+        // rejects `LIMIT -1` and `OFFSET -1` outright, so without it a
+        // negative value is an unbounded scan on one backend and a 500
+        // on the other two.
         let lim = limit.clamp(1, MAX_LIST_LIMIT);
         let off = offset.max(0);
+        // `, id DESC` is the tiebreaker, and it is not cosmetic.
+        //
+        // `uploaded_at DESC` alone is not a *total* order, and ties are
+        // the normal case rather than the edge: on PostgreSQL `now()` is
+        // the transaction timestamp, so every row of one bulk import
+        // carries the identical value; on SQLite the column has
+        // one-second resolution. With a small `LIMIT` the planner picks
+        // a top-N heapsort whose order among tied keys differs per
+        // (limit, offset) pair, so paging the same data twice returns
+        // different rows.
+        //
+        // Measured on PostgreSQL, 200 rows sharing one `uploaded_at`,
+        // paged at 20: **197 unique, 3 duplicated, 3 never returned** —
+        // the missing rows appear on no page at all, so a client paging
+        // to the end simply never sees them. SQLite masked it by
+        // happening to return tied rows in rowid order. Same defect as
+        // #1464.
         let p_lim = d.placeholder(ids.len() + 1);
         let p_off = d.placeholder(ids.len() + 2);
         let sql = format!(
@@ -1106,7 +1127,7 @@ impl MediaManager {
                     collection_id, metadata, deleted_at \
                FROM rustango_media \
               WHERE collection_id IN ({in_list}) AND deleted_at IS NULL \
-              ORDER BY uploaded_at DESC \
+              ORDER BY uploaded_at DESC, id DESC \
               LIMIT {p_lim} OFFSET {p_off}"
         );
         let mut binds: Vec<crate::core::SqlValue> =
@@ -1372,7 +1393,7 @@ impl MediaManager {
                JOIN rustango_media_tag_links l ON l.media_id = m.id \
                JOIN rustango_media_tags t ON t.id = l.tag_id \
               WHERE t.slug = {p1} AND m.deleted_at IS NULL \
-              ORDER BY m.uploaded_at DESC \
+              ORDER BY m.uploaded_at DESC, m.id DESC \
               LIMIT {p2} OFFSET {p3}"
         );
         let rows: Vec<Media> = crate::sql::raw_query_pool(

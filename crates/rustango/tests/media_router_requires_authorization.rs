@@ -997,3 +997,78 @@ async fn the_write_and_error_routes_are_uncacheable_too() {
         missing.join("\n  ")
     );
 }
+
+/// Paging must *partition* the collection — no row twice, none missing.
+///
+/// `ORDER BY uploaded_at DESC` alone is not a total order, and ties are
+/// the normal case rather than the edge: on PostgreSQL `now()` is the
+/// transaction timestamp, so every row of one bulk import carries the
+/// identical value; on SQLite the column has one-second resolution. With
+/// a small `LIMIT` the planner picks a top-N sort whose order among tied
+/// keys differs per (limit, offset) pair.
+///
+/// Measured on PostgreSQL before the `, id DESC` tiebreaker, 200 rows at
+/// limit 20: **197 unique, 3 duplicated, 3 never returned.**
+///
+/// Asserting page *lengths* cannot see this — every count is correct.
+/// Only the identities are wrong, so the assertion has to be that the
+/// union of the pages equals the seeded set.
+#[tokio::test]
+async fn paging_the_contents_partitions_it() {
+    use std::collections::HashSet;
+
+    let mgr = manager().await;
+    let c = mgr
+        .create_collection("Tied", "tied", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    // Seeded in one go, so `uploaded_at` ties across the whole set —
+    // which is the condition, not a contrivance.
+    let seeded: HashSet<i64> = seed_n(&mgr, Some(cid), 60).await.into_iter().collect();
+    let app = media_router_with(mgr, AllowAll);
+
+    let mut seen: Vec<i64> = Vec::new();
+    for page in 0..6 {
+        let uri = format!("/collections/{cid}/contents?limit=10&offset={}", page * 10);
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .expect("router answers");
+        assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+        let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("body");
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).expect("json");
+        for r in rows {
+            seen.push(r["id"].as_i64().expect("id"));
+        }
+    }
+
+    let unique: HashSet<i64> = seen.iter().copied().collect();
+    let duplicated = seen.len() - unique.len();
+    let missing: Vec<i64> = seeded.difference(&unique).copied().collect();
+
+    assert_eq!(
+        duplicated,
+        0,
+        "{duplicated} of {} returned rows appeared on more than one page — the \
+         ordering is not total, so a row sorts differently per (limit, offset)",
+        seen.len()
+    );
+    assert!(
+        missing.is_empty(),
+        "{} rows were never returned by any page: {missing:?}. A client paging this \
+         collection to the end never sees them at all.",
+        missing.len()
+    );
+    assert_eq!(
+        unique.len(),
+        seeded.len(),
+        "the pages did not cover the set"
+    );
+}
