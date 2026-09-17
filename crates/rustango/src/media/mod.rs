@@ -1359,13 +1359,75 @@ impl MediaManager {
     /// Replace the entire tag set for a media row. Tags not in
     /// `slugs` are removed; tags in `slugs` are added (auto-created
     /// if needed).
+    ///
+    /// **Atomic.** The delete and the inserts are one transaction, so a
+    /// failure part-way leaves the row's tags as they were rather than
+    /// as neither the old set nor the new one. It used to be a bare
+    /// `DELETE` followed by [`Self::tag`]: anything failing in between —
+    /// a driver error, a slug that could not be created — stripped every
+    /// tag and put none back, and `POST /media/{id}/tags` is the
+    /// API-reachable caller.
+    ///
+    /// # Errors
+    /// `Db` for the delete, either insert, or the commit.
     pub async fn set_tags(&self, media_id: i64, slugs: &[&str]) -> Result<(), MediaError> {
-        let p = self.pool.dialect().placeholder(1);
-        let sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p}");
-        crate::sql::raw_execute_pool(&self.pool, &sql, vec![crate::core::SqlValue::I64(media_id)])
+        // Resolve every tag id **before** opening the transaction.
+        //
+        // `ensure_tag` is get-or-create, so it writes, and it was the
+        // step most likely to fail in the middle. Running it first means
+        // a failure here happens while the row still has its old tags;
+        // it also keeps N round trips out of an open write transaction.
+        // A tag row created for a set that then fails is not a
+        // corruption — `popular_tags` counts links, so it reports zero
+        // uses.
+        let mut tag_ids: Vec<i64> = Vec::with_capacity(slugs.len());
+        for slug in slugs {
+            let t = self.ensure_tag(slug).await?;
+            if let Auto::Set(v) = t.id {
+                tag_ids.push(v);
+            }
+        }
+
+        let d = self.pool.dialect();
+        let (p1, p2) = (d.placeholder(1), d.placeholder(2));
+        let delete_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p1}");
+        // PG/SQLite: ON CONFLICT DO NOTHING; MySQL: INSERT IGNORE.
+        let insert_sql = if d.name() == "mysql" {
+            format!(
+                "INSERT IGNORE INTO `rustango_media_tag_links` (`media_id`, `tag_id`) \
+                 VALUES ({p1}, {p2})"
+            )
+        } else {
+            format!(
+                "INSERT INTO rustango_media_tag_links (media_id, tag_id) \
+                 VALUES ({p1}, {p2}) ON CONFLICT DO NOTHING"
+            )
+        };
+
+        let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
-        self.tag(media_id, slugs).await
+        crate::sql::raw_execute_tx(
+            &mut tx,
+            &delete_sql,
+            vec![crate::core::SqlValue::I64(media_id)],
+        )
+        .await
+        .map_err(media_err_from_exec)?;
+        for tag_id in tag_ids {
+            crate::sql::raw_execute_tx(
+                &mut tx,
+                &insert_sql,
+                vec![
+                    crate::core::SqlValue::I64(media_id),
+                    crate::core::SqlValue::I64(tag_id),
+                ],
+            )
+            .await
+            .map_err(media_err_from_exec)?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// List tags applied to a media row, alphabetically by slug.

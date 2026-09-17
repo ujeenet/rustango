@@ -191,6 +191,32 @@ exploitable?" answered honestly — including where the answer is no.
 
 ### Fixed
 
+- **A failed `set_tags` left the row with neither tag set** (#1551 B5).
+  It was a bare `DELETE FROM rustango_media_tag_links` followed by
+  `tag()`. Anything failing in between — a driver error, a slug that
+  could not be created — stripped every tag and put none back, and
+  `POST /media/{id}/tags` is the API-reachable caller. Same shape as the
+  collection delete fixed earlier in this release: the first statement
+  had already committed when the second failed.
+
+  The delete and the inserts are one transaction now. Tag ids are
+  resolved **before** it opens, so `ensure_tag` — the step most likely
+  to fail, and the one that writes — fails while the row still has its
+  old tags, and N round trips stay out of an open write transaction.
+
+  `media_tags_mysql_live` is new, and is the media module's **first
+  MySQL coverage**: `media_live` and `media_collections_tags_live` are
+  PostgreSQL-typed and `media_sqlite_live` is SQLite, so `tag`'s
+  `INSERT IGNORE` branch and `tags_for_many`'s positional-`?` `IN (…)`
+  had never executed on MySQL at all.
+
+  Found while writing it, and worth knowing: **`INSERT IGNORE`
+  downgrades row-level failures to warnings on MySQL** — a missing
+  NOT NULL default (1364) and a `CHECK` violation (3819) both return
+  `Ok`. Measured against MySQL 8.0, not inferred. A control assertion is
+  what caught it; the first two versions of the rollback test injected
+  failures MySQL swallowed, so they proved nothing while passing.
+
 - **`purge` reported access revoked after failing to revoke it**
   (#1551 B). It threw away the result of the storage delete (`let _ =`),
   behind an `if let Some(disk)` that skipped the delete entirely when

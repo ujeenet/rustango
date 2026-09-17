@@ -1029,6 +1029,15 @@ jobs:
       # `IF EXISTS` on either, so this is the arm that was failing with
       # error 1064 while the emission tests stayed green.
       - run: cargo test -p rustango --features mysql,testkit --test migrate_ddl_tri
+      # The media tag surface had no MySQL coverage at all — `media_live`
+      # and `media_collections_tags_live` are PostgreSQL-typed and
+      # `media_sqlite_live` is SQLite, so `tag`'s `INSERT IGNORE` branch
+      # and `tags_for_many`'s positional-`?` `IN (…)` had never executed
+      # on this backend. `--test-threads=1`: every test drops and
+      # rebuilds the shared `rustango_media*` tables.
+      - run: >-
+          cargo test -p rustango --features mysql,media,testkit
+          --test media_tags_mysql_live -- --test-threads=1
       # #1403 — bulk create must roll back on a constraint violation.
       # `--all-features` so the MySQL arm of the tri-dialect guard is
       # compiled in; the sqlite arm runs everywhere, this is the one that
