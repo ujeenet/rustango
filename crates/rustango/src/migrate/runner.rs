@@ -2209,6 +2209,35 @@ async fn apply_atomic_pool(
             );
             let mut tx = my.begin().await?;
             let mut deferred_fks: Vec<String> = Vec::new();
+            // What has already committed when something fails.
+            //
+            // `applied` counts operations that finished; `ddl_applied`
+            // counts how many of those were DDL, and that is the number
+            // that decides whether the failure is recoverable. A driver
+            // error with `ddl_applied == 0` rolls back cleanly and is
+            // reported unchanged; above zero, the schema has moved and
+            // the ledger has not, so the operator needs to be told that
+            // and told how to get out (#1588).
+            let total = mig.forward.len();
+            let mut applied = 0usize;
+            let mut ddl_applied = 0usize;
+            // Wrap a driver error with what survived it.
+            macro_rules! stuck {
+                ($e:expr) => {{
+                    let e: sqlx::Error = $e;
+                    if ddl_applied == 0 {
+                        MigrateError::Driver(e)
+                    } else {
+                        MigrateError::PartiallyApplied {
+                            migration: mig.name.clone(),
+                            applied,
+                            total,
+                            ddl_applied,
+                            source: Box::new(e),
+                        }
+                    }
+                }};
+            }
             for op in &mig.forward {
                 match op {
                     Operation::Schema(change) => {
@@ -2218,28 +2247,45 @@ async fn apply_atomic_pool(
                             dialect,
                         )
                         .map_err(MigrateError::Validation)?;
+                        // Counted per *statement*, not per operation:
+                        // one operation can render several, and each
+                        // auto-commits on its own, so an operation
+                        // that fails halfway has still left the
+                        // earlier ones applied.
                         for stmt in batch.immediate {
-                            sqlx::query(&stmt).execute(&mut *tx).await?;
+                            sqlx::query(&stmt)
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(|e| stuck!(e))?;
+                            ddl_applied += 1;
                         }
                         deferred_fks.extend(batch.deferred_fks);
                     }
                     Operation::Data(d) => {
-                        sqlx::query(&d.sql).execute(&mut *tx).await?;
+                        sqlx::query(&d.sql)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| stuck!(e))?;
                     }
                     Operation::Callback(c) => {
                         // #347 — see `invoke_migration_callback` doc.
                         invoke_migration_callback(c, pool.clone().into()).await?;
                     }
                 }
+                applied += 1;
             }
             for stmt in deferred_fks {
-                sqlx::query(&stmt).execute(&mut *tx).await?;
+                sqlx::query(&stmt)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| stuck!(e))?;
             }
             sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES (?)"))
                 .bind(&mig.name)
                 .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
+                .await
+                .map_err(|e| stuck!(e))?;
+            tx.commit().await.map_err(|e| stuck!(e))?;
         }
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
