@@ -294,7 +294,9 @@ jobs:
             --test docs_live_suite_counts \
             --test every_example_crate_is_built \
             --test every_live_suite_runs_in_ci \
+            --test every_serve_shuts_down_gracefully \
             --test every_serving_path_is_observable \
+            --test every_structural_guard_is_ungated \
             --test every_test_suite_compiles_in_ci \
             --test logging_fields_agree
 
@@ -330,10 +332,18 @@ jobs:
   # The second command is not redundant. Six suites are gated on a
   # **negated** feature, so `--all-features` compiles them out by
   # construction — five on `not(feature = "postgres")`, which this covers,
-  # and `oauth2_router_standalone` on `not(feature = "admin")`, which needs
-  # a third shape and is still built only in the gated `feature_combos`.
-  # That one is a known gap; `every_test_suite_compiles_in_ci` says so
-  # rather than claiming the coverage is complete.
+  # and `oauth2_router_standalone` on `not(feature = "admin")`, which the
+  # third command covers.
+  #
+  # An earlier version of this comment said that last one was "still built
+  # only in the gated `feature_combos`". That was false, and it is the
+  # mistake this job exists to prevent, made while writing the job:
+  # `feature_combos` runs `cargo check --lib` and `cargo test --lib`, and
+  # **neither builds `tests/**`** — nor does any of its 13 rows enable
+  # `oauth2`. The file was compiled by nothing at all. Checked, not
+  # assumed, this time: `cargo test -p rustango --no-default-features
+  # --features oauth2,manage,sqlite --test oauth2_router_standalone
+  # --no-run` is the command below, and it was run.
   #
   # Cost: `--all-features` shares no build cache with `clippy` or `guards`
   # (both `--features tenancy`), so this is roughly one extra cold build per
@@ -357,6 +367,9 @@ jobs:
       # The `not(feature = "postgres")` family; same command `sqlite_litmus`
       # runs, which is gated.
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
+      # `oauth2_router_standalone`, gated on `not(feature = "admin")`. The
+      # only shape that compiles it; nothing else in CI did.
+      - run: cargo test -p rustango --no-default-features --features oauth2,manage,sqlite --no-run
 
   # Primary PG test job — runs the full workspace with `--all-features`
   # against a real PostgreSQL service. Covers every PG-typed live test
