@@ -475,6 +475,63 @@ async fn browsing_folders_does_not_read_the_media_inside_them() {
     );
 }
 
+/// …and `?recursive=true` does not walk around that refusal.
+///
+/// The recursive form used to classify as `Read(Listing)`, which maps to
+/// `rustango_media.view` **alone** — one codename for a read that
+/// returns the named collection's media *and every descendant's*, where
+/// the narrow read takes two.
+///
+/// So the grant to hold here is `rustango_media.view` by itself: it is
+/// refused `/contents`, and it was exactly what the recursive form
+/// asked for. Seven characters of query string turned the 403 into a
+/// 200 over strictly more rows.
+///
+/// The control matters. Granting the *other* half
+/// (`rustango_media_collections.view`, as
+/// `browsing_folders_does_not_read_the_media_inside_them` does) refuses
+/// both forms either way, so it would pass against the hole.
+#[tokio::test]
+async fn recursive_does_not_walk_around_the_contents_refusal() {
+    let (mgr, pool) = setup().await;
+    let c = mgr
+        .create_collection("Shared", "shared", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+    let uid = make_user(&pool, "browser", false).await;
+    grant(&pool, uid, "rustango_media.view").await;
+    let app = app(mgr, pool, Some(principal(uid, false)));
+
+    let status = |uri: String| {
+        let app = app.clone();
+        async move {
+            app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .expect("router answers")
+                .status()
+        }
+    };
+
+    assert_eq!(
+        status(format!("/collections/{cid}/contents")).await,
+        StatusCode::FORBIDDEN,
+        "control: the contents read takes both view codenames, so holding only \
+         `rustango_media.view` must be refused — otherwise the recursive assertion \
+         below is measuring nothing"
+    );
+    assert_eq!(
+        status(format!("/collections/{cid}/contents?recursive=true")).await,
+        StatusCode::FORBIDDEN,
+        "the caller just refused `/contents` was served `/contents?recursive=true`, \
+         which returns that collection's media plus every descendant's. Widening a \
+         read cost less than not widening it"
+    );
+}
+
 /// …and holding both codenames reads it, so the split is a gate.
 #[tokio::test]
 async fn both_view_codenames_read_the_contents() {
@@ -584,5 +641,97 @@ async fn an_upload_grant_does_not_reach_every_disk() {
         begin(scoped, ticket("default")).await,
         StatusCode::FORBIDDEN,
         "the allow-listed disk was refused — the list is a wall, not a gate"
+    );
+}
+
+/// The disk allow-list binds superusers too.
+///
+/// `is_superuser` is the **per-tenant** flag: it elevates to org admin
+/// inside one tenant and grants nothing in `/operator`. Every other
+/// check here is a permission lookup on that tenant's own pool, so
+/// short-circuiting them stays inside the tenant. `allow_disks` is not
+/// — `StorageRegistry` is process-wide, and the list is the only thing
+/// between a tenant's admin and another tenant's bucket.
+///
+/// The short-circuit used to run first, so a superuser minted a
+/// presigned PUT into any registered disk however the list was
+/// configured. The check is ahead of it now, and it is the only one
+/// that is.
+#[tokio::test]
+async fn a_tenant_superuser_is_still_held_to_the_disk_allow_list() {
+    let (mgr, pool) = setup().await;
+    // No grants at all. Whatever answers here answers because of
+    // `is_superuser`, not because of a codename.
+    let uid = make_user(&pool, "org-admin", true).await;
+
+    let ticket = |disk: &str| {
+        format!(
+            r#"{{"disk":"{disk}","key_prefix":"t/","mime":"text/plain",
+                "original_filename":"x.txt","size_bytes":1}}"#
+        )
+    };
+    let begin = |app: axum::Router, body: String| async move {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/uploads/begin")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("router answers")
+        .status()
+    };
+    let with_perms = |perms: MediaPerms| {
+        media_router_with(mgr.clone(), perms).layer(axum::middleware::from_fn({
+            let u = principal(uid, true);
+            move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+                let u = u.clone();
+                async move {
+                    req.extensions_mut().insert(u);
+                    next.run(req).await
+                }
+            }
+        }))
+    };
+
+    // Control: unset means every disk, for a superuser as for anyone
+    // else. Without this the test below would also pass if the
+    // short-circuit had simply been deleted.
+    assert_ne!(
+        begin(
+            with_perms(MediaPerms::new(pool.clone())),
+            ticket("other-tenants-bucket")
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "control: with no allow-list every disk stays writable, which is the \
+         documented default"
+    );
+
+    assert_eq!(
+        begin(
+            with_perms(MediaPerms::new(pool.clone()).allow_disks(["default"])),
+            ticket("other-tenants-bucket")
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "a tenant superuser minted a presigned PUT into a disk outside the \
+         allow-list. `is_superuser` is per-tenant and the registry is not, so \
+         that is one tenant's admin writing into another tenant's bucket"
+    );
+
+    // And the elevation still works where the list permits it — a
+    // superuser holding no codenames is served.
+    assert_ne!(
+        begin(
+            with_perms(MediaPerms::new(pool).allow_disks(["default"])),
+            ticket("default")
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "the allow-listed disk was refused for a superuser holding no grants — \
+         the disk check swallowed the elevation instead of preceding it"
     );
 }

@@ -458,7 +458,7 @@ async fn the_whole_route_table_reaches_the_gate_correctly() {
         (
             "GET",
             "/collections/7/contents",
-            "Read(CollectionContents(7))",
+            "Read(CollectionContents { id: 7, recursive: false })",
         ),
         ("DELETE", "/collections/7", "Delete(CollectionSubtree(7))"),
         ("POST", "/tags", "Add(NewTag)"),
@@ -528,18 +528,28 @@ async fn axum_path_decoding_is_what_the_gate_must_match() {
     }
 }
 
-/// A recursive listing reaches rows the named collection does not hold.
+/// A recursive listing reaches rows the named collection does not hold,
+/// and the gate has to be told — without losing the collection.
 ///
 /// Same verb, same target, different query string, wider reach: it
 /// returns media living in descendant collections the authorizer was
-/// never asked about. It classifies as `Listing`, whose docs say
-/// granting it is not harmless.
+/// never asked about. `recursive` therefore rides on the target.
+///
+/// It used to become `Read(Listing)` instead, which cost twice. The id
+/// vanished, so a policy scoping collections by owner had nothing left
+/// to scope by; and `Listing` maps to one codename where
+/// `CollectionContents` maps to two, so appending `?recursive=true`
+/// turned a refusal into a 200 over strictly more rows. See
+/// `widening_a_read_can_never_narrow_what_it_costs`.
 #[tokio::test]
 async fn a_recursive_listing_is_not_a_single_collection_read() {
     let (plain, _) = action_for("/collections/7/contents", "GET").await;
     assert_eq!(
         plain,
-        vec![MediaAction::Read(MediaTarget::CollectionContents(7))],
+        vec![MediaAction::Read(MediaTarget::CollectionContents {
+            id: 7,
+            recursive: false
+        })],
         "a non-recursive contents read names one collection"
     );
 
@@ -561,12 +571,52 @@ async fn a_recursive_listing_is_not_a_single_collection_read() {
         let (seen, _) = action_for(uri, "GET").await;
         assert_eq!(
             seen,
-            vec![MediaAction::Read(MediaTarget::Listing)],
+            vec![MediaAction::Read(MediaTarget::CollectionContents {
+                id: 7,
+                recursive: true
+            })],
             "{uri} widens past the collection it names, but the gate was told \
              {seen:?} — a policy granting that one collection would authorise \
              descendants it never saw"
         );
     }
+}
+
+/// Widening a read must never lower its price.
+///
+/// This is the property the `?recursive` split got backwards, stated
+/// directly against the mapping rather than against one route: whatever
+/// the recursive contents listing requires must be a **superset** of
+/// what the same listing requires without it. It returns strictly more
+/// rows, so it cannot cost strictly less.
+///
+/// Asserting a specific pair of codenames would pass just as happily if
+/// someone routed the wide form somewhere cheaper again. The superset
+/// is what actually fails.
+#[cfg(feature = "tenancy")]
+#[test]
+fn widening_a_read_can_never_narrow_what_it_costs() {
+    use rustango::media::router::required_codenames;
+
+    let narrow = required_codenames(&MediaAction::Read(MediaTarget::CollectionContents {
+        id: 7,
+        recursive: false,
+    }))
+    .expect("the narrow contents read must have a mapping");
+    let wide = required_codenames(&MediaAction::Read(MediaTarget::CollectionContents {
+        id: 7,
+        recursive: true,
+    }))
+    .expect("the recursive contents read must have a mapping");
+
+    let missing: Vec<_> = narrow.iter().filter(|cn| !wide.contains(cn)).collect();
+    assert!(
+        missing.is_empty(),
+        "?recursive returns strictly more rows than the same read without it, \
+         yet drops {missing:?} from what it demands — narrow needs {narrow:?}, \
+         wide needs {wide:?}. A caller refused the one collection can append \
+         ?recursive=true and be served its whole subtree"
+    );
 }
 
 /// HEAD must reach the gate as the GET it is routed to.
