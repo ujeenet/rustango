@@ -292,6 +292,7 @@ jobs:
             --test docs_versions \
             --test docs_inventories \
             --test docs_live_suite_counts \
+            --test every_example_crate_is_built \
             --test every_live_suite_runs_in_ci \
             --test every_serving_path_is_observable \
             --test every_test_suite_compiles_in_ci \
@@ -639,6 +640,13 @@ jobs:
       # terminal. Off one, it must fail with a message rather than block on a
       # prompt nobody can answer; this job is exactly that caller.
       - run: cargo test -p cargo-rustango --test wizard_cli
+      # Both of this suite's tests are `#[ignore]`d, and the only
+      # `--ignored` above is scoped to `generated_project_compiles` — so
+      # it ran nowhere, while its own header said "CI runs it with the
+      # rest: `cargo test -p cargo-rustango -- --ignored`" (#1592). It
+      # compiles rustango, hence `--test-threads=1` alongside the other
+      # compiling suite.
+      - run: cargo test -p cargo-rustango --test worker_reaches_the_apps_jobs -- --ignored --test-threads=1
 
   # #1208 — the feature table is a public promise, so check the promise.
   # `sqlite_litmus` below is a single combination, and it happens to be one
@@ -913,6 +921,7 @@ jobs:
             --test tenancy_manage_sqlite_live \
             --test tenant_auth_sqlite_live \
             --test tenant_extractor_sqlite_live \
+            --test soft_delete_without_postgres \
             --test tenant_pools_sqlite_live \
             --test tx_methods_sqlite_live \
             --test unique_when_sqlite_live \
@@ -1350,6 +1359,20 @@ jobs:
           # now — the current flow tests (passwords, sessions) are pure /
           # in-memory; flips to true once DB-backed flow tests land.
           - example: auth_demo
+            migrate: false
+          # These two were compiled by **nothing** until #1592 — they
+          # appeared in `ci.yml` only as `deny-examples` and `lockfiles`
+          # matrix rows, which read a manifest and never build the crate.
+          # Both still compiled when that was found, so nothing had
+          # rotted; nothing would have said if it had.
+          #
+          # `migrate: false` for both: `mcp_demo` is SQLite and needs no
+          # service, and `tenant_user_extension`'s one test is pure
+          # schema math (its own header says "No DB needed"). It had
+          # never run anywhere despite passing in under a second.
+          - example: mcp_demo
+            migrate: false
+          - example: tenant_user_extension
             migrate: false
     services:
       # See `postgres_test`'s comment for the AWS Public ECR mirror
