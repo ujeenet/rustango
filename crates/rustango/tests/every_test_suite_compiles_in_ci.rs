@@ -107,7 +107,7 @@ fn job_name(line: &str) -> Option<&str> {
 /// case, and it is not cosmetic. Leaving them in let a prose comment on
 /// some other job's `run:` line supply the tokens this guard matches
 /// on, so deleting the real job and mentioning its command in passing
-/// kept the guard green. The sibling `every_mysql_arm_runs_in_ci`
+/// kept the guard green. The sibling `every_live_suite_runs_in_ci`
 /// strips them for the same reason.
 fn strip_trailing_comment(line: &str) -> &str {
     match line.find(" #") {
