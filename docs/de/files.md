@@ -191,11 +191,54 @@ Er kümmert sich außerdem um Soft-Delete und das Bereinigen von Waisen. Der vol
 in `media_sqlite_live.rs` erprobt; die vorsignierten/Direct-Upload-Methoden des Managers sind
 PostgreSQL-orientiert.
 
-### Der REST-Router braucht eine Autorisierungs-Policy
+### Medien auf einer öffentlichen Seite ausliefern
 
-`media::router` hängt 16 JSON-Routen über den Manager. **Jede einzelne davon
-ist abgesichert, und es gibt keinen freizügigen Standard.** Baue ihn mit
-`media_router_with` und übergib eine Policy:
+Eine öffentliche Seite geht **nicht** über `media::router`. Dieser Router ist
+die interne Verwaltungs-API — Uploads, Löschungen, Tags, Blättern — und er
+antwortet allen, die nicht angemeldet sind, auf jeder Route absichtlich mit
+`401`.
+
+Ermittle die URL stattdessen im eigenen Handler:
+
+```rust
+// deine eigene öffentliche Route
+let url = manager.public_url(media_id).await?;   // Option<String>, ohne Signatur
+```
+
+`public_url` ist ein Datenbank-Lookup plus ein String; es signiert nichts und
+wartet auf keinen Signierer — deshalb passt es in eine Seite. Zwei
+Auslieferungsmodelle, und die Wahl dazwischen ist die eigentliche Entscheidung:
+
+| | öffentlicher Bucket / CDN | privater Bucket + Presigned |
+|---|---|---|
+| Adresse | `manager.public_url(id)` — stabil | `manager.presigned_get(&m, ttl)` — läuft ab |
+| cachebar | ja, von Browsern und CDNs | nein; der Router sendet `no-store` |
+| wer darf laden | jede:r mit der URL | jede:r mit der URL, bis sie abläuft |
+| wofür | öffentliche Seiten, `<img src>` | der Verwaltungs-Router, interne Tools |
+
+`public_url` sagt dir, **wo** das Objekt ausgeliefert *würde*; es macht das
+Objekt nicht lesbar. Zeigt es auf einen privaten Bucket, bekommst du eine
+korrekte URL und einen 403 — dieser Fall will eine Presigned-URL, die bewusst
+weder cachebar noch teilbar ist.
+
+Für Dateien auf der lokalen Platte statt in einem Bucket erledigt das der
+Static-Handler bereits, ganz ohne Media-Zeile:
+
+```rust
+Cli::new(pool).with_static("/uploads", "./var/uploads")
+```
+
+**Wenn du gerade einen `AllowAll`-Authorizer schreiben wolltest, damit eine
+öffentliche Seite funktioniert: nicht tun.** Das öffnet alle 16 Routen — auch
+`DELETE` und das Presigned `PUT` — für alle, und genau dieses Loch hat 0.57.7
+geschlossen.
+
+### Der Verwaltungs-Router braucht eine Autorisierungs-Policy
+
+`media::router` hängt 16 JSON-Routen über den Manager, allesamt
+Verwaltungs-Aktionen auf der Mediathek. **Jede einzelne davon ist abgesichert,
+und es gibt keinen freizügigen Standard.** Baue ihn mit `media_router_with`
+und übergib eine Policy:
 
 ```rust
 use rustango::media::router::{media_router_with, MediaPerms};
