@@ -100,6 +100,20 @@ const DEFAULT_DISK_NAME: &str = "default";
 /// already applied, so the whole surface has one bound.
 const MAX_LIST_LIMIT: i64 = 1000;
 
+/// Rows [`MediaManager::purge_pending`] deletes per call.
+///
+/// The sweep is a single `DELETE`, so this bounds three things at once:
+/// how long write locks are held, how many binds the statement uses,
+/// and how much a scheduled run can do before yielding. 10 000 is well
+/// under every backend's parameter ceiling (SQLite's 32 766 is the
+/// lowest) and small enough that the measured lock waits — 847 ms on
+/// MySQL, 1.25 s on SQLite at a 1M backlog — do not arise.
+///
+/// A backlog larger than this drains over successive runs rather than
+/// in one, which is the intended trade: a sweep that finishes late is
+/// better than one that blocks every other writer.
+const PURGE_PENDING_BATCH: i64 = 10_000;
+
 /// Page size when a caller names none. Deliberately below
 /// [`MAX_LIST_LIMIT`]: the unpaged form of a listing should be a
 /// reasonable page, not the largest one a caller could ask for.
@@ -746,114 +760,93 @@ impl MediaManager {
         .map_err(media_err_from_exec)
     }
 
-    /// Hard-delete every Media row stuck in `Pending` for longer
-    /// than `older_than`. Direct-browser-upload flows leave Pending
-    /// rows behind when the browser abandons before calling
-    /// `finalize_upload`; this sweep cleans them up.
+    /// Hard-delete Media rows stuck in `Pending` for longer than
+    /// `older_than`, up to `PURGE_PENDING_BATCH` per call.
+    ///
+    /// Direct-browser-upload flows leave Pending rows behind when the
+    /// browser abandons before calling `finalize_upload`; this sweep
+    /// cleans them up. Run it from the [`crate::scheduler`].
+    ///
+    /// Returns the number of media rows deleted. A full return value
+    /// means there was more than one batch of work — call again, or
+    /// let the next scheduled run take it.
+    ///
+    /// # Why this is one statement
+    ///
+    /// 0.57.7 briefly replaced this with a `SELECT` that resolved ids
+    /// and a transaction that deleted by id. Two rounds of review found
+    /// six defects in that shape and none in this one, so it is back:
+    ///
+    /// - deleting by bare id dropped the `status` predicate, so a row
+    ///   that finalized between the `SELECT` and the `DELETE` was
+    ///   destroyed — a Ready row with a real storage object, while its
+    ///   client held a `200` naming it;
+    /// - putting the predicate back on the row delete only meant the
+    ///   tag-link delete still ran for every captured id, so a row the
+    ///   predicate spared lost every tag instead;
+    /// - predicating both **still** does not close it on PostgreSQL or
+    ///   MySQL, where the two statements evaluate at different times
+    ///   under READ COMMITTED;
+    /// - one `IN (…)` over the whole backlog exceeded the bind ceiling
+    ///   and, because the next run re-selected the same rows, wedged
+    ///   the sweep permanently rather than degrading;
+    /// - chunking inside a single transaction then held write locks for
+    ///   the length of the backlog: measured, MySQL blocked a
+    ///   concurrent `finalize_upload` for 847 ms and SQLite's WAL
+    ///   blocked writes to *unrelated tables* for 1.25 s.
+    ///
+    /// One predicated statement has none of those. The predicate cannot
+    /// drift from the row set because there is no second evaluation, and
+    /// the `LIMIT` bounds both the lock footprint and the bind count.
+    ///
+    /// # Errors
+    /// Driver / SQL failures.
     pub async fn purge_pending(&self, older_than: Duration) -> Result<u64, MediaError> {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
         let d = self.pool.dialect();
-        let p = d.placeholder(1);
+        let (p1, p2) = (d.placeholder(1), d.placeholder(2));
 
-        // Resolve the victims **once**, then act on those ids.
+        // Hand-built rather than `QuerySet`, for three reasons that are
+        // ORM gaps rather than preferences — all three filed as #1578:
+        // `DeleteQuery` carries no `limit`; `InSubquery` emits the naive
+        // form; and `WhereExpr::RelExists`, which the unlink below
+        // needs, has no public builder. With those closed this function
+        // is about eight lines of ORM.
         //
-        // Two statements each re-selecting `status = 'pending'` is not
-        // equivalent, and the difference is destructive: a row that
-        // finalizes between them has its tag links deleted by the first
-        // and is then skipped by the second. The result is a live,
-        // finalized media row with every tag stripped — and the call
-        // returns `Ok(0)`, "nothing purged", so a scheduled sweep
-        // logging a clean run is indistinguishable from one that just
-        // did that.
-        //
-        // A transaction alone does not fix it, because the second
-        // statement would still re-evaluate `status` inside the
-        // transaction. Capturing the ids is what makes the two
-        // statements agree about which rows they mean; the transaction
-        // on top is what makes them atomic.
-        let select_sql = format!(
-            "SELECT id FROM rustango_media \
-              WHERE status = 'pending' AND uploaded_at < {p}"
+        // The derived table is not decoration: MySQL rejects a bare
+        // `IN (SELECT … LIMIT n)` with error 1235, "doesn't yet support
+        // 'LIMIT & IN/ALL/ANY/SOME subquery'". Wrapping it makes the
+        // same statement run on all three — verified against
+        // PostgreSQL 16, MySQL 8.0.46 and SQLite.
+        let sql = format!(
+            "DELETE FROM rustango_media               WHERE id IN (SELECT id FROM (                     SELECT id FROM rustango_media                      WHERE status = 'pending' AND uploaded_at < {p1}                      LIMIT {p2}) AS victims)"
         );
-        let victims: Vec<(i64,)> = crate::sql::raw_query_pool(
-            &select_sql,
-            vec![crate::core::SqlValue::DateTime(cutoff)],
+        let purged = crate::sql::raw_execute_pool(
             &self.pool,
+            &sql,
+            vec![
+                crate::core::SqlValue::DateTime(cutoff),
+                crate::core::SqlValue::I64(PURGE_PENDING_BATCH),
+            ],
         )
         .await
         .map_err(media_err_from_exec)?;
-        let ids: Vec<i64> = victims.into_iter().map(|(id,)| id).collect();
-        if ids.is_empty() {
-            return Ok(0);
-        }
 
-        // Chunk on the backend's own parameter ceiling.
+        // Reclaim tag links whose media row is gone.
         //
-        // One bind per id in a single `IN (…)` meant the statement was
-        // rejected outright past the ceiling — and because the next run
-        // re-selects the same backlog, the sweep **wedged permanently**
-        // rather than degrading: measured at 33 000 pending rows,
-        // SQLite purged 0 and kept purging 0. `max_bind_params` already
-        // encodes every backend's limit and `bulk_insert` already
-        // chunks on it; this is the same arithmetic, minus the two
-        // binds the predicate below adds.
-        let per_chunk = (d.max_bind_params().saturating_sub(2)).max(1);
-        let mut purged = 0u64;
-
-        let mut tx = crate::sql::transaction_pool(&self.pool)
+        // `rustango_media_tag_links.media_id` carries no foreign key, so
+        // nothing else reclaims them. Keying on "the row does not exist"
+        // rather than on the ids we just deleted is what makes this
+        // race-free: a link whose media row is present is never touched,
+        // whatever happened concurrently, and a link whose row is absent
+        // is garbage by definition. It also sweeps up orphans left by
+        // earlier versions of this function.
+        let unlink_sql = "DELETE FROM rustango_media_tag_links                            WHERE NOT EXISTS (SELECT 1 FROM rustango_media m                                               WHERE m.id = rustango_media_tag_links.media_id)";
+        crate::sql::raw_execute_pool(&self.pool, unlink_sql, Vec::new())
             .await
             .map_err(media_err_from_exec)?;
 
-        for chunk in ids.chunks(per_chunk) {
-            let in_list = (1..=chunk.len())
-                .map(|i| d.placeholder(i))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let id_binds: Vec<crate::core::SqlValue> = chunk
-                .iter()
-                .copied()
-                .map(crate::core::SqlValue::I64)
-                .collect();
-
-            // Links first, same as `purge` — `rustango_media_tag_links`
-            // carries no foreign key on `media_id`, so a hard delete of
-            // the media row leaves them behind with nothing to reclaim
-            // them. A Pending row can carry tags: `set_tags` accepts any
-            // media id.
-            let unlink_sql =
-                format!("DELETE FROM rustango_media_tag_links WHERE media_id IN ({in_list})");
-            crate::sql::raw_execute_tx(&mut tx, &unlink_sql, id_binds.clone())
-                .await
-                .map_err(media_err_from_exec)?;
-
-            // The predicate stays on the destructive statement.
-            //
-            // Capturing the ids is what makes the two statements agree
-            // about which rows they mean; it is not a licence to delete
-            // by id alone. The SELECT runs on a different connection
-            // and `transaction_pool` must then acquire one, so a
-            // `finalize_upload` can commit `status = 'ready'` in that
-            // window — and a delete by bare id would destroy a **Ready**
-            // row with a real storage object while its client holds a
-            // 200 naming that id. 0.57.6 was a single predicated
-            // statement and could not do this; re-checking here is what
-            // restores that guarantee without giving up the shared id
-            // set.
-            let p_cut = d.placeholder(chunk.len() + 1);
-            let sql = format!(
-                "DELETE FROM rustango_media \
-                  WHERE id IN ({in_list}) \
-                    AND status = 'pending' AND uploaded_at < {p_cut}"
-            );
-            let mut binds = id_binds;
-            binds.push(crate::core::SqlValue::DateTime(cutoff));
-            let n = crate::sql::raw_execute_tx(&mut tx, &sql, binds)
-                .await
-                .map_err(media_err_from_exec)?;
-            purged += n;
-        }
-        tx.commit().await?;
         Ok(purged)
     }
 

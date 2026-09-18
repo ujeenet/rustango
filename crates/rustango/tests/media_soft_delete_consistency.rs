@@ -658,115 +658,172 @@ async fn set_tags_still_replaces_the_whole_set() {
 }
 
 // =====================================================================
-// `purge_pending` deleted by bare id, and bound every row it found
+// `purge_pending` is one predicated, bounded statement
 // =====================================================================
 //
-// 0.57.6 was one statement:
-//   DELETE FROM rustango_media WHERE status='pending' AND uploaded_at < ?
-// 0.57.7 replaced it with a SELECT that resolves ids and a transaction
-// that deleted **by id**, dropping the predicate and binding every row
-// into one `IN (…)`. Both halves are regressions, and the suite's
-// stated reason for not testing this function ("by symmetry with
-// `purge`") was untrue — `purge` does not have this shape.
+// 0.57.6 was a single `DELETE ... WHERE status='pending' AND
+// uploaded_at < ?`. 0.57.7 replaced it with a SELECT resolving ids plus
+// a transaction deleting by id, then patched that twice. Two review
+// rounds found six defects in that shape and none in this one, so it is
+// back — with a `LIMIT` for the one thing the original lacked.
+//
+// These guards pin the three properties that shape gives for free, and
+// each fails on **every** backend rather than only where a literal
+// happens to bite. The previous chunking guard used SQLite's 32 766
+// ceiling as its number, so it could not fail on PostgreSQL or MySQL.
 
-/// A row that leaves `pending` between the SELECT and the DELETE must
-/// survive. It is a Ready row with a real storage object, and its
-/// client is holding a 200 that names it.
+/// The predicate is on the destructive statement, so a row that is not
+/// `pending` when the DELETE runs is not deleted — whatever it was when
+/// the sweep started.
 ///
-/// **The interleaving is the whole test.** Flipping the status *before*
-/// calling the sweep proves nothing — the SELECT simply does not find
-/// the row, so the guard passes with or without the predicate. The
-/// first version of this test did exactly that. The row has to be
-/// `pending` when the SELECT runs and `ready` when the DELETE does.
-///
-/// `purge_pending`'s transaction deletes the tag links first and the
-/// media row second, so a `BEFORE DELETE` trigger on the links fires
-/// between them — inside the transaction, at the one point this test
-/// can reach. That is the same window `finalize_upload` commits in
-/// when the pool is saturated and `transaction_pool` blocks acquiring
-/// its connection.
+/// With one statement there is no window to interleave: the predicate
+/// and the row set are evaluated together, which is the entire reason
+/// for going back to this shape. The guard proves the predicate is
+/// *there* by giving the sweep a Ready row it would otherwise match on
+/// age alone.
 #[tokio::test]
-async fn purge_pending_does_not_delete_a_row_that_finalized() {
+async fn purge_pending_leaves_a_finalized_row_alone() {
     let (mgr, pool) = manager_with_pool().await;
-    let m = seed(&mgr, None).await;
-    let id = id_of(&m);
-    // A tag link, so the trigger below has something to fire on.
-    mgr.tag(id, &["pending-tag"]).await.expect("tag");
+    let pending = seed(&mgr, None).await;
+    let ready = seed(&mgr, None).await;
+    let pending_id = id_of(&pending);
+    let ready_id = id_of(&ready);
 
-    // Put the row in the state the sweep selects: pending, and old
-    // enough for a zero-length cutoff.
+    // Both old enough for a zero cutoff; one has finalized.
     rustango::sql::raw_execute_pool(
         &pool,
-        "UPDATE rustango_media SET status = 'pending' WHERE id = ?",
-        vec![rustango::core::SqlValue::I64(id)],
-    )
-    .await
-    .expect("mark pending");
-    let in_scope = rustango::sql::raw_query_pool::<(i64,)>(
-        "SELECT id FROM rustango_media WHERE status = 'pending'",
-        Vec::new(),
-        &pool,
-    )
-    .await
-    .expect("scope check");
-    assert_eq!(
-        in_scope.len(),
-        1,
-        "control: the row must be in scope for the sweep, or this test measures \
-         an empty set"
-    );
-
-    // The finalize lands mid-sweep.
-    rustango::sql::raw_execute_pool(
-        &pool,
-        "CREATE TRIGGER finalize_mid_sweep \
-         BEFORE DELETE ON rustango_media_tag_links \
-         BEGIN UPDATE rustango_media SET status = 'ready' WHERE id = OLD.media_id; END",
+        "UPDATE rustango_media SET status = 'pending', uploaded_at = '2000-01-01 00:00:00'",
         Vec::new(),
     )
     .await
-    .expect("install trigger");
+    .expect("age both rows");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "UPDATE rustango_media SET status = 'ready' WHERE id = ?",
+        vec![rustango::core::SqlValue::I64(ready_id)],
+    )
+    .await
+    .expect("finalize one");
 
-    mgr.purge_pending(std::time::Duration::ZERO)
+    let purged = mgr
+        .purge_pending(std::time::Duration::ZERO)
         .await
         .expect("sweep");
+    assert_eq!(
+        purged, 1,
+        "control: exactly the one pending row should be purged, not {purged}"
+    );
 
-    rustango::sql::raw_execute_pool(&pool, "DROP TRIGGER finalize_mid_sweep", Vec::new())
-        .await
-        .expect("drop trigger");
-
-    let rows = rustango::sql::raw_query_pool::<(i64,)>(
-        "SELECT id FROM rustango_media WHERE id = ?",
-        vec![rustango::core::SqlValue::I64(id)],
+    let left: Vec<(i64,)> = rustango::sql::raw_query_pool(
+        "SELECT id FROM rustango_media ORDER BY id",
+        Vec::new(),
         &pool,
     )
     .await
     .expect("read back");
     assert_eq!(
-        rows.len(),
-        1,
-        "a row that finalized before the DELETE ran was hard-deleted anyway. It is \
-         a Ready row with a real storage object, its client holds a 200 naming that \
-         id, and nothing else records the storage key — so the object leaks \
-         permanently. 0.57.6's single predicated statement could not do this"
+        left.iter().map(|(id,)| *id).collect::<Vec<_>>(),
+        vec![ready_id],
+        "the finalized row was deleted. It is a Ready row with a real storage \
+         object, and its client holds a 200 naming that id — nothing else records \
+         the storage key, so the object leaks permanently"
+    );
+    assert_ne!(pending_id, ready_id, "control: two distinct rows");
+}
+
+/// A surviving row keeps its tags.
+///
+/// The unlink keys on "the media row is gone", not on a captured id
+/// list, so it cannot strip a row the delete spared. The previous
+/// version deleted links for every id it had captured, which stripped
+/// exactly the row the predicate had just protected.
+#[tokio::test]
+async fn purge_pending_does_not_strip_tags_from_a_surviving_row() {
+    let (mgr, pool) = manager_with_pool().await;
+    let ready = seed(&mgr, None).await;
+    let ready_id = id_of(&ready);
+    mgr.tag(ready_id, &["keep-me"]).await.expect("tag");
+
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "UPDATE rustango_media SET status = 'ready', uploaded_at = '2000-01-01 00:00:00'",
+        Vec::new(),
+    )
+    .await
+    .expect("age and finalize");
+
+    mgr.purge_pending(std::time::Duration::ZERO)
+        .await
+        .expect("sweep");
+
+    let tags: Vec<String> = mgr
+        .tags_for(ready_id)
+        .await
+        .expect("tags_for")
+        .into_iter()
+        .map(|t| t.slug)
+        .collect();
+    assert_eq!(
+        tags,
+        vec!["keep-me".to_owned()],
+        "a row the sweep correctly spared lost its tags anyway — the unlink and the \
+         delete disagreed about which rows they meant"
     );
 }
 
-/// The sweep must not wedge on a backlog bigger than the backend's
-/// parameter ceiling.
-///
-/// SQLite's is the lowest at 32 766, so this is where it bites first.
-/// Unchunked, the statement is rejected before execution, nothing is
-/// purged, and the next run re-selects the same oversized set — the
-/// sweep stops working permanently rather than degrading.
+/// …and a purged row's links are reclaimed, including orphans older
+/// versions of this function left behind.
 #[tokio::test]
-async fn purge_pending_chunks_past_the_parameter_ceiling() {
+async fn purge_pending_reclaims_links_of_rows_it_deletes() {
+    let (mgr, pool) = manager_with_pool().await;
+    let doomed = seed(&mgr, None).await;
+    let id = id_of(&doomed);
+    mgr.tag(id, &["going"]).await.expect("tag");
+
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "UPDATE rustango_media SET status = 'pending', uploaded_at = '2000-01-01 00:00:00'",
+        Vec::new(),
+    )
+    .await
+    .expect("age");
+
+    assert_eq!(
+        mgr.purge_pending(std::time::Duration::ZERO)
+            .await
+            .expect("sweep"),
+        1,
+        "control: the row is purged"
+    );
+
+    let links: Vec<(i64,)> = rustango::sql::raw_query_pool(
+        "SELECT media_id FROM rustango_media_tag_links",
+        Vec::new(),
+        &pool,
+    )
+    .await
+    .expect("read links");
+    assert!(
+        links.is_empty(),
+        "the media row is gone and its tag links survive: {links:?}. `media_id` \
+         carries no foreign key, so nothing else reclaims them and `popular_tags` \
+         counts them forever"
+    );
+}
+
+/// The sweep is bounded, and the bound is the same on every backend.
+///
+/// `PURGE_PENDING_BATCH` is 10 000. Seeding one more than that and
+/// asserting the sweep stops at the batch proves the `LIMIT` is applied
+/// — on PostgreSQL, MySQL and SQLite alike, because the number is the
+/// framework's own constant rather than one backend's parameter
+/// ceiling. The guard it replaces used SQLite's 32 766 and so could not
+/// fail on the other two.
+#[tokio::test]
+async fn purge_pending_stops_at_one_batch() {
     let (mgr, pool) = manager_with_pool().await;
 
-    // Past SQLite's 32 766 ceiling. Inserted directly: `save_bytes`
-    // per row would dominate the test's runtime and the storage write
-    // is not what is under test.
-    let n = 33_000;
+    let n = 10_001;
     let mut sql = String::from(
         "INSERT INTO rustango_media \
          (disk, storage_key, mime, size_bytes, original_filename, status, uploaded_at, metadata) \
@@ -782,14 +839,25 @@ async fn purge_pending_chunks_past_the_parameter_ceiling() {
         .await
         .expect("seed a backlog");
 
-    let purged = mgr.purge_pending(std::time::Duration::ZERO).await.expect(
-        "the sweep errored on a backlog larger than the parameter ceiling — \
-             unchunked, this is the state it never recovers from, because the next \
-             run re-selects the same rows",
-    );
+    let first = mgr
+        .purge_pending(std::time::Duration::ZERO)
+        .await
+        .expect("first sweep");
     assert_eq!(
-        purged, n as u64,
-        "the sweep purged {purged} of {n}; a backlog past the ceiling must be \
-         chunked, not refused"
+        first, 10_000,
+        "the sweep purged {first} of {n} in one call. It must stop at \
+         PURGE_PENDING_BATCH: an unbounded DELETE holds write locks for the length \
+         of the backlog, which measured 847 ms of blocking on MySQL and 1.25 s on \
+         SQLite against unrelated tables"
+    );
+
+    let second = mgr
+        .purge_pending(std::time::Duration::ZERO)
+        .await
+        .expect("second sweep");
+    assert_eq!(
+        second, 1,
+        "the remainder must drain on the next run, not be stranded — a bounded \
+         sweep that never finishes is the wedge this shape exists to avoid"
     );
 }

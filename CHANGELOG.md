@@ -246,6 +246,47 @@ exploitable?" answered honestly — including where the answer is no.
 
 ### Fixed
 
+- **`purge_pending` is one statement again.** 0.57.7 replaced 0.57.6's
+  single `DELETE … WHERE status = 'pending' AND uploaded_at < ?` with a
+  `SELECT` that resolved ids plus a transaction that deleted by id, then
+  patched that twice. Two review rounds found **six** defects in that
+  shape and none in this one, so it is back — with the `LIMIT` the
+  original lacked.
+
+  What the rewrite cost, in order: deleting by bare id dropped the
+  `status` predicate, so a row that finalized mid-sweep was destroyed —
+  a Ready row with a real storage object, while its client held a `200`
+  naming it. Putting the predicate back on the row delete only meant the
+  tag-link delete still ran for every captured id, so a row the
+  predicate *spared* lost every tag instead. Predicating both still does
+  not close it on PostgreSQL or MySQL, where the two statements evaluate
+  at different times under READ COMMITTED. One `IN (…)` over the whole
+  backlog exceeded the bind ceiling and, because the next run
+  re-selected the same rows, wedged the sweep permanently rather than
+  degrading. And chunking inside a single transaction then held write
+  locks for the length of the backlog — measured, MySQL blocked a
+  concurrent `finalize_upload` for **847 ms** and SQLite's WAL blocked
+  writes to *unrelated tables* for **1.25 s** at a 1M-row backlog.
+
+  One predicated statement has none of them. The predicate cannot drift
+  from the row set because there is no second evaluation, and
+  `PURGE_PENDING_BATCH` (10 000) bounds the lock footprint, the bind
+  count and the work per run. A larger backlog drains over successive
+  runs, which is the intended trade: a sweep that finishes late beats
+  one that blocks every other writer.
+
+  Tag links are reclaimed by "the media row is gone" rather than by a
+  captured id list, which is race-free by construction — a link whose
+  row is present is never touched, whatever happened concurrently — and
+  it also sweeps up orphans earlier versions left behind.
+
+  The statement is hand-built rather than `QuerySet`, for three ORM gaps
+  filed as **#1578**: `DeleteQuery` carries no `limit`, `InSubquery`
+  emits a form MySQL rejects with error 1235 when the inner select has
+  one, and `WhereExpr::RelExists` has no public builder. With those
+  closed this function is about eight lines of ORM.
+
+
 - **Three write-path regressions this release introduced**, found by a
   crew review of the assembled branch. 0.57.6 had none of them.
 
