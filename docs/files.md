@@ -216,7 +216,9 @@ prefix.
 permission codenames the admin already uses — `rustango_media.view` to read,
 `rustango_media_collections.add` to create a folder, and so on. Mount it
 **inside** `require_auth`, which is what injects the identity it reads;
-without that every request is a `401`. Superusers skip the check.
+without that every request is a `401`. Superusers skip the codename check —
+but **not** `allow_disks`, which binds them too: `is_superuser` elevates
+inside one tenant, and the object store is shared across all of them.
 
 Three things it does not do:
 
@@ -224,7 +226,10 @@ Three things it does not do:
   row by id. `MediaManager` holds one pool, so a multi-tenant deployment
   scopes rows itself — implement `MediaAuthorizer` for that. `MediaTarget`
   names the row (`Media(id)`, `Collection(id)`, `CollectionSubtree(id)`, …)
-  precisely so a per-row policy can be written.
+  precisely so a per-row policy can be written. `?recursive` on a collection's
+  contents arrives as `CollectionContents { id, recursive: true }` — same
+  target, flagged — so a policy can be stricter about the wide read without
+  losing the collection it names.
 - **Scope the object store.** `disk` is caller-supplied on
   `POST /uploads/begin` and the `StorageRegistry` is process-wide, so
   pool-per-tenant isolates the database and not the bucket: a bare

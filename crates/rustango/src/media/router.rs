@@ -39,7 +39,7 @@
 //! | POST   | `/collections`                    | Create: body `{name, slug, parent_id?, description?}`. Authorized as `Add(NewCollection)`. |
 //! | GET    | `/collections`                    | List every non-deleted collection. |
 //! | GET    | `/collections/{id}`               | Single collection. |
-//! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` to include sub-folders. Authorized as `Read(CollectionContents)` — media rows, not a collection read. |
+//! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` to include sub-folders. Authorized as `Read(CollectionContents { recursive })` — media rows, not a collection read, and the flag rides along so the wide form can never ask for less. |
 //! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside orphaned, NOT deleted). Authorized as `Delete(CollectionSubtree)`, not `Delete(Collection)`. |
 //! | POST   | `/tags`                           | Create / upsert: body `{slug}`. Authorized as `Add(NewTag)` — a different decision from creating a collection. |
 //! | GET    | `/tags`                           | All tags. |
@@ -114,7 +114,7 @@ pub enum MediaTarget {
     /// One collection row, by id — `GET /collections/{id}`.
     Collection(i64),
     /// The **media inside** one collection — `GET
-    /// /collections/{id}/contents` without `?recursive`.
+    /// /collections/{id}/contents`, with or without `?recursive`.
     ///
     /// Separate from [`Self::Collection`] because the two routes return
     /// different tables. This one answers `Vec<MediaResponse>`: media
@@ -128,7 +128,35 @@ pub enum MediaTarget {
     /// collections by owner can use it exactly as it uses
     /// [`Self::Collection`]. What changed is that granting it is also a
     /// decision about media.
-    CollectionContents(i64),
+    ///
+    /// **`recursive` widens the same read, it does not replace it.** A
+    /// recursive listing returns the media in every descendant
+    /// collection too, so it is strictly more rows than the same request
+    /// without it. It used to classify as [`Self::Listing`] instead —
+    /// which dropped the id, leaving a row-scoping authorizer nothing to
+    /// scope by, and under [`MediaPerms`] asked for *one* codename where
+    /// the narrow read asks for two. Adding `?recursive=true` to a
+    /// refused request made it succeed.
+    ///
+    /// Any policy deciding this must be at least as strict for
+    /// `recursive: true` as for `recursive: false`.
+    ///
+    /// Match as `MediaTarget::CollectionContents { id, recursive }`, or
+    /// `{ id, .. }` when the width does not change the answer.
+    ///
+    /// Unlike [`Self::NewUpload`] this variant is constructible from
+    /// outside the crate: it names an existing row, like
+    /// [`Self::Collection`] beside it, and a policy is worth unit
+    /// testing against a target the test can build. The body-derived
+    /// variants stay `#[non_exhaustive]` because they have more of the
+    /// request left to surface; this one does not.
+    CollectionContents {
+        /// The collection named in the path.
+        id: i64,
+        /// `true` when the request carries `?recursive`, and so reaches
+        /// media in descendant collections as well.
+        recursive: bool,
+    },
     /// A collection **and everything under it** — what
     /// `DELETE /collections/{id}` actually reaches.
     ///
@@ -216,8 +244,11 @@ pub enum MediaTarget {
     #[non_exhaustive]
     NewTag {},
     /// A read that enumerates rather than naming a row — `GET
-    /// /collections`, `GET /tags`, `GET /tags/popular`, and a
-    /// `?recursive` collection listing.
+    /// /collections`, `GET /tags` and `GET /tags/popular`.
+    ///
+    /// A `?recursive` contents listing is **not** one of these. It names
+    /// a collection, so it keeps it: see
+    /// [`Self::CollectionContents`].
     ///
     /// **Granting this is not harmless.** Listings enumerate, and
     /// enumeration is what turns "guess an id" into "read the index".
@@ -450,15 +481,20 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
         // The listing is of media, so it takes the media permission —
         // and the collection permission too, because the id names a
         // collection the caller must be allowed to open at all.
-        A::Read(T::CollectionContents(_)) => {
+        //
+        // Both widths take the same two. `recursive` is on the variant
+        // so a custom policy can be *stricter* about the wide one; what
+        // it must never be is looser, which is what routing it to
+        // `Listing` did — one codename for strictly more rows, so
+        // appending `?recursive=true` turned a 403 into a 200.
+        A::Read(T::CollectionContents { .. }) => {
             &["rustango_media_collections.view", "rustango_media.view"]
         }
         // `Listing` spans three tables — `GET /collections`, `GET
-        // /tags`, `GET /tags/popular` and a `?recursive` contents
-        // listing. The recursive one is the widest of the four, so the
-        // group takes the media permission: every listing here exists
-        // to browse the library, and requiring the widest is the
-        // fail-closed reading of a target that cannot say which.
+        // /tags` and `GET /tags/popular`. The group takes the media
+        // permission: every listing here exists to browse the library,
+        // and requiring the widest is the fail-closed reading of a
+        // target that cannot say which.
         //
         // Kept separate from the `Media | Tag` arm above even though the
         // answer coincides: these are two different reasons for the same
@@ -509,7 +545,11 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
 /// # What it checks
 ///
 /// [`required_codenames`] has the full mapping. Superusers
-/// short-circuit to allow, matching every other gate in this codebase.
+/// short-circuit to allow, matching every other gate in this codebase —
+/// with one exception, [`Self::allow_disks`], which is checked first and
+/// applies to them too. `is_superuser` is per-tenant, and that list is
+/// the only thing keeping one tenant's admin out of another tenant's
+/// bucket.
 ///
 /// # What it cannot check
 ///
@@ -574,6 +614,11 @@ impl MediaPerms {
     /// list here rather than a permission. It is checked **in addition
     /// to** `rustango_media.add`, never instead of it.
     ///
+    /// **It also binds superusers**, alone among the checks here.
+    /// `is_superuser` elevates inside one tenant; the disk allow-list is
+    /// what stops that reaching another tenant's storage. Leave it unset
+    /// if org admins should be exempt.
+    ///
     /// ```ignore
     /// MediaPerms::new(pool).allow_disks(["user-uploads"])
     /// ```
@@ -622,11 +667,6 @@ impl MediaAuthorizer for MediaPerms {
             // like, and 401 names that mistake better than 403 would.
             return MediaDecision::Unauthenticated;
         };
-        if auth.is_superuser {
-            return MediaDecision::Allow;
-        }
-        // A variant with no mapping is a route added after this policy
-        // was written. Denying it is the point.
         // `/uploads/begin` mints a presigned PUT for a disk and key
         // prefix the caller chooses, and `StorageRegistry` is
         // process-wide — pool-per-tenant isolates the database, not the
@@ -635,17 +675,33 @@ impl MediaAuthorizer for MediaPerms {
         // own docs call "write anywhere in any bucket". Whatever
         // `allowed_disks` says is applied on top of the codename, never
         // instead of it.
+        //
+        // **Ahead of the superuser short-circuit, and only this check.**
+        // `is_superuser` is the per-tenant flag — an org admin inside
+        // one tenant, not an operator — so short-circuiting first let
+        // any tenant's admin mint a presigned PUT into any *other*
+        // tenant's bucket. Skipping a permission lookup for a superuser
+        // stays inside that tenant's database; skipping this one leaves
+        // it, and `allow_disks` is the only thing standing between the
+        // two. A deployment that wants an admin exempt can leave
+        // `allow_disks` unset, which is still the default.
         if let MediaAction::Add(MediaTarget::NewUpload { disk, .. }) = &action {
             if !self.disk_allowed(disk) {
                 tracing::debug!(
                     target: "rustango::media::auth",
                     disk = %disk,
                     user_id = auth.id,
+                    superuser = auth.is_superuser,
                     "MediaPerms: upload ticket refused — disk not in the allow-list"
                 );
                 return MediaDecision::Forbidden;
             }
         }
+        if auth.is_superuser {
+            return MediaDecision::Allow;
+        }
+        // A variant with no mapping is a route added after this policy
+        // was written. Denying it is the point.
         let Some(codenames) = required_codenames(&action) else {
             tracing::debug!(
                 target: "rustango::media::auth",
@@ -756,9 +812,10 @@ fn wants_upload_body(method: &axum::http::Method, path: &str) -> bool {
 ///
 /// `query` is read for one thing only: `?recursive` on a collection's
 /// contents reaches media in descendant collections, so the request
-/// touches more rows than the one its path names. That widening is
-/// classified as [`MediaTarget::Listing`], whose docs say plainly that
-/// granting it is not harmless.
+/// touches more rows than the one its path names. That widening rides
+/// on [`MediaTarget::CollectionContents`] rather than replacing the
+/// target, so the id survives it and no policy can end up asking less
+/// of the wide form than of the narrow one.
 ///
 /// `upload` carries the parsed body for the one route that needs it —
 /// see [`wants_upload_body`]. It is `None` for every other route, and a
@@ -846,11 +903,6 @@ fn classify(
 
         (&Method::GET, ["collections"]) => Some(MediaAction::Read(MediaTarget::Listing)),
         (&Method::POST, ["collections"]) => Some(MediaAction::Add(MediaTarget::NewCollection {})),
-        // A recursive listing reaches descendants the authorizer is
-        // never asked about, so it is not a single-collection read.
-        (&Method::GET, ["collections", _, "contents"]) if recursive => {
-            Some(MediaAction::Read(MediaTarget::Listing))
-        }
         // The collection row itself.
         (&Method::GET, ["collections", raw]) => {
             Some(MediaAction::Read(MediaTarget::Collection(id(raw)?)))
@@ -858,8 +910,18 @@ fn classify(
         // The media inside it — a different table, and a presigned URL
         // per row. Sharing `Collection` with the arm above is what let
         // `rustango_media_collections.view` read the library.
+        //
+        // One arm for both widths. `?recursive` reaches descendants the
+        // authorizer is never asked about, but that is a reason to hand
+        // it the flag, not to drop the id: routing the wide one to
+        // `Listing` left a row-scoping policy with nothing to scope by,
+        // and left `MediaPerms` asking less of it than of the narrow
+        // one.
         (&Method::GET, ["collections", raw, "contents"]) => {
-            Some(MediaAction::Read(MediaTarget::CollectionContents(id(raw)?)))
+            Some(MediaAction::Read(MediaTarget::CollectionContents {
+                id: id(raw)?,
+                recursive,
+            }))
         }
         // Not `Collection` — this route deletes the whole subtree and
         // orphans the media under every level of it. Naming one id in a

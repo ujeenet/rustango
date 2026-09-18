@@ -47,7 +47,8 @@ exploitable?" answered honestly — including where the answer is no.
   row.
 
   The gate identifies that row through the new `MediaTarget`
-  (`Media(i64)` / `Collection(i64)` / `CollectionContents(i64)` /
+  (`Media(i64)` / `Collection(i64)` /
+  `CollectionContents { id, recursive }` /
   `CollectionSubtree(i64)` /
   `Tag(String)` / `NewUpload { disk, key_prefix, … }` /
   `NewCollection {}` / `NewTag {}` /
@@ -190,8 +191,8 @@ exploitable?" answered honestly — including where the answer is no.
     rows, each carrying a presigned GET URL. The mapping had been made
     by target *kind* rather than by what the route returns, so "may
     browse folders" harvested signed download links one collection at a
-    time. It is `Read(MediaTarget::CollectionContents(id))` now and
-    requires **both** view codenames.
+    time. It is `Read(MediaTarget::CollectionContents { id, recursive })`
+    now and requires **both** view codenames, at either width.
   - **`MediaPerms` ignored the `disk` it was handed.** The fields added
     above exist so a policy can constrain where an upload lands, and
     `required_codenames` matched them away — so `rustango_media.add`
@@ -243,6 +244,39 @@ exploitable?" answered honestly — including where the answer is no.
 
 - **`media` no longer enables `_async_trait` redundantly** — `storage`,
   which `media` already requires, enables it.
+
+- **Two ways past the media gate that this release's own fixes opened**,
+  found by a second crew review of the assembled branch. Both are
+  unreleased-only: neither exists in 0.57.6, where the gate did not.
+
+  - **`?recursive=true` cost less than not asking for it.** The
+    recursive contents listing classified as `Read(MediaTarget::Listing)`
+    — one codename, `rustango_media.view` — while the same route
+    without the flag classified as `Read(CollectionContents(id))` and
+    took two. The recursive form returns that collection's media *and
+    every descendant's*, so seven characters of query string turned a
+    403 into a 200 over strictly more rows. It also dropped the id, so a
+    custom `MediaAuthorizer` scoping collections by owner was handed
+    nothing to scope by on exactly the widest read.
+
+    Both widths are `CollectionContents { id, recursive }` now — one
+    target, one mapping, the flag carried so a policy can be *stricter*
+    about the wide one and cannot be looser. A guard asserts the
+    superset relation against the mapping itself rather than against a
+    fixed pair of codenames, so re-routing the wide form somewhere
+    cheaper fails the build.
+
+  - **The superuser short-circuit ran ahead of `allow_disks`.** So a
+    superuser minted a presigned `PUT` into any registered disk
+    regardless of the allow-list. `is_superuser` is the **per-tenant**
+    flag — org admin inside one tenant, no access to `/operator` — and
+    `StorageRegistry` is process-wide, so that is one tenant's admin
+    writing into another tenant's bucket, which is precisely the hole
+    `allow_disks` was added in this release to close. The disk check is
+    ahead of the short-circuit now, and it is the only check that is:
+    every other one is a permission lookup on that tenant's own pool,
+    and skipping those stays inside the tenant. Unset still means every
+    disk, so a deployment wanting admins exempt changes nothing.
 
 ### Fixed
 
