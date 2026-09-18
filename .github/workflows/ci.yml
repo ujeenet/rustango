@@ -1137,6 +1137,10 @@ jobs:
       # `IF EXISTS` there, so a render-only test elsewhere proves
       # nothing about it (#1588).
       - run: cargo test -p rustango --features mysql --test migrate_drop_index_mysql_live
+      # The partial-apply state only exists on MySQL: PostgreSQL and
+      # SQLite roll a failed migration back completely, so neither can
+      # reach "schema moved, ledger did not" (#1588).
+      - run: cargo test -p rustango --features mysql --test migrate_partial_apply_mysql_live
       # #1281 — the MySQL arm of DatabaseCache::add is bespoke SQL
       # (INSERT IGNORE + conditional UPDATE, since ON DUPLICATE KEY
       # UPDATE takes no WHERE). It is also positional-`?`, so a bind

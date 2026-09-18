@@ -148,6 +148,40 @@ untouched.
 
 ---
 
+## Unreleased
+
+### `MigrateError` is now `#[non_exhaustive]`
+
+Only affects code that **matches exhaustively** on it. Add a `_ =>` arm:
+
+```rust
+match err {
+    MigrateError::Driver(e) => …,
+    MigrateError::Io(e) => …,
+    _ => …,            // <- add this
+}
+```
+
+Anything that only propagates the error, or formats it with `{}` / `?`,
+is unaffected — which is most code.
+
+The marker went on together with a new variant, `PartiallyApplied`, so
+that this is **one** break rather than two: every future variant is now
+additive. See #1513, which wants the same treatment across the other
+public error enums.
+
+`PartiallyApplied` is raised when a migration fails on MySQL *after*
+committing DDL. MySQL commits DDL immediately, so the transaction around
+an `atomic: true` migration cannot undo it — the schema moves and the
+ledger row is never written, and re-running then fails differently
+because the work is already done. The error now names how much committed
+and the way out (`manage migrate --fake <name>` once the schema
+matches), which was previously folklore. A failure with no committed DDL
+still surfaces as `Driver`, unchanged, because that one rolled back
+cleanly and should simply be re-run.
+
+---
+
 ## 0.57.7
 
 > Published 2026-09-18.
