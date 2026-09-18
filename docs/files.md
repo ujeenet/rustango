@@ -191,11 +191,51 @@ It also handles soft-delete and orphan purging. The full flow is dogfooded in
 `media_sqlite_live.rs`; the manager's presigned/direct-upload methods are
 PostgreSQL-oriented.
 
-### The REST router needs an authorization policy
+### Serving media on a public page
 
-`media::router` mounts 16 JSON routes over the manager. **Every one of them
-is gated, and there is no permissive default.** Build it with
-`media_router_with` and supply a policy:
+A public page does **not** go through `media::router`. That router is the
+internal management API — uploads, deletes, tagging, browsing — and it
+answers `401` to anyone not signed in, on every route, by design.
+
+Render the URL from your own handler instead:
+
+```rust
+// your own public route
+let url = manager.public_url(media_id).await?;   // Option<String>, no signature
+```
+
+`public_url` is a database lookup plus a string; it mints nothing and awaits
+no signer, which is why it suits a page. Two delivery models, and choosing
+between them is the actual decision:
+
+| | public bucket / CDN | private bucket + presigned |
+|---|---|---|
+| address | `manager.public_url(id)` — stable | `manager.presigned_get(&m, ttl)` — expires |
+| cacheable | yes, by browsers and CDNs | no; the router sends `no-store` |
+| who may fetch | anyone with the URL | anyone with the URL, until it expires |
+| use for | public pages, `<img src>` | the management router, internal tools |
+
+`public_url` tells you where the object *would* be served from; it does not
+make the object readable. Point it at a private bucket and you get a correct
+URL and a 403 — that case wants a presigned URL, which is deliberately not
+cacheable and not shareable.
+
+For files on local disk rather than a bucket, the static handler already does
+this and needs no media row at all:
+
+```rust
+Cli::new(pool).with_static("/uploads", "./var/uploads")
+```
+
+**If you were about to write an `AllowAll` authorizer to make a public page
+work, stop.** That opens all 16 routes — including `DELETE` and the presigned
+`PUT` — to everyone, which is the hole 0.57.7 closed.
+
+### The management router needs an authorization policy
+
+`media::router` mounts 16 JSON routes over the manager, all of them operator
+actions on the library. **Every one is gated, and there is no permissive
+default.** Build it with `media_router_with` and supply a policy:
 
 ```rust
 use rustango::media::router::{media_router_with, MediaPerms};

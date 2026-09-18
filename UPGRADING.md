@@ -181,9 +181,15 @@ a collection needs **both** `rustango_media_collections.delete` and
 `rustango_media.change`, because that route re-parents every media row
 underneath it. Superusers skip the check.
 
-Mount it inside `require_auth` (or `optional_auth`) — that middleware is
-what injects the `AuthenticatedUser` it reads. Without it every request
-is a `401`, which is the symptom naming its own cause.
+Mount it inside `require_auth` — that middleware is what injects the
+`AuthenticatedUser` it reads. Without it every request is a `401`, which
+is the symptom naming its own cause.
+
+Not `optional_auth`: it compiles and then 401s anyway, because
+`MediaPerms` has no anonymous path. If what you wanted was a **public
+page** showing an uploaded image, this router is the wrong tool
+entirely — render `manager.public_url(id).await?` from your own route.
+`docs/files.md` has both delivery models.
 
 Reading a collection's **contents** needs
 `rustango_media_collections.view` *and* `rustango_media.view`, because

@@ -4,6 +4,60 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- **`MediaManager::public_url(id)`** — the CDN-aware public address for a
+  media id, minting no signature. This is the supported way to put an
+  uploaded image on a page anyone can reach.
+
+  It exists because there was no answer to that question. `media::router`
+  is the *internal management API* — uploads, deletes, tagging, browsing —
+  and it refuses an anonymous request on every route by design. Nothing
+  said so, and `docs/files.md` presented the router as the way to serve
+  media without mentioning any other path, so the two ways to discover the
+  truth were both bad: hand-roll a second read endpoint beside the router
+  and lose its tenant and soft-delete filtering, or fit an `AllowAll`
+  authorizer and reopen all sixteen routes including `DELETE` and the
+  presigned `PUT`.
+
+  Sync-friendly on purpose: no signing means no `await` in a template.
+  Tera filters are sync, so a presigned URL could never be built from one
+  — which is why the answer is a handler computing a string, not a
+  template helper.
+
+### Changed
+
+- **`media::router` is documented as what it is**, in its module header,
+  `docs/files.md` and the three translations: the internal management
+  API, not a delivery API. The page gains a "Serving media on a public
+  page" section with the two delivery models side by side — public
+  bucket/CDN versus private bucket plus presigned — and points at
+  `Cli::with_static` for local-disk files, which already did this and was
+  never mentioned there.
+
+- **The `optional_auth` suggestion is withdrawn** from `MediaPerms`'s
+  rustdoc and `UPGRADING.md`. It compiled and then answered `401` anyway,
+  because that policy has no anonymous path, so it sent anyone building a
+  public page down a road ending in unexplained 401s. It is meaningful
+  only under a custom `MediaAuthorizer` that deliberately allows some
+  anonymous action.
+
+### Testing
+
+- **`tests/files_doc_media.rs`** — the media half of `docs/files.md` had
+  **no backing test at all**. `files_doc.rs` is gated on `storage` +
+  `uploads` and asserts nothing about `media`, while `docs_contract`
+  reported the page as covered because coverage there is tracked per
+  *page*: a page can be half-guarded and still count. That is how the
+  framing drifted ninety lines without anything failing.
+
+  The new suite executes the public-page recipe end to end and pairs it
+  with the refusal: the same row that `public_url` serves must still get
+  a `401` from the management router. Each of the three guards was
+  mutation-tested against production code — soft-delete filtering
+  removed, `public_url` made to presign, and the router's
+  `Unauthenticated → 401` mapping changed — and each dies on its own.
+
 ## [0.57.7] — 2026-09-17
 
 The security pass. A review of `develop` at v0.57.6 produced 20 findings,
