@@ -304,7 +304,63 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             }
         }
     }
-    // Dropped tables.
+    // Objects that hang off a table, dropped **before** the table.
+    //
+    // Ordering, not suppression (#1598). #1588 was `DropTable` followed
+    // by `DropIndex` for an index the table owned: on MySQL the table
+    // drop auto-commits, the index drop then fails 1146, the ledger row
+    // is never written, and the re-run fails 1051 with nothing able to
+    // reconcile it.
+    //
+    // The first fix suppressed the dependent drop, which stopped that
+    // and broke rollback: the forward list became `[DropTable]` alone,
+    // `invert` produced `[CreateTable]`, and `CreateTable` renders no
+    // index DDL — so rolling back *succeeded* and silently restored the
+    // table without its indexes, UNIQUE ones included, while the
+    // predecessor snapshot still listed them. A loud failure traded for
+    // a quiet one.
+    //
+    // Emitting the drop first is accepted by every dialect, because the
+    // table is still there. `invert` walks the forward list in reverse,
+    // so `[DropIndex, DropTable]` inverts to
+    // `[CreateTable, CreateIndex]` — the right order, for free.
+    //
+    // Dropped indexes — present in prev, absent from current.
+    for idx in &prev.indexes {
+        if current.index(&idx.name).is_none() {
+            changes.push(SchemaChange::DropIndex {
+                name: idx.name.clone(),
+                table: idx.table.clone(),
+            });
+        }
+    }
+    // Dropped CHECK constraints. Same ordering rule, same reason: this
+    // loop and the EXCLUDE one below were the two #1588's fix missed,
+    // so a model carrying a table-level CHECK still reproduced it.
+    for c in &prev.checks {
+        if current.check(&c.name).is_none() {
+            changes.push(SchemaChange::DropCheckConstraint {
+                name: c.name.clone(),
+                table: c.table.clone(),
+            });
+        }
+    }
+    // Dropped PG EXCLUDE constraints.
+    //
+    // Names rather than a lookup helper: `SchemaSnapshot` has
+    // `table`/`index`/`check` accessors but none for excludes, and the
+    // add-side below builds the mirror set for the same reason.
+    let current_exclude_names: std::collections::HashSet<&str> =
+        current.excludes.iter().map(|x| x.name.as_str()).collect();
+    for x in &prev.excludes {
+        if !current_exclude_names.contains(x.name.as_str()) {
+            changes.push(SchemaChange::DropExclusionConstraint {
+                name: x.name.clone(),
+                table: x.table.clone(),
+            });
+        }
+    }
+    // Dropped tables — after everything that hangs off them.
     for pt in &prev.tables {
         if current.table(&pt.name).is_none() {
             changes.push(SchemaChange::DropTable(pt.name.clone()));
@@ -321,23 +377,6 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 method: idx.method.clone(),
                 where_clause: idx.where_clause.clone(),
                 include: idx.include.clone(),
-            });
-        }
-    }
-    // Dropped indexes — present in prev, absent from current.
-    //
-    // An index on a table this same migration drops is **not** emitted.
-    // Both MySQL and PostgreSQL drop a table's indexes with the table,
-    // so the op was always redundant — and on MySQL it was worse than
-    // redundant: `DropTable` succeeded, the following `DropIndex`
-    // failed, and the migration was recorded as failed with the table
-    // already gone. Re-running then failed differently (1051, unknown
-    // table) and no amount of retrying reconciled the ledger (#1588).
-    for idx in &prev.indexes {
-        if current.index(&idx.name).is_none() && current.table(&idx.table).is_some() {
-            changes.push(SchemaChange::DropIndex {
-                name: idx.name.clone(),
-                table: idx.table.clone(),
             });
         }
     }
@@ -417,15 +456,6 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             });
         }
     }
-    // Dropped CHECK constraints.
-    for c in &prev.checks {
-        if current.check(&c.name).is_none() {
-            changes.push(SchemaChange::DropCheckConstraint {
-                name: c.name.clone(),
-                table: c.table.clone(),
-            });
-        }
-    }
     // New PG EXCLUDE constraints (issue #319). Dropped EXCLUDEs surface
     // only when the constraint name disappears from the model — the
     // migration writer emits a `DropExclusionConstraint`. Same posture
@@ -434,8 +464,6 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     // makemigrations cycle.
     let prev_exclude_names: std::collections::HashSet<&str> =
         prev.excludes.iter().map(|x| x.name.as_str()).collect();
-    let current_exclude_names: std::collections::HashSet<&str> =
-        current.excludes.iter().map(|x| x.name.as_str()).collect();
     for x in &current.excludes {
         if !prev_exclude_names.contains(x.name.as_str()) {
             changes.push(SchemaChange::AddExclusionConstraint {
@@ -444,14 +472,6 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 using: x.using.clone(),
                 elements: x.elements.clone(),
                 where_clause: x.where_clause.clone(),
-            });
-        }
-    }
-    for x in &prev.excludes {
-        if !current_exclude_names.contains(x.name.as_str()) {
-            changes.push(SchemaChange::DropExclusionConstraint {
-                name: x.name.clone(),
-                table: x.table.clone(),
             });
         }
     }

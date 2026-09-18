@@ -5,7 +5,7 @@
 //! Live PG tests live in `migrate_runner.rs`.
 
 use rustango::migrate::{
-    detect_changes, render_changes, SchemaChange, SchemaSnapshot, TableSnapshot,
+    detect_changes, invert, render_changes, Operation, SchemaChange, SchemaSnapshot, TableSnapshot,
 };
 
 // ---------------- helpers ----------------
@@ -777,41 +777,127 @@ fn flipping_unique_flag_emits_drop_then_create() {
     ));
 }
 
-/// Dropping a model must not emit a `DropIndex` per index (#1588).
+/// Dropping a model drops its indexes **first** (#1588, #1598).
 ///
 /// This is the shape that broke a live MySQL tenant. `makemigrations`
-/// emitted `DropTable` plus one `DropIndex` per index, and MySQL
-/// applied the `DropTable`, failed on the first `DropIndex`, and
-/// recorded the migration as failed — so the table was gone with no
-/// ledger row, and re-running failed differently (1051, unknown
-/// table). Nothing reconciled that without `migrate --fake`.
+/// emitted `DropTable` and then `DropIndex`; MySQL applied the
+/// `DropTable`, failed on the index with 1146, and recorded the
+/// migration as failed — so the table was gone with no ledger row, and
+/// re-running failed differently (1051). Nothing reconciled that
+/// without `migrate --fake`.
 ///
-/// The ops were always redundant: both MySQL and PostgreSQL drop a
-/// table's indexes along with the table.
+/// The first fix *suppressed* the index drop. That stopped the failure
+/// and broke rollback instead — see
+/// `dropping_a_table_round_trips_through_invert_with_its_indexes`.
+/// Ordering is the fix that does both: every dialect accepts dropping
+/// an index while its table is still there.
 #[test]
-fn dropping_a_table_does_not_also_emit_drop_index_for_its_indexes() {
+fn dropping_a_table_drops_its_indexes_first() {
     let prev = snap_with_index("uq", &["a", "b"], true);
     // The table goes; so does the index that lived on it.
     let current = SchemaSnapshot::default();
 
     let changes = detect_changes(&prev, &current);
 
-    assert!(
-        changes
-            .iter()
-            .any(|c| matches!(c, SchemaChange::DropTable(t) if t == "diff_user")),
-        "control: the table itself must still be dropped, or this test is \
-         asserting nothing: {changes:?}"
-    );
-    let stray: Vec<_> = changes
+    let drop_table = changes
         .iter()
-        .filter(|c| matches!(c, SchemaChange::DropIndex { .. }))
-        .collect();
+        .position(|c| matches!(c, SchemaChange::DropTable(t) if t == "diff_user"))
+        .expect("control: the table itself must still be dropped");
+    let drop_index = changes
+        .iter()
+        .position(|c| matches!(c, SchemaChange::DropIndex { name, .. } if name == "uq"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the index was not dropped at all. Suppressing it leaves rollback \
+                 restoring the table without it: {changes:?}"
+            )
+        });
+
     assert!(
-        stray.is_empty(),
-        "DropIndex emitted for an index whose table is dropped in the same \
-         migration. On MySQL the DropTable succeeds and this then fails, \
-         leaving the schema changed and the ledger empty: {stray:?}"
+        drop_index < drop_table,
+        "DropIndex must be emitted before DropTable. After the table is gone MySQL \
+         fails the index drop with 1146, having already auto-committed the DROP TABLE \
+         — schema changed, ledger empty, re-run fails 1051: {changes:?}"
+    );
+}
+
+/// The same ordering for a table-level CHECK (#1598).
+///
+/// #1588's fix reached one of three identical loops. This one and the
+/// EXCLUDE loop below still emitted their drop *after* `DropTable`, so
+/// a model carrying a CHECK reproduced the original failure exactly.
+#[test]
+fn dropping_a_table_drops_its_check_constraints_first() {
+    let mut prev = snap_with_index("uq", &["a", "b"], true);
+    prev.checks = vec![serde_json::from_value(serde_json::json!({
+        "name": "ck_age", "table": "diff_user", "expr": "age > 0"
+    }))
+    .expect("check snapshot")];
+    let current = SchemaSnapshot::default();
+
+    let changes = detect_changes(&prev, &current);
+
+    let drop_table = changes
+        .iter()
+        .position(|c| matches!(c, SchemaChange::DropTable(t) if t == "diff_user"))
+        .expect("control: the table must still be dropped");
+    let drop_check = changes
+        .iter()
+        .position(
+            |c| matches!(c, SchemaChange::DropCheckConstraint { name, .. } if name == "ck_age"),
+        )
+        .expect("the CHECK must still be dropped");
+
+    assert!(
+        drop_check < drop_table,
+        "DropCheckConstraint must precede DropTable — on MySQL the table drop \
+         auto-commits and `ALTER TABLE t DROP CHECK` then fails 1146, which is #1588 \
+         reproduced through the loop its fix missed: {changes:?}"
+    );
+}
+
+/// Dropping a model is invertible, and the inverse restores the
+/// indexes (#1598).
+///
+/// The suppression fix made this silently false: the forward list
+/// became `[DropTable]` alone, `invert` gave `[CreateTable]`, and
+/// `CreateTable` renders no index DDL — so rolling back *succeeded*
+/// and left the table without its indexes, UNIQUE ones included, while
+/// the predecessor snapshot still listed them. `makemigrations` then
+/// saw no drift, so nothing ever recreated them.
+///
+/// Asserting the round trip rather than the op list: the op list is
+/// what changed, the property is what matters.
+#[test]
+fn dropping_a_table_round_trips_through_invert_with_its_indexes() {
+    let prev = snap_with_index("uq", &["a", "b"], true);
+    let current = SchemaSnapshot::default();
+
+    let forward: Vec<Operation> = detect_changes(&prev, &current)
+        .into_iter()
+        .map(Operation::Schema)
+        .collect();
+
+    // `invert` walks the forward list in reverse, so the ordering the
+    // forward list established is what puts CreateTable ahead of
+    // CreateIndex here — no second ordering rule to keep in step.
+    let back = invert(&forward, &prev).expect("a drop-model migration must be invertible");
+
+    let creates_table = back.iter().position(
+        |op| matches!(op, Operation::Schema(SchemaChange::CreateTable(t)) if t == "diff_user"),
+    );
+    let creates_index = back
+        .iter()
+        .position(|op| matches!(op, Operation::Schema(SchemaChange::CreateIndex { name, .. }) if name == "uq"));
+
+    let creates_table = creates_table.expect("inverse must recreate the table");
+    let creates_index = creates_index.expect(
+        "inverse must recreate the index. Without it the rollback succeeds and \
+         silently loses every index the table had, while the snapshot still lists them",
+    );
+    assert!(
+        creates_table < creates_index,
+        "the table must be created before its index: {back:?}"
     );
 }
 

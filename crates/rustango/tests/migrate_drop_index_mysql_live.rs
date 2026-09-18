@@ -159,3 +159,80 @@ async fn mysql_really_does_reject_the_postgres_form() {
         .await
         .unwrap();
 }
+
+/// Dropping a model with an index and a CHECK applies cleanly on MySQL
+/// (#1598).
+///
+/// The ordering fix's whole claim is that MySQL accepts dropping a
+/// dependent object while its table is still there. Asserted against
+/// the server, because the failure it replaces was a MySQL-only
+/// auto-commit behaviour that no other dialect can reproduce.
+///
+/// Before #1598 this migration left the table dropped, the ledger
+/// empty, and the re-run failing 1051.
+#[tokio::test]
+async fn dropping_a_model_with_dependents_applies_in_one_go() {
+    let Ok(url) = std::env::var("MYSQL_TEST_URL") else {
+        eprintln!("skipping — set MYSQL_TEST_URL");
+        return;
+    };
+    let my = sqlx::MySqlPool::connect(&url).await.expect("connect mysql");
+
+    let table = unique("dep_tbl");
+    let index = unique("dep_idx");
+    sqlx::query(&format!("DROP TABLE IF EXISTS `{table}`"))
+        .execute(&my)
+        .await
+        .unwrap();
+    sqlx::query(&format!(
+        "CREATE TABLE `{table}` (id BIGINT PRIMARY KEY, age INT, slug VARCHAR(64), \
+         CONSTRAINT `{table}_ck` CHECK (age > 0))"
+    ))
+    .execute(&my)
+    .await
+    .unwrap();
+    sqlx::query(&format!("CREATE INDEX `{index}` ON `{table}` (slug)"))
+        .execute(&my)
+        .await
+        .unwrap();
+
+    // The exact op order detect_changes now produces for a dropped
+    // model: dependents first, table last.
+    let changes = vec![
+        SchemaChange::DropIndex {
+            name: index.clone(),
+            table: table.clone(),
+        },
+        SchemaChange::DropCheckConstraint {
+            name: format!("{table}_ck"),
+            table: table.clone(),
+        },
+        SchemaChange::DropTable(table.clone()),
+    ];
+
+    for change in &changes {
+        let batch = render_changes_split_with_dialect(
+            std::slice::from_ref(change),
+            &SchemaSnapshot::default(),
+            &rustango::sql::MySql,
+        )
+        .expect("renders on MySQL");
+        for stmt in batch.immediate {
+            sqlx::query(&stmt)
+                .execute(&my)
+                .await
+                .unwrap_or_else(|e| panic!("MySQL rejected `{stmt}`: {e}"));
+        }
+    }
+
+    let left: i64 = sqlx::query(
+        "SELECT COUNT(*) AS c FROM information_schema.tables \
+         WHERE table_schema = DATABASE() AND table_name = ?",
+    )
+    .bind(&table)
+    .fetch_one(&my)
+    .await
+    .unwrap()
+    .get::<i64, _>("c");
+    assert_eq!(left, 0, "the table should be gone after the full sequence");
+}
