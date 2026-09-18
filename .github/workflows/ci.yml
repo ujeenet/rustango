@@ -369,7 +369,17 @@ jobs:
       - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
       # `oauth2_router_standalone`, gated on `not(feature = "admin")`. The
       # only shape that compiles it; nothing else in CI did.
-      - run: cargo test -p rustango --no-default-features --features oauth2,manage,sqlite --no-run
+      #
+      # `--test` on purpose, unlike the two commands above. Building the
+      # whole test surface under this narrow feature set fails on suites
+      # whose `#![cfg]` under-specifies what they import — e.g.
+      # `forms_prepare_save_sqlite_live` is gated on `sqlite` alone and
+      # uses `rustango::forms`, which nothing here enables. Those gates
+      # are wrong and only ever compiled because every job that built
+      # them happened to have the feature on; that is its own class of
+      # defect and its own change (#1594), not a reason to hold this job
+      # back.
+      - run: cargo test -p rustango --no-default-features --features oauth2,manage,sqlite --test oauth2_router_standalone --no-run
 
   # Primary PG test job — runs the full workspace with `--all-features`
   # against a real PostgreSQL service. Covers every PG-typed live test
