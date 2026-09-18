@@ -10,9 +10,10 @@
 //! ## Quick start
 //!
 //! ```ignore
-//! use rustango::media::{Media, MediaManager};
+//! use rustango::media::{MediaManager, SaveOpts};
 //! use rustango::storage::StorageRegistry;
 //! use std::sync::Arc;
+//! use std::time::Duration;
 //!
 //! // Tables come from the framework's system migrations (run during
 //! // provisioning / `migrate_framework`) — no per-boot table bootstrap.
@@ -21,7 +22,10 @@
 //!     .set("avatars", Arc::new(s3_storage))
 //!     .with_default("avatars");
 //!
-//! let manager = MediaManager::new(pool.clone(), registry);
+//! // `new_pool` takes `sql::Pool` and works on all three backends.
+//! // `MediaManager::new` is Postgres-only and takes a `PgPool` — it is
+//! // the one member of this API that is not portable.
+//! let manager = MediaManager::new_pool(pool.clone(), registry);
 //!
 //! // Server-side save (small files):
 //! let media = manager.save_bytes(SaveOpts {
@@ -31,6 +35,7 @@
 //!     mime: "image/png".into(),
 //!     original_filename: "alice.png".into(),
 //!     uploaded_by_id: Some(42),
+//!     collection_id: None,
 //!     metadata: serde_json::json!({}),
 //! }).await?;
 //!
@@ -38,9 +43,16 @@
 //! let url = manager.url(&media);                  // CDN-aware
 //! let download = manager.presigned_get(&media, Duration::from_secs(3600)).await;
 //!
-//! // Delete row + storage object via post_delete signal:
+//! // Soft-delete the row. The storage object survives, so a presigned
+//! // URL minted before this keeps working until its TTL expires —
+//! // `purge` is what actually revokes access.
 //! manager.delete(&media).await?;
 //! ```
+//!
+//! The REST router over this surface lives in [`router`] and needs the
+//! `admin` feature. It requires an authorization policy: `media_router`
+//! is deprecated and answers `403` to everything, and
+//! `router::media_router_with` takes a [`router::MediaAuthorizer`].
 //!
 //! ## Schema
 //!
@@ -65,10 +77,47 @@ pub mod tag;
 pub use collection::MediaCollection;
 pub use tag::{MediaTag, MediaTagLink};
 
+// No outer doc comment here. An outer `///` at a module's declaration
+// site concatenates with the module's own `//!` block and resolves the
+// combined text in *this* module's scope, so every relative intra-doc
+// link inside router.rs breaks. That cost six links on the page the
+// media API is learned from, and it is invisible locally because the
+// crate already emits ~414 rustdoc warnings. The `admin` requirement is
+// stated in router.rs's own header instead.
 #[cfg(feature = "admin")]
 pub mod router;
 
+/// Re-exported so implementing [`router::MediaAuthorizer`] does not
+/// need `async-trait` in the integrator's own `Cargo.toml`, and cannot
+/// drift from the version the trait was declared with.
+#[cfg(feature = "admin")]
+pub use async_trait::async_trait;
+
 const DEFAULT_DISK_NAME: &str = "default";
+
+/// Ceiling on any listing's page size. Matches the clamp
+/// [`MediaManager::list_with_tag`] and [`MediaManager::popular_tags`]
+/// already applied, so the whole surface has one bound.
+const MAX_LIST_LIMIT: i64 = 1000;
+
+/// Rows [`MediaManager::purge_pending`] deletes per call.
+///
+/// The sweep is a single `DELETE`, so this bounds three things at once:
+/// how long write locks are held, how many binds the statement uses,
+/// and how much a scheduled run can do before yielding. 10 000 is well
+/// under every backend's parameter ceiling (SQLite's 32 766 is the
+/// lowest) and small enough that the measured lock waits — 847 ms on
+/// MySQL, 1.25 s on SQLite at a 1M backlog — do not arise.
+///
+/// A backlog larger than this drains over successive runs rather than
+/// in one, which is the intended trade: a sweep that finishes late is
+/// better than one that blocks every other writer.
+const PURGE_PENDING_BATCH: i64 = 10_000;
+
+/// Page size when a caller names none. Deliberately below
+/// [`MAX_LIST_LIMIT`]: the unpaged form of a listing should be a
+/// reasonable page, not the largest one a caller could ask for.
+const DEFAULT_LIST_CAP: i64 = 100;
 
 /// Lifecycle state of a Media row.
 ///
@@ -120,7 +169,10 @@ impl MediaStatus {
 /// `#[rustango(index)]` attr can't express — behavior-equivalent for
 /// correctness.
 #[derive(crate::Model, Debug, Clone)]
-#[rustango(table = "rustango_media", index("disk, storage_key"))]
+// `permissions` so `auto_create_permissions` seeds
+// `rustango_media.{add,change,delete,view}` — the codenames
+// `router::MediaPerms` checks. Not a column, so no migration.
+#[rustango(table = "rustango_media", index("disk, storage_key"), permissions)]
 pub struct Media {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -551,20 +603,57 @@ impl MediaManager {
         Ok(())
     }
 
-    /// Hard-delete: remove the storage object AND the row. Use for
-    /// "I'm sure I want this gone right now" — typically called by
-    /// the post_delete signal once `delete()` has soft-deleted.
+    /// Hard-delete: remove the storage object, the row's tag links, AND
+    /// the row. Use for "I'm sure I want this gone right now" —
+    /// typically called by the post_delete signal once `delete()` has
+    /// soft-deleted.
+    ///
+    /// This is also the call that actually **revokes** access:
+    /// `delete()` only soft-deletes, so a presigned URL minted before
+    /// it keeps working until its TTL expires. The storage object has
+    /// to go for the credential to stop resolving.
+    ///
+    /// # Errors
+    /// `UnknownDisk` if `m.disk` is not registered, `Storage` if the
+    /// object could not be removed, `Db` for either delete. **The row
+    /// is left in place in every error case** — see below.
     pub async fn purge(&self, m: &Media) -> Result<(), MediaError> {
         let id = match m.id {
             Auto::Set(v) => v,
             _ => return Err(MediaError::Other("Media has no id".into())),
         };
-        // Best-effort storage delete (matches Storage::delete trait
-        // semantics — missing key is fine).
-        if let Some(storage) = self.registry.disk(&m.disk) {
-            let _ = storage.delete(&m.storage_key).await;
-        }
+        // The storage delete is what revokes access, and this row is the
+        // only record that the object exists: `orphans_older_than` finds
+        // it by `deleted_at`, and nothing else stores the key. So a
+        // failed delete must not be followed by the row delete.
+        //
+        // It used to be `let _ =`, over an `if let Some(disk)` that
+        // skipped silently when the disk was not registered. Either way
+        // the row went, leaving a live object no sweep would look for
+        // again and every presigned URL for it resolving to its TTL —
+        // while `purge` returned `Ok(())`, which is the one answer that
+        // means "revoked".
+        //
+        // `Storage::delete` is a no-op on a missing key, so an `Err`
+        // here is a real failure — credentials, network, policy — not a
+        // stale row. Leaving the row soft-deleted is what lets the next
+        // sweep retry it.
+        let storage = self.resolve_disk(&m.disk)?;
+        storage.delete(&m.storage_key).await?;
         let p = self.pool.dialect().placeholder(1);
+        // Links first. `rustango_media_tag_links.media_id` carries no
+        // foreign key, so deleting the media row alone left them behind
+        // forever — and since `popular_tags` counts links, the nightly
+        // `purge_orphans` sweep was manufacturing permanent phantom tag
+        // counts every time it ran.
+        let unlink_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p}");
+        crate::sql::raw_execute_pool(
+            &self.pool,
+            &unlink_sql,
+            vec![crate::core::SqlValue::I64(id)],
+        )
+        .await
+        .map_err(media_err_from_exec)?;
         let sql = format!("DELETE FROM rustango_media WHERE id = {p}");
         crate::sql::raw_execute_pool(&self.pool, &sql, vec![crate::core::SqlValue::I64(id)])
             .await
@@ -587,12 +676,43 @@ impl MediaManager {
     /// fan it out with [`crate::tenancy::for_each_tenant`] and reach for
     /// [`Self::purge_orphans_dry_run`] first when you are unsure what a
     /// pool is pointing at (#1226).
+    ///
+    /// # Errors
+    /// The first failure, **after attempting every row** — one
+    /// unreachable storage object no longer blocks the rest of the
+    /// sweep from ever being purged. Each failure is logged at `warn`
+    /// with its disk and key, and the run is summarised at `error`,
+    /// because the count purged does not survive the `Err`.
     pub async fn purge_orphans(&self, older_than: Duration) -> Result<u64, MediaError> {
         let rows = self.orphans_older_than(older_than).await?;
+        let total = rows.len();
         let mut purged = 0u64;
+        let mut first_err: Option<MediaError> = None;
         for m in rows {
-            self.purge(&m).await?;
-            purged += 1;
+            match self.purge(&m).await {
+                Ok(()) => purged += 1,
+                Err(e) => {
+                    tracing::warn!(
+                        disk = %m.disk,
+                        storage_key = %m.storage_key,
+                        error = %e,
+                        "media purge_orphans: row left in place, will retry next sweep"
+                    );
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        if let Some(e) = first_err {
+            let failed = total - purged as usize;
+            tracing::error!(
+                purged,
+                failed,
+                total,
+                "media purge_orphans: finished with failures"
+            );
+            return Err(e);
         }
         Ok(purged)
     }
@@ -640,23 +760,94 @@ impl MediaManager {
         .map_err(media_err_from_exec)
     }
 
-    /// Hard-delete every Media row stuck in `Pending` for longer
-    /// than `older_than`. Direct-browser-upload flows leave Pending
-    /// rows behind when the browser abandons before calling
-    /// `finalize_upload`; this sweep cleans them up.
+    /// Hard-delete Media rows stuck in `Pending` for longer than
+    /// `older_than`, up to `PURGE_PENDING_BATCH` per call.
+    ///
+    /// Direct-browser-upload flows leave Pending rows behind when the
+    /// browser abandons before calling `finalize_upload`; this sweep
+    /// cleans them up. Run it from the [`crate::scheduler`].
+    ///
+    /// Returns the number of media rows deleted. A full return value
+    /// means there was more than one batch of work — call again, or
+    /// let the next scheduled run take it.
+    ///
+    /// # Why this is one statement
+    ///
+    /// 0.57.7 briefly replaced this with a `SELECT` that resolved ids
+    /// and a transaction that deleted by id. Two rounds of review found
+    /// six defects in that shape and none in this one, so it is back:
+    ///
+    /// - deleting by bare id dropped the `status` predicate, so a row
+    ///   that finalized between the `SELECT` and the `DELETE` was
+    ///   destroyed — a Ready row with a real storage object, while its
+    ///   client held a `200` naming it;
+    /// - putting the predicate back on the row delete only meant the
+    ///   tag-link delete still ran for every captured id, so a row the
+    ///   predicate spared lost every tag instead;
+    /// - predicating both **still** does not close it on PostgreSQL or
+    ///   MySQL, where the two statements evaluate at different times
+    ///   under READ COMMITTED;
+    /// - one `IN (…)` over the whole backlog exceeded the bind ceiling
+    ///   and, because the next run re-selected the same rows, wedged
+    ///   the sweep permanently rather than degrading;
+    /// - chunking inside a single transaction then held write locks for
+    ///   the length of the backlog: measured, MySQL blocked a
+    ///   concurrent `finalize_upload` for 847 ms and SQLite's WAL
+    ///   blocked writes to *unrelated tables* for 1.25 s.
+    ///
+    /// One predicated statement has none of those. The predicate cannot
+    /// drift from the row set because there is no second evaluation, and
+    /// the `LIMIT` bounds both the lock footprint and the bind count.
+    ///
+    /// # Errors
+    /// Driver / SQL failures.
     pub async fn purge_pending(&self, older_than: Duration) -> Result<u64, MediaError> {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::seconds(0));
-        let p = self.pool.dialect().placeholder(1);
-        let sql =
-            format!("DELETE FROM rustango_media WHERE status = 'pending' AND uploaded_at < {p}");
-        crate::sql::raw_execute_pool(
+        let d = self.pool.dialect();
+        let (p1, p2) = (d.placeholder(1), d.placeholder(2));
+
+        // Hand-built rather than `QuerySet`, for three reasons that are
+        // ORM gaps rather than preferences — all three filed as #1578:
+        // `DeleteQuery` carries no `limit`; `InSubquery` emits the naive
+        // form; and `WhereExpr::RelExists`, which the unlink below
+        // needs, has no public builder. With those closed this function
+        // is about eight lines of ORM.
+        //
+        // The derived table is not decoration: MySQL rejects a bare
+        // `IN (SELECT … LIMIT n)` with error 1235, "doesn't yet support
+        // 'LIMIT & IN/ALL/ANY/SOME subquery'". Wrapping it makes the
+        // same statement run on all three — verified against
+        // PostgreSQL 16, MySQL 8.0.46 and SQLite.
+        let sql = format!(
+            "DELETE FROM rustango_media               WHERE id IN (SELECT id FROM (                     SELECT id FROM rustango_media                      WHERE status = 'pending' AND uploaded_at < {p1}                      LIMIT {p2}) AS victims)"
+        );
+        let purged = crate::sql::raw_execute_pool(
             &self.pool,
             &sql,
-            vec![crate::core::SqlValue::DateTime(cutoff)],
+            vec![
+                crate::core::SqlValue::DateTime(cutoff),
+                crate::core::SqlValue::I64(PURGE_PENDING_BATCH),
+            ],
         )
         .await
-        .map_err(media_err_from_exec)
+        .map_err(media_err_from_exec)?;
+
+        // Reclaim tag links whose media row is gone.
+        //
+        // `rustango_media_tag_links.media_id` carries no foreign key, so
+        // nothing else reclaims them. Keying on "the row does not exist"
+        // rather than on the ids we just deleted is what makes this
+        // race-free: a link whose media row is present is never touched,
+        // whatever happened concurrently, and a link whose row is absent
+        // is garbage by definition. It also sweeps up orphans left by
+        // earlier versions of this function.
+        let unlink_sql = "DELETE FROM rustango_media_tag_links                            WHERE NOT EXISTS (SELECT 1 FROM rustango_media m                                               WHERE m.id = rustango_media_tag_links.media_id)";
+        crate::sql::raw_execute_pool(&self.pool, unlink_sql, Vec::new())
+            .await
+            .map_err(media_err_from_exec)?;
+
+        Ok(purged)
     }
 
     // =================================================================
@@ -825,35 +1016,94 @@ impl MediaManager {
         Ok(parts.join("/"))
     }
 
-    /// Soft-delete a collection. Media inside it is NOT deleted —
-    /// rows are orphaned (`collection_id` set to NULL) so they remain
-    /// queryable and the storage objects survive.
+    /// Soft-delete a collection **and its descendants**. Media inside
+    /// any of them is NOT deleted — rows are orphaned (`collection_id`
+    /// set to NULL) so they remain queryable and the storage objects
+    /// survive.
+    ///
+    /// The subtree goes too because leaving it behind produced children
+    /// pointing at a parent that no longer resolves: still listed by
+    /// [`Self::list_collections`], and [`Self::collection_path`] on any
+    /// of them a permanent error.
     pub async fn delete_collection(&self, id: i64) -> Result<(), MediaError> {
+        // The **whole subtree**, not just this row. Soft-deleting one
+        // collection left its children listed and pointing at a parent
+        // that no longer resolves: a tree renderer got a dangling edge,
+        // and `collection_path` on any descendant walked into
+        // `get_collection`, which filters soft-deleted, and returned
+        // "collection N not found" forever. Media inside a descendant
+        // was never orphaned either, so the documented contract held
+        // exactly one level deep.
+        //
+        // Reuses the same recursive walk `list_in_collection` uses, so
+        // the two agree about what "inside" means.
+        let mut ids = self.collect_descendant_ids(id).await?;
+        if !ids.contains(&id) {
+            // `collect_descendant_ids` filters already-deleted rows, so
+            // a re-delete would otherwise find nothing and skip the
+            // orphaning below.
+            ids.push(id);
+        }
+
         let d = self.pool.dialect();
-        let p1 = d.placeholder(1);
-        let p2 = d.placeholder(2);
-        let orphan_sql =
-            format!("UPDATE rustango_media SET collection_id = NULL WHERE collection_id = {p1}");
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &orphan_sql,
-            vec![crate::core::SqlValue::I64(id)],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| d.placeholder(i)).collect();
+        let in_list = placeholders.join(", ");
+        let binds: Vec<crate::core::SqlValue> = ids
+            .iter()
+            .copied()
+            .map(crate::core::SqlValue::I64)
+            .collect();
+
+        // Both statements in one transaction. They are orphan-then-
+        // soft-delete, and run separately a failure of the second left
+        // the first committed: the collection still live, every media
+        // row under it orphaned, and the previous `collection_id`
+        // recorded nowhere. No undo, no log line, and nothing in the
+        // error saying the orphaning had already happened — a retry
+        // then "succeeds" with the association permanently gone.
+        //
+        // Any mid-request blip does that: a failover, a lock timeout, a
+        // reset connection. Both statements are database-only, with no
+        // external side effect to strand, so a transaction closes it
+        // completely.
+        let mut tx = crate::sql::transaction_pool(&self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+
+        // Media survives, as documented — it is orphaned, not deleted.
+        let orphan_sql = format!(
+            "UPDATE rustango_media SET collection_id = NULL \
+              WHERE collection_id IN ({in_list})"
+        );
+        crate::sql::raw_execute_tx(&mut tx, &orphan_sql, binds.clone())
+            .await
+            .map_err(media_err_from_exec)?;
+
         // Bind `Utc::now()` from Rust so the SQL is portable.
-        let soft_delete_sql =
-            format!("UPDATE rustango_media_collections SET deleted_at = {p1} WHERE id = {p2}");
-        crate::sql::raw_execute_pool(
-            &self.pool,
-            &soft_delete_sql,
-            vec![
-                crate::core::SqlValue::DateTime(Utc::now()),
-                crate::core::SqlValue::I64(id),
-            ],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        //
+        // The timestamp binds **first**, because it appears first in the
+        // statement. `Dialect::placeholder(n)` ignores `n` and returns a
+        // positional `?` on every dialect except PostgreSQL, so for
+        // SQLite and MySQL the bind vector has to follow the order the
+        // placeholders appear in the text, not the order the numbers
+        // suggest. Getting this backwards put the first collection id
+        // into `deleted_at` and the timestamp into the `IN` list — and
+        // because `collect_descendant_ids` returns the root first (it is
+        // the CTE anchor), the collection the caller *named* was the one
+        // that silently survived.
+        let p_now = d.placeholder(1);
+        let id_placeholders: Vec<String> = (2..=ids.len() + 1).map(|i| d.placeholder(i)).collect();
+        let id_list = id_placeholders.join(", ");
+        let soft_delete_sql = format!(
+            "UPDATE rustango_media_collections SET deleted_at = {p_now} \
+              WHERE id IN ({id_list})"
+        );
+        let mut del_binds = vec![crate::core::SqlValue::DateTime(Utc::now())];
+        del_binds.extend(ids.iter().copied().map(crate::core::SqlValue::I64));
+        crate::sql::raw_execute_tx(&mut tx, &soft_delete_sql, del_binds)
+            .await
+            .map_err(media_err_from_exec)?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -884,10 +1134,36 @@ impl MediaManager {
 
     /// List media in `collection_id`. When `recursive`, descends into
     /// every nested collection.
+    ///
+    /// **Returns at most [`DEFAULT_LIST_CAP`] rows** (100). Before
+    /// 0.57.7 this emitted no `LIMIT` at all, so the row count was set
+    /// by how much media the deployment held rather than by anything
+    /// the server controlled. The signature is unchanged, so nothing
+    /// will tell a caller that relied on getting everything — use
+    /// [`Self::list_in_collection_paged`] to choose the page.
     pub async fn list_in_collection(
         &self,
         collection_id: i64,
         recursive: bool,
+    ) -> Result<Vec<Media>, MediaError> {
+        self.list_in_collection_paged(collection_id, recursive, DEFAULT_LIST_CAP, 0)
+            .await
+    }
+
+    /// [`Self::list_in_collection`] with an explicit page.
+    ///
+    /// `limit` is clamped to `1..=MAX_LIST_LIMIT`, matching
+    /// [`Self::list_with_tag`]. The unpaged form used to emit no `LIMIT`
+    /// at all, so the row count was set by how much media the
+    /// deployment held rather than by anything the server controlled —
+    /// measured at ~1000x amplification on a 500-row collection, with
+    /// `recursive` widening it across the whole subtree.
+    pub async fn list_in_collection_paged(
+        &self,
+        collection_id: i64,
+        recursive: bool,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<Media>, MediaError> {
         let ids: Vec<i64> = if recursive {
             self.collect_descendant_ids(collection_id).await?
@@ -902,16 +1178,47 @@ impl MediaManager {
         let d = self.pool.dialect();
         let placeholders: Vec<String> = (1..=ids.len()).map(|i| d.placeholder(i)).collect();
         let in_list = placeholders.join(", ");
+        // Clamped, not trusted: a negative `LIMIT` means "no limit" on
+        // SQLite, so an unclamped caller value is an unbounded query
+        // wearing a limit.
+        // The clamp does more than the SQLite case above: PostgreSQL
+        // rejects `LIMIT -1` and `OFFSET -1` outright, so without it a
+        // negative value is an unbounded scan on one backend and a 500
+        // on the other two.
+        let lim = limit.clamp(1, MAX_LIST_LIMIT);
+        let off = offset.max(0);
+        // `, id DESC` is the tiebreaker, and it is not cosmetic.
+        //
+        // `uploaded_at DESC` alone is not a *total* order, and ties are
+        // the normal case rather than the edge: on PostgreSQL `now()` is
+        // the transaction timestamp, so every row of one bulk import
+        // carries the identical value; on SQLite the column has
+        // one-second resolution. With a small `LIMIT` the planner picks
+        // a top-N heapsort whose order among tied keys differs per
+        // (limit, offset) pair, so paging the same data twice returns
+        // different rows.
+        //
+        // Measured on PostgreSQL, 200 rows sharing one `uploaded_at`,
+        // paged at 20: **197 unique, 3 duplicated, 3 never returned** —
+        // the missing rows appear on no page at all, so a client paging
+        // to the end simply never sees them. SQLite masked it by
+        // happening to return tied rows in rowid order. Same defect as
+        // #1464.
+        let p_lim = d.placeholder(ids.len() + 1);
+        let p_off = d.placeholder(ids.len() + 2);
         let sql = format!(
             "SELECT id, disk, storage_key, mime, size_bytes, original_filename, \
                     status, uploaded_at, uploaded_by_id, derived_from_id, \
                     collection_id, metadata, deleted_at \
                FROM rustango_media \
               WHERE collection_id IN ({in_list}) AND deleted_at IS NULL \
-              ORDER BY uploaded_at DESC"
+              ORDER BY uploaded_at DESC, id DESC \
+              LIMIT {p_lim} OFFSET {p_off}"
         );
-        let binds: Vec<crate::core::SqlValue> =
+        let mut binds: Vec<crate::core::SqlValue> =
             ids.into_iter().map(crate::core::SqlValue::I64).collect();
+        binds.push(crate::core::SqlValue::I64(lim));
+        binds.push(crate::core::SqlValue::I64(off));
         let rows: Vec<Media> = crate::sql::raw_query_pool(&sql, binds, &self.pool)
             .await
             .map_err(media_err_from_exec)?;
@@ -1026,18 +1333,32 @@ impl MediaManager {
     pub async fn tag(&self, media_id: i64, slugs: &[&str]) -> Result<(), MediaError> {
         let d = self.pool.dialect();
         let (p1, p2) = (d.placeholder(1), d.placeholder(2));
-        // PG/SQLite: ON CONFLICT DO NOTHING; MySQL: INSERT IGNORE.
-        let sql = if d.name() == "mysql" {
-            format!(
-                "INSERT IGNORE INTO `rustango_media_tag_links` (`media_id`, `tag_id`) \
-                 VALUES ({p1}, {p2})"
-            )
-        } else {
-            format!(
-                "INSERT INTO rustango_media_tag_links (media_id, tag_id) \
-                 VALUES ({p1}, {p2}) ON CONFLICT DO NOTHING"
-            )
-        };
+        // `Dialect::insert_on_conflict_skip` rather than a hand-rolled
+        // branch, and **not** `INSERT IGNORE` on MySQL.
+        //
+        // The two MySQL forms are not equivalent. `INSERT IGNORE`
+        // downgrades every row-level error to a warning, not just the
+        // duplicate key — measured on MySQL 8.0, it swallows a missing
+        // NOT NULL default (1364), a CHECK violation (3819) and the
+        // `tag_id` foreign-key violation that PostgreSQL and SQLite
+        // raise. Inside `set_tags`' transaction, whose whole purpose is
+        // that a partial write rolls back, that meant the documented
+        // atomicity held on two backends and silently dropped a tag on
+        // the third. The dialect's own form is the narrow one:
+        // `ON DUPLICATE KEY UPDATE tag_id = tag_id`, which makes the
+        // duplicate a no-op and leaves every other error an error.
+        // The unique constraint is the composite `(media_id, tag_id)`
+        // from `MediaTagLink`'s `unique_together`, so both columns go
+        // here: PostgreSQL and SQLite reject an `ON CONFLICT` column
+        // list that matches no constraint, and naming only `tag_id`
+        // fails with "does not match any PRIMARY KEY or UNIQUE
+        // constraint". MySQL pivots on the first column, which is a
+        // no-op assignment either way.
+        let skip = d.insert_on_conflict_skip(&["media_id", "tag_id"]);
+        let sql = format!(
+            "INSERT INTO rustango_media_tag_links (media_id, tag_id) \
+             VALUES ({p1}, {p2}) {skip}"
+        );
         for slug in slugs {
             let t = self.ensure_tag(slug).await?;
             let tag_id = match t.id {
@@ -1085,13 +1406,89 @@ impl MediaManager {
     /// Replace the entire tag set for a media row. Tags not in
     /// `slugs` are removed; tags in `slugs` are added (auto-created
     /// if needed).
+    ///
+    /// **Atomic.** The delete and the inserts are one transaction, so a
+    /// failure part-way leaves the row's tags as they were rather than
+    /// as neither the old set nor the new one. It used to be a bare
+    /// `DELETE` followed by [`Self::tag`]: anything failing in between —
+    /// a driver error, a slug that could not be created — stripped every
+    /// tag and put none back, and `POST /media/{id}/tags` is the
+    /// API-reachable caller.
+    ///
+    /// # Errors
+    /// `Db` for the delete, either insert, or the commit.
     pub async fn set_tags(&self, media_id: i64, slugs: &[&str]) -> Result<(), MediaError> {
-        let p = self.pool.dialect().placeholder(1);
-        let sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p}");
-        crate::sql::raw_execute_pool(&self.pool, &sql, vec![crate::core::SqlValue::I64(media_id)])
+        // Resolve every tag id **before** opening the transaction.
+        //
+        // `ensure_tag` is get-or-create, so it writes, and it was the
+        // step most likely to fail in the middle. Running it first means
+        // a failure here happens while the row still has its old tags;
+        // it also keeps N round trips out of an open write transaction.
+        // A tag row created for a set that then fails is not a
+        // corruption — `popular_tags` counts links, so it reports zero
+        // uses.
+        let mut tag_ids: Vec<i64> = Vec::with_capacity(slugs.len());
+        for slug in slugs {
+            let t = self.ensure_tag(slug).await?;
+            if let Auto::Set(v) = t.id {
+                tag_ids.push(v);
+            }
+        }
+
+        let d = self.pool.dialect();
+        let (p1, p2) = (d.placeholder(1), d.placeholder(2));
+        let delete_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p1}");
+        // `Dialect::insert_on_conflict_skip` rather than a hand-rolled
+        // branch, and **not** `INSERT IGNORE` on MySQL.
+        //
+        // The two MySQL forms are not equivalent. `INSERT IGNORE`
+        // downgrades every row-level error to a warning, not just the
+        // duplicate key — measured on MySQL 8.0, it swallows a missing
+        // NOT NULL default (1364), a CHECK violation (3819) and the
+        // `tag_id` foreign-key violation that PostgreSQL and SQLite
+        // raise. Inside `set_tags`' transaction, whose whole purpose is
+        // that a partial write rolls back, that meant the documented
+        // atomicity held on two backends and silently dropped a tag on
+        // the third. The dialect's own form is the narrow one:
+        // `ON DUPLICATE KEY UPDATE tag_id = tag_id`, which makes the
+        // duplicate a no-op and leaves every other error an error.
+        // The unique constraint is the composite `(media_id, tag_id)`
+        // from `MediaTagLink`'s `unique_together`, so both columns go
+        // here: PostgreSQL and SQLite reject an `ON CONFLICT` column
+        // list that matches no constraint, and naming only `tag_id`
+        // fails with "does not match any PRIMARY KEY or UNIQUE
+        // constraint". MySQL pivots on the first column, which is a
+        // no-op assignment either way.
+        let skip = d.insert_on_conflict_skip(&["media_id", "tag_id"]);
+        let insert_sql = format!(
+            "INSERT INTO rustango_media_tag_links (media_id, tag_id) \
+             VALUES ({p1}, {p2}) {skip}"
+        );
+
+        let mut tx = crate::sql::transaction_pool(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
-        self.tag(media_id, slugs).await
+        crate::sql::raw_execute_tx(
+            &mut tx,
+            &delete_sql,
+            vec![crate::core::SqlValue::I64(media_id)],
+        )
+        .await
+        .map_err(media_err_from_exec)?;
+        for tag_id in tag_ids {
+            crate::sql::raw_execute_tx(
+                &mut tx,
+                &insert_sql,
+                vec![
+                    crate::core::SqlValue::I64(media_id),
+                    crate::core::SqlValue::I64(tag_id),
+                ],
+            )
+            .await
+            .map_err(media_err_from_exec)?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// List tags applied to a media row, alphabetically by slug.
@@ -1114,6 +1511,46 @@ impl MediaManager {
         Ok(rows)
     }
 
+    /// Tag slugs for many media rows, in **one** query.
+    ///
+    /// [`Self::tags_for`] is per-row, and a listing that called it in a
+    /// loop cost one round trip per row — measured at ~20 µs/row on
+    /// local SQLite, so 10 001 queries and ~200 ms for a 10 000-row
+    /// collection, and materially worse against a networked database.
+    /// Returns a map so a caller can drain it row by row; a media id
+    /// with no tags is simply absent.
+    pub async fn tags_for_many(
+        &self,
+        media_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<String>>, MediaError> {
+        let mut out: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+        if media_ids.is_empty() {
+            return Ok(out);
+        }
+        let d = self.pool.dialect();
+        let placeholders: Vec<String> = (1..=media_ids.len()).map(|i| d.placeholder(i)).collect();
+        let in_list = placeholders.join(", ");
+        let sql = format!(
+            "SELECT l.media_id, t.slug \
+               FROM rustango_media_tags t \
+               JOIN rustango_media_tag_links l ON l.tag_id = t.id \
+              WHERE l.media_id IN ({in_list}) \
+              ORDER BY l.media_id, t.slug"
+        );
+        let binds: Vec<crate::core::SqlValue> = media_ids
+            .iter()
+            .copied()
+            .map(crate::core::SqlValue::I64)
+            .collect();
+        let rows: Vec<(i64, String)> = crate::sql::raw_query_pool(&sql, binds, &self.pool)
+            .await
+            .map_err(media_err_from_exec)?;
+        for (media_id, slug) in rows {
+            out.entry(media_id).or_default().push(slug);
+        }
+        Ok(out)
+    }
+
     /// List media that carry `slug`. Soft-deleted media excluded.
     pub async fn list_with_tag(
         &self,
@@ -1131,14 +1568,14 @@ impl MediaManager {
                JOIN rustango_media_tag_links l ON l.media_id = m.id \
                JOIN rustango_media_tags t ON t.id = l.tag_id \
               WHERE t.slug = {p1} AND m.deleted_at IS NULL \
-              ORDER BY m.uploaded_at DESC \
+              ORDER BY m.uploaded_at DESC, m.id DESC \
               LIMIT {p2} OFFSET {p3}"
         );
         let rows: Vec<Media> = crate::sql::raw_query_pool(
             &sql,
             vec![
                 crate::core::SqlValue::String(slug.to_owned()),
-                crate::core::SqlValue::I64(limit.max(1).min(1000)),
+                crate::core::SqlValue::I64(limit.clamp(1, MAX_LIST_LIMIT)),
                 crate::core::SqlValue::I64(offset.max(0)),
             ],
             &self.pool,
@@ -1148,13 +1585,23 @@ impl MediaManager {
         Ok(rows)
     }
 
-    /// Top tags by usage count, descending. Limit clamped at 1000.
+    /// Top tags by usage count, descending. Limit clamped to
+    /// `1..=`[`MAX_LIST_LIMIT`].
     pub async fn popular_tags(&self, limit: i64) -> Result<Vec<(MediaTag, i64)>, MediaError> {
         let p = self.pool.dialect().placeholder(1);
         let sql = format!(
-            "SELECT t.id, t.name, t.slug, t.created_at, COUNT(l.media_id) AS use_count \
+            // The join to `rustango_media` is what makes this agree with
+            // `list_with_tag`. Without it the count included links to
+            // soft-deleted rows, so `GET /tags/popular` and
+            // `GET /tags/{slug}/media` reported different worlds — and
+            // the number of deleted rows leaked through a listing grant.
+            // Still a LEFT JOIN chain, so a tag with no live media
+            // remains listed with a count of zero.
+            "SELECT t.id, t.name, t.slug, t.created_at, COUNT(m.id) AS use_count \
                FROM rustango_media_tags t \
                LEFT JOIN rustango_media_tag_links l ON l.tag_id = t.id \
+               LEFT JOIN rustango_media m \
+                      ON m.id = l.media_id AND m.deleted_at IS NULL \
               GROUP BY t.id, t.name, t.slug, t.created_at \
               ORDER BY use_count DESC, t.slug \
               LIMIT {p}"
@@ -1163,7 +1610,7 @@ impl MediaManager {
         // `use_count` aggregate column isn't part of MediaTag's schema, so
         // per-backend pair decoders (below) pull `use_count` themselves and
         // delegate the tag columns to the derived `sqlx::FromRow`.
-        let lim = limit.max(1).min(1000);
+        let lim = limit.clamp(1, MAX_LIST_LIMIT);
         match &self.pool {
             #[cfg(feature = "postgres")]
             crate::sql::Pool::Postgres(pg) => {

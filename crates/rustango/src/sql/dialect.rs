@@ -78,9 +78,29 @@ pub trait Dialect: Send + Sync {
         format!("\"{escaped}\"")
     }
 
-    /// Render the `n`-th positional parameter placeholder. `n` is
-    /// 1-based. Default: `?` — works for SQLite + MySQL; Postgres
-    /// overrides to `$N`.
+    /// Render the placeholder for the `n`-th bind, 1-based.
+    ///
+    /// **`n` is advisory.** PostgreSQL emits `$n`; SQLite and MySQL
+    /// discard it and emit `?`. So on those two the bind vector must
+    /// follow the order the placeholders appear **in the SQL text**,
+    /// not the order the numbers suggest. Derive `n` from the bind
+    /// vector's length as you push, never from arithmetic on a separate
+    /// counter.
+    ///
+    /// Both ways of getting this wrong have already been shipped here:
+    ///
+    /// - **Out-of-order binds.** `SET ts = {p1} WHERE id IN ({p2}…)`
+    ///   with the timestamp pushed *last* binds the first id into `ts`.
+    ///   Same bind count, no error, silently wrong rows — and correct on
+    ///   PostgreSQL, so a PG-only test suite stays green.
+    /// - **Reusing a number.** `$1` twice is one bind on PostgreSQL and
+    ///   two `?` needing two binds elsewhere. See the note at
+    ///   `tenancy/permissions.rs`.
+    ///
+    /// `sql::writers::Sql::push_param` is the shape that cannot get this
+    /// wrong — it pushes the value first and takes `n` from
+    /// `params.len()` — but it is private to `sql`, so callers outside
+    /// that module hand-roll the pattern.
     fn placeholder(&self, n: usize) -> String {
         let _ = n;
         "?".to_owned()

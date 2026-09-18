@@ -128,6 +128,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::jobs` | Colas de trabajos en segundo plano |
 | `rustango::logging` | Avisos del propio subsistema |
 | `rustango::manage` | Verbos de `manage` |
+| `rustango::media::auth` | Rechazos de autorización del router de medios |
 | `rustango::messages` | Mensajes flash |
 | `rustango::migrate` | Ejecutor de migraciones |
 | `rustango::rate_limit` | Limitación de tasa |

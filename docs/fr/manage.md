@@ -643,7 +643,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.57.6
+rustango 0.57.7
 ```
 
 ### `about`
@@ -656,7 +656,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.57.6
+  version:        0.57.7
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

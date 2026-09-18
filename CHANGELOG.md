@@ -4,6 +4,542 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.57.7] — 2026-09-17
+
+The security pass. A review of `develop` at v0.57.6 produced 20 findings,
+every one traced to the code that implements it, with "is this currently
+exploitable?" answered honestly — including where the answer is no.
+
+### Security
+
+- **`media_router` served an unauthenticated, non-tenant-scoped media
+  API** (finding 01, High). Its 16 routes took no authentication,
+  authorization or tenant extractor — every handler was `State(manager)`
+  plus a path or body. An anonymous caller could `GET /media/{id}` for
+  the row **and a presigned S3 download URL**, walking the integer id
+  space to harvest signed links for the whole bucket; `DELETE
+  /media/{id}` by id with no ownership check; and `POST /uploads/begin`
+  to mint a presigned **PUT** for a caller-chosen disk and key prefix.
+  An integrator who copied the module's quick start shipped an open
+  bucket.
+
+  **`media_router` is deprecated and now refuses every request.** Build
+  the router with `media_router_with(manager, authorizer)` and supply a
+  `MediaAuthorizer`. This is a behaviour change on a patch release, and
+  it is the fail-closed direction deliberately.
+
+  ```rust
+  // before — served anyone who could reach it
+  .nest("/media", media_router(manager))
+  // after
+  .nest("/media", media_router_with(manager, MyPolicy))
+  ```
+
+  [UPGRADING.md](UPGRADING.md) has the full policy example. The router
+  needs the `admin` feature as well as `media`, and
+  `rustango::media::async_trait` is re-exported so implementing the
+  trait does not add a dependency.
+
+  A blanket `.layer(auth)` in front was never sufficient for a
+  multi-tenant deployment — no handler carried a tenant, so an
+  authenticated tenant-A user still read tenant B's row by id. The new
+  `MediaAction` names the target row so the decision can be made per
+  row.
+
+  The gate identifies that row through the new `MediaTarget`
+  (`Media(i64)` / `Collection(i64)` /
+  `CollectionContents { id, recursive }` /
+  `CollectionSubtree(i64)` /
+  `Tag(String)` / `NewUpload { disk, key_prefix, … }` /
+  `NewCollection {}` / `NewTag {}` /
+  `Listing`), and `MediaAction` splits into
+  `Read` / `Add` / `Change` / `Delete` to match the codenames used
+  elsewhere. The first cut of this API used a bare `Option<i64>`, and
+  review found three ways past it — all reproduced before fixing:
+
+  - `GET /media/%31` reached the authorizer with **no id** while the
+    handler decoded it and served row 1. Since the documented example
+    granted the no-id case (listings), copying the docs re-opened the
+    hole.
+  - `GET /tags/2024/media` handed `2024` over as an object id. A tag
+    slug is attacker-chosen, so that forged any id the policy trusted.
+  - `/collections/7` and `/media/7` were indistinguishable — one
+    integer, two tables.
+
+  Classification is now positional against the route table and
+  percent-decoded first, and an unrecognised shape is refused rather
+  than passed through. `url_codec::percent_decode_path` is the decoder:
+  path semantics, so `+` stays literal rather than becoming a space the
+  way the form-encoded `url_decode` does.
+
+  Review of the first cut found more, all reproduced before fixing:
+
+  - `/uploads/{id}/finalize` classified as a distinct `Upload(i64)`
+    target, but it mutates the **media row** of that id — one row
+    presented as two kinds. It is `Change(Media(id))` now, and
+    `MediaTarget::Upload` is gone.
+  - `?recursive` on a collection's contents reaches media in descendant
+    collections the policy was never asked about. It classifies as
+    `Listing`, not as a read of the one collection named.
+  - `HEAD` was refused on routes the policy allows, because axum maps
+    `HEAD` onto the `GET` handler and the gate matched `GET` only.
+  - `Arc<dyn MediaAuthorizer>` did not satisfy the constructor, so a
+    host could not pick its policy at runtime. There is a blanket impl.
+  - Both refusals now emit a `debug` tracing event naming the action, so
+    a misconfigured policy is debuggable without a debugger.
+
+  A third review round found one more, also reproduced before fixing:
+
+  - **`DELETE /collections/{id}` asked about one row and then destroyed
+    a subtree.** The gate classified it `Delete(Collection(id))`, but
+    the handler deletes every descendant collection and re-parents the
+    media underneath — rows the policy was never shown.
+
+    **That blast radius is new in this release**, and the entry above
+    read as though it were not. In 0.57.6 `delete_collection` orphaned
+    the media in *that one collection* and soft-deleted *that one row*;
+    child collections were untouched, which is the `#1551` B3 defect
+    (`collection_path` on the whole subtree became a permanent error).
+    Fixing B3 made the route recursive, and this finding is the gate
+    catching up with it. If you call `DELETE /collections/{id}` on a
+    collection with children, it now takes them — read that before you
+    upgrade, not after.
+
+    A policy that
+    granted delete on the one collection a caller owns deleted
+    everything nested under it, and the nesting is not the deleting
+    caller's to control: `POST /collections` takes `parent_id` in the
+    body, so anyone who may create a collection may graft one under
+    someone else's. It classifies as `Delete(CollectionSubtree(id))`
+    now — a distinct target, so a policy written for single rows
+    refuses it by falling through to its `_ => false` arm rather than
+    by remembering to check. `Read(Collection(id))` is unchanged: that
+    one really is a single row.
+
+  **There is a shipped policy now** (#1546). `MediaPerms::new(pool)`,
+  behind the `tenancy` feature, checks the `{table}.{action}` permission
+  codenames the admin and `auto_create_permissions` already use — so
+  the secure path is the one-liner:
+
+  ```rust
+  .nest("/media", media_router_with(manager, MediaPerms::new(pool)))
+  ```
+
+  It matters because the fastest way back to green from a 403 is an
+  `AllowAll` trait impl, which is the original hole with extra steps.
+  Superusers short-circuit; a request with no `AuthenticatedUser`
+  extension is `401`; a failed permission lookup **refuses**, because a
+  database blip is not a grant. `Media`, `MediaCollection` and
+  `MediaTag` now carry `#[rustango(permissions)]` so the codenames are
+  seeded — a model flag, not a column, so no migration.
+
+  `required_codenames` is public and is the whole mapping. One entry is
+  worth reading twice: `Delete(CollectionSubtree)` requires
+  **`rustango_media_collections.delete` and `rustango_media.change`**,
+  because that route re-parents every media row underneath, so it
+  writes to `rustango_media`. #1558 is the same point at the target
+  level.
+
+  What it cannot do is row-level: codenames are table-level, so a grant
+  of `rustango_media.view` reads *any* media row by id, and a
+  multi-tenant deployment still scopes rows in its own
+  `MediaAuthorizer`. `MediaPerms` is the floor, not the ceiling.
+
+  **The upload ticket's `disk` and `key_prefix` reach the policy now**
+  (#1546). `POST /uploads/begin` mints a presigned `PUT` for a disk and
+  key prefix the *caller* chooses, and both live in the body — which the
+  gate never read, so `Add(NewUpload)` carried nothing and granting it
+  meant "write anywhere in any bucket, attributed to anyone".
+  `NewUpload` now carries `disk`, `key_prefix`, `collection_id` and
+  `uploaded_by_id`, so a policy can allow-list a disk or pin a prefix
+  per tenant:
+
+  ```rust
+  MediaAction::Add(MediaTarget::NewUpload { disk, key_prefix, .. }) => {
+      disk == "user-uploads" && key_prefix.starts_with(&user.prefix())
+  }
+  ```
+
+  They are **unvalidated caller input**, not facts, and a body that does
+  not parse arrives as empty strings rather than a `400` — the gate
+  decides authorization, the handler decides validity, in that order. It
+  is the only route whose body the gate reads, capped at 16 KiB: an
+  upload-ticket body is a few hundred bytes, and buffering an unbounded
+  one inside an authorization layer would make the gate itself the place
+  to send a server a large request. A body over the cap is refused.
+
+  **A crew review of the assembled release found three more, all
+  reproduced before fixing.** The first two are the fourth and fifth
+  ways past this gate; the third is the shipped default policy granting
+  what its own documentation said nobody intended.
+
+  - **`?%72ecursive=true` walked past the subtree check.** `classify`
+    matched `recursive` against the **raw** query string while the
+    handler's `Query` extractor percent-decodes the key, so an encoded
+    spelling was authorized as a read of the one collection named and
+    served as a walk of the whole subtree — media from every descendant,
+    with a presigned URL each. Exactly the disagreement
+    `percent_decode_path` was introduced to close on the path segments;
+    the query side had been left raw. The key is decoded with form
+    semantics now, matching `form_urlencoded`. Presence still beats
+    value, so the gate stays *stricter* than the handler for a bare
+    `?recursive` — loosening it to match exactly would reopen the gap
+    from the other side.
+  - **`rustango_media_collections.view` read the whole library.**
+    `GET /collections/{id}/contents` classified as
+    `Read(Collection(id))`, but it answers `Vec<MediaResponse>` — media
+    rows, each carrying a presigned GET URL. The mapping had been made
+    by target *kind* rather than by what the route returns, so "may
+    browse folders" harvested signed download links one collection at a
+    time. It is `Read(MediaTarget::CollectionContents { id, recursive })`
+    now and requires **both** view codenames, at either width.
+  - **`MediaPerms` ignored the `disk` it was handed.** The fields added
+    above exist so a policy can constrain where an upload lands, and
+    `required_codenames` matched them away — so `rustango_media.add`
+    minted a presigned `PUT` into any registered disk. `StorageRegistry`
+    is process-wide, so on a multi-tenant deployment that is another
+    tenant's bucket: pool-per-tenant isolates the database, not the
+    object store. `MediaPerms::new(pool).allow_disks(["user-uploads"])`
+    is the fix, checked **in addition to** the codename. Unset still
+    means every disk — the default is documented rather than changed,
+    because narrowing it silently would break every single-disk
+    deployment on a patch release.
+
+  Also hardened: an empty codename list would have fallen through
+  `MediaPerms`' loop to `Allow`. Nothing returns one today; it refuses
+  now, so a future mapping that requires nothing is a mistake rather
+  than a grant.
+
+  A fourth round sharpened the gate's vocabulary, both prerequisites for
+  that policy:
+
+  - **Creating a folder and creating a tag were the same decision.**
+    `POST /collections` and `POST /tags` both arrived as
+    `Add(MediaTarget::Listing)` — one value, two tables, the same
+    confusion `Media(7)` and `Collection(7)` were split to remove. So a
+    grant that reads as "may label things" also created collections,
+    and since collections nest and take `parent_id` from the body, it
+    handed out a foothold under someone else's tree. They are
+    `Add(NewCollection {})` and `Add(NewTag {})` now, both empty struct
+    variants like `NewUpload {}` so body detail can be added later.
+    `Listing` means a read.
+  - **`authorize` returned `bool`, so every refusal was `403`** —
+    including one for a request carrying no identity at all. A token
+    client treats `401` as its cue to refresh, so a `403` there means
+    the refresh never fires and the member is silently logged out;
+    #1193 settled this for ViewSets. It returns `MediaDecision`
+    (`Allow` / `Unauthenticated` / `Forbidden`) now, with `From<bool>`
+    so an existing boolean policy needs only `.into()` — and `false`
+    maps to `Forbidden`, never `Unauthenticated`, because a bare
+    boolean carries no information about whether a principal existed.
+
+- **`url_codec::percent_decode_path`** — path semantics (`%XX` only,
+  `+` left literal), for comparing a segment against what a router
+  decoded. `url_decode` keeps form semantics and is unchanged for that.
+
+- **Neither decoder treats a signed hex pair as an escape.** `%+5`
+  decoded to byte `0x05`, because `u8::from_str_radix` accepts a leading
+  sign — against the module's own documented contract. Malformed input
+  only.
+
+- **`media` no longer enables `_async_trait` redundantly** — `storage`,
+  which `media` already requires, enables it.
+
+- **Two ways past the media gate that this release's own fixes opened**,
+  found by a second crew review of the assembled branch. Both are
+  unreleased-only: neither exists in 0.57.6, where the gate did not.
+
+  - **`?recursive=true` cost less than not asking for it.** The
+    recursive contents listing classified as `Read(MediaTarget::Listing)`
+    — one codename, `rustango_media.view` — while the same route
+    without the flag classified as `Read(CollectionContents(id))` and
+    took two. The recursive form returns that collection's media *and
+    every descendant's*, so seven characters of query string turned a
+    403 into a 200 over strictly more rows. It also dropped the id, so a
+    custom `MediaAuthorizer` scoping collections by owner was handed
+    nothing to scope by on exactly the widest read.
+
+    Both widths are `CollectionContents { id, recursive }` now — one
+    target, one mapping, the flag carried so a policy can be *stricter*
+    about the wide one and cannot be looser. A guard asserts the
+    superset relation against the mapping itself rather than against a
+    fixed pair of codenames, so re-routing the wide form somewhere
+    cheaper fails the build.
+
+  - **The superuser short-circuit ran ahead of `allow_disks`.** So a
+    superuser minted a presigned `PUT` into any registered disk
+    regardless of the allow-list. `is_superuser` is the **per-tenant**
+    flag — org admin inside one tenant, no access to `/operator` — and
+    `StorageRegistry` is process-wide, so that is one tenant's admin
+    writing into another tenant's bucket, which is precisely the hole
+    `allow_disks` was added in this release to close. The disk check is
+    ahead of the short-circuit now, and it is the only check that is:
+    every other one is a permission lookup on that tenant's own pool,
+    and skipping those stays inside the tenant. Unset still means every
+    disk, so a deployment wanting admins exempt changes nothing.
+
+### Fixed
+
+- **`purge_pending` is one statement again.** 0.57.7 replaced 0.57.6's
+  single `DELETE … WHERE status = 'pending' AND uploaded_at < ?` with a
+  `SELECT` that resolved ids plus a transaction that deleted by id, then
+  patched that twice. Two review rounds found **six** defects in that
+  shape and none in this one, so it is back — with the `LIMIT` the
+  original lacked.
+
+  What the rewrite cost, in order: deleting by bare id dropped the
+  `status` predicate, so a row that finalized mid-sweep was destroyed —
+  a Ready row with a real storage object, while its client held a `200`
+  naming it. Putting the predicate back on the row delete only meant the
+  tag-link delete still ran for every captured id, so a row the
+  predicate *spared* lost every tag instead. Predicating both still does
+  not close it on PostgreSQL or MySQL, where the two statements evaluate
+  at different times under READ COMMITTED. One `IN (…)` over the whole
+  backlog exceeded the bind ceiling and, because the next run
+  re-selected the same rows, wedged the sweep permanently rather than
+  degrading. And chunking inside a single transaction then held write
+  locks for the length of the backlog — measured, MySQL blocked a
+  concurrent `finalize_upload` for **847 ms** and SQLite's WAL blocked
+  writes to *unrelated tables* for **1.25 s** at a 1M-row backlog.
+
+  One predicated statement has none of them. The predicate cannot drift
+  from the row set because there is no second evaluation, and
+  `PURGE_PENDING_BATCH` (10 000) bounds the lock footprint, the bind
+  count and the work per run. A larger backlog drains over successive
+  runs, which is the intended trade: a sweep that finishes late beats
+  one that blocks every other writer.
+
+  Tag links are reclaimed by "the media row is gone" rather than by a
+  captured id list, which is race-free by construction — a link whose
+  row is present is never touched, whatever happened concurrently — and
+  it also sweeps up orphans earlier versions left behind.
+
+  The statement is hand-built rather than `QuerySet`, for three ORM gaps
+  filed as **#1578**: `DeleteQuery` carries no `limit`, `InSubquery`
+  emits a form MySQL rejects with error 1235 when the inner select has
+  one, and `WhereExpr::RelExists` has no public builder. With those
+  closed this function is about eight lines of ORM.
+
+
+- **Three write-path regressions this release introduced**, found by a
+  crew review of the assembled branch. 0.57.6 had none of them.
+
+  **`purge_pending` lost the predicate from its destructive statement.**
+  0.57.6 was one statement, `DELETE … WHERE status = 'pending' AND
+  uploaded_at < ?`. It became a SELECT resolving ids plus a transaction
+  deleting **by bare id** — and the SELECT runs on a different
+  connection, with `transaction_pool` then acquiring one, so a
+  `finalize_upload` committing in that window meant a **Ready** row with
+  a real storage object was hard-deleted while its client held a 200
+  naming that id. Nothing else records the storage key, so the object
+  leaked permanently. Capturing the ids is what makes the two statements
+  agree about which rows they mean; it was never a licence to delete by
+  id alone, and the predicate is back.
+
+  **`purge_pending` bound every pending row into one `IN (…)`.** Past
+  the backend's parameter ceiling the statement is rejected before
+  execution, nothing is purged, and the next run re-selects the same
+  backlog — so the sweep **wedged permanently** instead of degrading.
+  Measured: 33 000 pending rows purged 0 on SQLite, and kept purging 0.
+  It chunks on `Dialect::max_bind_params` now, which already encodes
+  every ceiling and which `bulk_insert` already chunks on.
+
+  **`INSERT IGNORE` defeated the transaction it sat inside.** `tag` and
+  `set_tags` branched by hand to `INSERT IGNORE` on MySQL, which
+  downgrades *every* row-level error to a warning — measured on MySQL
+  8.0: a missing NOT NULL default (1364), a `CHECK` violation (3819),
+  and the `tag_id` foreign-key violation PostgreSQL and SQLite raise. So
+  the atomicity contract documented for `set_tags` below held on two
+  backends and silently dropped a tag on the third. Both sites route
+  through `Dialect::insert_on_conflict_skip` now — the narrow `ON
+  DUPLICATE KEY UPDATE` on MySQL, `ON CONFLICT (media_id, tag_id) DO
+  NOTHING` elsewhere — which is one helper in place of a hand-rolled
+  branch that had been copied twice.
+
+- **`GET /tags/{slug}/media` still ran one tag query per row.**
+  `tags_for_many` was added in this release to remove exactly that N+1
+  and was wired into the collection-contents handler fifty lines above;
+  this route kept the per-row `from_row`, so at `?limit=1000` it cost
+  ~1001 round trips plus 1000 presign operations. The fix had landed on
+  one of the two handlers that needed it.
+
+- **Two guards survived the regression they were written for**, which a
+  crew review of the release established by mutation:
+
+  - `tags_for_many_batches_the_whole_page` asserted only that the
+    batched call *agrees with* the per-row call it replaced — something
+    a per-row implementation satisfies by construction. Restoring the
+    full N+1 left all 60 tests green. Nothing in the media suites
+    counted queries, so the batching half of #1551 A was unguarded.
+  - `paging_the_contents_partitions_it` is a SQLite copy of a
+    PostgreSQL-only property. Removing the `, id DESC` tiebreaker and
+    running it passes — measured twice — because SQLite's scan order is
+    stable across separate `LIMIT`/`OFFSET` queries where PostgreSQL's
+    is not.
+
+  Two query-counting guards replace the first, using the
+  `assert_num_queries` coverage this same release added for
+  `raw_query_pool`. The second is kept for the weaker property it does
+  hold — paging without dropping or repeating a row — and its rustdoc
+  now says plainly that it cannot fail on the tiebreaker, and where the
+  guard that can lives.
+
+  Also moved: `media_collections_tags_live`'s isolation was a
+  `--test-threads=1` on the `s3_live` job's command line, so the suite
+  raced silently when run any other way. It takes a suite-wide lock now
+  and passes 17/17 under the default parallel harness.
+
+- **A failed `set_tags` left the row with neither tag set** (#1551 B5).
+  It was a bare `DELETE FROM rustango_media_tag_links` followed by
+  `tag()`. Anything failing in between — a driver error, a slug that
+  could not be created — stripped every tag and put none back, and
+  `POST /media/{id}/tags` is the API-reachable caller. Same shape as the
+  collection delete fixed earlier in this release: the first statement
+  had already committed when the second failed.
+
+  The delete and the inserts are one transaction now. Tag ids are
+  resolved **before** it opens, so `ensure_tag` — the step most likely
+  to fail, and the one that writes — fails while the row still has its
+  old tags, and N round trips stay out of an open write transaction.
+
+  `media_tags_mysql_live` is new, and is the media module's **first
+  MySQL coverage**: `media_live` and `media_collections_tags_live` are
+  PostgreSQL-typed and `media_sqlite_live` is SQLite, so `tag`'s
+  `INSERT IGNORE` branch and `tags_for_many`'s positional-`?` `IN (…)`
+  had never executed on MySQL at all.
+
+  Found while writing it, and worth knowing: **`INSERT IGNORE`
+  downgrades row-level failures to warnings on MySQL** — a missing
+  NOT NULL default (1364) and a `CHECK` violation (3819) both return
+  `Ok`. Measured against MySQL 8.0, not inferred. A control assertion is
+  what caught it; the first two versions of the rollback test injected
+  failures MySQL swallowed, so they proved nothing while passing.
+
+- **`purge` reported access revoked after failing to revoke it**
+  (#1551 B). It threw away the result of the storage delete (`let _ =`),
+  behind an `if let Some(disk)` that skipped the delete entirely when
+  the disk was not registered — and then deleted the row either way,
+  returning `Ok(())`.
+
+  The row is the only record that the object exists: `orphans_older_than`
+  finds it by `deleted_at`, and nothing else stores the key. So a failed
+  delete left a live object no sweep would ever look for again, with
+  every presigned URL minted for it resolving until its TTL — while the
+  call that is documented as *the* revocation said it had succeeded.
+  `Storage::delete` is a no-op on a missing key, so an error there was
+  never a stale row.
+
+  `purge` now returns `UnknownDisk` or the `Storage` error and **leaves
+  the row in place**, so the next `purge_orphans` retries it.
+  `purge_orphans` in turn attempts every row before returning the first
+  failure, rather than stopping at it — one unreachable object used to
+  strand every orphan behind it on every future run. Each failure logs
+  at `warn` with its disk and key, and the run is summarised at `error`,
+  because the count purged does not survive the `Err`.
+
+- **`storage::async_trait`** — the macro is re-exported from `storage`
+  now, not only from `media` (where it is behind `admin`). Implementing
+  the public `Storage` trait needed `async-trait` in your own
+  `Cargo.toml`, at a version that could drift from the one the trait was
+  declared with.
+
+- **`on_delete` never reached the database** (#1549). Every declared
+  `#[rustango(fk = "…", on_delete = "cascade")]` was dropped the moment
+  a schema snapshot was built, because `RelationSnapshot` had no field
+  for it. System migrations and `testkit::migrate_framework` render
+  *from snapshots*, so the clause reached no database at all: a declared
+  `cascade` arrived as `NO ACTION`, which turns a cascading delete into
+  a hard refusal (`ERROR 1451` on MySQL).
+
+  Measured on a fresh PostgreSQL, same probe both ways —
+  `pg_constraint.confdeltype` was `a` (NO ACTION) before and is `c`
+  (CASCADE) after.
+
+  **On new databases only.** An existing database keeps the constraints
+  it already has: a changed `on_delete` is not a schema operation this
+  release can emit, so `migrate` reports `nothing to migrate` and writes
+  no file. That is correct behaviour and it is also easy to misread as
+  "nothing to do" — see [UPGRADING.md](UPGRADING.md) for the `ALTER` to
+  run and how to check what you actually have. Emitting a drop/add pair
+  for a changed action is #1557.
+
+  Upgrading does **not** trip `make_migrations`. Adding the field
+  changes what an existing snapshot compares equal to, and the first
+  cut reported "fk changed" for every FK declaring an action — which
+  all three `make_migrations` entry points reject, so an upgrade with
+  zero model changes failed outright, listing framework tables the user
+  never wrote. FK identity and FK action are compared separately now:
+  `None → Some(_)` is the upgrade, while a real `Some(a) → Some(b)` is
+  still reported.
+
+  `RelationSnapshot` gains `on_delete`, skipped when absent so existing
+  snapshot JSON is byte-identical and already-written snapshots still
+  load. Both snapshot render paths emit the clause: the inline one for
+  SQLite and the post-hoc `ALTER` for PostgreSQL/MySQL.
+
+  Same bug class as `generated_as` and `db_comment`, both captured in
+  #559; `fk_on_delete` is the one that pass missed. It shipped green
+  because the guard rendered from a `ModelSchema` — the path that was
+  always correct — so it could not fail on this. There are now three
+  guards on the snapshot path, one of which executes the DDL and checks
+  the database enforces the cascade.
+
+- **`assert_num_queries` could not see a read** (#1561). The counter is
+  bumped per instrumented entry point in `sql::executor`. Writes all
+  funnel through `execute_pool`, which had one, and two read paths had
+  theirs — but `raw_query_pool`, `select_rows_pool`, `count_rows_pool`
+  (via `fetch_scalar_pool`), `fetch_aggregate_pool` and
+  `fetch_paginated_pool` issued their query directly and bumped nothing.
+  Same on the transaction side: `raw_execute_tx` and `raw_query_tx`
+  counted, while `insert_tx` / `update_tx` / `delete_tx` (all through
+  `execute_tx`), `insert_returning_tx` and `select_rows_tx_with_related`
+  did not.
+
+  So the framework's only N+1 detector could not see an N+1: a loop of
+  four `raw_query_pool` reads was observed as **0** queries, and
+  `assert_num_queries(1, …)` over it passed. The failure mode is a pass,
+  which is why the suite that exists to prove the counter fires "from
+  every instrumented entry point" had been green since it was written —
+  the paths it did not cover were the ones with nothing to fire.
+
+  All of them bump now, each with a guard that was run against the
+  un-bumped code first. The PostgreSQL-only `_on` family
+  (`annotate_count_children_on`, `fetch_aggregate_on`,
+  `fetch_with_prefetch`, `QuerySet::fetch_on`) is still uncounted —
+  it composes, so a bump per leaf double-counts — and the module docs
+  now say so outright: a `0` from a block touching `_on` code means
+  "not measured", not "no queries". Tracked as #1561.
+
+### Behaviour changes that had no entry
+
+Found by a crew review of the assembled release. Each is a user-visible
+change this release already shipped and did not write down — which is
+the same defect class as #1543, applied to the release notes rather than
+to a doc page.
+
+- **`GET /collections/{id}/contents` silently caps at 100 rows.**
+  `list_in_collection` was unbounded and is now `DEFAULT_LIST_CAP`, with
+  `?limit=` clamped to `1..=1000`. That is the right fix for the
+  amplification in #1551 A, but a client that previously received a
+  1 000-row collection in one response now receives 100 and no
+  indication there is more. Page with `?limit=` and `?offset=`.
+
+- **`popular_tags` counts changed meaning.** It used to count links to
+  soft-deleted media; it does not now, so every existing caller's
+  numbers drop. `GET /tags/popular` and `GET /tags` both serve it. The
+  new numbers are the correct ones — that contradiction is what #1551 B1
+  was — but a dashboard tracking them will show a step change on
+  upgrade, not a bug.
+
+- **Two doc claims contradicted the code beside them**, both corrected
+  here rather than left for a reader to trip over:
+  `OnDeleteAction::as_sql` said the shape of `ON DELETE` is "identical
+  across PG / MySQL / SQLite" when `SET NULL` and `SET DEFAULT` both
+  diverge on MySQL, and `has_perm_pool` claimed "three ORM queries …
+  ≈ 3× the CTE in latency" when its body is one round trip — which
+  anyone budgeting `MediaPerms` from that docblock would have
+  overstated threefold.
+
 ## [0.57.6] — 2026-09-16
 
 The tri-dialect train. The theme is a single question: **does this behaviour

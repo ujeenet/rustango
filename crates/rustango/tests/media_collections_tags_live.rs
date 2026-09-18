@@ -7,7 +7,20 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use rustango::media::router::media_router;
+use rustango::media::router::{media_router_with, MediaAction, MediaAuthorizer, MediaDecision};
+
+/// These tests exercise the routes, not the access check, so they mount
+/// a permissive authorizer. `media_router` itself now refuses every
+/// request (security finding 01) — the refusals are covered in
+/// `media_router_requires_authorization.rs`.
+struct AllowAll;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for AllowAll {
+    async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> MediaDecision {
+        MediaDecision::Allow
+    }
+}
 use rustango::media::{MediaManager, SaveOpts};
 use rustango::storage::s3::{S3Config, S3Storage};
 use rustango::storage::{BoxedStorage, StorageRegistry};
@@ -15,6 +28,20 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 const DISK_NAME: &str = "media-collections-live";
+
+/// Suite-wide lock.
+///
+/// Every test here truncates the shared `rustango_media*` tables in
+/// `maybe_setup`, so two running at once destroy each other's rows. The
+/// only thing that supplied that isolation was `--test-threads=1` on the
+/// `s3_live` job's command line — so running this suite any other way,
+/// locally or from a job that forgets the flag, raced silently. The
+/// requirement belongs with the code that needs it.
+fn live_lock() -> &'static tokio::sync::Mutex<()> {
+    use std::sync::OnceLock;
+    static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 async fn maybe_setup() -> Option<MediaManager> {
     let url = std::env::var("DATABASE_URL").ok()?;
@@ -79,6 +106,7 @@ fn save_opts(name: &str) -> SaveOpts {
 
 #[tokio::test]
 async fn create_then_get_collection_round_trips() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -107,6 +135,7 @@ async fn create_then_get_collection_round_trips() {
 
 #[tokio::test]
 async fn collection_path_walks_parent_chain() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -141,6 +170,7 @@ async fn collection_path_walks_parent_chain() {
 
 #[tokio::test]
 async fn list_in_collection_recursive_descends_subfolders() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -190,6 +220,7 @@ async fn list_in_collection_recursive_descends_subfolders() {
 
 #[tokio::test]
 async fn delete_collection_orphans_media_not_storage() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -230,6 +261,7 @@ async fn delete_collection_orphans_media_not_storage() {
 
 #[tokio::test]
 async fn move_to_collection_updates_fk() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -274,6 +306,7 @@ async fn move_to_collection_updates_fk() {
 
 #[tokio::test]
 async fn tag_then_tags_for_round_trips() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -314,6 +347,7 @@ async fn tag_then_tags_for_round_trips() {
 
 #[tokio::test]
 async fn untag_removes_one_keeps_others() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -341,6 +375,7 @@ async fn untag_removes_one_keeps_others() {
 
 #[tokio::test]
 async fn set_tags_replaces_entire_set() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -374,6 +409,7 @@ async fn set_tags_replaces_entire_set() {
 
 #[tokio::test]
 async fn list_with_tag_returns_matching_media() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -410,6 +446,7 @@ async fn list_with_tag_returns_matching_media() {
 
 #[tokio::test]
 async fn popular_tags_orders_by_use_count() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -456,6 +493,7 @@ async fn popular_tags_orders_by_use_count() {
 
 #[tokio::test]
 async fn router_get_media_returns_full_response() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -467,7 +505,7 @@ async fn router_get_media_returns_full_response() {
     };
     manager.tag(mid, &["api"]).await.unwrap();
 
-    let app = media_router(manager.clone());
+    let app = media_router_with(manager.clone(), AllowAll);
     let resp = app
         .clone()
         .oneshot(
@@ -497,11 +535,12 @@ async fn router_get_media_returns_full_response() {
 
 #[tokio::test]
 async fn router_create_collection_then_list_and_get() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
-    let app = media_router(manager.clone());
+    let app = media_router_with(manager.clone(), AllowAll);
 
     let resp = app
         .clone()
@@ -565,11 +604,12 @@ async fn router_create_collection_then_list_and_get() {
 
 #[tokio::test]
 async fn router_begin_then_finalize_upload_via_axum() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
     };
-    let app = media_router(manager.clone());
+    let app = media_router_with(manager.clone(), AllowAll);
 
     // 1. POST /uploads/begin
     let begin = app
@@ -637,6 +677,7 @@ async fn router_begin_then_finalize_upload_via_axum() {
 
 #[tokio::test]
 async fn router_set_tags_and_query_via_tag_endpoint() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -646,7 +687,7 @@ async fn router_set_tags_and_query_via_tag_endpoint() {
         rustango::sql::Auto::Set(v) => v,
         _ => unreachable!(),
     };
-    let app = media_router(manager.clone());
+    let app = media_router_with(manager.clone(), AllowAll);
 
     let resp = app
         .clone()
@@ -691,6 +732,7 @@ async fn router_set_tags_and_query_via_tag_endpoint() {
 
 #[tokio::test]
 async fn router_collection_contents_with_recursive_query() {
+    let _g = live_lock().lock().await;
     let Some(manager) = maybe_setup().await else {
         eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
         return;
@@ -724,7 +766,7 @@ async fn router_collection_contents_with_recursive_query() {
         .await
         .unwrap();
 
-    let app = media_router(manager.clone());
+    let app = media_router_with(manager.clone(), AllowAll);
 
     // Non-recursive
     let resp = app
@@ -785,4 +827,103 @@ async fn migrate_framework_is_idempotent_against_running_db() {
     rustango::testkit::migrate_framework(&pool_enum)
         .await
         .expect("migrate_framework called twice");
+}
+
+/// Paging must *partition* the collection — no row twice, none missing.
+///
+/// This test lives here, on PostgreSQL, and not in the SQLite suite,
+/// because SQLite cannot observe the bug. Measured: with the tiebreaker
+/// removed, the SQLite version of this assertion **passes** — tied rows
+/// happen to come back in rowid order there — while PostgreSQL returned
+/// 197 unique of 200, with 3 duplicated across pages and 3 appearing on
+/// no page at all.
+///
+/// `ORDER BY uploaded_at DESC` alone is not a total order, and the tie
+/// is the normal case rather than the edge: `now()` is the *transaction*
+/// timestamp on PostgreSQL, so every row of one bulk import carries the
+/// identical value. A small `LIMIT` then pushes the planner to a top-N
+/// sort whose order among tied keys differs per (limit, offset) pair.
+///
+/// Asserting page *lengths* cannot see this — every count is right. Only
+/// the identities are wrong, so the assertion is that the union of the
+/// pages equals the seeded set.
+#[tokio::test]
+async fn paging_a_collection_partitions_it() {
+    use std::collections::HashSet;
+
+    let _g = live_lock().lock().await;
+    let Some(manager) = maybe_setup().await else {
+        eprintln!("skipping — set DATABASE_URL + RUSTANGO_S3_TEST_*");
+        return;
+    };
+    let c = manager
+        .create_collection("Paged", "paged-partition", None, "")
+        .await
+        .expect("collection");
+    let cid = match c.id {
+        rustango::sql::Auto::Set(v) => v,
+        _ => panic!("no id"),
+    };
+
+    let mut seeded: HashSet<i64> = HashSet::new();
+    for i in 0..60 {
+        let mut o = save_opts(&format!("page-{i}"));
+        o.collection_id = Some(cid);
+        let m = manager.save_bytes(o).await.expect("seed");
+        if let rustango::sql::Auto::Set(v) = m.id {
+            seeded.insert(v);
+        }
+    }
+
+    // Force the tie explicitly rather than hoping for one. `save_bytes`
+    // opens a transaction per call, and `now()` is the *transaction*
+    // timestamp, so seeding in a loop gives 60 distinct values and no
+    // collision at all — the first version of this test seeded that way,
+    // passed with the bug present, and proved nothing. A real bulk
+    // import (one transaction, or a backfill copying timestamps) is what
+    // produces the tie, and this is that state.
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let raw = PgPool::connect(&url).await.expect("connect");
+    sqlx::query("UPDATE rustango_media SET uploaded_at = $1 WHERE collection_id = $2")
+        .bind(chrono::Utc::now())
+        .bind(cid)
+        .execute(&raw)
+        .await
+        .expect("flatten uploaded_at");
+
+    let mut seen: Vec<i64> = Vec::new();
+    for page in 0..6 {
+        let rows = manager
+            .list_in_collection_paged(cid, false, 10, page * 10)
+            .await
+            .expect("page");
+        for m in rows {
+            if let rustango::sql::Auto::Set(v) = m.id {
+                seen.push(v);
+            }
+        }
+    }
+
+    let unique: HashSet<i64> = seen.iter().copied().collect();
+    let duplicated = seen.len() - unique.len();
+    let missing: Vec<i64> = seeded.difference(&unique).copied().collect();
+
+    assert_eq!(
+        duplicated,
+        0,
+        "{duplicated} of {} returned rows appeared on more than one page — the \
+         ordering is not total, so a row sorts differently per (limit, offset)",
+        seen.len()
+    );
+    assert!(
+        missing.is_empty(),
+        "{} rows were never returned by any page: {missing:?}. A client paging this \
+         collection to the end never sees them at all.",
+        missing.len()
+    );
+    assert_eq!(
+        unique.len(),
+        seeded.len(),
+        "the pages did not cover the set"
+    );
 }

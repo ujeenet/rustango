@@ -656,3 +656,114 @@ jobs:
         assert!(!is_job_header("  # a comment"));
     }
 }
+
+// =====================================================================
+// The media live suites — #1548.
+//
+// 22 tests across `media_live` and `media_collections_tags_live` short-
+// circuit on a missing env var and report `ok`. `maybe_setup()` needs
+// `DATABASE_URL` **and** `RUSTANGO_S3_TEST_{KEY,SECRET,BUCKET}`, and
+// only `s3_live` sets both halves. In `postgres_test`
+// (`--workspace --all-features`, `DATABASE_URL` set, no S3 vars) all 22
+// run, skip, and pass.
+//
+// Nothing guarded that. Deleting the five `RUSTANGO_S3_TEST_*` lines
+// took 22 tests silent with every guard still green, and deleting the
+// two `--test` steps went unnoticed too, because `has_a_mysql_arm()`
+// only matches `*mysql_live` and `*_tri`.
+//
+// Not hypothetical: the `media_router` change broke the five `router_*`
+// tests in `media_collections_tags_live`, and the local run reported
+// them *passing* because the S3 vars were unset. A skip is
+// indistinguishable from a pass. Only `s3_live` caught it.
+// =====================================================================
+
+/// Every variable `maybe_setup()` reads, set by the job that runs it.
+#[test]
+fn the_s3_job_sets_every_variable_its_suites_read() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let block = job_block(&yaml, "s3_live");
+    assert!(
+        !block.is_empty(),
+        "no `s3_live` job in ci.yml — this guard is reading the wrong text, so a \
+         pass would mean nothing"
+    );
+
+    // Missing any one of these makes `maybe_setup()` return `None`, and
+    // every test in both media suites returns early printing `ok`.
+    //
+    // Matched as a **declaration** — a line that is only indentation,
+    // the name, a colon and a value — not as a substring. A substring
+    // check passes off the shell interpolation in the MinIO setup step
+    // (`-e MC_HOST_m=http://$RUSTANGO_S3_TEST_KEY:$RUSTANGO_S3_TEST_SECRET@…`),
+    // which contains `RUSTANGO_S3_TEST_KEY:` verbatim. Measured: with
+    // the substring form, deleting the env line left this guard green.
+    for var in [
+        "DATABASE_URL",
+        "RUSTANGO_S3_TEST_ENDPOINT",
+        "RUSTANGO_S3_TEST_BUCKET",
+        "RUSTANGO_S3_TEST_KEY",
+        "RUSTANGO_S3_TEST_SECRET",
+    ] {
+        let declared = block.lines().any(|l| {
+            let t = l.trim_start();
+            l.len() != t.len() && t.starts_with(&format!("{var}:"))
+        });
+        assert!(
+            declared,
+            "the `s3_live` job declares no `{var}:` in its env block. \
+             `maybe_setup()` needs all of them, so without it all 22 media live \
+             tests skip — and a skipped test prints `ok`, so the job reports green \
+             having exercised nothing.\n\n{block}"
+        );
+    }
+}
+
+/// The suites that need those variables are actually named by that job.
+#[test]
+fn the_media_live_suites_are_named_in_the_s3_job() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let block = job_block(&yaml, "s3_live");
+
+    // Every suite whose setup helper reads the S3 variables. A suite
+    // added here but not to the job is the #1437 shape all over again:
+    // present on disk, named in no workflow, skipping silently.
+    for target in ["media_live", "media_collections_tags_live"] {
+        assert!(
+            block.contains(&format!("--test {target}")),
+            "`s3_live` does not name `--test {target}`. That suite reads the S3 \
+             variables, so it runs nowhere else — `postgres_test` has `DATABASE_URL` \
+             but no S3 credentials, so it skips there and reports green.\n\n{block}"
+        );
+    }
+}
+
+/// The media feature axis is compiled by `feature_combos`.
+///
+/// The matrix had no `media`, no `storage` and no `uploads`, so a
+/// feature-definition change in that area was checked by nothing except
+/// `--all-features`. That is how a test file gated on
+/// `sqlite, media, testkit` — while `media::router` is behind `admin` —
+/// went unnoticed: every media job leaves default features on, and
+/// `batteries` drags `admin` in.
+#[test]
+fn feature_combos_covers_the_media_axis() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let block = job_block(&yaml, "feature_combos");
+    assert!(
+        !block.is_empty(),
+        "no `feature_combos` job in ci.yml — this guard is reading the wrong text"
+    );
+    assert!(
+        block.contains("media"),
+        "the `feature_combos` matrix names no `media` combination, so the media \
+         feature graph is compiled only by `--all-features`, where every optional \
+         feature is on and nothing can be observed to be missing.\n\n{block}"
+    );
+}
