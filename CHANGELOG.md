@@ -4,6 +4,35 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed — **breaking for exhaustive matches on `MigrateError`**
+
+- **`MigrateError` is `#[non_exhaustive]`**, and gained
+  `PartiallyApplied`. Deliberately together, so this is one break rather
+  than two — every future variant is now additive. Code that only
+  propagates or formats the error is unaffected; a `match` that
+  enumerates every variant needs a `_ =>` arm. #1513 wants the same
+  across the other public error enums.
+
+- **A MySQL migration that fails after committing DDL now says so, and
+  says how to recover** (#1588 part 2). MySQL commits DDL immediately,
+  so the transaction around an `atomic: true` migration protects only
+  the `RunSQL` / `RunPython` operations between them. When a later
+  operation failed, the schema had moved and the ledger row was never
+  written — and re-running replayed from the top and failed
+  *differently*, because the earlier work was still there. Reported from
+  a live tenant as `DropTable` succeeding and the re-run then reporting
+  `1051 Unknown table`.
+
+  The error now names how many operations completed, how many DDL
+  statements committed, and the recovery — inspect the schema, then
+  `manage migrate --fake <name>` once it matches. That path was
+  previously folklore.
+
+  Raised **only** when DDL actually committed. A failure preceded solely
+  by `RunSQL` rolled back cleanly and still surfaces as `Driver`,
+  unchanged, because telling an operator to `--fake` a migration that
+  undid itself would be wrong. Both directions are guarded.
+
 ### Fixed
 
 - **Dropping a model produced a migration MySQL could not apply** (#1588).
