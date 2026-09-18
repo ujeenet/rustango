@@ -191,6 +191,65 @@ It also handles soft-delete and orphan purging. The full flow is dogfooded in
 `media_sqlite_live.rs`; the manager's presigned/direct-upload methods are
 PostgreSQL-oriented.
 
+### The REST router needs an authorization policy
+
+`media::router` mounts 16 JSON routes over the manager. **Every one of them
+is gated, and there is no permissive default.** Build it with
+`media_router_with` and supply a policy:
+
+```rust
+use rustango::media::router::{media_router_with, MediaPerms};
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+```
+
+`media_router(manager)` — the old constructor — is deprecated and now
+answers `403` on every route. That is a deliberate behaviour change in
+0.57.7: before it, those routes took no authentication, authorization or
+tenant extractor at all, so `GET /media/{id}` returned the row **and a
+presigned S3 download URL** to anyone who could guess an integer, and
+`POST /uploads/begin` minted a presigned `PUT` for a caller-chosen key
+prefix.
+
+`MediaPerms` (needs the `tenancy` feature) checks the `{table}.{action}`
+permission codenames the admin already uses — `rustango_media.view` to read,
+`rustango_media_collections.add` to create a folder, and so on. Mount it
+**inside** `require_auth`, which is what injects the identity it reads;
+without that every request is a `401`. Superusers skip the codename check —
+but **not** `allow_disks`, which binds them too: `is_superuser` elevates
+inside one tenant, and the object store is shared across all of them.
+
+Three things it does not do:
+
+- **Row-level decisions.** A grant of `rustango_media.view` reads *any* media
+  row by id. `MediaManager` holds one pool, so a multi-tenant deployment
+  scopes rows itself — implement `MediaAuthorizer` for that. `MediaTarget`
+  names the row (`Media(id)`, `Collection(id)`, `CollectionSubtree(id)`, …)
+  precisely so a per-row policy can be written. `?recursive` on a collection's
+  contents arrives as `CollectionContents { id, recursive: true }` — same
+  target, flagged — so a policy can be stricter about the wide read without
+  losing the collection it names.
+- **Scope the object store.** `disk` is caller-supplied on
+  `POST /uploads/begin` and the `StorageRegistry` is process-wide, so
+  pool-per-tenant isolates the database and not the bucket: a bare
+  `rustango_media.add` grant writes into any disk the process knows about.
+  Say which ones with `MediaPerms::new(pool).allow_disks(["user-uploads"])`.
+  Prefixes within a disk still need `MediaAuthorizer`, which is handed
+  `key_prefix`.
+- **Guess what a new route means.** Both `MediaAction` and `MediaTarget` are
+  `#[non_exhaustive]`, so end a hand-written policy on `_ => false` and a
+  route added in a later release arrives denied rather than allowed.
+
+Worth knowing when you write your own: `DELETE /collections/{id}` deletes the
+whole **subtree** and re-parents the media under every level of it, so it
+arrives as `Delete(CollectionSubtree(id))` rather than
+`Delete(Collection(id))` — and under `MediaPerms` it needs
+`rustango_media.change` as well as `rustango_media_collections.delete`,
+because it writes to the media table.
+[UPGRADING.md](https://github.com/ujeenet/rustango/blob/main/UPGRADING.md) has
+the migration notes.
+
 ### How the media tables are created
 
 The media tables (`rustango_media`, `rustango_media_collections`,

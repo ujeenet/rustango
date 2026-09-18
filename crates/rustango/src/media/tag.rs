@@ -21,7 +21,10 @@ use crate::sql::Auto;
 
 /// One free-form label. Cheap to clone.
 #[derive(crate::Model, Debug, Clone)]
-#[rustango(table = "rustango_media_tags")]
+// `permissions` so `auto_create_permissions` seeds
+// `rustango_media_tags.{add,change,delete,view}` — the codenames
+// `router::MediaPerms` checks. Not a column, so no migration.
+#[rustango(table = "rustango_media_tags", permissions)]
 pub struct MediaTag {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

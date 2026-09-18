@@ -281,6 +281,9 @@ uploads = ["admin", "storage", "axum/multipart"]
 # backend (PG / MySQL 8+ / SQLite), so `media` now only requires
 # `storage` + at least one database backend feature
 # (postgres / mysql / sqlite).
+# `MediaAuthorizer`, the policy hook the media router requires since
+# 0.57.7, needs `_async_trait` — which arrives via `storage`, so it is
+# not repeated here. The router itself is behind `admin`.
 media = ["storage"]
 
 # S3-compatible storage backend (`rustango::storage::s3::S3Storage`).
@@ -492,7 +495,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "0.57.6", path = "../rustango-macros" }
+rustango-macros = { version = "0.57.7", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

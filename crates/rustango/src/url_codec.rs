@@ -68,22 +68,70 @@ pub fn url_encode(s: &str) -> String {
 /// See module docs for malformed-input handling.
 #[must_use]
 pub fn url_decode(s: &str) -> String {
+    decode_escapes(s, true)
+}
+
+/// The byte after `%%` at `i`, when both are hex digits.
+///
+/// `u8::from_str_radix` alone is **not** this check: it accepts a
+/// leading sign, so `from_str_radix("+5", 16)` is `Ok(5)` and `%+5`
+/// would decode to `0x05`. The module contract says a non-hex pair
+/// keeps the literal `%`, and a decoder that quietly disagrees with
+/// whatever else decoded the same string is how a gate ends up
+/// guarding a different value than the one acted on.
+fn hex_pair_at(bytes: &[u8], i: usize) -> Option<u8> {
+    let pair = bytes.get(i + 1..i + 3)?;
+    if !pair.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
+}
+
+/// Shared body of the two decoders. `plus_is_space` is the only
+/// difference between form semantics and path semantics.
+fn decode_escapes(s: &str, plus_is_space: bool) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
-            if let Ok(b) = u8::from_str_radix(hex, 16) {
+        if bytes[i] == b'%' {
+            if let Some(b) = hex_pair_at(bytes, i) {
                 out.push(b);
                 i += 3;
                 continue;
             }
         }
-        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+        out.push(if plus_is_space && bytes[i] == b'+' {
+            b' '
+        } else {
+            bytes[i]
+        });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Decode one **path** segment: `%XX` only, `+` kept literal.
+///
+/// [`url_decode`] maps `+` to a space, which is the
+/// `x-www-form-urlencoded` convention and is wrong for a path — there
+/// `+` is an ordinary character. Routers decode path params this way
+/// (axum's `Path` included), so anything comparing a decoded segment
+/// against what a handler will see has to use this, not `url_decode`.
+///
+/// Getting that wrong is not cosmetic. A gate that decodes `/tags/a+b`
+/// as `a b` while the handler reads `a+b` is deciding about a different
+/// row than the one it is guarding.
+///
+/// ```ignore
+/// use rustango::url_codec::percent_decode_path;
+/// assert_eq!(percent_decode_path("%31"), "1");     // digits survive encoding
+/// assert_eq!(percent_decode_path("a+b"), "a+b");   // '+' is literal here
+/// assert_eq!(percent_decode_path("a%2Fb"), "a/b");
+/// ```
+#[must_use]
+pub fn percent_decode_path(s: &str) -> String {
+    decode_escapes(s, false)
 }
 
 /// Django-parity
@@ -515,6 +563,49 @@ mod tests {
     #[test]
     fn malformed_non_hex_first_digit() {
         assert_eq!(url_decode("a%XYb"), "a%XYb");
+    }
+
+    /// A signed hex pair is not a valid escape.
+    ///
+    /// `u8::from_str_radix` accepts a leading sign, so the previous
+    /// implementation decoded `%+5` to `0x05` and `%-5` likewise —
+    /// against this module's own stated contract. It mattered: the
+    /// media authorization gate decoded `/tags/%+5/media` to a slug of
+    /// `"\u{5}"` while the handler, which does not over-decode, queried
+    /// the literal `"%+5"`. The gate was deciding about a row the
+    /// handler was not touching.
+    #[test]
+    fn a_signed_hex_pair_is_not_an_escape() {
+        // Path semantics: the whole thing survives, byte for byte,
+        // which is what axum's `Path` extractor produces.
+        for raw in ["a%+5b", "a%-5b", "a%+Ab"] {
+            assert_eq!(percent_decode_path(raw), raw, "{raw} was decoded");
+        }
+        // Form semantics: the `%` is literal, and then `+` is a space
+        // by the form convention. Not an escape either way — the point
+        // is that no `0x05` byte is produced.
+        assert_eq!(url_decode("a%+5b"), "a% 5b");
+        assert_eq!(url_decode("a%-5b"), "a%-5b");
+        for decoded in [url_decode("a%+5b"), percent_decode_path("a%+5b")] {
+            assert!(
+                !decoded.contains('\u{5}'),
+                "a signed hex pair produced a control byte: {decoded:?}"
+            );
+        }
+        // The encoded form of '+' still decodes normally.
+        assert_eq!(percent_decode_path("a%2Bb"), "a+b");
+    }
+
+    /// Path semantics: `%XX` decodes, `+` stays literal.
+    #[test]
+    fn percent_decode_path_leaves_plus_alone() {
+        assert_eq!(percent_decode_path("a+b"), "a+b");
+        assert_eq!(url_decode("a+b"), "a b");
+        assert_eq!(percent_decode_path("%31"), "1");
+        assert_eq!(percent_decode_path("a%2Fb"), "a/b");
+        // Truncated escapes survive as literals in both.
+        assert_eq!(percent_decode_path("foo%"), "foo%");
+        assert_eq!(percent_decode_path("foo%4"), "foo%4");
     }
 
     #[test]

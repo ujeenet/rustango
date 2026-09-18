@@ -41,7 +41,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
+/// Re-exported so implementing [`Storage`] does not need `async-trait`
+/// in your own `Cargo.toml`, and cannot drift from the version the
+/// trait was declared with.
+///
+/// `media::async_trait` is the same macro, re-exported there for
+/// `MediaAuthorizer`. That one is behind the `admin` feature, so a
+/// crate implementing only `Storage` could not reach it.
+pub use async_trait::async_trait;
 
 // ------------------------------------------------------------------ Errors
 

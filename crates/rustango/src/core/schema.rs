@@ -190,7 +190,24 @@ pub enum OnDeleteAction {
 
 impl OnDeleteAction {
     /// SQL token rendered after `ON DELETE` in `ALTER TABLE … ADD
-    /// CONSTRAINT`. Shape is identical across PG / MySQL / SQLite.
+    /// CONSTRAINT`.
+    ///
+    /// The **token** is identical across PG / MySQL / SQLite; what the
+    /// server does with it is not, and two of these diverge:
+    ///
+    /// - `SetNull` on a NOT NULL column is `ERROR 1830` at DDL time on
+    ///   MySQL, while PG and SQLite accept the constraint and fail at
+    ///   delete time. [`UPGRADING.md`] has the fix.
+    /// - `SetDefault` is honoured by PG and SQLite and **parsed and
+    ///   ignored by InnoDB** — MySQL records `DELETE_RULE = 'SET
+    ///   DEFAULT'` in `information_schema`, so introspection agrees with
+    ///   the model while the parent delete is refused outright (1451).
+    ///
+    /// Both measured on MySQL 8.0. This doc used to say the shape was
+    /// identical full stop, which is the sentence a reader meets before
+    /// they ever reach the upgrade note.
+    ///
+    /// [`UPGRADING.md`]: https://github.com/ujeenet/rustango/blob/main/UPGRADING.md
     #[must_use]
     pub const fn as_sql(self) -> &'static str {
         match self {

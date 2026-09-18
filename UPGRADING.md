@@ -148,11 +148,268 @@ untouched.
 
 ---
 
+## 0.57.7
+
+> **Not yet published.** Lives on `release/v0.57.7`. Pin a rev until it
+> lands.
+
+The security pass. One change can break a working deployment, and it
+does so at runtime rather than at build time — read the first row even
+if you skip the rest.
+
+### Breaking, and how to tell whether it reaches you
+
+| Change | How to check |
+|---|---|
+| **`media_router` is deprecated and now refuses every request with `403`.** Build the router with `media_router_with(manager, authorizer)` and supply a `MediaAuthorizer`. | Grep for `media_router(`. You get a **deprecation warning, not an error** — `cargo build` still succeeds, so a noisy build carries this to production, where the symptom is every media route answering 403. This is deliberate: the constructor used to mount 16 routes that took no authentication, authorization or tenant extractor at all, so the alternative was leaving an open bucket open. |
+
+**The shortest fix, with the `tenancy` feature on**, is the shipped
+policy — reach for it before writing a trait impl:
+
+```rust
+use rustango::media::router::{media_router_with, MediaPerms};
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
+```
+
+`MediaPerms` checks the `{table}.{action}` permission codenames the
+admin already uses: `rustango_media.view` to read a row or a listing,
+`rustango_media.add` for an upload ticket,
+`rustango_media_collections.add` / `rustango_media_tags.add` for the two
+creates, `rustango_media.change` / `.delete` for the media row. Deleting
+a collection needs **both** `rustango_media_collections.delete` and
+`rustango_media.change`, because that route re-parents every media row
+underneath it. Superusers skip the check.
+
+Mount it inside `require_auth` (or `optional_auth`) — that middleware is
+what injects the `AuthenticatedUser` it reads. Without it every request
+is a `401`, which is the symptom naming its own cause.
+
+Reading a collection's **contents** needs
+`rustango_media_collections.view` *and* `rustango_media.view`, because
+that route answers media rows with a presigned download URL each — it
+is a media read that happens to be addressed by collection id.
+
+Three things to know before you rely on it.
+
+The codenames are seeded by `auto_create_permissions`, which runs during
+provisioning and on migrate; an app upgrading into this can re-seed
+without a migrate cycle with the `seed-permissions` manage command.
+
+It is **table-level, not row-level**: `rustango_media.view` grants
+reading *any* media row by id, so a multi-tenant deployment still scopes
+rows in its own `MediaAuthorizer`. `MediaPerms` is the floor.
+
+And **every registered disk is writable until you say otherwise**.
+`disk` is caller-supplied on `POST /uploads/begin` and the
+`StorageRegistry` is process-wide, so pool-per-tenant isolates the
+database and *not* the object store — a bare `rustango_media.add` grant
+mints a presigned `PUT` into any bucket the process knows about. A
+codename cannot express "this disk", so the allow-list is a builder:
+
+```rust
+MediaPerms::new(pool).allow_disks(["user-uploads"])
+```
+
+Set it on any deployment with more than one disk. Prefixes *within* a
+disk are still not expressible — for "your own prefix on a shared
+bucket", implement `MediaAuthorizer`, which is handed `key_prefix`.
+
+Write the trait impl when you need per-row decisions:
+
+```rust
+// before (0.57.6) — served anyone who could reach it
+let app = axum::Router::new()
+    .nest("/media", media_router(manager));
+
+// after (0.57.7)
+use rustango::media::router::{
+    media_router_with, MediaAction, MediaAuthorizer, MediaDecision, MediaTarget,
+};
+
+struct MyPolicy;
+
+#[rustango::media::async_trait]
+impl MediaAuthorizer for MyPolicy {
+    async fn authorize(
+        &self,
+        parts: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
+        // No identity at all is 401, not 403.
+        let Some(user) = current_user(parts) else {
+            return MediaDecision::Unauthenticated;
+        };
+        let allowed = match action {
+            MediaAction::Read(MediaTarget::Media(id)) => user.may_read_media(id).await,
+            // Listings enumerate the whole library; NewUpload mints a
+            // presigned PUT for a caller-chosen disk and key prefix.
+            // Both are explicit decisions, not defaults.
+            MediaAction::Read(MediaTarget::Listing) => user.may_browse_library(),
+            MediaAction::Add(MediaTarget::NewUpload { disk, key_prefix, .. }) => {
+                user.is_trusted_uploader()
+                    && disk == "user-uploads"
+                    && key_prefix.starts_with(&user.prefix())
+            }
+            MediaAction::Add(MediaTarget::NewCollection { .. }) => user.is_editor(),
+            MediaAction::Add(MediaTarget::NewTag { .. }) => user.is_editor(),
+            _ => false,
+        };
+        allowed.into()
+    }
+}
+
+let app = axum::Router::new()
+    .nest("/media", media_router_with(manager, MyPolicy));
+```
+
+End on `_ => false`. `MediaAction` and `MediaTarget` are
+`#[non_exhaustive]`, so a route added later reaches your policy as a
+variant you have not written an arm for — and should arrive denied.
+
+`authorize` returns `MediaDecision`, not `bool`. `false.into()` is
+`Forbidden`, which is exactly the old behaviour, so a policy that
+already computes a boolean only needs `.into()`. Return
+`MediaDecision::Unauthenticated` where there is **no principal at all**
+— the client is then told `401` so a token client refreshes rather than
+treating the refusal as final. A signed-in user who lacks the permission
+stays `Forbidden`.
+
+`NewUpload` carries what the caller **asked for** — `disk`,
+`key_prefix`, `collection_id`, `uploaded_by_id` — read out of the
+request body before the handler runs, so the grant can be "this disk,
+under your own prefix" rather than "anywhere in any bucket, attributed
+to anyone". They are unvalidated caller input, not facts; a body that
+does not parse arrives as empty strings and `None` rather than a `400`,
+because authorization is decided before validation is. Match it with a
+trailing `..` (`MediaTarget::NewUpload { disk, .. }`) — the variant
+stays `#[non_exhaustive]` so more of the body can be surfaced later
+without breaking your policy.
+
+The gate buffers that one body, capped at 16 KiB; nothing legitimate
+sends an upload-ticket JSON larger than that, and a request that does is
+refused. No other route's body is read.
+
+`NewCollection` and `NewTag` are empty struct variants of the same
+shape, for `POST /collections` and `POST /tags`. Those two used to
+arrive as the same `Add(Listing)`, so "may label things" also granted
+"may create folders" — and collections nest, so it granted a foothold
+under someone else's tree. `Listing` now means a read.
+
+`DELETE /collections/{id}` arrives as
+`Delete(MediaTarget::CollectionSubtree(id))`, **not**
+`Delete(MediaTarget::Collection(id))` — so an arm written for the
+latter does not grant it, and the route answers 403 until you add the
+subtree arm. That is the intended reading: the route soft-deletes every
+descendant collection and orphans the media at every level, and the
+nesting is not the deleting caller's to control, since `POST
+/collections` takes `parent_id` in the body. Grant it where a caller
+owning the root may take the whole tree, and keep it on `_ => false`
+where they may not.
+
+The router needs the **`admin`** feature as well as `media`, and
+`media_router` is **removed in 0.59.0** — the deprecation is not
+open-ended.
+
+### Not breaking, but your clients will notice
+
+- **`DELETE /collections/{id}` now takes the whole subtree.** In 0.57.6
+  it orphaned the media in that one collection and soft-deleted that one
+  row; children were left pointing at a deleted parent, which made
+  `collection_path` on the subtree a permanent error. Fixing that made
+  the route recursive. If anything in your app deletes a collection that
+  has children, its blast radius changed — check that before upgrading,
+  not after.
+- **`GET /collections/{id}/contents` caps at 100 rows.** It was
+  unbounded. `?limit=` is clamped to `1..=1000`, so a client that used
+  to receive a whole large collection in one response now receives a
+  page, with nothing in the body saying there is more. Page with
+  `?limit=` and `?offset=`.
+- **`popular_tags` no longer counts soft-deleted media.** `GET
+  /tags/popular` and `GET /tags` both serve it, so their numbers drop on
+  upgrade. The new numbers are the correct ones — the old ones
+  contradicted `GET /tags/{slug}/media` — but a dashboard tracking them
+  will show a step change.
+
+### Not breaking, worth knowing
+
+- `url_codec::percent_decode_path` is new: `%XX` only, `+` left
+  literal, for comparing a path segment against what a router decoded.
+  `url_decode` keeps form semantics (`+` → space) and is unchanged for
+  that use.
+- Both decoders stopped treating a **signed** hex pair as an escape.
+  `%+5` used to decode to byte `0x05`, because `u8::from_str_radix`
+  accepts a leading sign. Only affects malformed input.
+- `MediaManager::purge` now **fails** when the storage object cannot be
+  deleted, instead of deleting the row and returning `Ok(())`. If your
+  scheduled `purge_orphans` starts returning an error, it is reporting a
+  storage failure it was previously hiding — check the `warn` lines,
+  which name the disk and key. The rows it could not purge stay
+  soft-deleted and are retried on the next sweep; the rest of the sweep
+  still runs. A disk missing from the `StorageRegistry` is now
+  `MediaError::UnknownDisk` rather than a silent skip.
+- `rustango::storage::async_trait` is re-exported, so implementing the
+  public `Storage` trait no longer needs `async-trait` in your own
+  `Cargo.toml`. The `media::async_trait` re-export is unchanged; it sits
+  behind the `admin` feature, which a crate implementing only `Storage`
+  may not have on.
+
+### `on_delete` now reaches the database — on **new** databases only
+
+Every `#[rustango(fk = "…", on_delete = "…")]` was being discarded when
+a schema snapshot was built, and system migrations render *from*
+snapshots, so the clause reached no database at all. A declared
+`cascade` arrived as `NO ACTION`, which does not merely fail to cascade
+— it makes the parent delete a hard refusal (`ERROR 1451` on MySQL).
+
+**What you need to know about upgrading:**
+
+| | |
+|---|---|
+| A **new** database, migrated from nothing | gets the correct `ON DELETE`. Nothing to do. |
+| An **existing** database | keeps the constraints it already has. `migrate` reports `nothing to migrate` and writes no file — correctly, because a changed `on_delete` is not a schema operation this release can emit. |
+
+So `migrate` exiting `0` after the upgrade does **not** mean your
+constraints were corrected. If you rely on a declared `cascade` — and
+you may not have noticed you did, because it has never worked — the
+constraint has to be rewritten by hand:
+
+```sql
+-- PostgreSQL / MySQL. Check first:
+--   PG:    SELECT conname, confdeltype FROM pg_constraint WHERE contype='f';
+--          'a' = NO ACTION, 'c' = CASCADE, 'n' = SET NULL
+--   MySQL: SELECT constraint_name, delete_rule
+--            FROM information_schema.referential_constraints;
+ALTER TABLE child DROP CONSTRAINT child_parent_id_fkey;
+ALTER TABLE child ADD CONSTRAINT child_parent_id_fkey
+  FOREIGN KEY (parent_id) REFERENCES parent (id) ON DELETE CASCADE;
+```
+
+SQLite has no `ALTER TABLE … DROP CONSTRAINT`, so correcting one there
+means rebuilding the table.
+
+This affects apps that never touched media: **eleven framework foreign
+keys declare `cascade`, ten of them in `tenancy`** (roles, permissions,
+agent skills), and `fold_in_framework_tables` puts them in every
+project's snapshot.
+
+### `ON DELETE SET NULL` can now fail your deploy on MySQL
+
+Because the clause is finally emitted, a model declaring
+`on_delete = "set_null"` on a **non-nullable** column now produces DDL
+MySQL rejects:
+
+> **`ERROR 1830 (HY000): Column 'x' cannot be NOT NULL: needed in a
+> foreign key constraint 'y' SET NULL`**
+
+Make the column `Option<…>`, or change the action. PostgreSQL and SQLite
+accept the DDL and fail at delete time instead, which is worse — so this
+is the loud one.
+
 ## 0.57.6
 
-> **Not yet published.** The newest tag is `v0.57.5`; 0.57.6 lives on
-> `release/v0.57.6` behind [#1479](https://github.com/ujeenet/rustango/pull/1479).
-> Pin a rev until it lands.
+> Published. `rustango = "0.57.6"` resolves.
 
 ### Breaking, and how to tell whether it reaches you
 
