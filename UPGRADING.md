@@ -150,8 +150,7 @@ untouched.
 
 ## 0.57.7
 
-> **Not yet published.** Lives on `release/v0.57.7`. Pin a rev until it
-> lands.
+> Published 2026-09-18.
 
 The security pass. One change can break a working deployment, and it
 does so at runtime rather than at build time — read the first row even
