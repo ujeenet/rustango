@@ -292,7 +292,7 @@ jobs:
             --test docs_versions \
             --test docs_inventories \
             --test docs_live_suite_counts \
-            --test every_mysql_arm_runs_in_ci \
+            --test every_live_suite_runs_in_ci \
             --test every_serving_path_is_observable \
             --test every_test_suite_compiles_in_ci \
             --test logging_fields_agree
@@ -1086,7 +1086,7 @@ jobs:
       # PostgreSQL and SQLite arms for free in `postgres_test`, so a
       # missing line here costs only the MySQL arm and the suite still
       # looks covered. These three shipped that way;
-      # `every_mysql_arm_runs_in_ci` now fails when a `*_tri` or
+      # `every_live_suite_runs_in_ci` now fails when a `*_tri` or
       # `*_mysql_live` target is absent from this job.
       - run: cargo test -p rustango --features mysql,testkit --test values_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
@@ -1127,7 +1127,7 @@ jobs:
       # workflow at all. MySQL is the strict dialect for migrations: a
       # re-run `CREATE TABLE` is error 1050 and `ALTER` rejects shapes
       # PG accepts, so a broken reconcile bites here first and nowhere
-      # else. `every_mysql_arm_runs_in_ci` now fails if a
+      # else. `every_live_suite_runs_in_ci` now fails if a
       # `tests/*_mysql_live.rs` is missing from this list.
       - run: cargo test -p rustango --features mysql,tenancy --test migrate_fake_initial_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test migrate_reconcile_mysql_live

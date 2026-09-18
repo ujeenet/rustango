@@ -1,5 +1,23 @@
-//! Every suite with a MySQL arm — `tests/*_mysql_live.rs` and
-//! `tests/*_tri.rs` — must be named in the `mysql_live` CI job (#1461).
+//! Every suite that needs a service CI must provide is named in the job
+//! that provides it.
+//!
+//! Four families, and each one skips silently when its dependency is
+//! absent — so an unnamed suite runs in `postgres_test`, returns early,
+//! and prints `ok` having exercised nothing:
+//!
+//! | family | detected by | job |
+//! |---|---|---|
+//! | MySQL — `*_mysql_live.rs`, `*_tri.rs` | filename | `mysql_live` |
+//! | Redis | `env::var("REDIS_TEST_URL")` | `redis_live` |
+//! | S3 | `env::var("RUSTANGO_S3_TEST_…")` | `s3_live` |
+//! | PostGIS | filename | `postgis_live` |
+//!
+//! It was called `every_mysql_arm_runs_in_ci` while already checking
+//! S3 and `feature_combos`, and the S3 half used a **frozen literal**
+//! rather than reading the directory — so it omitted `s3_live_presign`
+//! and would have missed any suite added after it was written. A guard
+//! with the shape it exists to prevent (#1592). Renamed and generalised
+//! together, because the name was the thing making that easy to miss.
 //!
 //! ## Why this needs a guard at all
 //!
@@ -721,25 +739,126 @@ fn the_s3_job_sets_every_variable_its_suites_read() {
     }
 }
 
-/// The suites that need those variables are actually named by that job.
+/// Every suite that needs an environment-gated service is named by the
+/// job that provides it.
+///
+/// ## Read from the directory, not from a list
+///
+/// This replaced a frozen literal — `["media_live",
+/// "media_collections_tags_live"]` — which did not read `tests/` at all
+/// and omitted `s3_live_presign`. A third S3-reading suite added
+/// afterwards would have skipped silently with this guard still green.
+/// **The guard had the shape it was written to prevent** (#1592).
+///
+/// ## How a suite is detected
+///
+/// By what it *reads*, not what it is called. A suite that reads
+/// `REDIS_TEST_URL` needs Redis whatever its filename; the naming
+/// convention is a hint, the env var is the requirement. PostGIS is the
+/// exception and is matched on filename, because it gates on
+/// `CREATE EXTENSION postgis` failing rather than on a variable.
+///
+/// ## Why omission is silent
+///
+/// Every one of these skips when its dependency is absent, and a
+/// skipped test prints `ok`. `postgres_test` sets `DATABASE_URL` and
+/// nothing else, so an unnamed suite runs there, finds no Redis / no S3
+/// credentials / no PostGIS extension (the image is
+/// `pgvector/pgvector:pg16`), returns early, and reports green having
+/// exercised nothing. That is #1437, and it is why this is worth a
+/// guard rather than a convention.
 #[test]
-fn the_media_live_suites_are_named_in_the_s3_job() {
-    let path = repo_root().join(".github/workflows/ci.yml");
+fn every_env_gated_live_suite_is_named_in_its_job() {
+    let root = repo_root();
+    let path = root.join(".github/workflows/ci.yml");
     let yaml = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-    let block = job_block(&yaml, "s3_live");
 
-    // Every suite whose setup helper reads the S3 variables. A suite
-    // added here but not to the job is the #1437 shape all over again:
-    // present on disk, named in no workflow, skipping silently.
-    for target in ["media_live", "media_collections_tags_live"] {
-        assert!(
-            block.contains(&format!("--test {target}")),
-            "`s3_live` does not name `--test {target}`. That suite reads the S3 \
-             variables, so it runs nowhere else — `postgres_test` has `DATABASE_URL` \
-             but no S3 credentials, so it skips there and reports green.\n\n{block}"
-        );
+    // (job, how a suite declares it needs that job, human name)
+    let families: [(&str, Detect, &str); 3] = [
+        ("redis_live", Detect::Reads("REDIS_TEST_URL"), "Redis"),
+        (
+            "s3_live",
+            Detect::Reads("RUSTANGO_S3_TEST_"),
+            "S3 credentials",
+        ),
+        (
+            "postgis_live",
+            Detect::NamedLike("postgis"),
+            "the PostGIS extension",
+        ),
+    ];
+
+    let dir = root.join("crates/rustango/tests");
+    let mut problems: Vec<String> = Vec::new();
+
+    for (job, detect, need) in families {
+        let block = job_block(&yaml, job);
+        for entry in std::fs::read_dir(&dir).expect("tests/ is readable") {
+            let p = entry.expect("dir entry").path();
+            let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if p.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            // `*_seed.rs` helpers are `#[ignore]`d on purpose — they
+            // populate a bucket for manual inspection and are not tests.
+            if stem.ends_with("_seed") {
+                continue;
+            }
+            // This file reads the variables in order to check for them.
+            if stem == "every_live_suite_runs_in_ci" {
+                continue;
+            }
+            let src = std::fs::read_to_string(&p).unwrap_or_default();
+            let needs = match detect {
+                // The `env::var("PREFIX` form, so a prefix like
+                // `RUSTANGO_S3_TEST_` matches each of its five
+                // variables while a mention in prose or a list does
+                // not.
+                Detect::Reads(var) => src.contains(&format!("env::var(\"{var}")),
+                Detect::NamedLike(frag) => stem.contains(frag),
+            };
+            if needs && !block.contains(&format!("--test {stem}")) {
+                problems.push(format!(
+                    "  {stem} needs {need}, but `{job}` does not name `--test {stem}`"
+                ));
+            }
+        }
     }
+    problems.sort();
+
+    assert!(
+        problems.is_empty(),
+        "live suite(s) that no job provides their dependency for:\n{}\n\n\
+         Each of these skips when its dependency is missing, and a skipped test \
+         prints `ok` — so it runs in `postgres_test` (which sets `DATABASE_URL` and \
+         nothing else), returns early, and reports green having exercised nothing \
+         (#1437, #1592).\n\n\
+         Add the `--test <name>` line to the job that provides the service.",
+        problems.join("\n")
+    );
+}
+
+/// How a suite declares which service it needs.
+#[derive(Clone, Copy)]
+enum Detect {
+    /// It calls `env::var("<name>")`.
+    ///
+    /// The **call**, not the bare string. Matching the string alone
+    /// flagged `docs_live_suite_counts`, which enumerates the gating
+    /// variables in order to count suites per variable and needs none
+    /// of the services. A guard that fires on a file merely *naming* a
+    /// variable trains people to add exclusions, which is how a
+    /// ratchet stops ratcheting.
+    Reads(&'static str),
+    /// Its filename contains this — for services with no env gate.
+    ///
+    /// PostGIS is the only one: its suites skip on
+    /// `CREATE EXTENSION postgis` failing, so there is no variable to
+    /// look for.
+    NamedLike(&'static str),
 }
 
 /// The media feature axis is compiled by `feature_combos`.
