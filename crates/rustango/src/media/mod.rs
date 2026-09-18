@@ -553,6 +553,42 @@ impl MediaManager {
         self.registry.cdn_url(&m.disk, &m.storage_key)
     }
 
+    /// CDN-aware public URL for a media **id**, minting no signature.
+    ///
+    /// This is the supported way to put an uploaded image on a page
+    /// anyone can reach. [`crate::media::router`] is the *internal*
+    /// management API — it refuses an anonymous request by design, and
+    /// mounting it on a public page is not the answer. A public page
+    /// renders this string into its own template, from its own route.
+    ///
+    /// `Ok(None)` has two causes and they are not the same: the row is
+    /// missing or soft-deleted, or the disk has no CDN prefix and no
+    /// base URL. Call [`Self::get`] first if you need to tell them
+    /// apart.
+    ///
+    /// **The address is only as public as the bucket.** This returns
+    /// where the object *would* be served from; it does not make the
+    /// object readable. On a private bucket the URL is correct and the
+    /// fetch is a 403 — that combination wants
+    /// [`Self::presigned_get`] instead, which expires and is therefore
+    /// not cacheable and not shareable.
+    ///
+    /// Sync-friendly by design: no signing means no `await` inside a
+    /// template. Tera filters are sync, so a presigned URL could never
+    /// be built from one.
+    ///
+    /// ```ignore
+    /// let ctx = tera::Context::from_serialize(serde_json::json!({
+    ///     "hero": manager.public_url(hero_id).await?,
+    /// }))?;
+    /// ```
+    ///
+    /// # Errors
+    /// Propagates the row lookup's driver error.
+    pub async fn public_url(&self, id: i64) -> Result<Option<String>, MediaError> {
+        Ok(self.get(id).await?.and_then(|m| self.url(&m)))
+    }
+
     /// Bare backend URL (no CDN). For internal admin / debug.
     #[must_use]
     pub fn origin_url(&self, m: &Media) -> Option<String> {
