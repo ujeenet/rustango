@@ -4,6 +4,41 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dropping a model produced a migration MySQL could not apply** (#1588).
+  `makemigrations` emitted `DropTable` plus one `DropIndex` per index, and
+  `SchemaChange::DropIndex` carried only a name — so the renderer refused on
+  MySQL, which needs `DROP INDEX <name> ON <table>`. An ordinary "remove a
+  table" migration was therefore un-appliable straight out of the generator.
+
+  Worse than un-appliable, because MySQL auto-commits DDL: the `DropTable`
+  succeeded, the first `DropIndex` failed, the migration was recorded as
+  failed — so the table was gone with **no ledger row**, and re-running
+  failed differently (1051, unknown table). Nothing reconciled that without
+  `migrate --fake`, which you have to already know exists.
+
+  Two fixes, and they are complementary rather than alternatives:
+
+  - `DropIndex` is **no longer emitted for an index whose table the same
+    migration drops**. Those ops were always redundant — MySQL and
+    PostgreSQL both drop a table's indexes with the table — and they were
+    the whole of the failure above.
+  - `DropIndex` now carries `{ name, table }` and renders MySQL's form. That
+    covers the case the suppression does not: dropping an index while
+    keeping its table.
+
+  `table` is `#[serde(default)]`, so a migration file written before this
+  still deserializes; it applies unchanged on PostgreSQL and SQLite, and on
+  MySQL gets an error naming the field to add rather than a serde failure
+  naming nothing.
+
+  A unit test previously asserted that MySQL *must* refuse, so the defect had
+  a green test defending it. It is replaced by one asserting the rendered
+  SQL, and by `migrate_drop_index_mysql_live` — which executes the DDL
+  against a real server and separately pins that MySQL does reject the
+  PostgreSQL `IF EXISTS` form, rather than trusting the comment that said so.
+
 ### Added
 
 - **`MediaManager::public_url(id)`** — the CDN-aware public address for a

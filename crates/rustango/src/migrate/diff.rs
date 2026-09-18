@@ -137,8 +137,24 @@ pub enum SchemaChange {
         include: Vec<String>,
     },
     /// Drop an index by name.
+    ///
+    /// `table` is carried because **MySQL needs it** —
+    /// `DROP INDEX <name> ON <table>` — while PostgreSQL and SQLite drop
+    /// by name alone. Without it the renderer could only refuse on
+    /// MySQL, which it did, and `makemigrations` generates these ops
+    /// itself: dropping a model emitted a `DropTable` plus one
+    /// `DropIndex` per index, so an ordinary "remove a table" migration
+    /// was un-appliable on MySQL straight out of the generator (#1588).
+    ///
+    /// `#[serde(default)]` so a migration file written before #1588 —
+    /// which carries no `table` — still deserializes. Such a file is
+    /// appliable on PostgreSQL and SQLite exactly as it was, and gets a
+    /// diagnostic naming the file on MySQL rather than a serde error
+    /// that names nothing.
     DropIndex {
         name: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        table: String,
     },
     /// Add a table-level CHECK constraint.
     AddCheckConstraint {
@@ -309,10 +325,19 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
         }
     }
     // Dropped indexes — present in prev, absent from current.
+    //
+    // An index on a table this same migration drops is **not** emitted.
+    // Both MySQL and PostgreSQL drop a table's indexes with the table,
+    // so the op was always redundant — and on MySQL it was worse than
+    // redundant: `DropTable` succeeded, the following `DropIndex`
+    // failed, and the migration was recorded as failed with the table
+    // already gone. Re-running then failed differently (1051, unknown
+    // table) and no amount of retrying reconciled the ledger (#1588).
     for idx in &prev.indexes {
-        if current.index(&idx.name).is_none() {
+        if current.index(&idx.name).is_none() && current.table(&idx.table).is_some() {
             changes.push(SchemaChange::DropIndex {
                 name: idx.name.clone(),
+                table: idx.table.clone(),
             });
         }
     }
@@ -331,7 +356,13 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 || prev_idx.where_clause != idx.where_clause
             {
                 changes.push(SchemaChange::DropIndex {
+                    // `prev_idx.table`, not `idx.table`: one of the
+                    // conditions above is `prev_idx.table != idx.table`,
+                    // so this branch covers an index that **moved
+                    // tables**. The DROP has to name the table it is
+                    // still on; the CreateIndex below names the new one.
                     name: idx.name.clone(),
+                    table: prev_idx.table.clone(),
                 });
                 changes.push(SchemaChange::CreateIndex {
                     name: idx.name.clone(),
@@ -358,6 +389,11 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             {
                 changes.push(SchemaChange::DropIndex {
                     name: idx.name.clone(),
+                    // Equal to `idx.table` here — the condition above
+                    // requires it — but read from `prev_idx` so both
+                    // drop-and-recreate branches say the same thing:
+                    // a DROP names the table the index is on *now*.
+                    table: prev_idx.table.clone(),
                 });
                 changes.push(SchemaChange::CreateIndex {
                     name: idx.name.clone(),
@@ -1014,18 +1050,26 @@ fn render_changes_split_inner(
                     using,
                 ));
             }
-            SchemaChange::DropIndex { name } => {
+            SchemaChange::DropIndex { name, table } => {
                 // MySQL needs `DROP INDEX <name> ON <table>` and rejects
-                // `IF EXISTS`. The variant doesn't carry the table — fail
-                // loudly until #559 promotes `DropIndex` to include it.
+                // `IF EXISTS` on it. PostgreSQL and SQLite drop by name.
                 if dialect.name() == "mysql" {
-                    return Err(format!(
-                        "DropIndex for `{name}` is not yet supported on dialect `mysql`. \
-                         MySQL requires the table name (`DROP INDEX <name> ON <table>`) but \
-                         the `SchemaChange::DropIndex` variant only carries `name`. \
-                         Workaround: emit a hand-written `Operation::Data` (RunSQL) with the \
-                         dialect-correct DDL for your migration. Tracked in #559."
+                    if table.is_empty() {
+                        return Err(format!(
+                            "DropIndex for `{name}` carries no table, and MySQL needs one \
+                             (`DROP INDEX <name> ON <table>`). This migration file was \
+                             written before #1588 added the field. Add \
+                             `\"table\": \"<owning table>\"` beside `\"name\"` in the \
+                             DropIndex op, or regenerate the migration. PostgreSQL and \
+                             SQLite apply the file unchanged."
+                        ));
+                    }
+                    out.immediate.push(format!(
+                        "DROP INDEX {} ON {}",
+                        dialect.quote_ident(name),
+                        dialect.quote_ident(table),
                     ));
+                    continue;
                 }
                 out.immediate.push(format!(
                     "DROP INDEX IF EXISTS {}",
@@ -1807,9 +1851,12 @@ mod sql_type_tests {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropIndex {
             name: "idx_post_slug".into(),
+            table: "post".into(),
         }];
         let out =
             render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        // PostgreSQL drops by name; the table is carried for MySQL's
+        // sake and must not leak into this form.
         assert_eq!(
             out.immediate,
             vec![r#"DROP INDEX IF EXISTS "idx_post_slug""#.to_string()]
@@ -1822,6 +1869,7 @@ mod sql_type_tests {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropIndex {
             name: "idx_post_slug".into(),
+            table: "post".into(),
         }];
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite).unwrap();
         assert_eq!(
@@ -1830,19 +1878,67 @@ mod sql_type_tests {
         );
     }
 
+    /// MySQL renders `DROP INDEX <name> ON <table>` — the form it
+    /// actually accepts.
+    ///
+    /// This test replaces one that asserted the opposite. The old
+    /// `drop_index_mysql_rejects_until_variant_carries_table` pinned
+    /// the refusal as correct behaviour, so the bug in #1588 had a
+    /// green test defending it: `makemigrations` generated `DropIndex`
+    /// for every index of a dropped model, and the result was
+    /// un-appliable on MySQL straight out of the generator.
     #[cfg(feature = "mysql")]
     #[test]
-    fn drop_index_mysql_rejects_until_variant_carries_table() {
+    fn drop_index_mysql_names_the_table() {
         let snap = empty_snap();
         let changes = vec![SchemaChange::DropIndex {
             name: "idx_post_slug".into(),
+            table: "post".into(),
+        }];
+        let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
+            .expect("DropIndex renders on MySQL now that the variant carries the table");
+        // No `IF EXISTS` — MySQL rejects it on DROP INDEX.
+        assert_eq!(
+            out.immediate,
+            vec!["DROP INDEX `idx_post_slug` ON `post`".to_string()]
+        );
+    }
+
+    /// A migration file written before #1588 carries no `table`, and
+    /// `#[serde(default)]` gives it an empty one. On MySQL that cannot
+    /// be rendered, and the error has to name the file's problem rather
+    /// than emit `ON ``` and let the server complain.
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn drop_index_mysql_without_a_table_says_which_file_to_fix() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropIndex {
+            name: "idx_post_slug".into(),
+            table: String::new(),
         }];
         let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
-            .expect_err("DropIndex must reject MySQL — variant lacks table reference");
-        assert!(err.contains("DropIndex"));
-        assert!(err.contains("idx_post_slug"));
-        assert!(err.contains("mysql"));
-        assert!(err.contains("ON <table>"));
+            .expect_err("an empty table cannot render on MySQL");
+        assert!(err.contains("idx_post_slug"), "{err}");
+        assert!(err.contains("carries no table"), "{err}");
+        assert!(err.contains("\"table\""), "names the field to add: {err}");
+    }
+
+    /// …and the same legacy file still applies on PostgreSQL, because
+    /// that dialect never needed the table. An upgrade must not break
+    /// migrations that were working.
+    #[test]
+    fn drop_index_without_a_table_still_renders_on_postgres() {
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::DropIndex {
+            name: "idx_post_slug".into(),
+            table: String::new(),
+        }];
+        let out =
+            render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
+        assert_eq!(
+            out.immediate,
+            vec![r#"DROP INDEX IF EXISTS "idx_post_slug""#.to_string()]
+        );
     }
 
     #[test]

@@ -1131,6 +1131,12 @@ jobs:
       # `tests/*_mysql_live.rs` is missing from this list.
       - run: cargo test -p rustango --features mysql,tenancy --test migrate_fake_initial_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test migrate_reconcile_mysql_live
+      # `--features mysql` alone: this suite needs no tenancy, and the
+      # narrower set is the honest one. MySQL is the only dialect that
+      # needs the table on DROP INDEX and the only one that rejects
+      # `IF EXISTS` there, so a render-only test elsewhere proves
+      # nothing about it (#1588).
+      - run: cargo test -p rustango --features mysql --test migrate_drop_index_mysql_live
       # #1281 — the MySQL arm of DatabaseCache::add is bespoke SQL
       # (INSERT IGNORE + conditional UPDATE, since ON DUPLICATE KEY
       # UPDATE takes no WHERE). It is also positional-`?`, so a bind
