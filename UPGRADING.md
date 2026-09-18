@@ -148,10 +148,43 @@ untouched.
 
 ---
 
+## Unreleased
+
+### `MigrateError` is now `#[non_exhaustive]`
+
+Only affects code that **matches exhaustively** on it. Add a `_ =>` arm:
+
+```rust
+match err {
+    MigrateError::Driver(e) => …,
+    MigrateError::Io(e) => …,
+    _ => …,            // <- add this
+}
+```
+
+Anything that only propagates the error, or formats it with `{}` / `?`,
+is unaffected — which is most code.
+
+The marker went on together with a new variant, `PartiallyApplied`, so
+that this is **one** break rather than two: every future variant is now
+additive. See #1513, which wants the same treatment across the other
+public error enums.
+
+`PartiallyApplied` is raised when a migration fails on MySQL *after*
+committing DDL. MySQL commits DDL immediately, so the transaction around
+an `atomic: true` migration cannot undo it — the schema moves and the
+ledger row is never written, and re-running then fails differently
+because the work is already done. The error now names how much committed
+and the way out (`manage migrate --fake <name>` once the schema
+matches), which was previously folklore. A failure with no committed DDL
+still surfaces as `Driver`, unchanged, because that one rolled back
+cleanly and should simply be re-run.
+
+---
+
 ## 0.57.7
 
-> **Not yet published.** Lives on `release/v0.57.7`. Pin a rev until it
-> lands.
+> Published 2026-09-18.
 
 The security pass. One change can break a working deployment, and it
 does so at runtime rather than at build time — read the first row even
@@ -182,9 +215,15 @@ a collection needs **both** `rustango_media_collections.delete` and
 `rustango_media.change`, because that route re-parents every media row
 underneath it. Superusers skip the check.
 
-Mount it inside `require_auth` (or `optional_auth`) — that middleware is
-what injects the `AuthenticatedUser` it reads. Without it every request
-is a `401`, which is the symptom naming its own cause.
+Mount it inside `require_auth` — that middleware is what injects the
+`AuthenticatedUser` it reads. Without it every request is a `401`, which
+is the symptom naming its own cause.
+
+Not `optional_auth`: it compiles and then 401s anyway, because
+`MediaPerms` has no anonymous path. If what you wanted was a **public
+page** showing an uploaded image, this router is the wrong tool
+entirely — render `manager.public_url(id).await?` from your own route.
+`docs/files.md` has both delivery models.
 
 Reading a collection's **contents** needs
 `rustango_media_collections.view` *and* `rustango_media.view`, because

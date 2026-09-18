@@ -506,7 +506,7 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
             new_column,
         }] => format!("rename_{old_column}_to_{new_column}_on_{table}"),
         [SchemaChange::CreateIndex { name, .. }] => format!("create_index_{name}"),
-        [SchemaChange::DropIndex { name }] => format!("drop_index_{name}"),
+        [SchemaChange::DropIndex { name, .. }] => format!("drop_index_{name}"),
         [SchemaChange::AddCheckConstraint { name, .. }] => format!("add_check_{name}"),
         [SchemaChange::DropCheckConstraint { name, .. }] => format!("drop_check_{name}"),
         [SchemaChange::CreateM2MTable { through, .. }] => format!("create_m2m_{through}"),
