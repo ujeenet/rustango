@@ -130,6 +130,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::jobs` | Files de tâches de fond |
 | `rustango::logging` | Avertissements de ce sous-système lui-même |
 | `rustango::manage` | Verbes `manage` |
+| `rustango::media::auth` | Refus d'autorisation du routeur média |
 | `rustango::messages` | Messages flash |
 | `rustango::migrate` | Exécuteur de migrations |
 | `rustango::rate_limit` | Limitation de débit |

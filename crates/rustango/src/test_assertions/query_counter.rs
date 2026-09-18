@@ -46,16 +46,33 @@
 //!
 //! ## What gets counted
 //!
-//! Every `_pool` entry point in [`crate::sql`] that hits a real query:
+//! Every `_pool` and `_tx` entry point in [`crate::sql`] that hits a
+//! real query:
 //!
-//! - `raw_execute_pool` — fall-through raw SQL
+//! - `raw_execute_pool` / `raw_query_pool` — fall-through raw SQL
 //! - `select_rows_as_json` / `select_one_row_as_json` — JSON-bridge reads
-//! - `select_rows_pool_with_related` / `select_one_row_pool` — typed reads
+//! - `select_rows_pool` / `select_rows_pool_with_related` /
+//!   `select_one_row_pool` — typed reads
+//! - `count_rows_pool`, `fetch_aggregate_pool`, `fetch_paginated_pool`
 //! - `insert_pool` / `update_pool` / `delete_pool` — single-row writes
+//! - the `_tx` counterparts of all of the above
 //!
 //! Each call increments by 1 regardless of how many rows the query
 //! returns — mirroring Django's `assertNumQueries` (one SQL statement
 //! = one count, even if it returns thousands of rows).
+//!
+//! ## What does **not** get counted
+//!
+//! The PostgreSQL-only `_on` family — `annotate_count_children_on`,
+//! `fetch_aggregate_on`, `fetch_with_prefetch`, `QuerySet::fetch_on`
+//! — takes a bare sqlx executor rather than a [`crate::sql::Pool`] and
+//! runs its query without passing through any instrumented entry
+//! point. A block that only uses those counts zero.
+//!
+//! Stated here because the failure mode is a **pass**: `assert_num_queries`
+//! sees no query and agrees with any expectation of 0. Until #1561, read
+//! a 0 from a block that touched `_on` code as "not measured", not as
+//! "no queries".
 
 use std::cell::Cell;
 use std::future::Future;

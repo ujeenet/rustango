@@ -197,6 +197,22 @@ pub struct RelationSnapshot {
     pub kind: String,
     pub to: String,
     pub on: String,
+    /// The `ON DELETE` action, as its SQL token (`"CASCADE"`,
+    /// `"SET NULL"`, …). Threaded through from
+    /// `FieldSchema::fk_on_delete`.
+    ///
+    /// Absent before #1549, which meant a declared `on_delete` was
+    /// dropped the moment a snapshot was built — and since system
+    /// migrations render *from snapshots*, the clause never reached any
+    /// database. A declared `cascade` arrived as `NO ACTION`, turning a
+    /// cascading delete into a hard refusal. Same bug class as
+    /// `generated_as` and `db_comment` above, both captured in #559.
+    ///
+    /// `skip_serializing_if` keeps existing snapshot JSON byte-identical
+    /// when no action is declared, and `default` lets already-written
+    /// snapshots load.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub on_delete: Option<String>,
 }
 
 /// Was this model registered by the framework itself (as opposed to a
@@ -578,16 +594,19 @@ impl TableSnapshot {
 
 impl FieldSnapshot {
     fn from_schema(f: &crate::core::FieldSchema) -> Self {
+        let on_delete = f.fk_on_delete.map(|a| a.as_sql().to_owned());
         let fk = f.relation.and_then(|r| match r {
             Relation::Fk { to, on } => Some(RelationSnapshot {
                 kind: "fk".into(),
                 to: to.to_owned(),
                 on: on.to_owned(),
+                on_delete: on_delete.clone(),
             }),
             Relation::O2O { to, on } => Some(RelationSnapshot {
                 kind: "o2o".into(),
                 to: to.to_owned(),
                 on: on.to_owned(),
+                on_delete: on_delete.clone(),
             }),
         });
         Self {

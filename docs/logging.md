@@ -125,6 +125,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::jobs` | Background job queues |
 | `rustango::logging` | This subsystem's own warnings |
 | `rustango::manage` | `manage` verbs |
+| `rustango::media::auth` | Media-router authorization refusals |
 | `rustango::messages` | Flash messages |
 | `rustango::migrate` | Migration runner |
 | `rustango::rate_limit` | Rate limiting |

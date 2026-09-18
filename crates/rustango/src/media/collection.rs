@@ -19,7 +19,10 @@ use crate::sql::Auto;
 
 /// One folder. Cheap to clone.
 #[derive(crate::Model, Debug, Clone)]
-#[rustango(table = "rustango_media_collections")]
+// `permissions` so `auto_create_permissions` seeds
+// `rustango_media_collections.{add,change,delete,view}` — the codenames
+// `router::MediaPerms` checks. Not a column, so no migration.
+#[rustango(table = "rustango_media_collections", permissions)]
 pub struct MediaCollection {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
