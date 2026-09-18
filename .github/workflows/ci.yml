@@ -289,7 +289,45 @@ jobs:
             --test docs_live_suite_counts \
             --test every_mysql_arm_runs_in_ci \
             --test every_serving_path_is_observable \
+            --test every_test_suite_compiles_in_ci \
             --test logging_fields_agree
+
+  # Ungated, and the reason is #1572: a test file that does not build was
+  # merging green.
+  #
+  # `default = ["postgres", "batteries"]`, and `batteries` pulls in neither
+  # `sqlite`, `testkit` nor `mysql`. `clippy` is the only other ungated job
+  # that compiles `tests/**`, and it runs `--features tenancy` on top of
+  # those defaults — so every suite gated on one of the three compiles to an
+  # **empty crate** there. At the time this job was written that was
+  # `media_router_requires_authorization`, `media_soft_delete_consistency`,
+  # `media_perms_default_policy`, `fk_on_delete_live`, `media_tags_mysql_live`
+  # and `assert_num_queries_sqlite_live` — six suites, including every guard
+  # the 0.57.7 security pass added. They executed only in `postgres_test` /
+  # `sqlite_live` / `mysql_live`, every one `needs: gate`.
+  #
+  # So on an unlabelled PR into `develop` the six were neither run nor
+  # compiled, and a change that broke one of their signatures merged with a
+  # green tick. That is #1437's failure mode one layer down: not a suite that
+  # skips silently, but a suite that is not built where anyone would notice.
+  #
+  # `--no-run` on purpose. This job answers "does it build with the features
+  # that include it", which is the question `clippy` cannot answer and the
+  # live jobs answer too late. Running them needs databases and belongs in
+  # the gated matrix, per the `guards` header above.
+  #
+  # Cost: `--all-features` does not share a build cache with `clippy` or
+  # `guards` (both `--features tenancy`), so this is roughly one extra cold
+  # build per PR. That is the price of the suites being compiled anywhere an
+  # unlabelled PR can see, and it is already what `.githooks/pre-push` asks
+  # of a developer locally.
+  tests_compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features --no-run
 
   # Primary PG test job — runs the full workspace with `--all-features`
   # against a real PostgreSQL service. Covers every PG-typed live test
