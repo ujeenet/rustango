@@ -8,7 +8,10 @@
 //! `#![cfg(feature = "sqlite")]` and friends — compiles to an **empty
 //! crate** without it. It builds, it reports `ok`, and it contains
 //! nothing. Evaluated against the feature set `clippy` resolves, that
-//! is **275 of 559** suites in `tests/`.
+//! is **roughly half** of `tests/`. The precise figure is stated once,
+//! in the `tests_compile` job's own comment; repeating a derived number
+//! across files is how the previous one ("275 of 559") came to be wrong
+//! in both halves.
 //!
 //! Before this job existed, `clippy` was the only ungated job that
 //! compiled `tests/**` at all, and it runs `--features tenancy` on top
@@ -45,11 +48,18 @@
 //! Six suites are gated on a **negated** feature —
 //! `not(feature = "postgres")` for five, `not(feature = "admin")` for
 //! `oauth2_router_standalone` — so `--all-features` compiles them out
-//! by construction. The second command in `tests_compile` covers the
-//! `not(postgres)` family; `oauth2_router_standalone` needs a third
-//! shape and is built only in the gated `feature_combos`. That gap is
-//! real and stated rather than papered over: this guard asserts the two
-//! commands that exist, not that coverage is complete.
+//! by construction. `tests_compile` carries a command for each: the
+//! second covers the `not(postgres)` family, the third builds
+//! `oauth2_router_standalone`.
+//!
+//! An earlier version of this paragraph said that last one was "built
+//! only in the gated `feature_combos`". That was false —
+//! `feature_combos` runs `cargo check --lib` and `cargo test --lib`,
+//! neither of which builds `tests/**`, and no row of its matrix
+//! enables `oauth2`. The file was compiled by nothing. The claim was
+//! corrected in `ci.yml` and left standing here, which is why it is
+//! spelled out rather than quietly deleted: a retraction in one file
+//! and not its sibling is not a retraction.
 
 use std::path::{Path, PathBuf};
 
@@ -221,7 +231,7 @@ fn some_ungated_job_compiles_every_test_suite() {
     assert!(
         !builders.is_empty(),
         "no CI job runs `cargo test --workspace --all-features` without a narrowing selector. \
-         275 of 559 suites in tests/ are gated on a feature the default set omits, so they \
+         Roughly half the suites in tests/ are gated on a feature the default set omits, so they \
          compile to empty crates in the only jobs an unlabelled PR runs — and a test file that \
          does not build merges green (#1572). Note that adding `--lib`, `--test <one>` or \
          `--exclude` to an existing job's command puts it in this state without removing it."
