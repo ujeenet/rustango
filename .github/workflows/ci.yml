@@ -268,7 +268,7 @@ jobs:
   # to catch exactly that first fired post-merge, on develop's push run.
   # That is #1437's failure mode relocated from the suite to the guard.
   #
-  # These nine need no database and no service container — they read the
+  # These fifteen need no database and no service container — they read the
   # source tree and the workflow file — so they cost seconds and can run
   # on every PR. `--features tenancy` matches `clippy` above so the two
   # jobs share a build.
@@ -296,7 +296,11 @@ jobs:
             --test every_live_suite_runs_in_ci \
             --test every_serve_shuts_down_gracefully \
             --test every_serving_path_is_observable \
-            --test every_structural_guard_is_ungated \
+            --test every_structural_guard_runs_in_ci \
+            --test live_suites_fail_loudly \
+            --test macro_internals_stays_internal \
+            --test pool_construction \
+            --test tracing_targets \
             --test every_test_suite_compiles_in_ci \
             --test logging_fields_agree
 
@@ -308,7 +312,9 @@ jobs:
   # compiles `tests/**`, and it runs `--features tenancy` on top of those
   # defaults — so every suite gated on a feature outside that set compiles
   # to an **empty crate** there. Evaluated against the feature set `clippy`
-  # resolves, that is **275 of the 559 suites** in `crates/rustango/tests/`,
+  # resolves, that is **roughly half** of `crates/rustango/tests/` —
+  # 287 of 562 when this was measured, a figure that moves with every
+  # suite added, which is why it is stated here once and nowhere else.
   # including every guard the 0.57.7 security pass added.
   #
   # The axes are `sqlite`, `mysql`, `mcp` (16 suites), `cache-redis`,
@@ -336,14 +342,10 @@ jobs:
   # third command covers.
   #
   # An earlier version of this comment said that last one was "still built
-  # only in the gated `feature_combos`". That was false, and it is the
-  # mistake this job exists to prevent, made while writing the job:
-  # `feature_combos` runs `cargo check --lib` and `cargo test --lib`, and
-  # **neither builds `tests/**`** — nor does any of its 13 rows enable
-  # `oauth2`. The file was compiled by nothing at all. Checked, not
-  # assumed, this time: `cargo test -p rustango --no-default-features
-  # --features oauth2,manage,sqlite --test oauth2_router_standalone
-  # --no-run` is the command below, and it was run.
+  # only in the gated `feature_combos`". That was false: `feature_combos`
+  # runs `cargo check --lib` and `cargo test --lib`, and **neither builds
+  # `tests/**`** — nor does any of its 13 rows enable `oauth2`. The file
+  # was compiled by nothing at all.
   #
   # Cost: `--all-features` shares no build cache with `clippy` or `guards`
   # (both `--features tenancy`), so this is roughly one extra cold build per
