@@ -745,7 +745,7 @@ fn changing_index_columns_keeps_name_emits_drop_then_create() {
     let changes = detect_changes(&prev, &current);
     let drop_idx = changes
         .iter()
-        .position(|c| matches!(c, SchemaChange::DropIndex { name } if name == "uq"));
+        .position(|c| matches!(c, SchemaChange::DropIndex { name, .. } if name == "uq"));
     let create_idx = changes.iter().position(|c| {
         matches!(c, SchemaChange::CreateIndex { name, columns, .. }
             if name == "uq" && columns == &vec!["a".to_string(), "c".into()])
@@ -771,10 +771,76 @@ fn flipping_unique_flag_emits_drop_then_create() {
     let changes = detect_changes(&prev, &current);
     assert!(changes
         .iter()
-        .any(|c| matches!(c, SchemaChange::DropIndex { name } if name == "idx")));
+        .any(|c| matches!(c, SchemaChange::DropIndex { name, .. } if name == "idx")));
     assert!(changes.iter().any(
         |c| matches!(c, SchemaChange::CreateIndex { name, unique, .. } if name == "idx" && *unique)
     ));
+}
+
+/// Dropping a model must not emit a `DropIndex` per index (#1588).
+///
+/// This is the shape that broke a live MySQL tenant. `makemigrations`
+/// emitted `DropTable` plus one `DropIndex` per index, and MySQL
+/// applied the `DropTable`, failed on the first `DropIndex`, and
+/// recorded the migration as failed — so the table was gone with no
+/// ledger row, and re-running failed differently (1051, unknown
+/// table). Nothing reconciled that without `migrate --fake`.
+///
+/// The ops were always redundant: both MySQL and PostgreSQL drop a
+/// table's indexes along with the table.
+#[test]
+fn dropping_a_table_does_not_also_emit_drop_index_for_its_indexes() {
+    let prev = snap_with_index("uq", &["a", "b"], true);
+    // The table goes; so does the index that lived on it.
+    let current = SchemaSnapshot::default();
+
+    let changes = detect_changes(&prev, &current);
+
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, SchemaChange::DropTable(t) if t == "diff_user")),
+        "control: the table itself must still be dropped, or this test is \
+         asserting nothing: {changes:?}"
+    );
+    let stray: Vec<_> = changes
+        .iter()
+        .filter(|c| matches!(c, SchemaChange::DropIndex { .. }))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "DropIndex emitted for an index whose table is dropped in the same \
+         migration. On MySQL the DropTable succeeds and this then fails, \
+         leaving the schema changed and the ledger empty: {stray:?}"
+    );
+}
+
+/// …but an index dropped on a table that *survives* is still emitted,
+/// and now carries the table MySQL needs.
+///
+/// Without this, "suppress DropIndex" could be implemented as "never
+/// emit DropIndex" and the test above would still pass.
+#[test]
+fn dropping_only_the_index_still_emits_drop_index_with_its_table() {
+    let prev = snap_with_index("uq", &["a", "b"], true);
+    let current = SchemaSnapshot {
+        tables: prev.tables.clone(),
+        indexes: vec![],
+        ..Default::default()
+    };
+
+    let changes = detect_changes(&prev, &current);
+
+    let found = changes.iter().find_map(|c| match c {
+        SchemaChange::DropIndex { name, table } if name == "uq" => Some(table.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        found.as_deref(),
+        Some("diff_user"),
+        "an index dropped from a surviving table must still be dropped, and must \
+         name its table so MySQL can render `DROP INDEX <name> ON <table>`: {changes:?}"
+    );
 }
 
 #[test]

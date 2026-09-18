@@ -191,12 +191,17 @@ fn invert_one(op: &Operation, prev: &SchemaSnapshot) -> Result<Operation, Migrat
                 "cannot invert DropExclusionConstraint(`{name}` on `{table}`): exclusion constraints aren't tracked in SchemaSnapshot; write the inverse `AddExclusionConstraint` by hand. Issue #32.",
             )))
         }
-        Operation::Schema(SchemaChange::CreateIndex { name, .. }) => {
+        Operation::Schema(SchemaChange::CreateIndex { name, table, .. }) => {
             Ok(Operation::Schema(SchemaChange::DropIndex {
                 name: name.clone(),
+                // Carried so the inverse is appliable on MySQL, which
+                // needs `DROP INDEX <name> ON <table>` (#1588). Before
+                // this, rolling back a CreateIndex produced an op the
+                // MySQL renderer refused.
+                table: table.clone(),
             }))
         }
-        Operation::Schema(SchemaChange::DropIndex { name }) => {
+        Operation::Schema(SchemaChange::DropIndex { name, .. }) => {
             let idx = prev.index(name).ok_or_else(|| {
                 MigrateError::Validation(format!(
                     "cannot invert DropIndex(`{name}`): index not in predecessor snapshot",
