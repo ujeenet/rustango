@@ -3,10 +3,17 @@
 //!
 //! Mirrors `django.utils.crypto.get_random_string(length,
 //! allowed_chars=…)` — generates a uniformly-random string of
-//! `length` characters drawn from `allowed_chars`. Backed by the
-//! `rand::rngs::OsRng` CSPRNG so output is suitable for session
-//! identifiers, password-reset tokens, email verification codes —
-//! anywhere Django code reaches for `get_random_string`.
+//! `length` characters drawn from `allowed_chars`. Output is
+//! suitable for session identifiers, password-reset tokens, email
+//! verification codes — anywhere Django code reaches for
+//! `get_random_string`.
+//!
+//! Two CSPRNGs, by shape of draw: bulk fills take `OsRng` directly,
+//! per-character draws take `rand::thread_rng` (ChaCha12, seeded and
+//! periodically reseeded from the OS) to avoid a syscall per
+//! character. Both are cryptographically secure. The module used to
+//! claim `OsRng` throughout while `get_random_string` used
+//! `thread_rng` (#1536).
 //!
 //! ```ignore
 //! use rustango::random::{get_random_string, get_random_string_default,
@@ -50,8 +57,8 @@ pub const ALPHANUM_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRST
 /// Django-parity
 /// [`get_random_string(length, allowed_chars=…)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.get_random_string) —
 /// return a uniformly-random string of `length` characters chosen
-/// from `allowed_chars`. Uses `OsRng` (CSPRNG) — suitable for
-/// security-sensitive tokens.
+/// from `allowed_chars`. Uses `rand::thread_rng` — a CSPRNG seeded
+/// from the OS — so it is suitable for security-sensitive tokens.
 ///
 /// `allowed_chars` is taken as a `&str` so callers can pass either
 /// the predefined [`ALPHANUM_CHARS`] / [`URL_SAFE_CHARS`] /

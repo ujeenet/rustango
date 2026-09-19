@@ -71,10 +71,14 @@ const EXPIRES_PARAM: &str = "expires";
 /// the URL already has a query string).
 #[must_use]
 pub fn sign(url: &str, secret: &[u8], ttl: Option<Duration>) -> String {
+    // Opposite fallback to `current_unix_secs`, and deliberately so:
+    // both directions fail closed. A broken clock here mints a URL
+    // stamped in 1970, i.e. already expired; answering `u64::MAX`
+    // would mint one that never expires.
     let expires = ttl.map(|d| {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |t| t.as_secs() + d.as_secs())
+            .map_or(0, |t| t.as_secs().saturating_add(d.as_secs()))
     });
     sign_at(url, secret, expires)
 }
@@ -140,10 +144,23 @@ pub fn verify_at(url: &str, secret: &[u8], now_secs: u64) -> Result<(), SignedUr
 
 // ------------------------------------------------------------------ internals
 
+/// Wall clock in unix seconds, failing **closed**.
+///
+/// `duration_since` errors when the clock is before 1970 — a dead
+/// RTC battery, a bad NTP step, a container starting at epoch 0.
+/// This used to answer `0`, which makes `now > exp` false for every
+/// timestamp, so every expired URL verified (#1542). `u64::MAX`
+/// expires everything instead: a broken clock should refuse signed
+/// URLs, not honour them forever.
 fn current_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |t| t.as_secs())
+    clock_secs(SystemTime::now().duration_since(UNIX_EPOCH))
+}
+
+/// The fallback itself, split out so it is reachable from a test —
+/// the clock cannot be broken on demand, and asserting this through
+/// `verify_at` would only re-measure the caller's own argument.
+fn clock_secs<E>(elapsed: Result<Duration, E>) -> u64 {
+    elapsed.map_or(u64::MAX, |t| t.as_secs())
 }
 
 fn parse_url(url: &str) -> (String, Vec<(String, String)>) {
@@ -319,5 +336,47 @@ mod tests {
         let url = "https://example.com/?expires=not-a-number&signature=anything";
         let r = verify(url, SECRET);
         assert_eq!(r, Err(SignedUrlError::MalformedSignature));
+    }
+
+    #[test]
+    fn a_clock_before_1970_expires_everything_instead_of_nothing() {
+        // #1542. `current_unix_secs` answers `u64::MAX` when
+        // `duration_since(UNIX_EPOCH)` fails, so `now > exp` holds for
+        // every stamp a URL can carry. It used to answer `0`, which
+        // made that comparison false for all of them — one dead RTC
+        // battery and every expired signed URL verified again.
+        //
+        // The fallback itself, which is the thing that was wrong:
+        assert_eq!(
+            clock_secs::<()>(Err(())),
+            u64::MAX,
+            "an unreadable clock must read as `expired`, not as 1970",
+        );
+        assert_eq!(clock_secs::<()>(Ok(Duration::from_secs(42))), 42);
+
+        // …and what that value then does to a real verification.
+        let url = sign_at("https://example.com/f.pdf", SECRET, Some(2_000_000_000));
+        assert_eq!(
+            verify_at(&url, SECRET, u64::MAX),
+            Err(SignedUrlError::Expired),
+            "the broken-clock fallback must reject, not accept",
+        );
+        assert_eq!(
+            verify_at(&url, SECRET, 0),
+            Ok(()),
+            "control: the old `0` fallback is exactly what accepted it",
+        );
+    }
+
+    #[test]
+    fn signing_with_a_broken_clock_mints_an_already_dead_url() {
+        // The other direction of #1542: `sign` keeps the `0` fallback
+        // on purpose. A 1970 stamp is refused by any sane clock, where
+        // `u64::MAX` would mint a URL that never expires.
+        let url = sign_at("https://example.com/f.pdf", SECRET, Some(3_600));
+        assert_eq!(
+            verify_at(&url, SECRET, 1_700_000_000),
+            Err(SignedUrlError::Expired),
+        );
     }
 }
