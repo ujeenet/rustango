@@ -257,6 +257,16 @@ Type constructors: `string` · `integer` / `int32` · `number` · `boolean` ·
   defines the method: `PathItem::query` sets it on the whole document. If your
   tooling only reads 3.1, that is the one thing that will change the version
   out from under it — see [query-method](query-method.md).
+
+  A ViewSet mounts a QUERY route but **does not describe it by default**, so
+  the generated document stays 3.1.0. Opt in when your toolchain reads 3.2:
+
+  ```rust,ignore
+  ViewSet::for_model(Post::SCHEMA).openapi_query(true)
+  ```
+
+  The route is served either way; the flag only decides whether the document
+  mentions it, and therefore which version the document has to declare.
 - **The viewer router needs the `admin` feature** (for axum); `openapi` alone is
   enough to *build* and serialize a spec (`spec.to_json()`).
 - **Viewers load from a CDN** — fine for internal/dev docs; self-host the assets
