@@ -74,11 +74,16 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 /// caller already knows the expected length (HMAC tags are
 /// fixed-size, etc.).
 ///
-/// rustango ships this consolidating two prior private copies
-/// (`totp::constant_time_eq` + `forms::csrf::constant_time_eq`) —
-/// constant-time comparisons MUST live in one place because subtle
-/// branches added to "fix" something on one side can let attackers
-/// recover secrets on the other.
+/// This is where constant-time comparison belongs: it MUST live in
+/// one place, because subtle branches added to "fix" something on one
+/// side can let attackers recover secrets on the other.
+///
+/// The consolidation is **not done**. `totp::constant_time_eq` and
+/// `forms::csrf::constant_time_eq` both still exist, and the csrf one
+/// hand-rolls its own XOR loop rather than delegating to `subtle`.
+/// This said it shipped "consolidating two prior private copies",
+/// which reads as finished work and is why the copies survived review
+/// (#1543). Collapsing them is #1535.
 ///
 /// ```ignore
 /// use rustango::crypto::constant_time_compare;

@@ -71,7 +71,7 @@ supplémentaire est donc sans effet plutôt qu'une panique :
 
 ```rust,ignore
 fn main() {
-    rustango::logging::setup();   // pretty, filtre d'environnement, "info,sqlx=warn"
+    rustango::logging::setup();   // full, filtre d'environnement, "info,sqlx=warn"
     // ...
 }
 ```
@@ -180,7 +180,7 @@ rustango::logging::Setup::new()
 ```
 
 Ou laissez le palier décider. `setup_for_env()` lit `RUSTANGO_ENV` et choisit
-JSON quand la valeur est `prod` ou `production`, pretty sinon :
+JSON quand la valeur est `prod` ou `production`, `full` sinon :
 
 ```rust,ignore
 rustango::logging::setup_for_env();

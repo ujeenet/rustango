@@ -931,10 +931,17 @@ impl Cache for InMemoryCache {
 ///
 /// Django's FBC takes a `_lock` file for atomic multi-process writes
 /// + supports MAX_ENTRIES with a cull strategy. This implementation
-/// is the minimal Django-shape primitive: same on-disk semantics,
-/// per-process atomicity via `std::fs::write` (atomic per-call on
-/// most filesystems). Add file locking when a project actually
-/// shares the directory across processes.
+/// is the minimal Django-shape primitive with the same on-disk
+/// semantics.
+///
+/// **Writes are not atomic.** `std::fs::write` is `O_TRUNC` followed
+/// by a write, on every common filesystem — a concurrent reader can
+/// see a truncated or partial file, and `get` deletes an entry whose
+/// decode fails. This claimed "per-process atomicity via
+/// `std::fs::write` (atomic per-call on most filesystems)", sitting
+/// directly under a correct note about Django's lock file, which made
+/// it read as considered rather than assumed (#1543). Write-to-temp
+/// plus rename, and file locking for a shared directory, are #1530.
 pub struct FileCache {
     dir: std::path::PathBuf,
 }

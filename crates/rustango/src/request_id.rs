@@ -1,11 +1,24 @@
 //! Request ID middleware — assign a unique ID to every incoming request.
 //!
 //! Adds an `X-Request-Id` response header and exposes the value via the
-//! [`RequestId`] axum extractor so handlers can include it in log events.
+//! [`RequestId`] axum extractor.
 //!
 //! Honors an inbound `X-Request-Id` header by default (useful for chained
 //! services that want to propagate IDs end-to-end), or always generates
 //! a fresh one with [`RequestIdLayer::always_generate`].
+//!
+//! ## Getting the id onto your log lines
+//!
+//! You do not have to. Since #1480 the request span declares a
+//! `request_id` field and [`record`] fills it, so **every** event
+//! emitted during the request carries it — including ones from the
+//! ORM and from code that has never heard of a request id.
+//!
+//! This header used to show `tracing::info!(req_id = %id.0, …)` on
+//! every call site instead. That is the tedious way, it silently
+//! misses the events you did not write, and the field name differs
+//! from the span's, so following it now puts a *second*,
+//! differently-named id on the same line (#1505).
 //!
 //! ## Quick start
 //!
@@ -16,8 +29,9 @@
 //!     .route("/me", get(handler))
 //!     .request_id(RequestIdLayer::default());
 //!
+//! // No `req_id = …`: the span already carries `request_id`.
 //! async fn handler(id: RequestId) -> String {
-//!     tracing::info!(req_id = %id.0, "handling /me");
+//!     tracing::info!("handling /me");
 //!     format!("request {}", id.0)
 //! }
 //! ```

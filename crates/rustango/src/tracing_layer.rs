@@ -5,17 +5,24 @@
 //!
 //! - `http.request.method`         — `GET` / `POST` / ...
 //! - `url.path`                    — request path (no query)
-//! - `url.query`                   — query string (omitted when empty)
+//! - `url.query`                   — **redacted** query string (omitted when empty)
 //! - `network.protocol.version`    — `HTTP/1.1`, `HTTP/2`, etc.
 //! - `user_agent.original`         — User-Agent header
 //! - `http.response.status_code`   — set after the handler returns
 //! - `http.response.body.size`     — Content-Length when emitted
 //! - `duration_ms`                 — full request lifetime
+//! - `request_id`                  — set by [`crate::request_id::record`]
 //! - `tenant` / `org_id`           — set when a tenant resolves
 //!
-//! `tenant` is recorded by [`crate::tenant_log::record`] partway through
-//! the request, so every event emitted after it — the ORM's included —
-//! carries the tenant in its span context. It is omitted entirely when
+//! `url.query` passes through the access log's **configured**
+//! `redact_query_params`, not just the defaults, so a key a project
+//! adds is redacted here too. It rendered raw until #1480, beside the
+//! redacted copy in the access-log event.
+//!
+//! `tenant` and `request_id` are recorded partway through the request
+//! — by [`crate::tenant_log::record`] and [`crate::request_id::record`]
+//! — so every event emitted after that point, the ORM's included,
+//! carries them in its span context. `tenant` is omitted entirely when
 //! no tenant resolves.
 //!
 //! Plus, when the incoming request carries a W3C `traceparent`
@@ -204,7 +211,7 @@ fn build_request_span(req: &Request<Body>, redact: &[String]) -> tracing::Span {
         "trace_flags" = field::Empty,
     );
     if !query.is_empty() {
-        // Redacted, with the same default key list the access log uses.
+        // Redacted, with the access log's *configured* key list.
         //
         // This recorded the raw string until the layer was first mounted
         // by default. The span's context renders on the same line as the
@@ -218,11 +225,14 @@ fn build_request_span(req: &Request<Body>, redact: &[String]) -> tracing::Span {
         // was supposed to remove it. Reproduced against a live instance,
         // not reasoned about.
         //
-        // The default list is used rather than `AccessLogLayer`'s
-        // configured one because the span layer holds no config; a
-        // project that adds its own key to `redact_query_params` still
-        // gets it redacted in the event, and the defaults already cover
-        // the credential-bearing names.
+        // `redact` is the caller's configured list, not the defaults —
+        // see the field doc at `redact_query_params`. This comment
+        // used to describe the opposite, because the first cut of the
+        // fix redacted with `default_redact_params()` and the second
+        // changed it; only the code was updated (#1504). Stating the
+        // rejected design here told an auditor their own configured
+        // key was rendered in cleartext on the span, which is exactly
+        // the bug the fix removed.
         let redacted = crate::access_log::redact_query(query, redact);
         span.record("url.query", redacted.as_str());
     }

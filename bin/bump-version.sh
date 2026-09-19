@@ -224,8 +224,13 @@ echo "verifying nothing still claims $OLD"
 # Prose naming an old release is supposed to keep its number; that is the
 # whole reason the rewrite is anchored. So the verification has to ask the
 # narrower question the rewrite asks: does any *claim about the current
-# version* still say OLD? The alternation below is the same six shapes the
-# perl pass rewrites, and nothing else.
+# version* still say OLD? The alternation below is the six FULL-version
+# shapes the perl pass rewrites, and nothing else.
+#
+# The perl pass also rewrites two SERIES-version shapes (`rustango = "0.57"`
+# bare and inside an inline table). Those are not checked here — this grep
+# looks for OLD, the full version, which a series claim never contains. So a
+# stale series claim is rewritten but never verified. See #1605.
 CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+|^(cargo-)?rustango[a-z-]*[[:space:]]*=[[:space:]]*")'
 stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \
   ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true)

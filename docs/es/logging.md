@@ -69,7 +69,7 @@ más no hace nada en lugar de provocar un panic:
 
 ```rust,ignore
 fn main() {
-    rustango::logging::setup();   // pretty, filtro de entorno, "info,sqlx=warn"
+    rustango::logging::setup();   // full, filtro de entorno, "info,sqlx=warn"
     // ...
 }
 ```
@@ -178,7 +178,7 @@ rustango::logging::Setup::new()
 ```
 
 O deja que decida el entorno. `setup_for_env()` lee `RUSTANGO_ENV` y elige JSON
-cuando vale `prod` o `production`, y pretty en el resto de casos:
+cuando vale `prod` o `production`, y `full` en el resto de casos:
 
 ```rust,ignore
 rustango::logging::setup_for_env();

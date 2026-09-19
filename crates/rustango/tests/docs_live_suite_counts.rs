@@ -294,4 +294,17 @@ fn the_matrix_header_counts_match_the_test_tree() {
         wrong.join(", "),
         stems.len(),
     );
+
+    // The same total is quoted in the neighbouring tri suite, which had
+    // no guard and had drifted to 192 — a number the tree has never
+    // held (#1507). Same recount, same failure mode, so same check.
+    let forms = std::fs::read_to_string(dir.join("testkit_matrix_forms_tri.rs"))
+        .expect("read testkit_matrix_forms_tri.rs");
+    let claim = format!("{} `*_sqlite_live.rs` suites", stems.len());
+    assert!(
+        forms.contains(&claim),
+        "testkit_matrix_forms_tri.rs's header count is stale: expected it to \
+         say `{claim}`. A count written once and never recomputed is the \
+         defect this file exists to catch.",
+    );
 }

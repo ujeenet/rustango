@@ -154,11 +154,15 @@ impl<DB: Database> Tenant<DB> {
     /// [`Tenant::conn`] is the shared-registry path; prefer it when you
     /// want the request's single pinned connection rather than a pool.
     ///
-    /// **Cost, schema-mode only:** that dedicated pool is built per
-    /// extraction and is not cached, and sqlx's `connect_with` opens a
-    /// connection eagerly — so a schema-mode request that touches this
-    /// pool pays a fresh PG connection. Database-mode reuses the
-    /// tenant's cached pool and pays nothing.
+    /// **Cost:** none worth avoiding. `scoped_pool` caches per tenant
+    /// slug and the extractor hands back the cached pool, so a
+    /// schema-mode request pays a build only on the first miss.
+    /// Database-mode reuses the tenant's dedicated pool.
+    ///
+    /// This used to say the pool was "built per extraction and is not
+    /// cached", which was true until #1235 added the cache. Left
+    /// standing, it steers integrators away from the one accessor that
+    /// is always tenant-scoped, toward reaching around it (#1543).
     #[must_use]
     pub fn pool(&self) -> &crate::sql::Pool {
         &self.pool

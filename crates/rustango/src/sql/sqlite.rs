@@ -90,9 +90,15 @@ impl Dialect for Sqlite {
         None
     }
 
-    /// Same as [`Sqlite::drop_check_constraint_sql`]; SQLite names no
-    /// foreign key it can later drop, because they are inlined into
-    /// `CREATE TABLE`.
+    /// Same as [`Sqlite::drop_check_constraint_sql`]: SQLite has no
+    /// `ALTER TABLE … DROP CONSTRAINT` in any form, so there is no
+    /// statement to return. A table rebuild is the only route.
+    ///
+    /// Not a naming problem — this said SQLite "names no foreign key",
+    /// and the framework names every one: `inline_fk_clauses` emits
+    /// `CONSTRAINT "{table}_{column}_fkey"` into the `CREATE TABLE`.
+    /// As written it invited someone to add naming and expect the drop
+    /// to start working (#1507).
     fn drop_foreign_key_sql(&self, _table: &str, _name: &str) -> Option<String> {
         None
     }

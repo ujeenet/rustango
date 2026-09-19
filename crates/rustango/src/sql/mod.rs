@@ -85,10 +85,14 @@ pub use executor::row_to_json;
 ///
 /// These lived in the `#[doc(hidden)]` `__macro_internals` module until
 /// #1431, under a "do not import" notice, with no supported alternative.
-/// Ten in-tree tests and the flagship example's own request handlers
+/// Nine in-tree tests, the `cookbook_blog` example — both its request
+/// handlers and its chapter-3 test — and **rustango's own library**
 /// imported them anyway, because there was no other way to run an
-/// aggregate or a prefetch against a specific connection. A prohibition
-/// the framework's own example violates is not a prohibition.
+/// aggregate or a prefetch against a specific connection. A
+/// prohibition the framework itself violates is not a prohibition:
+/// `tenancy::permissions` still calls `__macro_internals::delete_on`
+/// today, and the guard in `macro_internals_stays_internal` walks only
+/// `tests/` and `examples/`, so it cannot see it (#1519, #1516).
 ///
 /// The macro never emitted `fetch_aggregate_on`,
 /// `annotate_count_children{,_on}` or `select_rows_on` at all — they

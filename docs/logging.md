@@ -68,7 +68,7 @@ rather than a panic:
 
 ```rust,ignore
 fn main() {
-    rustango::logging::setup();   // pretty, env-filter, "info,sqlx=warn"
+    rustango::logging::setup();   // full, env-filter, "info,sqlx=warn"
     // ...
 }
 ```
@@ -193,7 +193,7 @@ rustango::logging::Setup::new()
 ```
 
 Or let the tier decide. `setup_for_env()` reads `RUSTANGO_ENV` and picks JSON
-when it is `prod` or `production`, pretty otherwise:
+when it is `prod` or `production`, `full` otherwise:
 
 ```rust,ignore
 rustango::logging::setup_for_env();

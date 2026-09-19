@@ -69,7 +69,7 @@ ist also ein No-op und kein Panic:
 
 ```rust,ignore
 fn main() {
-    rustango::logging::setup();   // pretty, Env-Filter, "info,sqlx=warn"
+    rustango::logging::setup();   // full, Env-Filter, "info,sqlx=warn"
     // ...
 }
 ```
@@ -178,7 +178,7 @@ rustango::logging::Setup::new()
 ```
 
 Oder überlassen Sie die Wahl der Stufe. `setup_for_env()` liest `RUSTANGO_ENV`
-und nimmt JSON, wenn der Wert `prod` oder `production` ist, sonst pretty:
+und nimmt JSON, wenn der Wert `prod` oder `production` ist, sonst `full`:
 
 ```rust,ignore
 rustango::logging::setup_for_env();

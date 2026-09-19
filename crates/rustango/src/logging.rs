@@ -5,7 +5,7 @@
 //!
 //! ```ignore
 //! fn main() {
-//!     rustango::logging::setup();        // env-filter, pretty, "info,sqlx=warn"
+//!     rustango::logging::setup();        // env-filter, full, "info,sqlx=warn"
 //!     // ... rest of your main
 //! }
 //! ```
@@ -33,7 +33,7 @@ use tracing_subscriber::EnvFilter;
 /// info for app code + warn for sqlx (sqlx is verbose at info).
 pub const DEFAULT_FILTER: &str = "info,sqlx=warn";
 
-/// Install the canonical dev logger: pretty format, env-filter from
+/// Install the canonical dev logger: `full` format, env-filter from
 /// `RUST_LOG` (falling back to `"info,sqlx=warn"`).
 ///
 /// Idempotent — safe to call from `main`, tests, anywhere. Stdout-only;
@@ -81,10 +81,6 @@ struct FileSink {
     rotation: Rotation,
 }
 
-/// Builder for the tracing-subscriber config.
-///
-/// All knobs are optional with sensible defaults. Build up the config and
-/// call [`install`](Self::install) when done.
 /// How the terminal output is shaped.
 ///
 /// Split out because `json` used to be a `bool` and `pretty`/`compact`
@@ -223,6 +219,15 @@ where
     }
 }
 
+/// Builder for the tracing-subscriber config.
+///
+/// All knobs are optional with sensible defaults. Build up the config
+/// and call [`install`](Self::install) when done.
+///
+/// These two paragraphs spent a release attached to [`Format`], which
+/// was inserted below them with no blank line — so `Format`'s page
+/// opened by describing a builder, and `Setup`, the public entry
+/// point, had no page at all (#1503).
 #[cfg(feature = "runtime")]
 pub struct Setup {
     format: Format,
@@ -243,8 +248,12 @@ pub struct Setup {
 
 #[cfg(feature = "runtime")]
 impl Setup {
-    /// New builder with defaults: pretty format, `"info,sqlx=warn"` filter,
-    /// no thread IDs, no line numbers, targets shown.
+    /// New builder with defaults: `full` format, `"info,sqlx=warn"`
+    /// filter, no thread IDs, no line numbers, targets shown.
+    ///
+    /// `full` since 0.57.6 made `Pretty` a genuinely distinct
+    /// multi-line formatter; before that `pretty` was a loose synonym
+    /// for ordinary terminal output and this line said so (#1502).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -289,7 +298,11 @@ impl Setup {
         self
     }
 
-    /// Hide event targets (the module path) in pretty output.
+    /// Hide event targets (the module path) from the output.
+    ///
+    /// Applies to every format: `fmt_layer` sets `.with_target` on the
+    /// base layer before the format match, and the no-file path does
+    /// the same. This used to say "in pretty output" (#1502).
     #[must_use]
     pub fn without_targets(mut self) -> Self {
         self.with_targets = false;
@@ -537,7 +550,7 @@ impl Setup {
 /// first subscriber. The overwhelmingly common cause is
 /// `#[rustango::main]`, which installs one before `main` runs, so the
 /// message names its opt-out (#1465). Swallowing this is how
-/// `format = "json"` stays pretty and `file_dir` writes nothing with
+/// `format = "json"` stays plain text and `file_dir` writes nothing with
 /// no indication why.
 #[cfg(feature = "runtime")]
 fn warn_if_already_installed<E: std::fmt::Display>(outcome: &Result<(), E>) -> bool {
@@ -574,7 +587,7 @@ pub fn should_use_json_for_env() -> bool {
 }
 
 /// One-call setup that picks the right format based on `RUSTANGO_ENV`:
-/// JSON in prod, pretty in dev. Stdout-only; for file output use
+/// JSON in prod, `full` in dev. Stdout-only; for file output use
 /// [`Setup::with_file`].
 #[cfg(feature = "runtime")]
 pub fn setup_for_env() {
@@ -605,8 +618,11 @@ mod tests {
         std::env::remove_var("RUSTANGO_ENV");
     }
 
+    // Named for what they assert — `should_use_json_for_env` is a
+    // claim about JSON, and the non-JSON format is `full`, not
+    // `pretty` (#1502).
     #[test]
-    fn should_use_pretty_for_other_envs() {
+    fn should_not_use_json_for_other_envs() {
         let _g = env_lock().lock().unwrap();
         std::env::set_var("RUSTANGO_ENV", "local");
         assert!(!should_use_json_for_env());
@@ -616,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn should_use_pretty_when_unset() {
+    fn should_not_use_json_when_unset() {
         let _g = env_lock().lock().unwrap();
         std::env::remove_var("RUSTANGO_ENV");
         assert!(!should_use_json_for_env());
