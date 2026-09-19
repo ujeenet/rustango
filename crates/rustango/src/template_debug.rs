@@ -1,11 +1,11 @@
 //! Django-shape DEBUG template-error overlay — issue #386.
 //!
 //! When Tera fails to render a template at request time, the default
-//! `template_views::render` fallback emits a 500 with a plain-text
-//! "template render error: {err}" body — fine for production where
-//! the operator pulls the full error from the tracing log, but
-//! hostile to local dev where the developer wants to *see* what
-//! broke without leaving the browser.
+//! `template_views::render` fallback emits a 500 whose body says only
+//! "template render error" — fine for production, where the operator
+//! pulls the full error from the tracing log, but hostile to local
+//! dev where the developer wants to *see* what broke without leaving
+//! the browser.
 //!
 //! This module provides the inverse path. [`enabled`] decides whether
 //! the current process should serve debug overlays based on the
@@ -63,25 +63,12 @@
 /// and avoids a startup-time vs. config-load-time ordering hazard.
 /// Callers that want compile-time control can wrap their call site
 /// in `#[cfg(debug_assertions)]`.
+///
+/// The resolution lives in `error.rs` — every 5xx path needs the same
+/// answer, and this module is gated on `_tera` (#1525).
 #[must_use]
 pub fn enabled() -> bool {
-    if let Ok(raw) = std::env::var("RUSTANGO_TEMPLATE_DEBUG") {
-        return match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            // Any other value — ignore and fall through to env-tier.
-            _ => env_tier_is_dev(),
-        };
-    }
-    env_tier_is_dev()
-}
-
-fn env_tier_is_dev() -> bool {
-    let env = std::env::var("RUSTANGO_ENV").unwrap_or_default();
-    !matches!(
-        env.trim().to_ascii_lowercase().as_str(),
-        "prod" | "production"
-    )
+    crate::error::debug_details_enabled()
 }
 
 /// Render a styled HTML page describing a template render failure.
@@ -199,33 +186,10 @@ fn escape_html(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Guard against parallel-test env mutation — env is process-global.
-    /// All `enabled()` tests acquire this mutex so they can mutate the
-    /// two env vars deterministically.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// Helper for env-mutating tests. Edition 2021 still permits
-    /// bare `set_var`/`remove_var`; the workspace `unsafe_code =
-    /// "forbid"` lint blocks the edition-2024 unsafe form, so this
-    /// keeps the calls bare.
-    fn with_env<F: FnOnce()>(key: &str, val: Option<&str>, f: F) {
-        let prev = std::env::var(key).ok();
-        match val {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-        f();
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-    }
+    // The tier env vars are also read by `error::server_error_body`,
+    // so the lock is shared with that module's tests rather than
+    // duplicated here (#1525).
+    use crate::error::test_env::{lock as env_lock, with as with_env};
 
     #[test]
     fn enabled_defaults_to_true_when_no_env_set() {

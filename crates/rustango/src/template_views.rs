@@ -967,8 +967,8 @@ impl DetailView {
     ///
     /// Field name must exist on the schema (Rust field name OR
     /// SQL column name); unknown names produce a 500 at request
-    /// time with a clear `template render error: unknown lookup
-    /// field …` message.
+    /// time. The `unknown lookup field …` detail is logged, and
+    /// reaches the response body only on the debug tier (#1525).
     ///
     /// ```ignore
     /// // /posts/{slug} → SELECT … WHERE slug = $1
@@ -3011,9 +3011,14 @@ fn render(tera: &Tera, name: &str, ctx: &Context) -> Response {
                 )
                     .into_response();
             }
+            // Not the debug tier: the full diagnostic went to the
+            // `warn!` above, and the body says only that it failed.
+            // It used to interpolate `{e}`, directly under a comment
+            // promising no leak — Tera errors quote template source
+            // and the context keys around the failure (#1525, #1543).
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("template render error: {e}"),
+                "template render error".to_owned(),
             )
                 .into_response()
         }

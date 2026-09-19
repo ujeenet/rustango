@@ -38,6 +38,83 @@
 
 use std::fmt;
 
+/// Fixed body text for a 5xx whose real cause must not be published.
+pub(crate) const OPAQUE_SERVER_ERROR: &str = "internal server error";
+
+/// `true` when a 5xx response body may carry the underlying error
+/// text: `RUSTANGO_TEMPLATE_DEBUG` if set, else `RUSTANGO_ENV` is
+/// not prod.
+///
+/// This is the tier [`crate::template_debug::enabled`] publishes,
+/// held here because that module is gated on `_tera` while the
+/// decision is about env vars alone and every 5xx path needs it.
+pub(crate) fn debug_details_enabled() -> bool {
+    if let Ok(raw) = std::env::var("RUSTANGO_TEMPLATE_DEBUG") {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            // Any other value — ignore and fall through to env-tier.
+            _ => {}
+        }
+    }
+    let env = std::env::var("RUSTANGO_ENV").unwrap_or_default();
+    !matches!(
+        env.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
+}
+
+/// Shared harness for tests that mutate the tier env vars. Lives
+/// here, ungated, because `error` and `template_debug` both read
+/// them and cargo builds the lib tests as one binary — a second
+/// lock in the other module would serialize nothing.
+#[cfg(test)]
+pub(crate) mod test_env {
+    /// Suite-wide lock. Env is process-global, so every test that
+    /// sets `RUSTANGO_ENV` / `RUSTANGO_TEMPLATE_DEBUG` takes it.
+    pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Set `key` for the duration of `f`, then restore it. Edition
+    /// 2021 still permits bare `set_var`/`remove_var`; the workspace
+    /// `unsafe_code = "forbid"` lint blocks the edition-2024 unsafe
+    /// form, so these stay bare.
+    pub(crate) fn with<F: FnOnce()>(key: &str, val: Option<&str>, f: F) {
+        let prev = std::env::var(key).ok();
+        match val {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
+/// Body text for a 5xx: always log `e`, publish it only on a debug
+/// tier.
+///
+/// Driver errors carry table names, constraint names, column lists
+/// and often the database host. Returning `e.to_string()` to an
+/// unauthenticated client hands all of that over on any 500 (#1525).
+/// The operator still gets the full text — from the log, which is
+/// where it was always meant to be read.
+pub(crate) fn server_error_body(context: &str, e: &dyn fmt::Display) -> String {
+    tracing::error!(target: "rustango::error", context, error = %e, "server error");
+    if debug_details_enabled() {
+        e.to_string()
+    } else {
+        OPAQUE_SERVER_ERROR.to_owned()
+    }
+}
+
 // ------------------------------------------------------------------ enum
 
 /// Unified error type for app-level code. `From` impls cover every module
@@ -423,7 +500,7 @@ mod into_response {
             other => ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                other.to_string(),
+                super::server_error_body("RustangoError", &other),
             ),
         }
     }
@@ -537,5 +614,52 @@ mod tests {
         let e: RustangoError = jwt_err.into();
         let r = e.into_response();
         assert_eq!(r.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    /// A driver error of the shape sqlx actually produces.
+    const DRIVER_ERROR: &str = "error returned from database: relation \
+         \"tenant_billing_accounts\" violates unique constraint \
+         \"uq_billing_stripe_customer\" (db=pg-prod-01.internal:5432)";
+
+    #[test]
+    fn server_error_body_withholds_driver_text_in_prod() {
+        let _g = test_env::lock();
+        test_env::with("RUSTANGO_TEMPLATE_DEBUG", None, || {
+            test_env::with("RUSTANGO_ENV", Some("prod"), || {
+                let body = server_error_body("test", &DRIVER_ERROR);
+                // Each of these is a separate disclosure, so each is
+                // asserted separately — a single `!= DRIVER_ERROR`
+                // would pass on a body that leaked only the host.
+                for secret in [
+                    "tenant_billing_accounts",
+                    "uq_billing_stripe_customer",
+                    "pg-prod-01.internal",
+                    "5432",
+                ] {
+                    assert!(
+                        !body.contains(secret),
+                        "prod 500 body leaked `{secret}`: {body}",
+                    );
+                }
+                assert_eq!(body, OPAQUE_SERVER_ERROR);
+            });
+        });
+    }
+
+    #[test]
+    fn server_error_body_keeps_driver_text_on_the_debug_tier() {
+        // The control. Without it, a `server_error_body` that always
+        // returned the fixed string would pass the test above while
+        // making every 500 undebuggable in dev.
+        let _g = test_env::lock();
+        test_env::with("RUSTANGO_TEMPLATE_DEBUG", Some("1"), || {
+            test_env::with("RUSTANGO_ENV", Some("prod"), || {
+                let body = server_error_body("test", &DRIVER_ERROR);
+                assert!(
+                    body.contains("uq_billing_stripe_customer"),
+                    "explicit debug override must still show the cause: {body}",
+                );
+            });
+        });
     }
 }
