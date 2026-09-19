@@ -174,7 +174,6 @@ pub async fn rotate_agent_secret_pool(pool: &Pool, name: &str) -> Result<AgentSe
     agent.secret_hash = hash;
     agent.secret_rotated_at = Some(chrono::Utc::now());
     agent.save_pool(pool).await?;
-    notify_credential_revoked(agent.id.get().copied().unwrap_or_default());
     Ok(AgentSecret { agent, token })
 }
 
@@ -488,18 +487,25 @@ fn notify_grants_changed(slug: &str, agent_id: i64) {
     }
 }
 
-/// Drop any cached raw-key verification for `agent_id`.
-///
-/// Call from every path that invalidates a credential — rotation and
-/// deletion. The MCP verifier caches a positive argon2 result for a
-/// minute, so without this a revoked key kept working for up to that
-/// long after the command returned success (#1539). No-op without
-/// the `mcp` feature.
-#[allow(unused_variables)]
-fn notify_credential_revoked(agent_id: i64) {
-    #[cfg(feature = "mcp")]
-    crate::mcp::invalidate_raw_key_cache(agent_id);
-}
+// A `notify_credential_revoked` hook used to live here, clearing the
+// MCP raw-key cache on rotation and deletion. It was removed in the
+// review of #1604: it did nothing useful and cost something real.
+//
+// Nothing, because the only production callers of the rotate/revoke
+// functions are `manage` subcommands — a separate, short-lived
+// process whose cache is empty. The serving replica that actually
+// holds the entry was never told, so the window stayed open exactly
+// where it mattered while the CLI reported success.
+//
+// Cost, because the cache key is `(tenant, token)` while the hook
+// matched on `agent_id` alone, and agent ids are per-tenant database
+// sequences — revoking one tenant's agent 7 evicted every tenant's
+// agent 7, each paying a fresh ~12 ms Argon2 verify.
+//
+// Deletion and deactivation never needed it: the per-request liveness
+// check runs on the cache-hit path too. Rotation did, and now goes
+// through `AgentAuthState::secret_rotated_at` instead, which works
+// across processes because it is read from the row.
 
 /// Resolve `(agent_id, skill_id)` from human identifiers, erroring if either
 /// is missing.
@@ -940,7 +946,6 @@ pub async fn revoke_user_key_pool(
         g.delete_pool(pool).await?;
     }
     agent.delete_pool(pool).await?;
-    notify_credential_revoked(agent_id);
     Ok(())
 }
 
@@ -971,7 +976,6 @@ pub async fn delete_user_keys_pool(pool: &Pool, user_id: i64) -> Result<(), Agen
             g.delete_pool(pool).await?;
         }
         agent.delete_pool(pool).await?;
-        notify_credential_revoked(agent_id);
     }
     Ok(())
 }
@@ -989,21 +993,80 @@ pub async fn delete_user_keys_pool(pool: &Pool, user_id: i64) -> Result<(), Agen
 ///
 /// # Errors
 /// Propagates DB errors.
-pub async fn agent_token_still_valid_pool(
+/// The authorization-relevant state of an agent, as the database has
+/// it right now.
+///
+/// Returned by [`agent_auth_state_pool`] so a caller holding a cached
+/// verification can check it against the live row instead of trusting
+/// what it cached. Nothing here may be cached across requests: the
+/// owner can change and the secret can rotate, and both decide what
+/// the request is allowed to do.
+#[derive(Debug, Clone, Copy)]
+pub struct AgentAuthState {
+    /// `false` once the key is deactivated — refuse.
+    pub active: bool,
+    /// Current owner. Selects the grant resolver, so a stale value
+    /// picks the wrong one.
+    pub user_id: Option<i64>,
+    /// When the secret was last rotated, if ever. A verification
+    /// performed before this is no longer valid.
+    pub secret_rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Read an agent's current authorization state.
+///
+/// One indexed lookup, the same one [`agent_token_still_valid_pool`]
+/// already performs on every request — so a caller that needs the
+/// owner or the rotation stamp pays nothing extra for them.
+///
+/// # Errors
+/// Propagates DB errors.
+pub async fn agent_auth_state_pool(
     pool: &Pool,
     agent_id: i64,
-    user_id: Option<i64>,
-) -> Result<bool, AgentError> {
+) -> Result<Option<AgentAuthState>, AgentError> {
     use crate::sql::FetcherPool as _;
 
-    let Some(agent) = Agent::objects()
+    Ok(Agent::objects()
         .filter("id", agent_id)
         .limit(1)
         .fetch(pool)
         .await?
         .into_iter()
         .next()
-    else {
+        .map(|a| AgentAuthState {
+            active: a.active,
+            user_id: a.user_id,
+            secret_rotated_at: a.secret_rotated_at,
+        }))
+}
+
+/// `true` when the tenant user owning a personal key is still active.
+///
+/// Split out so a caller that already read [`AgentAuthState`] can run
+/// the owner half without re-reading the agent row.
+///
+/// # Errors
+/// Propagates DB errors.
+pub async fn agent_owner_is_active_pool(pool: &Pool, user_id: i64) -> Result<bool, AgentError> {
+    use crate::sql::FetcherPool as _;
+
+    Ok(crate::tenancy::User::objects()
+        .filter("id", user_id)
+        .limit(1)
+        .fetch(pool)
+        .await?
+        .into_iter()
+        .next()
+        .is_some_and(|u| u.active))
+}
+
+pub async fn agent_token_still_valid_pool(
+    pool: &Pool,
+    agent_id: i64,
+    user_id: Option<i64>,
+) -> Result<bool, AgentError> {
+    let Some(agent) = agent_auth_state_pool(pool, agent_id).await? else {
         return Ok(false);
     };
     if !agent.active {
@@ -1011,15 +1074,7 @@ pub async fn agent_token_still_valid_pool(
     }
 
     if let Some(uid) = user_id {
-        let owner_active = crate::tenancy::User::objects()
-            .filter("id", uid)
-            .limit(1)
-            .fetch(pool)
-            .await?
-            .into_iter()
-            .next()
-            .is_some_and(|u| u.active);
-        if !owner_active {
+        if !agent_owner_is_active_pool(pool, uid).await? {
             return Ok(false);
         }
     }

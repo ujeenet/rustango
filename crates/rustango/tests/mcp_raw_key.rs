@@ -19,6 +19,7 @@ use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::permissions::set_user_perm_pool;
 use rustango::tenancy::{
     create_skill_pool, create_user_key_pool, map_skill_to_permission_pool, revoke_user_key_pool,
+    rotate_agent_secret_pool,
 };
 
 async fn world() -> Pool {
@@ -131,6 +132,59 @@ async fn revoked_key_is_refused_immediately() {
             .await
             .is_none(),
         "revoked key must be refused despite the warm cache"
+    );
+}
+
+/// Rotation, which nothing covered.
+///
+/// This is the case #1539 was filed for and the only one the
+/// verification cache could actually get wrong: deletion and
+/// deactivation are caught by the liveness check on every request, so
+/// `revoked_key_is_refused_immediately` above passes with or without
+/// any cache handling — it deletes the agent. Rotation leaves the row
+/// active with a new hash, so a warm entry is the only thing that can
+/// keep the *old* secret working.
+#[tokio::test]
+async fn a_rotated_secret_stops_working_even_with_a_warm_cache() {
+    let pool = world().await;
+    skill_world(&pool).await;
+    let uid = make_user(&pool, "carol").await;
+    set_user_perm_pool(uid, "thing.edit", true, &pool)
+        .await
+        .expect("grant");
+    let issued = create_user_key_pool(&pool, uid, "carol's key", &[])
+        .await
+        .expect("key");
+    let name = issued.agent.name.clone();
+
+    // Warm the cache, so a subsequent call would skip Argon2 and take
+    // whatever the entry says.
+    assert!(
+        verify_raw_agent_credential(&pool, "acme", &issued.token)
+            .await
+            .is_some(),
+        "precondition: the freshly issued token authenticates",
+    );
+
+    let rotated = rotate_agent_secret_pool(&pool, &name)
+        .await
+        .expect("rotate");
+
+    assert!(
+        verify_raw_agent_credential(&pool, "acme", &issued.token)
+            .await
+            .is_none(),
+        "the OLD secret must stop working the moment the row records a \
+         rotation — the first attempt at this cleared a process-local \
+         cache from the `manage` CLI, which never reaches the serving \
+         process, so the old secret kept working for the whole TTL",
+    );
+    assert!(
+        verify_raw_agent_credential(&pool, "acme", &rotated.token)
+            .await
+            .is_some(),
+        "control: the NEW secret must authenticate, or the assertion \
+         above would pass on a rotation that simply broke the key",
     );
 }
 
