@@ -293,6 +293,7 @@ jobs:
             --test live_suites_fail_loudly \
             --test macro_internals_stays_internal \
             --test pool_construction \
+            --test system_migration_scopes \
             --test tracing_targets \
             --test every_test_suite_compiles_in_ci \
             --test logging_fields_agree
