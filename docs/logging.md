@@ -121,6 +121,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::cors` | CORS policy decisions |
 | `rustango::email` | Mail dispatch |
 | `rustango::email::smtp` | SMTP transport |
+| `rustango::error` | The cause behind a 5xx, which the response body withholds |
 | `rustango::humanize` | Humanize filters |
 | `rustango::jobs` | Background job queues |
 | `rustango::logging` | This subsystem's own warnings |
@@ -258,14 +259,25 @@ rustango::manage::Cli::new()
 `logging::setup()` itself doesn't get a second installer. Order in the chain
 doesn't matter: the install happens at `run()`, against the final settings.
 
-> **`#[rustango::main]` will beat it.** The macro installs a subscriber before
-> the runtime is even built, and every installer uses `try_init`, so the first
-> one wins and later ones are discarded silently. A `main` that keeps the macro
-> *and* calls `with_logging()` therefore gets the macro's defaults — your
-> `[logging]` section is read and then has no effect, with nothing logged to
-> say so. For settings-driven logging, swap `#[rustango::main]` for
-> `#[tokio::main]`, which is the one thing a scaffolded project has to change.
-> Tracked in [#1465](https://github.com/ujeenet/rustango/issues/1465).
+> **Tell `#[rustango::main]` to step aside.** The macro installs a subscriber
+> before the runtime is even built, and every installer uses `try_init`, so the
+> first one wins. Pass `logging = false` and yours installs first:
+>
+> ```rust,ignore
+> #[rustango::main(logging = false)]
+> async fn main() -> Result<(), Box<dyn std::error::Error>> {
+>     rustango::manage::Cli::new()
+>         .with_settings_from_env()
+>         .with_logging()
+>         .run().await
+> }
+> ```
+>
+> Without it the `[logging]` section is read and discarded. That used to be
+> silent; `install()` now warns on stderr and through `tracing` when it finds a
+> subscriber already in place ([#1465]).
+
+[#1465]: https://github.com/ujeenet/rustango/issues/1465
 
 Any key can be overridden per-deployment with an environment variable, using
 the section and key as path segments:
@@ -454,6 +466,8 @@ covers.
 - **File is empty after a crash.** The guard from `install()` was dropped, or
   the process died before the appender flushed. See
   [Writing to a file](#writing-to-a-file).
-- **Two subscribers, second one ignored.** `try_init` means first install wins,
-  silently. If you call `logging::setup()` *and* `Cli::with_logging()`, the
-  settings-driven one loses.
+- **Two subscribers, second one ignored.** `try_init` means first install wins.
+  If you call `logging::setup()` *and* `Cli::with_logging()`, the
+  settings-driven one loses. `install()` warns when this happens — look for
+  `[logging] settings ignored` on stderr. Under `#[rustango::main]`, add
+  `logging = false`.

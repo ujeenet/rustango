@@ -15,7 +15,7 @@
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
-        {% if brand_logo_url %}<img class="brand-logo" src="{{ brand_logo_url | safe }}" alt="">{% endif %}
+        {% if brand_logo_url %}<img class="brand-logo" src="{{ brand_logo_url }}" alt="">{% endif %}
         <span>{{ brand_name | default(value='Rustango') }}</span>
         {% if brand_tagline %}<span class="brand-tagline">{{ brand_tagline }}</span>{% endif %}
       </div>

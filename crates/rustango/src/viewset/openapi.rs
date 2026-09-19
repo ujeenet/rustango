@@ -80,6 +80,60 @@ impl ViewSet {
             p = p.post(create_op);
         }
 
+        // -------- query (QUERY, RFC 10008)
+        //
+        // Gated exactly as the route is (`viewset/mod.rs` mounts
+        // `handle_query` under `admin`, because the routing shim
+        // lives in the admin-gated `http_query`). Emitting this
+        // unconditionally would advertise an operation a
+        // `tenancy`-only build does not serve — the inverse of the
+        // bug being fixed.
+        //
+        // The ViewSet has served QUERY since #1112 and the spec never
+        // mentioned it, so every generated SDK, gateway and contract
+        // test was blind to it (#1401).
+        #[cfg(feature = "admin")]
+        if self.openapi_query {
+            // `parse_query_body_params` collapses the body to
+            // `HashMap<String, String>` — scalars stringified, arrays
+            // comma-joined — so every criterion is a string whatever
+            // the GET parameter's type is.
+            let mut criteria = Schema::object();
+            for param in self.list_query_params() {
+                criteria = criteria.property(param.name.clone(), Schema::string());
+            }
+            let query_op = Operation::new()
+                .summary(format!("Query {tag}"))
+                .description(
+                    "Same filtered list as GET, with the criteria in the body instead \
+                     of the querystring — for filters too long or too structured for a \
+                     URL. Values are read as strings: a JSON array is comma-joined, so \
+                     `{\"status__in\": [\"a\", \"b\"]}` matches `?status__in=a,b`.",
+                )
+                .operation_id(format!("query_{}", snake(tag)))
+                .tag(tag)
+                .request_body(
+                    RequestBody::json(criteria.clone())
+                        .and_content("application/x-www-form-urlencoded", criteria)
+                        .description("Filter criteria. An empty body lists everything."),
+                )
+                .response(
+                    "200",
+                    Response::new("paginated list")
+                        .json_content(self.list_response_schema(item_ref)),
+                )
+                .response("413", Response::new("body larger than 1 MiB"))
+                .response(
+                    "415",
+                    Response::new("content type is neither JSON nor urlencoded"),
+                )
+                .response(
+                    "422",
+                    Response::new("body is not a JSON object of criteria"),
+                );
+            p = p.query(query_op);
+        }
+
         p
     }
 
@@ -669,5 +723,88 @@ mod tests {
         assert_eq!(snake("PostThing"), "post_thing");
         assert_eq!(snake("HTTPRequest"), "h_t_t_p_request");
         assert_eq!(snake("post"), "post");
+    }
+
+    /// #1401 — the ViewSet has mounted QUERY since #1112 and the spec
+    /// never said so, so no generated client could reach it.
+    /// The default must stay 3.1.0-compatible: the QUERY operation is
+    /// opt-in because emitting it forces the whole document to 3.2.0,
+    /// which a 3.1-pinned generator rejects outright.
+    #[cfg(feature = "admin")]
+    #[test]
+    fn the_query_operation_is_off_by_default() {
+        let paths = vs().openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+        assert!(
+            coll.query.is_none(),
+            "emitting this by default flips every ViewSet spec to 3.2.0 \
+             without the caller asking — `getting_started_blog`'s own \
+             openapi test caught exactly that",
+        );
+
+        let mut spec = crate::openapi::OpenApiSpec::new("t", "1");
+        for (path, item) in vs().openapi_paths("/api/posts", "Post") {
+            spec = spec.add_path(path, item);
+        }
+        assert_eq!(
+            spec.openapi, "3.1.0",
+            "the default document must stay 3.1.0"
+        );
+    }
+
+    #[cfg(feature = "admin")]
+    #[test]
+    fn the_collection_advertises_the_query_operation_it_serves() {
+        let paths = vs().openapi_query(true).openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+
+        let q = coll
+            .query
+            .as_ref()
+            .expect("the collection serves QUERY, so the spec must carry it");
+        assert_eq!(q.operation_id.as_deref(), Some("query_post"));
+
+        // Both content types the handler accepts, or a generated
+        // client picks one and the other 415s.
+        let body = q.request_body.as_ref().expect("QUERY takes a body");
+        assert!(
+            body.content.contains_key("application/json"),
+            "{:?}",
+            body.content.keys()
+        );
+        assert!(
+            body.content
+                .contains_key("application/x-www-form-urlencoded"),
+            "{:?}",
+            body.content.keys(),
+        );
+
+        // The criteria object must carry the same names as the GET
+        // querystring — that equivalence is the whole point of the
+        // operation, and it is what drifts if a filter is added to
+        // one path only.
+        let props = &body.content["application/json"].schema.properties;
+        for param in vs().list_query_params() {
+            assert!(
+                props.contains_key(&param.name),
+                "`{}` is a GET query param but not a QUERY body criterion: {:?}",
+                param.name,
+                props.keys().collect::<Vec<_>>(),
+            );
+        }
+        assert!(!props.is_empty(), "criteria schema must not be empty");
+    }
+
+    /// The spec version has to follow the operation, or tooling
+    /// rejects a 3.1.0 document containing a `query` field.
+    #[cfg(feature = "admin")]
+    #[test]
+    fn a_spec_carrying_the_query_operation_declares_3_2_0() {
+        let paths = vs().openapi_query(true).openapi_paths("/api/posts", "Post");
+        let mut spec = crate::openapi::OpenApiSpec::new("t", "1");
+        for (path, item) in paths {
+            spec = spec.add_path(path, item);
+        }
+        assert_eq!(spec.openapi, "3.2.0");
     }
 }

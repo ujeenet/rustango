@@ -87,8 +87,15 @@ async fn login_form_renders_default_brand_when_env_unset() {
         body.contains(r#"data-theme="auto""#),
         "default theme_mode is auto: {body}"
     );
+    // Matched on the filename rather than the full path: #1537 dropped
+    // the `| safe` that let an operator-supplied logo URL inject
+    // attributes, so Tera escapes the value and the slashes render as
+    // `&#x2F;`. That is correct — the HTML parser decodes character
+    // references in attribute values before resolving the URL — and
+    // asserting the raw path failed on a page that works. Same defect
+    // as `branding_live.rs`, one file over (#1606 review).
     assert!(
-        body.contains("/__static__/rustango.png"),
+        body.contains("rustango.png"),
         "default logo URL should be the bundled PNG: {body}"
     );
 }

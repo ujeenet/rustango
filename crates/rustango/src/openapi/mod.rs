@@ -537,6 +537,22 @@ impl RequestBody {
         }
     }
 
+    /// Add another accepted content type to an existing body.
+    ///
+    /// A handler that takes both JSON and urlencoded has to say so,
+    /// or a generated client picks one and the other 415s.
+    #[must_use]
+    pub fn and_content(mut self, content_type: impl Into<String>, schema: Schema) -> Self {
+        self.content.insert(
+            content_type.into(),
+            MediaType {
+                schema,
+                example: None,
+            },
+        );
+        self
+    }
+
     #[must_use]
     pub fn description(mut self, d: impl Into<String>) -> Self {
         self.description = Some(d.into());

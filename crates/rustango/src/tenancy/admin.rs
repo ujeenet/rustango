@@ -1458,18 +1458,26 @@ fn sanitize_next(next: Option<&str>) -> String {
 }
 
 fn sanitize_next_with_routes(next: Option<&str>, routes: &super::routes::RouteConfig) -> String {
-    match next {
-        Some(s)
-            if s.starts_with('/')
-                && !s.starts_with("//")
-                && !s.contains("://")
-                && !s.starts_with(&routes.login_url)
-                && !s.starts_with(&routes.logout_url) =>
-        {
-            s.to_owned()
-        }
-        _ => "/".to_owned(),
+    // Shape validation is `auth_decorators::safe_next`, the one copy of
+    // this rule that is actually hardened: it percent-decodes, requires
+    // BOTH the decoded and the raw form to be path-shaped, and rejects
+    // `/\` — the backslash a browser rewrites into a protocol-relative
+    // URL.
+    //
+    // This used to hand-roll `starts_with('/') && !starts_with("//") &&
+    // !contains("://")`, which accepts `/\evil.example/x` and put it
+    // straight into `Location` on a successful login. #1526 hardened a
+    // fourth copy of the rule that has no callers, so the live hole
+    // stayed open until the review of #1604 found it.
+    let Some(s) = next.and_then(crate::auth_decorators::safe_next) else {
+        return "/".to_owned();
+    };
+    // Bouncing back to login/logout would loop. Not a safety check —
+    // that is `safe_next`'s job — so it stays here.
+    if s.starts_with(&routes.login_url) || s.starts_with(&routes.logout_url) {
+        return "/".to_owned();
     }
+    s
 }
 
 fn build_inner_admin_router(
@@ -1592,5 +1600,80 @@ async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStor
             warn!(target: "rustango::tenancy::admin", error = %e, "brand asset");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
+    }
+}
+
+/// #1526. Exercises `sanitize_next_with_routes` — the function
+/// `login_submit` actually calls at `:974`, whose result reaches
+/// `Location` — rather than `urls::url_has_allowed_host_and_scheme`,
+/// which nothing in this codebase calls and which is where the
+/// original fix landed.
+#[cfg(test)]
+mod sanitize_next_tests {
+    use super::sanitize_next_with_routes;
+    use crate::tenancy::routes::RouteConfig;
+
+    fn nxt(s: Option<&str>) -> String {
+        sanitize_next_with_routes(s, &RouteConfig::default())
+    }
+
+    #[test]
+    fn a_backslash_the_browser_rewrites_is_refused() {
+        // Each leaves as protocol-relative `//evil…` once the browser
+        // applies its `\` → `/` rewrite, while starting with `/` in
+        // the source text — which is what the old hand-rolled check
+        // accepted.
+        for hostile in [
+            "/\\evil.example/x",
+            "/\\\\evil.example/x",
+            "\\/evil.example/x",
+            "/%5Cevil.example/x",
+        ] {
+            assert_eq!(
+                nxt(Some(hostile)),
+                "/",
+                "`{hostile}` must not reach Location"
+            );
+        }
+    }
+
+    #[test]
+    fn the_classic_shapes_are_still_refused() {
+        for hostile in [
+            "//evil.example/x",
+            "https://evil.example",
+            "javascript:1",
+            // The browser strips TAB, CR and LF while parsing a URL
+            // (WHATWG URL 4.1), so each of these leaves as the
+            // protocol-relative `//evil.example` (#1604 security-001).
+            "/\x09/evil.example/x",
+            "/\x0d/evil.example/x",
+            "/\x0a/evil.example/x",
+        ] {
+            assert_eq!(nxt(Some(hostile)), "/", "{hostile}");
+        }
+        assert_eq!(nxt(None), "/");
+    }
+
+    #[test]
+    fn an_ordinary_path_still_survives() {
+        // The control. Without it, a sanitizer that returned "/" for
+        // everything would satisfy both assertions above and quietly
+        // break every post-login redirect.
+        for ok in ["/admin/posts", "/admin/posts?page=2"] {
+            assert_eq!(nxt(Some(ok)), ok, "{ok} should survive");
+        }
+    }
+
+    #[test]
+    fn the_login_loop_guard_still_applies() {
+        // Not a safety check — it stops a redirect loop — but it is
+        // the behaviour the old hand-rolled version also provided, so
+        // delegating must not drop it.
+        let routes = RouteConfig::default();
+        assert_eq!(
+            sanitize_next_with_routes(Some(&routes.login_url), &routes),
+            "/",
+        );
     }
 }

@@ -1,12 +1,17 @@
 //! Backing test for `docs/logging.md` — "the first installer wins".
 //!
-//! Every installer uses `try_init`, so a second one is a silent no-op
-//! rather than a panic. That is what makes `#[rustango::main]` safe to
-//! pair with anything — and it is also why a *later*, more specific
-//! configuration is discarded without a word. The page tells readers
-//! that, and a scaffolded project runs straight into it: the macro
-//! installs before the runtime is built, so a `Cli::with_logging()`
-//! inside `main` is always second.
+//! Every installer uses `try_init`, so a second one is a no-op rather
+//! than a panic. That is what makes `#[rustango::main]` safe to pair
+//! with anything — and it is also why a *later*, more specific
+//! configuration is discarded. The page tells readers that, and a
+//! scaffolded project ran straight into it: the macro installs before
+//! the runtime is built, so a `Cli::with_logging()` inside `main` is
+//! always second.
+//!
+//! `tracing` discards it silently. `Setup::install` no longer does —
+//! it reports the discard and names `#[rustango::main(logging =
+//! false)]` (#1465). Both halves are asserted below: who wins, and
+//! that losing is now audible.
 //!
 //! Its own test binary with exactly **one** test, because the global
 //! subscriber installed here is process-wide and irreversible — the same
@@ -57,7 +62,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
 /// one event. It lands in exactly one of them, and which one is the
 /// whole claim.
 #[test]
-fn the_second_installer_is_discarded_without_a_word() {
+fn the_second_installer_is_discarded_and_setup_says_so() {
     // `RUST_LOG` beats the default filter and the harness inherits the
     // developer's environment. Clear it so this measures installer
     // precedence rather than whatever is exported in the shell.
@@ -103,5 +108,29 @@ fn the_second_installer_is_discarded_without_a_word() {
          `try_init` started replacing the global subscriber and the \
          page's advice about install order is now wrong. Got: {:?}",
         second.contents()
+    );
+
+    // #1465. The framework's own installer is the one a project
+    // actually reaches, via `Cli::with_logging()`. It loses the same
+    // way — and used to lose in silence, which is why `format =
+    // "json"` stayed pretty with nothing to explain it.
+    let before = first.contents().len();
+    let guard = rustango::logging::Setup::new()
+        .with_format(rustango::logging::Format::Json)
+        .install();
+    assert!(
+        guard.is_none(),
+        "no file sink was configured, so there is no guard to hand back",
+    );
+    let warning = &first.contents()[before..];
+    assert!(
+        warning.contains("[logging] settings ignored"),
+        "a discarded `Setup::install` must say so — that silence was the \
+         whole of #1465. Emitted since the last assert: {warning:?}",
+    );
+    assert!(
+        warning.contains("logging = false"),
+        "the warning has to name the fix, or it only tells the operator \
+         they have a problem. Got: {warning:?}",
     );
 }

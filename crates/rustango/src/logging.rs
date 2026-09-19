@@ -461,20 +461,13 @@ impl Setup {
             // `Pretty` and `Compact` previously fell through to `Full`,
             // so `format = "compact"` and `format = "pretty"` produced
             // byte-identical output (#1480).
-            match self.format {
-                Format::Json => {
-                    let _ = b.json().try_init();
-                }
-                Format::Pretty => {
-                    let _ = b.pretty().with_ansi(ansi).try_init();
-                }
-                Format::Compact => {
-                    let _ = b.compact().with_ansi(ansi).try_init();
-                }
-                Format::Full => {
-                    let _ = b.with_ansi(ansi).try_init();
-                }
-            }
+            let outcome = match self.format {
+                Format::Json => b.json().try_init(),
+                Format::Pretty => b.pretty().with_ansi(ansi).try_init(),
+                Format::Compact => b.compact().with_ansi(ansi).try_init(),
+                Format::Full => b.with_ansi(ansi).try_init(),
+            };
+            warn_if_already_installed(&outcome);
             return None;
         };
 
@@ -523,12 +516,44 @@ impl Setup {
         if self.keep_stdout {
             layers.push(build(None));
         }
-        let _ = tracing_subscriber::registry()
+        let outcome = tracing_subscriber::registry()
             .with(layers)
             .with(env_filter)
             .try_init();
+        if warn_if_already_installed(&outcome) {
+            // The guard would keep a writer alive for a file nothing
+            // is routed to, which reads like the sink is working.
+            return None;
+        }
         Some(guard)
     }
+}
+
+/// Say so when a subscriber was already installed, and return `true`
+/// in that case.
+///
+/// `try_init` returning `Err` means every setting just assembled —
+/// format, level, file sink — was discarded, and `tracing` keeps the
+/// first subscriber. The overwhelmingly common cause is
+/// `#[rustango::main]`, which installs one before `main` runs, so the
+/// message names its opt-out (#1465). Swallowing this is how
+/// `format = "json"` stays pretty and `file_dir` writes nothing with
+/// no indication why.
+#[cfg(feature = "runtime")]
+fn warn_if_already_installed<E: std::fmt::Display>(outcome: &Result<(), E>) -> bool {
+    let Err(e) = outcome else {
+        return false;
+    };
+    // The installed subscriber may filter this out, so it also goes
+    // to stderr — the point is that it is not silent.
+    let msg = format!(
+        "[logging] settings ignored: a tracing subscriber is already installed ({e}). \
+         If this is `#[rustango::main]`, use `#[rustango::main(logging = false)]` \
+         so your own setup installs first."
+    );
+    tracing::warn!(target: "rustango::logging", "{msg}");
+    eprintln!("warning: {msg}");
+    true
 }
 
 #[cfg(feature = "runtime")]
@@ -563,16 +588,24 @@ pub fn setup_for_env() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    fn env_lock() -> &'static Mutex<()> {
-        static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-        M.get_or_init(|| Mutex::new(()))
+    /// The suite-wide env lock, shared with `error` and
+    /// `template_debug`.
+    ///
+    /// This was a third private mutex over `RUSTANGO_ENV`. Cargo builds
+    /// the lib tests as one binary, so three separate mutexes over one
+    /// process-global variable serialize nothing against each other —
+    /// widening the window made `error`'s no-leak assertion fail with
+    /// the full driver string in the body. Found by mutation review of
+    /// #1604; the PR that introduced the shared lock removed one
+    /// duplicate and missed this one.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::error::test_env::lock()
     }
 
     #[test]
     fn should_use_json_for_prod_env() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         std::env::set_var("RUSTANGO_ENV", "prod");
         assert!(should_use_json_for_env());
         std::env::set_var("RUSTANGO_ENV", "production");
@@ -582,7 +615,7 @@ mod tests {
 
     #[test]
     fn should_use_pretty_for_other_envs() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         std::env::set_var("RUSTANGO_ENV", "local");
         assert!(!should_use_json_for_env());
         std::env::set_var("RUSTANGO_ENV", "staging");
@@ -592,7 +625,7 @@ mod tests {
 
     #[test]
     fn should_use_pretty_when_unset() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         std::env::remove_var("RUSTANGO_ENV");
         assert!(!should_use_json_for_env());
     }
@@ -678,7 +711,7 @@ mod tests {
         //
         // What *is* deterministic is the `NO_COLOR` contract, which is
         // the part with a specification behind it.
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = env_lock();
         let previous = std::env::var_os("NO_COLOR");
         std::env::set_var("NO_COLOR", "1");
         assert!(

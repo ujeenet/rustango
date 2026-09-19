@@ -934,6 +934,16 @@ fn render_changes_split_inner(
                 from: _,
                 to,
             } => {
+                // SQLite gives `VARCHAR(n)` and `TEXT` the same TEXT
+                // affinity and never enforces the length, so this
+                // change has no storage effect there. Emitting nothing
+                // is the honest rendering; the guard below used to
+                // reject it, failing a migration over DDL that would
+                // have been a no-op (#1220). MySQL *does* enforce the
+                // length and still needs `MODIFY COLUMN` (#559).
+                if dialect.name() == "sqlite" {
+                    continue;
+                }
                 guard_alter_column_dialect(dialect, "AlterColumnMaxLength", table, column)?;
                 let pg_to = match to {
                     Some(n) => format!("VARCHAR({n})"),
@@ -1784,7 +1794,12 @@ mod sql_type_tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
-    fn alter_column_max_length_errors_on_sqlite() {
+    fn alter_column_max_length_is_a_no_op_on_sqlite() {
+        // #1220. This used to be `..._errors_on_sqlite`, asserting a
+        // rejection. SQLite gives `VARCHAR(n)` and `TEXT` the same
+        // affinity and never enforces the length, so there is no DDL
+        // to emit and nothing to fail — refusing it failed a
+        // migration over a change that does nothing.
         let snap = empty_snap();
         let changes = vec![SchemaChange::AlterColumnMaxLength {
             table: "t".into(),
@@ -1792,9 +1807,32 @@ mod sql_type_tests {
             from: Some(50),
             to: Some(100),
         }];
-        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
-            .expect_err("AlterColumnMaxLength must reject SQLite");
-        assert!(err.contains("AlterColumnMaxLength"));
+        let batch = render_changes_split_with_dialect(&changes, &snap, &crate::sql::Sqlite)
+            .expect("AlterColumnMaxLength must be accepted on SQLite");
+        assert!(
+            batch.immediate.is_empty() && batch.deferred_fks.is_empty(),
+            "no statement should be emitted, got {:?} / {:?}",
+            batch.immediate,
+            batch.deferred_fks,
+        );
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn alter_column_max_length_still_errors_on_mysql() {
+        // The control for the SQLite no-op: MySQL *does* enforce
+        // VARCHAR length, so silently emitting nothing there would
+        // leave the column wrong. It must keep pointing at #559.
+        let snap = empty_snap();
+        let changes = vec![SchemaChange::AlterColumnMaxLength {
+            table: "t".into(),
+            column: "c".into(),
+            from: Some(50),
+            to: Some(100),
+        }];
+        let err = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql)
+            .expect_err("MySQL enforces VARCHAR length and cannot no-op");
+        assert!(err.contains("AlterColumnMaxLength"), "{err}");
     }
 
     #[cfg(feature = "mysql")]

@@ -717,13 +717,19 @@ fn random_unusable_secret() -> String {
     base64::engine::general_purpose::STANDARD.encode(buf)
 }
 
-/// Sanitize a `?next` redirect target: only a same-origin absolute path
-/// (`/...`, not `//host`) is honored, else fall back to `landing`.
+/// Sanitize a `?next` redirect target: only a same-origin absolute
+/// path is honored, else fall back to `landing`.
+///
+/// Delegates to `auth_decorators::safe_next`, the one hardened copy of
+/// this rule. The hand-rolled version here checked `starts_with('/')`
+/// and `!starts_with("//")` and accepted `/\evil.example/x`, which a
+/// browser rewrites to `//evil.example/x` — and the result goes
+/// straight into `LOCATION` via `redirect_with_cookie`. Found by the
+/// ratchet added with the #1526 re-fix; the review of PR #1604 caught
+/// the two sibling copies and missed this one.
 fn safe_landing(next: Option<&str>, landing: &str) -> String {
-    match next {
-        Some(n) if n.starts_with('/') && !n.starts_with("//") => n.to_owned(),
-        _ => landing.to_owned(),
-    }
+    next.and_then(crate::auth_decorators::safe_next)
+        .unwrap_or_else(|| landing.to_owned())
 }
 
 /// A `303 See Other` redirect carrying a single `Set-Cookie`.
@@ -920,5 +926,10 @@ mod tests {
         assert_eq!(safe_landing(Some("//evil.com"), "/"), "/");
         assert_eq!(safe_landing(Some("https://evil.com"), "/"), "/");
         assert_eq!(safe_landing(None, "/home"), "/home");
+        // The case the hand-rolled version accepted: starts with `/`,
+        // is not `//`, and the browser rewrites `\` to `/` so it
+        // leaves as protocol-relative `//evil.com/x` (#1526).
+        assert_eq!(safe_landing(Some("/\\evil.com/x"), "/"), "/");
+        assert_eq!(safe_landing(Some("/%5Cevil.com/x"), "/"), "/");
     }
 }

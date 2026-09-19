@@ -19,6 +19,7 @@ use rustango::sql::{sqlx, Pool};
 use rustango::tenancy::permissions::set_user_perm_pool;
 use rustango::tenancy::{
     create_skill_pool, create_user_key_pool, map_skill_to_permission_pool, revoke_user_key_pool,
+    rotate_agent_secret_pool,
 };
 
 async fn world() -> Pool {
@@ -134,6 +135,59 @@ async fn revoked_key_is_refused_immediately() {
     );
 }
 
+/// Rotation, which nothing covered.
+///
+/// This is the case #1539 was filed for and the only one the
+/// verification cache could actually get wrong: deletion and
+/// deactivation are caught by the liveness check on every request, so
+/// `revoked_key_is_refused_immediately` above passes with or without
+/// any cache handling — it deletes the agent. Rotation leaves the row
+/// active with a new hash, so a warm entry is the only thing that can
+/// keep the *old* secret working.
+#[tokio::test]
+async fn a_rotated_secret_stops_working_even_with_a_warm_cache() {
+    let pool = world().await;
+    skill_world(&pool).await;
+    let uid = make_user(&pool, "carol").await;
+    set_user_perm_pool(uid, "thing.edit", true, &pool)
+        .await
+        .expect("grant");
+    let issued = create_user_key_pool(&pool, uid, "carol's key", &[])
+        .await
+        .expect("key");
+    let name = issued.agent.name.clone();
+
+    // Warm the cache, so a subsequent call would skip Argon2 and take
+    // whatever the entry says.
+    assert!(
+        verify_raw_agent_credential(&pool, "acme", &issued.token)
+            .await
+            .is_some(),
+        "precondition: the freshly issued token authenticates",
+    );
+
+    let rotated = rotate_agent_secret_pool(&pool, &name)
+        .await
+        .expect("rotate");
+
+    assert!(
+        verify_raw_agent_credential(&pool, "acme", &issued.token)
+            .await
+            .is_none(),
+        "the OLD secret must stop working the moment the row records a \
+         rotation — the first attempt at this cleared a process-local \
+         cache from the `manage` CLI, which never reaches the serving \
+         process, so the old secret kept working for the whole TTL",
+    );
+    assert!(
+        verify_raw_agent_credential(&pool, "acme", &rotated.token)
+            .await
+            .is_some(),
+        "control: the NEW secret must authenticate, or the assertion \
+         above would pass on a rotation that simply broke the key",
+    );
+}
+
 #[tokio::test]
 async fn deactivated_owner_is_refused() {
     let pool = world().await;
@@ -231,14 +285,34 @@ async fn credential_does_not_cross_tenants() {
         "credential must not authenticate against another tenant"
     );
 
-    // Cross-tenant is refused even when the foreign slug is presented
-    // against the owning pool's token first — i.e. the cache key, not just
-    // the pool, carries the tenant.
+    // The dangerous shape: the OWNING slug (so the warm cache entry is
+    // found) against a FOREIGN pool. On a hit the agent id comes from
+    // the entry, and everything else is then read by that id from
+    // whichever pool was passed — so the foreign tenant must have a
+    // row at the same id for this to test anything. Ids are per-tenant
+    // sequences, so giving globex one key makes them collide at 1.
+    //
+    // Without that row this assertion passed for the wrong reason:
+    // `agent_auth_state_pool` returned `None` and the refusal proved
+    // nothing about re-binding (#1604 review, tenancy-001).
+    let g_uid = make_user(&globex, "mallory").await;
+    let g_issued = create_user_key_pool(&globex, g_uid, "mallory's key", &[])
+        .await
+        .expect("globex key");
+    assert_eq!(
+        issued.agent.id.get().copied(),
+        g_issued.agent.id.get().copied(),
+        "precondition: both tenants' first agent must share an id, or \
+         the redemption below is not being exercised",
+    );
+
     assert!(
         verify_raw_agent_credential(&globex, "acme", &issued.token)
             .await
             .is_none(),
-        "foreign pool must refuse even with the owning slug"
+        "a warm entry must not be redeemable against another tenant's \
+         storage: the cached id resolves to a different agent there, \
+         whose owner and grants would otherwise be handed to the caller"
     );
 
     // The owning tenant still works afterwards — isolation must not have

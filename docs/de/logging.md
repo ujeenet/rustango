@@ -124,6 +124,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::cors` | CORS-Entscheidungen |
 | `rustango::email` | Mail-Versand |
 | `rustango::email::smtp` | SMTP-Transport |
+| `rustango::error` | Die Ursache eines 5xx, die der Response-Body zurückhält |
 | `rustango::humanize` | Humanize-Filter |
 | `rustango::jobs` | Hintergrund-Job-Queues |
 | `rustango::logging` | Warnungen dieses Subsystems selbst |
