@@ -39,15 +39,58 @@
 use std::fmt;
 
 /// Fixed body text for a 5xx whose real cause must not be published.
+///
+/// The 5xx family's only callers are the ViewSet (`admin` /
+/// `tenancy`) and `into_response` (`admin`), so a build without
+/// either has none. Compiled anyway — rather than `#[cfg]`-ed away —
+/// so widening a caller's gate cannot turn this into a missing-item
+/// error; same shape as `extractors::tenant::TenantConnCell::Deferred`.
+/// Ungated, these tripped `-D warnings` on the bare `sqlite`,
+/// `postgres` and `mysql` rows of `feature_combos`, a gated job that
+/// does not run on an unlabelled PR (#1604 review, dialects-004).
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) const OPAQUE_SERVER_ERROR: &str = "internal server error";
 
-/// `true` when a 5xx response body may carry the underlying error
-/// text: `RUSTANGO_TEMPLATE_DEBUG` if set, else `RUSTANGO_ENV` is
+/// Env var that opts a deployment **in** to publishing error detail.
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+pub(crate) const DISCLOSE_ENV: &str = "RUSTANGO_DISCLOSE_ERRORS";
+
+/// `true` when a 5xx response body may carry the underlying error text.
+///
+/// **Defaults to `false`.** Only an explicit truthy
+/// `RUSTANGO_DISCLOSE_ERRORS` turns disclosure on.
+///
+/// This deliberately does *not* reuse
+/// [`crate::template_debug::enabled`], which answers a different
+/// question — "should I render the dev error overlay" — and defaults
+/// to *on* outside prod, which is right for a local overlay and wrong
+/// for what an unauthenticated client is handed. Routing the 5xx body
+/// through that tier made the sanitiser inert on every deployment that
+/// had not set `RUSTANGO_ENV=prod`, which is the default, and the
+/// original tests hid it by pinning the variable (#1525).
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+pub(crate) fn disclose_server_errors() -> bool {
+    matches!(
+        std::env::var(DISCLOSE_ENV)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// `true` when the current process should serve the dev template-error
+/// overlay: `RUSTANGO_TEMPLATE_DEBUG` if set, else `RUSTANGO_ENV` is
 /// not prod.
 ///
-/// This is the tier [`crate::template_debug::enabled`] publishes,
-/// held here because that module is gated on `_tera` while the
-/// decision is about env vars alone and every 5xx path needs it.
+/// Held here rather than in `template_debug` because that module is
+/// gated on `_tera` while the decision is about env vars alone.
+/// **Not** the 5xx-body decision — see [`disclose_server_errors`].
+#[cfg_attr(
+    not(any(feature = "admin", feature = "tenancy", feature = "_tera")),
+    allow(dead_code)
+)]
 pub(crate) fn debug_details_enabled() -> bool {
     if let Ok(raw) = std::env::var("RUSTANGO_TEMPLATE_DEBUG") {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -106,14 +149,50 @@ pub(crate) mod test_env {
 /// unauthenticated client hands all of that over on any 500 (#1525).
 /// The operator still gets the full text — from the log, which is
 /// where it was always meant to be read.
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) fn server_error_body(context: &str, e: &dyn fmt::Display) -> String {
     tracing::error!(target: "rustango::error", context, error = %e, "server error");
-    if debug_details_enabled() {
+    if disclose_server_errors() {
         e.to_string()
     } else {
         OPAQUE_SERVER_ERROR.to_owned()
     }
 }
+
+/// Body text for a rejection the **client** caused.
+///
+/// Same withholding rule as [`server_error_body`], but logged at
+/// `warn` and attributed to the caller: a client can drive these at
+/// will, and an `ERROR` line per bad request is a log-volume lever
+/// pointed at the operator (#1604 review, performance-003).
+///
+/// `client_caused` decides the level, and the caller must decide it
+/// honestly. A constraint violation is the client's doing; a pool
+/// timeout on the same code path is not, and silently logging that at
+/// `warn` loses the only record an operator has of an outage (#1604
+/// review, correctness-003). When in doubt, pass `false`.
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+pub(crate) fn client_error_body(
+    context: &str,
+    e: &dyn fmt::Display,
+    client_caused: bool,
+) -> String {
+    if client_caused {
+        tracing::warn!(target: "rustango::error", context, error = %e, "rejected request");
+    } else {
+        tracing::error!(target: "rustango::error", context, error = %e, "server error");
+    }
+    if disclose_server_errors() {
+        e.to_string()
+    } else {
+        OPAQUE_CLIENT_ERROR.to_owned()
+    }
+}
+
+/// Fixed body text for a 4xx. Distinct from [`OPAQUE_SERVER_ERROR`]
+/// because "internal server error" on a 400 is simply false.
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+pub(crate) const OPAQUE_CLIENT_ERROR: &str = "request rejected";
 
 // ------------------------------------------------------------------ enum
 
@@ -621,44 +700,104 @@ mod tests {
          \"tenant_billing_accounts\" violates unique constraint \
          \"uq_billing_stripe_customer\" (db=pg-prod-01.internal:5432)";
 
+    /// Assert `body` carries none of the four separate disclosures in
+    /// `DRIVER_ERROR`. Each is checked on its own: a single
+    /// `!= DRIVER_ERROR` passes on a body that leaked only the host.
+    fn assert_withholds(body: &str, what: &str) {
+        for secret in [
+            "tenant_billing_accounts",
+            "uq_billing_stripe_customer",
+            "pg-prod-01.internal",
+            "5432",
+        ] {
+            assert!(!body.contains(secret), "{what} leaked `{secret}`: {body}");
+        }
+    }
+
+    /// The test that matters: **nothing set**. The first version of
+    /// this pinned `RUSTANGO_ENV=prod`, so it asserted the one
+    /// configuration in which the fix was active and never exercised
+    /// the default every deployment actually runs in — where the old
+    /// tier answered "disclose" (#1525, found in review of #1604).
     #[test]
-    fn server_error_body_withholds_driver_text_in_prod() {
+    fn server_error_body_withholds_by_default_with_no_env_set() {
         let _g = test_env::lock();
-        test_env::with("RUSTANGO_TEMPLATE_DEBUG", None, || {
-            test_env::with("RUSTANGO_ENV", Some("prod"), || {
-                let body = server_error_body("test", &DRIVER_ERROR);
-                // Each of these is a separate disclosure, so each is
-                // asserted separately — a single `!= DRIVER_ERROR`
-                // would pass on a body that leaked only the host.
-                for secret in [
-                    "tenant_billing_accounts",
-                    "uq_billing_stripe_customer",
-                    "pg-prod-01.internal",
-                    "5432",
-                ] {
+        test_env::with(DISCLOSE_ENV, None, || {
+            test_env::with("RUSTANGO_TEMPLATE_DEBUG", None, || {
+                test_env::with("RUSTANGO_ENV", None, || {
+                    let body = server_error_body("test", &DRIVER_ERROR);
+                    assert_withholds(&body, "default 500 body");
+                    assert_eq!(body, OPAQUE_SERVER_ERROR);
+                });
+            });
+        });
+    }
+
+    /// The dev-overlay tier must not decide this one. `RUSTANGO_ENV`
+    /// unset *and* `RUSTANGO_TEMPLATE_DEBUG=1` is exactly the state
+    /// that used to disclose.
+    #[test]
+    fn the_template_debug_tier_does_not_open_the_5xx_body() {
+        let _g = test_env::lock();
+        test_env::with(DISCLOSE_ENV, None, || {
+            test_env::with("RUSTANGO_TEMPLATE_DEBUG", Some("1"), || {
+                test_env::with("RUSTANGO_ENV", None, || {
                     assert!(
-                        !body.contains(secret),
-                        "prod 500 body leaked `{secret}`: {body}",
+                        debug_details_enabled(),
+                        "precondition: the overlay tier is on in this state",
                     );
-                }
-                assert_eq!(body, OPAQUE_SERVER_ERROR);
+                    let body = server_error_body("test", &DRIVER_ERROR);
+                    assert_withholds(&body, "body with the overlay tier on");
+                });
             });
         });
     }
 
     #[test]
-    fn server_error_body_keeps_driver_text_on_the_debug_tier() {
-        // The control. Without it, a `server_error_body` that always
-        // returned the fixed string would pass the test above while
-        // making every 500 undebuggable in dev.
+    fn server_error_body_withholds_driver_text_in_prod() {
         let _g = test_env::lock();
-        test_env::with("RUSTANGO_TEMPLATE_DEBUG", Some("1"), || {
-            test_env::with("RUSTANGO_ENV", Some("prod"), || {
-                let body = server_error_body("test", &DRIVER_ERROR);
-                assert!(
-                    body.contains("uq_billing_stripe_customer"),
-                    "explicit debug override must still show the cause: {body}",
-                );
+        test_env::with(DISCLOSE_ENV, None, || {
+            test_env::with("RUSTANGO_TEMPLATE_DEBUG", None, || {
+                test_env::with("RUSTANGO_ENV", Some("prod"), || {
+                    let body = server_error_body("test", &DRIVER_ERROR);
+                    assert_withholds(&body, "prod 500 body");
+                    assert_eq!(body, OPAQUE_SERVER_ERROR);
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn a_client_caused_4xx_does_not_claim_a_server_fault() {
+        let _g = test_env::lock();
+        test_env::with(DISCLOSE_ENV, None, || {
+            let body = client_error_body("test", &DRIVER_ERROR, true);
+            assert_withholds(&body, "default 400 body");
+            assert_eq!(body, OPAQUE_CLIENT_ERROR);
+            assert!(
+                !body.contains("internal server error"),
+                "a 400 must not report a server fault: {body}",
+            );
+        });
+    }
+
+    #[test]
+    fn an_explicit_opt_in_still_shows_the_cause() {
+        // The control. Without it, a `server_error_body` that always
+        // returned the fixed string would pass every test above while
+        // making a 500 undebuggable for an operator who asked to see
+        // it. Opting in is now its own variable, not a side effect of
+        // the dev-overlay tier.
+        let _g = test_env::lock();
+        test_env::with(DISCLOSE_ENV, Some("1"), || {
+            test_env::with("RUSTANGO_TEMPLATE_DEBUG", None, || {
+                test_env::with("RUSTANGO_ENV", Some("prod"), || {
+                    let body = server_error_body("test", &DRIVER_ERROR);
+                    assert!(
+                        body.contains("uq_billing_stripe_customer"),
+                        "an explicit opt-in must still show the cause: {body}",
+                    );
+                });
             });
         });
     }

@@ -355,8 +355,8 @@ pub async fn verify_raw_agent_credential(
     }
 
     let cache_key = raw_key_cache_key(slug, token);
-    let (agent_id, user_id) = match raw_key_cache_get(&cache_key) {
-        Some(hit) => hit,
+    let agent_id = match raw_key_cache_get(&cache_key) {
+        Some(id) => id,
         None => {
             let agent =
                 match crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret).await
@@ -369,18 +369,70 @@ pub async fn verify_raw_agent_credential(
                     }
                 };
             let agent_id = agent.id.get().copied().unwrap_or_default();
-            raw_key_cache_put(cache_key, (agent_id, agent.user_id));
-            (agent_id, agent.user_id)
+            raw_key_cache_put(cache_key, agent_id);
+            agent_id
         }
     };
 
-    // Liveness on every request (covers the cache-hit path too): a revoked
-    // key or a deactivated owner is refused immediately.
-    match crate::tenancy::agent_token_still_valid_pool(pool, agent_id, user_id).await {
-        Ok(true) => {}
-        Ok(false) => return None,
+    // The live row decides, on every request, cache hit included.
+    //
+    // The cache holds one fact — "this token hashed to this agent at
+    // time T" — and nothing that authorization depends on. `user_id`
+    // selects the grant resolver and is read here rather than cached,
+    // because an owner change would otherwise keep routing through the
+    // wrong one for the rest of the TTL.
+    let state = match crate::tenancy::agent_auth_state_pool(pool, agent_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return None,
         Err(e) => {
             tracing::warn!(error = %e, "mcp raw-key liveness check failed");
+            return None;
+        }
+    };
+    if !state.active {
+        raw_key_cache_forget(&cache_key);
+        return None;
+    }
+    // Re-bind the cached id to the credential actually presented.
+    //
+    // This is what closes #1539, and it took three attempts. The
+    // cache holds "token T hashed to agent N" — a fact about the
+    // past. `secret_prefix` is regenerated on every rotation and is
+    // random per credential, so comparing it against the prefix in
+    // hand asks the two questions the entry cannot answer itself:
+    // has this been rotated since, and does this row even belong to
+    // the credential presented.
+    //
+    // What it replaced, and why each failed:
+    //
+    // * Clearing the cache on rotation — the only callers are
+    //   `manage` subcommands, a different process from the server,
+    //   so the serving replica was never told.
+    // * Comparing `secret_rotated_at` against a timestamp the server
+    //   took — wrong even with synchronised clocks, because the
+    //   rotation stamps before its own commit while the verifier
+    //   stamps after an ~11.5 ms Argon2, so both biases make a
+    //   rotation inside that window look older than the verify.
+    //
+    // A string comparison has neither problem, and needs no clock,
+    // no ordering and no timestamp precision — which also means
+    // #1464's proposed second-resolution datetime encoding cannot
+    // reopen this (#1604 review: correctness-001, security-003/004,
+    // tenancy-001, dialects-002).
+    if state.secret_prefix != prefix {
+        raw_key_cache_forget(&cache_key);
+        return None;
+    }
+    let user_id = state.user_id;
+    if let Some(uid) = user_id {
+        let owner_active = match crate::tenancy::agent_owner_is_active_pool(pool, uid).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "mcp raw-key owner check failed");
+                return None;
+            }
+        };
+        if !owner_active {
             return None;
         }
     }
@@ -412,7 +464,19 @@ const RAW_KEY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60
 /// Bound on cached verifications; oldest entries are evicted past this.
 const RAW_KEY_CACHE_CAP: usize = 256;
 
-type RawKeyCache = std::collections::HashMap<[u8; 32], ((i64, Option<i64>), std::time::Instant)>;
+/// `token hash → (agent id, monotonic TTL clock)`.
+///
+/// Holds the agent id and nothing else. Every fact authorization
+/// depends on — the owner, the grants, whether the row still accepts
+/// this credential — is read from the row on each request, so a hit
+/// can carry neither a stale owner nor a stale permission set, and
+/// the id it does carry is re-bound to the presented credential
+/// before use.
+///
+/// `Instant`, not a wall clock: the TTL must not move when the system
+/// clock does, and nothing here is compared against a timestamp from
+/// another machine any more.
+type RawKeyCache = std::collections::HashMap<[u8; 32], (i64, std::time::Instant)>;
 
 fn raw_key_cache() -> &'static std::sync::Mutex<RawKeyCache> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<RawKeyCache>> = std::sync::OnceLock::new();
@@ -430,13 +494,22 @@ fn raw_key_cache_key(slug: &str, token: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn raw_key_cache_get(key: &[u8; 32]) -> Option<(i64, Option<i64>)> {
+fn raw_key_cache_get(key: &[u8; 32]) -> Option<i64> {
     let cache = raw_key_cache().lock().ok()?;
-    let (identity, verified_at) = cache.get(key)?;
-    (verified_at.elapsed() < RAW_KEY_CACHE_TTL).then_some(*identity)
+    let (agent_id, cached_at) = cache.get(key)?;
+    (cached_at.elapsed() < RAW_KEY_CACHE_TTL).then_some(*agent_id)
 }
 
-fn raw_key_cache_put(key: [u8; 32], identity: (i64, Option<i64>)) {
+/// Drop one entry. Used when the row says the verification it records
+/// is stale, so the next request re-runs Argon2 rather than repeating
+/// the same rejected lookup for the rest of the TTL.
+fn raw_key_cache_forget(key: &[u8; 32]) {
+    if let Ok(mut cache) = raw_key_cache().lock() {
+        cache.remove(key);
+    }
+}
+
+fn raw_key_cache_put(key: [u8; 32], agent_id: i64) {
     let Ok(mut cache) = raw_key_cache().lock() else {
         return;
     };
@@ -448,26 +521,15 @@ fn raw_key_cache_put(key: [u8; 32], identity: (i64, Option<i64>)) {
             cache.clear();
         }
     }
-    cache.insert(key, (identity, std::time::Instant::now()));
+    cache.insert(key, (agent_id, std::time::Instant::now()));
 }
 
-/// Drop every cached verification for `agent_id`.
-///
-/// The cache skips argon2 for `RAW_KEY_CACHE_TTL`, so without this a
-/// rotated or deleted credential kept authenticating for up to a
-/// minute after the command reported success — the window in which
-/// an operator revoking a leaked key most needs the revocation to be
-/// true (#1539).
-///
-/// Keyed by token hash, so entries cannot be found by agent id
-/// directly; the identity is the value, and the cache is capped at
-/// `RAW_KEY_CACHE_CAP`, so the scan is bounded and off the hot path.
-pub fn invalidate_raw_key_cache(agent_id: i64) {
-    let Ok(mut cache) = raw_key_cache().lock() else {
-        return;
-    };
-    cache.retain(|_, ((cached_agent, _), _)| *cached_agent != agent_id);
-}
+// `invalidate_raw_key_cache(agent_id)` stood here. It was removed in
+// the review of #1604 rather than fixed: this cache is process-local
+// and the callers that would have invoked it run in the `manage` CLI,
+// so it could never reach the serving replica's cache. Rotation is
+// detected from `AgentAuthState::secret_rotated_at` instead, which is
+// read from the row and therefore works across processes.
 
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -666,52 +728,47 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
     }
 
+    // The behavioural rules — rotation and cross-tenant redemption —
+    // are asserted in `tests/mcp_raw_key.rs`, which has a `Pool` and
+    // can call `verify_raw_agent_credential`. Two tests lived here
+    // that could not: one compared two locally-built timestamps and
+    // so asserted `chrono`'s `>` operator, the other destructured the
+    // cache tuple. Deleting the entire rotation check left both green
+    // (#1604 review, tests-001 and tests-005). What is left here is
+    // what this module can actually decide on its own.
+
     #[test]
-    fn revoking_an_agent_drops_its_cached_verification() {
+    fn a_cached_entry_round_trips_and_can_be_forgotten() {
         let _g = cache_lock();
         raw_key_cache().lock().unwrap().clear();
 
-        let revoked = raw_key_cache_key("acme", "tok-revoked");
-        let other = raw_key_cache_key("acme", "tok-other");
-        raw_key_cache_put(revoked, (7, None));
-        raw_key_cache_put(other, (8, None));
+        let key = raw_key_cache_key("acme", "pfx.secret");
+        assert_eq!(raw_key_cache_get(&key), None, "cold cache");
 
-        // Precondition: the cache is what makes the key keep working.
-        assert_eq!(raw_key_cache_get(&revoked), Some((7, None)));
+        raw_key_cache_put(key, 7);
+        assert_eq!(raw_key_cache_get(&key), Some(7));
 
-        invalidate_raw_key_cache(7);
-
+        raw_key_cache_forget(&key);
         assert_eq!(
-            raw_key_cache_get(&revoked),
+            raw_key_cache_get(&key),
             None,
-            "a revoked agent's cached verification must be gone at once, \
-             not after the 60s TTL — that window is exactly when an \
-             operator revoking a leaked key needs it to be true (#1539)",
-        );
-        assert_eq!(
-            raw_key_cache_get(&other),
-            Some((8, None)),
-            "revoking agent 7 must not evict agent 8 — an over-broad \
-             clear would pass the assertion above for the wrong reason",
+            "a forgotten entry must not be served again — the reject \
+             paths call this so the next request re-runs Argon2 rather \
+             than repeating the same refusal for the rest of the TTL",
         );
     }
 
     #[test]
-    fn invalidating_drops_every_token_for_one_agent() {
-        // An agent can have more than one live cache entry: the key is
-        // the token hash, and `verify_raw_agent_credential` accepts
-        // both the full `prefix.secret` and the bare secret.
+    fn the_cache_key_is_tenant_scoped() {
+        // Two tenants routinely have an agent 7, because ids are
+        // per-tenant database sequences. The key must separate them —
+        // the removed invalidation hook matched on the id alone and
+        // evicted every tenant's agent 7 at once.
         let _g = cache_lock();
-        raw_key_cache().lock().unwrap().clear();
-
-        let full = raw_key_cache_key("acme", "pfx.secret");
-        let bare = raw_key_cache_key("acme", "secret");
-        raw_key_cache_put(full, (9, Some(42)));
-        raw_key_cache_put(bare, (9, Some(42)));
-
-        invalidate_raw_key_cache(9);
-
-        assert_eq!(raw_key_cache_get(&full), None);
-        assert_eq!(raw_key_cache_get(&bare), None, "both spellings must go");
+        assert_ne!(
+            raw_key_cache_key("acme", "pfx.secret"),
+            raw_key_cache_key("globex", "pfx.secret"),
+            "the same token under two tenants must not share a slot",
+        );
     }
 }

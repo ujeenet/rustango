@@ -609,6 +609,9 @@ pub struct ViewSet {
     default_ordering: Vec<(String, bool)>,
     perms: ViewSetPerms,
     read_only: bool,
+    /// Describe the mounted `QUERY` route in the generated OpenAPI
+    /// document. Off by default — see [`ViewSet::openapi_query`].
+    openapi_query: bool,
     pagination: PaginationStyle,
     /// Pluggable filter backends (#1010) — each contributes extra `WHERE`
     /// predicates on the list action, ANDed with the built-in filters.
@@ -641,6 +644,7 @@ impl ViewSet {
             default_ordering: Vec::new(),
             perms: ViewSetPerms::default(),
             read_only: false,
+            openapi_query: false,
             pagination: PaginationStyle::PageNumber,
             filter_backends: Vec::new(),
             throttle: ViewSetThrottle::default(),
@@ -977,6 +981,33 @@ impl ViewSet {
     /// Allow GET only — wires list + retrieve, skips create/update/destroy.
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
+        self
+    }
+
+    /// Describe the mounted RFC 10008 `QUERY` route in the generated
+    /// OpenAPI document.
+    ///
+    /// **Off by default, and the default is about tooling, not about
+    /// the route.** The route is mounted either way. `query` is a
+    /// Path Item field OpenAPI added in **3.2.0**, so a document
+    /// containing one must declare 3.2.0 — and a client pinned to
+    /// 3.1.0 rejects the whole document, including the operations it
+    /// does understand. Most generators are still 3.1.
+    ///
+    /// Turn it on once your toolchain reads 3.2:
+    ///
+    /// ```ignore
+    /// ViewSet::for_model(Post::SCHEMA).openapi_query(true)
+    /// ```
+    ///
+    /// #1401 emitted this unconditionally, which flipped every
+    /// ViewSet spec to 3.2.0 without asking — `getting_started_blog`'s
+    /// own test caught it. The operation being absent was the
+    /// complaint; making it describable is the fix, and choosing the
+    /// document version is the caller's.
+    #[must_use]
+    pub fn openapi_query(mut self, on: bool) -> Self {
+        self.openapi_query = on;
         self
     }
 
@@ -2736,8 +2767,21 @@ async fn create_many(
                 let _ = tx.rollback().await;
                 // The entry index is what the caller can act on; the
                 // driver text behind it names tables and constraints,
-                // so it goes to the log only (#1525).
-                let detail = crate::error::server_error_body("viewset::bulk_create::entry", &e);
+                // so it goes to the log only (#1525). The body must
+                // not claim a server fault on a 400.
+                //
+                // Only a *database rejection* is the client's doing.
+                // This arm also catches pool timeouts and dropped
+                // connections, and logging those at `warn` left an
+                // outage with no ERROR record anywhere (#1604 review,
+                // correctness-003).
+                let client_caused =
+                    matches!(&e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
+                let detail = crate::error::client_error_body(
+                    "viewset::bulk_create::entry",
+                    &e,
+                    client_caused,
+                );
                 return json_error(
                     StatusCode::BAD_REQUEST,
                     &format!("bulk entry {i}: {detail}"),

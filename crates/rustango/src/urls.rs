@@ -352,7 +352,15 @@ fn check_host_and_scheme(trimmed: &str, allowed_hosts: &[&str], require_https: b
 /// [`url_has_allowed_host_and_scheme`] for the policy check.
 #[must_use]
 pub fn is_absolute_url(url: &str) -> bool {
-    if url.starts_with("//") {
+    // `//`, and the backslash spellings a browser rewrites into it
+    // (`/\`, `\/`, `\\`). All four are network-path references that
+    // leave for another origin, which is the question this predicate
+    // is asked. `is_relative_url` is its inverse and its rustdoc
+    // offers it as a same-site check, so answering "relative" for
+    // `/\evil.example/x` handed the caller an open redirect — the same
+    // shape as #1526, in the same file (#1604 review, security-008).
+    let b = url.as_bytes();
+    if matches!(b.first(), Some(b'/' | b'\\')) && matches!(b.get(1), Some(b'/' | b'\\')) {
         return true;
     }
     let mut chars = url.chars();
@@ -382,7 +390,15 @@ pub fn is_absolute_url(url: &str) -> bool {
 /// assert!(is_relative_url("page?x=1"));
 /// assert!(!is_relative_url("https://example.com"));
 /// assert!(!is_relative_url("//evil.com"));
+/// assert!(!is_relative_url("/\\evil.com"));   // browser reads as //
 /// ```
+///
+/// **Not a redirect-safety check on its own.** It answers "is this
+/// path-shaped", and says nothing about control characters, which a
+/// browser strips while parsing — `/<TAB>/evil.example` is relative by
+/// this predicate and protocol-relative by the time it is fetched. For
+/// a `?next=` target use [`crate::auth_decorators::safe_next`], which
+/// screens those and is what the framework's own login handlers call.
 #[must_use]
 pub fn is_relative_url(url: &str) -> bool {
     !is_absolute_url(url)

@@ -93,7 +93,7 @@ impl ViewSet {
         // mentioned it, so every generated SDK, gateway and contract
         // test was blind to it (#1401).
         #[cfg(feature = "admin")]
-        {
+        if self.openapi_query {
             // `parse_query_body_params` collapses the body to
             // `HashMap<String, String>` — scalars stringified, arrays
             // comma-joined — so every criterion is a string whatever
@@ -727,10 +727,35 @@ mod tests {
 
     /// #1401 — the ViewSet has mounted QUERY since #1112 and the spec
     /// never said so, so no generated client could reach it.
+    /// The default must stay 3.1.0-compatible: the QUERY operation is
+    /// opt-in because emitting it forces the whole document to 3.2.0,
+    /// which a 3.1-pinned generator rejects outright.
+    #[cfg(feature = "admin")]
+    #[test]
+    fn the_query_operation_is_off_by_default() {
+        let paths = vs().openapi_paths("/api/posts", "Post");
+        let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
+        assert!(
+            coll.query.is_none(),
+            "emitting this by default flips every ViewSet spec to 3.2.0 \
+             without the caller asking — `getting_started_blog`'s own \
+             openapi test caught exactly that",
+        );
+
+        let mut spec = crate::openapi::OpenApiSpec::new("t", "1");
+        for (path, item) in vs().openapi_paths("/api/posts", "Post") {
+            spec = spec.add_path(path, item);
+        }
+        assert_eq!(
+            spec.openapi, "3.1.0",
+            "the default document must stay 3.1.0"
+        );
+    }
+
     #[cfg(feature = "admin")]
     #[test]
     fn the_collection_advertises_the_query_operation_it_serves() {
-        let paths = vs().openapi_paths("/api/posts", "Post");
+        let paths = vs().openapi_query(true).openapi_paths("/api/posts", "Post");
         let coll = &paths.iter().find(|(p, _)| p == "/api/posts").unwrap().1;
 
         let q = coll
@@ -775,7 +800,7 @@ mod tests {
     #[cfg(feature = "admin")]
     #[test]
     fn a_spec_carrying_the_query_operation_declares_3_2_0() {
-        let paths = vs().openapi_paths("/api/posts", "Post");
+        let paths = vs().openapi_query(true).openapi_paths("/api/posts", "Post");
         let mut spec = crate::openapi::OpenApiSpec::new("t", "1");
         for (path, item) in paths {
             spec = spec.add_path(path, item);

@@ -719,18 +719,30 @@ pub fn safe_next(next: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    // Percent-decode first so encoded bypass attempts
-    // (`%2F%2Fevil.example/x` → `//evil.example/x`) are caught by the
-    // string-shape checks below. We discard the decoded form after
-    // validation and return the original trimmed input — that way
-    // double-encoded sequences in legitimate paths survive the
-    // redirect intact.
-    let decoded = crate::url_codec::url_decode(trimmed);
-    if !is_safe_path(&decoded) {
+    // Raw control characters are the dangerous form, and they are
+    // screened over the whole value without allocating. A *raw* TAB
+    // makes `/<TAB>/evil` leave as protocol-relative once the browser
+    // strips it (WHATWG URL §4.1), and a raw CR/LF makes
+    // `HeaderValue` construction fail. A percent-encoded one is
+    // inert, because this returns `trimmed` — still encoded — so it
+    // reaches the header as literal `%09` and the browser reads it as
+    // path content. Form decoding upstream is what turns `%09` into a
+    // raw tab, and by then it is raw here too.
+    if trimmed.chars().any(char::is_control) {
         return None;
     }
-    // Original may differ from decoded if it contained percent-escapes;
-    // both forms must be path-shaped.
+    // Only the first two bytes decide the shape, so decode a bounded
+    // prefix rather than the whole caller-supplied value. Decoding all
+    // of it to read two bytes cost 36x on a pre-auth path whose body
+    // limit is 2 MiB, or unbounded on the admin login which takes a
+    // raw `Body` (#1604 review, performance-001).
+    const SHAPE_PREFIX: usize = 24;
+    let head: String = trimmed.chars().take(SHAPE_PREFIX).collect();
+    if !is_safe_path(&crate::url_codec::url_decode(&head)) {
+        return None;
+    }
+    // The raw form must be path-shaped too: decoding can only reveal
+    // a `//`, never hide one.
     if !is_safe_path(trimmed) {
         return None;
     }
@@ -741,16 +753,31 @@ pub fn safe_next(next: &str) -> Option<String> {
 /// the `next` value. Path must start with `/` and must NOT start
 /// with `//` (scheme-relative) or `/\` (backslash-host).
 fn is_safe_path(s: &str) -> bool {
-    if !s.starts_with('/') {
+    // Control characters first. A browser strips TAB, CR and LF while
+    // parsing a URL (WHATWG URL §4.1), so `/<TAB>/evil.example/x`
+    // arrives here looking path-shaped and leaves as the
+    // protocol-relative `//evil.example/x`. `HeaderValue` accepts
+    // 0x09, so nothing downstream catches it either.
+    //
+    // This is the check that made `urls::url_has_allowed_host_and_scheme`
+    // the stronger of the two copies. Three live sanitizers were
+    // pointed at *this* function without it (#1604 review,
+    // security-001); CR and LF additionally make
+    // `member_auth::redirect_with_cookie`'s builder return `Err`,
+    // which it `.expect()`s (security-002).
+    if s.chars().any(char::is_control) {
         return false;
     }
-    if s.starts_with("//") {
+    // Byte comparison rather than `replace('\\', "/")`: the decision
+    // reads two bytes, and allocating a normalised copy of a
+    // caller-sized value to read them is what made this expensive.
+    // `\` is rewritten to `/` by the browser, so `//` and `/\` are
+    // both protocol-relative once the request leaves.
+    let b = s.as_bytes();
+    if b.first() != Some(&b'/') {
         return false;
     }
-    if s.starts_with("/\\") {
-        return false;
-    }
-    true
+    !matches!(b.get(1), Some(b'/' | b'\\'))
 }
 
 #[cfg(test)]
