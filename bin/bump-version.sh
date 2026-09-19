@@ -159,9 +159,11 @@ done
 # here, so they are printed rather than assumed correct.
 #
 # This list is the ONLY thing standing between an unrecognised claim shape and
-# a silently stale version. The verification below deliberately checks the same
-# shapes the rewriter handles, so by construction it cannot catch a sixth. That
-# is why this is a stop-and-read rather than a log line: the earlier version
+# a silently stale version. The verification below checks a SUBSET of what the
+# rewriter handles — six full-version shapes against the pass's eight — so it
+# cannot catch an unrecognised shape, and does not even cover the two
+# series-version substitutions (see the note above CLAIM, and #1605). That is
+# why this is a stop-and-read rather than a log line: the earlier version
 # printed the list and then exited 1 on it, which was wrong but at least loud.
 # Dropping straight through to "clean" would have been the worse failure.
 LEFT=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|$)" -- . \

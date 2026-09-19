@@ -167,7 +167,9 @@ die Zeilen oben.
 
 | Format | Wofür | Wie |
 |---|---|---|
-| `pretty` | Entwicklung — farbig, mehrzeilig, lesbar | Default |
+| `full` | Der Default — eine Zeile pro Event, mit Span-Kontext | Default |
+| `pretty` | Entwicklung — mehrzeilig, ein Feld pro Zeile, Quellposition | `.with_format(Format::Pretty)` |
+| `compact` | Entwicklung — knappere Einzelzeile, Span-Felder am Ende | `.with_format(Format::Compact)` |
 | `json` | Produktion — ein Objekt pro Event, für Loki / CloudWatch / Datadog | `.json()` |
 
 ```rust,ignore

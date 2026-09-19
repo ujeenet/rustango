@@ -8,8 +8,12 @@
 
 // `sqlite` alone. The `postgres` conjunct meant the only end-to-end
 // proof the transaction path works without Postgres never ran in a
-// sqlite-only or mysql-only build — the exact configuration it exists
-// to cover (#1460 gap 4). Nothing in this file touches Postgres.
+// sqlite-only build — the exact configuration it exists to cover
+// (#1460 gap 4). Nothing in this file touches Postgres.
+//
+// Not mysql-only: this gate still excludes that build, and always
+// will, because the file hardcodes `SqlitePool`. The first version
+// of this comment claimed both (#1606 review).
 #![cfg(feature = "sqlite")]
 
 use rustango::core::Column as _;

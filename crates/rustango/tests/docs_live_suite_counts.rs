@@ -298,11 +298,21 @@ fn the_matrix_header_counts_match_the_test_tree() {
     // The same total is quoted in the neighbouring tri suite, which had
     // no guard and had drifted to 192 — a number the tree has never
     // held (#1507). Same recount, same failure mode, so same check.
+    // Whitespace-squashed so a `//!` rewrap of a *correct* count does
+    // not report it stale, and anchored on the preceding word so a
+    // gained leading digit cannot satisfy it — `contains("188 …")` is
+    // true of a header saying 1188, which is the exact shape the
+    // `claims` array above anchors against (#1606 review, tests).
     let forms = std::fs::read_to_string(dir.join("testkit_matrix_forms_tri.rs"))
         .expect("read testkit_matrix_forms_tri.rs");
-    let claim = format!("{} `*_sqlite_live.rs` suites", stems.len());
+    let squashed: String = forms
+        .replace("//!", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let claim = format!("the {} `*_sqlite_live.rs` suites", stems.len());
     assert!(
-        forms.contains(&claim),
+        squashed.contains(&claim),
         "testkit_matrix_forms_tri.rs's header count is stale: expected it to \
          say `{claim}`. A count written once and never recomputed is the \
          defect this file exists to catch.",

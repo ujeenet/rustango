@@ -976,9 +976,13 @@ fn render_changes_split_inner(
             // `"` here is a string delimiter on MySQL, so
             // `ALTER TABLE "post" RENAME TO "article"` is `ERROR 1064`,
             // the same failure as #1461 in the `DropCheckConstraint`
-            // arm of this same match (#559). Named rather than counted:
-            // this said "two arms further down" and three arms sit
-            // between them (#1507).
+            // arm of this same match (#559).
+            //
+            // Named rather than counted, because the count has now been
+            // wrong twice: it said "two arms further down" (#1507), and
+            // the correction said "three arms sit between them" when it
+            // is four (#1606 review). A position that moves whenever an
+            // arm is added does not belong in a comment.
             SchemaChange::RenameTable { old_name, new_name } => {
                 out.immediate.push(format!(
                     "ALTER TABLE {} RENAME TO {}",

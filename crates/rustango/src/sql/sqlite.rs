@@ -94,11 +94,19 @@ impl Dialect for Sqlite {
     /// `ALTER TABLE … DROP CONSTRAINT` in any form, so there is no
     /// statement to return. A table rebuild is the only route.
     ///
-    /// Not a naming problem — this said SQLite "names no foreign key",
-    /// and the framework names every one: `inline_fk_clauses` emits
-    /// `CONSTRAINT "{table}_{column}_fkey"` into the `CREATE TABLE`.
-    /// As written it invited someone to add naming and expect the drop
-    /// to start working (#1507).
+    /// Not a naming problem. This said SQLite "names no foreign key",
+    /// which invited someone to add naming and expect the drop to
+    /// start working (#1507) — it would not, because there is no
+    /// statement to name.
+    ///
+    /// The framework's two emitters differ, and neither changes that:
+    /// `ddl::inline_fk_clauses` writes
+    /// `CONSTRAINT "{table}_{column}_fkey"`, while the `SchemaSnapshot`
+    /// emitter in `migrate::diff` writes a bare `REFERENCES …` with no
+    /// name — and that second one is the path `manage migrate` takes.
+    /// The first correction claimed the framework "names every one",
+    /// which is backwards for the dominant path (#1606 review,
+    /// dialects).
     fn drop_foreign_key_sql(&self, _table: &str, _name: &str) -> Option<String> {
         None
     }

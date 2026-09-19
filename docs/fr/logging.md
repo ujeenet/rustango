@@ -169,7 +169,9 @@ comme les lignes ci-dessus.
 
 | Format | Pour quoi | Comment |
 |---|---|---|
-| `pretty` | Développement — couleur, multiligne, lisible | par défaut |
+| `full` | Le défaut — une ligne par événement, avec le contexte de span | par défaut |
+| `pretty` | Développement — multiligne, un champ par ligne, position source | `.with_format(Format::Pretty)` |
+| `compact` | Développement — ligne unique plus concise, champs de span à la fin | `.with_format(Format::Compact)` |
 | `json` | Production — un objet par événement, pour Loki / CloudWatch / Datadog | `.json()` |
 
 ```rust,ignore

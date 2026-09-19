@@ -167,7 +167,9 @@ filas de arriba.
 
 | Formato | Para qué | Cómo |
 |---|---|---|
-| `pretty` | Desarrollo — color, multilínea, legible | por defecto |
+| `full` | El valor por defecto — una línea por evento, con contexto de span | por defecto |
+| `pretty` | Desarrollo — multilínea, un campo por línea, ubicación en el código | `.with_format(Format::Pretty)` |
+| `compact` | Desarrollo — línea única más concisa, campos de span al final | `.with_format(Format::Compact)` |
 | `json` | Producción — un objeto por evento, para Loki / CloudWatch / Datadog | `.json()` |
 
 ```rust,ignore

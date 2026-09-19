@@ -14,10 +14,24 @@
 //! - `request_id`                  — set by [`crate::request_id::record`]
 //! - `tenant` / `org_id`           — set when a tenant resolves
 //!
-//! `url.query` passes through the access log's **configured**
-//! `redact_query_params`, not just the defaults, so a key a project
-//! adds is redacted here too. It rendered raw until #1480, beside the
-//! redacted copy in the access-log event.
+//! `url.query` is redacted. **Which list is used depends on how the
+//! span was mounted**, and the difference matters:
+//!
+//! * Mounted alongside the access log — the normal path — it uses the
+//!   access log's **configured** `redact_query_params`, so a key a
+//!   project adds is redacted on the span too. It rendered raw until
+//!   #1480, beside the redacted copy in the access-log event.
+//! * Mounted with `[logging] access_log = false` — the span is still
+//!   mounted, but `mount_observability` has no layer to take the list
+//!   from and falls back to `default_redact_params()`. A key added
+//!   under `[audit] redact_query_params` is then rendered in
+//!   cleartext on the span. The two settings live in different config
+//!   sections, so turning the access log off silently narrows an
+//!   audit setting — see #1610.
+//!
+//! An earlier version of this paragraph stated the configured list
+//! unconditionally. That was the same overclaim in the opposite
+//! direction from the comment it replaced (#1606 review, security).
 //!
 //! `tenant` and `request_id` are recorded partway through the request
 //! — by [`crate::tenant_log::record`] and [`crate::request_id::record`]

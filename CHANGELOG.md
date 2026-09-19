@@ -1017,8 +1017,15 @@ sets no CORS — so the notes below are for hand-written apps.
     token in yourself:
 
     ```rust,ignore
-    let token = rustango::admin::session::current_csrf_token().unwrap_or_default();
-    ctx.insert("csrf_input", &rustango::forms::csrf::csrf_input_html(&token));
+    // Outside a request there is no token. Render nothing rather than
+    // an empty `value=""`, which is what the framework's own injector
+    // does — an empty hidden field submits and then 403s, which is the
+    // failure this note exists to prevent.
+    let csrf_input = match rustango::admin::session::current_csrf_token() {
+        Some(t) if !t.is_empty() => rustango::forms::csrf::csrf_input_html(&t),
+        _ => String::new(),
+    };
+    ctx.insert("csrf_input", &csrf_input);
     ```
 
   Or send `X-CSRF-Token`. The bundled templates are already done.
