@@ -185,15 +185,20 @@ jobs:
   # Copies of the same `if:` would drift, which is the failure this repo
   # keeps paying for elsewhere.
   #
-  # What is NOT gated: `fmt`, `clippy`, `doc`, `deny`, `deny-examples`,
-  # `lockfiles`, `trivy`. Those run on every pull request, always. Gating
-  # them was a mistake — it meant a feature PR into `develop` merged with
-  # no signal whatsoever, including no dependency-advisory or container
-  # scan, when the intent was only to defer the live matrix.
+  # What is NOT gated: `fmt`, `clippy`, `guards`, `doc`, `deny`,
+  # `deny-examples`, `lockfiles`, `trivy` and `tests_compile`. Those run on
+  # every pull request, always. Gating them was a mistake — it meant a
+  # feature PR into `develop` merged with no signal whatsoever, including
+  # no dependency-advisory or container scan, when the intent was only to
+  # defer the live matrix.
   #
   # The test for whether a job belongs here is not "is it fast" but "does
-  # its absence let a defect reach `develop` unseen". All seven are
-  # minutes; together they are a fraction of one live job.
+  # its absence let a defect reach `develop` unseen". Eight of the nine are
+  # minutes, and together a fraction of one live job. `tests_compile` is
+  # the exception and is deliberately ungated anyway: it costs a cold
+  # `--all-features` build, and gating it would restore exactly the hole it
+  # exists to close (#1572). `every_test_suite_compiles_in_ci` fails if
+  # anyone adds `needs:`, `if:` or `continue-on-error:` to it.
   #
   # It runs when:
   #   * the event is not a pull request — a push to `main`, `develop` or
@@ -263,7 +268,7 @@ jobs:
   # to catch exactly that first fired post-merge, on develop's push run.
   # That is #1437's failure mode relocated from the suite to the guard.
   #
-  # These eight need no database and no service container — they read the
+  # These fifteen need no database and no service container — they read the
   # source tree and the workflow file — so they cost seconds and can run
   # on every PR. `--features tenancy` matches `clippy` above so the two
   # jobs share a build.
@@ -287,9 +292,96 @@ jobs:
             --test docs_versions \
             --test docs_inventories \
             --test docs_live_suite_counts \
-            --test every_mysql_arm_runs_in_ci \
+            --test every_example_crate_is_built \
+            --test every_live_suite_runs_in_ci \
+            --test every_serve_shuts_down_gracefully \
             --test every_serving_path_is_observable \
+            --test every_structural_guard_runs_in_ci \
+            --test live_suites_fail_loudly \
+            --test macro_internals_stays_internal \
+            --test pool_construction \
+            --test tracing_targets \
+            --test every_test_suite_compiles_in_ci \
             --test logging_fields_agree
+
+  # Ungated, and the reason is #1572: a test file that does not build was
+  # merging green.
+  #
+  # `default = ["postgres", "batteries"]`, and `batteries` pulls in neither
+  # `sqlite` nor `mysql`. `clippy` is the only other ungated job that
+  # compiles `tests/**`, and it runs `--features tenancy` on top of those
+  # defaults — so every suite gated on a feature outside that set compiles
+  # to an **empty crate** there. Evaluated against the feature set `clippy`
+  # resolves, that is **roughly half** of `crates/rustango/tests/` —
+  # 287 of 562 when this was measured, a figure that moves with every
+  # suite added, which is why it is stated here once and nowhere else.
+  # including every guard the 0.57.7 security pass added.
+  #
+  # The axes are `sqlite`, `mysql`, `mcp` (16 suites), `cache-redis`,
+  # `cache-page`, `passkey`, `email-smtp` and `admin-sso`. `testkit` is
+  # **not** one of them despite being outside `batteries`: the self
+  # dev-dependency in crates/rustango/Cargo.toml turns it on for any
+  # `cargo test` build.
+  #
+  # Those 275 executed only in `postgres_test` / `sqlite_live` /
+  # `mysql_live`, every one `needs: gate`. So on an unlabelled PR into
+  # `develop` they were neither run nor compiled, and a change that broke
+  # one of their signatures merged with a green tick. That is #1437's
+  # failure mode one layer down: not a suite that skips silently, but a
+  # suite that is not built where anyone would notice.
+  #
+  # `--no-run` on purpose. This job answers "does it build with the features
+  # that include it", which is the question `clippy` cannot answer and the
+  # live jobs answer too late. Running them needs databases and belongs in
+  # the gated matrix, per the `guards` header above.
+  #
+  # The second command is not redundant. Six suites are gated on a
+  # **negated** feature, so `--all-features` compiles them out by
+  # construction — five on `not(feature = "postgres")`, which this covers,
+  # and `oauth2_router_standalone` on `not(feature = "admin")`, which the
+  # third command covers.
+  #
+  # An earlier version of this comment said that last one was "still built
+  # only in the gated `feature_combos`". That was false: `feature_combos`
+  # runs `cargo check --lib` and `cargo test --lib`, and **neither builds
+  # `tests/**`** — nor does any of its 13 rows enable `oauth2`. The file
+  # was compiled by nothing at all.
+  #
+  # Cost: `--all-features` shares no build cache with `clippy` or `guards`
+  # (both `--features tenancy`), so this is roughly one extra cold build per
+  # PR, and it is the one ungated job that is not minutes. Nothing local
+  # currently covers it either — `.githooks/pre-push` runs `cargo check`
+  # (lib and bins; `--tests` is opt-in) and `cargo test --lib`, so the hook
+  # would not have caught #1572 any more than `clippy` did.
+  #
+  # `timeout-minutes` because this job is reachable from a fork pull
+  # request and builds three `build.rs` scripts that nothing ungated built
+  # before — `libsqlite3-sys` with `bundled` compiles the SQLite C
+  # amalgamation. The default is six hours.
+  tests_compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features --no-run
+      # The `not(feature = "postgres")` family; same command `sqlite_litmus`
+      # runs, which is gated.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy --no-run
+      # `oauth2_router_standalone`, gated on `not(feature = "admin")`. The
+      # only shape that compiles it; nothing else in CI did.
+      #
+      # `--test` on purpose, unlike the two commands above. Building the
+      # whole test surface under this narrow feature set fails on suites
+      # whose `#![cfg]` under-specifies what they import — e.g.
+      # `forms_prepare_save_sqlite_live` is gated on `sqlite` alone and
+      # uses `rustango::forms`, which nothing here enables. Those gates
+      # are wrong and only ever compiled because every job that built
+      # them happened to have the feature on; that is its own class of
+      # defect and its own change (#1594), not a reason to hold this job
+      # back.
+      - run: cargo test -p rustango --no-default-features --features oauth2,manage,sqlite --test oauth2_router_standalone --no-run
 
   # Primary PG test job — runs the full workspace with `--all-features`
   # against a real PostgreSQL service. Covers every PG-typed live test
@@ -573,6 +665,13 @@ jobs:
       # terminal. Off one, it must fail with a message rather than block on a
       # prompt nobody can answer; this job is exactly that caller.
       - run: cargo test -p cargo-rustango --test wizard_cli
+      # Both of this suite's tests are `#[ignore]`d, and the only
+      # `--ignored` above is scoped to `generated_project_compiles` — so
+      # it ran nowhere, while its own header said "CI runs it with the
+      # rest: `cargo test -p cargo-rustango -- --ignored`" (#1592). It
+      # compiles rustango, hence `--test-threads=1` alongside the other
+      # compiling suite.
+      - run: cargo test -p cargo-rustango --test worker_reaches_the_apps_jobs -- --ignored --test-threads=1
 
   # #1208 — the feature table is a public promise, so check the promise.
   # `sqlite_litmus` below is a single combination, and it happens to be one
@@ -847,6 +946,7 @@ jobs:
             --test tenancy_manage_sqlite_live \
             --test tenant_auth_sqlite_live \
             --test tenant_extractor_sqlite_live \
+            --test soft_delete_without_postgres \
             --test tenant_pools_sqlite_live \
             --test tx_methods_sqlite_live \
             --test unique_when_sqlite_live \
@@ -1020,7 +1120,7 @@ jobs:
       # PostgreSQL and SQLite arms for free in `postgres_test`, so a
       # missing line here costs only the MySQL arm and the suite still
       # looks covered. These three shipped that way;
-      # `every_mysql_arm_runs_in_ci` now fails when a `*_tri` or
+      # `every_live_suite_runs_in_ci` now fails when a `*_tri` or
       # `*_mysql_live` target is absent from this job.
       - run: cargo test -p rustango --features mysql,testkit --test values_tri
       - run: cargo test -p rustango --features mysql,testkit --test regex_tri
@@ -1061,10 +1161,20 @@ jobs:
       # workflow at all. MySQL is the strict dialect for migrations: a
       # re-run `CREATE TABLE` is error 1050 and `ALTER` rejects shapes
       # PG accepts, so a broken reconcile bites here first and nowhere
-      # else. `every_mysql_arm_runs_in_ci` now fails if a
+      # else. `every_live_suite_runs_in_ci` now fails if a
       # `tests/*_mysql_live.rs` is missing from this list.
       - run: cargo test -p rustango --features mysql,tenancy --test migrate_fake_initial_mysql_live
       - run: cargo test -p rustango --features mysql,tenancy --test migrate_reconcile_mysql_live
+      # `--features mysql` alone: this suite needs no tenancy, and the
+      # narrower set is the honest one. MySQL is the only dialect that
+      # needs the table on DROP INDEX and the only one that rejects
+      # `IF EXISTS` there, so a render-only test elsewhere proves
+      # nothing about it (#1588).
+      - run: cargo test -p rustango --features mysql --test migrate_drop_index_mysql_live
+      # The partial-apply state only exists on MySQL: PostgreSQL and
+      # SQLite roll a failed migration back completely, so neither can
+      # reach "schema moved, ledger did not" (#1588).
+      - run: cargo test -p rustango --features mysql --test migrate_partial_apply_mysql_live
       # #1281 — the MySQL arm of DatabaseCache::add is bespoke SQL
       # (INSERT IGNORE + conditional UPDATE, since ON DUPLICATE KEY
       # UPDATE takes no WHERE). It is also positional-`?`, so a bind
@@ -1274,6 +1384,20 @@ jobs:
           # now — the current flow tests (passwords, sessions) are pure /
           # in-memory; flips to true once DB-backed flow tests land.
           - example: auth_demo
+            migrate: false
+          # These two were compiled by **nothing** until #1592 — they
+          # appeared in `ci.yml` only as `deny-examples` and `lockfiles`
+          # matrix rows, which read a manifest and never build the crate.
+          # Both still compiled when that was found, so nothing had
+          # rotted; nothing would have said if it had.
+          #
+          # `migrate: false` for both: `mcp_demo` is SQLite and needs no
+          # service, and `tenant_user_extension`'s one test is pure
+          # schema math (its own header says "No DB needed"). It had
+          # never run anywhere despite passing in under a second.
+          - example: mcp_demo
+            migrate: false
+          - example: tenant_user_extension
             migrate: false
     services:
       # See `postgres_test`'s comment for the AWS Public ECR mirror

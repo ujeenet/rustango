@@ -23,8 +23,13 @@
 //! project's own verbs, follow the advice each verb prints, and
 //! compile. Before the fix this does not build.
 //!
-//! `#[ignore]` because it compiles rustango twice over. CI runs it with
-//! the rest: `cargo test -p cargo-rustango -- --ignored`.
+//! `#[ignore]` because it compiles rustango twice over.
+//!
+//! This header used to say "CI runs it with the rest: `cargo test -p
+//! cargo-rustango -- --ignored`". It did not — the only `--ignored` in
+//! `ci.yml` was scoped to `--test generated_project_compiles`, so both
+//! tests here ran nowhere while the file asserted they ran (#1592).
+//! `scaffolded_projects` now names this suite explicitly.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

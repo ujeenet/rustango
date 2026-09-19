@@ -4,6 +4,215 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.57.8] — 2026-09-18
+
+A migrations release, and a CI-integrity one.
+
+Two defects made an ordinary "remove a model" migration unapplyable on
+MySQL and, when it failed, left the schema and the ledger permanently
+disagreeing — reported from a live tenant, reproduced twice. Both are
+fixed, and the fix for the first was itself wrong on the first attempt;
+that is recorded below rather than smoothed over.
+
+The rest is the machinery that was supposed to have caught this class.
+An audit of what this repo actually guards found **six structural guards
+running on no pull request at all**, two example crates compiled by
+nothing, and a guard whose own check was a frozen literal — the shape it
+existed to prevent. The `guards` job went from 9 targets to 16.
+
+### Changed — **breaking for exhaustive matches on `MigrateError`**
+
+- **`MigrateError` is `#[non_exhaustive]`**, and gained
+  `PartiallyApplied`. Deliberately together, so this is one break rather
+  than two — every future variant is now additive. Code that only
+  propagates or formats the error is unaffected; a `match` that
+  enumerates every variant needs a `_ =>` arm. #1513 wants the same
+  across the other public error enums.
+
+- **A MySQL migration that fails after committing DDL now says so, and
+  says how to recover** (#1588 part 2). MySQL commits DDL immediately,
+  so the transaction around an `atomic: true` migration protects only
+  the `RunSQL` / `RunPython` operations between them. When a later
+  operation failed, the schema had moved and the ledger row was never
+  written — and re-running replayed from the top and failed
+  *differently*, because the earlier work was still there. Reported from
+  a live tenant as `DropTable` succeeding and the re-run then reporting
+  `1051 Unknown table`.
+
+  The error now names how many operations completed, how many DDL
+  statements committed, and the recovery — inspect the schema, then
+  `manage migrate --fake <name>` once it matches. That path was
+  previously folklore.
+
+  Raised **only** when DDL actually committed. A failure preceded solely
+  by `RunSQL` rolled back cleanly and still surfaces as `Driver`,
+  unchanged, because telling an operator to `--fake` a migration that
+  undid itself would be wrong. Both directions are guarded.
+
+### Fixed
+
+- **Dropping a model produced a migration MySQL could not apply** (#1588).
+  `makemigrations` emitted `DropTable` plus one `DropIndex` per index, and
+  `SchemaChange::DropIndex` carried only a name — so the renderer refused on
+  MySQL, which needs `DROP INDEX <name> ON <table>`. An ordinary "remove a
+  table" migration was therefore un-appliable straight out of the generator.
+
+  Worse than un-appliable, because MySQL auto-commits DDL: the `DropTable`
+  succeeded, the first `DropIndex` failed, the migration was recorded as
+  failed — so the table was gone with **no ledger row**, and re-running
+  failed differently (1051, unknown table). Nothing reconciled that without
+  `migrate --fake`, which you have to already know exists.
+
+  Two fixes, and they are complementary rather than alternatives:
+
+  - `DropIndex` is **no longer emitted for an index whose table the same
+    migration drops**. Those ops were always redundant — MySQL and
+    PostgreSQL both drop a table's indexes with the table — and they were
+    the whole of the failure above.
+  - `DropIndex` now carries `{ name, table }` and renders MySQL's form. That
+    covers the case the suppression does not: dropping an index while
+    keeping its table.
+
+  `table` is `#[serde(default)]`, so a migration file written before this
+  still deserializes; it applies unchanged on PostgreSQL and SQLite, and on
+  MySQL gets an error naming the field to add rather than a serde failure
+  naming nothing.
+
+  A unit test previously asserted that MySQL *must* refuse, so the defect had
+  a green test defending it. It is replaced by one asserting the rendered
+  SQL, and by `migrate_drop_index_mysql_live` — which executes the DDL
+  against a real server and separately pins that MySQL does reject the
+  PostgreSQL `IF EXISTS` form, rather than trusting the comment that said so.
+
+- **…and that fix was wrong twice over** (#1598). Stated plainly because
+  both halves shipped and both were caught by review rather than by a
+  test.
+
+  It suppressed the dependent drop, and `detect_changes` has **three**
+  structurally identical "dropped dependent" loops. Only the index one was
+  touched, so a model carrying a table-level `CHECK` still emitted
+  `DropTable` then `DropCheckConstraint` — the same unrecoverable MySQL
+  state, through the loop the fix missed. `DropCompositeFk` already had the
+  correct guard and documented why.
+
+  And suppression broke rollback. With the index drop gone, a drop-model
+  migration's forward list is `[DropTable]`; `invert` yields
+  `[CreateTable]`; and `CreateTable` renders no index DDL. So rolling back
+  **succeeded** and silently restored the table without its indexes, UNIQUE
+  ones included, while the predecessor snapshot still listed them —
+  `makemigrations` then saw no drift and nothing recreated them. A loud
+  failure traded for a quiet one, which is worse.
+
+  Both are fixed by **ordering rather than suppression**: the dependent
+  drop is emitted *before* the table, which every dialect accepts because
+  the table is still there, and `invert` walks the list in reverse so
+  `[DropIndex, DropTable]` inverts to `[CreateTable, CreateIndex]` — the
+  right order for free. The same move fixes the CHECK and EXCLUDE loops.
+
+  Guarded by a round-trip test rather than an op-list assertion: the op
+  list is what changed, invertibility is the property that matters, and it
+  is what would have caught the regression.
+
+### Added
+
+- **`MediaManager::public_url(id)`** — the CDN-aware public address for a
+  media id, minting no signature. This is the supported way to put an
+  uploaded image on a page anyone can reach.
+
+  It exists because there was no answer to that question. `media::router`
+  is the *internal management API* — uploads, deletes, tagging, browsing —
+  and it refuses an anonymous request on every route by design. Nothing
+  said so, and `docs/files.md` presented the router as the way to serve
+  media without mentioning any other path, so the two ways to discover the
+  truth were both bad: hand-roll a second read endpoint beside the router
+  and lose its tenant and soft-delete filtering, or fit an `AllowAll`
+  authorizer and reopen all sixteen routes including `DELETE` and the
+  presigned `PUT`.
+
+  Sync-friendly on purpose: no signing means no `await` in a template.
+  Tera filters are sync, so a presigned URL could never be built from one
+  — which is why the answer is a handler computing a string, not a
+  template helper.
+
+### Changed
+
+- **`media::router` is documented as what it is**, in its module header,
+  `docs/files.md` and the three translations: the internal management
+  API, not a delivery API. The page gains a "Serving media on a public
+  page" section with the two delivery models side by side — public
+  bucket/CDN versus private bucket plus presigned — and points at
+  `Cli::with_static` for local-disk files, which already did this and was
+  never mentioned there.
+
+- **The `optional_auth` suggestion is withdrawn** from `MediaPerms`'s
+  rustdoc and `UPGRADING.md`. It compiled and then answered `401` anyway,
+  because that policy has no anonymous path, so it sent anyone building a
+  public page down a road ending in unexplained 401s. It is meaningful
+  only under a custom `MediaAuthorizer` that deliberately allows some
+  anonymous action.
+
+### CI
+
+An audit of what this repo actually guards, prompted by a stale number
+that three locally-run guards missed because only a subset of the job was
+run. Eleven jobs carry a hand-maintained list; two were guarded. The
+`guards` job went from **9 targets to 16**, and six of the seven
+additions are guards that previously ran on no pull request at all.
+
+- **Six structural guards ran on no pull request.**
+  `every_serve_shuts_down_gracefully`, `live_suites_fail_loudly`,
+  `macro_internals_stays_internal`, `tracing_targets` and
+  `pool_construction` were named in no job, so they ran only inside
+  `postgres_test` — which is `needs: gate`. All still passed; nothing
+  would have said otherwise. `every_structural_guard_runs_in_ci` now keeps
+  them there, keyed on a **property** (derives a path from
+  `CARGO_MANIFEST_DIR`, carries no crate-level `#![cfg]`) rather than a
+  filename convention, which had left four of them out while reporting
+  green.
+
+- **275 of 559 test suites compiled to empty crates** in the only ungated
+  job that built `tests/**`. `default = ["postgres", "batteries"]` omits
+  `sqlite` and `mysql`, so every suite gated on one of them built to
+  nothing under `clippy`'s feature set — including every guard the 0.57.7
+  security pass added. A new ungated `tests_compile` job builds the full
+  surface (#1572).
+
+- **Two example crates were compiled by nothing.** `mcp_demo` and
+  `tenant_user_extension` appeared in `ci.yml` only as `deny-examples` and
+  `lockfiles` rows, which read a manifest and compile nothing — and a
+  severed example is outside the workspace, so `cargo test --workspace`
+  never reached them either. `tenant_user_extension` also carried a test
+  that had never run anywhere. Guarded by
+  `every_example_crate_is_built` (#1592).
+
+- **The live-suite guard checked a frozen literal.**
+  `every_mysql_arm_runs_in_ci` asserted a hard-coded pair of suite names
+  rather than reading the directory, so it omitted `s3_live_presign` and
+  would have missed anything added after it was written — the shape it
+  existed to prevent. Renamed to `every_live_suite_runs_in_ci` and
+  generalised to four families; Redis and PostGIS had no coverage at all,
+  and both skip silently when their dependency is absent.
+
+- Also wired: `soft_delete_without_postgres`, compiled but never executed,
+  and `worker_reaches_the_apps_jobs`, whose own header claimed CI ran it
+  while no job passed `--ignored` for it.
+
+### Testing
+
+- **`tests/files_doc_media.rs`** — the media half of `docs/files.md` had
+  **no backing test at all**. `files_doc.rs` is gated on `storage` +
+  `uploads` and asserts nothing about `media`, while `docs_contract`
+  reported the page as covered because coverage there is tracked per
+  *page*: a page can be half-guarded and still count. That is how the
+  framing drifted ninety lines without anything failing.
+
+  The new suite executes the public-page recipe end to end and pairs it
+  with the refusal: the same row that `public_url` serves must still get
+  a `401` from the management router. Each of the three guards was
+  mutation-tested against production code — soft-delete filtering
+  removed, `public_url` made to presign, and the router's
+  `Unauthenticated → 401` mapping changed — and each dies on its own.
+
 ## [0.57.7] — 2026-09-17
 
 The security pass. A review of `develop` at v0.57.6 produced 20 findings,

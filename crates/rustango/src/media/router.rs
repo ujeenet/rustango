@@ -1,6 +1,36 @@
-//! Axum REST router for the [`MediaManager`] surface.
+//! Axum REST router for the [`MediaManager`] surface — the **internal
+//! management API**.
 //!
 //! Requires the **`admin`** feature as well as `media`.
+//!
+//! # What this router is for
+//!
+//! Uploading, deleting, moving, tagging and browsing the library, from
+//! inside your app or your admin. Every one of its routes is an
+//! operator action on the library, and every response carrying a media
+//! row carries a **presigned** URL with it — which is why the whole
+//! surface ships `Cache-Control: no-store`.
+//!
+//! # What it is not for
+//!
+//! **Serving media to the public.** There is no anonymous route here
+//! and no read that is cheaper than the others; [`MediaPerms`] answers
+//! `401` to a request with no principal, on every path. That is not an
+//! oversight to work around — a public page showing an uploaded image
+//! does not call this API at all.
+//!
+//! It renders a URL its own handler computed:
+//!
+//! ```ignore
+//! // your own public route, outside this router
+//! let url = manager.public_url(id).await?;   // CDN address, no signature
+//! ```
+//!
+//! See [`crate::media::MediaManager::public_url`], and `docs/files.md`
+//! for the two delivery models side by side. If you reached for an
+//! `AllowAll` [`MediaAuthorizer`] to get a public page working, that is
+//! the wrong end of the problem — it opens all sixteen routes,
+//! including `DELETE` and the presigned `PUT`, to everyone.
 //!
 //! # This router requires an authorization policy
 //!
@@ -536,11 +566,20 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
 ///     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
 /// ```
 ///
-/// Mount it **inside** [`crate::tenancy::middleware::RouterAuthExt::require_auth`]
-/// (or `optional_auth`), which is what injects the `AuthenticatedUser`
-/// this reads. Without that extension every request is
-/// [`MediaDecision::Unauthenticated`] — a `401`, so the symptom names
-/// its own cause.
+/// Mount it **inside** [`crate::tenancy::middleware::RouterAuthExt::require_auth`],
+/// which is what injects the `AuthenticatedUser` this reads. Without
+/// that extension every request is [`MediaDecision::Unauthenticated`] —
+/// a `401`, so the symptom names its own cause.
+///
+/// **Not `optional_auth`.** It compiles, and then answers `401` to
+/// every anonymous request anyway, because this policy has no
+/// anonymous path — the check above runs before any other. Earlier
+/// versions of this sentence offered it as an alternative, which sends
+/// someone building a public page down a road that dead-ends in
+/// unexplained 401s. `optional_auth` is only meaningful under a
+/// **custom** [`MediaAuthorizer`] that deliberately allows some
+/// anonymous action; for a public *page*, do not mount this router at
+/// all (see the module header).
 ///
 /// # What it checks
 ///
