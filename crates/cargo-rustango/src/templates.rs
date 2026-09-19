@@ -914,9 +914,9 @@ pub fn config_default_toml(name: &str, backend: Backend) -> String {
 # [audit]
 # retention_days = 90
 
-# [logging]                        # needs `Cli::with_logging()` AND a `main`
-#                                  # without `#[rustango::main]` — see
-#                                  # config/prod_settings.toml for why
+# [logging]                        # needs `Cli::with_logging()` AND
+#                                  # `#[rustango::main(logging = false)]` —
+#                                  # see config/prod_settings.toml for why
 # level             = "info,sqlx=warn"   # RUST_LOG syntax; RUST_LOG still wins
 # format            = "pretty"           # pretty | json | compact
 # with_line_numbers = false
@@ -1032,10 +1032,11 @@ hsts_max_age_secs = 31536000
 [audit]
 retention_days = 365
 
-# Read by `Cli::with_logging()`, which this project does NOT call — and
-# which would lose anyway while `src/main.rs` keeps `#[rustango::main]`:
-# the macro installs a subscriber first, and the first one wins. Swap the
-# macro for `#[tokio::main]` and add `.with_logging()` to make this live.
+# Read by `Cli::with_logging()`, which this project does NOT call. To make
+# this section live: add `.with_logging()`, and change `src/main.rs` to
+# `#[rustango::main(logging = false)]` so the macro's own subscriber steps
+# aside — `tracing` keeps the first one installed, so without that the
+# settings here are read and discarded (#1465).
 # `RUST_LOG` overrides `level` either way, and works today.
 # [logging]
 # level  = "info"
