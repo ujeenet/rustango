@@ -103,17 +103,64 @@ fn no_module_hand_rolls_the_redirect_check() {
     );
 }
 
-/// The canonical rule must keep rejecting the case the copies missed.
-/// Without this the ratchet above could point at an implementation
-/// that is itself wrong.
+/// The canonical rule must actually reject what every other sanitizer
+/// now delegates to it for.
+///
+/// This used to grep the source for the literal `starts_with("/\\")`,
+/// which survives *inverting the branch it guards* — the guard passed
+/// 2/2 against a build where the rule was reversed (#1604 review,
+/// tests-004). Calling the function is the only version of this check
+/// that means anything.
 #[test]
-fn the_canonical_rule_rejects_the_backslash() {
-    let src = std::fs::read_to_string(crate_root().join(CANONICAL)).expect("read auth_decorators");
-    assert!(
-        src.replace(char::is_whitespace, "")
-            .contains(r#"starts_with("/\\")"#),
-        "`{CANONICAL}` must still reject a leading `/\\` — every other \
-         sanitizer now delegates to it, so this is the only place the case \
-         is handled",
-    );
+fn the_canonical_rule_rejects_what_the_copies_missed() {
+    use rustango::auth_decorators::safe_next;
+
+    for hostile in [
+        // Protocol-relative, and the backslash spellings a browser
+        // rewrites into it.
+        "//evil.example/x",
+        "/\\evil.example/x",
+        "\\/evil.example/x",
+        "\\\\evil.example/x",
+        // Percent-encoded forms of the same.
+        "/%2Fevil.example/x",
+        "/%5Cevil.example/x",
+        // Control characters the browser strips while parsing, which
+        // turn a path-shaped value into a protocol-relative one.
+        "/\u{09}/evil.example/x",
+        "/\u{0d}/evil.example/x",
+        "/\u{0a}/evil.example/x",
+        // Absolute.
+        "https://evil.example",
+        "javascript:alert(1)",
+    ] {
+        assert_eq!(
+            safe_next(hostile),
+            None,
+            "`{hostile}` must be refused by the canonical rule — every \
+             live `?next=` sanitizer delegates here, so anything this \
+             accepts reaches a `Location` header",
+        );
+    }
+}
+
+/// The control: tightening must not reject ordinary paths, or every
+/// post-login redirect silently becomes `/`.
+#[test]
+fn the_canonical_rule_accepts_ordinary_paths() {
+    use rustango::auth_decorators::safe_next;
+
+    for ok in [
+        "/account",
+        "/a/b?q=1&r=2",
+        "/x#frag",
+        "/posts/hello%20world",
+        "/deep/path/with/many/segments?and=query",
+    ] {
+        assert_eq!(
+            safe_next(ok),
+            Some(ok.to_owned()),
+            "`{ok}` is an ordinary path and must survive",
+        );
+    }
 }

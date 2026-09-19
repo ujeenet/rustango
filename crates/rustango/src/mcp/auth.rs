@@ -355,9 +355,8 @@ pub async fn verify_raw_agent_credential(
     }
 
     let cache_key = raw_key_cache_key(slug, token);
-    let cached = raw_key_cache_get(&cache_key);
-    let (agent_id, verified_at) = match cached {
-        Some(hit) => hit,
+    let agent_id = match raw_key_cache_get(&cache_key) {
+        Some(id) => id,
         None => {
             let agent =
                 match crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret).await
@@ -370,9 +369,8 @@ pub async fn verify_raw_agent_credential(
                     }
                 };
             let agent_id = agent.id.get().copied().unwrap_or_default();
-            let now = chrono::Utc::now();
-            raw_key_cache_put(cache_key, (agent_id, now));
-            (agent_id, now)
+            raw_key_cache_put(cache_key, agent_id);
+            agent_id
         }
     };
 
@@ -392,19 +390,36 @@ pub async fn verify_raw_agent_credential(
         }
     };
     if !state.active {
+        raw_key_cache_forget(&cache_key);
         return None;
     }
-    // A verification performed before the secret rotated proves
-    // nothing about the secret in hand. This is what actually closes
-    // #1539: the previous attempt cleared the cache from the `manage`
-    // CLI, a different process from the server, so the serving
-    // replica kept honouring the old secret for the rest of the TTL.
-    // Reading the stamp off the row works across processes because
-    // that is where the rotation was recorded.
-    if state
-        .secret_rotated_at
-        .is_some_and(|rotated| rotated > verified_at)
-    {
+    // Re-bind the cached id to the credential actually presented.
+    //
+    // This is what closes #1539, and it took three attempts. The
+    // cache holds "token T hashed to agent N" — a fact about the
+    // past. `secret_prefix` is regenerated on every rotation and is
+    // random per credential, so comparing it against the prefix in
+    // hand asks the two questions the entry cannot answer itself:
+    // has this been rotated since, and does this row even belong to
+    // the credential presented.
+    //
+    // What it replaced, and why each failed:
+    //
+    // * Clearing the cache on rotation — the only callers are
+    //   `manage` subcommands, a different process from the server,
+    //   so the serving replica was never told.
+    // * Comparing `secret_rotated_at` against a timestamp the server
+    //   took — wrong even with synchronised clocks, because the
+    //   rotation stamps before its own commit while the verifier
+    //   stamps after an ~11.5 ms Argon2, so both biases make a
+    //   rotation inside that window look older than the verify.
+    //
+    // A string comparison has neither problem, and needs no clock,
+    // no ordering and no timestamp precision — which also means
+    // #1464's proposed second-resolution datetime encoding cannot
+    // reopen this (#1604 review: correctness-001, security-003/004,
+    // tenancy-001, dialects-002).
+    if state.secret_prefix != prefix {
         raw_key_cache_forget(&cache_key);
         return None;
     }
@@ -449,18 +464,19 @@ const RAW_KEY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60
 /// Bound on cached verifications; oldest entries are evicted past this.
 const RAW_KEY_CACHE_CAP: usize = 256;
 
-/// `token hash → (agent id, when the Argon2 verify happened, monotonic TTL clock)`.
+/// `token hash → (agent id, monotonic TTL clock)`.
 ///
-/// Deliberately holds nothing authorization depends on — no `user_id`,
-/// no grants. Those are read from the row on every request, so a cache
-/// hit cannot carry a stale owner or a stale permission set.
+/// Holds the agent id and nothing else. Every fact authorization
+/// depends on — the owner, the grants, whether the row still accepts
+/// this credential — is read from the row on each request, so a hit
+/// can carry neither a stale owner nor a stale permission set, and
+/// the id it does carry is re-bound to the presented credential
+/// before use.
 ///
-/// `DateTime<Utc>` for the verification stamp because it is compared
-/// against `secret_rotated_at`, which is wall clock and written by
-/// another process; `Instant` alongside it for the TTL, because that
-/// comparison must not move when the system clock does.
-type RawKeyCache =
-    std::collections::HashMap<[u8; 32], (i64, chrono::DateTime<chrono::Utc>, std::time::Instant)>;
+/// `Instant`, not a wall clock: the TTL must not move when the system
+/// clock does, and nothing here is compared against a timestamp from
+/// another machine any more.
+type RawKeyCache = std::collections::HashMap<[u8; 32], (i64, std::time::Instant)>;
 
 fn raw_key_cache() -> &'static std::sync::Mutex<RawKeyCache> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<RawKeyCache>> = std::sync::OnceLock::new();
@@ -478,10 +494,10 @@ fn raw_key_cache_key(slug: &str, token: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn raw_key_cache_get(key: &[u8; 32]) -> Option<(i64, chrono::DateTime<chrono::Utc>)> {
+fn raw_key_cache_get(key: &[u8; 32]) -> Option<i64> {
     let cache = raw_key_cache().lock().ok()?;
-    let (agent_id, verified_at, cached_at) = cache.get(key)?;
-    (cached_at.elapsed() < RAW_KEY_CACHE_TTL).then_some((*agent_id, *verified_at))
+    let (agent_id, cached_at) = cache.get(key)?;
+    (cached_at.elapsed() < RAW_KEY_CACHE_TTL).then_some(*agent_id)
 }
 
 /// Drop one entry. Used when the row says the verification it records
@@ -493,19 +509,19 @@ fn raw_key_cache_forget(key: &[u8; 32]) {
     }
 }
 
-fn raw_key_cache_put(key: [u8; 32], entry: (i64, chrono::DateTime<chrono::Utc>)) {
+fn raw_key_cache_put(key: [u8; 32], agent_id: i64) {
     let Ok(mut cache) = raw_key_cache().lock() else {
         return;
     };
     if cache.len() >= RAW_KEY_CACHE_CAP {
         // Drop expired entries first; if still over cap, clear outright —
         // the cache is a pure optimization and refilling costs one argon2.
-        cache.retain(|_, (_, _, at)| at.elapsed() < RAW_KEY_CACHE_TTL);
+        cache.retain(|_, (_, at)| at.elapsed() < RAW_KEY_CACHE_TTL);
         if cache.len() >= RAW_KEY_CACHE_CAP {
             cache.clear();
         }
     }
-    cache.insert(key, (entry.0, entry.1, std::time::Instant::now()));
+    cache.insert(key, (agent_id, std::time::Instant::now()));
 }
 
 // `invalidate_raw_key_cache(agent_id)` stood here. It was removed in
@@ -712,55 +728,34 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
     }
 
+    // The behavioural rules — rotation and cross-tenant redemption —
+    // are asserted in `tests/mcp_raw_key.rs`, which has a `Pool` and
+    // can call `verify_raw_agent_credential`. Two tests lived here
+    // that could not: one compared two locally-built timestamps and
+    // so asserted `chrono`'s `>` operator, the other destructured the
+    // cache tuple. Deleting the entire rotation check left both green
+    // (#1604 review, tests-001 and tests-005). What is left here is
+    // what this module can actually decide on its own.
+
     #[test]
-    fn a_verification_older_than_the_rotation_is_refused() {
-        // The rule that closes #1539, stated directly: the cached
-        // entry records *when* Argon2 ran, and the row records when
-        // the secret changed. The comparison is the whole mechanism,
-        // and it is what makes this work across processes — the
-        // previous attempt cleared a process-local cache from the
-        // `manage` CLI and never reached the serving replica.
+    fn a_cached_entry_round_trips_and_can_be_forgotten() {
         let _g = cache_lock();
         raw_key_cache().lock().unwrap().clear();
 
         let key = raw_key_cache_key("acme", "pfx.secret");
-        let verified_at = chrono::Utc::now();
-        raw_key_cache_put(key, (7, verified_at));
+        assert_eq!(raw_key_cache_get(&key), None, "cold cache");
 
-        let (_, cached_at) = raw_key_cache_get(&key).expect("entry is live");
-        let rotated_after = verified_at + chrono::Duration::seconds(1);
-        let rotated_before = verified_at - chrono::Duration::seconds(1);
+        raw_key_cache_put(key, 7);
+        assert_eq!(raw_key_cache_get(&key), Some(7));
 
-        assert!(
-            rotated_after > cached_at,
-            "a rotation after the verify must invalidate it",
+        raw_key_cache_forget(&key);
+        assert_eq!(
+            raw_key_cache_get(&key),
+            None,
+            "a forgotten entry must not be served again — the reject \
+             paths call this so the next request re-runs Argon2 rather \
+             than repeating the same refusal for the rest of the TTL",
         );
-        assert!(
-            !(rotated_before > cached_at),
-            "a rotation that predates the verify must not — otherwise \
-             every key with any rotation history would be refused",
-        );
-    }
-
-    #[test]
-    fn the_cache_holds_nothing_authorization_depends_on() {
-        // `user_id` used to be cached, and it selects the grant
-        // resolver: a stale `None` took the unbounded path instead of
-        // the owner-scoped one, with no invalidation hook anywhere
-        // (#1604 review, tenancy-003). The entry is now the agent id
-        // and two timestamps, so an owner change cannot be carried.
-        let _g = cache_lock();
-        raw_key_cache().lock().unwrap().clear();
-
-        let key = raw_key_cache_key("acme", "pfx.secret");
-        raw_key_cache_put(key, (7, chrono::Utc::now()));
-        let (agent_id, _) = raw_key_cache_get(&key).expect("entry is live");
-        assert_eq!(agent_id, 7);
-
-        // If this tuple ever grows a field, ask whether authorization
-        // reads it. The compiler will point here.
-        let entry = raw_key_cache().lock().unwrap();
-        let (_, _, _) = entry.get(&key).expect("entry is live");
     }
 
     #[test]

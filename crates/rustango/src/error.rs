@@ -159,15 +159,29 @@ pub(crate) fn server_error_body(context: &str, e: &dyn fmt::Display) -> String {
     }
 }
 
-/// Body text for a client-caused 4xx.
+/// Body text for a rejection the **client** caused.
 ///
-/// Same withholding rule, but logged at `warn` and attributed to the
-/// caller: a client can drive these at will, and an `ERROR` line per
-/// bad request is a log-volume lever pointed at the operator (#1604
-/// review, performance-003).
+/// Same withholding rule as [`server_error_body`], but logged at
+/// `warn` and attributed to the caller: a client can drive these at
+/// will, and an `ERROR` line per bad request is a log-volume lever
+/// pointed at the operator (#1604 review, performance-003).
+///
+/// `client_caused` decides the level, and the caller must decide it
+/// honestly. A constraint violation is the client's doing; a pool
+/// timeout on the same code path is not, and silently logging that at
+/// `warn` loses the only record an operator has of an outage (#1604
+/// review, correctness-003). When in doubt, pass `false`.
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
-pub(crate) fn client_error_body(context: &str, e: &dyn fmt::Display) -> String {
-    tracing::warn!(target: "rustango::error", context, error = %e, "rejected request");
+pub(crate) fn client_error_body(
+    context: &str,
+    e: &dyn fmt::Display,
+    client_caused: bool,
+) -> String {
+    if client_caused {
+        tracing::warn!(target: "rustango::error", context, error = %e, "rejected request");
+    } else {
+        tracing::error!(target: "rustango::error", context, error = %e, "server error");
+    }
     if disclose_server_errors() {
         e.to_string()
     } else {
@@ -757,7 +771,7 @@ mod tests {
     fn a_client_caused_4xx_does_not_claim_a_server_fault() {
         let _g = test_env::lock();
         test_env::with(DISCLOSE_ENV, None, || {
-            let body = client_error_body("test", &DRIVER_ERROR);
+            let body = client_error_body("test", &DRIVER_ERROR, true);
             assert_withholds(&body, "default 400 body");
             assert_eq!(body, OPAQUE_CLIENT_ERROR);
             assert!(

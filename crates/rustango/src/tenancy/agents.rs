@@ -980,19 +980,6 @@ pub async fn delete_user_keys_pool(pool: &Pool, user_id: i64) -> Result<(), Agen
     Ok(())
 }
 
-/// Request-time liveness re-check for a verified agent token. MCP agent JWTs
-/// are stateless — [`crate::mcp::verify_agent_token`] proves the token is
-/// well-formed and tenant-pinned but not that the agent still exists. Call
-/// this right after verification (where the tenant [`Pool`] is available) so
-/// that revoking / deactivating a key takes effect immediately instead of
-/// lingering until the token expires.
-///
-/// Returns `false` (reject) when the agent row is absent or `active == false`,
-/// and — for a user-owned key (`user_id.is_some()`) — when the owning user is
-/// missing or `active == false`. One cheap lookup per request.
-///
-/// # Errors
-/// Propagates DB errors.
 /// The authorization-relevant state of an agent, as the database has
 /// it right now.
 ///
@@ -1001,16 +988,23 @@ pub async fn delete_user_keys_pool(pool: &Pool, user_id: i64) -> Result<(), Agen
 /// what it cached. Nothing here may be cached across requests: the
 /// owner can change and the secret can rotate, and both decide what
 /// the request is allowed to do.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AgentAuthState {
     /// `false` once the key is deactivated — refuse.
     pub active: bool,
     /// Current owner. Selects the grant resolver, so a stale value
     /// picks the wrong one.
     pub user_id: Option<i64>,
-    /// When the secret was last rotated, if ever. A verification
-    /// performed before this is no longer valid.
-    pub secret_rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The credential this row currently accepts, identified by its
+    /// public prefix.
+    ///
+    /// This is what makes a cached verification falsifiable. It is
+    /// regenerated on every rotation and is random per credential, so
+    /// comparing it against the prefix of the token in hand answers
+    /// both "has this been rotated since?" and "does this row even
+    /// belong to the credential presented?" — without a clock.
+    pub secret_prefix: String,
 }
 
 /// Read an agent's current authorization state.
@@ -1037,7 +1031,7 @@ pub async fn agent_auth_state_pool(
         .map(|a| AgentAuthState {
             active: a.active,
             user_id: a.user_id,
-            secret_rotated_at: a.secret_rotated_at,
+            secret_prefix: a.secret_prefix,
         }))
 }
 
@@ -1061,6 +1055,19 @@ pub async fn agent_owner_is_active_pool(pool: &Pool, user_id: i64) -> Result<boo
         .is_some_and(|u| u.active))
 }
 
+/// Request-time liveness re-check for a verified agent token. MCP agent JWTs
+/// are stateless — [`crate::mcp::verify_agent_token`] proves the token is
+/// well-formed and tenant-pinned but not that the agent still exists. Call
+/// this right after verification (where the tenant [`Pool`] is available) so
+/// that revoking / deactivating a key takes effect immediately instead of
+/// lingering until the token expires.
+///
+/// Returns `false` (reject) when the agent row is absent or `active == false`,
+/// and — for a user-owned key (`user_id.is_some()`) — when the owning user is
+/// missing or `active == false`. One cheap lookup per request.
+///
+/// # Errors
+/// Propagates DB errors.
 pub async fn agent_token_still_valid_pool(
     pool: &Pool,
     agent_id: i64,

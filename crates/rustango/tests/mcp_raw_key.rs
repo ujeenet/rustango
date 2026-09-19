@@ -285,14 +285,34 @@ async fn credential_does_not_cross_tenants() {
         "credential must not authenticate against another tenant"
     );
 
-    // Cross-tenant is refused even when the foreign slug is presented
-    // against the owning pool's token first — i.e. the cache key, not just
-    // the pool, carries the tenant.
+    // The dangerous shape: the OWNING slug (so the warm cache entry is
+    // found) against a FOREIGN pool. On a hit the agent id comes from
+    // the entry, and everything else is then read by that id from
+    // whichever pool was passed — so the foreign tenant must have a
+    // row at the same id for this to test anything. Ids are per-tenant
+    // sequences, so giving globex one key makes them collide at 1.
+    //
+    // Without that row this assertion passed for the wrong reason:
+    // `agent_auth_state_pool` returned `None` and the refusal proved
+    // nothing about re-binding (#1604 review, tenancy-001).
+    let g_uid = make_user(&globex, "mallory").await;
+    let g_issued = create_user_key_pool(&globex, g_uid, "mallory's key", &[])
+        .await
+        .expect("globex key");
+    assert_eq!(
+        issued.agent.id.get().copied(),
+        g_issued.agent.id.get().copied(),
+        "precondition: both tenants' first agent must share an id, or \
+         the redemption below is not being exercised",
+    );
+
     assert!(
         verify_raw_agent_credential(&globex, "acme", &issued.token)
             .await
             .is_none(),
-        "foreign pool must refuse even with the owning slug"
+        "a warm entry must not be redeemable against another tenant's \
+         storage: the cached id resolves to a different agent there, \
+         whose owner and grants would otherwise be handed to the caller"
     );
 
     // The owning tenant still works afterwards — isolation must not have

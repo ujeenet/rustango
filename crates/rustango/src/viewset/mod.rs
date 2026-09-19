@@ -2767,10 +2767,21 @@ async fn create_many(
                 let _ = tx.rollback().await;
                 // The entry index is what the caller can act on; the
                 // driver text behind it names tables and constraints,
-                // so it goes to the log only (#1525). `client_error_*`
-                // because this is a 400 a client can drive: logged at
-                // `warn`, and the body must not claim a server fault.
-                let detail = crate::error::client_error_body("viewset::bulk_create::entry", &e);
+                // so it goes to the log only (#1525). The body must
+                // not claim a server fault on a 400.
+                //
+                // Only a *database rejection* is the client's doing.
+                // This arm also catches pool timeouts and dropped
+                // connections, and logging those at `warn` left an
+                // outage with no ERROR record anywhere (#1604 review,
+                // correctness-003).
+                let client_caused =
+                    matches!(&e, crate::sql::ExecError::Driver(sqlx::Error::Database(_)));
+                let detail = crate::error::client_error_body(
+                    "viewset::bulk_create::entry",
+                    &e,
+                    client_caused,
+                );
                 return json_error(
                     StatusCode::BAD_REQUEST,
                     &format!("bulk entry {i}: {detail}"),

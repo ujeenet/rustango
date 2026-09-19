@@ -301,9 +301,21 @@ async fn tenant_admin_renders_brand_overrides() {
         "brand_name should render in admin: {body}"
     );
     // Logo URL ends up as an `<img>` source in the sidebar.
+    //
+    // Matched on the path segment rather than `src="/__brand__/`:
+    // #1537 dropped the `| safe` filter that let an operator-supplied
+    // URL inject attributes, so Tera now escapes the value and the
+    // rendered attribute reads `src="&#x2F;__brand__&#x2F;…"`. That is
+    // correct — the HTML parser decodes character references in
+    // attribute values before the URL is resolved — and asserting the
+    // raw spelling made this test fail on a page that works.
     assert!(
-        body.contains(r#"src="/__brand__/"#),
+        body.contains("__brand__"),
         "logo URL should appear in admin: {body}"
+    );
+    assert!(
+        !body.contains(r#"| safe"#),
+        "the template must not be re-marking branding URLs safe",
     );
     // Tagline renders.
     assert!(

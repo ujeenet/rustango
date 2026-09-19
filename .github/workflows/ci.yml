@@ -277,6 +277,21 @@ jobs:
       # the #1440 policy an unset var is a skip, and these guards must
       # not depend on one. If a guard added here starts needing a
       # database it will fail closed rather than skip silently.
+      # The crate's own unit tests, ungated.
+      #
+      # `--test <name>` builds only that integration target, so every
+      # `#[cfg(test)] mod tests` in `src/` was invisible to this job —
+      # and to every other ungated one: `tests_compile` is `--no-run`,
+      # and `postgres_test` / `feature_combos` / `windows_test` all
+      # `needs: gate`. An unlabelled PR therefore ran **no** lib test
+      # at all. 17 of the 18 assertions added by the 0.57.9 review
+      # round live in `src/`, so almost none of that work was checked
+      # by the green tick on its own PR (#1604 review, tests-002).
+      #
+      # `tenancy,sso` rather than `tenancy` alone: `member_auth` is
+      # gated on `sso`, so its sanitizer tests compile to nothing
+      # without it. No database — these are unit tests.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,sso --lib
       - run: |
           cargo test -p rustango --features tenancy \
             --test branding_urls_are_escaped \
@@ -292,6 +307,7 @@ jobs:
             --test every_structural_guard_runs_in_ci \
             --test live_suites_fail_loudly \
             --test macro_internals_stays_internal \
+            --test no_orphaned_doc_comments \
             --test one_redirect_sanitizer \
             --test pool_construction \
             --test system_migration_scopes \

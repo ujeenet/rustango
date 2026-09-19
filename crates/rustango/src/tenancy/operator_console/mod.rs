@@ -2431,7 +2431,17 @@ mod sanitize_next_tests {
 
     #[test]
     fn the_classic_shapes_are_still_refused() {
-        for hostile in ["//evil.example/x", "https://evil.example", "javascript:1"] {
+        for hostile in [
+            "//evil.example/x",
+            "https://evil.example",
+            "javascript:1",
+            // The browser strips TAB, CR and LF while parsing a URL
+            // (WHATWG URL 4.1), so each of these leaves as the
+            // protocol-relative `//evil.example` (#1604 security-001).
+            "/\x09/evil.example/x",
+            "/\x0d/evil.example/x",
+            "/\x0a/evil.example/x",
+        ] {
             assert_eq!(sanitize_next(Some(hostile)), "/", "{hostile}");
         }
         assert_eq!(sanitize_next(None), "/");
