@@ -4,6 +4,121 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.57.9] — 2026-09-19
+
+Thirteen verified defects from the 2026-09-18 triage, each small enough
+that the fix is smaller than the argument for it.
+
+Seven are security. The common shape is worth naming, because it decides
+how the rest of this list should be read: **four of these holes were
+guarded, and the guard passed against the defect it named.** A signed-URL
+test drove the clock explicitly and so never reached the fallback it
+existed to cover; a migration guard tested a predicate rather than the
+function that calls it; an MCP cache was cleared in the wrong process. In
+each case the guard was rewritten and revert-tested — the fix undone, the
+guard watched to *fail*, and only then restored. Three of the thirteen
+needed that second pass, and the commits say which.
+
+### Added
+
+- **`ViewSet::openapi_query(bool)`** (#1401). The ViewSet has answered
+  RFC 10008 `QUERY` since #1112 and the generated spec never mentioned
+  it, so no generated client could reach the method. Off by default, so
+  a document that does not need it stays at OpenAPI 3.1.0 — the `query`
+  Path Item field is 3.2.0, and `add_path` bumps the document version
+  when it sees one.
+
+- **`logging = false` for `#[rustango::main]`** (#1465), and a new
+  `no_orphaned_doc_comments` guard. The doc-swallow it catches — a
+  `# Errors` section landing on a `struct` or `const` instead of the
+  function below it — had happened three times, twice while writing
+  this release.
+
+### Fixed
+
+- **`url_has_allowed_host_and_scheme` accepted `/\evil.com/x`** (#1526).
+  Browsers rewrite `\` to `/` while parsing (WHATWG URL §4.1), so that
+  path leaves as protocol-relative and the redirect lands off-site. Both
+  the raw and the rewritten form are now validated, as Django does, and
+  control characters are rejected before decoding. The three live
+  `?next=` sanitizers — admin, operator console, member auth — now
+  delegate to the one implementation instead of carrying three copies
+  that had already drifted apart.
+
+- **Raw driver text in unauthenticated 5xx bodies** (#1525). Six paths
+  published sqlx's message — table, constraint, column list, database
+  host — to any client that could provoke the error. The cause is now
+  logged and the body withheld, split as two decisions rather than one:
+  whether to disclose a server error at all (off by default) and whether
+  the dev overlay is on (off in production). The previous fix was inert
+  by default and is recorded here as such.
+
+- **Operator branding injected attributes through `| safe`** (#1537).
+  `brand_logo_url` and `brand_favicon_url` reached `src=`/`href=`
+  unescaped on seven templates, including both login pages and the admin
+  sidebar. `brand_css` keeps its `| safe` — it has to — and the test
+  records why.
+
+- **Signed-URL expiry failed open** (#1542). An unreadable clock read as
+  `0`, which makes `now > exp` false for every timestamp ever minted.
+  It now reads as `u64::MAX`, so an unreadable clock refuses rather than
+  admits.
+
+- **A revoked MCP credential kept working for 60 seconds** (#1539). The
+  raw-key cache skipped argon2 on a hit and nothing invalidated it, so
+  `manage mcp revoke` reported success while the key still opened the
+  door. The cache entry now carries the credential's `secret_prefix` and
+  is dropped when it stops matching — which closes rotation, both
+  directions of clock skew, dialect timestamp precision and cross-tenant
+  redemption with one comparison, rather than four timing rules that
+  each had to be right.
+
+- **The CSRF same-origin check compared only the host** (#1529, partial).
+  `Origin: example.com`, `Origin: null` and a plain `http://` origin
+  against an https site all passed, and an absent header fell back to
+  the raw value. Scheme, host and port are now compared as a triple. The
+  check is still **off by default**; turning it on is a breaking change
+  and stays open.
+
+- **`#[rustango::main]` silently discarded `[logging]`** (#1465). It
+  installed a tracing subscriber before `main` ran, so `Cli::with_logging()`
+  always lost the race and every scaffolded project ignored its own
+  configuration. `Setup::install` now reports a lost race instead of
+  swallowing it.
+
+- **Every fresh non-tenancy project got a migration it could not apply**
+  (#1307). `makemigrations` emitted a registry-scoped `0001` that
+  `migrate` never runs and that later collides with `relation already
+  exists`. The registry snapshot is never empty — the shared tables are
+  pulled into every scope by name — so the emptiness test that was
+  supposed to suppress it could not fire.
+
+- **`AlterColumnMaxLength` refused SQLite** (#1220), where `VARCHAR(n)`
+  and `TEXT` share an affinity and the change is a no-op. MySQL still
+  errors, asserted as a control so an over-broad fix cannot pass for the
+  wrong reason.
+
+- **Documentation drift in `crypto`** (#1536). The module claimed OsRng
+  throughout while `get_random_string` uses `thread_rng`. Both are
+  CSPRNGs and no weak token was ever minted; the doc was wrong, not the
+  code.
+
+### CI
+
+- **A PR into a feature branch ran no jobs at all** (#1586). A
+  `branches:` filter on `pull_request` meant every stacked PR in this
+  repo merged with zero signal. Removed.
+
+- **`jlumbroso/free-disk-space@main`** (#1540) — a mutable ref on an
+  action that runs before checkout and can write the rust-cache. Pinned
+  to v2.0.0's SHA. The issue named one call site; there were two.
+
+- **An ungated `--lib` run under `sqlite,tenancy,sso`.** The only
+  ungated job compiling `tests/**` runs on default features, which
+  include neither `sqlite` nor `testkit`, so several suites compiled to
+  empty crates on an unlabelled PR. This is a partial answer to #1572;
+  the full `--all-features --no-run` job is still open.
+
 ## [0.57.8] — 2026-09-18
 
 A migrations release, and a CI-integrity one.
