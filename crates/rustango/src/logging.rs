@@ -588,16 +588,24 @@ pub fn setup_for_env() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    fn env_lock() -> &'static Mutex<()> {
-        static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-        M.get_or_init(|| Mutex::new(()))
+    /// The suite-wide env lock, shared with `error` and
+    /// `template_debug`.
+    ///
+    /// This was a third private mutex over `RUSTANGO_ENV`. Cargo builds
+    /// the lib tests as one binary, so three separate mutexes over one
+    /// process-global variable serialize nothing against each other —
+    /// widening the window made `error`'s no-leak assertion fail with
+    /// the full driver string in the body. Found by mutation review of
+    /// #1604; the PR that introduced the shared lock removed one
+    /// duplicate and missed this one.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::error::test_env::lock()
     }
 
     #[test]
     fn should_use_json_for_prod_env() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         std::env::set_var("RUSTANGO_ENV", "prod");
         assert!(should_use_json_for_env());
         std::env::set_var("RUSTANGO_ENV", "production");
@@ -607,7 +615,7 @@ mod tests {
 
     #[test]
     fn should_use_pretty_for_other_envs() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         std::env::set_var("RUSTANGO_ENV", "local");
         assert!(!should_use_json_for_env());
         std::env::set_var("RUSTANGO_ENV", "staging");
@@ -617,7 +625,7 @@ mod tests {
 
     #[test]
     fn should_use_pretty_when_unset() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock();
         std::env::remove_var("RUSTANGO_ENV");
         assert!(!should_use_json_for_env());
     }
@@ -703,7 +711,7 @@ mod tests {
         //
         // What *is* deterministic is the `NO_COLOR` contract, which is
         // the part with a specification behind it.
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = env_lock();
         let previous = std::env::var_os("NO_COLOR");
         std::env::set_var("NO_COLOR", "1");
         assert!(

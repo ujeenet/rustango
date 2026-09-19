@@ -2736,8 +2736,10 @@ async fn create_many(
                 let _ = tx.rollback().await;
                 // The entry index is what the caller can act on; the
                 // driver text behind it names tables and constraints,
-                // so it goes to the log only (#1525).
-                let detail = crate::error::server_error_body("viewset::bulk_create::entry", &e);
+                // so it goes to the log only (#1525). `client_error_*`
+                // because this is a 400 a client can drive: logged at
+                // `warn`, and the body must not claim a server fault.
+                let detail = crate::error::client_error_body("viewset::bulk_create::entry", &e);
                 return json_error(
                     StatusCode::BAD_REQUEST,
                     &format!("bulk entry {i}: {detail}"),
