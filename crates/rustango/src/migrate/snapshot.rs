@@ -9,6 +9,32 @@
 use crate::core::{inventory, FieldType, ModelEntry, ModelSchema, Relation};
 use serde::{Deserialize, Serialize};
 
+/// Framework tables that exist in EVERY rustango database — the
+/// registry and each tenant — because both do audits and carry a
+/// content-type catalog. The single-scope migration model cannot say
+/// "both", so they appear in every scope's system migrations and each
+/// database creates its own copy.
+pub const SHARED_SYSTEM_TABLES: &[&str] = &["rustango_audit_log", "rustango_content_types"];
+
+/// `true` when at least one framework model *declares* `scope`.
+///
+/// Not the same as "this scope's snapshot is non-empty".
+/// [`SHARED_SYSTEM_TABLES`] are declared on the tenant scope and
+/// pulled into every other scope by table name, so the registry
+/// snapshot is never empty even in a build that has no registry
+/// database at all. Without the `tenancy` feature that is exactly the
+/// situation: the registry snapshot holds the two shared tables and
+/// nothing else (#1307).
+#[must_use]
+pub fn scope_owns_system_tables(scope: crate::core::ModelScope) -> bool {
+    inventory::iter::<ModelEntry>.into_iter().any(|e| {
+        e.schema.scope == scope
+            && e.schema.table.starts_with("rustango_")
+            && !e.schema.is_view
+            && e.schema.managed
+    })
+}
+
 /// A snapshot of every registered model, ordered by table name.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SchemaSnapshot {
@@ -295,16 +321,14 @@ impl SchemaSnapshot {
     /// of hand-written bootstrap/ensure DDL. User (non-`rustango_`)
     /// models are excluded so the framework's migrations and the app's
     /// own migrations never mix.
+    ///
+    /// Every scope also carries [`SHARED_SYSTEM_TABLES`], so a
+    /// non-empty snapshot does not by itself mean the scope is in use
+    /// — see [`scope_owns_system_tables`].
     #[must_use]
     pub fn from_registry_system_for_scope(scope: crate::core::ModelScope) -> Self {
-        // A few framework tables are "shared" — they exist in EVERY
-        // rustango database (the registry AND each tenant), because both
-        // do audits / carry a content-type catalog. The single-scope
-        // migration model can't say "both", so they're included in every
-        // scope's system migrations (each DB creates its own copy).
-        const SHARED: &[&str] = &["rustango_audit_log", "rustango_content_types"];
         let matching = inventory::iter::<ModelEntry>.into_iter().filter(|e| {
-            (e.schema.scope == scope || SHARED.contains(&e.schema.table))
+            (e.schema.scope == scope || SHARED_SYSTEM_TABLES.contains(&e.schema.table))
                 && e.schema.table.starts_with("rustango_")
                 && !e.schema.is_view
                 && e.schema.managed

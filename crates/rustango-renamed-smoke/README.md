@@ -8,7 +8,7 @@ The Cargo.toml renames the rustango dep to `orm`:
 
 ```toml
 [dependencies]
-orm = { package = "rustango", path = "../rustango", version = "0.57.8" }
+orm = { package = "rustango", path = "../rustango", version = "0.57.9" }
 ```
 
 …then uses every macro entry point through the renamed name and confirms the resulting code compiles + runs.

@@ -2257,11 +2257,17 @@ fn urlencoding_lite(s: &str) -> String {
 /// Drop suspicious next paths — only allow same-origin relative
 /// targets so an attacker can't redirect post-login to an external
 /// site.
+/// Validate a caller-supplied `?next=` before it reaches `Location`.
+///
+/// Delegates to `auth_decorators::safe_next` — see the note in
+/// `tenancy::admin::sanitize_next_with_routes`. The hand-rolled
+/// version here accepted `/\evil.example/x`, which the operator
+/// console then handed to `Redirect::to` on a successful login. That
+/// is the cross-tenant surface, so it mattered more here than
+/// anywhere (#1526).
 fn sanitize_next(next: Option<&str>) -> String {
-    match next {
-        Some(s) if s.starts_with('/') && !s.starts_with("//") && !s.contains("://") => s.to_owned(),
-        _ => "/".to_owned(),
-    }
+    next.and_then(crate::auth_decorators::safe_next)
+        .unwrap_or_else(|| "/".to_owned())
 }
 
 // ============================================================== /orgs/{slug}/impersonate
@@ -2393,6 +2399,62 @@ async fn org_impersonate(
         "minted impersonation handoff token",
     );
     resp
+}
+
+/// #1526. These exercise `sanitize_next` — the function the login
+/// handler actually calls, whose result reaches `Redirect::to` — and
+/// not the public `urls::url_has_allowed_host_and_scheme` helper,
+/// which this codebase never calls and which the original fix went
+/// into.
+#[cfg(test)]
+mod sanitize_next_tests {
+    use super::sanitize_next;
+
+    #[test]
+    fn a_backslash_the_browser_rewrites_is_refused() {
+        // Each reaches the network as protocol-relative `//evil…`
+        // after the browser's `\` → `/` rewrite (WHATWG URL 4.4),
+        // while starting with `/` in the source text.
+        for hostile in [
+            "/\\evil.example/x",
+            "/\\\\evil.example/x",
+            "\\/evil.example/x",
+            "/%5Cevil.example/x",
+        ] {
+            assert_eq!(
+                sanitize_next(Some(hostile)),
+                "/",
+                "`{hostile}` must not reach Location",
+            );
+        }
+    }
+
+    #[test]
+    fn the_classic_shapes_are_still_refused() {
+        for hostile in [
+            "//evil.example/x",
+            "https://evil.example",
+            "javascript:1",
+            // The browser strips TAB, CR and LF while parsing a URL
+            // (WHATWG URL 4.1), so each of these leaves as the
+            // protocol-relative `//evil.example` (#1604 security-001).
+            "/\x09/evil.example/x",
+            "/\x0d/evil.example/x",
+            "/\x0a/evil.example/x",
+        ] {
+            assert_eq!(sanitize_next(Some(hostile)), "/", "{hostile}");
+        }
+        assert_eq!(sanitize_next(None), "/");
+    }
+
+    #[test]
+    fn an_ordinary_path_still_survives() {
+        // The control: tightening must not send every operator to `/`
+        // after login, which would pass the assertions above.
+        for ok in ["/orgs", "/orgs/acme/edit", "/orgs?page=2&q=a"] {
+            assert_eq!(sanitize_next(Some(ok)), ok, "{ok} should survive");
+        }
+    }
 }
 
 #[cfg(test)]

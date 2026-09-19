@@ -227,6 +227,25 @@ pub fn make_migrations_system(
     scope: crate::core::ModelScope,
     name_override: Option<&str>,
 ) -> Result<Option<Migration>, MigrateError> {
+    // Skip the registry scope when no model declares it — i.e. when
+    // this build has no registry database. Its snapshot is still
+    // non-empty there, because the shared tables are pulled into
+    // every scope by name, so it emitted a registry-scoped `0001`
+    // creating two tables the tenant-scope migration already creates.
+    // `migrate_system` only ever applies tenant-scoped migrations, so
+    // that file was written, never applied, and then collided with
+    // `relation already exists` the day the project enabled tenancy
+    // (#1307).
+    //
+    // Deliberately registry-only. In a single-database project the
+    // tenant scope is the one that gets applied and it carries the
+    // shared tables, so suppressing it when it happens to own nothing
+    // else would leave nothing to create them.
+    if scope == crate::core::ModelScope::Registry
+        && !super::snapshot::scope_owns_system_tables(scope)
+    {
+        return Ok(None);
+    }
     let dir = project_root.join("system").join("migrations");
     let migration_scope = match scope {
         crate::core::ModelScope::Registry => super::MigrationScope::Registry,

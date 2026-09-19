@@ -218,6 +218,12 @@ pub fn reverse_owned(name: &str, params: &HashMap<String, String>) -> Result<Str
 ///    injection).
 /// 4. Relative URLs (starting with `/` after the control-char
 ///    strip) are always safe.
+///
+/// Rules 3–5 are applied **twice**: once to the URL as given, and
+/// once with every `\` rewritten to `/`. Browsers do that rewrite
+/// themselves (WHATWG URL §4.4), so `/\evil.example/x` reaches the
+/// network as the protocol-relative `//evil.example/x` while
+/// passing rule 4 as written. Both forms must be safe (#1526).
 /// 5. Absolute URLs must use `http` or `https` (case-insensitive);
 ///    if `require_https`, only `https` is accepted. The host
 ///    must appear in `allowed_hosts` (case-insensitive, port
@@ -240,6 +246,9 @@ pub fn reverse_owned(name: &str, params: &HashMap<String, String>) -> Result<Str
 ///     "//evil.com/x", &["example.com"], false));
 /// assert!(!url_has_allowed_host_and_scheme(
 ///     "javascript:alert(1)", &[], false));
+/// // Backslash the browser will rewrite to `/` — rejected.
+/// assert!(!url_has_allowed_host_and_scheme(
+///     "/\\evil.com/x", &["example.com"], false));
 /// ```
 #[must_use]
 pub fn url_has_allowed_host_and_scheme(
@@ -258,6 +267,22 @@ pub fn url_has_allowed_host_and_scheme(
     if trimmed.chars().any(|c| c.is_control()) {
         return false;
     }
+    // Check the URL as given *and* as the browser will rewrite it.
+    // A backslash may legitimately sit inside userinfo, so neither
+    // form alone is authoritative — require both (#1526).
+    if !check_host_and_scheme(trimmed, allowed_hosts, require_https) {
+        return false;
+    }
+    let unescaped = trimmed.replace('\\', "/");
+    if unescaped != trimmed && !check_host_and_scheme(&unescaped, allowed_hosts, require_https) {
+        return false;
+    }
+    true
+}
+
+/// Rules 3–5 of [`url_has_allowed_host_and_scheme`], on a URL that
+/// has already been trimmed and screened for control characters.
+fn check_host_and_scheme(trimmed: &str, allowed_hosts: &[&str], require_https: bool) -> bool {
     // Rule 3 — protocol-relative / Windows-path injection.
     if trimmed.starts_with("//") || trimmed.starts_with("\\\\") || trimmed.starts_with('\\') {
         return false;
@@ -327,7 +352,15 @@ pub fn url_has_allowed_host_and_scheme(
 /// [`url_has_allowed_host_and_scheme`] for the policy check.
 #[must_use]
 pub fn is_absolute_url(url: &str) -> bool {
-    if url.starts_with("//") {
+    // `//`, and the backslash spellings a browser rewrites into it
+    // (`/\`, `\/`, `\\`). All four are network-path references that
+    // leave for another origin, which is the question this predicate
+    // is asked. `is_relative_url` is its inverse and its rustdoc
+    // offers it as a same-site check, so answering "relative" for
+    // `/\evil.example/x` handed the caller an open redirect — the same
+    // shape as #1526, in the same file (#1604 review, security-008).
+    let b = url.as_bytes();
+    if matches!(b.first(), Some(b'/' | b'\\')) && matches!(b.get(1), Some(b'/' | b'\\')) {
         return true;
     }
     let mut chars = url.chars();
@@ -357,7 +390,15 @@ pub fn is_absolute_url(url: &str) -> bool {
 /// assert!(is_relative_url("page?x=1"));
 /// assert!(!is_relative_url("https://example.com"));
 /// assert!(!is_relative_url("//evil.com"));
+/// assert!(!is_relative_url("/\\evil.com"));   // browser reads as //
 /// ```
+///
+/// **Not a redirect-safety check on its own.** It answers "is this
+/// path-shaped", and says nothing about control characters, which a
+/// browser strips while parsing — `/<TAB>/evil.example` is relative by
+/// this predicate and protocol-relative by the time it is fetched. For
+/// a `?next=` target use [`crate::auth_decorators::safe_next`], which
+/// screens those and is what the framework's own login handlers call.
 #[must_use]
 pub fn is_relative_url(url: &str) -> bool {
     !is_absolute_url(url)
@@ -1253,6 +1294,32 @@ mod querystring_tests {
             &["example.com"],
             false
         ));
+    }
+
+    #[test]
+    fn safe_url_rejects_backslash_the_browser_rewrites_to_slash() {
+        // #1526. Browsers rewrite `\` to `/` (WHATWG URL §4.4), so
+        // each of these reaches the network as protocol-relative
+        // `//evil.com/x` while starting with `/` in the source text
+        // — which rule 4 accepted as "relative, therefore safe".
+        for url in ["/\\evil.com/x", "/\\\\evil.com/x", "\\/evil.com/x"] {
+            assert!(
+                !url_has_allowed_host_and_scheme(url, &["example.com"], false),
+                "{url} must be rejected: the browser sends it to evil.com",
+            );
+        }
+    }
+
+    #[test]
+    fn safe_url_still_accepts_ordinary_relative_paths() {
+        // The control for the test above: the backslash rewrite must
+        // not start rejecting paths that were always safe.
+        for url in ["/account", "/a/b?q=1&r=2", "/x#frag"] {
+            assert!(
+                url_has_allowed_host_and_scheme(url, &["example.com"], false),
+                "{url} is an ordinary relative path and must stay safe",
+            );
+        }
     }
 
     #[test]

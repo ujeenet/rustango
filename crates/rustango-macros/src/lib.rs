@@ -282,6 +282,23 @@ pub fn Q(input: TokenStream) -> TokenStream {
 /// Optional `flavor = "current_thread"` passes through to
 /// `#[tokio::main]`; default is the multi-threaded runtime.
 ///
+/// `logging = false` suppresses the default subscriber, for apps
+/// that install their own. Needed whenever the body reaches
+/// `Cli::with_logging()` or `logging::Setup`: the subscriber this
+/// macro installs gets there first, and `tracing` keeps the first
+/// one, so the `[logging]` section would otherwise be read and
+/// discarded (#1465).
+///
+/// ```ignore
+/// #[rustango::main(logging = false)]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     rustango::manage::Cli::new()
+///         .with_settings_from_env()
+///         .with_logging()          // now the first installer
+///         .run().await
+/// }
+/// ```
+///
 /// Pulls `tracing-subscriber` into the rustango crate behind the
 /// `runtime` sub-feature (implied by `tenancy`), so apps that opt
 /// out get plain `#[tokio::main]` ergonomics without the dependency.
@@ -327,8 +344,12 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // builds the runtime and blocks on the async body.
     let user_body = input.block.clone();
     input.sig.asyncness = None;
-    input.block = syn::parse2(quote! {{
-        {
+
+    // `logging = false` drops the block entirely, so a later
+    // `Cli::with_logging()` is the first installer and its
+    // `[logging]` settings actually take effect (#1465).
+    let logging_prologue = if parse_logging(&args) {
+        quote! {
             use #root::__private_runtime::tracing_subscriber::{self, EnvFilter};
             // Colour only when stdout is a terminal, and never under
             // `NO_COLOR` — `Color::Auto`'s rule, called rather than
@@ -362,6 +383,12 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
                 .with_ansi(__ansi)
                 .try_init();
         }
+    } else {
+        quote! {}
+    };
+
+    input.block = syn::parse2(quote! {{
+        { #logging_prologue }
         let __rt = #builder_call
             .enable_all()
             .build()
@@ -389,6 +416,13 @@ fn parse_flavor(args: &TokenStream2) -> Flavor {
     } else {
         Flavor::MultiThread
     }
+}
+
+/// `false` when the attribute carries `logging = false` — the caller
+/// installs their own subscriber, usually via `Cli::with_logging`
+/// (#1465). Same cheap token match as `parse_flavor`.
+fn parse_logging(args: &TokenStream2) -> bool {
+    !args.to_string().replace(' ', "").contains("logging=false")
 }
 
 /// Parse form for `Q!()` — `<TypePath>.<Ident> = <Expr>`.
@@ -13458,4 +13492,59 @@ fn is_option(ty: &syn::Type) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod main_attr_tests {
+    use super::*;
+
+    fn expand(args: &str) -> String {
+        let body = quote! { async fn main() { run().await } };
+        expand_main(args.parse().unwrap(), body)
+            .expect("expansion failed")
+            .to_string()
+    }
+
+    /// Asserts on the expansion rather than on `parse_logging`,
+    /// because the defect was a subscriber reaching the output, not
+    /// an argument being misread (#1465).
+    #[test]
+    fn logging_false_emits_no_subscriber() {
+        let out = expand("logging = false");
+        assert!(
+            !out.contains("tracing_subscriber"),
+            "`logging = false` must not install a subscriber:\n{out}",
+        );
+        assert!(
+            out.contains("block_on"),
+            "the runtime must still be built:\n{out}",
+        );
+    }
+
+    #[test]
+    fn default_still_installs_a_subscriber() {
+        // The control. Without it, an `expand_main` that dropped the
+        // prologue unconditionally would pass the test above while
+        // leaving every default project with no logging at all.
+        let out = expand("");
+        assert!(
+            out.contains("tracing_subscriber"),
+            "the default entrypoint must still install one:\n{out}",
+        );
+    }
+
+    #[test]
+    fn logging_false_composes_with_flavor() {
+        let out = expand("flavor = \"current_thread\", logging = false");
+        assert!(!out.contains("tracing_subscriber"), "{out}");
+        assert!(out.contains("new_current_thread"), "{out}");
+    }
+
+    #[test]
+    fn logging_true_is_the_default_shape() {
+        // `logging = true` is accepted and means the default, so the
+        // match must not fire on the substring `logging`.
+        assert!(parse_logging(&"logging = true".parse().unwrap()));
+        assert!(!parse_logging(&"logging=false".parse().unwrap()));
+    }
 }

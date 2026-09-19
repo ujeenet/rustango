@@ -967,8 +967,8 @@ impl DetailView {
     ///
     /// Field name must exist on the schema (Rust field name OR
     /// SQL column name); unknown names produce a 500 at request
-    /// time with a clear `template render error: unknown lookup
-    /// field …` message.
+    /// time. The `unknown lookup field …` detail is logged, and
+    /// reaches the response body only on the debug tier (#1525).
     ///
     /// ```ignore
     /// // /posts/{slug} → SELECT … WHERE slug = $1
@@ -2998,22 +2998,36 @@ fn render(tera: &Tera, name: &str, ctx: &Context) -> Response {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             tracing::warn!(target: "rustango::template_views", template = %name, error = %e, "template render failed");
-            // #386 — Django-shape DEBUG overlay. When the active tier
-            // is dev/staging (or RUSTANGO_TEMPLATE_DEBUG=1), serve a
-            // styled HTML page with the full Tera diagnostic instead
-            // of the plain-text 500 fallback. The plain-text path
-            // stays the production default — same stderr/tracing
-            // breadcrumbs, no information leak in the response body.
-            if crate::template_debug::enabled() {
+            // #386 — Django-shape DEBUG overlay: a styled page with
+            // the full Tera diagnostic instead of the plain-text 500.
+            //
+            // Requires **both** the dev tier and the explicit
+            // disclosure opt-in. The overlay renders `Display`,
+            // `Debug` and the whole source chain, which is the same
+            // class of content #1525 removed from 5xx bodies — and it
+            // was reachable on any deployment that had not set
+            // `RUSTANGO_ENV`, i.e. the default, eleven lines above a
+            // comment promising no leak (#1604 review, security-006).
+            //
+            // `template_debug::enabled()` alone still governs whether
+            // this is a *dev* build; `disclose_server_errors` governs
+            // whether a response body may carry a cause. An overlay is
+            // a response body, so it needs both.
+            if crate::template_debug::enabled() && crate::error::disclose_server_errors() {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Html(crate::template_debug::error_page_html(&e, name)),
                 )
                     .into_response();
             }
+            // Not the debug tier: the full diagnostic went to the
+            // `warn!` above, and the body says only that it failed.
+            // It used to interpolate `{e}`, directly under a comment
+            // promising no leak — Tera errors quote template source
+            // and the context keys around the failure (#1525, #1543).
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("template render error: {e}"),
+                "template render error".to_owned(),
             )
                 .into_response()
         }

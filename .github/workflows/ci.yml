@@ -27,33 +27,25 @@ on:
       - develop
       - '**release**'
       - '**Release**'
-  # Only PRs **into** an integration branch reach the workflow.
+  # Every PR reaches the workflow, whatever its base.
   #
-  # `branches:` filters on the *base*, so this is "where is it going",
-  # not "where did it come from". A PR into a feature branch — stacking
-  # work, a review split, someone's scratch base — now runs nothing at
-  # all, where before every PR in the repo pulled the ungated jobs
-  # (`fmt`, `clippy`, `guards`, `doc`, `deny`, `deny-examples`,
-  # `lockfiles`, `trivy`). Those are minutes each and were being spent
-  # on merges that cannot reach `main` without a second PR that runs
-  # them again.
+  # There used to be a `branches:` filter here restricting this to
+  # PRs into `main` / `develop` / `**release**`. `branches:` filters
+  # on the *base*, so a PR into a feature branch — a stack, a review
+  # split, someone's scratch base — matched nothing and ran **no
+  # jobs at all**: no `fmt`, no `clippy`, no `guards`, and no `deny`
+  # or `trivy` either. The saving was real but small, and it was paid
+  # for by the lower half of every stack merging with zero signal
+  # (#1586).
   #
-  # The globs match the `push:` list above deliberately: a branch worth
-  # a post-merge run is a branch worth checking the PR into it.
+  # The `gate` job below still decides whether the expensive matrix
+  # runs, so an unlabelled PR into a feature branch costs the ungated
+  # jobs and nothing more — which is the cost this filter was trying
+  # to avoid and the signal it was accidentally removing.
   #
-  # Once a PR *does* reach the workflow, the `gate` job below decides
-  # whether the expensive matrix runs on top of the ungated jobs.
   # `labeled` is in `types:` so adding the opt-in label to an open PR
   # starts a run immediately rather than waiting for the next push.
-  #
-  # Checking a feature branch that no such PR covers: `workflow_dispatch`
-  # below, or open the PR into its real base.
   pull_request:
-    branches:
-      - main
-      - develop
-      - '**release**'
-      - '**Release**'
     types: [opened, synchronize, reopened, labeled]
   # Lets a run be triggered by hand against any branch, without
   # inventing a no-op commit or opening a throwaway PR — useful for
@@ -285,8 +277,24 @@ jobs:
       # the #1440 policy an unset var is a skip, and these guards must
       # not depend on one. If a guard added here starts needing a
       # database it will fail closed rather than skip silently.
+      # The crate's own unit tests, ungated.
+      #
+      # `--test <name>` builds only that integration target, so every
+      # `#[cfg(test)] mod tests` in `src/` was invisible to this job —
+      # and to every other ungated one: `tests_compile` is `--no-run`,
+      # and `postgres_test` / `feature_combos` / `windows_test` all
+      # `needs: gate`. An unlabelled PR therefore ran **no** lib test
+      # at all. 17 of the 18 assertions added by the 0.57.9 review
+      # round live in `src/`, so almost none of that work was checked
+      # by the green tick on its own PR (#1604 review, tests-002).
+      #
+      # `tenancy,sso` rather than `tenancy` alone: `member_auth` is
+      # gated on `sso`, so its sanitizer tests compile to nothing
+      # without it. No database — these are unit tests.
+      - run: cargo test -p rustango --no-default-features --features sqlite,tenancy,sso --lib
       - run: |
           cargo test -p rustango --features tenancy \
+            --test branding_urls_are_escaped \
             --test docs_links \
             --test docs_contract \
             --test docs_versions \
@@ -299,7 +307,10 @@ jobs:
             --test every_structural_guard_runs_in_ci \
             --test live_suites_fail_loudly \
             --test macro_internals_stays_internal \
+            --test no_orphaned_doc_comments \
+            --test one_redirect_sanitizer \
             --test pool_construction \
+            --test system_migration_scopes \
             --test tracing_targets \
             --test every_test_suite_compiles_in_ci \
             --test logging_fields_agree
@@ -428,8 +439,14 @@ jobs:
       # linking starts. `large-packages: true` was flipped from
       # false because we kept hitting `ld: No space left on device`
       # under load.
+      # SHA-pinned, not `@main` (#1540). This step runs before
+      # checkout and can write anywhere in the workspace, including
+      # the `rust-cache` this job later populates for other jobs, so
+      # a mutable ref here is the widest supply-chain surface in the
+      # file. `ceedf095` is the v2.0.0 release; every other
+      # third-party action is at least tag-pinned.
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
         with:
           tool-cache: false
           android: true
@@ -1308,8 +1325,14 @@ jobs:
           --health-timeout 5s
           --health-retries 30
     steps:
+      # SHA-pinned, not `@main` (#1540). This step runs before
+      # checkout and can write anywhere in the workspace, including
+      # the `rust-cache` this job later populates for other jobs, so
+      # a mutable ref here is the widest supply-chain surface in the
+      # file. `ceedf095` is the v2.0.0 release; every other
+      # third-party action is at least tag-pinned.
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
         with:
           tool-cache: false
           android: true
