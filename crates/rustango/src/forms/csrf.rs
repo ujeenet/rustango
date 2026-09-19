@@ -212,8 +212,11 @@ impl CsrfConfig {
 /// cookie. Returns `true` if the request's Origin header is allowed:
 ///
 /// * No Origin header → allow (some clients / curl don't send it).
-/// * Origin scheme+host matches the request's Host header → allow
-///   (same-origin POST is the common case).
+/// * Origin's scheme **and** host match the request → allow
+///   (same-origin POST is the common case). An Origin that is not
+///   `scheme://host` — empty, the opaque `null`, a bare hostname —
+///   never counts as same-origin, and a plain `http://` Origin does
+///   not match a request that visibly arrived over TLS (#1529).
 /// * Origin matches an entry in `trusted_origins` (exact or
 ///   `*.subdomain.example.com` wildcard) → allow.
 /// * Anything else → reject.
@@ -221,6 +224,52 @@ impl CsrfConfig {
 /// When `trusted_origins` is empty, the layer skips the check
 /// entirely (back-compat default) — the Origin header alone is
 /// not consulted.
+/// Split an `Origin` header into `(scheme, host[:port])`.
+///
+/// `None` when it is not `scheme://host` — an empty header, the
+/// opaque `null`, or a bare hostname. Those are never same-origin.
+fn split_origin(origin: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = origin.split_once("://")?;
+    if scheme.is_empty() || rest.is_empty() {
+        return None;
+    }
+    Some((scheme, rest))
+}
+
+/// `true` when the request visibly arrived over TLS.
+///
+/// Best-effort and deliberately one-directional: it is used only to
+/// *reject* a plain-http Origin, so a proxy that forwards neither
+/// header leaves behaviour exactly as it was rather than locking
+/// anyone out.
+fn request_is_https(req: &Request<Body>) -> bool {
+    if req.uri().scheme_str() == Some("https") {
+        return true;
+    }
+    let h = req.headers();
+    if h.get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("https")
+        })
+    {
+        return true;
+    }
+    // RFC 7239 `Forwarded: proto=https;for=...`
+    h.get("forwarded")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(';')
+                .flat_map(|p| p.split(','))
+                .filter_map(|p| p.trim().strip_prefix("proto="))
+                .any(|p| p.trim_matches('"').eq_ignore_ascii_case("https"))
+        })
+}
+
 fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
     if trusted.is_empty() {
         return true;
@@ -236,19 +285,26 @@ fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
         // protected by the double-submit token check.
         return true;
     };
-    // Same-origin: Origin's host matches the request's Host header.
+    // Same-origin: Origin's scheme AND host must match the request.
     if let Some(host) = req
         .headers()
         .get(axum::http::header::HOST)
         .and_then(|h| h.to_str().ok())
     {
-        let origin_host = origin
-            .split("://")
-            .nth(1)
-            .unwrap_or(origin)
-            .trim_end_matches('/');
-        if origin_host == host {
-            return true;
+        // An Origin that is not `scheme://host` is not same-origin.
+        // This used to fall back to comparing the raw header against
+        // Host, so `Origin: example.com` — and the opaque `Origin:
+        // null` a sandboxed iframe sends — could match (#1529).
+        if let Some((scheme, origin_host)) = split_origin(origin) {
+            let host_matches = origin_host.trim_end_matches('/') == host;
+            // Whenever the request visibly arrived over TLS, a plain
+            // `http://` Origin is a different origin, not this one.
+            // Accepting it let a network attacker who can serve the
+            // http site forge a same-origin POST at the https one.
+            let scheme_ok = !(scheme == "http" && request_is_https(req));
+            if host_matches && scheme_ok {
+                return true;
+            }
         }
     }
     // Trusted-origin allowlist. Support `*.example.com` wildcard.

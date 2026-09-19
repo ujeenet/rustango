@@ -160,3 +160,107 @@ async fn with_trusted_origins_replaces_list() {
         StatusCode::OK
     );
 }
+
+// ---------------------------------------------------------------- #1529
+
+/// Like `post_with_headers`, plus an arbitrary extra header — used to
+/// present the request as having arrived over TLS.
+async fn post_with_proto(
+    app: Router,
+    host: &str,
+    origin: &str,
+    proto_header: Option<(&str, &str)>,
+) -> StatusCode {
+    let mut req = Request::builder()
+        .uri("/post")
+        .method("POST")
+        .header("Host", host)
+        .header("Origin", origin)
+        .header("X-CSRF-Token", TOKEN)
+        .header("Cookie", format!("rustango_csrf={TOKEN}"));
+    if let Some((k, v)) = proto_header {
+        req = req.header(k, v);
+    }
+    let req = req.body(Body::empty()).unwrap();
+    app.oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn an_origin_without_a_scheme_is_not_same_origin() {
+    // The same-origin test used to fall back to comparing the raw
+    // header against Host, so anything spelling the host matched.
+    let app = app(CsrfConfig::default()
+        .allow_insecure_for_dev()
+        .trust_origin("https://app.example.com"));
+    for bogus in ["example.com", "null", "://example.com", "https://"] {
+        assert_eq!(
+            post_with_headers(app.clone(), "example.com", Some(bogus)).await,
+            StatusCode::FORBIDDEN,
+            "`Origin: {bogus}` is not `scheme://host` and must not pass as same-origin",
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_real_same_origin_post_still_passes() {
+    // The control. Tightening the parse must not break the ordinary
+    // browser case these checks exist to allow.
+    let app = app(CsrfConfig::default()
+        .allow_insecure_for_dev()
+        .trust_origin("https://app.example.com"));
+    assert_eq!(
+        post_with_headers(app.clone(), "example.com", Some("https://example.com")).await,
+        StatusCode::OK
+    );
+    // …including with a port, and over plain http when nothing says
+    // the request was TLS.
+    assert_eq!(
+        post_with_headers(app, "example.com:8443", Some("https://example.com:8443")).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn an_http_origin_is_rejected_when_the_request_arrived_over_tls() {
+    let cfg = || {
+        CsrfConfig::default()
+            .allow_insecure_for_dev()
+            .trust_origin("https://app.example.com")
+    };
+    for header in [
+        ("X-Forwarded-Proto", "https"),
+        ("X-Forwarded-Proto", "https, http"),
+        ("Forwarded", "proto=https;for=192.0.2.1"),
+    ] {
+        assert_eq!(
+            post_with_proto(
+                app(cfg()),
+                "example.com",
+                "http://example.com",
+                Some(header)
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "an http Origin is a different origin from the https site ({header:?})",
+        );
+        // Control: the https Origin passes through the same path, so
+        // the rejection is about the scheme and not the header.
+        assert_eq!(
+            post_with_proto(
+                app(cfg()),
+                "example.com",
+                "https://example.com",
+                Some(header)
+            )
+            .await,
+            StatusCode::OK,
+            "the matching https Origin must still pass ({header:?})",
+        );
+    }
+    // Without any TLS signal the scheme is unknown, so behaviour is
+    // unchanged — a proxy forwarding neither header locks nobody out.
+    assert_eq!(
+        post_with_proto(app(cfg()), "example.com", "http://example.com", None).await,
+        StatusCode::OK
+    );
+}
