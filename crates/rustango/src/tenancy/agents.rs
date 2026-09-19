@@ -174,6 +174,7 @@ pub async fn rotate_agent_secret_pool(pool: &Pool, name: &str) -> Result<AgentSe
     agent.secret_hash = hash;
     agent.secret_rotated_at = Some(chrono::Utc::now());
     agent.save_pool(pool).await?;
+    notify_credential_revoked(agent.id.get().copied().unwrap_or_default());
     Ok(AgentSecret { agent, token })
 }
 
@@ -485,6 +486,19 @@ fn notify_grants_changed(slug: &str, agent_id: i64) {
         crate::mcp::notify_prompts_list_changed(slug, Some(agent_id));
         crate::mcp::notify_resources_list_changed(slug, Some(agent_id));
     }
+}
+
+/// Drop any cached raw-key verification for `agent_id`.
+///
+/// Call from every path that invalidates a credential — rotation and
+/// deletion. The MCP verifier caches a positive argon2 result for a
+/// minute, so without this a revoked key kept working for up to that
+/// long after the command returned success (#1539). No-op without
+/// the `mcp` feature.
+#[allow(unused_variables)]
+fn notify_credential_revoked(agent_id: i64) {
+    #[cfg(feature = "mcp")]
+    crate::mcp::invalidate_raw_key_cache(agent_id);
 }
 
 /// Resolve `(agent_id, skill_id)` from human identifiers, erroring if either
@@ -926,6 +940,7 @@ pub async fn revoke_user_key_pool(
         g.delete_pool(pool).await?;
     }
     agent.delete_pool(pool).await?;
+    notify_credential_revoked(agent_id);
     Ok(())
 }
 
@@ -956,6 +971,7 @@ pub async fn delete_user_keys_pool(pool: &Pool, user_id: i64) -> Result<(), Agen
             g.delete_pool(pool).await?;
         }
         agent.delete_pool(pool).await?;
+        notify_credential_revoked(agent_id);
     }
     Ok(())
 }

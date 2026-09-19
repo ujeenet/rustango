@@ -451,6 +451,24 @@ fn raw_key_cache_put(key: [u8; 32], identity: (i64, Option<i64>)) {
     cache.insert(key, (identity, std::time::Instant::now()));
 }
 
+/// Drop every cached verification for `agent_id`.
+///
+/// The cache skips argon2 for `RAW_KEY_CACHE_TTL`, so without this a
+/// rotated or deleted credential kept authenticating for up to a
+/// minute after the command reported success — the window in which
+/// an operator revoking a leaked key most needs the revocation to be
+/// true (#1539).
+///
+/// Keyed by token hash, so entries cannot be found by agent id
+/// directly; the identity is the value, and the cache is capped at
+/// `RAW_KEY_CACHE_CAP`, so the scan is bounded and off the hot path.
+pub fn invalidate_raw_key_cache(agent_id: i64) {
+    let Ok(mut cache) = raw_key_cache().lock() else {
+        return;
+    };
+    cache.retain(|_, ((cached_agent, _), _)| *cached_agent != agent_id);
+}
+
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)?
@@ -638,5 +656,62 @@ mod tests {
         let h = headers("localhost:8080");
         let uri: Uri = "/mcp".parse().unwrap();
         assert_eq!(mount_base(&h, &uri, ""), "http://localhost:8080/mcp");
+    }
+
+    /// The raw-key cache is process-global, so these serialize.
+    fn cache_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn revoking_an_agent_drops_its_cached_verification() {
+        let _g = cache_lock();
+        raw_key_cache().lock().unwrap().clear();
+
+        let revoked = raw_key_cache_key("acme", "tok-revoked");
+        let other = raw_key_cache_key("acme", "tok-other");
+        raw_key_cache_put(revoked, (7, None));
+        raw_key_cache_put(other, (8, None));
+
+        // Precondition: the cache is what makes the key keep working.
+        assert_eq!(raw_key_cache_get(&revoked), Some((7, None)));
+
+        invalidate_raw_key_cache(7);
+
+        assert_eq!(
+            raw_key_cache_get(&revoked),
+            None,
+            "a revoked agent's cached verification must be gone at once, \
+             not after the 60s TTL — that window is exactly when an \
+             operator revoking a leaked key needs it to be true (#1539)",
+        );
+        assert_eq!(
+            raw_key_cache_get(&other),
+            Some((8, None)),
+            "revoking agent 7 must not evict agent 8 — an over-broad \
+             clear would pass the assertion above for the wrong reason",
+        );
+    }
+
+    #[test]
+    fn invalidating_drops_every_token_for_one_agent() {
+        // An agent can have more than one live cache entry: the key is
+        // the token hash, and `verify_raw_agent_credential` accepts
+        // both the full `prefix.secret` and the bare secret.
+        let _g = cache_lock();
+        raw_key_cache().lock().unwrap().clear();
+
+        let full = raw_key_cache_key("acme", "pfx.secret");
+        let bare = raw_key_cache_key("acme", "secret");
+        raw_key_cache_put(full, (9, Some(42)));
+        raw_key_cache_put(bare, (9, Some(42)));
+
+        invalidate_raw_key_cache(9);
+
+        assert_eq!(raw_key_cache_get(&full), None);
+        assert_eq!(raw_key_cache_get(&bare), None, "both spellings must go");
     }
 }
