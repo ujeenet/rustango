@@ -258,10 +258,10 @@ pasando el pool:
 ```rust
 // src/blog/urls.rs (or your urls::api aggregator)
 use axum::Router;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use crate::blog::post_view_set::PostViewSet;
 
-pub fn api(pool: PgPool) -> Router {
+pub fn api(pool: Pool) -> Router {
     Router::new()
         .merge(PostViewSet::router("/api/posts", pool))
 }
@@ -366,11 +366,11 @@ respuestas HTTP reales sin arrancar un servidor:
 // tests/post_api.rs
 use rustango::test_client::TestClient;
 use myblog::blog::post_view_set::PostViewSet;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
+    let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
     PostViewSet::router("/api/posts", pool)
 }
 

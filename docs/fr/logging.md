@@ -71,7 +71,7 @@ supplémentaire est donc sans effet plutôt qu'une panique :
 
 ```rust,ignore
 fn main() {
-    rustango::logging::setup();   // pretty, filtre d'environnement, "info,sqlx=warn"
+    rustango::logging::setup();   // full, filtre d'environnement, "info,sqlx=warn"
     // ...
 }
 ```
@@ -169,7 +169,9 @@ comme les lignes ci-dessus.
 
 | Format | Pour quoi | Comment |
 |---|---|---|
-| `pretty` | Développement — couleur, multiligne, lisible | par défaut |
+| `full` | Le défaut — une ligne par événement, avec le contexte de span | par défaut |
+| `pretty` | Développement — multiligne, un champ par ligne, position source | `.with_format(Format::Pretty)` |
+| `compact` | Développement — ligne unique plus concise, champs de span à la fin | `.with_format(Format::Compact)` |
 | `json` | Production — un objet par événement, pour Loki / CloudWatch / Datadog | `.json()` |
 
 ```rust,ignore
@@ -180,7 +182,7 @@ rustango::logging::Setup::new()
 ```
 
 Ou laissez le palier décider. `setup_for_env()` lit `RUSTANGO_ENV` et choisit
-JSON quand la valeur est `prod` ou `production`, pretty sinon :
+JSON quand la valeur est `prod` ou `production`, `full` sinon :
 
 ```rust,ignore
 rustango::logging::setup_for_env();

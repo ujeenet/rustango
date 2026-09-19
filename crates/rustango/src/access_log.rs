@@ -226,9 +226,12 @@ impl AccessLogLayer {
 /// exists to remove, just narrowed to project-specific names.
 /// Gated to its callers. `Cli::mount_observability` needs `manage` and
 /// `server::Builder` needs `tenancy`; a build with `admin` but neither
-/// — `postgres,admin`, which `feature_combos` checks — has no caller,
+/// — `sqlite,admin`, which `feature_combos` checks — has no caller,
 /// and `-D warnings` makes dead code a build failure there. Same shape
 /// as #1485, caught the same way.
+///
+/// (This named `postgres,admin`, which is not in the matrix. The gate
+/// is enforced, just by a different row — #1507.)
 #[cfg(any(feature = "manage", feature = "tenancy"))]
 #[must_use]
 pub(crate) fn mount_observability(router: Router, access_log: Option<AccessLogLayer>) -> Router {

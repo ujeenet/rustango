@@ -159,9 +159,11 @@ done
 # here, so they are printed rather than assumed correct.
 #
 # This list is the ONLY thing standing between an unrecognised claim shape and
-# a silently stale version. The verification below deliberately checks the same
-# shapes the rewriter handles, so by construction it cannot catch a sixth. That
-# is why this is a stop-and-read rather than a log line: the earlier version
+# a silently stale version. The verification below checks a SUBSET of what the
+# rewriter handles — six full-version shapes against the pass's eight — so it
+# cannot catch an unrecognised shape, and does not even cover the two
+# series-version substitutions (see the note above CLAIM, and #1605). That is
+# why this is a stop-and-read rather than a log line: the earlier version
 # printed the list and then exited 1 on it, which was wrong but at least loud.
 # Dropping straight through to "clean" would have been the worse failure.
 LEFT=$(git grep -nE "(^|[^0-9.])${OLD//./\\.}([^0-9.]|$)" -- . \
@@ -224,8 +226,13 @@ echo "verifying nothing still claims $OLD"
 # Prose naming an old release is supposed to keep its number; that is the
 # whole reason the rewrite is anchored. So the verification has to ask the
 # narrower question the rewrite asks: does any *claim about the current
-# version* still say OLD? The alternation below is the same six shapes the
-# perl pass rewrites, and nothing else.
+# version* still say OLD? The alternation below is the six FULL-version
+# shapes the perl pass rewrites, and nothing else.
+#
+# The perl pass also rewrites two SERIES-version shapes (`rustango = "0.57"`
+# bare and inside an inline table). Those are not checked here — this grep
+# looks for OLD, the full version, which a series claim never contains. So a
+# stale series claim is rewritten but never verified. See #1605.
 CLAIM='(version[[:space:]]*=[[:space:]]*"|"version"[[:space:]]*:[[:space:]]*"|version:[[:space:]]+|--version[[:space:]]+"?|^rustango[[:space:]]+|^(cargo-)?rustango[a-z-]*[[:space:]]*=[[:space:]]*")'
 stale=$(git grep -nE "${CLAIM}${OLD//./\\.}([^0-9.]|\$)" -- . \
   ':(exclude)CHANGELOG.md' ':(exclude)*Cargo.lock' || true)

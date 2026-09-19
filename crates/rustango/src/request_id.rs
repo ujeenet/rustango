@@ -1,23 +1,52 @@
 //! Request ID middleware — assign a unique ID to every incoming request.
 //!
 //! Adds an `X-Request-Id` response header and exposes the value via the
-//! [`RequestId`] axum extractor so handlers can include it in log events.
+//! [`RequestId`] axum extractor.
 //!
 //! Honors an inbound `X-Request-Id` header by default (useful for chained
 //! services that want to propagate IDs end-to-end), or always generates
 //! a fresh one with [`RequestIdLayer::always_generate`].
 //!
+//! ## Getting the id onto your log lines
+//!
+//! **Mount [`crate::tracing_layer::TracingLayer`] as well**, and then
+//! you do not have to do anything else. Since #1480 the request span
+//! declares a `request_id` field and [`record`] fills it, so **every**
+//! event emitted during the request carries it — including ones from
+//! the ORM and from code that has never heard of a request id.
+//!
+//! That layer is not optional for this. [`record`] is
+//! `Span::current().record("request_id", …)`, which is a **no-op**
+//! when the current span has no such field — so this layer on its own
+//! sets the response header and leaves your log lines bare.
+//! `Cli::mount_observability` mounts both for you; wiring the router
+//! by hand means mounting both by hand.
+//!
+//! This header used to show `tracing::info!(req_id = %id.0, …)` on
+//! every call site instead. That is the tedious way, it silently
+//! misses the events you did not write, and the field name differs
+//! from the span's, so following it puts a *second*,
+//! differently-named id on the same line (#1505). Correcting that
+//! without naming the span layer was its own defect: a reader
+//! dropping `req_id` from a router that mounts only this layer loses
+//! correlation entirely, which is worse than what they started with
+//! (#1606 review, correctness).
+//!
 //! ## Quick start
 //!
 //! ```ignore
 //! use rustango::request_id::{RequestIdLayer, RequestIdRouterExt, RequestId};
+//! use rustango::tracing_layer::TracingLayer;
 //!
 //! let app = Router::new()
 //!     .route("/me", get(handler))
-//!     .request_id(RequestIdLayer::default());
+//!     .request_id(RequestIdLayer::default())
+//!     // Without this the id reaches the response header but not the log.
+//!     .layer(TracingLayer::new());
 //!
+//! // No `req_id = …`: the span carries `request_id` for every event.
 //! async fn handler(id: RequestId) -> String {
-//!     tracing::info!(req_id = %id.0, "handling /me");
+//!     tracing::info!("handling /me");
 //!     format!("request {}", id.0)
 //! }
 //! ```

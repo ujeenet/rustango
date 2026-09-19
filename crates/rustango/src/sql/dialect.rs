@@ -330,10 +330,13 @@ pub trait Dialect: Send + Sync {
     /// constraint is absent rather than doing nothing.
     ///
     /// This lives on the dialect rather than in the migration writer
-    /// because it had drifted into four hand-written copies — two in
-    /// `migrate/diff.rs` and two in `migrate/ddl.rs` — and two of them
-    /// emitted the PostgreSQL form to MySQL, which is `ERROR 1064`
-    /// (#559). A caller that cannot spell the statement itself cannot
+    /// because it had drifted into hand-written copies across
+    /// `migrate/diff.rs` and `migrate/ddl.rs`, some of which emitted
+    /// the PostgreSQL form to MySQL, which is `ERROR 1064` (#559).
+    /// (This said "four — two in each"; the split was never that
+    /// even, and a bare count rots the moment an arm moves, so the
+    /// files are named instead — #1507.)
+    /// A caller that cannot spell the statement itself cannot
     /// spell it wrongly.
     /// `None` means this dialect has no `ALTER TABLE … DROP CONSTRAINT`
     /// at all — SQLite. Returning a `String` unconditionally meant the
