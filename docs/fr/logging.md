@@ -126,6 +126,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::cors` | Décisions de politique CORS |
 | `rustango::email` | Envoi de courrier |
 | `rustango::email::smtp` | Transport SMTP |
+| `rustango::error` | La cause d'une 5xx, que le corps de la réponse ne divulgue pas |
 | `rustango::humanize` | Filtres humanize |
 | `rustango::jobs` | Files de tâches de fond |
 | `rustango::logging` | Avertissements de ce sous-système lui-même |

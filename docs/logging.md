@@ -121,6 +121,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::cors` | CORS policy decisions |
 | `rustango::email` | Mail dispatch |
 | `rustango::email::smtp` | SMTP transport |
+| `rustango::error` | The cause behind a 5xx, which the response body withholds |
 | `rustango::humanize` | Humanize filters |
 | `rustango::jobs` | Background job queues |
 | `rustango::logging` | This subsystem's own warnings |

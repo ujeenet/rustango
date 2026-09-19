@@ -124,6 +124,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::cors` | Decisiones de política CORS |
 | `rustango::email` | Envío de correo |
 | `rustango::email::smtp` | Transporte SMTP |
+| `rustango::error` | La causa de un 5xx, que el cuerpo de la respuesta omite |
 | `rustango::humanize` | Filtros de humanize |
 | `rustango::jobs` | Colas de trabajos en segundo plano |
 | `rustango::logging` | Avisos del propio subsistema |
