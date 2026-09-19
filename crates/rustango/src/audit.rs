@@ -295,10 +295,34 @@ fn audit_select_sql(dialect: &dyn crate::sql::Dialect) -> String {
 
 /// v0.37 — render the `DELETE … WHERE occurred_at < $1` used by
 /// [`cleanup_older_than_pool`] through the dialect emitter.
+///
+/// On SQLite the comparison normalises the **stored** side first, so it
+/// is correct whether the row carries the pre-#1464 `CURRENT_TIMESTAMP`
+/// shape or the RFC3339 one written now.
+///
+/// This is deliberately belt-and-braces with the `migrate` sweep. That
+/// sweep converts the stored rows, and after it runs the `CASE` never
+/// fires — but it runs on `migrate`, and this is a **DELETE**. Between
+/// upgrading the crate and running migrations, a legacy row compared
+/// against an RFC3339 bind is "less than" everything, so the retention
+/// sweep would delete history it was asked to keep. Everywhere else
+/// that window costs a wrong query result, which is the pre-existing
+/// bug continuing; here it would destroy data, which would be a new one.
+///
+/// The `CASE` costs the index on this path. That is the right trade for
+/// a retention sweep, which scans by definition and runs rarely.
 fn audit_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
     let t = dialect.quote_ident("rustango_audit_log");
     let oa = dialect.quote_ident("occurred_at");
     let p1 = dialect.placeholder(1);
+    if dialect.name() == "sqlite" {
+        let fmt = crate::sql::SQLITE_DATETIME_FORMAT;
+        let legacy = crate::sql::SQLITE_LEGACY_DATETIME_LIKE;
+        return format!(
+            "DELETE FROM {t} WHERE \
+             (CASE WHEN {oa} LIKE '{legacy}' THEN strftime('{fmt}', {oa}) ELSE {oa} END) < {p1}"
+        );
+    }
     format!("DELETE FROM {t} WHERE {oa} < {p1}")
 }
 
@@ -1006,19 +1030,20 @@ pub async fn cleanup_older_than_pool(
     let cutoff = cutoff_days.max(0);
     let cutoff_ts = chrono::Utc::now() - chrono::Duration::days(cutoff);
     let sql = audit_cleanup_older_than_sql(pool.dialect());
-    // #560 — `occurred_at` is `TEXT DEFAULT CURRENT_TIMESTAMP` on
-    // SQLite (`CREATE_TABLE_SQL_SQLITE`). SQLite's CURRENT_TIMESTAMP
-    // emits `"YYYY-MM-DD HH:MM:SS"` (space sep, no fractional, no
-    // timezone); sqlx-sqlite would otherwise encode a
-    // `chrono::DateTime<Utc>` as RFC3339, and lex-compare diverges
-    // at position 10 (space < T). Bind the SQLite cutoff in the
-    // same CURRENT_TIMESTAMP shape. PG / MySQL keep the native
-    // DateTime binding via `SqlValue::DateTime`.
-    let bind = if pool.dialect().name() == "sqlite" {
-        SqlValue::String(cutoff_ts.format("%Y-%m-%d %H:%M:%S").to_string())
-    } else {
-        SqlValue::DateTime(cutoff_ts)
-    };
+    // #560's SQLite special case is gone as of #1464, and removing it
+    // is required rather than tidy-up: it bound the cutoff in the old
+    // `YYYY-MM-DD HH:MM:SS` shape to match what SQLite's
+    // `CURRENT_TIMESTAMP` default wrote. That default is now a
+    // `strftime` in the RFC3339 shape, and `migrate` converts rows
+    // already stored the old way, so a legacy-shaped bind would be the
+    // side that no longer compares — the same defect, pointed the
+    // other way.
+    //
+    // `occurred_at` reaches the fix through the ordinary path: the
+    // column is `#[rustango(default = "now()")]` on `AuditLog`, and
+    // `ensure_table_pool` renders it from `AuditLog::SCHEMA` through
+    // the dialect's `translate_default_expr`.
+    let bind = SqlValue::DateTime(cutoff_ts);
     // #561 — was a 3-arm `match pool` that bound per-backend by
     // hand. The bind dispatch already lives in `raw_execute_pool`'s
     // internals — share the same path every other helper uses.

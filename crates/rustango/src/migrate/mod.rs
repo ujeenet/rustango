@@ -40,6 +40,10 @@ pub mod progress;
 mod runner;
 pub mod scaffold;
 pub mod snapshot;
+/// Rewriting `SQLite` datetime columns written by the pre-#1464 default
+/// onto the one shape that compares against a Rust-bound timestamp.
+#[cfg(feature = "sqlite")]
+pub mod sqlite_datetime;
 
 pub use diff::{
     detect_changes, detect_unsupported_field_changes, render_changes,

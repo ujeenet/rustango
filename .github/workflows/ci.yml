@@ -310,6 +310,7 @@ jobs:
             --test no_orphaned_doc_comments \
             --test one_redirect_sanitizer \
             --test pool_construction \
+            --test sqlite_datetime_ddl_is_consistent \
             --test system_migration_scopes \
             --test tracing_targets \
             --test every_test_suite_compiles_in_ci \
