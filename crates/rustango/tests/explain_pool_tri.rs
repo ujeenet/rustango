@@ -12,7 +12,15 @@
 //! | | PostgreSQL | MySQL | SQLite |
 //! |---|---|---|---|
 //! | JSON shape | array | **object** | array |
-//! | `analyze: true` | runs it, reports timings | accepted | silently ignored |
+//! | `analyze: true` | runs it, reports timings | runs it, reports timings (8.0.18+) | silently ignored |
+//!
+//! The MySQL cell read "accepted" until #1506 — the pre-correction
+//! reading, where the flag is tolerated but the plan stays an estimate.
+//! Making the ANALYZE assertion two-sided showed that false, and the
+//! arms below were fixed while this table was not. **The arms are
+//! authoritative**: they carry the same facts with a `because` string
+//! each, and the macro will not compile if one goes missing, which a
+//! hand-maintained table cannot promise.
 //!
 //! A shared body could paper over that by asserting only `!plan.is_empty()`
 //! on all three. The suite would stay green and stop testing anything.

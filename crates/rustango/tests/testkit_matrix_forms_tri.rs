@@ -2,14 +2,15 @@
 //!
 //! `explain_pool_tri` and `bulk_upsert_tri` both use the common shape —
 //! `model:` plus in-memory SQLite. This file covers the other two, which
-//! exist because 29 of the 192 SQLite suites cannot use either:
+//! exist because a minority of the 188 `*_sqlite_live.rs` suites cannot
+//! use either:
 //!
 //! * **`setup:`** — the suite builds its own tables. The job queue calls
 //!   `ensure_table_pool`; a migration suite runs migrations. There is no
 //!   single model whose schema describes the state they need.
 //! * **`sqlite: file`** — for WAL journalling, file locking, or a second
 //!   *process*. **Not** for cross-connection visibility: that was the
-//!   stated reason those 29 suites reach for a temp file, and it is
+//!   stated reason those suites reach for a temp file, and it is
 //!   false. sqlx shares an in-memory database across a pool's
 //!   connections, measured with a barrier forcing eight simultaneous
 //!   ones (`sqlite_file_pool`'s doc carries the measurement). This

@@ -2,11 +2,19 @@
 //! (#1431).
 //!
 //! The module carries "**Not part of the public API; do not import**"
-//! and had fourteen importers — ten in-tree tests, the cookbook's
-//! chapter-3 test, and two in the flagship example's own **request
-//! handlers**. A reader copying that pattern copied an import the crate
-//! forbids, against a function `cargo doc` will not show them because
-//! the module is `#[doc(hidden)]`.
+//! and had fourteen call sites across twelve files: nine in-tree
+//! tests, four in the `cookbook_blog` example (two in its request
+//! handlers, two in its chapter-3 test) and one in **rustango's own
+//! library**, `tenancy::permissions`. A reader copying that pattern
+//! copied an import the crate forbids, against a function `cargo doc`
+//! will not show them because the module is `#[doc(hidden)]`.
+//!
+//! (The breakdown used to read "ten in-tree tests, the cookbook's
+//! chapter-3 test, and two in the flagship example" — which sums to
+//! thirteen, counts `cookbook_blog` twice under two names, and omits
+//! the library's own call site, the one that most undermines the
+//! prohibition. This guard still cannot see that site: it walks
+//! `tests/` and `examples/` only — #1519, #1516.)
 //!
 //! They were not misusing it. There was no public way to run an
 //! aggregate or a prefetch against a specific executor rather than a

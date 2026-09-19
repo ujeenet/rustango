@@ -69,7 +69,7 @@ ist also ein No-op und kein Panic:
 
 ```rust,ignore
 fn main() {
-    rustango::logging::setup();   // pretty, Env-Filter, "info,sqlx=warn"
+    rustango::logging::setup();   // full, Env-Filter, "info,sqlx=warn"
     // ...
 }
 ```
@@ -167,7 +167,9 @@ die Zeilen oben.
 
 | Format | Wofür | Wie |
 |---|---|---|
-| `pretty` | Entwicklung — farbig, mehrzeilig, lesbar | Default |
+| `full` | Der Default — eine Zeile pro Event, mit Span-Kontext | Default |
+| `pretty` | Entwicklung — mehrzeilig, ein Feld pro Zeile, Quellposition | `.with_format(Format::Pretty)` |
+| `compact` | Entwicklung — knappere Einzelzeile, Span-Felder am Ende | `.with_format(Format::Compact)` |
 | `json` | Produktion — ein Objekt pro Event, für Loki / CloudWatch / Datadog | `.json()` |
 
 ```rust,ignore
@@ -178,7 +180,7 @@ rustango::logging::Setup::new()
 ```
 
 Oder überlassen Sie die Wahl der Stufe. `setup_for_env()` liest `RUSTANGO_ENV`
-und nimmt JSON, wenn der Wert `prod` oder `production` ist, sonst pretty:
+und nimmt JSON, wenn der Wert `prod` oder `production` ist, sonst `full`:
 
 ```rust,ignore
 rustango::logging::setup_for_env();

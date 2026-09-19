@@ -961,6 +961,14 @@ looked correct and had passing tests.
   anyone. It now refuses a key under 32 bytes, the floor `JwtBackend::new` and
   `auth_routes::build_jwt` already enforced. Audit A-06.
 
+- **`SessionSecret::from_bytes` now panics on a key under 32 bytes.** Same
+  floor and same reasoning as `JwtLifecycle::new` above — which the change's
+  own doc comment cites as its precedent — and a forged session cookie on the
+  operator console is a larger blast radius than a forged JWT. A caller passing
+  a shorter key panics at startup. `UPGRADING.md` documented this; the release
+  notes did not, so a reader skimming for what breaks saw one of the two
+  (#1507).
+
 - **The key-floor panic no longer names the key's length.** CodeQL
   `rust/cleartext-logging`: a panic message reaches logs and crash reports, and
   the length of a signing key is information about it.
@@ -979,9 +987,13 @@ looked correct and had passing tests.
 
   Two unit tests asserted the unparseable string and held it in place. Both
   were named `…_uses_backticks` and both did check the quoting; the statement
-  around the quoting was simply never run against a server. **The MySQL drop is
-  not idempotent** — error 3821 when the constraint is absent — where the
-  PostgreSQL one is.
+  around the quoting was simply never run against a server. **Neither MySQL
+  drop is idempotent**, where the PostgreSQL ones are, and they raise different
+  errors: `DROP CHECK` on an absent constraint is **3821**
+  (`ER_CHECK_CONSTRAINT_NOT_FOUND`), `DROP FOREIGN KEY` on an absent key is
+  **1091** (`ER_CANT_DROP_FIELD_OR_KEY`). A retry predicate written from 3821
+  alone hard-fails the first time a composite FK is dropped twice — mid-deploy,
+  on the composite-FK half of this very fix (#1517).
 
 - **[#559](https://github.com/ujeenet/rustango/issues/559) — `RenameTable` and
   `RenameColumn` emitted hardcoded double quotes to every dialect.** The
@@ -992,8 +1004,8 @@ looked correct and had passing tests.
 
   Both renames are portable (MySQL 8.0, SQLite 3.25+), so unlike the
   neighbouring `ALTER COLUMN` arms they needed no capability guard — only the
-  dialect's quoting, which they now use. Found two arms away from the
-  `DROP CONSTRAINT` fix above, in the same `match`.
+  dialect's quoting, which they now use. Found in the same `match` as the
+  `DROP CONSTRAINT` fix above, a few arms away.
 
 - **`bin/bump-version.sh` could not complete a bump.** The rewriting pass was
   narrowed to anchored version *claims* so that prose about an old release keeps
@@ -1001,7 +1013,9 @@ looked correct and had passing tests.
   version and exited 1 on every prose hit — including the script's own usage
   examples. It rewrote the files, regenerated the lockfiles, printed the lines
   it had deliberately left alone, and then died naming those same lines. The
-  verification now checks the five claim shapes the rewrite handles.
+  verification now checks the six claim shapes the rewrite handled at this
+  release. (It said five; the perl pass and the alternation both had six —
+  #1522.)
 
 - **The live-suite table counted every tri suite as needing no server.**
   `docs/testing.md` and its three translations classify a suite by the
@@ -1023,11 +1037,16 @@ looked correct and had passing tests.
   and discards earlier ones, so merging three commits in quick succession left
   the middle one with no build at all.
 
-  `fmt`, `clippy`, `doc`, `deny`, `deny-examples`, `lockfiles` and `trivy` are
-  **not** gated and run on every pull request. Gating them was a mistake in the
-  first cut: it meant a feature PR into `develop` merged with no signal
-  whatsoever, including no dependency-advisory or container scan, when the
-  intent was only to defer the live matrix.
+  `fmt`, `clippy`, `guards`, `doc`, `deny`, `deny-examples`, `lockfiles` and
+  `trivy` are **not** gated and run on every pull request. Gating them was a
+  mistake in the first cut: it meant a feature PR into `develop` merged with no
+  signal whatsoever, including no dependency-advisory or container scan, when
+  the intent was only to defer the live matrix.
+
+  (This list named seven of the eight, omitting `guards` — the job that runs
+  this release's own new structural guards. Corrected as a historical record of
+  what 0.57.6 shipped; the ungated set has changed since, and `tests_compile`
+  joined it later — #1521.)
 
 - **Six suites converted to one body across three dialects** — `bulk_upsert`,
   `values`, `regex`, `json_path`, `explain_pool`, plus the harness's own forms.
@@ -1055,8 +1074,13 @@ looked correct and had passing tests.
   check sat inside a one-sided `if`, so the arms selecting `false` bought no
   coverage. Making it two-sided immediately showed the MySQL arm's stated reason
   was false: it claimed the framework does not opt into `EXPLAIN ANALYZE` and
-  that the plan stays an estimate, and MySQL 8.0.46 reports real `actual time=`
-  measurements. The claim is corrected.
+  that the plan stays an estimate, and **MySQL 8.0.18+** reports real
+  `actual time=` measurements — 8.0.18 being the release that shipped
+  `EXPLAIN ANALYZE`. The claim is corrected.
+
+  (This credited 8.0.46, which is only the server the CI leg happened to run
+  against. Stated as a floor everywhere else in this document, so a reader on
+  8.0.30 would conclude their server could not do it — #1523.)
 
 - `regex_tri` regained `not_iregex` and the runtime `__iregex` lookup, which the
   conversion dropped and which no live suite covered afterwards.
@@ -1097,10 +1121,34 @@ sets no CORS — so the notes below are for hand-written apps.
 
   **You must update** any **custom admin template** with a POST form, and any
   **custom admin view registered with `Method::POST`** — both are mounted inside
-  the new layer and will return `403` until the form carries a token. Add
-  `{{ csrf_input | safe }}` inside the `<form>` (the variable is in every admin
-  template's context automatically), or send `X-CSRF-Token`. The bundled
-  templates are already done.
+  the new layer and will return `403` until the form carries a token. The two
+  halves need different fixes:
+
+  - **Custom template, built-in view.** Add `{{ csrf_input | safe }}` inside the
+    `<form>`. The built-in view built the context, so the variable is there.
+  - **Custom `Method::POST` view.** It builds its own context, and the injector
+    (`chrome_context`) is `pub(crate)` — so `csrf_input` is *not* defined and
+    Tera renders it empty, giving a form that 403s on every submit. Put the
+    token in yourself:
+
+    ```rust,ignore
+    // Outside a request there is no token. Render nothing rather than
+    // an empty `value=""`, which is what the framework's own injector
+    // does — an empty hidden field submits and then 403s, which is the
+    // failure this note exists to prevent.
+    let csrf_input = match rustango::admin::session::current_csrf_token() {
+        Some(t) if !t.is_empty() => rustango::forms::csrf::csrf_input_html(&t),
+        _ => String::new(),
+    };
+    ctx.insert("csrf_input", &csrf_input);
+    ```
+
+  Or send `X-CSRF-Token`. The bundled templates are already done.
+
+  (This said the variable "is in every admin template's context automatically",
+  which is true only for the first half — while the same sentence tells you to
+  fix the second. A reader following it ships a 403ing form and goes looking
+  for a bug in the layer — #1518.)
 
   Only applies when you call `.with_session_auth(...)`; CSRF defends
   cookie-borne credentials, and an admin without it has none.
@@ -1217,8 +1265,10 @@ sets no CORS — so the notes below are for hand-written apps.
 - **`bin/bump-version.sh`** — the release version is repeated across 25 sites
   cargo will not fix (four manifest pins, the `manage version` / `manage about`
   transcripts, the MCP `serverInfo` and the `cargo install` line in all four doc
-  languages) plus nine lockfiles. A hand pass on this release missed one; the
-  script found it. Lockfiles are regenerated with `cargo metadata`, never
+  languages) plus every tracked lockfile. A hand pass on this release missed
+  one; the script found it. Lockfiles are discovered with
+  `git ls-files '*Cargo.lock'` rather than listed, so adding an example crate
+  needs no edit here; they are regenerated with `cargo metadata`, never
   edited, and `CHANGELOG.md` is left alone because its older headings are
   history.
 - **`docker/soak/`** — the commerce soak: two scaffolder-generated applications,
@@ -1382,9 +1432,11 @@ reachable that way.
 - **A documented prohibition the framework's own example violated** (#1431).
   The executor-taking query operations — now public, see Added — lived in
   `sql::__macro_internals`, marked `#[doc(hidden)]` and "do not import", with
-  **fourteen importers** — ten in-tree tests, the cookbook, and
-  two in the flagship example's own request handlers. Not misuse: there was no
-  public way to do it, and `cargo doc` would not show the functions. Four of
+  **fourteen call sites across twelve files** — nine in-tree tests, four in
+  the `cookbook_blog` example (two request handlers, two in its chapter-3
+  test), and one in rustango's own library, `tenancy::permissions`. Not
+  misuse: there was no public way to do it, and `cargo doc` would not show
+  the functions. Four of
   them — `fetch_aggregate_on`, `select_rows_on` and the two
   `annotate_count_children` forms — were **never emitted by the macro at all**;
   they had been filed as codegen support and were never that.
@@ -1497,9 +1549,16 @@ reachable that way.
   server. `s3_live_presign` went from "3 passed in 0.00s" to 3.03s once a real
   endpoint existed. A new `s3_live` job runs it against MinIO.
 
-  The 22 media tests are `#[ignore]`d rather than wired in, because pointing
-  them at a real Postgres for the first time made all 22 fail — on #1450, a
-  framework bug they were written to catch and never got the chance to.
+  The 22 media tests are wired into the same `s3_live` job. Pointing them at a
+  real Postgres for the first time made all 22 fail — on #1450, a framework bug
+  they were written to catch and never got the chance to — and they pass now,
+  as the #1450 entry above says. They skip via `maybe_setup()` returning `None`
+  when the env vars are unset, the #1440 policy, rather than `#[ignore]`; a set
+  but unreachable `DATABASE_URL` still panics.
+
+  (This entry said they were `#[ignore]`d rather than wired in, which is the
+  inverse of what shipped and contradicted the #1450 entry twenty lines above
+  it — #1515.)
 
 - **Job retry backoff was `2s, 4s, 8s, 16s`, not the documented `1s, 2s, 4s,
   8s`** (#1410). The shift ran off the 1-based `next_attempt`, so every wait was
@@ -1540,8 +1599,11 @@ reachable that way.
 
 ### Dependencies
 
-- **All nine lockfiles refreshed** — the workspace and all eight example
-  crates. 37 transitive crates move in the workspace lock, including
+- **All eleven lockfiles refreshed** — the workspace and all ten example
+  crates. (Nine/eight was the count at v0.57.1; this release added
+  `platform_commerce` and `platform_commerce_saas`, so both figures were
+  already stale on the release that printed them — #1520.)
+  37 transitive crates move in the workspace lock, including
   `rustls` 0.23.43 → 0.23.45, `quinn` 0.11.11 → 0.11.12 (and `quinn-proto`
   0.11.17 → 0.11.18), `tokio-rustls` 0.26.4 → 0.26.5, the `crossbeam`
   family, `pest` 2.9.0 → 2.9.1, `uuid` 1.26.0 → 1.26.1 and the

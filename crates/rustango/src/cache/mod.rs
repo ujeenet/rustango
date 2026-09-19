@@ -931,10 +931,26 @@ impl Cache for InMemoryCache {
 ///
 /// Django's FBC takes a `_lock` file for atomic multi-process writes
 /// + supports MAX_ENTRIES with a cull strategy. This implementation
-/// is the minimal Django-shape primitive: same on-disk semantics,
-/// per-process atomicity via `std::fs::write` (atomic per-call on
-/// most filesystems). Add file locking when a project actually
-/// shares the directory across processes.
+/// is the minimal Django-shape primitive with the same on-disk
+/// semantics.
+///
+/// **Writes are not atomic, and a torn read does not always fail.**
+/// `std::fs::write` is `O_TRUNC` followed by a write, on every common
+/// filesystem, so a concurrent reader can see a partial file. What
+/// happens next depends on where the tear lands: the header is
+/// length-checked, so a tear inside it makes `decode` return `None`
+/// and `get` delete the entry — but `encode` writes no length for the
+/// **value**, and `decode` takes `body[key_len..]` verbatim. A tear
+/// after the key therefore yields `Some(_)` with a silently truncated
+/// value, which is worse than the miss, because nothing signals it.
+///
+/// This originally claimed "per-process atomicity via `std::fs::write`
+/// (atomic per-call on most filesystems)", sitting directly under a
+/// correct note about Django's lock file, which made it read as
+/// considered rather than assumed (#1543). The first correction then
+/// said a torn read "fails decode", which is only half true (#1606
+/// review). Write-to-temp plus rename, a value length, and file
+/// locking for a shared directory are #1530.
 pub struct FileCache {
     dir: std::path::PathBuf,
 }
