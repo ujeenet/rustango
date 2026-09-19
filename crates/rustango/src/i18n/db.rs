@@ -63,6 +63,18 @@ CREATE TABLE IF NOT EXISTS "rustango_translations" (
 );
 "#;
 
+/// The timestamp defaults are a `strftime`, not `CURRENT_TIMESTAMP`:
+/// SQLite stores a datetime as TEXT and compares it lexicographically,
+/// and `CURRENT_TIMESTAMP`'s `YYYY-MM-DD HH:MM:SS` does not sort
+/// against the RFC3339 sqlx binds for a `DateTime<Utc>` (#1464). The
+/// format is `sql::sqlite::SQLITE_DATETIME_FORMAT`, which is what the
+/// model-derived tables emit; `sqlite_datetime_ddl_is_consistent`
+/// fails if a new hand-written table drifts from it.
+///
+/// **No `--` comments inside this string.** It reaches the driver with
+/// its newlines collapsed, so a `--` comment swallows the rest of the
+/// statement and SQLite rejects it with `incomplete input`. Explain
+/// things here instead.
 const DDL_SQLITE: &str = r#"
 CREATE TABLE IF NOT EXISTS "rustango_translations" (
     "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,8 +82,8 @@ CREATE TABLE IF NOT EXISTS "rustango_translations" (
     "key"        TEXT NOT NULL,
     "value"      TEXT NOT NULL,
     "updated_by" TEXT NOT NULL DEFAULT '',
-    "created_at" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')),
+    "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')),
     CONSTRAINT "rustango_translations_locale_key_uq" UNIQUE ("locale", "key")
 );
 "#;

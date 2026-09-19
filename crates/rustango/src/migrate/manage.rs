@@ -898,6 +898,32 @@ async fn migrate<W: Write>(
     // migrations are applied — the user never hand-creates it. Cheap and
     // safe to re-run on every `migrate`.
     crate::audit::ensure_table_pool(pool).await?;
+
+    // #1464 — rows written by the pre-fix SQLite default are stored as
+    // `YYYY-MM-DD HH:MM:SS` and do not compare or sort against a
+    // timestamp bound from Rust. Correcting the DDL fixes new rows and
+    // leaves every existing database silently wrong, so the stored
+    // values are converted here.
+    //
+    // Unconditional rather than behind a repair flag, for the reason
+    // the bug itself demonstrates: an operator does not know to run a
+    // verb they have not heard of, and silence reads exactly like "you
+    // are fine". Runs after the migrations above because it needs the
+    // tables to exist, and it is idempotent — the mask stops matching
+    // once a value is converted — so a second `migrate` updates nothing.
+    #[cfg(feature = "sqlite")]
+    {
+        let fixed = super::sqlite_datetime::normalise_sqlite_datetimes(pool).await?;
+        if !fixed.is_clean() {
+            writeln!(
+                w,
+                "  normalised {} SQLite datetime value(s) in {} — these were written by \
+                 the pre-0.57.11 default and did not compare against a bound timestamp (#1464)",
+                fixed.rows,
+                fixed.columns.join(", "),
+            )?;
+        }
+    }
     Ok(())
 }
 

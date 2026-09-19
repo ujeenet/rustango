@@ -1420,10 +1420,18 @@ pub async fn ensure_ledger_pool_with_ledger(
     let timestamp_col = match dialect_name {
         "postgres" => "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
         "mysql" => "DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
-        // SQLite has no native TIMESTAMP type — TEXT with affinity
-        // and `CURRENT_TIMESTAMP` (UTC, ISO-8601 to second precision)
-        // is the conventional shape. Sufficient for ledger ordering.
-        "sqlite" => "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        // SQLite has no native TIMESTAMP type, so this is TEXT and
+        // compares lexicographically.
+        //
+        // `CURRENT_TIMESTAMP` was "sufficient for ledger ordering" and
+        // that much was true — every row here is written by the same
+        // default, so they sort against each other. It stopped being
+        // enough once anything compared the column against a timestamp
+        // bound from Rust, which is #1464: the shapes diverge at
+        // position 10, `' '` against `'T'`. Matched to
+        // `sql::sqlite::SQLITE_DATETIME_FORMAT` so the ledger agrees
+        // with every other table rather than being the one exception.
+        "sqlite" => "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now'))",
         // Future dialects: a `Dialect::current_timestamp_default()` +
         // `Dialect::timestamp_type()` pair would let this branch go
         // away. For now the runner only knows the backends rustango

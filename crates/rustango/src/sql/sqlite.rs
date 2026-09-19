@@ -35,6 +35,57 @@ use super::writers::{
 };
 use super::{CompiledStatement, Dialect, SqlError};
 
+/// `strftime` format producing the one text shape a `SQLite` datetime
+/// column may hold (#1464).
+///
+/// `SQLite` has no datetime type, so a `DateTime<Utc>` column is TEXT
+/// and compares **lexicographically**. That makes the stored spelling
+/// part of the contract, not a presentation detail: two shapes in one
+/// column and both `<` and `ORDER BY` are wrong.
+///
+/// `CURRENT_TIMESTAMP` — what this used to emit — produces
+/// `YYYY-MM-DD HH:MM:SS`, while sqlx encodes a bound `DateTime<Utc>` as
+/// RFC3339. They diverge at position 10, `' '` (0x20) against `'T'`
+/// (0x54), so `WHERE col < ?` was true for **every** row whatever was
+/// bound. Cursor pagination on such a column returned page one forever.
+///
+/// This matches what sqlx writes, which is the side that cannot be
+/// changed. Note that sqlx's encoding is *variable width* — chrono's
+/// `%.f` emits 0, 3, 6 or 9 fractional digits — so this family has to
+/// be checked for sort-soundness rather than assumed:
+///
+/// ```text
+/// 2027-01-15T08:00:00+00:00           (no fraction)
+/// 2027-01-15T08:00:00.123+00:00       (3)
+/// 2027-01-15T08:00:00.413181+00:00    (6)
+/// ```
+///
+/// It is sound, because `'+'` (0x2B) sorts below `'.'` (0x2E) and below
+/// every digit: "no fraction" precedes any fraction, and a short
+/// fraction precedes a longer one extending it. `.400+` against
+/// `.413181+` decides at the second digit, correctly.
+///
+/// `%f` is `SQLite`'s `SS.SSS`, so the literal `000` pads three
+/// milliseconds out to six digits and lands on the 6-digit member of
+/// that family. The DEFAULT therefore carries millisecond resolution —
+/// `SQLite`'s own limit through `strftime` — while sorting correctly
+/// against binds of any precision.
+pub(crate) const SQLITE_DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%f000+00:00";
+
+/// `LIKE` mask matching exactly the legacy `CURRENT_TIMESTAMP` shape,
+/// `YYYY-MM-DD HH:MM:SS`. `_` is LIKE's single-character wildcard, so
+/// this matches on width and separator placement without matching the
+/// RFC3339 shape, whose position 10 is `T` rather than a space.
+///
+/// Used to normalise rows written before the fix. Anchored this way the
+/// UPDATE is idempotent: a row already converted no longer matches.
+///
+/// Read by `migrate::sqlite_datetime`'s sweep and by `audit`'s
+/// retention DELETE, which uses it to normalise the stored side of the
+/// comparison so the sweep is correct on a database that has not been
+/// migrated yet.
+pub(crate) const SQLITE_LEGACY_DATETIME_LIKE: &str = "____-__-__ __:__:__";
+
 /// The `SQLite` 3.35+ dialect. Stateless; construct with `Sqlite`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Sqlite;
@@ -131,8 +182,15 @@ impl Dialect for Sqlite {
     /// Translate Postgres-native `DEFAULT` expressions to SQLite
     /// spelling.
     ///
-    /// - `now()` / `CURRENT_TIMESTAMP` → `CURRENT_TIMESTAMP` (SQLite has
-    ///   no `now()` function in DDL).
+    /// - `now()` / `CURRENT_TIMESTAMP` → a parenthesised `strftime` in
+    ///   [`SQLITE_DATETIME_FORMAT`], **not** `CURRENT_TIMESTAMP`.
+    ///   `SQLite` stores a datetime as TEXT and compares it
+    ///   lexicographically, and `CURRENT_TIMESTAMP`'s
+    ///   `YYYY-MM-DD HH:MM:SS` does not sort against the RFC3339 sqlx
+    ///   binds for a `DateTime<Utc>`, so every comparison against an
+    ///   `auto_now_add` column was wrong (#1464). The parentheses are
+    ///   required: `SQLite` accepts a non-constant DEFAULT only in
+    ///   expression form.
     /// - `'<lit>'::<type>` → `'<lit>'` (SQLite has no `::` cast syntax;
     ///   the bare literal is the right encoding for JSON-as-TEXT,
     ///   boolean-as-INTEGER, etc.).
@@ -143,7 +201,7 @@ impl Dialect for Sqlite {
         let trimmed = expr.trim();
         match trimmed {
             "now()" | "NOW()" | "current_timestamp" | "CURRENT_TIMESTAMP" => {
-                return "CURRENT_TIMESTAMP".to_owned();
+                return format!("(strftime('{SQLITE_DATETIME_FORMAT}','now'))");
             }
             _ => {}
         }
