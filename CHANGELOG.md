@@ -4,6 +4,77 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.57.10] — 2026-09-19
+
+A documentation release, and the first one where the docs were treated
+as code that can be wrong rather than as prose that can be stale.
+
+Fifteen corrections. The distinction that decides which of them matter:
+a stale doc costs a reader time, but a doc that is *confidently wrong*
+costs them a broken deployment, because they act on it. Six were the
+second kind.
+
+### Fixed — documentation a reader would have acted on
+
+- **The CSRF note sent you to fix the wrong half** (#1518). It told you
+  to repair a custom `Method::POST` view, then gave a remedy that only
+  works for the other half: `chrome_context` is `pub(crate)`, so
+  `csrf_input` is undefined in a user template and Tera renders it
+  empty — a 403 on a form that looks correct. Both halves now carry
+  their own fix.
+
+- **A comment claimed configured `redact_query_params` keys are logged
+  in cleartext** (#1504). It described the design that was *rejected*
+  during the fix, and gave a false reason for it. A reader would have
+  concluded their redaction list did nothing.
+
+- **A retry predicate that hard-fails mid-deploy** (#1517). The table
+  gave MySQL `3821` for both foreign-key drop errors; `DROP FOREIGN KEY`
+  raises `1091`. Anyone who wrote the documented predicate would have it
+  not match, in the middle of a migration.
+
+- **A cost warning that #1235 had already made obsolete** (#1543) steered
+  readers away from `Tenant::pool()` — the accessor that is always
+  tenant-scoped — toward paths that are not.
+
+- **`cannot find PgPool in sqlx`** (#1272). The mount snippet hardcoded
+  `PgPool`, so the documented example did not compile on any other
+  backend. Swept in all four locales.
+
+- **An invitation to fix something unfixable** (#1507). The note implied
+  SQLite FK naming could be corrected so `DROP CONSTRAINT` would start
+  working. SQLite has no such statement, and the framework already names
+  every FK.
+
+### Fixed — counts, omissions and drift
+
+#1502, #1503, #1505, #1506, #1515, #1519, #1520, #1521, #1522, #1523,
+and the remaining #1507 / #1543 items.
+
+### Fixed — not documentation
+
+- **A transaction suite that never ran without Postgres** (#1460, gap 4).
+  `tx_methods_sqlite_live` was gated on `sqlite` **and** `postgres`, so
+  the only end-to-end proof the transaction path works in a sqlite-only
+  or mysql-only build was compiled out of exactly those builds. Nothing
+  in the file touches Postgres. All three tests pass under
+  `sqlite,tenancy`.
+
+- **A published count with no guard.** The `192 SQLite suites` figure was
+  a frozen literal while its siblings in `matrix.rs` are recomputed from
+  the tree — the precise shape those siblings exist to prevent. It was
+  also wrong: the tree says 188. Corrected and brought under the existing
+  recount, verified by putting 192 back and watching it fail.
+
+### Known — filed, not fixed
+
+- **#1605** — `bin/bump-version.sh` rewrites eight version-claim shapes
+  while its verification alternation checks six, so the two
+  *series*-version substitutions are unverified. The script's own comment
+  asserted six and was silently false; it now describes the gap. Benign
+  across a patch bump, where the series does not move; a real exposure at
+  0.58.0.
+
 ## [0.57.9] — 2026-09-19
 
 Thirteen verified defects from the 2026-09-18 triage, each small enough
