@@ -292,6 +292,7 @@ jobs:
             --test every_structural_guard_runs_in_ci \
             --test live_suites_fail_loudly \
             --test macro_internals_stays_internal \
+            --test one_redirect_sanitizer \
             --test pool_construction \
             --test system_migration_scopes \
             --test tracing_targets \
