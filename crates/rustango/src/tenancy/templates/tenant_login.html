@@ -6,7 +6,7 @@
   {# v0.27.3 (#71) — favicon picks up the org's uploaded asset
      when present; falls back to the embedded rustango icon. #}
   {% if brand_favicon_url %}
-  <link rel="icon" href="{{ brand_favicon_url | safe }}">
+  <link rel="icon" href="{{ brand_favicon_url }}">
   {% else %}
   <link rel="icon" href="{{ static_url | default(value='/__static__') }}/rustango.png">
   {% endif %}
@@ -125,7 +125,7 @@
   <form class="card" method="post" action="{{ login_url | default(value='/__login') }}">
     <div class="brand">
       {% if brand_logo_url %}
-      <img class="brand-logo" src="{{ brand_logo_url | safe }}" alt="">
+      <img class="brand-logo" src="{{ brand_logo_url }}" alt="">
       {% else %}
       <img class="brand-logo" src="{{ static_url | default(value='/__static__') }}/rustango.png" alt="">
       {% endif %}
