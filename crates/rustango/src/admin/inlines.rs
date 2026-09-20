@@ -1067,6 +1067,8 @@ async fn apply_one_inline(
             columns.push(inline.fk_column);
             values.push(parent_pk.clone());
         }
+        // Schema-driven INSERT: nothing else supplies these (#1464).
+        crate::forms::stamp_auto_timestamps(child_model, &mut columns, &mut values);
         let q = crate::core::InsertQuery {
             model: child_model,
             columns,

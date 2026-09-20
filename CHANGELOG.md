@@ -4,6 +4,35 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — schema-driven writers stamp their own timestamps too (#1464)
+
+The entry below fixed the writers that go through `#[derive(Model)]`.
+Six more do not: they build an `InsertQuery` from [`ModelSchema`] and
+the client payload, and a server-assigned timestamp is in no payload —
+so the column was omitted and the database default fired.
+
+- `ViewSet` create and bulk-create — the REST API.
+- The admin's create view, and inline formsets.
+- `ModelForm::save` / `PreparedSave::commit_pool`.
+- The generic `template_views` create handlers, plain and tenant.
+
+All six now call `forms::stamp_auto_timestamps`. **INSERT only**: the
+UPDATE paths deliberately do not, because `auto_now_add` is immutable
+after insert and `FieldSchema` cannot tell it from `auto_now`.
+
+`FieldSchema::is_auto_timestamp()` is how they know. It is inferred
+rather than stored — the macro rejects a non-PK `Auto<T>` field unless
+it carries `auto_uuid`, `default_uuid_v7`, `auto_now_add` or
+`auto_now`, and only the last two may be `DateTime` — which kept 57
+literal `FieldSchema` constructions across the test suite from having
+to grow a field.
+
+Found by the commerce soak, not by a unit test. 7572 tests passed on a
+tree where `ViewSet`-created rows still stored
+`2026-09-20 21:13:34`, and cursor pagination on SQLite still served
+page one forever. The soak's `KNOWN-GAP` excuse for that leg is gone
+with the bug.
+
 ### Fixed — no writer reads its timestamp from a column default (#1464)
 
 A column default is a backstop for hand-written SQL. Every framework

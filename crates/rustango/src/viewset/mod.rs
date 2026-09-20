@@ -117,7 +117,7 @@ use crate::core::{
     Assignment, CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op,
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
-use crate::forms::{collect_values, parse_form_value, parse_pk_string, FormError};
+use crate::forms::{collect_insert_values, parse_form_value, parse_pk_string, FormError};
 use crate::sql::Pool;
 
 // ------------------------------------------------------------------ Permissions config
@@ -2656,7 +2656,7 @@ async fn create_one(
     // model column) so the client can POST the serializer field name.
     let renamed = serializer_input_renamed_form(state, form);
     let form = renamed.as_ref().unwrap_or(form);
-    let collected = match collect_values(state.vs.schema, form, &all_skip) {
+    let collected = match collect_insert_values(state.vs.schema, form, &all_skip) {
         Ok(v) => v,
         Err(e) => {
             return json_error(
@@ -2707,7 +2707,7 @@ async fn create_many(
         all_skip.extend(extra_skip);
         let renamed = serializer_input_renamed_form(state, row);
         let row = renamed.as_ref().unwrap_or(row);
-        let collected = match collect_values(state.vs.schema, row, &all_skip) {
+        let collected = match collect_insert_values(state.vs.schema, row, &all_skip) {
             Ok(v) => v,
             Err(e) => {
                 let e = public_form_error(state, e);

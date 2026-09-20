@@ -8,4 +8,6 @@
 //! The `admin` feature implies `forms`, so this re-export is always
 //! available when admin is on.
 
-pub(crate) use crate::forms::{collect_values, parse_form_value, parse_pk_string, FormError};
+pub(crate) use crate::forms::{
+    collect_insert_values, collect_values, parse_form_value, parse_pk_string, FormError,
+};
