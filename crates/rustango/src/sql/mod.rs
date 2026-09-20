@@ -133,6 +133,18 @@ pub mod __macro_internals {
     };
 }
 
+/// The per-dialect `SqlValue` binders, so nothing outside `executor`
+/// has to hand-copy what `bind_match_*!` expands to.
+///
+/// `audit` carried 116 lines of exactly that copy across three
+/// dialects, and the SQLite one silently missed #1464's encoding change
+/// because a copy cannot track the macro it was copied from.
+#[cfg(feature = "postgres")]
+pub(crate) use executor::bind_query;
+#[cfg(feature = "mysql")]
+pub(crate) use executor::bind_query_my;
+#[cfg(feature = "sqlite")]
+pub(crate) use executor::bind_query_sqlite;
 #[cfg(feature = "mysql")]
 pub use executor::LoadRelatedMy;
 #[cfg(feature = "sqlite")]

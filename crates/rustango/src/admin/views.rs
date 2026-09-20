@@ -1439,8 +1439,17 @@ impl BucketBind {
     ) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
         match self {
             BucketBind::None => q,
+            // A `Date` carries no time separator, so it has no #1464
+            // exposure and binds as itself.
             BucketBind::Date(lo, hi) => q.bind(*lo).bind(*hi),
-            BucketBind::DateTime(lo, hi) => q.bind(*lo).bind(*hi),
+            // A `DateTime` must go through the canonical encoder. These
+            // bounds are compared against a TEXT column whose other
+            // writers all emit the fixed-width shape; letting sqlx pick
+            // its variable-width encoding here makes the bucket filter
+            // miss rows whose fraction happens to differ in length.
+            BucketBind::DateTime(lo, hi) => q
+                .bind(crate::sql::encode_datetime(*lo))
+                .bind(crate::sql::encode_datetime(*hi)),
         }
     }
 }
