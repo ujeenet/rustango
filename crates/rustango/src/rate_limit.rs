@@ -33,6 +33,16 @@ use axum::http::{header, HeaderValue, Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
 
+/// Ceiling on distinct in-flight buckets (GHSA-rj6w).
+///
+/// At ~64 bytes of key plus a 24-byte `Bucket`, 100k entries is a few
+/// megabytes — high enough that a real deployment never reaches it
+/// (it would need 100k distinct clients inside one `refill_period`),
+/// low enough that a flood of forged header values cannot exhaust
+/// memory. The shared-cache limiter has no equivalent because its
+/// entries carry the cache's own TTL.
+const MAX_BUCKETS: usize = 100_000;
+
 /// Warn (at most once per process) that the limiter could not derive a
 /// per-client key and is falling back to a shared bucket — a
 /// misconfiguration that turns the limiter into a site-wide throttle
@@ -143,6 +153,9 @@ pub struct RateLimitLayer {
     refill_period: Duration,
     /// Bucket key strategy.
     key_by: KeyBy,
+    /// Ceiling on distinct buckets — see [`MAX_BUCKETS`] and
+    /// [`RateLimitLayer::max_buckets`].
+    max_buckets: usize,
     /// Shared bucket store across all requests.
     store: Arc<tokio::sync::Mutex<HashMap<String, Bucket>>>,
 }
@@ -177,8 +190,25 @@ impl RateLimitLayer {
             capacity,
             refill_period,
             key_by,
+            max_buckets: MAX_BUCKETS,
             store: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Override the distinct-bucket ceiling (default [`MAX_BUCKETS`]).
+    ///
+    /// Raise it if you genuinely serve more than 100k distinct clients
+    /// inside one `refill_period` and have the memory for it; lower it
+    /// on a small instance. `0` is treated as 1 — a limiter with no
+    /// buckets cannot limit.
+    ///
+    /// Also what makes the eviction path testable: a guard can set a
+    /// small ceiling and actually reach it, rather than passing because
+    /// the code never ran (GHSA-rj6w).
+    #[must_use]
+    pub fn max_buckets(mut self, n: usize) -> Self {
+        self.max_buckets = n.max(1);
+        self
     }
 
     fn rate_per_sec(&self) -> f64 {
@@ -188,6 +218,63 @@ impl RateLimitLayer {
         self.capacity as f64 / self.refill_period.as_secs_f64()
     }
 
+    /// Bound the bucket map before inserting a new key (GHSA-rj6w).
+    ///
+    /// Nothing removed entries before this, and with
+    /// `KeyBy::Header` the key is the raw header value — entirely
+    /// attacker-chosen and uncapped in length. One request per random
+    /// value grew the map until the process died.
+    ///
+    /// The sweep is exact rather than heuristic: **a bucket that has
+    /// refilled to capacity is indistinguishable from one that does
+    /// not exist.** A fresh key is inserted with `tokens = capacity`,
+    /// and a bucket idle for `refill_period` has refilled to exactly
+    /// that. So dropping it cannot hand an attacker a single extra
+    /// request, which is what would make an eviction policy a bypass.
+    ///
+    /// The hard cap behind it covers the case the sweep cannot — a
+    /// burst of distinct keys inside one `refill_period`, where every
+    /// bucket still holds spent tokens. There the **fullest** go first,
+    /// because they are the ones closest to costing nothing.
+    ///
+    /// Both passes rank on *projected* tokens, never on age. Age is the
+    /// obvious proxy and it is backwards: `last_refill` moves on every
+    /// take, so the least-recently-touched bucket is the one that spent
+    /// its budget and then went quiet — precisely the bucket an
+    /// attacker wants evicted. An earlier draft of this evicted by age
+    /// and `a_swept_key_is_not_a_free_pass` caught it handing a spent
+    /// client a fresh allowance.
+    fn make_room(&self, store: &mut HashMap<String, Bucket>, now: Instant) {
+        if store.len() < self.max_buckets {
+            return;
+        }
+        let cap = self.capacity as f64;
+        let rate = self.rate_per_sec();
+        // What this bucket would hold if it were touched right now.
+        let projected = |b: &Bucket| {
+            let elapsed = now.duration_since(b.last_refill).as_secs_f64();
+            (b.tokens + elapsed * rate).min(cap)
+        };
+
+        // Exact: a bucket at capacity hands out the same number of
+        // requests as one that does not exist.
+        store.retain(|_, b| projected(b) < cap);
+        if store.len() < self.max_buckets {
+            return;
+        }
+
+        // Still at the cap. Drop the fullest eighth, so this does not
+        // run again on the very next miss.
+        let mut by_fullness: Vec<(f64, String)> = store
+            .iter()
+            .map(|(k, b)| (projected(b), k.clone()))
+            .collect();
+        by_fullness.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        for (_, k) in by_fullness.into_iter().take((self.max_buckets / 8).max(1)) {
+            store.remove(&k);
+        }
+    }
+
     /// Take one token. Returns `Ok((remaining, retry_after_secs))` on success,
     /// `Err(retry_after_secs)` when the bucket is empty.
     async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
@@ -195,6 +282,11 @@ impl RateLimitLayer {
         let cap = self.capacity as f64;
         let rate = self.rate_per_sec();
         let mut store = self.store.lock().await;
+        // Only a *new* key can grow the map, so the sweep rides the
+        // miss path and the hot path stays a lookup (GHSA-rj6w).
+        if !store.contains_key(key) {
+            self.make_room(&mut store, now);
+        }
         let bucket = store.entry(key.to_owned()).or_insert(Bucket {
             tokens: cap,
             last_refill: now,
