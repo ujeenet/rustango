@@ -25,9 +25,9 @@
 //! invocation:
 //!
 //! - it only ever touches SQLite — other dialects return immediately;
-//! - it matches on [`SQLITE_LEGACY_DATETIME_LIKE`], a width-and-separator
-//!   mask that the corrected shape cannot match (position 10 is `T`,
-//!   not a space), so it is idempotent and a second run updates nothing;
+//! - it rewrites a value only when `strftime` can parse it **and** it
+//!   does not already match [`crate::sql::SQLITE_CANONICAL_GLOB`], so a
+//!   converted row stops matching and a second run updates nothing;
 //! - it is driven by the model registry, so it visits declared datetime
 //!   columns and nothing else.
 //!
@@ -39,7 +39,7 @@
 //! is invisible here, and is reported rather than silently skipped.
 
 use crate::core::{FieldType, ModelEntry, SqlValue};
-use crate::sql::{Pool, SQLITE_DATETIME_FORMAT};
+use crate::sql::{Pool, SQLITE_CANONICAL_GLOB, SQLITE_DATETIME_FORMAT};
 
 use super::MigrateError;
 
@@ -127,21 +127,32 @@ pub async fn normalise_sqlite_datetimes(pool: &Pool) -> Result<Normalised, Migra
         // that NULL over the row — destroying a timestamp on a nullable
         // column and hard-failing `migrate` on a NOT NULL one.
         //
-        // This predicate says what is actually meant: *if SQLite can
-        // read it and it is not already the canonical spelling, rewrite
-        // it.* Unparseable text is left exactly as found, and the sweep
-        // is idempotent by construction rather than by the mask's
-        // shape — after a pass, `col = strftime(col)` and the row stops
-        // matching.
+        // "Already canonical" is a question about **shape**, and it must
+        // not be answered by round-tripping through `strftime`.
+        //
+        // The version before this asked `col <> strftime(FMT, col)`,
+        // which reads as "not already canonical" and is not: SQLite's
+        // `%f` is *milliseconds* while `encode_datetime`'s chrono
+        // `%.6f` is *microseconds*, so `strftime` is not the identity
+        // on a value the fixed bind path wrote. `.413681` came back
+        // `.414000`. Roughly 999 in 1000 correct rows therefore matched,
+        // and every `migrate` rewrote them — rounding each up to 500 µs
+        // forward and reporting them as legacy conversions (#1616 rework
+        // review, correctness-002 / dialects-001).
+        //
+        // `GLOB` asks the question directly. `?` is one character and
+        // `[0-9]` a digit, so this matches the canonical spelling and
+        // nothing else, leaves microsecond precision alone, and is still
+        // idempotent — a converted row no longer matches.
         let sql = format!(
             "UPDATE {t} SET {c} = strftime(?, {c}) \
              WHERE strftime(?, {c}) IS NOT NULL \
-               AND {c} <> strftime(?, {c})"
+               AND {c} NOT GLOB ?"
         );
         let binds = vec![
             SqlValue::String(SQLITE_DATETIME_FORMAT.to_owned()),
             SqlValue::String(SQLITE_DATETIME_FORMAT.to_owned()),
-            SqlValue::String(SQLITE_DATETIME_FORMAT.to_owned()),
+            SqlValue::String(SQLITE_CANONICAL_GLOB.to_owned()),
         ];
         match crate::sql::raw_execute_pool(pool, &sql, binds).await {
             Ok(n) if n > 0 => {

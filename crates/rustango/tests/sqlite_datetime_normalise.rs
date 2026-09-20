@@ -390,3 +390,60 @@ async fn audit_table(pool: &Pool) {
     .await
     .expect("create audit table");
 }
+
+/// A row the **fixed bind path** wrote must survive the sweep exactly.
+///
+/// This is the defect that made the first predicate unusable. It asked
+/// `col <> strftime(FMT, col)`, which reads as "not already canonical"
+/// and is not: SQLite's `%f` is milliseconds, `encode_datetime`'s
+/// chrono `%.6f` is microseconds, so `strftime` is not the identity on
+/// a canonical value — `.413681` renders back as `.414000`. Roughly 999
+/// in 1000 correct rows matched, and every `migrate` rewrote them,
+/// rounding each one forward and reporting it as a legacy conversion
+/// (#1616 rework review, correctness-002 / dialects-001).
+///
+/// The microseconds are the whole point of the fixture. A whole-
+/// millisecond value passes against the broken predicate too.
+#[tokio::test]
+async fn a_microsecond_value_is_not_touched_by_the_sweep() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");
+    rustango::testkit::create_tables_for::<Evt>(&pool)
+        .await
+        .expect("create");
+
+    // Sub-millisecond digits that SQLite's strftime cannot express.
+    let precise: DateTime<Utc> = "2026-09-20T08:00:00.413681Z".parse().expect("parse");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "INSERT INTO normalise_evt (label, created_at, born_on) VALUES (?, ?, ?)",
+        vec![
+            SqlValue::String("precise".to_owned()),
+            SqlValue::DateTime(precise),
+            SqlValue::String("2026-09-20".to_owned()),
+        ],
+    )
+    .await
+    .expect("insert");
+
+    let before = stored(&pool).await;
+    let out = normalise_sqlite_datetimes(&pool).await.expect("sweep");
+    let after = stored(&pool).await;
+
+    assert_eq!(
+        before, after,
+        "the sweep rewrote a row the bind path had already written \
+         correctly. `strftime` is not the identity on a microsecond \
+         value, so it must not be used to decide what is canonical."
+    );
+    assert!(
+        out.is_clean(),
+        "and it should report no work: {} row(s), {:?}",
+        out.rows,
+        out.columns
+    );
+    assert!(
+        after[0].ends_with(".413681+00:00"),
+        "the microseconds must survive untouched, got {}",
+        after[0]
+    );
+}
