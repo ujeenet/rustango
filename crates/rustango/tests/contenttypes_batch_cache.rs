@@ -63,6 +63,41 @@ async fn sqlite_pool() -> Pool {
     pool
 }
 
+/// A second database whose `content_type` ids are deliberately offset
+/// from the first's, which is what a real second tenant looks like:
+/// its sequence is its own, and it was seeded at its own time against
+/// its own model set.
+///
+/// The filler rows go in **before** `ensure_seeded`, so the real rows
+/// land higher. Inserting them afterwards leaves the seeded ids equal
+/// across pools and makes any cross-tenant assertion vacuous.
+async fn sqlite_pool_with_offset(offset: usize) -> Pool {
+    let pool = Pool::Sqlite(
+        sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool"),
+    );
+    contenttypes::ensure_table(&pool)
+        .await
+        .expect("content type table");
+    for i in 0..offset {
+        sqlx::query(
+            "INSERT INTO rustango_content_types (app_label, model_name, \"table\") \
+             VALUES (?, ?, ?)",
+        )
+        .bind(format!("ct_bc_filler{i}"))
+        .bind(format!("filler{i}"))
+        .bind(format!("ct_bc_filler{i}"))
+        .execute(pool.as_sqlite().expect("sqlite"))
+        .await
+        .expect("shift the sequence");
+    }
+    contenttypes::ensure_seeded(&pool)
+        .await
+        .expect("ensure_seeded_pool");
+    pool
+}
+
 /// Batch lookup returns one entry per requested pair that exists.
 /// Both `&str` literals and `String` values are accepted.
 #[tokio::test]
@@ -250,4 +285,99 @@ async fn get_for_model_resolves_type() {
     assert_eq!(cached.id.get(), uncached.id.get());
     assert_eq!(cached.app_label, "ct_bc_blog");
     assert_eq!(cached.model_name, "post");
+}
+
+/// Two databases must not share a cached `ContentType` id (#1533).
+///
+/// The id comes from each database's own sequence, so the same natural
+/// key is a different number in each. Keyed on the natural key alone —
+/// as it was — the first pool to warm the entry decided what the second
+/// was handed, and three public generic-FK entry points reach this, so
+/// the wrong id lands in real junction rows.
+///
+/// The assertion is not "the two ids differ". That would pass on an
+/// over-partitioned key that is still wrong, and it would pass on a key
+/// that changes every call. It is **`b` gets what an uncached read of
+/// `b` returns** — the cache must be transparent, which is the only
+/// property that actually matters here.
+#[tokio::test]
+async fn a_second_database_does_not_inherit_the_first_ones_id() {
+    let _g = cache_lock().lock().await;
+    contenttypes::clear_cache();
+
+    let a = sqlite_pool().await;
+    // `b`'s sequence is shifted **before** it is seeded, so its `post`
+    // lands on a different id from `a`'s. Doing this after seeding is
+    // useless — the row already has its id, both pools agree, and a
+    // shared cache entry is then indistinguishable from a correct one.
+    // The first draft did exactly that and passed with the fix
+    // reverted.
+    let b = sqlite_pool_with_offset(3).await;
+    contenttypes::clear_cache();
+
+    // Warm from `a` first — the tenant that "gets there first".
+    let from_a = ContentType::get_by_natural_key(&a, "ct_bc_blog", "post")
+        .await
+        .expect("a lookup")
+        .expect("seeded in a");
+
+    let from_b = ContentType::get_by_natural_key(&b, "ct_bc_blog", "post")
+        .await
+        .expect("b lookup")
+        .expect("seeded in b");
+
+    let b_truth = ContentType::by_natural_key(&b.clone().into(), "ct_bc_blog", "post")
+        .await
+        .expect("b uncached")
+        .expect("seeded in b");
+
+    assert_eq!(
+        from_b.id.get(),
+        b_truth.id.get(),
+        "the cached read for pool b must equal an uncached read of b. \
+         Getting a's id ({:?}) here is the cross-tenant defect: the cache \
+         was keyed on the natural key alone, so whoever warmed it first \
+         decided every other database's answer (#1533).",
+        from_a.id.get()
+    );
+}
+
+/// `clear_cache_for` drops one database's entries and leaves the rest.
+#[tokio::test]
+async fn clearing_one_scope_leaves_the_other() {
+    let _g = cache_lock().lock().await;
+    contenttypes::clear_cache();
+
+    let a = sqlite_pool().await;
+    let b = sqlite_pool().await;
+
+    let _ = ContentType::get_by_natural_key(&a, "ct_bc_blog", "post").await;
+    let _ = ContentType::get_by_natural_key(&b, "ct_bc_blog", "post").await;
+
+    // Drop `a`'s table so a cache miss on `a` would error, then clear
+    // only `b`. `a` must still answer from cache; `b` must re-read and
+    // succeed. Asserting on a *dropped table* is what makes "served
+    // from cache" observable at all.
+    sqlx::query("DROP TABLE rustango_content_types")
+        .execute(a.as_sqlite().expect("sqlite"))
+        .await
+        .expect("drop a's table");
+
+    contenttypes::clear_cache_for(&b);
+
+    assert!(
+        ContentType::get_by_natural_key(&a, "ct_bc_blog", "post")
+            .await
+            .expect("a still cached")
+            .is_some(),
+        "clearing b's scope must not evict a — a's table is gone, so a \
+         miss here would surface as an error rather than a wrong id"
+    );
+    assert!(
+        ContentType::get_by_natural_key(&b, "ct_bc_blog", "post")
+            .await
+            .expect("b re-reads")
+            .is_some(),
+        "b must re-read from its own database after its scope was cleared"
+    );
 }
