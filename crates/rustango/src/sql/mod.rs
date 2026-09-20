@@ -147,6 +147,10 @@ pub use postgres::Postgres;
 #[cfg(feature = "sqlite")]
 pub(crate) use sqlite::encode_datetime;
 pub use sqlite::Sqlite;
+/// The sweep's "already canonical?" shape test. Gated with its only
+/// reader, which needs a live `SQLite` pool.
+#[cfg(feature = "sqlite")]
+pub(crate) use sqlite::SQLITE_CANONICAL_GLOB;
 /// The one text shape a `SQLite` datetime column may hold, and the mask
 /// matching what the pre-#1464 default wrote. `pub(crate)` because the
 /// migration sweep and `audit`'s retention DELETE need them and

@@ -104,6 +104,27 @@ pub(crate) fn encode_datetime(d: chrono::DateTime<chrono::Utc>) -> String {
     d.format(SQLITE_DATETIME_CHRONO).to_string()
 }
 
+/// `GLOB` pattern matching exactly [`SQLITE_DATETIME_FORMAT`]'s output
+/// and nothing else — the sweep's "is this already canonical?" test.
+///
+/// It must be a shape test rather than a round-trip through
+/// `strftime`. SQLite's `%f` is milliseconds and `encode_datetime`'s
+/// chrono `%.6f` is microseconds, so `strftime(FMT, col)` is **not the
+/// identity** on a value the bind path wrote: `.413681` renders back as
+/// `.414000`. A sweep keyed on that inequality rewrites almost every
+/// correct row on every `migrate`, rounding each one forward, and
+/// reports them as legacy conversions.
+///
+/// `?` is one character and `[0-9]` a digit, so this is exact: 4-2-2
+/// date, `T`, 2-2-2 time, a six-digit fraction, and a literal `+00:00`.
+///
+/// Read only by `migrate::sqlite_datetime`, which needs a live `SQLite`
+/// pool; this module compiles in every build because the dialect
+/// renders SQL for all of them.
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+pub(crate) const SQLITE_CANONICAL_GLOB: &str =
+    "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00";
+
 /// `LIKE` mask matching exactly the legacy `CURRENT_TIMESTAMP` shape,
 /// `YYYY-MM-DD HH:MM:SS`. `_` is LIKE's single-character wildcard, so
 /// this matches on width and separator placement without matching the
