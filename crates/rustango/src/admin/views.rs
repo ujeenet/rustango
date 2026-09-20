@@ -1926,7 +1926,7 @@ pub(crate) async fn create_submit(
     if pk_field.auto {
         skip.push(pk_field.name);
     }
-    let collected = match forms::collect_values(model, &form, &skip) {
+    let collected = match forms::collect_insert_values(model, &form, &skip) {
         Ok(v) => v,
         Err(e) => {
             // Re-render the form with the error message instead of a 4xx.

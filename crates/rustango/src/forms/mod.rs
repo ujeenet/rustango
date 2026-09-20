@@ -458,11 +458,14 @@ pub fn collect_values(
     for field in model.scalar_fields() {
         // Server-assigned columns (`Auto<T>` PK with BIGSERIAL,
         // `auto_now_add` / `auto_now` mixins, `auto_uuid`) are never
-        // present in HTML forms — the macro skips them on INSERT and
-        // the DB DEFAULT supplies the value. Filtering them here
-        // keeps both code paths in lock-step. See cookbook chapter 7
+        // present in HTML forms. Filtering them here keeps both code
+        // paths in lock-step. See cookbook chapter 7
         // `modelform_parses_form_encoded_into_typed_values` for the
         // ModelFormFor analogue.
+        //
+        // Dropping them is right for an UPDATE. For an INSERT, use
+        // [`collect_insert_values`] — the timestamps among them have to
+        // be supplied rather than left to the column default (#1464).
         if field.auto || skip.contains(&field.name) {
             continue;
         }
@@ -471,6 +474,72 @@ pub fn collect_values(
         out.push((field.column, value));
     }
     Ok(out)
+}
+
+/// [`collect_values`], plus the server-assigned timestamps an INSERT
+/// has to supply itself.
+///
+/// `auto_now_add` / `auto_now` columns are absent from every client
+/// payload, so a schema-driven writer omits them and the column default
+/// fires. That default cannot be trusted: on a SQLite database created
+/// before #1464 it is still `CURRENT_TIMESTAMP`, and `ALTER TABLE`
+/// there has no statement that can replace it. Its
+/// `YYYY-MM-DD HH:MM:SS` sorts below the canonical spelling, so a
+/// cursor keyed on such a column matches every row and serves page one
+/// forever — which is how this was found, in the commerce soak, after
+/// the derive macro's own INSERT path had already been fixed.
+///
+/// Separate from [`collect_values`] rather than a flag on it because
+/// the two differ on UPDATE: `auto_now` should be restamped there and
+/// `auto_now_add` must not, and [`crate::core::FieldSchema`] cannot
+/// tell them apart. UPDATE keeps the plain version, where the derive
+/// macro's `update_assignments` already handles both correctly.
+///
+/// # Errors
+/// As [`collect_values`].
+pub fn collect_insert_values(
+    model: &'static ModelSchema,
+    form: &HashMap<String, String>,
+    skip: &[&str],
+) -> Result<Vec<(&'static str, SqlValue)>, FormError> {
+    let mut out = collect_values(model, form, skip)?;
+    let now = chrono::Utc::now();
+    for field in model.scalar_fields() {
+        if field.is_auto_timestamp()
+            && !skip.contains(&field.name)
+            && !out.iter().any(|(c, _)| *c == field.column)
+        {
+            out.push((field.column, SqlValue::DateTime(now)));
+        }
+    }
+    Ok(out)
+}
+
+/// Add the server-assigned timestamps to a schema-driven INSERT's
+/// column list — the `(columns, values)` form, for the writers that
+/// build those directly rather than through [`collect_insert_values`].
+///
+/// **INSERT only.** `auto_now_add` is immutable after insert, and
+/// nothing here can tell it from `auto_now`; an UPDATE must leave both
+/// alone and let the derive macro's `update_assignments` handle them.
+///
+/// Idempotent — a column already in the list is left as the caller set
+/// it, so an explicit value always wins.
+///
+/// See [`collect_insert_values`] for why the database default is not
+/// good enough (#1464).
+pub fn stamp_auto_timestamps(
+    model: &'static ModelSchema,
+    columns: &mut Vec<&'static str>,
+    values: &mut Vec<SqlValue>,
+) {
+    let now = chrono::Utc::now();
+    for field in model.scalar_fields() {
+        if field.is_auto_timestamp() && !columns.contains(&field.column) {
+            columns.push(field.column);
+            values.push(SqlValue::DateTime(now));
+        }
+    }
 }
 
 // ------------------------------------------------------------------ ModelForm
@@ -803,10 +872,19 @@ impl PreparedSave {
             return Ok(pk_val);
         }
 
+        // INSERT, not UPDATE — so the server-assigned timestamps are
+        // stamped here (#1464). `should_include` drops every `auto`
+        // field, which is right for the payload and wrong for the
+        // statement: nothing else supplies them and the column default
+        // cannot be trusted. The UPDATE branch above deliberately does
+        // not do this — `auto_now_add` is immutable after insert.
+        let mut columns = self.columns;
+        let mut values = self.values;
+        stamp_auto_timestamps(self.schema, &mut columns, &mut values);
         let query = InsertQuery {
             model: self.schema,
-            columns: self.columns,
-            values: self.values,
+            columns,
+            values,
             returning: vec![self.pk_field.column],
             on_conflict: None,
         };

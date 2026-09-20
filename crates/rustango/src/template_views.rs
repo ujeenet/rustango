@@ -1907,11 +1907,14 @@ async fn handle_create_post(
     headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
-    let (columns, values, mut errors) = parse_form(state.schema, state.fields.as_deref(), &form);
+    let (mut columns, mut values, mut errors) =
+        parse_form(state.schema, state.fields.as_deref(), &form);
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
         return rerender_form(&state, &form, &errors, /*is_update=*/ false, &headers);
     }
+    // Schema-driven INSERT: nothing else supplies these (#1464).
+    crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
     // When `success_url` carries `{column}` placeholders, request
     // those columns back via RETURNING so we can substitute
     // before the redirect. Otherwise plain INSERT — saves the
@@ -3728,7 +3731,7 @@ mod tenant {
         t: Tenant,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
-        let (columns, values, mut errors) =
+        let (mut columns, mut values, mut errors) =
             parse_form(state.schema, state.fields.as_deref(), &form);
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
@@ -3736,6 +3739,8 @@ mod tenant {
                 &state, &form, &errors, /*is_update=*/ false, &headers,
             );
         }
+        // Schema-driven INSERT: nothing else supplies these (#1464).
+        crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
         let returning = match super::success_url_returning_columns(&state.success_url, state.schema)
         {
             Ok(cols) => cols,

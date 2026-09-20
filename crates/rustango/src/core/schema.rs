@@ -152,6 +152,31 @@ impl FieldSchema {
     pub fn display_label(&self) -> &'static str {
         self.verbose_name.unwrap_or(self.name)
     }
+
+    /// `true` for a server-assigned timestamp — an `#[rustango(auto_now_add)]`
+    /// or `#[rustango(auto_now)]` column. Writers that build an INSERT
+    /// from schema rather than from the derive macro's codegen must
+    /// fill these from the clock (#1464).
+    ///
+    /// Inferred rather than stored, because the macro's own validation
+    /// makes the inference exact: a non-PK `Auto<T>` field is rejected
+    /// unless it carries `auto_uuid`, `default_uuid_v7`, `auto_now_add`
+    /// or `auto_now`, and of those only the last two may be `DateTime`.
+    /// So `auto && !primary_key && DateTime` is that pair and nothing
+    /// else — without a new `FieldSchema` field, which 57 literal
+    /// constructions across the test suite would have had to grow.
+    ///
+    /// Why it matters: these columns are absent from any client
+    /// payload, so a generic writer omits them and the database default
+    /// fires. On SQLite that default is `CURRENT_TIMESTAMP` on any
+    /// database created before #1464 — unfixable, since `ALTER TABLE`
+    /// there cannot replace one — and its `YYYY-MM-DD HH:MM:SS` sorts
+    /// below the canonical spelling, so cursor pagination keyed on the
+    /// column serves page one forever.
+    #[must_use]
+    pub fn is_auto_timestamp(&self) -> bool {
+        self.auto && !self.primary_key && matches!(self.ty, FieldType::DateTime)
+    }
 }
 
 /// Static description of a relation to another model.
