@@ -924,7 +924,12 @@ macro_rules! bind_match_sqlite {
             SqlValue::F64(v) => $q.bind(v),
             SqlValue::Bool(v) => $q.bind(v),
             SqlValue::String(v) => $q.bind(v),
-            SqlValue::DateTime(v) => $q.bind(v),
+            // #1464 — encoded here rather than handed to sqlx. sqlx uses
+            // chrono's `AutoSi`, which emits 0/3/6/9 fractional digits by
+            // value, so a stored timestamp did not equal its own re-bound
+            // form and a cursor re-emitted its last row forever. This is
+            // fixed-width and matches what the DDL default writes.
+            SqlValue::DateTime(v) => $q.bind(crate::sql::encode_datetime(v)),
             SqlValue::Date(v) => $q.bind(v),
             SqlValue::Time(v) => $q.bind(v),
             SqlValue::Uuid(v) => $q.bind(v),

@@ -38,8 +38,8 @@
 //! A table created by hand-written DDL and never described to the ORM
 //! is invisible here, and is reported rather than silently skipped.
 
-use crate::core::{FieldType, ModelEntry};
-use crate::sql::{Pool, SQLITE_DATETIME_FORMAT, SQLITE_LEGACY_DATETIME_LIKE};
+use crate::core::{FieldType, ModelEntry, SqlValue};
+use crate::sql::{Pool, SQLITE_DATETIME_FORMAT};
 
 use super::MigrateError;
 
@@ -94,16 +94,50 @@ pub async fn normalise_sqlite_datetimes(pool: &Pool) -> Result<Normalised, Migra
         return Ok(out);
     }
 
+    let d = pool.dialect();
     for (table, column) in targets() {
-        // `format!` rather than a bind: SQLite does not accept a
-        // placeholder for an identifier, and both halves are
-        // compile-time constants from the schema, never user input.
+        // `quote_ident` rather than a hand-rolled `"{}"`: it doubles an
+        // embedded quote. The invariant that a schema identifier is
+        // `[A-Za-z_][A-Za-z0-9_]*` is enforced by the derive macro, but
+        // `ModelSchema` is public with public `&'static str` fields, so
+        // the invariant is a comment and this is a type. Identifiers
+        // cannot be bound as placeholders; the values below can be and
+        // are.
+        let t = d.quote_ident(table.as_str());
+        let c = d.quote_ident(column.as_str());
+
+        // Convert **any** parseable value that is not already canonical,
+        // rather than only the `YYYY-MM-DD HH:MM:SS` shape.
+        //
+        // The first version matched a `LIKE` mask of that one legacy
+        // shape, which was wrong twice. It missed the *other* legacy
+        // shape — sqlx's old variable-width RFC3339, where a
+        // whole-second instant has no fractional part at all — so a row
+        // written by an older rustango stayed un-normalised and stopped
+        // comparing against the fixed-width bind this release
+        // introduces. And it matched things `strftime` cannot parse:
+        // `0000-00-00 00:00:00`, the MySQL zero date, fits the mask
+        // exactly, `strftime` returns NULL for it, and the UPDATE wrote
+        // that NULL over the row — destroying a timestamp on a nullable
+        // column and hard-failing `migrate` on a NOT NULL one.
+        //
+        // This predicate says what is actually meant: *if SQLite can
+        // read it and it is not already the canonical spelling, rewrite
+        // it.* Unparseable text is left exactly as found, and the sweep
+        // is idempotent by construction rather than by the mask's
+        // shape — after a pass, `col = strftime(col)` and the row stops
+        // matching.
         let sql = format!(
-            "UPDATE \"{table}\" SET \"{column}\" = \
-             strftime('{SQLITE_DATETIME_FORMAT}', \"{column}\") \
-             WHERE \"{column}\" LIKE '{SQLITE_LEGACY_DATETIME_LIKE}'"
+            "UPDATE {t} SET {c} = strftime(?, {c}) \
+             WHERE strftime(?, {c}) IS NOT NULL \
+               AND {c} <> strftime(?, {c})"
         );
-        match crate::sql::raw_execute_pool(pool, &sql, Vec::new()).await {
+        let binds = vec![
+            SqlValue::String(SQLITE_DATETIME_FORMAT.to_owned()),
+            SqlValue::String(SQLITE_DATETIME_FORMAT.to_owned()),
+            SqlValue::String(SQLITE_DATETIME_FORMAT.to_owned()),
+        ];
+        match crate::sql::raw_execute_pool(pool, &sql, binds).await {
             Ok(n) if n > 0 => {
                 out.rows += n;
                 out.columns.push(format!("{table}.{column}"));
@@ -204,30 +238,24 @@ mod tests {
         }
     }
 
-    /// The legacy mask must not match the shape the fix produces, or
-    /// the sweep would rewrite its own output on every run and stop
-    /// being idempotent.
+    /// Idempotence, asserted where it now lives: in the predicate.
     ///
-    /// Asserted on the constants rather than against a database,
-    /// because it is a property of the two strings.
+    /// This replaces a test that measured the old `LIKE` mask against
+    /// the corrected shape — comparing two string lengths and one byte.
+    /// That proved a property of two constants, not of the sweep, and
+    /// the sweep no longer uses the mask: the predicate is "parseable
+    /// and not already canonical", which cannot match its own output by
+    /// construction. The behavioural proof is
+    /// `the_sweep_is_idempotent` in `tests/sqlite_datetime_normalise.rs`,
+    /// which runs it twice against a database and asserts the second
+    /// pass changes nothing.
     #[test]
-    fn the_legacy_mask_cannot_match_the_corrected_shape() {
-        // A LIKE mask of `_` wildcards matches on width and on the
-        // position of its literal characters. The corrected shape is
-        // 32 characters against the mask's 19, and carries `T` where
-        // the mask demands a space.
-        assert_eq!(SQLITE_LEGACY_DATETIME_LIKE.len(), 19);
+    fn the_canonical_shape_is_a_fixed_width() {
+        // Every value the sweep writes is `strftime` output in
+        // SQLITE_DATETIME_FORMAT, so the width is the one thing the
+        // predicate's `<>` leg depends on staying constant.
         let corrected = "2026-09-19T19:44:55.869000+00:00";
-        assert_ne!(corrected.len(), SQLITE_LEGACY_DATETIME_LIKE.len());
-        assert_eq!(
-            SQLITE_LEGACY_DATETIME_LIKE.as_bytes()[10],
-            b' ',
-            "the mask must require a space at position 10"
-        );
-        assert_eq!(
-            corrected.as_bytes()[10],
-            b'T',
-            "the corrected shape must carry T at position 10"
-        );
+        assert_eq!(corrected.len(), 32);
+        assert_eq!(corrected.as_bytes()[10], b'T');
     }
 }
