@@ -50,10 +50,16 @@ use super::MigrateError;
 /// the tables whose `CREATE TABLE` text this crate ships, so a new one
 /// is a change to this crate and belongs in this list by the same edit.
 const FRAMEWORK_COLUMNS: &[(&str, &str)] = &[
-    ("rustango_audit_log", "occurred_at"),
+    // `rustango_translations` is the reason this list exists.
+    // `Translation` IS `#[derive(Model)]`, but it declares no DateTime
+    // field — `created_at` / `updated_at` live only in the
+    // hand-written DDL — so the registry sweep cannot see them.
     ("rustango_translations", "created_at"),
     ("rustango_translations", "updated_at"),
-    ("rustango_migrations", "applied_at"),
+    // `rustango_jobs` is likewise hand-written DDL with no model.
+    ("rustango_jobs", "run_at"),
+    ("rustango_jobs", "locked_at"),
+    ("rustango_jobs", "created_at"),
 ];
 
 /// Outcome of one sweep, so the caller can say what happened rather
@@ -170,6 +176,24 @@ fn targets() -> Vec<(String, String)> {
         .iter()
         .map(|(t, c)| ((*t).to_owned(), (*c).to_owned()))
         .collect();
+
+    // The two migration ledgers, named from the constants that own
+    // those names rather than retyped. The first version of this list
+    // spelled one of them `rustango_migrations`, which is not a table
+    // anywhere in the crate — so it always raised `no such table`, was
+    // swallowed into `missing`, and the ledger went unswept although
+    // this release changed its DDL.
+    //
+    // `ensure_ledger_pool_with_ledger` lets an operator rename the
+    // ledger (#146), so even the constants only cover the default. A
+    // renamed ledger is the operator's to normalise; its `applied_at`
+    // is display-only and compared against nothing.
+    for t in [
+        super::runner::LEDGER_TABLE,
+        super::runner::SYSTEM_LEDGER_TABLE,
+    ] {
+        seen.push((t.to_owned(), "applied_at".to_owned()));
+    }
 
     for entry in inventory::iter::<ModelEntry> {
         for field in entry.schema.fields {

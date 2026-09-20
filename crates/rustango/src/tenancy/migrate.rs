@@ -344,6 +344,14 @@ pub async fn migrate_registry_pool(
             "contenttypes::ensure_seeded failed for registry pool",
         );
     }
+    // #1464 — the single-database `migrate` runs this at the end of its
+    // own path, and tenancy never reaches that: `tenancy::manage`
+    // intercepts the `migrate` verb before the fall-through, precisely
+    // so migrations stay scope-aware. That left the registry and every
+    // tenant database un-normalised while this release switched the
+    // write side to RFC3339 — the new assumption with none of the
+    // repair, reported as success.
+    normalise_datetimes_quietly(registry, "registry").await;
     info!(
         target: "rustango::tenancy",
         applied = applied.len(),
@@ -750,7 +758,43 @@ where
     if let Err(e) = crate::contenttypes::ensure_seeded(&inner_pool).await {
         tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
     }
+    // #1464 — see the registry seam. SQLite tenancy is
+    // database-per-tenant, so a missed tenant is a whole database left
+    // holding a shape the ORM no longer compares against.
+    normalise_datetimes_quietly(&inner_pool, &org.slug).await;
     Ok(applied)
+}
+
+/// Run the #1464 datetime sweep on one pool, warning rather than
+/// failing.
+///
+/// Warn-not-fail matches the seeders either side of it: a migration
+/// run that applied every migration has succeeded, and a repair that
+/// could not complete should not retract that. The count is logged so
+/// it is visible rather than silent — the sweep rewrites stored data,
+/// which is not something to do without saying so.
+///
+/// A no-op on PostgreSQL and MySQL, which have real datetime types.
+#[allow(unused_variables)]
+async fn normalise_datetimes_quietly(pool: &crate::sql::Pool, scope: &str) {
+    #[cfg(feature = "sqlite")]
+    match crate::migrate::sqlite_datetime::normalise_sqlite_datetimes(pool).await {
+        Ok(fixed) if !fixed.is_clean() => tracing::info!(
+            target: "rustango::tenancy",
+            scope = %scope,
+            rows = fixed.rows,
+            columns = ?fixed.columns,
+            "normalised SQLite datetime values written before 0.57.11 (#1464)",
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            target: "rustango::tenancy",
+            scope = %scope,
+            error = %e,
+            "SQLite datetime normalisation failed; timestamps written before \
+             0.57.11 may not compare correctly until it succeeds (#1464)",
+        ),
+    }
 }
 
 /// Tri-dialect tenant migration dispatch (v0.38). On PG, downcasts
@@ -853,6 +897,12 @@ async fn run_for_one_tenant(
             if let Err(e) = crate::contenttypes::ensure_seeded(&dbpool).await {
                 tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for schema-mode tenant");
             }
+            // #1464 — schema mode is PG-only, so the sweep is a no-op
+            // here today. Wired anyway: the invariant is "every database
+            // the migrator touches gets swept", and an exception that
+            // happens to be harmless is how the single-database-only
+            // version of this shipped.
+            normalise_datetimes_quietly(&dbpool, &org.slug).await;
             pool.close().await;
             Ok(applied)
         }
@@ -878,6 +928,9 @@ async fn run_for_one_tenant(
             if let Err(e) = crate::contenttypes::ensure_seeded(&dbpool).await {
                 tracing::warn!(target: "rustango::tenancy", slug = %org.slug, error = %e, "contenttypes::ensure_seeded failed for database-mode tenant");
             }
+            // #1464 — database mode on a non-PG backend is exactly the
+            // deployment shape the sweep exists for.
+            normalise_datetimes_quietly(&dbpool, &org.slug).await;
             Ok(applied)
         }
     }

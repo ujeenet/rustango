@@ -304,6 +304,7 @@ jobs:
             --test every_live_suite_runs_in_ci \
             --test every_serve_shuts_down_gracefully \
             --test every_serving_path_is_observable \
+            --test every_migrate_path_normalises_datetimes \
             --test every_structural_guard_runs_in_ci \
             --test live_suites_fail_loudly \
             --test macro_internals_stays_internal \
