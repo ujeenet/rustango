@@ -126,6 +126,87 @@ fn no_sqlite_ddl_defaults_a_datetime_to_current_timestamp() {
     );
 }
 
+/// The canonical shape, spelled once.
+///
+/// Duplicated from `sql::sqlite::SQLITE_DATETIME_FORMAT`, which is
+/// `pub(crate)` and so unreachable from an integration test. That is
+/// the drift this guard accepts in order to prevent a worse one, and
+/// `the_canonical_format_is_still_what_the_crate_uses` pins the copy
+/// against the source.
+const CANONICAL: &str = "%Y-%m-%dT%H:%M:%f000+00:00";
+
+/// A `strftime` DDL default must use the canonical format, not merely
+/// avoid `CURRENT_TIMESTAMP`.
+///
+/// Banning one wrong spelling leaves every other wrong spelling
+/// allowed, and one was already in the tree: `rustango_jobs` defaulted
+/// to `%Y-%m-%dT%H:%M:%fZ` — `Z` suffix, three digits — which for the
+/// same instant is a different string from the six-digit `+00:00`
+/// shape everything else writes. Two canonical formats is the same
+/// defect as one canonical and one legacy; the column still holds two
+/// spellings and comparisons across them are still wrong.
+#[test]
+fn every_sqlite_strftime_default_uses_the_canonical_format() {
+    let mut files = Vec::new();
+    sources(&src_root(), &mut files);
+
+    let mut hits = Vec::new();
+    for path in &files {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for (i, line) in text.lines().enumerate() {
+            // Only DDL defaults. `strftime` also appears in query
+            // emitters (`date_hierarchy`, `trunc`), where the format is
+            // the caller's business and has nothing to do with how a
+            // column is stored.
+            if !line.contains("DEFAULT (strftime(") {
+                continue;
+            }
+            if line.contains(CANONICAL) {
+                continue;
+            }
+            hits.push(format!(
+                "{}:{}: {}",
+                path.strip_prefix(src_root().parent().unwrap_or(Path::new("")))
+                    .unwrap_or(path)
+                    .display(),
+                i + 1,
+                line.trim()
+            ));
+        }
+    }
+
+    assert!(
+        hits.is_empty(),
+        "a SQLite `DEFAULT (strftime(…))` must use the canonical format \
+         `{CANONICAL}` (#1464).\n\n{}\n\nA second strftime shape is not \
+         an improvement on `CURRENT_TIMESTAMP`: the column still ends up \
+         holding two spellings of the same instant, and text comparison \
+         still gets them wrong. `rustango_jobs` was in exactly this \
+         state with a `%fZ` default.",
+        hits.join("\n"),
+    );
+}
+
+/// The copy above must match what the crate actually emits.
+///
+/// Without this the guard could enforce a format the code stopped
+/// using — passing while every column drifted somewhere else, which is
+/// the failure mode it exists to prevent, one level up.
+#[test]
+fn the_canonical_format_is_still_what_the_crate_uses() {
+    let sqlite_rs = std::fs::read_to_string(src_root().join("sql/sqlite.rs")).expect("read");
+    assert!(
+        sqlite_rs.contains(&format!(
+            "pub(crate) const SQLITE_DATETIME_FORMAT: &str = \"{CANONICAL}\";"
+        )),
+        "this file's CANONICAL copy no longer matches \
+         `SQLITE_DATETIME_FORMAT` in sql/sqlite.rs. Update both, or the \
+         guard above is enforcing a format nothing writes."
+    );
+}
+
 /// The guard above is a negative assertion, so it passes on a tree
 /// where it matches nothing for the wrong reason — a broken scan, a
 /// changed spelling. This proves the matcher still recognises the
