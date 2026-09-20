@@ -404,25 +404,18 @@ async def check_cursor_walks(client, name, base, headers=None):
                    "`next` was offered but its page is empty", name)
     elif set(ids_1) & set(ids_2):
         overlap = sorted(set(ids_1) & set(ids_2))
-        # #1464 — on SQLite an `auto_now_add` column is written by
-        # `DEFAULT CURRENT_TIMESTAMP` as "YYYY-MM-DD HH:MM:SS" while
-        # sqlx binds `DateTime<Utc>` as RFC3339. Space (0x20) sorts
-        # before 'T' (0x54), so the cursor predicate matches every row
-        # and page two is page one. Known, filed, and deliberately not
-        # fixed in 0.57.5: every fix changes the stored format.
+        # SQLite used to be excused here as a KNOWN-GAP for #1464: its
+        # `auto_now_add` columns were written by `DEFAULT
+        # CURRENT_TIMESTAMP` as "YYYY-MM-DD HH:MM:SS" while sqlx bound
+        # RFC3339, so the cursor predicate matched every row and page
+        # two was page one.
         #
-        # Scoped to SQLite and to this symptom. A cursor that fails to
-        # advance on Postgres or MySQL, or that fails any other way, is
-        # still a FAIL.
-        if name.endswith("-sq"):
-            REPORT.add("timestamp cursor advances", "#1464", "KNOWN-GAP",
-                       f"SQLite stores auto_now_add as 'YYYY-MM-DD HH:MM:SS' and binds "
-                       f"RFC3339, so the cursor predicate matches every row; page two "
-                       f"repeats {overlap}. Not a regression — see issue #1464",
-                       name)
-        else:
-            REPORT.add("timestamp cursor advances", issue, "FAIL",
-                       f"page two repeats rows from page one: {overlap}", name)
+        # #1464 is fixed, and the excuse goes with it. Leaving it would
+        # make this leg unable to fail — which would also make it unable
+        # to prove anything, and a regression would read as "known gap"
+        # forever.
+        REPORT.add("timestamp cursor advances", issue, "FAIL",
+                   f"page two repeats rows from page one: {overlap}", name)
     else:
         REPORT.add("timestamp cursor advances", issue, "PASS",
                    f"{len(ids_1)} then {len(ids_2)} distinct rows", name)
