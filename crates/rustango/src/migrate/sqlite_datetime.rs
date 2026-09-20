@@ -70,8 +70,10 @@ pub struct Normalised {
     pub rows: u64,
     /// `table.column` for each column that had at least one legacy row.
     pub columns: Vec<String>,
-    /// Columns skipped because the table does not exist yet. Normal on
-    /// a fresh database, where `migrate` creates the tables afterwards.
+    /// Targets skipped because the table or the column does not exist
+    /// yet. Normal on a fresh database, and normal between deploying a
+    /// model with a new `DateTime` field and applying its migration —
+    /// the registry lists the column as soon as the binary is built.
     pub missing: usize,
 }
 
@@ -91,9 +93,11 @@ impl Normalised {
 ///
 /// # Errors
 /// Propagates the driver error from the sweep's `UPDATE`. A missing
-/// table is **not** an error — it is counted in
-/// [`Normalised::missing`], because this runs before `migrate` has
-/// created the tables on a fresh database.
+/// **table or column** is not an error — it is counted in
+/// [`Normalised::missing`]. Both are ordinary mid-migration: a fresh
+/// database has no tables yet, and a model that declares a new
+/// `DateTime` field puts that column in the target list the moment the
+/// binary is built, before the migration adding it has run.
 pub async fn normalise_sqlite_datetimes(pool: &Pool) -> Result<Normalised, MigrateError> {
     let mut out = Normalised::default();
     if pool.dialect().name() != "sqlite" {
@@ -160,7 +164,7 @@ pub async fn normalise_sqlite_datetimes(pool: &Pool) -> Result<Normalised, Migra
                 out.columns.push(format!("{table}.{column}"));
             }
             Ok(_) => {}
-            Err(e) if is_missing_table(&e) => out.missing += 1,
+            Err(e) if is_missing_target(&e) => out.missing += 1,
             // Forward the driver error rather than flattening it to a
             // string, so a caller can still match on the sqlx cause.
             Err(crate::sql::ExecError::Driver(e)) => return Err(MigrateError::Driver(e)),
@@ -225,11 +229,30 @@ fn targets() -> Vec<(String, String)> {
     seen
 }
 
-/// `SQLite` reports an absent table as `no such table: <name>`. Matched
-/// on the message because sqlx surfaces it as a generic database error
-/// with no code this can key on.
-fn is_missing_table(e: &crate::sql::ExecError) -> bool {
-    e.to_string().contains("no such table")
+/// Is this error "the thing I was going to sweep is not there yet"?
+///
+/// Both shapes are `SQLite` **prepare** errors and both are ordinary
+/// during a migration run:
+///
+/// ```text
+/// no such table: gone        — the migration creating it has not run
+/// no such column: nope       — the model declares it, the migration has not run
+/// ```
+///
+/// Only the table case was matched. A model declaring a new `DateTime`
+/// column put that column in `targets()` the moment the binary was
+/// built, so between deploying the code and applying its migration the
+/// sweep raised `no such column`, which fell through to `Err` — and the
+/// sweep runs at the *end* of `migrate`, so the run aborted after
+/// earlier migrations had already committed (#1616 review,
+/// correctness-002; carried unfixed into the rework, where four peers
+/// handed it over again).
+///
+/// Matched on the message because sqlx surfaces both as a generic
+/// database error with no code to key on.
+fn is_missing_target(e: &crate::sql::ExecError) -> bool {
+    let msg = e.to_string();
+    msg.contains("no such table") || msg.contains("no such column")
 }
 
 #[cfg(test)]

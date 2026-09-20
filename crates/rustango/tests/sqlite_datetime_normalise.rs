@@ -447,3 +447,43 @@ async fn a_microsecond_value_is_not_touched_by_the_sweep() {
         after[0]
     );
 }
+
+/// A declared column whose migration has not run yet must be skipped,
+/// not fatal.
+///
+/// `targets()` is built from the model registry, so a new `DateTime`
+/// field is a sweep target the moment the binary is built — before the
+/// migration adding it has been applied. SQLite answers that with a
+/// **prepare** error, `no such column: <name>`, which the classifier
+/// matched only for tables. The sweep returned `Err`, and because it
+/// runs at the *end* of `migrate`, the run aborted **after earlier
+/// migrations had already committed** (#1616 review, correctness-002 —
+/// carried unfixed into the rework and handed over by four peers).
+///
+/// The table exists here and the column does not. A fixture with no
+/// table at all passes against the old classifier too, so it would
+/// have proved nothing.
+#[tokio::test]
+async fn a_declared_column_that_does_not_exist_yet_is_skipped() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");
+
+    // The model's table, minus the column the model declares — exactly
+    // the window between deploying code and applying its migration.
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "CREATE TABLE normalise_evt (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL)",
+        Vec::new(),
+    )
+    .await
+    .expect("create table without created_at");
+
+    let out = normalise_sqlite_datetimes(&pool)
+        .await
+        .expect("a column that does not exist yet must not fail the sweep");
+
+    assert!(
+        out.missing > 0,
+        "the absent column should be counted as missing, got {out:?}"
+    );
+    assert!(out.is_clean(), "and nothing should have been rewritten");
+}
