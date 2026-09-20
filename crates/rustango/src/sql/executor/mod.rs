@@ -970,7 +970,7 @@ pub(super) fn bind_query_as<T>(
 }
 
 #[cfg(feature = "postgres")]
-pub(super) fn bind_query(
+pub(crate) fn bind_query(
     q: Query<'_, sqlx::Postgres, PgArguments>,
     value: SqlValue,
 ) -> Query<'_, sqlx::Postgres, PgArguments> {
@@ -1089,7 +1089,7 @@ use super::Pool;
 /// the Postgres-typed [`bind_query`] using the same polymorphic
 /// `bind_match!` body.
 #[cfg(feature = "mysql")]
-pub(super) fn bind_query_my(
+pub(crate) fn bind_query_my(
     q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
     value: SqlValue,
 ) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
@@ -1102,7 +1102,7 @@ pub(super) fn bind_query_my(
 /// values go through the `json` feature into TEXT — both feature flags
 /// are pulled in by the runtime feature set when `sqlite` is on).
 #[cfg(feature = "sqlite")]
-pub(super) fn bind_query_sqlite<'a>(
+pub(crate) fn bind_query_sqlite<'a>(
     q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
     value: SqlValue,
 ) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {

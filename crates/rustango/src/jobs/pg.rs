@@ -524,7 +524,15 @@ async fn pick_one(pool: &Pool, worker_id: &str) -> Result<Option<PickedJob>, sql
             // BEGIN IMMEDIATE (sqlx's `begin()` for sqlite acquires
             // a write lock) + UPDATE … WHERE id = (SELECT id …) RETURNING.
             let mut tx = sq.begin().await?;
-            let now_str = now.to_rfc3339();
+            // #1464 — the canonical encoding, not `to_rfc3339()`.
+            // chrono's RFC3339 is variable width (0/3/6/9 fractional
+            // digits by value), and this string is used twice: written
+            // into `locked_at`, and compared against `run_at`, whose
+            // DDL default now writes the fixed six-digit shape. A
+            // whole-second `now` encodes with no fractional part at
+            // all, and `+` (0x2B) sorts below `.` (0x2E), so
+            // `run_at <= ?` read a due job as not-yet-due.
+            let now_str = crate::sql::encode_datetime(now);
             let row = sqlx::query(
                 "UPDATE rustango_jobs
                     SET locked_at = ?, locked_by = ?

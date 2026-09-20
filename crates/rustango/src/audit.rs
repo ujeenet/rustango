@@ -1275,7 +1275,7 @@ pub fn __bind_value_pg(
     q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
     value: crate::core::SqlValue,
 ) -> sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    bind_value_pg(q, value)
+    crate::sql::bind_query(q, value)
 }
 
 /// MySQL counterpart of [`__bind_value_pg`] — same purpose, MySQL
@@ -1286,7 +1286,7 @@ pub fn __bind_value_my(
     q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
     value: crate::core::SqlValue,
 ) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
-    bind_value_my(q, value)
+    crate::sql::bind_query_my(q, value)
 }
 
 /// SQLite counterpart of [`__bind_value_pg`] — same purpose, SQLite
@@ -1297,129 +1297,7 @@ pub fn __bind_value_sqlite<'q>(
     q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
     value: crate::core::SqlValue,
 ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
-    bind_value_sqlite(q, value)
-}
-
-#[cfg(feature = "postgres")]
-fn bind_value_pg(
-    q: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    value: crate::core::SqlValue,
-) -> sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    use crate::core::SqlValue;
-    match value {
-        SqlValue::Null => q.bind(None::<String>),
-        SqlValue::I16(v) => q.bind(v),
-        SqlValue::I32(v) => q.bind(v),
-        SqlValue::I64(v) => q.bind(v),
-        SqlValue::F32(v) => q.bind(v),
-        SqlValue::F64(v) => q.bind(v),
-        SqlValue::Bool(v) => q.bind(v),
-        SqlValue::String(v) => q.bind(v),
-        SqlValue::DateTime(v) => q.bind(v),
-        SqlValue::Date(v) => q.bind(v),
-        SqlValue::Time(v) => q.bind(v),
-        SqlValue::Uuid(v) => q.bind(v),
-        SqlValue::Json(v) => q.bind(sqlx::types::Json(v)),
-        SqlValue::Decimal(v) => q.bind(v),
-        SqlValue::Binary(v) => q.bind(v),
-        SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
-        // Array values only flow through WHERE clauses, not audit row saves.
-        SqlValue::Array(_) => unreachable!("Array values never reach audited-save bind path"),
-        SqlValue::RangeLiteral(_) => {
-            unreachable!("RangeLiteral values never reach audited-save bind path")
-        }
-        SqlValue::HStore(_) => {
-            unreachable!("HStore values never reach audited-save bind path")
-        }
-        SqlValue::Vector(_) => {
-            unreachable!("Vector values never reach audited-save bind path")
-        }
-        SqlValue::Geometry { .. } => {
-            unreachable!("Geometry values never reach audited-save bind path")
-        }
-    }
-}
-
-#[cfg(feature = "mysql")]
-fn bind_value_my(
-    q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments>,
-    value: crate::core::SqlValue,
-) -> sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> {
-    use crate::core::SqlValue;
-    match value {
-        SqlValue::Null => q.bind(None::<String>),
-        SqlValue::I16(v) => q.bind(v),
-        SqlValue::I32(v) => q.bind(v),
-        SqlValue::I64(v) => q.bind(v),
-        SqlValue::F32(v) => q.bind(v),
-        SqlValue::F64(v) => q.bind(v),
-        SqlValue::Bool(v) => q.bind(v),
-        SqlValue::String(v) => q.bind(v),
-        SqlValue::DateTime(v) => q.bind(v),
-        SqlValue::Date(v) => q.bind(v),
-        SqlValue::Time(v) => q.bind(v),
-        SqlValue::Uuid(v) => q.bind(v),
-        SqlValue::Json(v) => q.bind(sqlx::types::Json(v)),
-        SqlValue::Decimal(v) => q.bind(v),
-        SqlValue::Binary(v) => q.bind(v),
-        SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
-        // Array values only flow through WHERE clauses, not audit row saves.
-        SqlValue::Array(_) => unreachable!("Array values never reach audited-save bind path"),
-        SqlValue::RangeLiteral(_) => {
-            unreachable!("RangeLiteral values never reach audited-save bind path")
-        }
-        SqlValue::HStore(_) => {
-            unreachable!("HStore values never reach audited-save bind path")
-        }
-        SqlValue::Vector(_) => {
-            unreachable!("Vector values never reach audited-save bind path")
-        }
-        SqlValue::Geometry { .. } => {
-            unreachable!("Geometry values never reach audited-save bind path")
-        }
-    }
-}
-
-#[cfg(feature = "sqlite")]
-fn bind_value_sqlite<'q>(
-    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
-    value: crate::core::SqlValue,
-) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
-    use crate::core::SqlValue;
-    match value {
-        SqlValue::Null => q.bind(None::<String>),
-        SqlValue::I16(v) => q.bind(v),
-        SqlValue::I32(v) => q.bind(v),
-        SqlValue::I64(v) => q.bind(v),
-        SqlValue::F32(v) => q.bind(v),
-        SqlValue::F64(v) => q.bind(v),
-        SqlValue::Bool(v) => q.bind(v),
-        SqlValue::String(v) => q.bind(v),
-        SqlValue::DateTime(v) => q.bind(v),
-        SqlValue::Date(v) => q.bind(v),
-        SqlValue::Time(v) => q.bind(v),
-        SqlValue::Uuid(v) => q.bind(v),
-        SqlValue::Json(v) => q.bind(sqlx::types::Json(v)),
-        // sqlx-sqlite has no `Decimal: Type<Sqlite>` — round-trip via
-        // TEXT to match `bind_match_sqlite!` in `sql::executor`.
-        SqlValue::Decimal(v) => q.bind(v.to_string()),
-        SqlValue::Binary(v) => q.bind(v),
-        SqlValue::List(_) => unreachable!("List expanded to scalars by SQL writer"),
-        // Array values only flow through WHERE clauses, not audit row saves.
-        SqlValue::Array(_) => unreachable!("Array values never reach audited-save bind path"),
-        SqlValue::RangeLiteral(_) => {
-            unreachable!("RangeLiteral values never reach audited-save bind path")
-        }
-        SqlValue::HStore(_) => {
-            unreachable!("HStore values never reach audited-save bind path")
-        }
-        SqlValue::Vector(_) => {
-            unreachable!("Vector values never reach audited-save bind path")
-        }
-        SqlValue::Geometry { .. } => {
-            unreachable!("Geometry values never reach audited-save bind path")
-        }
-    }
+    crate::sql::bind_query_sqlite(q, value)
 }
 
 /// Per-row audited save against either backend.
@@ -1485,7 +1363,7 @@ where
                 select_cols_pg, entity_table, pk_column,
             );
             let pk_q = sqlx::query(&select_sql);
-            let pk_q = bind_value_pg(pk_q, pk_value);
+            let pk_q = crate::sql::bind_query(pk_q, pk_value);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
                 match pk_q.fetch_optional(&mut *tx).await {
                     Ok(Some(row)) => Some(decode_before_pg(&row)),
@@ -1512,7 +1390,7 @@ where
                 select_cols_my, entity_table, pk_column,
             );
             let pk_q = sqlx::query(&select_sql);
-            let pk_q = bind_value_my(pk_q, pk_value);
+            let pk_q = crate::sql::bind_query_my(pk_q, pk_value);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
                 match pk_q.fetch_optional(&mut *tx).await {
                     Ok(Some(row)) => Some(decode_before_my(&row)),
@@ -1539,7 +1417,7 @@ where
                 select_cols_sqlite, entity_table, pk_column,
             );
             let pk_q = sqlx::query(&select_sql);
-            let pk_q = bind_value_sqlite(pk_q, pk_value);
+            let pk_q = crate::sql::bind_query_sqlite(pk_q, pk_value);
             let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> =
                 match pk_q.fetch_optional(&mut *tx).await {
                     Ok(Some(row)) => Some(decode_before_sqlite(&row)),
