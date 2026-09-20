@@ -36,6 +36,10 @@ services:
       MYSQL_PASSWORD: rustango
     ports:
       - "3406:3306"
+    # The image grants `rustango` on `MYSQL_DATABASE` only, which is
+    # not enough for the tenancy and preflight suites. See the file.
+    volumes:
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "rustango", "-prustango"]
       interval: 2s
