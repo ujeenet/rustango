@@ -141,11 +141,11 @@ CREATE TABLE IF NOT EXISTS rustango_jobs (
     payload      TEXT     NOT NULL,
     attempt      INTEGER  NOT NULL DEFAULT 0,
     max_attempts INTEGER  NOT NULL,
-    run_at       TEXT     NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    run_at       TEXT     NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')),
     locked_at    TEXT,
     locked_by    TEXT,
     last_error   TEXT,
-    created_at   TEXT     NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    created_at   TEXT     NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now'))
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
     ON rustango_jobs (run_at) WHERE locked_at IS NULL";
