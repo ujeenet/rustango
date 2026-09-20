@@ -397,3 +397,44 @@ async fn facet_counts_rejects_non_allowlisted_column() {
     let r = audit::facet_counts(&pool, "no_such_column").await;
     assert!(r.is_err(), "non-allowlisted column should be rejected");
 }
+
+/// The retention DELETE must use the `occurred_at` index.
+///
+/// The first #1464 fix wrapped the column in a `CASE`/`strftime` to
+/// make the comparison correct for not-yet-swept rows. It was correct
+/// and it turned `SEARCH` into `SCAN`: measured on a steady
+/// keep-last-N-days sweep, 1 ms to 97 ms and 35 to 17,864 pages read,
+/// O(table) rather than O(rows deleted).
+///
+/// The shape that is both correct and indexable keeps the range bare
+/// and filters legacy rows after it. That is easy to undo by accident —
+/// any future edit that wraps the column loses the index silently,
+/// because every correctness test still passes. This asserts the plan.
+#[tokio::test]
+async fn the_retention_delete_uses_the_occurred_at_index() {
+    use sqlx::Row as _;
+    let pool = pool().await;
+    ensure_table_pool(&pool).await.unwrap();
+    let sq = pool.as_sqlite().expect("sqlite pool");
+
+    // The renderer's own SQL, so this cannot drift from what runs.
+    let sql = rustango::audit::__test_cleanup_older_than_sql(pool.dialect());
+    let plan: Vec<String> = sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .bind("2026-01-01T00:00:00.000000+00:00")
+        .bind("2026-01-01 00:00:00")
+        .fetch_all(sq)
+        .await
+        .expect("explain")
+        .iter()
+        .map(|r| r.get::<String, _>("detail"))
+        .collect();
+
+    let joined = plan.join(" | ");
+    assert!(
+        joined.contains("USING INDEX") && !joined.contains("SCAN rustango_audit_log"),
+        "the retention DELETE must seek the occurred_at index, not scan the \
+         table. Plan: {joined}\n\nIf a correctness fix required wrapping the \
+         column, say so here — but measure it first: this path is O(table) \
+         once the index is lost."
+    );
+}
