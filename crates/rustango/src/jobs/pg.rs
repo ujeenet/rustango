@@ -134,21 +134,33 @@ CREATE TABLE IF NOT EXISTS `rustango_jobs` (
 );
 CREATE INDEX `rustango_jobs_pickup_idx` ON `rustango_jobs` (`run_at`)";
 
-const CREATE_JOBS_TABLE_SQL_SQLITE: &str = "\
+/// `run_at` / `created_at` take their DEFAULT from the dialect rather
+/// than a literal. It used to be spelled out here, and drifted twice:
+/// first `CURRENT_TIMESTAMP`, then a `%fZ` strftime that was a second
+/// canonical format rather than the one (#1464).
+///
+/// The default is a backstop for hand-written INSERTs — `dispatch`
+/// binds both columns.
+fn create_jobs_table_sql_sqlite(dialect: &dyn crate::sql::Dialect) -> String {
+    let now = dialect.current_timestamp_default();
+    format!(
+        "\
 CREATE TABLE IF NOT EXISTS rustango_jobs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT     NOT NULL,
     payload      TEXT     NOT NULL,
     attempt      INTEGER  NOT NULL DEFAULT 0,
     max_attempts INTEGER  NOT NULL,
-    run_at       TEXT     NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')),
+    run_at       TEXT     NOT NULL DEFAULT {now},
     locked_at    TEXT,
     locked_by    TEXT,
     last_error   TEXT,
-    created_at   TEXT     NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now'))
+    created_at   TEXT     NOT NULL DEFAULT {now}
 );
 CREATE INDEX IF NOT EXISTS rustango_jobs_pickup_idx
-    ON rustango_jobs (run_at) WHERE locked_at IS NULL";
+    ON rustango_jobs (run_at) WHERE locked_at IS NULL"
+    )
+}
 
 impl PgJobQueue {
     /// Build a queue from a [`crate::sql::Pool`] with `worker_count`
@@ -234,14 +246,13 @@ impl PgJobQueue {
     /// Underlying sqlx DDL error.
     pub async fn ensure_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
         let ddl = match pool.dialect().name() {
-            "postgres" => CREATE_JOBS_TABLE_SQL_PG,
-            "mysql" => CREATE_JOBS_TABLE_SQL_MYSQL,
-            "sqlite" => CREATE_JOBS_TABLE_SQL_SQLITE,
-            _ => CREATE_JOBS_TABLE_SQL_PG,
+            "mysql" => CREATE_JOBS_TABLE_SQL_MYSQL.to_owned(),
+            "sqlite" => create_jobs_table_sql_sqlite(pool.dialect()),
+            _ => CREATE_JOBS_TABLE_SQL_PG.to_owned(),
         };
         // #561 — split-by-`;` + dispatch + swallow-dup-index loop
         // is shared via `crate::sql::run_ddl_idempotent`.
-        crate::sql::run_ddl_idempotent(pool, ddl).await
+        crate::sql::run_ddl_idempotent(pool, &ddl).await
     }
 
     /// PG-typed back-compat shim around [`Self::reclaim_stuck_jobs_pool`].

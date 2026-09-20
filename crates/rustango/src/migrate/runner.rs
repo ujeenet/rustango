@@ -657,7 +657,8 @@ async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateErr
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS {ledger} (\
          name TEXT PRIMARY KEY, \
-         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+         applied_at {})",
+        dialect.timestamp_now_column()
     );
     sqlx::query(&create_sql).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -1421,26 +1422,11 @@ pub async fn ensure_ledger_pool_with_ledger(
     pool: &crate::sql::Pool,
     ledger: &str,
 ) -> Result<(), MigrateError> {
-    let dialect_name = pool.dialect().name();
-    let timestamp_col = match dialect_name {
-        "postgres" => "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-        "mysql" => "DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
-        // SQLite has no native TIMESTAMP type, so this is TEXT and
-        // compares lexicographically. Matched to
-        // `sql::sqlite::SQLITE_DATETIME_FORMAT` so the ledger agrees
-        // with every other table rather than being the one exception
-        // (#1464).
-        "sqlite" => "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now'))",
-        // Future dialects: a `Dialect::current_timestamp_default()` +
-        // `Dialect::timestamp_type()` pair would let this branch go
-        // away. For now the runner only knows the backends rustango
-        // ships against.
-        other => {
-            return Err(MigrateError::Validation(format!(
-                "ensure_ledger_pool: unrecognized dialect `{other}`"
-            )));
-        }
-    };
+    // Was a three-arm match on the dialect name with a hand-written
+    // type + DEFAULT each, whose SQLite arm carried a copy of #1464's
+    // canonical `strftime`. `Dialect` answers both halves now, so the
+    // unreachable "unrecognized dialect" error goes too.
+    let timestamp_col = pool.dialect().timestamp_now_column();
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS {ledger} (\
          name VARCHAR(255) PRIMARY KEY, \

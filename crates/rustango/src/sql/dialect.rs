@@ -170,9 +170,10 @@ pub trait Dialect: Send + Sync {
     /// `JSON` columns since `DEFAULT '{}'` is rejected.
     ///
     /// Default: pass-through (Postgres-native). SQLite overrides
-    /// `now()` → `CURRENT_TIMESTAMP` and strips `::type` casts.
-    /// MySQL overrides similarly plus wraps defaults on its
-    /// LOB-rendered columns (JSON / TEXT / BLOB) in parens.
+    /// `now()` → a parenthesised `strftime` in the canonical datetime
+    /// format and strips `::type` casts. MySQL overrides similarly plus
+    /// wraps defaults on its LOB-rendered columns (JSON / TEXT / BLOB)
+    /// in parens.
     ///
     /// `max_length` is the field's declared length cap (PG/SQLite
     /// ignore it here); MySQL needs it to tell an unbounded `String`
@@ -180,6 +181,28 @@ pub trait Dialect: Send + Sync {
     /// bounded one (→ `VARCHAR(n)`, which allows it).
     fn translate_default_expr(&self, expr: &str, _ty: &str, _max_length: Option<u32>) -> String {
         expr.to_owned()
+    }
+
+    /// The `DEFAULT` expression for "written now", per dialect.
+    ///
+    /// Hand-written framework DDL asks here rather than copying it: on
+    /// SQLite it is not a keyword but #1464's canonical `strftime`, and
+    /// five copies had to be hand-corrected when that changed.
+    ///
+    /// A **backstop** only — every writer binds its own timestamp, and
+    /// on an upgraded SQLite file this default is unfixable anyway.
+    fn current_timestamp_default(&self) -> String {
+        self.translate_default_expr("now()", "datetime", None)
+    }
+
+    /// The full column clause for such a timestamp:
+    /// `<type> NOT NULL DEFAULT <now>`.
+    fn timestamp_now_column(&self) -> String {
+        format!(
+            "{} NOT NULL DEFAULT {}",
+            self.column_type(FieldType::DateTime, None),
+            self.current_timestamp_default()
+        )
     }
 
     /// Render a boolean literal for `DEFAULT` clauses and inline
