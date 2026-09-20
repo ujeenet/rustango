@@ -325,9 +325,33 @@ fn audit_select_sql(dialect: &dyn crate::sql::Dialect) -> String {
 /// removed a legacy row an hour *after* the cutoff.
 ///
 /// So the second leg is a filter on the first, not an alternative to
-/// it: a row passes the indexed range, and then a legacy-shaped row
-/// must also beat the cutoff written in *its* spelling. Canonical rows
-/// short-circuit on `NOT LIKE`.
+/// it: a row passes the indexed range, and then its own value is
+/// normalised and re-checked against the cutoff.
+///
+/// That second leg **normalises** rather than enumerating spellings.
+/// The version before it matched `NOT LIKE '____-__-__ __:__:__'`,
+/// which recognises only an exactly-19-character value — so
+/// `2026-09-20 08:00:00.123456`, the PG/MySQL dump spelling and what
+/// sqlx writes for a bound `NaiveDateTime`, skipped the guard entirely
+/// and was judged by the bare range, where `' '` sorts below `'T'`.
+/// Rows *hours after* the cutoff were deleted (#1616 rework review,
+/// security-001). Enumerating shapes is the same mistake this guard
+/// exists to prevent, one level down.
+fn audit_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
+    let t = dialect.quote_ident("rustango_audit_log");
+    let oa = dialect.quote_ident("occurred_at");
+    let p1 = dialect.placeholder(1);
+    if dialect.name() == "sqlite" {
+        let fmt = crate::sql::SQLITE_DATETIME_FORMAT;
+        let p2 = dialect.placeholder(2);
+        return format!(
+            "DELETE FROM {t} WHERE {oa} < {p1} \
+             AND strftime('{fmt}', {oa}) < {p2}"
+        );
+    }
+    format!("DELETE FROM {t} WHERE {oa} < {p1}")
+}
+
 /// Test hook for [`audit_cleanup_older_than_sql`], following the
 /// `__bind_value_*` pattern below.
 ///
@@ -339,21 +363,6 @@ fn audit_select_sql(dialect: &dyn crate::sql::Dialect) -> String {
 #[must_use]
 pub fn __test_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
     audit_cleanup_older_than_sql(dialect)
-}
-
-fn audit_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
-    let t = dialect.quote_ident("rustango_audit_log");
-    let oa = dialect.quote_ident("occurred_at");
-    let p1 = dialect.placeholder(1);
-    if dialect.name() == "sqlite" {
-        let legacy = crate::sql::SQLITE_LEGACY_DATETIME_LIKE;
-        let p2 = dialect.placeholder(2);
-        return format!(
-            "DELETE FROM {t} WHERE {oa} < {p1} \
-             AND ({oa} NOT LIKE '{legacy}' OR {oa} < {p2})"
-        );
-    }
-    format!("DELETE FROM {t} WHERE {oa} < {p1}")
 }
 
 /// v0.37 — render the per-row retention DELETE used by
@@ -1074,15 +1083,16 @@ pub async fn cleanup_older_than_pool(
     // `ensure_table_pool` renders it from `AuditLog::SCHEMA` through
     // the dialect's `translate_default_expr`.
     //
-    // SQLite takes the cutoff twice — once for the indexed range, once
-    // in the legacy spelling for the second leg that keeps a
-    // not-yet-swept row from being judged by the wrong encoding. See
-    // `audit_cleanup_older_than_sql`.
+    // SQLite takes the cutoff twice: once for the indexed range, and
+    // once for the second leg, which normalises the stored side before
+    // comparing. Both are the **canonical** spelling — the second leg
+    // normalises the column rather than the cutoff, so there is no
+    // legacy-spelled bind any more. It used to be
+    // `%Y-%m-%d %H:%M:%S`, paired with a width-keyed `LIKE` that a
+    // space-separated value carrying a fraction walked straight past.
     let mut binds = vec![SqlValue::DateTime(cutoff_ts)];
     if pool.dialect().name() == "sqlite" {
-        binds.push(SqlValue::String(
-            cutoff_ts.format("%Y-%m-%d %H:%M:%S").to_string(),
-        ));
+        binds.push(SqlValue::DateTime(cutoff_ts));
     }
     // #561 — was a 3-arm `match pool` that bound per-backend by
     // hand. The bind dispatch already lives in `raw_execute_pool`'s
