@@ -32,10 +32,12 @@ use crate::Model;
 /// locale.
 ///
 /// `managed = false`: created by [`ensure_table_pool`], not the
-/// migration graph. The table also carries DB-defaulted `created_at` /
-/// `updated_at` columns for the Slice 2 audit trail; they're not mapped
-/// here because the ORM only `SELECT`s declared columns, so the extra
-/// columns are harmless to this model.
+/// migration graph.
+///
+/// `created_at` / `updated_at` carry the Slice 2 audit trail. Mapped
+/// onto the model as of #1464 so the ORM writes them: left DB-defaulted
+/// they arrived legacy-shaped forever on an upgraded SQLite file, whose
+/// `CURRENT_TIMESTAMP` default `ALTER TABLE` cannot replace.
 #[derive(Model, Debug, Clone, serde::Serialize)]
 #[rustango(table = "rustango_translations", managed = false)]
 pub struct Translation {
@@ -48,6 +50,10 @@ pub struct Translation {
     pub value: String,
     #[rustango(max_length = 200, default = "")]
     pub updated_by: String,
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+    #[rustango(auto_now)]
+    pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 
 const DDL_PG: &str = r#"
@@ -146,8 +152,19 @@ pub async fn upsert_pool(
         key: key.to_owned(),
         value: value.to_owned(),
         updated_by: updated_by.to_owned(),
+        created_at: Auto::Unset,
+        updated_at: Auto::Unset,
     };
-    Translation::bulk_upsert_pool(&[row], &["locale", "key"], &["value", "updated_by"], pool).await
+    // `updated_at` is in the DO UPDATE list: an upsert that lands on
+    // the conflict branch is an edit, and the audit trail is the point
+    // of the column.
+    Translation::bulk_upsert_pool(
+        &[row],
+        &["locale", "key"],
+        &["value", "updated_by", "updated_at"],
+        pool,
+    )
+    .await
 }
 
 /// Seed the DB layer from a [`Translator`]'s file catalogs. Existing
@@ -175,6 +192,8 @@ pub async fn seed_from_translator_pool(
             key,
             value,
             updated_by: String::new(),
+            created_at: Auto::Unset,
+            updated_at: Auto::Unset,
         })
         .collect();
     let n = rows.len();

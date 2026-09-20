@@ -303,13 +303,25 @@ impl JobQueue for PgJobQueue {
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
         let max_attempts = i32::try_from(T::MAX_ATTEMPTS).unwrap_or(i32::MAX);
         let dialect = self.pool.dialect();
-        let (p1, p2, p3) = (
+        let (p1, p2, p3, p4, p5) = (
             dialect.placeholder(1),
             dialect.placeholder(2),
             dialect.placeholder(3),
+            dialect.placeholder(4),
+            dialect.placeholder(5),
         );
+        // `run_at` / `created_at` are bound rather than defaulted
+        // (#1464). The DDL above now defaults them to the canonical
+        // spelling, but a table created before that keeps the old
+        // `CURRENT_TIMESTAMP`, and SQLite cannot ALTER a column
+        // default — so on an upgraded queue every newly dispatched row
+        // would carry a `YYYY-MM-DD HH:MM:SS` `run_at`, which sorts
+        // below every canonical one and jumps the whole
+        // `ORDER BY run_at, id` pickup queue, permanently.
+        let now = Utc::now();
         let sql = format!(
-            "INSERT INTO rustango_jobs (name, payload, max_attempts) VALUES ({p1}, {p2}, {p3})"
+            "INSERT INTO rustango_jobs (name, payload, max_attempts, run_at, created_at) \
+             VALUES ({p1}, {p2}, {p3}, {p4}, {p5})"
         );
         // #561 — was a 3-arm `match pool` each doing the bind +
         // execute by hand (PG `&Value`, MySQL `sqlx::types::Json(&v)`,
@@ -325,6 +337,8 @@ impl JobQueue for PgJobQueue {
                 SqlValue::String(T::NAME.to_owned()),
                 SqlValue::Json(value),
                 SqlValue::I32(max_attempts),
+                SqlValue::DateTime(now),
+                SqlValue::DateTime(now),
             ],
         )
         .await
