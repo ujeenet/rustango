@@ -359,6 +359,23 @@ async fn a_framework_table_is_swept() {
          only through the explicit framework list. Swept: {:?}",
         out.columns
     );
+
+    // And the row actually changed. The report is a claim the sweep
+    // makes about itself; asserting only that leaves a sweep which
+    // lists the column and rewrites nothing indistinguishable from one
+    // that works (#1616 rework review, tests-007).
+    let rows: Vec<(String,)> = rustango::sql::raw_query_pool(
+        "SELECT occurred_at FROM rustango_audit_log",
+        Vec::new(),
+        &pool,
+    )
+    .await
+    .expect("read back");
+    assert_eq!(
+        rows[0].0, "2026-09-19T12:00:00.000000+00:00",
+        "the audit log row was reported as swept but still holds the \
+         legacy shape"
+    );
 }
 
 /// Minimal stand-in for the audit table — only the column under test.

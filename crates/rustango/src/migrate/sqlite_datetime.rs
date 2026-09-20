@@ -262,24 +262,41 @@ mod tests {
         }
     }
 
-    /// Idempotence, asserted where it now lives: in the predicate.
+    /// The format the sweep writes must have the shape the sweep
+    /// assumes — asserted against the **constant**, not a literal.
     ///
-    /// This replaces a test that measured the old `LIKE` mask against
-    /// the corrected shape — comparing two string lengths and one byte.
-    /// That proved a property of two constants, not of the sweep, and
-    /// the sweep no longer uses the mask: the predicate is "parseable
-    /// and not already canonical", which cannot match its own output by
-    /// construction. The behavioural proof is
-    /// `the_sweep_is_idempotent` in `tests/sqlite_datetime_normalise.rs`,
-    /// which runs it twice against a database and asserts the second
-    /// pass changes nothing.
+    /// The version this replaces declared
+    /// `let corrected = "2026-09-19T19:44:55.869000+00:00"` in its own
+    /// body and asserted that string's length and tenth byte. It read
+    /// no crate code, so it would have passed in an empty repository
+    /// and could not fail under any change whatsoever (#1616 rework
+    /// review, tests-006). It was itself written to replace an earlier
+    /// test judged too weak, which is worth remembering: "assert
+    /// something about the format" is not the same as "assert the
+    /// format the code uses".
     #[test]
-    fn the_canonical_shape_is_a_fixed_width() {
-        // Every value the sweep writes is `strftime` output in
-        // SQLITE_DATETIME_FORMAT, so the width is the one thing the
-        // predicate's `<>` leg depends on staying constant.
-        let corrected = "2026-09-19T19:44:55.869000+00:00";
-        assert_eq!(corrected.len(), 32);
-        assert_eq!(corrected.as_bytes()[10], b'T');
+    fn the_canonical_format_has_the_shape_the_sweep_assumes() {
+        let f = SQLITE_DATETIME_FORMAT;
+        // Rendered width is what the predicate's shape test keys on, so
+        // derive it from the format rather than restating it: `%Y` is 4
+        // characters, `%m %d %H %M` are 2 each, and `%f` is `SS.SSS`,
+        // 6 characters.
+        let rendered_len = f.len() - "%Y".len() + 4 - 4 * ("%m".len() - 2) - "%f".len() + 6;
+        assert_eq!(
+            rendered_len, 32,
+            "the canonical format renders {rendered_len} chars, not 32; the \
+             sweep's GLOB shape test and every width assumption downstream \
+             are keyed on 32. Format: {f}"
+        );
+        assert!(
+            f.contains("T%H"),
+            "the separator must be `T`: a space is the legacy shape that \
+             sorts below it and started #1464. Format: {f}"
+        );
+        assert!(
+            f.ends_with("+00:00"),
+            "the offset must be explicit and fixed-width, or two encodings \
+             of one instant differ. Format: {f}"
+        );
     }
 }

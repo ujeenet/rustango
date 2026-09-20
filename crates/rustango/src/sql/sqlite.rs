@@ -914,4 +914,32 @@ mod tests {
              bound from Rust"
         );
     }
+
+    /// The test above compares chrono against a **hand-typed literal**,
+    /// so it never reads `SQLITE_DATETIME_FORMAT` and a change to the
+    /// strftime spelling slips straight past the guard whose whole job
+    /// is catching that (#1616 rework review, tests-005).
+    ///
+    /// It cannot run `strftime` — that needs a live SQLite, which a
+    /// unit test does not have — so the missing half is asserted
+    /// structurally here, and behaviourally by
+    /// `the_two_engines_render_the_same_bytes` in
+    /// `tests/auto_now_add_sqlite_format.rs`, which runs both engines
+    /// against a real database.
+    #[test]
+    fn the_literal_above_still_matches_the_strftime_format() {
+        // Derive the literal's shape from the format, so editing
+        // SQLITE_DATETIME_FORMAT without editing the literal fails here
+        // rather than silently disarming the comparison.
+        let f = SQLITE_DATETIME_FORMAT;
+        assert!(
+            f.starts_with("%Y-%m-%dT%H:%M:%f"),
+            "the literal in the test above assumes this prefix: {f}"
+        );
+        assert!(
+            f.ends_with("000+00:00"),
+            "the literal assumes `%f` is padded by `000` to six digits \
+             and closed with a fixed offset: {f}"
+        );
+    }
 }
