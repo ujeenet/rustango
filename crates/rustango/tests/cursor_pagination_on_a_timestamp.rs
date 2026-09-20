@@ -265,9 +265,23 @@ async fn tied_pool() -> Pool {
         .await
         .expect("create");
     for i in 0..9 {
+        // The fraction is explicit because #1464 made the stored
+        // spelling part of the contract: SQLite compares these as text,
+        // and the canonical shape is a fixed six digits. This literal
+        // was `T10:00:00+00:00` — the variable-width form sqlx used to
+        // write, which is what a database from before that release
+        // holds. That form no longer equals the value the ORM binds, so
+        // the tiebreaker's `occurred_at = ?` leg missed and paging
+        // skipped the rest of each tie group.
+        //
+        // Changed here rather than "fixed" in the code, because the
+        // property under test is the tiebreaker and the old literal was
+        // incidental to it. The upgrade path that old literal really
+        // represents is covered by `old_shape_rows_page_correctly_after_the_sweep`
+        // below, which seeds exactly that spelling on purpose.
         let sql = format!(
             "INSERT INTO cursor_ts_event (label, occurred_at, score) \
-             VALUES ('e{i}', '2026-09-1{}T10:00:00+00:00', {i}.5)",
+             VALUES ('e{i}', '2026-09-1{}T10:00:00.000000+00:00', {i}.5)",
             i / 3 + 1
         );
         rustango::sql::raw_execute_pool(&pool, &sql, Vec::new())
@@ -415,5 +429,115 @@ async fn a_legacy_single_value_token_is_still_accepted() {
     assert!(
         body["results"].as_array().is_some_and(|r| !r.is_empty()),
         "and must still return the rows after it: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// The upgrade path: a database written before #1464 (2026-09-19).
+//
+// `tied_pool` above now seeds the canonical spelling, because the
+// tiebreaker is what it tests. This seeds what a real pre-#1464
+// database actually holds — sqlx's old variable-width RFC3339, where a
+// whole-second instant carries no fractional part at all — and proves
+// two things in order: that such a database pages *wrongly* until the
+// sweep runs, and correctly afterwards.
+//
+// The first half matters as much as the second. Fixed-width comparison
+// only works once every stored value is fixed width, so "run migrate"
+// is a real precondition of this release and not a detail. A test that
+// only checked the after state would let the precondition go unstated.
+// ---------------------------------------------------------------------
+
+/// Nine rows in the pre-#1464 spelling, three per timestamp.
+async fn legacy_shape_pool() -> Pool {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");
+    rustango::sql::raw_execute_pool(&pool, DDL, Vec::new())
+        .await
+        .expect("create");
+    for i in 0..9 {
+        // No fractional part — exactly what sqlx wrote for a
+        // whole-second instant before this release.
+        let sql = format!(
+            "INSERT INTO cursor_ts_event (label, occurred_at, score) \
+             VALUES ('e{i}', '2026-09-1{}T10:00:00+00:00', {i}.5)",
+            i / 3 + 1
+        );
+        rustango::sql::raw_execute_pool(&pool, &sql, Vec::new())
+            .await
+            .expect("insert");
+    }
+    pool
+}
+
+async fn walk_all_labels(pool: &Pool) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut uri = "/events".to_string();
+    for _ in 0..20 {
+        let app = ViewSet::for_model(Event::SCHEMA)
+            .cursor_pagination("occurred_at")
+            .page_size(2)
+            .router_pool("/events", pool.clone());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .expect("body"),
+        )
+        .unwrap();
+        for row in body["results"].as_array().expect("results") {
+            seen.push(row["label"].as_str().unwrap_or_default().to_owned());
+        }
+        match body["next"].as_str() {
+            Some(t) => uri = format!("/events?cursor={t}"),
+            None => break,
+        }
+    }
+    seen.sort();
+    seen.dedup();
+    seen
+}
+
+#[tokio::test]
+async fn old_shape_rows_page_correctly_after_the_sweep() {
+    let pool = legacy_shape_pool().await;
+
+    // Before: the stored values are not the shape the ORM now binds, so
+    // the tiebreaker's equality leg misses and rows are skipped. This
+    // asserts the precondition rather than glossing over it.
+    let before = walk_all_labels(&pool).await;
+    assert!(
+        before.len() < 9,
+        "this fixture is meant to start broken — pre-#1464 rows do not \
+         compare against a fixed-width bind. Saw {} of 9: {before:?}. If \
+         this now reaches 9, the sweep is no longer a precondition and \
+         this test should be rewritten, not deleted.",
+        before.len()
+    );
+
+    // The sweep is what `migrate` runs.
+    let fixed = rustango::migrate::sqlite_datetime::normalise_sqlite_datetimes(&pool)
+        .await
+        .expect("sweep");
+    assert!(
+        fixed.rows >= 9,
+        "the sweep should have rewritten all nine rows, rewrote {}",
+        fixed.rows
+    );
+
+    // After: every row is reachable.
+    let after = walk_all_labels(&pool).await;
+    assert_eq!(
+        after.len(),
+        9,
+        "after the sweep every row must be visited exactly once, saw {after:?}"
     );
 }

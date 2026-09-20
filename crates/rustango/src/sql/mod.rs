@@ -142,17 +142,20 @@ pub use m2m::{GenericM2MManager, M2MManager};
 pub use mysql::MySql;
 pub use pool::{configure_pools, Pool, PoolError, PoolTuning};
 pub use postgres::Postgres;
+/// The canonical `SQLite` timestamp encoder. Gated because its only
+/// caller is the `SQLite` bind path, which needs the driver linked.
+#[cfg(feature = "sqlite")]
+pub(crate) use sqlite::encode_datetime;
 pub use sqlite::Sqlite;
 /// The one text shape a `SQLite` datetime column may hold, and the mask
 /// matching what the pre-#1464 default wrote. `pub(crate)` because the
-/// migration sweep needs them and `sql::sqlite` is a private module —
-/// they are an internal contract between the DDL writer and that
-/// sweep, not API.
+/// migration sweep and `audit`'s retention DELETE need them and
+/// `sql::sqlite` is a private module — an internal contract between the
+/// writers and those two readers, not API.
 ///
-/// Ungated, matching the dialect emitters above: `audit`'s retention
-/// DELETE builds its `SQLite` branch from both of these through
-/// `Dialect`, and that renderer compiles in every build whether or not
-/// the driver is linked.
+/// Ungated, matching the dialect emitters above: the retention DELETE
+/// builds its `SQLite` branch through `Dialect`, and that renderer
+/// compiles in every build whether or not the driver is linked.
 pub(crate) use sqlite::{SQLITE_DATETIME_FORMAT, SQLITE_LEGACY_DATETIME_LIKE};
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without

@@ -123,6 +123,94 @@ async fn a_db_written_timestamp_compares_against_a_rust_bound_one() {
     );
 }
 
+/// **The property every other assertion in this file assumes and none of
+/// them checks: a stored value must equal itself after a round trip.**
+///
+/// Read a timestamp out of the database, bind it straight back, and ask
+/// for the row by equality. If the bind path and the write path encode
+/// the same instant differently, this matches nothing.
+///
+/// That is not hypothetical — it is how the first version of this fix
+/// failed. The DDL default wrote a fixed 6-digit fraction while sqlx
+/// encoded a bound `DateTime<Utc>` with chrono's `AutoSi`, which emits
+/// 0, 3, 6 or 9 digits by value. `...869000+00:00` and `...869+00:00`
+/// are the same instant and different text, so equality found nothing
+/// and `>` found the row itself — which is exactly #1464's
+/// never-terminating cursor, reintroduced by its own fix.
+///
+/// Every other test here compares with `<` or `ORDER BY`, and all of
+/// them pass while this property is broken. Ordering across *distinct*
+/// instants is a different claim from identity of *one* instant, and
+/// only the second one makes a cursor terminate.
+#[tokio::test]
+async fn a_stored_timestamp_equals_itself_after_a_round_trip() {
+    let pool = seeded().await;
+
+    // Decode what the database wrote...
+    let decoded: Vec<(DateTime<Utc>,)> = rustango::sql::raw_query_pool(
+        "SELECT created_at FROM auto_now_add_fmt ORDER BY id",
+        Vec::new(),
+        &pool,
+    )
+    .await
+    .expect("decode");
+    assert_eq!(decoded.len(), 3, "fixture should hold three rows");
+
+    // ...and bind it straight back, unchanged.
+    for (i, (d,)) in decoded.iter().enumerate() {
+        let hits: Vec<(i64,)> = rustango::sql::raw_query_pool(
+            "SELECT COUNT(*) FROM auto_now_add_fmt WHERE created_at = ?",
+            vec![SqlValue::DateTime(*d)],
+            &pool,
+        )
+        .await
+        .expect("equality probe");
+        assert!(
+            hits[0].0 >= 1,
+            "row {i}: a value read from the database did not match itself when \
+             bound back. The write path and the bind path encode the same \
+             instant differently. Stored: {:?}",
+            stored_text(&pool).await
+        );
+    }
+}
+
+/// The cursor consequence, stated as the thing a caller actually does.
+///
+/// Paging with `WHERE col > <last row seen>` must not return that same
+/// row again. Separate from the equality test above because this is the
+/// user-visible symptom, and a fix could in principle satisfy one and
+/// not the other.
+#[tokio::test]
+async fn a_cursor_does_not_re_emit_its_own_last_row() {
+    let pool = seeded().await;
+
+    let last: Vec<(i64, DateTime<Utc>)> = rustango::sql::raw_query_pool(
+        "SELECT id, created_at FROM auto_now_add_fmt ORDER BY created_at DESC, id DESC LIMIT 1",
+        Vec::new(),
+        &pool,
+    )
+    .await
+    .expect("last row");
+    let (last_id, cursor) = last[0];
+
+    let after: Vec<(i64,)> = rustango::sql::raw_query_pool(
+        "SELECT id FROM auto_now_add_fmt WHERE created_at > ? ORDER BY created_at, id",
+        vec![SqlValue::DateTime(cursor)],
+        &pool,
+    )
+    .await
+    .expect("page two");
+
+    assert!(
+        !after.iter().any(|(id,)| *id == last_id),
+        "the cursor re-emitted the row it was built from (id {last_id}) — this is \
+         the #1464 non-terminating page. Returned: {:?}. Stored: {:?}",
+        after.iter().map(|(i,)| *i).collect::<Vec<_>>(),
+        stored_text(&pool).await
+    );
+}
+
 async fn count_before(pool: &Pool, cutoff: DateTime<Utc>) -> i64 {
     let rows: Vec<(i64,)> = rustango::sql::raw_query_pool(
         "SELECT COUNT(*) FROM auto_now_add_fmt WHERE created_at < ?",

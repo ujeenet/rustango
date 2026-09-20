@@ -72,6 +72,38 @@ use super::{CompiledStatement, Dialect, SqlError};
 /// against binds of any precision.
 pub(crate) const SQLITE_DATETIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%f000+00:00";
 
+/// The same shape as [`SQLITE_DATETIME_FORMAT`], spelled for chrono
+/// instead of `SQLite`'s `strftime`.
+///
+/// Two strings are needed because the two engines disagree on syntax:
+/// `SQLite`'s `%f` is `SS.SSS` (seconds included, milliseconds), while
+/// chrono's `%S` is seconds alone and `%.6f` is a dot plus six digits.
+/// They must produce byte-identical output for the same instant, which
+/// `the_two_format_spellings_agree` asserts — a comment promising it
+/// would be the same kind of unchecked claim that caused #1464.
+///
+/// **Fixed width is the whole point.** Letting sqlx encode a bound
+/// `DateTime<Utc>` was the original defect: it uses chrono's
+/// `SecondsFormat::AutoSi`, which emits 0, 3, 6 or 9 fractional digits
+/// depending on the value, so `...869000+00:00` came back as
+/// `...869+00:00`. Same instant, different text — equality found
+/// nothing and `>` found the row itself, which is #1464's
+/// never-terminating cursor.
+/// Read by [`encode_datetime`] and by the test that checks the two
+/// spellings agree, both of which are `SQLite`-side concerns; this
+/// module compiles in every build because the dialect renders SQL for
+/// all of them.
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+pub(crate) const SQLITE_DATETIME_CHRONO: &str = "%Y-%m-%dT%H:%M:%S%.6f+00:00";
+
+/// Encode a timestamp the one way a `SQLite` datetime column may hold
+/// it. Every Rust-side write goes through here, so the bind path and
+/// the DDL default cannot drift apart.
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
+pub(crate) fn encode_datetime(d: chrono::DateTime<chrono::Utc>) -> String {
+    d.format(SQLITE_DATETIME_CHRONO).to_string()
+}
+
 /// `LIKE` mask matching exactly the legacy `CURRENT_TIMESTAMP` shape,
 /// `YYYY-MM-DD HH:MM:SS`. `_` is LIKE's single-character wildcard, so
 /// this matches on width and separator placement without matching the
@@ -833,5 +865,53 @@ mod tests {
         assert!(stmt.sql.contains("\"demo\""), "table quoted: {}", stmt.sql);
         assert!(stmt.sql.contains("\"id\" = ?"), "predicate: {}", stmt.sql);
         assert_eq!(stmt.params.len(), 1);
+    }
+
+    /// The Rust-side encoder is fixed width for every input.
+    ///
+    /// This is the property #1464 turned on. sqlx's encoder is
+    /// variable width — 0, 3, 6 or 9 fractional digits by value — and
+    /// that is what made a stored timestamp differ from its own
+    /// re-bound form.
+    #[test]
+    fn the_encoder_is_fixed_width_at_every_precision() {
+        use chrono::{TimeZone as _, Utc};
+        for ns in [0, 1_000, 123_000_000, 869_000_000, 413_181_000, 999_999_000] {
+            let d = Utc.timestamp_opt(1_800_000_000, ns).unwrap();
+            let s = encode_datetime(d);
+            assert_eq!(
+                s.len(),
+                32,
+                "every encoding must be 32 chars or two instants of different \
+                 precision cannot be compared: {ns}ns gave {s}"
+            );
+            assert!(s.ends_with("+00:00"), "offset must be explicit: {s}");
+        }
+    }
+
+    /// The `strftime` spelling and the chrono spelling must produce the
+    /// same bytes, or the DDL default and the bind path drift apart
+    /// again — silently, which is how #1464 behaved.
+    ///
+    /// Asserted on the *shape* both produce rather than on the two
+    /// format strings, because the strings are deliberately different
+    /// (`SQLite`'s `%f` includes the seconds; chrono's does not) and
+    /// comparing them would prove nothing.
+    #[test]
+    fn the_two_format_spellings_agree() {
+        use chrono::{TimeZone as _, Utc};
+        // What chrono writes for a whole-millisecond instant — the only
+        // precision SQLite's `%f` can express.
+        let d = Utc.timestamp_opt(1_800_000_000, 869_000_000).unwrap();
+        let chrono_side = encode_datetime(d);
+        // What `strftime` writes, reproduced from the format's own
+        // structure: `%f` gives `SS.SSS`, the literal `000` pads to six.
+        let strftime_side = "2027-01-15T08:00:00.869000+00:00";
+        assert_eq!(
+            chrono_side, strftime_side,
+            "the two spellings of SQLITE_DATETIME_FORMAT disagree; a value \
+             written by the DDL default would not equal the same instant \
+             bound from Rust"
+        );
     }
 }
