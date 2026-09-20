@@ -56,56 +56,65 @@ pub struct Translation {
     pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 
-const DDL_PG: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_translations" (
-    "id"         BIGSERIAL PRIMARY KEY,
-    "locale"     VARCHAR(16) NOT NULL,
-    "key"        VARCHAR(200) NOT NULL,
-    "value"      TEXT NOT NULL,
-    "updated_by" VARCHAR(200) NOT NULL DEFAULT '',
-    "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT "rustango_translations_locale_key_uq" UNIQUE ("locale", "key")
-);
-"#;
-
-/// The timestamp defaults are a `strftime`, not `CURRENT_TIMESTAMP`:
-/// SQLite stores a datetime as TEXT and compares it lexicographically,
-/// and `CURRENT_TIMESTAMP`'s `YYYY-MM-DD HH:MM:SS` does not sort
-/// against the RFC3339 sqlx binds for a `DateTime<Utc>` (#1464). The
-/// format is `sql::sqlite::SQLITE_DATETIME_FORMAT`, which is what the
-/// model-derived tables emit; `sqlite_datetime_ddl_is_consistent`
-/// fails if a new hand-written table drifts from it.
+/// The `CREATE TABLE` for this dialect.
 ///
-/// **No `--` comments inside this string.** It reaches the driver with
-/// its newlines collapsed, so a `--` comment swallows the rest of the
-/// statement and SQLite rejects it with `incomplete input`. Explain
-/// things here instead.
-const DDL_SQLITE: &str = r#"
-CREATE TABLE IF NOT EXISTS "rustango_translations" (
-    "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
-    "locale"     TEXT NOT NULL,
-    "key"        TEXT NOT NULL,
-    "value"      TEXT NOT NULL,
-    "updated_by" TEXT NOT NULL DEFAULT '',
-    "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')),
-    "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now')),
-    CONSTRAINT "rustango_translations_locale_key_uq" UNIQUE ("locale", "key")
-);
-"#;
-
-const DDL_MYSQL: &str = r"
+/// Both timestamp columns take type *and* `DEFAULT` from
+/// [`crate::sql::Dialect::timestamp_now_column`]. That also moves MySQL
+/// off `TIMESTAMP` (whole seconds) onto `DATETIME(6)`, now that the ORM
+/// binds microseconds into them — but `IF NOT EXISTS` leaves an
+/// existing MySQL table truncating, which needs a migration.
+///
+/// **No `--` comments inside the returned string.** Its newlines
+/// collapse before the driver sees it, so a `--` swallows the rest of
+/// the statement and SQLite rejects it with `incomplete input`.
+fn ddl(dialect: &dyn crate::sql::Dialect) -> String {
+    let ts = dialect.timestamp_now_column();
+    match dialect.name() {
+        "mysql" => format!(
+            r"
 CREATE TABLE IF NOT EXISTS `rustango_translations` (
     `id`         BIGINT AUTO_INCREMENT PRIMARY KEY,
     `locale`     VARCHAR(16) NOT NULL,
     `key`        VARCHAR(200) NOT NULL,
     `value`      TEXT NOT NULL,
     `updated_by` VARCHAR(200) NOT NULL DEFAULT '',
-    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `created_at` {ts},
+    `updated_at` {ts},
     CONSTRAINT `rustango_translations_locale_key_uq` UNIQUE (`locale`, `key`)
 );
-";
+"
+        ),
+        "sqlite" => format!(
+            r#"
+CREATE TABLE IF NOT EXISTS "rustango_translations" (
+    "id"         INTEGER PRIMARY KEY AUTOINCREMENT,
+    "locale"     TEXT NOT NULL,
+    "key"        TEXT NOT NULL,
+    "value"      TEXT NOT NULL,
+    "updated_by" TEXT NOT NULL DEFAULT '',
+    "created_at" {ts},
+    "updated_at" {ts},
+    CONSTRAINT "rustango_translations_locale_key_uq" UNIQUE ("locale", "key")
+);
+"#
+        ),
+        // Postgres + any future dialect: the standard `"`-quoted DDL.
+        _ => format!(
+            r#"
+CREATE TABLE IF NOT EXISTS "rustango_translations" (
+    "id"         BIGSERIAL PRIMARY KEY,
+    "locale"     VARCHAR(16) NOT NULL,
+    "key"        VARCHAR(200) NOT NULL,
+    "value"      TEXT NOT NULL,
+    "updated_by" VARCHAR(200) NOT NULL DEFAULT '',
+    "created_at" {ts},
+    "updated_at" {ts},
+    CONSTRAINT "rustango_translations_locale_key_uq" UNIQUE ("locale", "key")
+);
+"#
+        ),
+    }
+}
 
 /// Create `rustango_translations` if absent — idempotent, dispatched per
 /// dialect. Call once at startup (and the Slice 2 `seed-translations`
@@ -115,13 +124,7 @@ CREATE TABLE IF NOT EXISTS `rustango_translations` (
 /// Driver / SQL failures other than the duplicate-object errors that
 /// [`crate::sql::run_ddl_idempotent`] swallows.
 pub async fn ensure_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
-    let ddl = match pool.dialect().name() {
-        "mysql" => DDL_MYSQL,
-        "sqlite" => DDL_SQLITE,
-        // Postgres + any future dialect: the standard `"`-quoted DDL.
-        _ => DDL_PG,
-    };
-    crate::sql::run_ddl_idempotent(pool, ddl).await
+    crate::sql::run_ddl_idempotent(pool, &ddl(pool.dialect())).await
 }
 
 /// Every override row, for the admin list view / [`refresh_overrides_pool`].

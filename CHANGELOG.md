@@ -42,6 +42,21 @@ leaving the column permanently mixed.
   the writer that would otherwise undo `migrate`'s own datetime sweep
   once per migration.
 
+### Changed
+
+- `Dialect` gained `current_timestamp_default()` and
+  `timestamp_now_column()`. Hand-written framework DDL asks the dialect
+  for the expression instead of spelling it out — five copies of the
+  canonical SQLite `strftime` are gone, along with the ledger's
+  three-arm dialect match and its unreachable "unrecognized dialect"
+  error.
+- `rustango_translations` renders its timestamps as `DATETIME(6)` on
+  MySQL rather than `TIMESTAMP`, matching every other `DateTime` column
+  the ORM emits, now that the ORM binds microseconds into them.
+  `CREATE TABLE IF NOT EXISTS` leaves an existing MySQL table on
+  `TIMESTAMP`, still truncating to whole seconds; that needs a
+  migration.
+
 ## [0.57.10] — 2026-09-19
 
 A documentation release, and the first one where the docs were treated
