@@ -543,11 +543,17 @@ pub mod jsonapi;
 /// HMAC-signed request authentication for service-to-service traffic.
 /// Shared HMAC-SHA256 / SHA-256 / hex-encoding primitives. Internal —
 /// users wanting raw HMAC pull in `hmac` + `sha2` themselves.
+/// `csrf` and `totp` joined the list in #1535: both had their own
+/// private `constant_time_eq`, and consolidating them here means they
+/// now need the module that owns the guarantee to be present whenever
+/// they are.
 #[cfg(any(
     feature = "hmac-auth",
     feature = "storage-s3",
     feature = "signed_url",
     feature = "jwt",
+    feature = "csrf",
+    feature = "totp",
 ))]
 pub(crate) mod crypto;
 

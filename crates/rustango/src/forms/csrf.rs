@@ -417,7 +417,7 @@ where
                 if let Some(h) = header_value {
                     // Header path — short-circuit, no body buffering.
                     let token_match = match &cookie_value {
-                        Some(c) => constant_time_eq(c.as_bytes(), h.as_bytes()),
+                        Some(c) => crate::crypto::constant_time_compare(c.as_bytes(), h.as_bytes()),
                         None => false,
                     };
                     if !token_match {
@@ -438,7 +438,9 @@ where
                     };
                     let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
                     let token_match = match (&cookie_value, &form_token) {
-                        (Some(c), Some(f)) => constant_time_eq(c.as_bytes(), f.as_bytes()),
+                        (Some(c), Some(f)) => {
+                            crate::crypto::constant_time_compare(c.as_bytes(), f.as_bytes())
+                        }
                         _ => false,
                     };
                     if !token_match {
@@ -690,23 +692,11 @@ pub fn verify_form_token(headers: &axum::http::HeaderMap, submitted: Option<&str
         read_csrf_cookie_from_headers(headers, CSRF_COOKIE),
         submitted,
     ) {
-        (Some(cookie), Some(form)) => constant_time_eq(cookie.as_bytes(), form.as_bytes()),
+        (Some(cookie), Some(form)) => {
+            crate::crypto::constant_time_compare(cookie.as_bytes(), form.as_bytes())
+        }
         _ => false,
     }
-}
-
-/// Constant-time byte-slice equality. Avoids a leaky `==` even
-/// though the bodies of the comparison aren't really secret in this
-/// scheme — best practice.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 fn forbid_response(detail: &'static str) -> Response<Body> {
@@ -894,10 +884,10 @@ mod tests {
 
     #[test]
     fn ct_eq_matches_eq() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"abcd"));
-        assert!(constant_time_eq(b"", b""));
+        assert!(crate::crypto::constant_time_compare(b"abc", b"abc"));
+        assert!(!crate::crypto::constant_time_compare(b"abc", b"abd"));
+        assert!(!crate::crypto::constant_time_compare(b"abc", b"abcd"));
+        assert!(crate::crypto::constant_time_compare(b"", b""));
     }
 
     #[test]

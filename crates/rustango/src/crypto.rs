@@ -78,22 +78,18 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 /// one place, because subtle branches added to "fix" something on one
 /// side can let attackers recover secrets on the other.
 ///
-/// The consolidation is **not done**, and this function is not the
-/// hardened one. Three implementations exist:
+/// The consolidation is done as of #1535. `totp::constant_time_eq` and
+/// `forms::csrf::constant_time_eq` are gone and their callers come
+/// here, and this function delegates to `subtle::ConstantTimeEq`
+/// rather than hand-rolling the XOR loop.
 ///
-/// * `totp::constant_time_eq` — delegates to `subtle::ConstantTimeEq`.
-///   The only one that does.
-/// * `forms::csrf::constant_time_eq` — hand-rolled XOR loop.
-/// * this one — the *same* hand-rolled XOR loop. `crypto` does not
-///   depend on `subtle` at all.
-///
-/// The original text claimed it shipped "consolidating two prior
-/// private copies", which reads as finished work and is why they
-/// survived review (#1543). The first correction then singled out
-/// `forms::csrf` for hand-rolling "rather than delegating to
-/// `subtle`" — while the function that comment is attached to does
-/// exactly the same thing (#1606 review, security). Collapsing all
-/// three onto `subtle` is #1535.
+/// The loop was not obviously wrong — on current rustc it is likely to
+/// compile branch-free. But nothing in safe Rust stops LLVM
+/// vectorising it or introducing an early exit, which is the entire
+/// reason `subtle` exists. Three copies of a guarantee that cannot be
+/// expressed in the language is how the next refactor introduces a
+/// real timing oracle, and the module had already written that rule
+/// down for itself without holding to it (#1543, #1606 review).
 ///
 /// ```ignore
 /// use rustango::crypto::constant_time_compare;
@@ -108,15 +104,8 @@ pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    // XOR every byte pair into an accumulator and check 0 at end —
-    // every byte is touched regardless of where the first mismatch
-    // sits, so the loop body's time is independent of which bytes
-    // differ.
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    use subtle::ConstantTimeEq as _;
+    a.ct_eq(b).into()
 }
 
 /// Django-parity
