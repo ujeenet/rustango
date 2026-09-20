@@ -110,7 +110,10 @@ pub fn verify_at(
             Ok(c) => c,
             Err(_) => continue,
         };
-        if constant_time_eq(&hotp(&secret.0, counter, digits), code) {
+        if crate::crypto::constant_time_compare(
+            hotp(&secret.0, counter, digits).as_bytes(),
+            code.as_bytes(),
+        ) {
             return true;
         }
     }
@@ -197,14 +200,6 @@ fn base32_decode(input: &str) -> Option<Vec<u8>> {
 }
 
 // ------------------------------------------------------------------ helpers
-
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    use subtle::ConstantTimeEq;
-    if a.len() != b.len() {
-        return false;
-    }
-    a.as_bytes().ct_eq(b.as_bytes()).unwrap_u8() == 1
-}
 
 // #806 — was byte-identical to `crate::url_codec::url_encode`
 // (RFC 3986 unreserved set — the right alphabet for an otpauth URI's
