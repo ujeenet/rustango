@@ -300,27 +300,57 @@ fn audit_select_sql(dialect: &dyn crate::sql::Dialect) -> String {
 /// is correct whether the row carries the pre-#1464 `CURRENT_TIMESTAMP`
 /// shape or the RFC3339 one written now.
 ///
-/// This is deliberately belt-and-braces with the `migrate` sweep. That
-/// sweep converts the stored rows, and after it runs the `CASE` never
+/// This is belt-and-braces with the `migrate` sweep. That sweep
+/// converts the stored rows, and after it runs the second leg never
 /// fires — but it runs on `migrate`, and this is a **DELETE**. Between
 /// upgrading the crate and running migrations, a legacy row compared
 /// against an RFC3339 bind is "less than" everything, so the retention
 /// sweep would delete history it was asked to keep. Everywhere else
 /// that window costs a wrong query result, which is the pre-existing
-/// bug continuing; here it would destroy data, which would be a new one.
+/// bug continuing; here it would destroy data.
 ///
-/// The `CASE` costs the index on this path. That is the right trade for
-/// a retention sweep, which scans by definition and runs rarely.
+/// ## Shape, and why not the obvious two
+///
+/// The **leading range stays bare** so the `occurred_at` index is
+/// usable: `SEARCH … USING INDEX (occurred_at<?)`. Wrapping the column
+/// in a `CASE`/`strftime` — the first version of this — is correct but
+/// forces a `SCAN`, which for a steady keep-last-N-days sweep measured
+/// 1 ms to 97 ms and 35 to 17,864 pages read, and is O(table) rather
+/// than O(rows deleted).
+///
+/// A plain disjunction of the cutoff in both spellings is the natural
+/// next guess and **over-deletes**: `' '` (0x20) sorts below `'T'`
+/// (0x54), so every same-date legacy row is "less than" a canonical
+/// cutoff whatever its clock time. Measured on a mixed corpus it
+/// removed a legacy row an hour *after* the cutoff.
+///
+/// So the second leg is a filter on the first, not an alternative to
+/// it: a row passes the indexed range, and then a legacy-shaped row
+/// must also beat the cutoff written in *its* spelling. Canonical rows
+/// short-circuit on `NOT LIKE`.
+/// Test hook for [`audit_cleanup_older_than_sql`], following the
+/// `__bind_value_*` pattern below.
+///
+/// Exposed so the index-plan guard runs the renderer's own SQL rather
+/// than a copy: a guard that re-types the statement it checks cannot
+/// notice the statement changing, which is the whole failure it exists
+/// to catch.
+#[doc(hidden)]
+#[must_use]
+pub fn __test_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
+    audit_cleanup_older_than_sql(dialect)
+}
+
 fn audit_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
     let t = dialect.quote_ident("rustango_audit_log");
     let oa = dialect.quote_ident("occurred_at");
     let p1 = dialect.placeholder(1);
     if dialect.name() == "sqlite" {
-        let fmt = crate::sql::SQLITE_DATETIME_FORMAT;
         let legacy = crate::sql::SQLITE_LEGACY_DATETIME_LIKE;
+        let p2 = dialect.placeholder(2);
         return format!(
-            "DELETE FROM {t} WHERE \
-             (CASE WHEN {oa} LIKE '{legacy}' THEN strftime('{fmt}', {oa}) ELSE {oa} END) < {p1}"
+            "DELETE FROM {t} WHERE {oa} < {p1} \
+             AND ({oa} NOT LIKE '{legacy}' OR {oa} < {p2})"
         );
     }
     format!("DELETE FROM {t} WHERE {oa} < {p1}")
@@ -1043,11 +1073,21 @@ pub async fn cleanup_older_than_pool(
     // column is `#[rustango(default = "now()")]` on `AuditLog`, and
     // `ensure_table_pool` renders it from `AuditLog::SCHEMA` through
     // the dialect's `translate_default_expr`.
-    let bind = SqlValue::DateTime(cutoff_ts);
+    //
+    // SQLite takes the cutoff twice — once for the indexed range, once
+    // in the legacy spelling for the second leg that keeps a
+    // not-yet-swept row from being judged by the wrong encoding. See
+    // `audit_cleanup_older_than_sql`.
+    let mut binds = vec![SqlValue::DateTime(cutoff_ts)];
+    if pool.dialect().name() == "sqlite" {
+        binds.push(SqlValue::String(
+            cutoff_ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+        ));
+    }
     // #561 — was a 3-arm `match pool` that bound per-backend by
     // hand. The bind dispatch already lives in `raw_execute_pool`'s
     // internals — share the same path every other helper uses.
-    crate::sql::raw_execute_pool(pool, &sql, vec![bind])
+    crate::sql::raw_execute_pool(pool, &sql, binds)
         .await
         .map_err(|e| match e {
             crate::sql::ExecError::Driver(err) => err,
