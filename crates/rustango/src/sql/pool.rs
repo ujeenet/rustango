@@ -375,6 +375,56 @@ impl Pool {
         self.dialect().name()
     }
 
+    /// A stable hash of **which database this pool talks to** — the
+    /// partition key for any process-global cache holding rows that are
+    /// per-database facts rather than per-process ones (#1533).
+    ///
+    /// The motivating case is `ContentType`: its `id` comes from that
+    /// database's own sequence, so `("blog", "post")` is a different
+    /// number in every tenant, and tenants can be mid-migration and not
+    /// hold the row at all. A cache keyed only on the natural key hands
+    /// one tenant another's id.
+    ///
+    /// **Postgres includes `get_options()`, and that is the part that
+    /// matters.** Schema-mode tenants share one host, port and database
+    /// and are told apart only by the `search_path` baked into their
+    /// connect options by `build_scoped_pool`. A key built from
+    /// connection details alone would collide across every schema-mode
+    /// tenant — leaving the bug intact in the mode that looks safest.
+    ///
+    /// Not an identity: two pools to the same database hash the same,
+    /// which is what a cache wants. Cheap enough for the hot path — a
+    /// few short-string hashes against a network round trip.
+    #[must_use]
+    pub fn scope_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.backend_name().hash(&mut h);
+        match self {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(p) => {
+                let o = p.connect_options();
+                o.get_host().hash(&mut h);
+                o.get_port().hash(&mut h);
+                o.get_database().hash(&mut h);
+                o.get_options().hash(&mut h);
+            }
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(p) => {
+                let o = p.connect_options();
+                o.get_host().hash(&mut h);
+                o.get_port().hash(&mut h);
+                o.get_database().hash(&mut h);
+            }
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(p) => {
+                let o = p.connect_options();
+                o.get_filename().hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
     /// Borrow as a `PgPool` for callers (and existing code paths)
     /// that expect Postgres specifically. Returns `None` when the
     /// pool wraps a non-Postgres backend.
