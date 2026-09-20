@@ -56,10 +56,36 @@ fn now_emits_now_on_pg_mysql_current_timestamp_on_sqlite() {
     let my = MySql.compile_update(&q).unwrap();
     assert!(my.sql.contains("= NOW()"), "MySQL: {}", my.sql);
 
+    // SQLite must NOT emit bare `CURRENT_TIMESTAMP`. It did until
+    // #1464: a SQLite datetime column is TEXT compared
+    // lexicographically, so `CURRENT_TIMESTAMP`'s
+    // `YYYY-MM-DD HH:MM:SS` and the RFC3339 every other write path
+    // produces are two shapes in one column, and comparisons across
+    // them are wrong. `now()` reaches that through `SET col = now()`
+    // and `WHERE col < now()`.
+    //
+    // Asserted as "writes the same shape as everything else" rather
+    // than against a literal, so the one place that owns the format
+    // stays the one place that owns it.
     let sq = Sqlite.compile_update(&q).unwrap();
-    assert!(sq.sql.contains("= CURRENT_TIMESTAMP"), "SQLite: {}", sq.sql);
-    // SQLite version emits the keyword without parens.
-    assert!(!sq.sql.contains("CURRENT_TIMESTAMP("), "SQLite: {}", sq.sql);
+    assert!(
+        !sq.sql.contains("= CURRENT_TIMESTAMP"),
+        "SQLite must not write the legacy space-separated shape: {}",
+        sq.sql
+    );
+    assert!(
+        sq.sql.contains("strftime("),
+        "SQLite should emit a strftime in the canonical shape: {}",
+        sq.sql
+    );
+    // The canonical marks: `T` separator, six fractional digits, an
+    // explicit `+00:00`. Same shape the DDL default and the bind path
+    // produce, which is the property that matters.
+    assert!(
+        sq.sql.contains("%Y-%m-%dT%H:%M:%f000+00:00"),
+        "SQLite's now() must use the canonical format: {}",
+        sq.sql
+    );
 }
 
 #[test]

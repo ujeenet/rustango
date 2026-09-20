@@ -2188,14 +2188,26 @@ fn write_function(
                     got: args.len(),
                 });
             }
-            // SQLite uses `CURRENT_TIMESTAMP` (a keyword, no parens);
             // PG and MySQL accept `NOW()` and treat `CURRENT_TIMESTAMP`
             // as an equivalent alias.
-            b.sql.push_str(if b.d.name() == "sqlite" {
-                "CURRENT_TIMESTAMP"
+            //
+            // SQLite used to emit bare `CURRENT_TIMESTAMP` here, and
+            // that is #1464 on the query path rather than the DDL one.
+            // A SQLite datetime column is TEXT compared
+            // lexicographically, so `now()` writing
+            // `YYYY-MM-DD HH:MM:SS` while every other write path writes
+            // RFC3339 puts two shapes in one column — the mixed state
+            // the whole issue is about. `SET col = now()` and
+            // `WHERE col < now()` were the two ways to reach it.
+            if b.d.name() == "sqlite" {
+                let _ = write!(
+                    b.sql,
+                    "strftime('{}','now')",
+                    crate::sql::SQLITE_DATETIME_FORMAT
+                );
             } else {
-                "NOW()"
-            });
+                b.sql.push_str("NOW()");
+            }
             Ok(())
         }
         F::ExtractYear

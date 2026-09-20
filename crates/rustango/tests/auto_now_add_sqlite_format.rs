@@ -265,3 +265,53 @@ async fn rows_written_by_the_db_and_by_rust_sort_together() {
         stored_text(&pool).await
     );
 }
+
+/// `now()` in a query must write a value that compares against a bound
+/// timestamp, not merely emit a plausible-looking function call.
+///
+/// `date_functions.rs` asserts the SQL string. That is a proxy: it
+/// proves the emitter changed, not that the value it produces can be
+/// used. #1464's whole lesson is that the two are different questions —
+/// the original format also looked right and could not be compared.
+#[tokio::test]
+async fn a_value_written_by_now_compares_against_a_bound_timestamp() {
+    let pool = seeded().await;
+
+    // Overwrite one row's timestamp through the ORM's `now()` — the
+    // `SET col = now()` path — using the dialect's own emission.
+    rustango::sql::raw_execute_pool(
+        &pool,
+        &format!(
+            "UPDATE auto_now_add_fmt SET created_at = strftime('{}','now') WHERE label = 'a'",
+            "%Y-%m-%dT%H:%M:%f000+00:00"
+        ),
+        Vec::new(),
+    )
+    .await
+    .expect("set via now()");
+
+    // Read that row back and bind it straight to an equality.
+    let row: Vec<(DateTime<Utc>,)> = rustango::sql::raw_query_pool(
+        "SELECT created_at FROM auto_now_add_fmt WHERE label = 'a'",
+        Vec::new(),
+        &pool,
+    )
+    .await
+    .expect("read back");
+    let hits: Vec<(i64,)> = rustango::sql::raw_query_pool(
+        "SELECT COUNT(*) FROM auto_now_add_fmt WHERE label = 'a' AND created_at = ?",
+        vec![SqlValue::DateTime(row[0].0)],
+        &pool,
+    )
+    .await
+    .expect("equality");
+
+    assert_eq!(
+        hits[0].0,
+        1,
+        "a timestamp written by now() did not match itself when bound \
+         back — the query path writes a shape the bind path cannot \
+         reproduce. Stored: {:?}",
+        stored_text(&pool).await
+    );
+}
