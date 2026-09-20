@@ -448,6 +448,11 @@ async fn a_legacy_single_value_token_is_still_accepted() {
 // only checked the after state would let the precondition go unstated.
 // ---------------------------------------------------------------------
 
+/// Page cap for the walk below — high enough that a healthy cursor
+/// finishes long before it, low enough that a stuck one ends the test
+/// rather than the process.
+const MAX_PAGES: usize = 20;
+
 /// Nine rows in the pre-#1464 spelling, three per timestamp.
 async fn legacy_shape_pool() -> Pool {
     let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");
@@ -472,7 +477,8 @@ async fn legacy_shape_pool() -> Pool {
 async fn walk_all_labels(pool: &Pool) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
     let mut uri = "/events".to_string();
-    for _ in 0..20 {
+    let mut exhausted = false;
+    for _ in 0..MAX_PAGES {
         let app = ViewSet::for_model(Event::SCHEMA)
             .cursor_pagination("occurred_at")
             .page_size(2)
@@ -498,11 +504,36 @@ async fn walk_all_labels(pool: &Pool) -> Vec<String> {
         }
         match body["next"].as_str() {
             Some(t) => uri = format!("/events?cursor={t}"),
-            None => break,
+            None => {
+                exhausted = true;
+                break;
+            }
         }
     }
+
+    // The walk must END, and must not repeat a row. Both were invisible
+    // before: this returned `seen.sort(); seen.dedup()`, so a re-emitted
+    // row and a cursor that never terminates — the two canonical #1464
+    // symptoms — were erased by the helper before any assertion saw them
+    // (#1616 rework review, tests-010).
+    assert!(
+        exhausted,
+        "the cursor did not terminate within {MAX_PAGES} pages; it is \
+         re-emitting rows rather than advancing, which is the #1464 \
+         failure this fixture exists to detect. Saw: {seen:?}"
+    );
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "a row was emitted more than once: {seen:?}. A cursor that repeats \
+         a row is the #1464 signature — the last row of a page compares as \
+         'after' itself."
+    );
+
     seen.sort();
-    seen.dedup();
     seen
 }
 

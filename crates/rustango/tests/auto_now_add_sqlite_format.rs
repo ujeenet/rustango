@@ -315,3 +315,58 @@ async fn a_value_written_by_now_compares_against_a_bound_timestamp() {
         stored_text(&pool).await
     );
 }
+
+/// The two format spellings must render the same bytes, checked by
+/// running **both engines**.
+///
+/// `sql::sqlite::the_two_format_spellings_agree` compares chrono
+/// against a hand-typed literal, because a unit test has no SQLite to
+/// run `strftime` in. That leaves the strftime side unexercised: the
+/// guard whose purpose is catching a divergence between the two
+/// spellings never evaluates one of them (#1616 rework review,
+/// tests-005). This closes that.
+#[tokio::test]
+async fn the_two_engines_render_the_same_bytes() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");
+
+    // A whole-millisecond instant, the only precision both engines can
+    // express: SQLite's `%f` is milliseconds, chrono's `%.6f` is
+    // microseconds.
+    let d: DateTime<Utc> = "2027-01-15T08:00:00.869Z".parse().expect("parse");
+
+    // The SQLite side: strftime rendering that instant.
+    let rows: Vec<(String,)> = rustango::sql::raw_query_pool(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%f000+00:00', ?)",
+        vec![SqlValue::String("2027-01-15 08:00:00.869".to_owned())],
+        &pool,
+    )
+    .await
+    .expect("strftime");
+    let sqlite_side = &rows[0].0;
+
+    // The Rust side: whatever the bind path writes for the same
+    // instant. Read back through a round-trip so this is the bytes
+    // that actually land in a column, not a formatting call.
+    rustango::sql::raw_execute_pool(&pool, "CREATE TABLE r (v TEXT)", Vec::new())
+        .await
+        .expect("create");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "INSERT INTO r (v) VALUES (?)",
+        vec![SqlValue::DateTime(d)],
+    )
+    .await
+    .expect("insert");
+    let back: Vec<(String,)> = rustango::sql::raw_query_pool("SELECT v FROM r", Vec::new(), &pool)
+        .await
+        .expect("read");
+    let rust_side = &back[0].0;
+
+    assert_eq!(
+        sqlite_side, rust_side,
+        "the DDL default and the bind path write different bytes for the \
+         same instant. Everything in #1464 follows from these agreeing: a \
+         column written by both holds two spellings and compares wrongly \
+         across them."
+    );
+}

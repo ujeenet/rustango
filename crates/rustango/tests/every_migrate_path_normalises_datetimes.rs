@@ -34,17 +34,36 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-/// Names that count as running the sweep.
-const SWEEP_CALLS: &[&str] = &["normalise_sqlite_datetimes", "normalise_datetimes_quietly"];
-
-fn calls_the_sweep(text: &str) -> bool {
-    SWEEP_CALLS.iter().any(|n| text.contains(n))
+/// Count the lines that **call** `name`, excluding its declaration.
+///
+/// Two mistakes were made here in sequence and both mattered:
+///
+/// 1. `text.contains(name)` — the helper's own `async fn` line contains
+///    its name, so the check passed with every call site deleted.
+/// 2. Excluding only declarations — but
+///    `normalise_datetimes_quietly`'s *body* calls
+///    `normalise_sqlite_datetimes`, so searching for "any sweep name"
+///    still matched after the four seams were removed.
+///
+/// So the question has to be asked about one specific function, and
+/// answered by counting call sites rather than mentions. That is what
+/// the sibling count below was already doing correctly; this is the
+/// same logic, applied where it should have been from the start
+/// (#1616 rework review, tenancy-004).
+fn call_sites(text: &str, name: &str) -> usize {
+    text.lines()
+        .filter(|l| {
+            let calls = l.contains(&format!("{name}("));
+            let declares = l.contains("fn ") || l.trim_start().starts_with("///");
+            calls && !declares
+        })
+        .count()
 }
 
 #[test]
 fn the_single_database_migrate_runs_the_sweep() {
     assert!(
-        calls_the_sweep(&read("migrate/manage.rs")),
+        call_sites(&read("migrate/manage.rs"), "normalise_sqlite_datetimes") > 0,
         "migrate::manage no longer runs the #1464 datetime sweep. A database \
          migrated without it holds timestamps in a shape the ORM does not \
          compare against, and `migrate` reports success."
@@ -54,7 +73,7 @@ fn the_single_database_migrate_runs_the_sweep() {
 #[test]
 fn the_tenancy_migrate_paths_run_the_sweep() {
     assert!(
-        calls_the_sweep(&read("tenancy/migrate.rs")),
+        call_sites(&read("tenancy/migrate.rs"), "normalise_datetimes_quietly") > 0,
         "tenancy::migrate no longer runs the #1464 datetime sweep. This is the \
          state the fix shipped in: `tenancy::manage` intercepts `migrate` \
          before `migrate::manage`, so tenancy deployments never reach the \
@@ -79,10 +98,7 @@ fn every_seeded_database_is_also_swept() {
     // Call sites only — the helper's own `async fn` line contains the
     // name too, and counting it hid one missing seam when this guard
     // was first written.
-    let swept = text
-        .lines()
-        .filter(|l| l.contains("normalise_datetimes_quietly(") && !l.contains("async fn"))
-        .count();
+    let swept = call_sites(&text, "normalise_datetimes_quietly");
 
     assert!(
         seeded > 0,

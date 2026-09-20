@@ -76,19 +76,27 @@ fn no_sqlite_ddl_defaults_a_datetime_to_current_timestamp() {
             if rest.starts_with('(') {
                 continue;
             }
-            // The defect needs a **TEXT** column: it is lexicographic
-            // comparison of a formatted string that goes wrong, and
-            // only SQLite stores a datetime that way. MySQL's
-            // `TIMESTAMP`/`DATETIME` and Postgres' `TIMESTAMPTZ` are
-            // real datetime types and compare as instants, so a bare
+            // Which dialect's DDL is this? The defect is lexicographic
+            // comparison of stored *text*, which is a SQLite property.
+            // MySQL's `TIMESTAMP`/`DATETIME` and Postgres' `TIMESTAMPTZ`
+            // are real datetime types, compare as instants, and a bare
             // `DEFAULT CURRENT_TIMESTAMP` on those is correct.
             //
-            // Keying on the type rather than on which `const` block the
-            // line sits in: the first version of this guard matched the
-            // whole line and flagged `rustango_translations`' MySQL DDL,
-            // which is right as written. The type is what actually
-            // decides whether the bug is possible.
-            if !line.contains("TEXT") {
+            // Keyed on the **quoting style**, not the column type. The
+            // first version required `TEXT` on the line, which let
+            // `DATETIME`, `TIMESTAMP` and untyped SQLite columns
+            // through — every one of them valid SQLite storing the same
+            // broken text, and SQLite's type affinity means the
+            // declared type does not even decide how it is stored
+            // (#1616 rework review, tests-001).
+            //
+            // MySQL DDL in this crate is backtick-quoted; SQLite and PG
+            // use double quotes or bare identifiers. PG is then
+            // excluded by its own type spelling.
+            if line.contains('`') {
+                continue;
+            }
+            if line.contains("TIMESTAMPTZ") || line.contains("WITH TIME ZONE") {
                 continue;
             }
             // A line that is prose about the defect rather than DDL
@@ -220,6 +228,11 @@ fn the_scan_still_recognises_the_defect() {
     let mysql_bare = "    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,";
     let comment = "    // was DEFAULT CURRENT_TIMESTAMP before #1464";
 
+    // SQLite columns the old `TEXT`-keyed rule let through. SQLite's
+    // type affinity means all three store the same broken text.
+    let sqlite_datetime_typed = r#"    "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"#;
+    let sqlite_untyped = r#"    "created_at" NOT NULL DEFAULT CURRENT_TIMESTAMP,"#;
+
     let is_hit = |line: &str| {
         let Some(pos) = line.find("DEFAULT CURRENT_TIMESTAMP") else {
             return false;
@@ -228,7 +241,10 @@ fn the_scan_still_recognises_the_defect() {
         if rest.starts_with('(') {
             return false;
         }
-        if !line.contains("TEXT") {
+        if line.contains('`') {
+            return false;
+        }
+        if line.contains("TIMESTAMPTZ") || line.contains("WITH TIME ZONE") {
             return false;
         }
         let t = line.trim_start();
@@ -238,6 +254,15 @@ fn the_scan_still_recognises_the_defect() {
     assert!(
         is_hit(sqlite_shape),
         "must flag a TEXT column with a bare CURRENT_TIMESTAMP default"
+    );
+    assert!(
+        is_hit(sqlite_datetime_typed),
+        "must flag a DATETIME-typed SQLite column too — affinity means it \
+         is still stored as text"
+    );
+    assert!(
+        is_hit(sqlite_untyped),
+        "must flag an untyped SQLite column too"
     );
     assert!(
         !is_hit(mysql_fractional),
