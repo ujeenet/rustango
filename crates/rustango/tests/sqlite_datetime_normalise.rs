@@ -31,6 +31,15 @@ pub struct Evt {
     pub label: String,
     #[rustango(auto_now_add)]
     pub created_at: Auto<DateTime<Utc>>,
+    /// A `Date`, declared on the model **on purpose**.
+    ///
+    /// `a_bare_date_column_is_not_rewritten` used to build its own
+    /// table with a `born_on` column that belonged to no model, so the
+    /// registry never saw it and the exclusion it claimed to test was
+    /// unreachable: making `targets()` sweep `Date` columns left all 14
+    /// tests green. Declaring it here puts the column in the registry,
+    /// which is what makes the exclusion observable.
+    pub born_on: chrono::NaiveDate,
 }
 
 /// A table holding exactly what a pre-fix database holds: values
@@ -50,12 +59,17 @@ async fn legacy_db() -> Pool {
         ("dawn", "2026-09-19 06:00:00"),
         ("dusk", "2026-09-19 18:00:00"),
     ] {
+        // `born_on` is a `Date` on the model and therefore NOT NULL.
+        // Seeded with a bare date, which is also the control: the
+        // sweep must leave it alone, and it is in the registry so it
+        // would be reached if `targets()` stopped excluding `Date`.
         rustango::sql::raw_execute_pool(
             &pool,
-            "INSERT INTO normalise_evt (label, created_at) VALUES (?, ?)",
+            "INSERT INTO normalise_evt (label, created_at, born_on) VALUES (?, ?, ?)",
             vec![
                 SqlValue::String(label.to_owned()),
                 SqlValue::String(ts.to_owned()),
+                SqlValue::String("2026-09-19".to_owned()),
             ],
         )
         .await
@@ -162,8 +176,12 @@ async fn converted_and_native_rows_sort_together() {
     let mid: DateTime<Utc> = "2026-09-19T09:00:00Z".parse().expect("parse");
     rustango::sql::raw_execute_pool(
         &pool,
-        "INSERT INTO normalise_evt (label, created_at) VALUES (?, ?)",
-        vec![SqlValue::String("mid".to_owned()), SqlValue::DateTime(mid)],
+        "INSERT INTO normalise_evt (label, created_at, born_on) VALUES (?, ?, ?)",
+        vec![
+            SqlValue::String("mid".to_owned()),
+            SqlValue::DateTime(mid),
+            SqlValue::String("2026-09-19".to_owned()),
+        ],
     )
     .await
     .expect("insert native");
@@ -216,19 +234,46 @@ async fn the_sweep_is_idempotent() {
 /// unconditionally from `migrate`, so this is what keeps it off
 /// Postgres and MySQL, where the column is a real datetime type and
 /// `strftime` does not exist.
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn a_non_sqlite_pool_is_untouched() {
-    // Constructing a PG pool needs a server; the dialect check happens
-    // before any query, so assert on the branch that does not. A
-    // SQLite pool with no tables at all exercises the same early path
-    // plus the missing-table accounting.
-    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");
+    // A **Postgres** pool, which is the branch this test names.
+    //
+    // It used a SQLite pool, on the stated grounds that "constructing a
+    // PG pool needs a server". That is false — `connect_lazy` opens
+    // nothing until the first query, and the dialect check returns
+    // before any query is issued. So the test exercised the sqlite
+    // path while claiming to cover the non-sqlite one, and removing
+    // the early return entirely left all 14 tests in this file green
+    // (#1616 review, tests-002).
+    //
+    // Gated on `postgres` because that is the honest scope: in a
+    // sqlite-only build a non-sqlite pool cannot be constructed at all
+    // (`Pool::connect_lazy` returns `FeatureNotEnabled`), so the branch
+    // does not exist there and a test pretending to cover it would be
+    // the same mistake in a new place. It runs wherever both backends
+    // are linked, which includes `postgres_test`'s `--all-features`.
+    let pool = Pool::connect_lazy("postgres://u:p@127.0.0.1:1/never_connected")
+        .expect("lazy pool needs no server");
+    assert_ne!(
+        pool.dialect().name(),
+        "sqlite",
+        "fixture must be non-sqlite"
+    );
+
     let out = normalise_sqlite_datetimes(&pool).await.expect("sweep");
-    assert!(out.is_clean(), "no tables means nothing to rewrite");
+
+    assert!(out.is_clean(), "a non-sqlite pool must rewrite nothing");
+    assert_eq!(
+        out.missing, 0,
+        "the sweep must return before it looks for a single table — a \
+         non-zero `missing` would mean it issued queries against a \
+         database whose datetimes are a real type and were never broken"
+    );
     assert!(
-        out.missing > 0,
-        "the framework tables do not exist here, so they must be \
-         counted as missing rather than erroring"
+        out.columns.is_empty(),
+        "and it must report no swept columns: {:?}",
+        out.columns
     );
 }
 
@@ -241,6 +286,12 @@ async fn a_bare_date_column_is_not_rewritten() {
     let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");
     rustango::sql::raw_execute_pool(
         &pool,
+        // Built from the model's own schema, so `born_on` is the
+        // registry's `Date` column rather than one this test invented.
+        // With a hand-rolled table the exclusion was untestable: the
+        // registry never saw the column, so sweeping `Date` columns
+        // could not have touched it and the assertion below held
+        // whatever `targets()` did.
         "CREATE TABLE normalise_evt (id INTEGER PRIMARY KEY AUTOINCREMENT, \
          label TEXT NOT NULL, created_at TEXT NOT NULL, born_on TEXT NOT NULL)",
         Vec::new(),

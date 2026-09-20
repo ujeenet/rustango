@@ -316,6 +316,24 @@ jobs:
             --test tracing_targets \
             --test every_test_suite_compiles_in_ci \
             --test logging_fields_agree
+      # The #1464 datetime suites, which the list above cannot run.
+      #
+      # That list uses `--features tenancy`, i.e. **default features**
+      # plus tenancy — and `default = ["postgres", "batteries"]` has no
+      # `sqlite`. These three files are `#![cfg(feature = "sqlite")]`,
+      # so there they compile to `ok. 0 passed` while proving nothing.
+      # The only job that executed them was `postgres_test`, which is
+      # `needs: gate`, so the behavioural proof of #1464 never ran on an
+      # unlabelled PR — the #1572 failure mode, in the PR that fixed
+      # #1464 (#1616 review, tests-001).
+      #
+      # They need no database: in-memory and temp-file SQLite only.
+      - run: |
+          cargo test -p rustango --no-default-features --features sqlite,tenancy \
+            --test auto_now_add_sqlite_format \
+            --test sqlite_datetime_normalise \
+            --test tenant_datetime_sweep_sqlite_file_live \
+            --test cursor_pagination_on_a_timestamp
 
   # Ungated, and the reason is #1572: a test file that does not build was
   # merging green.
