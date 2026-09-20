@@ -2217,7 +2217,11 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
             // unnecessary RETURNING column on every dialect, and (b)
             // the MySQL `LAST_INSERT_ID()` path that can only fill an
             // integer PK.
-            if !info.default_uuid_v7 {
+            // `auto_now_add` / `auto_now` join `default_uuid_v7` here
+            // for the same reason: they are filled Rust-side below and
+            // bound, so the value is already in `self` and RETURNING
+            // would be a redundant column on every dialect.
+            if !info.default_uuid_v7 && !info.auto_now_add && !info.auto_now {
                 out.returning_cols.push(quote!(#column));
                 out.auto_field_idents
                     .push((ident.clone(), info.column.clone()));
@@ -2235,6 +2239,42 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                     if matches!(&self.#ident, #root::sql::Auto::Unset) {
                         self.#ident = #root::sql::Auto::Set(
                             #root::__uuid::Uuid::now_v7(),
+                        );
+                    }
+                    if let #root::sql::Auto::Set(_v) = &self.#ident {
+                        _columns.push(#column);
+                        _values.push(::core::convert::Into::<#root::core::SqlValue>::into(
+                            ::core::clone::Clone::clone(_v)
+                        ));
+                    }
+                });
+            } else if info.auto_now_add || info.auto_now {
+                // Rust-side write timestamp (#1464), mirroring
+                // `default_uuid_v7` above. `auto_now` has always bound
+                // `Utc::now()` on UPDATE but not on INSERT, so the
+                // first write of an `updated_at` took the DB default
+                // while every later one took the clock — the same
+                // column, filled two different ways.
+                //
+                // The default is the problem. `CREATE TABLE IF NOT
+                // EXISTS` leaves an upgraded table's
+                // `DEFAULT CURRENT_TIMESTAMP` in place, and SQLite's
+                // ALTER TABLE grammar (RENAME/ADD/DROP) has no
+                // statement that changes it — so every insert relying
+                // on that default wrote the legacy shape forever, while
+                // the migrate sweep converted the rows around it. The
+                // column went permanently mixed and `ORDER BY` inverted
+                // the admin audit log (#1616 rework review,
+                // correctness-001 / dialects-005 / security-002).
+                //
+                // Binding it here makes the stale default unreachable
+                // rather than trying to migrate it. It also matches
+                // Django, where `auto_now_add` is set in Python rather
+                // than by the database.
+                out.insert_pushes.push(quote! {
+                    if matches!(&self.#ident, #root::sql::Auto::Unset) {
+                        self.#ident = #root::sql::Auto::Set(
+                            #root::__chrono::Utc::now(),
                         );
                     }
                     if let #root::sql::Auto::Set(_v) = &self.#ident {
@@ -2262,6 +2302,28 @@ fn collect_fields(named: &syn::FieldsNamed, table: &str) -> syn::Result<Collecte
                     ::core::clone::Clone::clone(&_row.#ident)
                 ));
             });
+            // …except the timestamp columns, which must appear in BOTH
+            // paths (#1464). The path is chosen by the *first* Auto
+            // field — in practice the PK — so a bulk insert of rows
+            // with an unset PK took the no-auto branch and dropped the
+            // timestamp column, falling back to the DB default that
+            // this change exists to stop depending on.
+            //
+            // `rows` is borrowed immutably here, so this fills per row
+            // at push time rather than writing back into the struct. An
+            // explicitly-Set value is still honoured; only `Unset`
+            // takes the clock.
+            if info.auto_now_add || info.auto_now {
+                out.bulk_columns_no_auto.push(quote!(#column));
+                out.bulk_pushes_no_auto.push(quote! {
+                    _row_vals.push(::core::convert::Into::<#root::core::SqlValue>::into(
+                        match &_row.#ident {
+                            #root::sql::Auto::Set(_v) => ::core::clone::Clone::clone(_v),
+                            #root::sql::Auto::Unset => #root::__chrono::Utc::now(),
+                        }
+                    ));
+                });
+            }
             // Uniformity check: every row's Auto state must match the
             // first row's. Mixed Set/Unset within one bulk_insert is
             // rejected here so the column list stays consistent.

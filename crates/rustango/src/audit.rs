@@ -155,6 +155,18 @@ impl AuditOp {
 /// Emit a single entry against a Postgres executor. Used by per-row
 /// write paths on PG. For bi-dialect emission see [`emit_one_pool`].
 ///
+/// # `occurred_at` is bound, not defaulted
+///
+/// Every emit path — three dialects, single-row and batch — binds it.
+/// The column default is a backstop for hand-written SQL (#1464).
+///
+/// SQLite is why: a database created before #1464 still defaults to
+/// `CURRENT_TIMESTAMP`, whose `YYYY-MM-DD HH:MM:SS` sorts *below* the
+/// canonical `…T…` spelling, and `ALTER TABLE` there cannot replace a
+/// default. Every later row would arrive legacy-shaped, inverting
+/// `ORDER BY occurred_at DESC` and making `cleanup_keep_last_n` discard
+/// the newest entries. PG and MySQL bind for uniformity.
+///
 /// # Errors
 /// Driver / SQL failures from the INSERT.
 #[cfg(feature = "postgres")]
@@ -164,14 +176,15 @@ where
 {
     sqlx::query(
         r#"INSERT INTO "rustango_audit_log"
-              ("entity_table", "entity_pk", "operation", "source", "changes")
-           VALUES ($1, $2, $3, $4, $5)"#,
+              ("entity_table", "entity_pk", "operation", "source", "changes", "occurred_at")
+           VALUES ($1, $2, $3, $4, $5, $6)"#,
     )
     .bind(entry.entity_table)
     .bind(&entry.entity_pk)
     .bind(entry.operation.as_str())
     .bind(entry.source.as_token())
     .bind(&entry.changes)
+    .bind(chrono::Utc::now())
     .execute(executor)
     .await?;
     Ok(())
@@ -192,11 +205,11 @@ where
         return Ok(());
     }
     // We compose one big multi-row VALUES list rather than UNNEST-ing
-    // 5 typed arrays — keeps the SQL readable and `sqlx` happy with
-    // mixed column types (TEXT + JSONB).
+    // 6 typed arrays — keeps the SQL readable and `sqlx` happy with
+    // mixed column types (TEXT + JSONB + TIMESTAMPTZ).
     let mut sql = String::from(
         r#"INSERT INTO "rustango_audit_log"
-              ("entity_table", "entity_pk", "operation", "source", "changes")
+              ("entity_table", "entity_pk", "operation", "source", "changes", "occurred_at")
            VALUES "#,
     );
     let mut bind_idx = 1usize;
@@ -207,23 +220,28 @@ where
         use std::fmt::Write as _;
         let _ = write!(
             sql,
-            "(${}, ${}, ${}, ${}, ${})",
+            "(${}, ${}, ${}, ${}, ${}, ${})",
             bind_idx,
             bind_idx + 1,
             bind_idx + 2,
             bind_idx + 3,
             bind_idx + 4,
+            bind_idx + 5,
         );
-        bind_idx += 5;
+        bind_idx += 6;
     }
     let mut q = sqlx::query(&sql);
     for entry in entries {
+        // Stamped per row rather than once for the batch, so a batch
+        // behaves the same here as it does on the MySQL / SQLite
+        // fallback, which loops `emit_one_*`.
         q = q
             .bind(entry.entity_table)
             .bind(&entry.entity_pk)
             .bind(entry.operation.as_str())
             .bind(entry.source.as_token())
-            .bind(&entry.changes);
+            .bind(&entry.changes)
+            .bind(chrono::Utc::now());
     }
     q.execute(executor).await?;
     Ok(())
@@ -540,24 +558,24 @@ impl AuditEntry {
 /// `cutoff_days = 0` clears the entire table (use with caution); a
 /// negative value is clamped to 0.
 ///
-/// **PG-only by SQL syntax**: uses `NOW() - ($1::int8 * INTERVAL '1
-/// day')` which is Postgres-specific (`INTERVAL` literal + cast
-/// syntax). The tri-dialect rewrite computes the cutoff timestamp
-/// Rust-side (chrono) and binds it — future work; until then, MySQL/
-/// SQLite apps roll their own retention DELETEs.
+/// PG-typed; [`cleanup_older_than_pool`] is the tri-dialect one.
+///
+/// The cutoff is bound from Rust, not `NOW()`. Once [`emit_one`] began
+/// binding `occurred_at` (#1464) a database-side `NOW()` put two clocks
+/// in one comparison: a host running ahead writes rows in the
+/// database's future and a zero-day sweep deletes none of them. Both
+/// live retention tests failed this way against a Docker Postgres.
 ///
 /// # Errors
 /// Driver / SQL failures from the DELETE.
 #[cfg(feature = "postgres")]
 pub async fn cleanup_older_than(pool: &PgPool, cutoff_days: i64) -> Result<u64, sqlx::Error> {
     let cutoff = cutoff_days.max(0);
-    let result = sqlx::query(
-        r#"DELETE FROM "rustango_audit_log"
-           WHERE "occurred_at" < NOW() - ($1::int8 * INTERVAL '1 day')"#,
-    )
-    .bind(cutoff)
-    .execute(pool)
-    .await?;
+    let cutoff_ts = chrono::Utc::now() - chrono::Duration::days(cutoff);
+    let result = sqlx::query(r#"DELETE FROM "rustango_audit_log" WHERE "occurred_at" < $1"#)
+        .bind(cutoff_ts)
+        .execute(pool)
+        .await?;
     Ok(result.rows_affected())
 }
 
@@ -670,16 +688,18 @@ pub async fn emit_one_my<'c, E>(executor: E, entry: &PendingEntry) -> Result<(),
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
+    // `occurred_at` bound, not defaulted — see [`emit_one`].
     sqlx::query(
         r#"INSERT INTO `rustango_audit_log`
-              (`entity_table`, `entity_pk`, `operation`, `source`, `changes`)
-           VALUES (?, ?, ?, ?, ?)"#,
+              (`entity_table`, `entity_pk`, `operation`, `source`, `changes`, `occurred_at`)
+           VALUES (?, ?, ?, ?, ?, ?)"#,
     )
     .bind(entry.entity_table)
     .bind(&entry.entity_pk)
     .bind(entry.operation.as_str())
     .bind(entry.source.as_token())
     .bind(sqlx::types::Json(&entry.changes))
+    .bind(chrono::Utc::now())
     .execute(executor)
     .await?;
     Ok(())
@@ -697,16 +717,21 @@ pub async fn emit_one_sqlite<'c, E>(executor: E, entry: &PendingEntry) -> Result
 where
     E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
 {
+    // `occurred_at` bound, not defaulted — see [`emit_one`]. This is
+    // the dialect the rule exists for: an upgraded database's default
+    // is unfixable, so a defaulted write here is a legacy-shaped row
+    // among canonical ones, forever.
     sqlx::query(
         r#"INSERT INTO "rustango_audit_log"
-              ("entity_table", "entity_pk", "operation", "source", "changes")
-           VALUES (?, ?, ?, ?, ?)"#,
+              ("entity_table", "entity_pk", "operation", "source", "changes", "occurred_at")
+           VALUES (?, ?, ?, ?, ?, ?)"#,
     )
     .bind(entry.entity_table)
     .bind(&entry.entity_pk)
     .bind(entry.operation.as_str())
     .bind(entry.source.as_token())
     .bind(sqlx::types::Json(&entry.changes))
+    .bind(crate::sql::encode_datetime(chrono::Utc::now()))
     .execute(executor)
     .await?;
     Ok(())

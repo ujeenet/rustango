@@ -4,6 +4,44 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed — no writer reads its timestamp from a column default (#1464)
+
+A column default is a backstop for hand-written SQL. Every framework
+writer now stamps its own timestamps, on all three dialects.
+
+The reason is SQLite-shaped but the rule is not. SQLite stores a
+datetime as TEXT and compares it lexicographically, so the stored
+spelling is a correctness contract — and `CURRENT_TIMESTAMP` writes
+`YYYY-MM-DD HH:MM:SS`, whose separator at index 10 is `' '` (0x20)
+against the canonical `'T'` (0x54). A database created before this fix
+still carries that default and always will: SQLite's `ALTER TABLE`
+grammar is RENAME / ADD / DROP, and none of those replaces a column
+default. So on an upgraded database the migrate sweep converted the
+rows already stored while every new row arrived in the legacy shape,
+leaving the column permanently mixed.
+
+- **`auto_now` now binds on INSERT**, not only on UPDATE. The first
+  write of an `updated_at` took the database default and every later
+  one took the clock — one column filled two different ways.
+- **`audit`** binds `occurred_at` on every emit path, single-row and
+  batch. This is what made `cleanup_keep_last_n` discard the *newest*
+  entries: it ranks with `ORDER BY occurred_at DESC`, and a
+  legacy-spelled row sorts below every canonical one whatever instant
+  it holds.
+- **`jobs::dispatch`** binds `run_at` and `created_at`. `run_at` is the
+  pickup queue's sort key, so such a row jumped ahead of every
+  correctly-stamped job — permanently, since the stale default kept
+  writing more of them.
+- **`i18n` translations** map `created_at` / `updated_at` onto the
+  model, so both go through the ORM's write path. **Breaking:**
+  `Translation` gained two required fields; a struct literal that does
+  not set them no longer compiles. Add `created_at: Auto::Unset,
+  updated_at: Auto::Unset` — the ORM fills both.
+- **The migration ledger** binds `applied_at` across all five runners.
+  Nothing reads that column today, so this is not a live defect; it is
+  the writer that would otherwise undo `migrate`'s own datetime sweep
+  once per migration.
+
 ## [0.57.10] — 2026-09-19
 
 A documentation release, and the first one where the docs were treated

@@ -49,8 +49,8 @@ pub struct Event {
     #[rustango(max_length = 40)]
     pub label: String,
     /// The column under test. `Auto<..>` is mandatory for
-    /// `auto_now_add` — it is what makes the macro skip the column on
-    /// INSERT so the DB default fires.
+    /// `auto_now_add` — `Unset` is what tells the macro to fill the
+    /// column from the clock rather than honour a caller's value.
     #[rustango(auto_now_add)]
     pub created_at: Auto<DateTime<Utc>>,
 }
@@ -368,5 +368,69 @@ async fn the_two_engines_render_the_same_bytes() {
          same instant. Everything in #1464 follows from these agreeing: a \
          column written by both holds two spellings and compares wrongly \
          across them."
+    );
+}
+
+/// An **upgraded** table — one whose `DEFAULT` is still the legacy
+/// `CURRENT_TIMESTAMP` — must still receive canonical rows.
+///
+/// This is the state no migration can repair. `CREATE TABLE IF NOT
+/// EXISTS` leaves an existing table's default alone, and SQLite's
+/// `ALTER TABLE` grammar is RENAME/ADD/DROP — there is no statement
+/// that changes a column default. So every insert relying on that
+/// default wrote the legacy shape forever, while the migrate sweep
+/// converted the rows around it: the column went permanently mixed and
+/// `ORDER BY` inverted the admin audit log (#1616 rework review,
+/// correctness-001 / dialects-005).
+///
+/// `auto_now_add` binds from Rust now, so the stale default is never
+/// reached. The fixture builds the table the **old** way on purpose — a
+/// table created by the current DDL would pass whether or not the fix
+/// is present.
+#[tokio::test]
+async fn an_upgraded_table_with_the_old_default_still_gets_canonical_rows() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");
+
+    // The pre-#1464 shape, exactly as an upgraded database holds it.
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "CREATE TABLE auto_now_add_fmt (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )",
+        Vec::new(),
+    )
+    .await
+    .expect("create with the legacy default");
+
+    // Inserted through the ORM, which is what an application does.
+    let mut row = Event {
+        id: Auto::Unset,
+        label: "through-the-orm".to_owned(),
+        created_at: Auto::Unset,
+    };
+    row.save_pool(&pool).await.expect("save");
+
+    let stored = stored_text(&pool).await;
+    assert_eq!(stored.len(), 1, "one row expected, got {stored:?}");
+    assert!(
+        stored[0].as_bytes()[10] == b'T' && stored[0].ends_with("+00:00"),
+        "a row written through the ORM into a table whose DEFAULT is still \
+         `CURRENT_TIMESTAMP` must carry the canonical shape — the default \
+         must not be reached. Stored: {stored:?}"
+    );
+
+    // And it compares, which is the property the shape exists for.
+    let hits: Vec<(i64,)> = rustango::sql::raw_query_pool(
+        "SELECT COUNT(*) FROM auto_now_add_fmt WHERE created_at < ?",
+        vec![SqlValue::DateTime(Utc::now() + Duration::hours(1))],
+        &pool,
+    )
+    .await
+    .expect("compare");
+    assert_eq!(
+        hits[0].0, 1,
+        "and it must compare against a bound timestamp"
     );
 }

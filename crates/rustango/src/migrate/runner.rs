@@ -786,8 +786,11 @@ fn preview_migration(mig: &Migration, ledger: &str) -> Result<MigrationPreview, 
         }
     }
     statements.extend(deferred_fks);
+    // The preview shows the column list the runners actually write,
+    // `applied_at` included — a plan that omits a column the apply then
+    // writes is a plan of a different statement.
     statements.push(format!(
-        "INSERT INTO {ledger} (name) VALUES ('{}')",
+        "INSERT INTO {ledger} (name, applied_at) VALUES ('{}', <now>)",
         mig.name.replace('\'', "''")
     ));
     if mig.atomic {
@@ -832,8 +835,9 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<()
     for stmt in deferred_fks {
         sqlx::query(&stmt).execute(&mut *tx).await?;
     }
-    sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES ($1)"))
+    sqlx::query(&ledger_insert_sql(&crate::sql::Postgres, ledger))
         .bind(&mig.name)
+        .bind(chrono::Utc::now())
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -1369,8 +1373,9 @@ async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(),
     for stmt in deferred_fks {
         sqlx::query(&stmt).execute(pool).await?;
     }
-    sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES ($1)"))
+    sqlx::query(&ledger_insert_sql(&crate::sql::Postgres, ledger))
         .bind(&mig.name)
+        .bind(chrono::Utc::now())
         .execute(pool)
         .await?;
     Ok(())
@@ -1421,16 +1426,10 @@ pub async fn ensure_ledger_pool_with_ledger(
         "postgres" => "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
         "mysql" => "DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)",
         // SQLite has no native TIMESTAMP type, so this is TEXT and
-        // compares lexicographically.
-        //
-        // `CURRENT_TIMESTAMP` was "sufficient for ledger ordering" and
-        // that much was true — every row here is written by the same
-        // default, so they sort against each other. It stopped being
-        // enough once anything compared the column against a timestamp
-        // bound from Rust, which is #1464: the shapes diverge at
-        // position 10, `' '` against `'T'`. Matched to
+        // compares lexicographically. Matched to
         // `sql::sqlite::SQLITE_DATETIME_FORMAT` so the ledger agrees
-        // with every other table rather than being the one exception.
+        // with every other table rather than being the one exception
+        // (#1464).
         "sqlite" => "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f000+00:00','now'))",
         // Future dialects: a `Dialect::current_timestamp_default()` +
         // `Dialect::timestamp_type()` pair would let this branch go
@@ -1449,6 +1448,18 @@ pub async fn ensure_ledger_pool_with_ledger(
     );
     crate::sql::raw_execute_pool(pool, &create_sql, ::std::vec::Vec::new()).await?;
     Ok(())
+}
+
+/// The statement that records a migration as applied — one column list
+/// for the five runners that write it.
+///
+/// `applied_at` is bound, not defaulted (#1464): a defaulted write on
+/// an upgraded SQLite file puts the legacy spelling back into a column
+/// `migrate`'s own sweep has just normalised. Nothing compares the
+/// column today, so this is housekeeping, not a live defect.
+fn ledger_insert_sql(dialect: &dyn crate::sql::Dialect, ledger: &str) -> String {
+    let (p1, p2) = (dialect.placeholder(1), dialect.placeholder(2));
+    format!("INSERT INTO {ledger} (name, applied_at) VALUES ({p1}, {p2})")
 }
 
 /// Set of migration names already recorded in the default ledger
@@ -2175,8 +2186,9 @@ async fn apply_atomic_pool(
             for stmt in deferred_fks {
                 sqlx::query(&stmt).execute(&mut *tx).await?;
             }
-            sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES ($1)"))
+            sqlx::query(&ledger_insert_sql(&crate::sql::Postgres, ledger))
                 .bind(&mig.name)
+                .bind(chrono::Utc::now())
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -2288,8 +2300,9 @@ async fn apply_atomic_pool(
                     .await
                     .map_err(|e| stuck!(e))?;
             }
-            sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES (?)"))
+            sqlx::query(&ledger_insert_sql(&crate::sql::MySql, ledger))
                 .bind(&mig.name)
+                .bind(chrono::Utc::now())
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| stuck!(e))?;
@@ -2327,8 +2340,15 @@ async fn apply_atomic_pool(
             for stmt in deferred_fks {
                 sqlx::query(&stmt).execute(&mut *tx).await?;
             }
-            sqlx::query(&format!("INSERT INTO {ledger} (name) VALUES (?)"))
+            // `encode_datetime`, not a bare `DateTime<Utc>`: sqlx-sqlite
+            // has its own RFC3339 formatter with a variable-width
+            // fraction, which is a second spelling of the same instant.
+            // Everything else in the crate reaches this encoder through
+            // the executor's binders; a typed `sqlx::query` here has to
+            // name it.
+            sqlx::query(&ledger_insert_sql(&crate::sql::Sqlite, ledger))
                 .bind(&mig.name)
+                .bind(crate::sql::encode_datetime(chrono::Utc::now()))
                 .execute(&mut *tx)
                 .await?;
             tx.commit().await?;
@@ -2373,12 +2393,14 @@ async fn apply_nonatomic_pool(
     for stmt in deferred_fks {
         crate::sql::raw_execute_pool(pool, &stmt, ::std::vec::Vec::new()).await?;
     }
-    let placeholder = pool.dialect().placeholder(1);
-    let insert_sql = format!("INSERT INTO {ledger} (name) VALUES ({placeholder})");
+    let insert_sql = ledger_insert_sql(pool.dialect(), ledger);
     crate::sql::raw_execute_pool(
         pool,
         &insert_sql,
-        ::std::vec![crate::core::SqlValue::String(mig.name.clone())],
+        ::std::vec![
+            crate::core::SqlValue::String(mig.name.clone()),
+            crate::core::SqlValue::DateTime(chrono::Utc::now()),
+        ],
     )
     .await?;
     Ok(())
