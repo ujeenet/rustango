@@ -125,20 +125,6 @@ pub(crate) fn encode_datetime(d: chrono::DateTime<chrono::Utc>) -> String {
 pub(crate) const SQLITE_CANONICAL_GLOB: &str =
     "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00";
 
-/// `LIKE` mask matching exactly the legacy `CURRENT_TIMESTAMP` shape,
-/// `YYYY-MM-DD HH:MM:SS`. `_` is LIKE's single-character wildcard, so
-/// this matches on width and separator placement without matching the
-/// RFC3339 shape, whose position 10 is `T` rather than a space.
-///
-/// Used to normalise rows written before the fix. Anchored this way the
-/// UPDATE is idempotent: a row already converted no longer matches.
-///
-/// Read by `migrate::sqlite_datetime`'s sweep and by `audit`'s
-/// retention DELETE, which uses it to normalise the stored side of the
-/// comparison so the sweep is correct on a database that has not been
-/// migrated yet.
-pub(crate) const SQLITE_LEGACY_DATETIME_LIKE: &str = "____-__-__ __:__:__";
-
 /// The `SQLite` 3.35+ dialect. Stateless; construct with `Sqlite`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Sqlite;

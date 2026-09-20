@@ -151,16 +151,15 @@ pub use sqlite::Sqlite;
 /// reader, which needs a live `SQLite` pool.
 #[cfg(feature = "sqlite")]
 pub(crate) use sqlite::SQLITE_CANONICAL_GLOB;
-/// The one text shape a `SQLite` datetime column may hold, and the mask
-/// matching what the pre-#1464 default wrote. `pub(crate)` because the
-/// migration sweep and `audit`'s retention DELETE need them and
-/// `sql::sqlite` is a private module — an internal contract between the
-/// writers and those two readers, not API.
+/// The one text shape a `SQLite` datetime column may hold.
+/// `pub(crate)` because the migration sweep and `audit`'s retention
+/// DELETE need it and `sql::sqlite` is a private module — an internal
+/// contract between the writers and those two readers, not API.
 ///
 /// Ungated, matching the dialect emitters above: the retention DELETE
 /// builds its `SQLite` branch through `Dialect`, and that renderer
 /// compiles in every build whether or not the driver is linked.
-pub(crate) use sqlite::{SQLITE_DATETIME_FORMAT, SQLITE_LEGACY_DATETIME_LIKE};
+pub(crate) use sqlite::SQLITE_DATETIME_FORMAT;
 
 /// Re-exported so `#[derive(Model)]` output can name `sqlx` types without
 /// requiring downstream crates to add their own dependency on it.

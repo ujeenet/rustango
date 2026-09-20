@@ -438,3 +438,70 @@ async fn the_retention_delete_uses_the_occurred_at_index() {
          once the index is lost."
     );
 }
+
+/// A stored spelling the width-keyed guard could not see must still be
+/// judged by its own clock time.
+///
+/// The predicate this replaces was
+/// `occurred_at NOT LIKE '____-__-__ __:__:__' OR occurred_at < ?`,
+/// which recognises only an *exactly 19-character* space-separated
+/// value. `2026-09-20 08:00:00.123456` — the PG/MySQL dump spelling,
+/// and what sqlx writes for a bound `NaiveDateTime` — does not match,
+/// so the guard was skipped and the bare range judged it, where `' '`
+/// (0x20) sorts below `'T'` (0x54) and makes every same-date legacy row
+/// "older" than a canonical cutoff whatever its hour. Rows *after* the
+/// cutoff were deleted (#1616 rework review, security-001).
+///
+/// The fixture is deliberately that spelling. A bare 19-character value
+/// survives the old predicate too, so the obvious fixture would have
+/// proved nothing.
+#[tokio::test]
+async fn a_fractional_legacy_row_after_the_cutoff_survives() {
+    use sqlx::Row as _;
+    let pool = pool().await;
+    ensure_table_pool(&pool).await.unwrap();
+    let sq = pool.as_sqlite().expect("sqlite pool");
+
+    // The rows must be **later the same day** as the cutoff, not a
+    // later day. A different date decides the comparison at position 9
+    // and never reaches the separator at position 10 — which is the
+    // whole defect. The first version of this fixture used tomorrow's
+    // date and passed against the broken predicate, the same
+    // proxy-testing mistake one level up.
+    let now = chrono::Utc::now();
+    if now.format("%H").to_string() == "23" {
+        eprintln!("skipping: no room later today for a same-day future row");
+        return;
+    }
+    let day = now.format("%Y-%m-%d").to_string();
+    for hhmmss in ["23:00:00.123456", "23:30:00.500000", "23:59:59.000001"] {
+        sqlx::query(
+            r#"INSERT INTO "rustango_audit_log"
+                  ("entity_table","entity_pk","operation","source","changes","occurred_at")
+               VALUES ('post','fut','create','test','{}', ?)"#,
+        )
+        .bind(format!("{day} {hhmmss}"))
+        .execute(sq)
+        .await
+        .unwrap();
+    }
+
+    // Retention with cutoff = now. Every seeded row is tomorrow, so
+    // nothing may go.
+    let removed = cleanup_older_than_pool(&pool, 0).await.unwrap();
+    assert_eq!(
+        removed, 0,
+        "rows dated later today were deleted by a retention sweep with a \
+         cutoff of now. The stored spelling carries a fraction, so a \
+         width-keyed guard does not recognise it and the bare range \
+         judges it by text — which is the #1464 comparison, inside the \
+         statement written to defend against it."
+    );
+
+    let left: i64 = sqlx::query(r#"SELECT COUNT(*) AS c FROM "rustango_audit_log""#)
+        .fetch_one(sq)
+        .await
+        .unwrap()
+        .get("c");
+    assert_eq!(left, 3, "all three rows should remain");
+}
