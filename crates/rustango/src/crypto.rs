@@ -52,6 +52,11 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 /// `HMAC-SHA256(key, data)` returning the raw 32-byte tag. The
 /// `new_from_slice` constructor cannot fail for SHA-256 (it accepts
 /// any key length) — the `expect` is for documentation only.
+// see `hex_encode` above. #1535 widened this module's cfg to `csrf` /
+// `totp`, which reach only `constant_time_compare` — so a build like
+// `postgres,manage,admin` now compiles the module with no HMAC caller
+// at all, and CI runs `-D warnings`.
+#[allow(dead_code)]
 #[must_use]
 pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC key");
@@ -140,6 +145,9 @@ pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
 /// let tag3 = salted_hmac(b"other-purpose", b"user-id=42", b"app-secret-key");
 /// assert_ne!(tag, tag3);
 /// ```
+// see `hmac_sha256` — dead in a build that pulls `crypto` in for
+// `constant_time_compare` alone.
+#[allow(dead_code)]
 #[must_use]
 pub fn salted_hmac(key_salt: &[u8], value: &[u8], secret: &[u8]) -> Vec<u8> {
     // Derive purpose-specific key: SHA256(secret || key_salt). This is
