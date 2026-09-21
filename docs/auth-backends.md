@@ -141,7 +141,7 @@ let app = Router::new()
 ```
 
 > **These took a `Pool` before 0.57.11.** They do not any more, and the
-> change is a security fix (GHSA-c4gg-mvfq-h268), not tidying. The pool
+> change is a security fix, not tidying. The pool
 > was captured when the router was built and reused for every request,
 > so a credential issued by one tenant authenticated on another
 > tenant's host — the backends looked the user up in whichever database

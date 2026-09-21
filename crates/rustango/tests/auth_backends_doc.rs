@@ -130,7 +130,7 @@ async fn admin_only() -> &'static str {
 
 /// Resolver that hands every request the same single-tenant Org.
 ///
-/// `require_auth` takes no pool as of GHSA-c4gg-mvfq-h268 — it reads
+/// `require_auth` takes no pool as of 0.57.11 — it reads
 /// the tenant resolved for each request, so even a one-tenant app has
 /// to mount a context for it to read. That is the cost of the fix and
 /// it is deliberate: a pool chosen once per process is exactly what

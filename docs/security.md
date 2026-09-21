@@ -340,7 +340,8 @@ let app = Router::new()
     .merge(posts)
     .require_auth(backends);       // outer: resolves the user first
 // No pool: the credential is checked against the tenant resolved from
-// the request's own host. Passing one is GHSA-c4gg-mvfq-h268.
+// the request's own host. Taking one let a credential from one tenant
+// authenticate on another's — fixed in 0.57.11.
 ```
 
 The middleware tries each backend in order. The first one that succeeds wins; the first one that returns a hard error stops the chain.

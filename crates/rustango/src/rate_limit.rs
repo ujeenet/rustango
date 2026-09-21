@@ -33,7 +33,7 @@ use axum::http::{header, HeaderValue, Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
 
-/// Ceiling on distinct in-flight buckets (GHSA-rj6w).
+/// Ceiling on distinct in-flight buckets.
 ///
 /// At ~64 bytes of key plus a 24-byte `Bucket`, 100k entries is a few
 /// megabytes — high enough that a real deployment never reaches it
@@ -204,7 +204,7 @@ impl RateLimitLayer {
     ///
     /// Also what makes the eviction path testable: a guard can set a
     /// small ceiling and actually reach it, rather than passing because
-    /// the code never ran (GHSA-rj6w).
+    /// the code never ran.
     #[must_use]
     pub fn max_buckets(mut self, n: usize) -> Self {
         self.max_buckets = n.max(1);
@@ -218,7 +218,7 @@ impl RateLimitLayer {
         self.capacity as f64 / self.refill_period.as_secs_f64()
     }
 
-    /// Bound the bucket map before inserting a new key (GHSA-rj6w).
+    /// Bound the bucket map before inserting a new key.
     ///
     /// Nothing removed entries before this, and with
     /// `KeyBy::Header` the key is the raw header value — entirely
@@ -283,7 +283,7 @@ impl RateLimitLayer {
         let rate = self.rate_per_sec();
         let mut store = self.store.lock().await;
         // Only a *new* key can grow the map, so the sweep rides the
-        // miss path and the hot path stays a lookup (GHSA-rj6w).
+        // miss path and the hot path stays a lookup.
         if !store.contains_key(key) {
             self.make_room(&mut store, now);
         }

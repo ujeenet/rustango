@@ -1,5 +1,4 @@
-//! A credential must not authenticate on another tenant's host
-//! (GHSA-c4gg-mvfq-h268).
+//! A credential must not authenticate on another tenant's host.
 //!
 //! `require_auth` used to take a `Pool` captured when the router was
 //! built, so every request authenticated against that one database
@@ -194,7 +193,6 @@ async fn the_same_credential_is_refused_on_another_tenants_host() {
         StatusCode::UNAUTHORIZED,
         "ann has no row in beta, so her credential must not authenticate \
          there. A 200 means the middleware checked her against some other \
-         tenant's database — the cross-tenant authentication bypass \
-         (GHSA-c4gg-mvfq-h268)."
+         tenant's database — the cross-tenant authentication bypass."
     );
 }
