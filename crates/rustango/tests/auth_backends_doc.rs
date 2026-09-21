@@ -57,7 +57,15 @@ fn basic(user: &str, pass: &str) -> String {
 /// In-memory SQLite with the user table + permission tables, two users, and a
 /// `post.add` grant for alice.
 async fn setup() -> (Pool, i64) {
-    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    // The same `cache=shared` database the tenant context resolves to,
+    // so the fixtures and the middleware see one set of rows.
+    let pool = Pool::connect(SOLE_TENANT_URL).await.expect("sqlite pool");
+    // Each test re-seeds; drop what a previous one left behind.
+    for t in ["rustango_users", "rustango_api_keys"] {
+        let _ =
+            rustango::sql::raw_execute_pool(&pool, &format!("DROP TABLE IF EXISTS {t}"), vec![])
+                .await;
+    }
     // rustango_users from `User::SCHEMA` (no hand-written DDL to drift).
     rustango::testkit::create_tables_for::<rustango::tenancy::User>(&pool)
         .await
@@ -120,21 +128,75 @@ async fn admin_only() -> &'static str {
     "secret area"
 }
 
-fn app(pool: Pool) -> Router {
+/// Resolver that hands every request the same single-tenant Org.
+///
+/// `require_auth` takes no pool as of GHSA-c4gg-mvfq-h268 — it reads
+/// the tenant resolved for each request, so even a one-tenant app has
+/// to mount a context for it to read. That is the cost of the fix and
+/// it is deliberate: a pool chosen once per process is exactly what
+/// let a credential from one tenant authenticate on another's host.
+#[derive(Clone)]
+struct SoleTenant;
+
+#[async_trait::async_trait]
+impl rustango::tenancy::OrgResolver for SoleTenant {
+    async fn resolve(
+        &self,
+        _parts: &axum::http::request::Parts,
+        _registry: &Pool,
+    ) -> Result<Option<rustango::tenancy::Org>, rustango::tenancy::TenancyError> {
+        Ok(Some(rustango::tenancy::Org {
+            id: rustango::sql::Auto::default(),
+            slug: "sole".into(),
+            display_name: "sole".into(),
+            storage_mode: "database".into(),
+            backend_kind: "sqlite".into(),
+            database_url: Some(SOLE_TENANT_URL.to_owned()),
+            ..rustango::testkit::org()
+        }))
+    }
+}
+
+/// One shared in-memory database for the whole test — `cache=shared`
+/// so the pool the context builds and the pool the fixtures seed are
+/// the same database.
+const SOLE_TENANT_URL: &str = "sqlite:file:auth_backends_doc?mode=memory&cache=shared";
+
+fn app() -> Router {
     // The chain: HTTP Basic (ModelBackend) first, then Bearer API key.
     let backends: Vec<Arc<dyn AuthBackend>> = vec![Arc::new(ModelBackend), Arc::new(ApiKeyBackend)];
+
+    let ctx = Arc::new(rustango::extractors::DatabaseTenantContext {
+        pools: Arc::new(
+            rustango::tenancy::DatabasePools::<sqlx::Sqlite>::new(
+                rustango::tenancy::BackendKind::Sqlite,
+            )
+            .with_url_template(SOLE_TENANT_URL),
+        ),
+        resolver: rustango::tenancy::ChainResolver::new().push(SoleTenant),
+        session_secret: rustango::tenancy::session::SessionSecret::from_bytes(
+            b"auth_backends_doc_secret_32byte!".to_vec(),
+        ),
+        operator_secret: rustango::tenancy::session::SessionSecret::from_bytes(
+            b"auth_backends_doc_operator_32by!".to_vec(),
+        ),
+        registry: Pool::Sqlite(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy sqlite"),
+        ),
+    });
 
     // `/admin` additionally needs the `post.add` permission. require_perm is
     // applied to the inner sub-router; require_auth wraps everything (outer),
     // so the user is resolved before the permission check reads it.
     let admin = Router::new()
         .route("/admin", get(admin_only))
-        .require_perm("post.add", pool.clone());
+        .require_perm("post.add");
 
     Router::new()
         .route("/profile", get(profile))
         .merge(admin)
-        .require_auth(backends, pool)
+        .require_auth(backends)
+        .layer(axum::Extension(ctx))
 }
 
 async fn call(app: &Router, path: &str, auth: Option<&str>) -> (StatusCode, String) {
@@ -156,8 +218,8 @@ async fn call(app: &Router, path: &str, auth: Option<&str>) -> (StatusCode, Stri
 
 #[tokio::test]
 async fn require_auth_rejects_anonymous_and_accepts_basic() {
-    let (pool, _) = setup().await;
-    let app = app(pool);
+    let (_keep, _) = setup().await;
+    let app = app();
 
     // No credentials → 401.
     let (status, _) = call(&app, "/profile", None).await;
@@ -180,7 +242,8 @@ async fn api_key_backend_authenticates_bearer() {
     let token = create_api_key(alice_id, "ci-key", None, &pool)
         .await
         .expect("create_api_key");
-    let app = app(pool);
+    let app = app();
+    let _keep = pool;
 
     let (status, body) = call(&app, "/profile", Some(&format!("Bearer {token}"))).await;
     assert_eq!(status, StatusCode::OK);
@@ -193,8 +256,8 @@ async fn api_key_backend_authenticates_bearer() {
 
 #[tokio::test]
 async fn require_perm_gates_by_codename() {
-    let (pool, _) = setup().await;
-    let app = app(pool);
+    let (_keep, _) = setup().await;
+    let app = app();
 
     // alice has `post.add` → 200.
     let (status, _) = call(&app, "/admin", Some(&basic("alice", "s3cret"))).await;

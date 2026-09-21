@@ -137,8 +137,28 @@ use rustango::tenancy::RouterAuthExt;
 
 let app = Router::new()
     .route("/profile", get(profile))
-    .require_auth(backends, pool);     // 401 if no backend matches
+    .require_auth(backends);           // 401 if no backend matches
 ```
+
+> **These took a `Pool` before 0.57.11.** They do not any more, and the
+> change is a security fix (GHSA-c4gg-mvfq-h268), not tidying. The pool
+> was captured when the router was built and reused for every request,
+> so a credential issued by one tenant authenticated on another
+> tenant's host — the backends looked the user up in whichever database
+> the router happened to be constructed with, and `is_superuser`
+> travelled onward in a request extension without a re-query.
+>
+> The pool now comes from the tenant resolved for **each request**.
+> Migration is dropping the argument:
+>
+> ```rust
+> .require_auth(backends, pool.clone())  →  .require_auth(backends)
+> .require_perm("post.add", pool)        →  .require_perm("post.add")
+> ```
+>
+> Mount the tenancy layer outside these. Without a tenant context in
+> request extensions they fail closed with a `500` rather than guess a
+> database.
 
 Verified behaviour:
 
@@ -183,12 +203,12 @@ outer one, so the user is resolved *before* the permission is checked:
 ```rust
 let admin = Router::new()
     .route("/admin", get(admin_only))
-    .require_perm("post.add", pool.clone());   // inner: needs the codename
+    .require_perm("post.add");     // inner: needs the codename
 
 let app = Router::new()
     .route("/profile", get(profile))
     .merge(admin)
-    .require_auth(backends, pool);             // outer: resolves the user first
+    .require_auth(backends);       // outer: resolves the user first
 ```
 
 ```rust

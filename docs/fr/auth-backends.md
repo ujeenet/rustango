@@ -140,7 +140,7 @@ use rustango::tenancy::RouterAuthExt;
 
 let app = Router::new()
     .route("/profile", get(profile))
-    .require_auth(backends, pool);     // 401 if no backend matches
+    .require_auth(backends);           // 401 if no backend matches
 ```
 
 Comportement vérifié :
@@ -187,12 +187,12 @@ permission ne soit vérifiée :
 ```rust
 let admin = Router::new()
     .route("/admin", get(admin_only))
-    .require_perm("post.add", pool.clone());   // inner: needs the codename
+    .require_perm("post.add");     // inner: needs the codename
 
 let app = Router::new()
     .route("/profile", get(profile))
     .merge(admin)
-    .require_auth(backends, pool);             // outer: resolves the user first
+    .require_auth(backends);       // outer: resolves the user first
 ```
 
 ```rust

@@ -334,12 +334,12 @@ let backends = vec![
 // behind post.add. Gate the permission on an inner sub-router instead.
 let posts = Router::new()
     .route("/posts/new", post(create_post))
-    .require_perm("post.add", pool.clone());        // inner: needs the codename
+    .require_perm("post.add");     // inner: needs the codename
 
 let app = Router::new()
     .route("/me", get(profile))
     .merge(posts)
-    .require_auth(backends, pool);                  // outer: resolves the user first
+    .require_auth(backends);       // outer: resolves the user first
 ```
 
 El middleware prueba cada backend en orden. El primero que tiene éxito gana; el primero que devuelve un error duro detiene la cadena.
