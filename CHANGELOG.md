@@ -315,11 +315,17 @@ needed that second pass, and the commits say which.
   action that runs before checkout and can write the rust-cache. Pinned
   to v2.0.0's SHA. The issue named one call site; there were two.
 
-- **An ungated `--lib` run under `sqlite,tenancy,sso`.** The only
-  ungated job compiling `tests/**` runs on default features, which
-  include neither `sqlite` nor `testkit`, so several suites compiled to
-  empty crates on an unlabelled PR. This is a partial answer to #1572;
-  the full `--all-features --no-run` job is still open.
+- **No ungated job ran a single lib unit test.** `--test <name>` builds
+  only that integration target, so every `#[cfg(test)] mod tests` in
+  `src/` was invisible to `guards`; `tests_compile` is `--no-run`; and
+  `postgres_test`, `feature_combos` and `windows_test` all `needs: gate`.
+  An unlabelled PR therefore executed **no** lib test at all — and 17 of
+  the 18 assertions added by this release's own review round live in
+  `src/`, so almost none of that work was checked by the green tick on
+  its own PR. `guards` now runs
+  `cargo test -p rustango --no-default-features --features sqlite,tenancy,sso --lib`.
+  `sso` is in that list because `member_auth` is gated on it, so its
+  sanitizer tests compile to nothing without it.
 
 ## [0.57.8] — 2026-09-18
 
