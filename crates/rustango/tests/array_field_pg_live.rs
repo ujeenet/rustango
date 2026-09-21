@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
-//! Live PostgreSQL round-trip for `Array<T>` columns — Django
-//! `ArrayField` (#341). Proves the typed field wrapper writes a native
+//! Live PostgreSQL round-trip for `Array<T>` columns
+//! (#341). Proves the typed field wrapper writes a native
 //! PG array (`text[]` / `integer[]`) on INSERT and decodes it back into
 //! `Array<T>` on SELECT, and that the `@>` containment operator filters
 //! on it.

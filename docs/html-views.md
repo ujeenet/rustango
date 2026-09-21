@@ -6,9 +6,9 @@ detail page, and create/edit/delete forms — from one declaration. It's the
 clients, an HTML view emits a rendered page for a browser. Both are built from
 the same `#[derive(Model)]`, and you can serve a model *both* ways at once.
 
-These are **Rustango**'s equivalent of Django's generic class-based views
-(`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) or Laravel's
-resource controllers returning Blade views. They render through [Tera](https://keats.github.io/tera/)
+There are five ready-made views — `ListView`, `DetailView`, `CreateView`,
+`UpdateView`, `DeleteView` — the page-serving equivalent of Laravel's resource
+controllers returning Blade views. They render through [Tera](https://keats.github.io/tera/)
 templates.
 
 [![HTML views in Rustango: one model feeds ListView, DetailView and CreateView/UpdateView/DeleteView, each rendering a Tera template into a server-rendered page](img/html-views.png)](img/html-views.png)
@@ -55,7 +55,6 @@ This is the first decision. Both turn a model into endpoints; they differ in
 | On bad input | `400` + a field-keyed JSON error map | re-render the form with the errors shown |
 | Reads a list as | a paginated JSON envelope | a `<table>`/loop in your template |
 | Usually authed by | tokens / JWT / API keys | session cookies |
-| Django analogue | DRF `ModelViewSet` | generic class-based views |
 
 You don't have to choose globally — pick per resource, and you can mount **both
 on the same model** (see [below](#serving-one-model-both-ways)). Rules of thumb:

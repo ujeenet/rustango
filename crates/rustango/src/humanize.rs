@@ -1,14 +1,14 @@
-//! Django `humanize` template filters as Tera filters. Issue #17.
+//! Human-readable number, size and time filters for Tera.
 //!
-//! 13 user-facing filters:
-//! * Number-style: `intcomma`, `intword`, `apnumber`, `ordinal`,
+//! * Numbers: `intcomma`, `intword`, `apnumber`, `ordinal`,
 //!   `format_number`, `format_currency`.
-//! * Byte-size: `naturalsize` (binary, 1024-base), `naturalsize_si`
-//!   (decimal, 1000-base).
-//! * Relative-time: `naturaltime`, `naturalday`, `timesince`,
-//!   `timeuntil`.
+//! * Byte sizes: `naturalsize` (1024-base), `naturalsize_si`
+//!   (1000-base).
+//! * Time: `naturaltime`, `naturaltime_short`, `naturalday`,
+//!   `timesince`, `timeuntil`, `format_duration_long`,
+//!   `format_duration_short`.
 //!
-//! Call [`register_filters`] on a Tera instance to make them available:
+//! Call [`register_filters`] on a Tera instance to add them all:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -16,20 +16,18 @@
 //! // now {{ count | intcomma }} renders "1,234,567"
 //! ```
 //!
-//! Matches [Django humanize](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/)
-//! output character-for-character on the English (en-US) locale.
-//! Locale-aware formatting (German thousands-separator `.`, French
-//! `intword` plural words, etc.) is deferred — gated on the
-//! framework-wide timezone / locale issue. Until then, every filter
-//! emits English output.
+//! Output is en-US. `format_number` and `format_currency` take a `locale`
+//! argument; every other filter writes English words.
+//!
+//! [`register_filters`]: crate::humanize::register_filters
 
 use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, Utc};
 use tera::{to_value, Tera, Value};
 
-/// Register every humanize filter on `tera`. Call from app setup
-/// (typically right after `Tera::new(...)` / `Tera::default()`).
+/// Add every humanize filter to `tera`. Call it at app setup, right
+/// after you build the `Tera` instance.
 pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("intcomma", intcomma_filter);
     tera.register_filter("intword", intword_filter);
@@ -50,10 +48,8 @@ pub fn register_filters(tera: &mut Tera) {
 
 // ------------------------------------------------------------------ intcomma
 
-/// [`django.contrib.humanize.intcomma`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#intcomma) —
-/// insert thousands-separator commas into an integer.
-/// `4500 → "4,500"`, `1_234_567 → "1,234,567"`,
-/// `-1_000 → "-1,000"`. For floats see [`intcomma_f64`].
+/// Put thousands separators into an integer. For floats use
+/// [`intcomma_f64`].
 ///
 /// ```
 /// use rustango::humanize::intcomma;
@@ -67,9 +63,8 @@ pub fn intcomma(n: i64) -> String {
     format_with_commas_i64(n)
 }
 
-/// `intcomma` variant for `f64` — comma-separates the integer
-/// portion, preserves the fractional part untouched.
-/// `1234567.89 → "1,234,567.89"`.
+/// [`intcomma`] for `f64`: separators go in the whole-number part,
+/// the fraction is left alone.
 ///
 /// ```
 /// use rustango::humanize::intcomma_f64;
@@ -121,7 +116,7 @@ fn format_with_commas_u64(n: u64) -> String {
     comma_separate_digits(&n.to_string())
 }
 
-/// Insert commas into a digit-string at every 3-digit boundary from the right.
+/// Put a comma every three digits, counting from the right.
 fn comma_separate_digits(digits: &str) -> String {
     let bytes = digits.as_bytes();
     let mut out = String::with_capacity(bytes.len() + bytes.len() / 3);
@@ -136,28 +131,12 @@ fn comma_separate_digits(digits: &str) -> String {
 
 // ------------------------------------------------------------------ format_number / format_currency
 //
-// Django-parity #426 + #428 — locale-aware number + currency
-// formatting via two Tera filters. Hard-coded table for common
-// locales; CLDR-driven dynamic locale data is a future-backlog
-// item (the dep weight isn't justified for v1).
-//
-// Supported locales (decimal sep, thousands sep, currency template):
-//
-//   en / en-US: 1,234,567.89    USD $1,234.56 / EUR €1,234.56
-//   en-GB:     1,234,567.89     GBP £1,234.56
-//   de:        1.234.567,89     EUR 1.234,56 €
-//   fr:        1 234 567,89     EUR 1 234,56 €
-//   es:        1.234.567,89     EUR 1.234,56 €
-//   it:        1.234.567,89     EUR 1.234,56 €
-//   ja:        1,234,567.89     JPY ¥1,234 (no decimals for JPY)
-//   zh:        1,234,567.89     CNY ¥1,234.56
-//   pt:        1.234.567,89     EUR 1.234,56 €
-//   ru:        1 234 567,89     RUB 1 234,56 ₽
-//
-// Unknown locales fall back to en-US convention with a
-// `tracing::warn!` so misspelled locale codes surface in logs.
+// Locale-aware number and currency output from a small built-in
+// table. Full CLDR data would add a heavy dependency for little
+// gain here. An unknown locale falls back to en-US and logs a
+// warning, so a misspelled code shows up in the logs.
 
-/// Per-locale numeric format spec — decimal point + group separator.
+/// Decimal point and group separator for one locale.
 #[derive(Debug, Clone, Copy)]
 struct NumberFmt {
     decimal: char,
@@ -165,29 +144,26 @@ struct NumberFmt {
 }
 
 fn locale_number_fmt(locale: &str) -> NumberFmt {
-    // Normalize: lowercase, base-lang split. "en-US" → "en"; the
-    // few region-specific entries (en-GB stays en for numbers,
-    // pt-BR stays pt for numbers) match here.
+    // Lowercase and keep the base language only: "en-US" is "en".
     let base = locale.to_ascii_lowercase();
     let base = base.split('-').next().unwrap_or(&base);
     match base {
-        // en family (incl. zh-CN where it's also dot+comma)
+        // Dot decimal, comma groups.
         "en" | "ja" | "zh" | "ko" | "th" => NumberFmt {
             decimal: '.',
             group: ',',
         },
-        // de / es / it / nl / pt: dot grouping, comma decimal
+        // Comma decimal, dot groups.
         "de" | "es" | "it" | "nl" | "pt" | "el" | "pl" | "tr" | "da" | "fi" | "sv" | "no"
         | "nb" | "nn" => NumberFmt {
             decimal: ',',
             group: '.',
         },
-        // fr / ru / cs / sk: thin/regular space grouping, comma decimal
+        // Comma decimal, space groups.
         "fr" | "ru" | "cs" | "sk" | "bg" | "uk" | "hu" => NumberFmt {
             decimal: ',',
             group: ' ',
         },
-        // Unknown — fall back to en-US with a warn.
         _ => {
             tracing::warn!(
                 target: "rustango::humanize",
@@ -202,9 +178,9 @@ fn locale_number_fmt(locale: &str) -> NumberFmt {
     }
 }
 
-/// Apply `fmt` to a digit string with optional fractional part.
-/// `integer_part` is the digits before the decimal, `frac_part` is
-/// the digits after (or `""`). Negative sign carried by caller.
+/// Join the digits before and after the decimal using `fmt`. Pass
+/// `""` for `frac_part` when there is none. The caller keeps the
+/// minus sign.
 fn apply_number_fmt(integer_part: &str, frac_part: &str, fmt: NumberFmt) -> String {
     let bytes = integer_part.as_bytes();
     let mut out = String::with_capacity(bytes.len() + bytes.len() / 3 + frac_part.len() + 1);
@@ -221,44 +197,28 @@ fn apply_number_fmt(integer_part: &str, frac_part: &str, fmt: NumberFmt) -> Stri
     out
 }
 
-/// `format_number` — Django-parity #426. Locale-aware decimal +
-/// thousands separator. Number-only; currency symbols handled by
-/// [`format_currency`] below.
+/// Format a number with the decimal point and thousands separator of
+/// a locale. Currency symbols live in [`format_currency`].
+///
+/// Only the base language counts, so `"en-US"` acts as `"en"`. An
+/// unknown locale falls back to `"en"` and logs a warning.
+///
+/// `decimals` of `None` keeps the input's own precision. `Some(n)`
+/// pads or cuts the fraction to exactly `n` digits.
+///
+/// Separators by language:
+/// * en, ja, zh, ko, th: `.` decimal, `,` groups
+/// * de, es, it, nl, pt, pl, sv, nb, nn, da, fi, el, tr: `,` decimal,
+///   `.` groups
+/// * fr, ru, cs, sk, bg, uk, hu: `,` decimal, space groups
+///
+/// As a Tera filter it takes the same `locale` and `decimals`
+/// arguments, and passes non-numeric input through unchanged:
 ///
 /// ```jinja
-/// {{ 1234567.89 | format_number(locale="en") }}     {# → 1,234,567.89 #}
-/// {{ 1234567.89 | format_number(locale="de") }}     {# → 1.234.567,89 #}
-/// {{ 1234567.89 | format_number(locale="fr") }}     {# → 1 234 567,89 #}
-/// {{ 1234.5    | format_number(locale="en", decimals=2) }}  {# → 1,234.50 #}
+/// {{ 1234567.89 | format_number(locale="de") }}            {# → 1.234.567,89 #}
+/// {{ 1234.5    | format_number(locale="en", decimals=2) }} {# → 1,234.50 #}
 /// ```
-///
-/// Arguments:
-/// - `locale` (string, default `"en"`) — locale code; only the
-///   base language is consulted (`en-US` ≡ `en`). Unknown locales
-///   fall back to `en` with a tracing warning.
-/// - `decimals` (integer, optional) — fixed decimal places. When
-///   set, the fractional part is padded/truncated to exactly this
-///   many digits. When unset, the input's natural precision is
-///   preserved.
-///
-/// Non-numeric input passes through unchanged.
-/// Locale-aware number formatter — public Rust API.
-///
-/// Produces a string with the correct decimal point + thousands
-/// separator for the given locale code. The base language is
-/// consulted (`"en-US" ≡ "en"`); unknown locales fall back to
-/// `"en"` with a `tracing::warn!`.
-///
-/// `decimals = None` preserves the input's natural precision
-/// (`1234.5 → "1,234.5"`). `decimals = Some(n)` truncates or
-/// pads the fractional part to exactly `n` digits
-/// (`1234.0 + Some(2) → "1,234.00"`).
-///
-/// Supported locales (decimal sep, thousands sep):
-/// * en / en-US / en-GB / ja / zh / ko / th: `.` decimal, `,` group
-/// * de / es / it / nl / pt / pl / sv / nb / nn / da / fi / el /
-///   tr: `,` decimal, `.` group
-/// * fr / ru / cs / sk / bg / uk / hu: `,` decimal, space group
 ///
 /// ```
 /// use rustango::humanize::format_number;
@@ -294,11 +254,8 @@ fn format_number_filter(value: &Value, args: &HashMap<String, Value>) -> tera::R
         .and_then(Value::as_u64)
         .map(|n| n as usize);
 
-    // Distinct integer-path branch: integers should NOT acquire a
-    // trailing decimal-and-zeros unless `decimals` was explicitly
-    // set. Filter wrapper preserves this by short-circuiting
-    // through `apply_number_fmt` directly with `frac = "0".repeat(d)`
-    // for the int case.
+    // Integers take their own path so they gain no trailing zeros
+    // unless `decimals` asked for them.
     if let Some(n) = value.as_i64() {
         let fmt = locale_number_fmt(locale);
         let abs = n.unsigned_abs().to_string();
@@ -323,15 +280,15 @@ fn format_number_filter(value: &Value, args: &HashMap<String, Value>) -> tera::R
     Ok(value.clone())
 }
 
-/// Per-locale currency-display spec.
+/// How to show one currency.
 #[derive(Debug, Clone, Copy)]
 struct CurrencyFmt {
-    /// Currency symbol (e.g. "$", "€", "£", "¥", "₽").
+    /// The symbol, such as "$", "€" or "₽".
     symbol: &'static str,
-    /// `true` if the symbol prefixes the amount (`$1,234.56`),
-    /// `false` if it suffixes (`1.234,56 €`).
+    /// `true` puts the symbol first (`$1,234.56`), `false` last
+    /// (`1.234,56 €`).
     prefix: bool,
-    /// Decimal places. Most currencies use 2; JPY/KRW/CLP use 0.
+    /// Decimal places. Most use 2; JPY, KRW and CLP use 0.
     decimals: u32,
 }
 
@@ -354,7 +311,7 @@ fn currency_fmt(code: &str) -> CurrencyFmt {
             decimals: 2,
         },
         "JPY" | "KRW" | "CLP" => CurrencyFmt {
-            // No fractional sub-unit in circulation.
+            // No sub-unit in circulation.
             symbol: "¥",
             prefix: true,
             decimals: 0,
@@ -384,8 +341,8 @@ fn currency_fmt(code: &str) -> CurrencyFmt {
             prefix: true,
             decimals: 2,
         },
-        // Unknown — emit the code itself as the symbol so the
-        // output is still meaningful.
+        // Unknown code: show the code itself, so the output still
+        // says something.
         _ => {
             tracing::warn!(
                 target: "rustango::humanize",
@@ -401,42 +358,20 @@ fn currency_fmt(code: &str) -> CurrencyFmt {
     }
 }
 
-/// `format_currency` — Django-parity #428. Locale-aware currency
-/// rendering. Composes [`format_number`] with a per-currency
-/// symbol + placement convention.
+/// Format an amount of money: [`format_number`] plus the currency's
+/// symbol, in the place that currency uses.
 ///
-/// ```jinja
-/// {{ 1234.5 | format_currency(currency="USD") }}              {# → $1,234.50 #}
-/// {{ 1234.5 | format_currency(currency="EUR", locale="de") }} {# → €1.234,50 (de places symbol after via locale-specific override; here prefix is default) #}
-/// {{ 1234.5 | format_currency(currency="EUR", locale="fr") }} {# → 1 234,50 € #}
-/// {{ 1234   | format_currency(currency="JPY") }}              {# → ¥1,234 (0 decimals) #}
-/// ```
+/// `currency` is an ISO 4217 code. It sets the symbol and the number
+/// of decimals: 2 for most, 0 for JPY, KRW and CLP. An unknown code
+/// is used as its own symbol and logs a warning. `locale` only sets
+/// the separators.
 ///
-/// Arguments:
-/// - `currency` (string, default `"USD"`) — ISO 4217 currency
-///   code. Unknown codes use the code itself as the "symbol"
-///   prefix and log a warning.
-/// - `locale` (string, default `"en"`) — locale code for the
-///   thousands/decimal separators. Decimal places come from the
-///   currency, not the locale.
+/// The euro is the one symbol whose place depends on the locale: fr,
+/// it, es, pt and nl put `€` after the amount, everyone else before.
 ///
-/// Symbol placement convention:
-/// - For currencies with their own placement (RUB suffix, USD
-///   prefix), the currency wins.
-/// - For Euro: prefix in en/de, suffix in fr/it/es (matches local
-///   typography conventions).
-///
-/// Non-numeric input passes through unchanged.
-/// Locale-aware currency formatter — public Rust API.
-///
-/// Produces `"$1,234.56"`, `"€1.234,56"`, `"1 234,56 €"`,
-/// `"¥1,234"`, etc. — based on the currency code's symbol, decimal
-/// precision (USD/EUR/GBP = 2; JPY/KRW/CLP = 0), and the locale's
-/// number-formatting conventions.
-///
-/// Locale-driven Euro placement override: French, Italian,
-/// Spanish, Portuguese, Dutch put the `€` symbol AFTER the amount
-/// with a space (`"1 234,56 €"`); other locales prefix it.
+/// As a Tera filter it takes the same `currency` (default `"USD"`)
+/// and `locale` (default `"en"`) arguments, and passes non-numeric
+/// input through unchanged.
 ///
 /// ```
 /// use rustango::humanize::format_currency;
@@ -497,18 +432,11 @@ fn format_currency_filter(value: &Value, args: &HashMap<String, Value>) -> tera:
 
 // ------------------------------------------------------------------ intword
 
-/// `intword` — large numbers as words. Django:
-/// `1_200_000 → "1.2 million"`, `1_000_000_000 → "1.0 billion"`.
-/// Below 1 million the number passes through as-is.
-/// [`django.contrib.humanize.intword`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#intword) —
-/// large numbers as words. `1_200_000 → "1.2 million"`,
-/// `1_000_000_000 → "1.0 billion"`. Below 1 million the integer
-/// passes through unformatted ("123" not "1.2e2" or "123.0").
+/// Write a large number as a word: `1_200_000` becomes
+/// `"1.2 million"`. Below one million the integer comes back plain.
 ///
-/// Scales recognized: million / billion / trillion / quadrillion
-/// / quintillion / sextillion / septillion / octillion /
-/// nonillion / decillion (`1e6 .. 1e33`). Values beyond decillion
-/// stay on the decillion scale (Django shape).
+/// The scales run from million up to decillion (`1e6` to `1e33`).
+/// Anything bigger stays on the decillion scale.
 ///
 /// ```
 /// use rustango::humanize::intword;
@@ -519,7 +447,7 @@ fn format_currency_filter(value: &Value, args: &HashMap<String, Value>) -> tera:
 /// ```
 pub fn intword(n: f64) -> String {
     if n.abs() < 1_000_000.0 {
-        // Django returns the integer unformatted for < 1M.
+        // Under 1M the integer comes back as is.
         return format!("{}", n.trunc() as i64);
     }
     let scales: &[(f64, &str)] = &[
@@ -565,15 +493,10 @@ fn intword_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Val
 
 // ------------------------------------------------------------------ naturalsize
 
-/// `naturalsize` — bytes formatted human-readable (binary KiB-scale).
-/// `1024 → "1.0 KB"`, `1536 → "1.5 KB"`, `1_572_864 → "1.5 MB"`.
-/// Falls back to bytes for values < 1024.
-/// [`django.contrib.humanize.naturalsize`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturalsize) —
-/// bytes formatted human-readable (binary KiB-scale: 1024).
-/// `1024 → "1.0 KB"`, `1_572_864 → "1.5 MB"`. Values below 1024
-/// return `"N bytes"` (or `"1 byte"` for `n == 1`).
+/// A byte count people can read, on the 1024 scale. Under 1024 you
+/// get `"N bytes"`, or `"1 byte"` for exactly one.
 ///
-/// Units recognized: bytes, KB, MB, GB, TB, PB, EB, ZB, YB.
+/// Units: bytes, KB, MB, GB, TB, PB, EB, ZB, YB.
 ///
 /// ```
 /// use rustango::humanize::naturalsize;
@@ -599,23 +522,12 @@ pub fn naturalsize(n: f64) -> String {
     format!("{:.1} {}", scaled, units[scale])
 }
 
-/// SI / decimal-base companion to [`naturalsize`] — bytes
-/// formatted using 1000-base units (kB / MB / GB) as Django's
-/// `naturalsize(binary=False)` shape. Use this when the consumer
-/// expects SI units (disk-vendor marketing, storage quota
-/// dashboards reporting purchased capacity, anything that should
-/// match the labels printed on a hard drive).
+/// [`naturalsize`] on the 1000 scale instead of 1024. Use it when
+/// the number should match what a disk vendor prints on the box, or
+/// a quota expressed in decimal units.
 ///
-/// Distinct from [`naturalsize`] which uses 1024-base (computer
-/// memory / OS-reported sizes). `naturalsize(1024)` returns
-/// `"1.0 KB"` (1 kibibyte mislabeled with the SI prefix — matches
-/// Django's `naturalsize(binary=True)` default); `naturalsize_si(1000)`
-/// returns `"1.0 kB"` (the SI-correct decimal kilobyte).
-///
-/// Units: `bytes` / `kB` / `MB` / `GB` / `TB` / `PB` / `EB` /
-/// `ZB` / `YB`. Lowercase `k` follows the SI standard
-/// (uppercase K is reserved for Kelvin in scientific contexts;
-/// Django uses lowercase too).
+/// Units: bytes, kB, MB, GB, TB, PB, EB, ZB, YB. The `k` is
+/// lowercase, per SI.
 ///
 /// ```
 /// use rustango::humanize::naturalsize_si;
@@ -627,8 +539,7 @@ pub fn naturalsize(n: f64) -> String {
 /// assert_eq!(naturalsize_si(1024.0), "1.0 kB");
 /// ```
 pub fn naturalsize_si(n: f64) -> String {
-    // SI prefixes: `k` (lowercase!) for kilo per ISO 80000-13.
-    // Django source uses the same `["bytes", "kB", "MB", ...]`.
+    // Lowercase `k` for kilo, per ISO 80000-13.
     let units = ["bytes", "kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
     if n < 1000.0 {
         if (n - 1.0).abs() < f64::EPSILON {
@@ -675,16 +586,10 @@ fn naturalsize_si_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Res
 
 // ------------------------------------------------------------------ ordinal
 
-/// `ordinal` — append the appropriate English ordinal suffix.
-/// `1 → "1st"`, `2 → "2nd"`, `3 → "3rd"`, `4 → "4th"`, `11 → "11th"`,
-/// `21 → "21st"`. Negative numbers get the same suffix as their
-/// absolute value.
-/// [`django.contrib.humanize.ordinal`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#ordinal) —
-/// append the appropriate English ordinal suffix.
-/// `1 → "1st"`, `2 → "2nd"`, `3 → "3rd"`, `4 → "4th"`,
-/// `11 → "11th"`, `21 → "21st"`. Teens (11/12/13) always take
-/// "th"; everything else falls through to the last-digit rule.
-/// Negative numbers get the same suffix as their absolute value.
+/// Add the English ordinal suffix: `1` becomes `"1st"`, `2` becomes
+/// `"2nd"`. 11, 12 and 13 always take "th"; every other number
+/// follows its last digit. A negative number takes the same suffix
+/// as its absolute value.
 ///
 /// ```
 /// use rustango::humanize::ordinal;
@@ -708,8 +613,7 @@ fn ordinal_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Val
 }
 
 fn ordinal_suffix(n: u64) -> &'static str {
-    // 11/12/13 are "th" — special-case the teens before falling
-    // through to the last-digit branch.
+    // The teens take "th", so check them before the last digit.
     let last_two = n % 100;
     if (11..=13).contains(&last_two) {
         return "th";
@@ -724,10 +628,8 @@ fn ordinal_suffix(n: u64) -> &'static str {
 
 // ------------------------------------------------------------------ apnumber
 
-/// [`django.contrib.humanize.apnumber`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#apnumber) —
-/// spell out small numbers (1..=9 → `"one"`..`"nine"`); other
-/// values stringify as the integer. Matches the AP style guide
-/// that Django adopts.
+/// Spell out 1 to 9 as `"one"` to `"nine"`, following AP style. Any
+/// other value comes back as its digits.
 ///
 /// ```
 /// use rustango::humanize::apnumber;
@@ -763,18 +665,12 @@ fn apnumber_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Va
 
 // ------------------------------------------------------------------ naturaltime
 
-/// `naturaltime` — relative time string compared to "now".
-/// `"3 minutes ago"`, `"in 5 hours"`, `"just now"`. Accepts RFC3339
-/// strings or anything serde-parsable as `DateTime<Utc>`.
+/// `naturaltime` — a time relative to now, such as "3 minutes ago"
+/// or "in 5 hours". Takes an RFC 3339 string or anything serde can
+/// read as `DateTime<Utc>`.
 ///
-/// Bucket thresholds match Django's `naturaltime`:
-/// - <30s → "now"
-/// - <60s → "N seconds {ago,from now}"
-/// - <60m → "N minutes {ago,from now}"
-/// - <24h → "N hours {ago,from now}"
-/// - <30d → "N days {ago,from now}"
-/// - <365d → "N months {ago,from now}"
-/// - ≥365d → "N years {ago,from now}"
+/// Under 30 seconds reads "now". Then the unit grows: seconds,
+/// minutes, hours, days, months, years.
 fn naturaltime_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let dt = match parse_datetime(value) {
         Some(d) => d,
@@ -801,16 +697,11 @@ fn parse_datetime(value: &Value) -> Option<DateTime<Utc>> {
     serde_json::from_value(value.clone()).ok()
 }
 
-/// [`django.contrib.humanize.naturaltime`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturaltime) —
-/// relative time string compared to `now`. `"3 minutes ago"`,
-/// `"in 5 hours"`, `"now"` (within 30 s either direction).
+/// A time relative to `now`: `"3 minutes ago"`, `"in 5 hours"`, or
+/// `"now"` within 30 seconds either way.
 ///
-/// Bucket thresholds match Django:
-/// `<30s` → "now"; `<60s` → seconds; `<60m` → minutes;
-/// `<24h` → hours; `<30d` → days; `<12mo` → months; else years.
-///
-/// Bucketing is single-unit (top bucket only). For depth-respecting
-/// "4 days, 6 hours" output use [`crate::timesince::timesince`].
+/// It reports one unit only, the largest that fits. For
+/// "4 days, 6 hours" use [`crate::timesince::timesince`].
 ///
 /// ```
 /// use chrono::{Duration, TimeZone, Utc};
@@ -830,22 +721,12 @@ pub fn naturaltime(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     natural_time_string(now, then)
 }
 
-/// Compact relative-time string — same semantic as [`naturaltime`]
-/// but emits a short form for tight UI:
+/// [`naturaltime`] in a short form for tight spaces: `"45s ago"`,
+/// `"3m ago"`, `"4h ago"`, `"2d ago"`, `"3mo ago"`, `"2y ago"`, or
+/// `"now"`. A future time reads `"in 10m"`.
 ///
-/// * `"now"` if within 30 seconds.
-/// * `"45s ago"` / `"in 45s"` — seconds.
-/// * `"3m ago"` — minutes.
-/// * `"4h ago"` — hours.
-/// * `"2d ago"` — days.
-/// * `"3mo ago"` — months (30-day approximation).
-/// * `"2y ago"` — years (365-day approximation).
-///
-/// Use when a table cell or chip badge can't fit the long form
-/// ("3 weeks, 2 days ago" → "23d ago"). Past values get the
-/// ` ago` suffix; future values get the `in ` prefix. The
-/// boundary thresholds match the long-form [`naturaltime`] for
-/// consistency.
+/// Months count as 30 days and years as 365. The cut-off points are
+/// the same as [`naturaltime`].
 ///
 /// ```ignore
 /// use chrono::{Duration, TimeZone, Utc};
@@ -886,12 +767,8 @@ pub fn naturaltime_short(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     }
 }
 
-/// [`django.contrib.humanize.naturalday`](https://docs.djangoproject.com/en/6.0/ref/contrib/humanize/#naturalday) —
-/// calendar-relative day name. `"today"`, `"yesterday"`,
-/// `"tomorrow"`, else `"Mmm DD"` (e.g. `"Apr 27"`).
-///
-/// The fallback `"Mmm DD"` matches Django's default `DATE_FORMAT`
-/// when no operator override is in force.
+/// Name a day relative to today: `"today"`, `"yesterday"`,
+/// `"tomorrow"`, or a date like `"Apr 27"`.
 ///
 /// ```
 /// use chrono::{Duration, TimeZone, Utc};
@@ -953,11 +830,9 @@ fn format_unit(n: i64, unit: &str, suffix: &str) -> String {
     }
 }
 
-/// Tera filter for `format_duration_long`. Accepts inputs as
-/// integer seconds (most common — the value coming out of
-/// `(now - then).num_seconds()`), or a string like `"3725"` /
-/// ISO-8601 `"PT1H2M5S"` (via `dateparse::parse_duration`).
-/// Non-parseable values pass through unchanged.
+/// Tera filter for `format_duration_long`. Takes a number of
+/// seconds, or a string holding seconds or an ISO-8601 duration
+/// like `"PT1H2M5S"`. Anything else passes through unchanged.
 fn format_duration_long_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(d) = duration_from_value(value) else {
         return Ok(value.clone());
@@ -981,8 +856,7 @@ fn duration_from_value(value: &Value) -> Option<chrono::Duration> {
             if let Ok(secs) = s.parse::<i64>() {
                 return Some(chrono::Duration::seconds(secs));
             }
-            // `parse_duration` returns `std::time::Duration`; convert
-            // to chrono::Duration for the formatter call sites.
+            // `parse_duration` gives a `std::time::Duration`.
             crate::dateparse::parse_duration(s).and_then(|d| chrono::Duration::from_std(d).ok())
         }
         _ => None,
@@ -991,17 +865,13 @@ fn duration_from_value(value: &Value) -> Option<chrono::Duration> {
 
 // ------------------------------------------------------------------ format_duration_long / format_duration_short
 
-/// Format a [`chrono::Duration`] as a long human-readable string
-/// like `"2 hours, 5 minutes, 3 seconds"`. Components below the
-/// resolution threshold are dropped; zero-component results in
-/// `"0 seconds"`.
+/// Spell out a [`chrono::Duration`], as in
+/// `"2 hours, 5 minutes, 3 seconds"`. Empty parts are left out and
+/// a zero duration reads `"0 seconds"`. A negative duration gets a
+/// leading minus sign.
 ///
-/// Used to display elapsed work times, lap timings, scheduled
-/// task durations — anywhere a non-relative duration needs to read
-/// naturally (vs `timesince` which is relative-to-now).
-///
-/// Negative durations are formatted using the absolute value plus
-/// a leading minus sign: `Duration::minutes(-5)` → `"-5 minutes"`.
+/// Use it for a length of time on its own, such as elapsed work or
+/// a task's runtime. For a time relative to now, use `timesince`.
 ///
 /// ```ignore
 /// use chrono::Duration;
@@ -1038,13 +908,10 @@ pub fn format_duration_long(d: chrono::Duration) -> String {
     format!("{sign}{}", parts.join(", "))
 }
 
-/// Format a [`chrono::Duration`] as a short, compact human-readable
-/// string like `"2h5m3s"`. Components with zero magnitude are dropped.
-/// Zero duration returns `"0s"`. Negative durations get a leading
-/// minus sign.
-///
-/// Useful for dashboards / monitoring panels / table cells where the
-/// long form takes too much horizontal space.
+/// [`format_duration_long`] in compact form, as in `"2h5m3s"`. Empty
+/// parts are left out, zero reads `"0s"`, and a negative duration
+/// gets a leading minus sign. Use it where the long form is too
+/// wide, such as a dashboard or a table cell.
 ///
 /// ```ignore
 /// use chrono::Duration;
@@ -1125,14 +992,11 @@ fn natural_day_string(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
 
 // ------------------------------------------------------------------ timesince / timeuntil
 
-/// Magnitude-only equivalent of [`natural_time_string`]: emits
-/// `"N units"` without an `"ago"` / `"in"` decorator. Used by
-/// [`timesince`] / [`timeuntil`].
+/// `"N units"` with no `"ago"` or `"in"` around it, for
+/// [`timesince`] and [`timeuntil`].
 ///
-/// Returns `"0 minutes"` for non-positive deltas — Django's
-/// `timesince` does the same (negative deltas indicate the page
-/// rendered AFTER the target, which we treat as "no time has
-/// passed yet").
+/// A delta of zero or less reads `"0 minutes"`: no time has passed
+/// yet.
 fn magnitude_string(seconds: i64) -> String {
     if seconds <= 0 {
         return "0 minutes".to_owned();
@@ -1165,14 +1029,10 @@ fn format_magnitude(n: i64, unit: &str) -> String {
     format!("{n} {unit}{plural}")
 }
 
-/// `timesince` — duration from `value` to now, formatted as
-/// `"N units"`. Django's `{{ post.created | timesince }}` shape.
-/// Returns `"0 minutes"` when the input is in the future (caller
-/// likely wants [`timeuntil`] for that case).
+/// `timesince` — how long ago `value` was, as `"N units"`. A future
+/// time reads `"0 minutes"`; use [`timeuntil`] for those.
 ///
-/// Bucketing matches [`naturaltime`] — seconds / minutes / hours
-/// / days / months (30-day) / years (365-day) — and pluralization
-/// drops the trailing `s` only for `1`.
+/// It reports one unit, on the same cut-offs as [`naturaltime`].
 fn timesince(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let dt = match parse_datetime(value) {
         Some(d) => d,
@@ -1183,10 +1043,8 @@ fn timesince(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     Ok(to_value(magnitude_string(delta))?)
 }
 
-/// `timeuntil` — duration from now to `value`, formatted as
-/// `"N units"`. Mirror of [`timesince`] for future-pointing values:
-/// `{{ event.start | timeuntil }}` → `"3 days"`. Past timestamps
-/// produce `"0 minutes"`.
+/// `timeuntil` — how long until `value`, as `"N units"`. The mirror
+/// of [`timesince`]. A past time reads `"0 minutes"`.
 fn timeuntil(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let dt = match parse_datetime(value) {
         Some(d) => d,
@@ -1312,7 +1170,7 @@ mod tests {
     #[test]
     fn naturalsize_si_uses_decimal_si_units() {
         let tera = setup();
-        // SI uses 1000-byte boundary, suffix "kB" / "MB" not "KB".
+        // SI breaks at 1000 and writes "kB", not "KB".
         for (bytes, expected) in [
             (0_u64, "0 bytes"),
             (999, "999 bytes"),
@@ -1418,7 +1276,7 @@ mod tests {
         assert_eq!(natural_day_string(now, today), "today");
         assert_eq!(natural_day_string(now, yesterday), "yesterday");
         assert_eq!(natural_day_string(now, tomorrow), "tomorrow");
-        // 7 days back from 2026-05-16 = 2026-05-09
+        // 7 days before 2026-05-16 is 2026-05-09.
         assert_eq!(natural_day_string(now, week_ago), "May 09");
     }
 
@@ -1453,7 +1311,7 @@ mod tests {
     fn timesince_filter_emits_magnitude_for_past() {
         let tera = setup();
         let mut ctx = tera::Context::new();
-        // 2 hours ago, give-or-take.
+        // Roughly two hours ago.
         let then = Utc::now() - Duration::hours(2);
         ctx.insert("then", &then.to_rfc3339());
         let out = render(&tera, "{{ then | timesince }}", ctx);
@@ -1474,8 +1332,8 @@ mod tests {
     fn timeuntil_filter_emits_magnitude_for_future() {
         let tera = setup();
         let mut ctx = tera::Context::new();
-        // Use a wider gap so test-wall-clock-drift between insert
-        // and render-time doesn't bump us across the day boundary.
+        // A wide gap, so clock drift between insert and render
+        // cannot cross a day boundary.
         let later = Utc::now() + Duration::days(3) + Duration::hours(1);
         ctx.insert("later", &later.to_rfc3339());
         let out = render(&tera, "{{ later | timeuntil }}", ctx);
@@ -1494,15 +1352,13 @@ mod tests {
 
     #[test]
     fn timesince_pluralizes_correctly() {
-        // 1 second → "1 second"; 2 → "2 seconds"
         assert_eq!(magnitude_string(1), "1 second");
         assert_eq!(magnitude_string(2), "2 seconds");
-        // 1 minute → "1 minute"; 2 → "2 minutes"
         assert_eq!(magnitude_string(60), "1 minute");
         assert_eq!(magnitude_string(120), "2 minutes");
     }
 
-    // -------- #426 / #428 — format_number + format_currency --------
+    // -------- format_number + format_currency --------
 
     fn render_filter(template: &str, ctx: tera::Context) -> String {
         let mut tera = Tera::default();
@@ -1578,7 +1434,7 @@ mod tests {
     fn format_number_unknown_locale_falls_back_to_en() {
         let mut ctx = tera::Context::new();
         ctx.insert("x", &1234.5_f64);
-        // "xx-YZ" has no entry; falls back to en-US.
+        // "xx-YZ" has no entry, so en-US is used.
         let out = render_filter(r#"{{ x | format_number(locale="xx-YZ") }}"#, ctx);
         assert_eq!(out, "1,234.5");
     }
@@ -1628,13 +1484,13 @@ mod tests {
     fn format_currency_unknown_code_uses_code_as_symbol() {
         let mut ctx = tera::Context::new();
         ctx.insert("x", &1234.0_f64);
-        // ZZX is not a real ISO 4217 code.
+        // ZZX is not a real currency code.
         let out = render_filter(r#"{{ x | format_currency(currency="ZZX") }}"#, ctx);
         assert!(out.contains("ZZX"), "got: {out}");
         assert!(out.contains("1,234.00"), "got: {out}");
     }
 
-    // -------- Public Rust API (extracted from Tera filters) --------
+    // -------- the plain Rust functions --------
 
     #[test]
     fn intword_public_basic() {
@@ -1666,13 +1522,13 @@ mod tests {
 
     #[test]
     fn naturalsize_public_top_scale_caps() {
-        // 2^80 bytes — fits exactly in YB scale (the last entry).
+        // 2^80 bytes lands on YB, the last unit.
         let n = 1024.0_f64.powi(8);
         let out = naturalsize(n);
         assert!(out.ends_with("YB"), "got: {out}");
     }
 
-    // -------- naturalsize_si (SI / decimal-base) --------
+    // -------- naturalsize_si (1000-base) --------
 
     #[test]
     fn naturalsize_si_basic() {
@@ -1685,7 +1541,7 @@ mod tests {
 
     #[test]
     fn naturalsize_si_uses_lowercase_k_for_kilo() {
-        // SI standard / Django shape — lowercase `k` for kilo.
+        // SI writes kilo with a lowercase `k`.
         let out = naturalsize_si(2500.0);
         assert!(out.contains("kB"), "got: {out}");
         assert!(!out.contains("KB"), "must not use uppercase K: {out}");
@@ -1693,20 +1549,19 @@ mod tests {
 
     #[test]
     fn naturalsize_si_distinct_from_naturalsize_at_boundary() {
-        // 1024 bytes is a kibibyte (KiB) — in 1024-base ("KB" label
-        // per Django's confusing default), and in 1000-base it's
-        // 1.024 → "1.0 kB" rounded.
+        // 1024 bytes: one unit on the 1024 scale, 1.024 rounded on
+        // the 1000 scale.
         assert_eq!(naturalsize(1024.0), "1.0 KB");
         assert_eq!(naturalsize_si(1024.0), "1.0 kB");
-        // At 1000 bytes the two paths diverge clearly: 1000-base
-        // crosses the boundary (1.0 kB) but 1024-base stays in bytes.
+        // At 1000 bytes they split: the 1000 scale turns over, the
+        // 1024 scale is still counting bytes.
         assert_eq!(naturalsize_si(1000.0), "1.0 kB");
         assert_eq!(naturalsize(1000.0), "1000 bytes");
     }
 
     #[test]
     fn naturalsize_si_top_scale_caps() {
-        // 10^24 bytes → YB scale (last entry).
+        // 10^24 bytes lands on YB, the last unit.
         let n = 1000.0_f64.powi(8);
         let out = naturalsize_si(n);
         assert!(out.ends_with("YB"), "got: {out}");
@@ -1806,7 +1661,7 @@ mod tests {
         let now = ntime_now();
         let other = now - Duration::days(45);
         let out = naturalday(now, other);
-        // 2026-06-05 minus 45 days = 2026-04-21
+        // 45 days before 2026-06-05 is 2026-04-21.
         assert_eq!(out, "Apr 21");
     }
 
@@ -1859,7 +1714,7 @@ mod tests {
 
     #[test]
     fn format_number_with_decimals() {
-        // decimals = Some pads / truncates to exact precision.
+        // `Some(n)` pads or cuts to exactly n digits.
         assert_eq!(format_number(1234.5, "en", Some(2)), "1,234.50");
         assert_eq!(format_number(0.0, "en", Some(0)), "0");
         assert_eq!(format_number(1234.56789, "en", Some(2)), "1,234.57"); // rounds
@@ -1873,7 +1728,7 @@ mod tests {
 
     #[test]
     fn format_number_public_unknown_locale_falls_back_to_en() {
-        // Returns the en-US shape on unknown.
+        // An unknown locale gives the en-US shape.
         assert_eq!(format_number(1234.5, "xx-YY", None), "1,234.5");
     }
 
@@ -1887,13 +1742,13 @@ mod tests {
 
     #[test]
     fn format_currency_eur_de_prefix() {
-        // German Euro: prefix with `€` symbol.
+        // German puts the `€` first.
         assert_eq!(format_currency(1234.56, "EUR", "de"), "€1.234,56");
     }
 
     #[test]
     fn format_currency_eur_fr_suffix_with_space() {
-        // French Euro: suffix with space — Romance language convention.
+        // Romance languages put the `€` last, after a space.
         assert_eq!(format_currency(1234.56, "EUR", "fr"), "1 234,56 €");
         assert_eq!(format_currency(1234.56, "EUR", "it"), "1.234,56 €");
         assert_eq!(format_currency(1234.56, "EUR", "es"), "1.234,56 €");
@@ -1901,16 +1756,16 @@ mod tests {
 
     #[test]
     fn format_currency_jpy_zero_decimals() {
-        // JPY/KRW/CLP use 0 decimals.
+        // JPY, KRW and CLP show no decimals.
         assert_eq!(format_currency(1234.0, "JPY", "ja"), "¥1,234");
         assert_eq!(format_currency(1234.99, "JPY", "ja"), "¥1,235"); // rounds
     }
 
     #[test]
     fn format_currency_negative_sign_before_symbol() {
-        // Sign carries before the currency symbol on prefix-locale.
+        // The minus sign comes first, before the symbol.
         assert_eq!(format_currency(-50.0, "USD", "en"), "-$50.00");
-        // On suffix-locale the sign still leads.
+        // It still leads when the symbol trails.
         assert_eq!(format_currency(-50.0, "EUR", "fr"), "-50,00 €");
     }
 

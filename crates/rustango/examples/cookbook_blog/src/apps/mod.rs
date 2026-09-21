@@ -1,4 +1,4 @@
-//! Sub-apps. Each subdir mirrors the Django shape:
+//! Sub-apps. Each subdir holds the same five files:
 //! `models.rs`, `urls.rs`, `views.rs`, `admin.rs`, `mod.rs`.
 //!
 //! Slice 1 ships empty stubs so the project compiles end-to-end while

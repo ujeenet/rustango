@@ -6,9 +6,8 @@
 //!    column tuple and propagates into [`ModelSchema::indexes`] as a
 //!    UNIQUE btree index.
 //! 2. The `.where_(a.eq).where_(b.eq)` lookup chain type-checks
-//!    against a real `#[derive(Model)]` type — the SQL it emits is
-//!    the same composite-key seek Django's native
-//!    `CompositePrimaryKey` lookup would generate.
+//!    against a real `#[derive(Model)]` type, and emits the
+//!    composite-key seek the pattern promises.
 //!
 //! No live DB required — all assertions are Rust-side.
 
@@ -62,10 +61,8 @@ pub struct InvoiceLine {
 #[test]
 fn unique_together_propagates_into_schema_as_composite_unique_index() {
     // Pin: the macro registers an `IndexSchema { unique: true,
-    // columns: &[...] }` on the schema — this is the row Django's
-    // `CompositePrimaryKey` would create implicitly, and the row the
-    // DDL emitter turns into `CREATE UNIQUE INDEX ... (tenant_id,
-    // invoice_number)`.
+    // columns: &[...] }` on the schema — the row the DDL emitter turns
+    // into `CREATE UNIQUE INDEX ... (tenant_id, invoice_number)`.
     let schema: &ModelSchema = Invoice::SCHEMA;
     let composite_uniques: Vec<_> = schema
         .indexes
@@ -99,9 +96,9 @@ fn three_column_unique_together_round_trips() {
 
 #[test]
 fn composite_key_lookup_chains_type_check_against_querysets() {
-    // Pin: the documented `.where_(a.eq).where_(b.eq)` chain — the
-    // direct stand-in for Django's `.get(pk=(7, "INV-0001"))` —
-    // produces a usable `QuerySet<T>` against a real Model derive.
+    // Pin: the documented `.where_(a.eq).where_(b.eq)` chain — how you
+    // look a row up by the whole composite key — produces a usable
+    // `QuerySet<T>` against a real Model derive.
     let _by_composite: QuerySet<Invoice> = Invoice::objects()
         .where_(Invoice::tenant_id.eq(7))
         .where_(Invoice::invoice_number.eq("INV-0001"));

@@ -162,8 +162,8 @@ pub(crate) fn chrome_context_with_session(
 }
 
 /// Build the sidebar context — every visible model the admin exposes,
-/// grouped by Django-shape app label. Pass `active_table` so the
-/// matching link gets `class="active"`.
+/// grouped by app label. Pass `active_table` so the matching link
+/// gets `class="active"`.
 ///
 /// Sidebar shape mirrors the operator console's left rail
 /// (`tenancy/templates/op_layout.html`) so tenant operators see a
@@ -336,8 +336,8 @@ pub(crate) fn lookup_model(state: &AppState, table: &str) -> Option<&'static Mod
 /// visible and has a display field. The join's `project` carries only
 /// the target's display column — that's all the admin renders.
 ///
-/// #352 — Django-shape `list_select_related` lets operators opt out
-/// of specific FK joins (`ListSelectRelated::None` for "no joins";
+/// `list_select_related` lets operators opt out of specific FK
+/// joins (`ListSelectRelated::None` for "no joins";
 /// `ListSelectRelated::Only(&[...])` for a whitelist). The default
 /// `ListSelectRelated::All` preserves rustango's join-everything
 /// behavior.
@@ -585,11 +585,10 @@ fn render_form_with_inlines_and_pickers(
         // PK is locked on edit; readonly_fields are locked on edit.
         // Auto fields are always locked — they're DB-assigned.
         let lock_input = f.auto || (pk_locked && (f.primary_key || is_readonly_field));
-        // #359 — Django-shape `formfield_overrides`. Look up a
-        // per-field widget override from the AdminConfig before
-        // dispatching to the FieldType default. Unknown names fall
-        // back automatically — `render_input_with_widget` logs the
-        // warning.
+        // `formfield_overrides`: look up a per-field widget override
+        // from the AdminConfig before dispatching to the FieldType
+        // default. Unknown names fall back automatically —
+        // `render_input_with_widget` logs the warning.
         let widget_override = admin_cfg
             .formfield_overrides
             .iter()
@@ -602,11 +601,11 @@ fn render_form_with_inlines_and_pickers(
         } else {
             render::render_input_with_widget(f, value, lock_input, widget_override)
         };
-        // #357 — Django-shape `raw_id_fields`. When the field is an
-        // FK / O2O AND is named in `admin.raw_id_fields`, append a
-        // magnifying-glass lookup link that points at the target
-        // model's admin list view. Lets the operator find the right
-        // PK to type without scrolling through every option.
+        // `raw_id_fields`: when the field is an FK / O2O and is named
+        // in `admin.raw_id_fields`, append a magnifying-glass lookup
+        // link that points at the target model's admin list view. It
+        // lets the operator find the right PK to type without
+        // scrolling through every option.
         if admin_cfg.raw_id_fields.iter().any(|n| *n == f.name) {
             if let Some(rel) = f.relation {
                 let target_table = match rel {
@@ -622,8 +621,8 @@ fn render_form_with_inlines_and_pickers(
                 );
             }
         }
-        // #358 — Django-shape `autocomplete_fields`. Append a
-        // `<datalist>` with `id="<field>_options"`, set the input's
+        // `autocomplete_fields`: append a `<datalist>` with
+        // `id="<field>_options"`, set the input's
         // `list=` attribute, and emit a tiny inline JS block that
         // populates the datalist via fetch to the target's
         // `__autocomplete` endpoint on every input event.
@@ -673,9 +672,9 @@ fn render_form_with_inlines_and_pickers(
             "label": f.display_label(),
             "extra": extra,
             "input": input_html,
-            // Django-shape `help_text` (#admin-helptext) — short
-            // caption rendered under the input. `None` means no
-            // caption; template treats it as falsy and renders nothing.
+            // `help_text` — short caption rendered under the input.
+            // `None` means no caption; the template treats it as
+            // falsy and renders nothing.
             "help_text": f.help_text,
         })
     };
@@ -689,10 +688,9 @@ fn render_form_with_inlines_and_pickers(
             // Hide auto fields entirely on the create form.
             return false;
         }
-        // #449 — Django-shape `editable = false` removes the field
-        // from the auto-generated change-form entirely. The value
-        // is still visible on list / detail views (those don't
-        // route through this filter).
+        // `editable = false` removes the field from the generated
+        // change form entirely. The value is still visible on list /
+        // detail views (those don't route through this filter).
         if !f.editable {
             return false;
         }
@@ -730,7 +728,7 @@ fn render_form_with_inlines_and_pickers(
         .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
         .collect();
 
-    // #356 — Django-shape `prepopulated_fields`. Build the
+    // `prepopulated_fields`: build the
     // `{ target_input_name: [source_input_name, …] }` map the
     // form.html JS reads to wire change events. We translate Rust
     // field names → HTML input `name=` (which == Rust field name in
@@ -776,9 +774,9 @@ fn render_form_with_inlines_and_pickers(
         "fieldsets": fieldsets_ctx,
         "inline_form_panels": inline_form_panels_ctx,
         "prepopulated_fields": prepopulated_ctx,
-        // Only emit the slug script when not editing — Django's
-        // semantic is "stop populating once the value is set" and a
-        // stored slug usually wants to remain stable. The form has
+        // Only emit the slug script when not editing: stop
+        // populating once the value is set, because a stored slug
+        // usually wants to stay stable. The form has
         // a `prepopulated_active` flag the template can branch on.
         "prepopulated_active": !pk_locked && !prepopulated_ctx.is_empty(),
     });
@@ -793,8 +791,8 @@ fn render_form_with_inlines_and_pickers(
 /// pre-loaded `ContentType` list into the form context. The first
 /// drives inline panel rendering (#50, slice 2); the second drives
 /// the `generic_fk` `<select>` picker (#244). Used by `edit_form` and
-/// `create_form` — pass an empty `inline_panels` from create-form
-/// (Django's create-form-doesn't-render-inlines behavior).
+/// `create_form` — pass an empty `inline_panels` from create-form,
+/// which does not render inlines.
 pub(crate) fn render_form_with_inlines_and_picker(
     state: &AppState,
     model: &'static ModelSchema,

@@ -1,7 +1,7 @@
 //! Multi-tenancy for rustango.
 //!
-//! v0.5 makes rustango "organizations-aware" without inheriting Django's
-//! `DATABASES`-dict-in-`settings.py` footgun. Tenants are first-class
+//! v0.5 makes rustango "organizations-aware" without listing every
+//! database in a settings file. Tenants are first-class
 //! rows in a `rustango_orgs` table that lives in the **registry**
 //! database — the only database the app boots knowing about. Every
 //! other database (or Postgres schema) is discovered through that

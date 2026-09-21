@@ -1,19 +1,18 @@
 # Serializers
 
 A serializer turns a model instance into a typed, JSON-ready shape — and back
-again on the way in. It's **Rustango**'s answer to a Django REST Framework
-`ModelSerializer` or a Laravel API Resource: declare a struct, annotate its
-fields, and you get controlled output (rename, hide, compute, nest), field- and
-object-level validation, and a clean hook into ViewSets.
+again on the way in. Declare a struct, annotate its fields, and you get
+controlled output (rename, hide, compute, nest), field- and object-level
+validation, and a clean hook into ViewSets.
 
-One thing to internalise up front, because it differs from DRF: a Rustango
-serializer **shapes data, it doesn't persist it**. There's no `serializer.save()`
-that writes to the database — the ORM does that. The serializer maps a model to
+One thing to internalise up front: a Rustango serializer **shapes data, it
+doesn't persist it**. There's no `serializer.save()` that writes to the
+database — the ORM does that. The serializer maps a model to
 JSON (`from_model` → `to_value`), declares which fields are writable, and
 validates. You compose it with the ORM and ViewSets rather than routing writes
 *through* it.
 
-> **New to a term here?** — *serializer*, *model*, *ORM*, *DRF*? The
+> **New to a term here?** — *serializer*, *model*, *ORM*? The
 > [glossary](glossary.md) defines each in plain language.
 
 [![A Rustango serializer: read_only, source rename, a computed method field, a nested FK, and a write_only field — declared on one struct](img/serializers.png)](img/serializers.png)
@@ -147,9 +146,9 @@ hand after `from_model` (e.g. a list of tag ids you fetch separately).
 
 ## Computed fields
 
-`method = "fn"` is DRF's `SerializerMethodField`. Declare the field, then write
-an associated function `fn(&Model) -> FieldType`; it's called during
-`from_model`:
+`method = "fn"` fills a field from a function instead of a column. Declare the
+field, then write an associated function `fn(&Model) -> FieldType`; it's called
+during `from_model`:
 
 ```rust
 #[derive(Serializer, serde::Deserialize, Default)]
@@ -231,7 +230,7 @@ let json = s.to_value();
 
 ## Slug related fields
 
-`slug = "name"` is DRF's `SlugRelatedField`: instead of an FK id or a full
+`slug = "name"` flattens a relation: instead of an FK id or a full
 nested object, emit a single named field pulled from the loaded parent.
 
 ```rust
@@ -253,15 +252,15 @@ unloaded; it's display-only (not writable).
 ## Validation
 
 Three layers, all surfacing as `rustango::forms::FormErrors` (and, on a ViewSet
-write, a DRF-shape `400`). They run in this order: declarative constraints, then
-per-field validators, then the cross-field hook.
+write, a field-keyed `400`). They run in this order: declarative constraints,
+then per-field validators, then the cross-field hook.
 
-**Declarative constraints (DRF `validators`, auto-inherited).** `max_length`,
-`min_length`, `min`, and `max` are field attributes — and when you omit them a
-field **inherits the model's** `max_length` / `min` / `max` / `choices`. So a
+**Declarative constraints (auto-inherited).** `max_length`, `min_length`, `min`,
+and `max` are field attributes — and when you omit them a field
+**inherits the model's** `max_length` / `min` / `max` / `choices`. So a
 `#[rustango(max_length = 200)]` column is length-checked with no serializer
-attribute at all (DRF `ModelSerializer` behaviour). They're checked on every
-writable field, turning would-be database-constraint `500`s into friendly `400`s:
+attribute at all. They're checked on every writable field, turning would-be
+database-constraint `500`s into friendly `400`s:
 
 ```rust
 #[serializer(model = Widget)]
@@ -274,7 +273,7 @@ struct WidgetSerializer {
 }
 ```
 
-Messages match Django/DRF: `"Ensure this value has at most N characters."`,
+The messages are fixed: `"Ensure this value has at most N characters."`,
 `"Ensure this value has at least N characters."`, `"Ensure this value is ≥ N."` /
 `"≤ N"`, and `"Select a valid choice."`. (`min_length` is serializer-only;
 `choices` is inherited from the model — there's no `choices` attribute.)
@@ -329,15 +328,15 @@ constraints above (`max_length` / `min_length` / `min` / `max` / inherited
 `choices`), custom rules are plain functions — there's no `email`/regex magic,
 which keeps custom validation explicit and testable. Outside a ViewSet the
 framework doesn't auto-render `FormErrors` to an HTTP body; map it to your 400
-response (the field/non-field split lines up with DRF's error JSON).
+response (the field/non-field split lines up with the error JSON a ViewSet
+returns).
 
 ---
 
 ## Unique-together validation
 
-For Django's `UniqueTogetherValidator` — a pre-save check that a candidate row
-won't collide on a multi-column unique index — call
-`check_unique_together_pool` before saving:
+To check before saving that a candidate row won't collide on a multi-column
+unique index, call `check_unique_together_pool`:
 
 ```rust
 use std::collections::HashMap;
@@ -361,8 +360,8 @@ to the insert's conflict handling; partial (`unique_when`) indexes are skipped.
 
 ## Hyperlinked output
 
-For a `HyperlinkedModelSerializer`-style shape (resource URLs instead of bare
-ids), two helpers post-process the JSON:
+For a hyperlinked shape (resource URLs instead of bare ids), two helpers
+post-process the JSON:
 
 ```rust
 use rustango::serializer::{hyperlink_url, hyperlinked_to_value};
@@ -414,7 +413,7 @@ pub struct PostViewSet;
   through `from_model`, so `source` / `method` / `read_only` / `write_only`
   shape the JSON.
 - **Input** — `create` / `update` run the serializer's `validate()` (a failure
-  is a DRF-shape `400`, `{field: [msgs]}`), and only writable fields are
+  is a field-keyed `400`, `{field: [msgs]}`), and only writable fields are
   written — `read_only` / computed fields a client posts are ignored,
   `source`-resolved to the model column.
 

@@ -5,8 +5,8 @@ einen Server zu booten oder das Netzwerk zu berühren. **Rustango**s `TestClient
 Router **in-process** aus: du rufst `client.get("/path")` auf, es routet die Anfrage
 durch den echten Stack (Extractors, Middleware, Handler) und gibt dir die
 Antwort zum Assertieren zurück. Füge Transaction-Rollback-Isolation für Datenbanktests und
-ein Set von Response-Assertions hinzu, und du hast Djangos Test-Client + `TestCase`, in
-Rust.
+ein Set von Response-Assertions hinzu, und du hast eine vollständige
+Integrationstest-Umgebung, ohne die Prozessgrenze zu verlassen.
 
 [![Testen in Rustango: TestClient umschließt deinen Router und sendet In-process-Anfragen durch den echten Handler-Stack; die TestResponse macht Status, Text und JSON zum Assertieren verfügbar — kein Socket, kein Server](../img/testing.png)](../img/testing.png)
 
@@ -209,8 +209,8 @@ Skip.
 
 ## Response-Assertion-Helper
 
-Für rohe `axum::Response`-Werte (z. B. aus `tower::oneshot`) liest sich `test_assertions`
-wie Djangos `assertContains` / `assertRedirects`:
+Für rohe `axum::Response`-Werte (z. B. aus `tower::oneshot`) liefert `test_assertions`
+lesbare Ein-Zeilen-Prüfungen für Status, Inhalt, Redirects und Cookies:
 
 ```rust
 use rustango::test_assertions::{assert_status_2xx, assert_redirects, assert_cookie_set};

@@ -1,12 +1,9 @@
-//! Attribute casts — a per-field get/set transform layer (Eloquent
-//! `$casts` / `CastsAttributes`; Django `from_db_value`/`get_prep_value`).
-//! Issue #819.
+//! Transform a field on its way to and from the database.
 //!
-//! A model field typed [`Cast<C>`] stores its logical value `C::Value`
-//! in memory but reads/writes the database through the [`CastValue`]
-//! impl `C` — `to_db` on the way in, `from_db` on the way out. The
-//! column itself is plain `TEXT`, so casts are backend-neutral and need
-//! no migration changes.
+//! A field typed [`Cast<C>`](crate::casts::Cast) holds the value you work with in Rust,
+//! but stores it through the [`CastValue`] impl `C`: `to_db` when
+//! writing, `from_db` when reading. The column is plain `TEXT`, so
+//! casts work on every backend and need no migration.
 //!
 //! ```ignore
 //! use rustango::casts::{Cast, EncryptedString};
@@ -23,20 +20,20 @@
 //! // `&*p.ssn` is the plaintext; the `ssn` column holds ciphertext.
 //! ```
 //!
-//! ## Extension point
+//! ## Writing your own
 //!
-//! Implement [`CastValue`] for your own marker type and use it as
-//! `Cast<MyCast>`. `to_db` serializes the logical value to the stored
-//! `String`; `from_db` parses it back (fallible). The
-//! [`EncryptedString`] built-in is the reference implementation; a
-//! JSON-value-object cast is one line of `serde_json`.
+//! Implement [`CastValue`] on a marker type and use `Cast<MyCast>`.
+//! `to_db` writes the value out as a `String`, `from_db` reads it
+//! back and may fail. [`EncryptedString`] is a worked example.
+//!
+//! [`CastValue`]: crate::casts::CastValue
+//! [`EncryptedString`]: crate::casts::EncryptedString
 
 use std::fmt;
 use std::marker::PhantomData;
 
-/// Error returned by [`CastValue::from_db`] when stored data can't be
-/// parsed back into the logical value (corrupt/tampered ciphertext,
-/// malformed JSON, …). Surfaces through sqlx's decode path as a
+/// [`CastValue::from_db`] could not read the stored value, for
+/// example because the data is corrupt. sqlx reports it as a
 /// `ColumnDecode` error.
 #[derive(Debug)]
 pub struct CastError(pub String);
@@ -49,32 +46,34 @@ impl fmt::Display for CastError {
 
 impl std::error::Error for CastError {}
 
-/// Bridges a logical Rust value to/from its stored `TEXT` representation.
+/// Converts a Rust value to and from the `TEXT` stored in the
+/// database.
 ///
-/// `to_db` is infallible (a misconfiguration — e.g. a missing encryption
-/// key — should fail fast); `from_db` is fallible (stored data may be
-/// corrupt). Implement this on a marker type and use [`Cast<Self>`].
+/// `to_db` cannot fail: a bad setup, such as a missing encryption
+/// key, should panic early instead. `from_db` can fail, because
+/// stored data may be corrupt. Implement this on a marker type and
+/// use [`Cast<Self>`].
 pub trait CastValue {
-    /// Logical in-memory type (what the model field "is").
+    /// The type the model field holds in memory.
     type Value;
-    /// Serialize the logical value to the stored `TEXT` form.
+    /// Turn the value into the stored `TEXT`.
     fn to_db(value: &Self::Value) -> String;
-    /// Parse the stored `TEXT` form back into the logical value.
+    /// Read the stored `TEXT` back into a value.
     ///
     /// # Errors
-    /// [`CastError`] when the stored form can't be decoded.
+    /// [`CastError`] when the stored form cannot be decoded.
     fn from_db(stored: &str) -> Result<Self::Value, CastError>;
 }
 
-/// A model field whose database representation is transformed by the
-/// [`CastValue`] impl `C`. See the [module docs](self).
+/// A model field stored through the [`CastValue`] impl `C`. See the
+/// [module docs](self).
 pub struct Cast<C: CastValue> {
     value: C::Value,
     _marker: PhantomData<fn() -> C>,
 }
 
 impl<C: CastValue> Cast<C> {
-    /// Wrap a logical value.
+    /// Wrap a value.
     pub fn new(value: C::Value) -> Self {
         Self {
             value,
@@ -82,7 +81,7 @@ impl<C: CastValue> Cast<C> {
         }
     }
 
-    /// Consume the wrapper, returning the logical value.
+    /// Unwrap and return the value.
     pub fn into_inner(self) -> C::Value {
         self.value
     }
@@ -101,10 +100,9 @@ impl<C: CastValue> std::ops::DerefMut for Cast<C> {
     }
 }
 
-// NB: no `impl From<C::Value> for Cast<C>` — `C::Value` is an
-// unconstrained associated type that could equal `Cast<C>`, which
-// collides with the std reflexive `From<T> for T`. Construct via
-// [`Cast::new`].
+// No `From<C::Value> for Cast<C>`: `C::Value` could itself be
+// `Cast<C>`, which clashes with std's `From<T> for T`. Use
+// `Cast::new`.
 
 impl<C: CastValue> fmt::Debug for Cast<C>
 where
@@ -161,11 +159,10 @@ impl<C: CastValue> From<Cast<C>> for crate::core::SqlValue {
     }
 }
 
-// ---- sqlx Type + Decode (FromRow read path): the column is TEXT ----
+// ---- sqlx Type + Decode (read path): the column is TEXT ----
 //
-// Decode the stored `String` then run `C::from_db`. Type/`compatible`
-// delegate to `String`, so the column is an ordinary text column on
-// every backend.
+// Decode a `String`, then run `C::from_db`. Type and `compatible`
+// defer to `String`, so this is an ordinary text column everywhere.
 
 macro_rules! cast_sqlx_impls {
     ($db:ty) => {
@@ -202,7 +199,7 @@ cast_sqlx_impls!(sqlx::MySql);
 cast_sqlx_impls!(sqlx::Sqlite);
 
 // ====================================================================
-// Built-in: EncryptedString (AEAD-at-rest)
+// Built-in: EncryptedString (AEAD at rest)
 // ====================================================================
 
 mod encrypted;

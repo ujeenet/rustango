@@ -1,14 +1,11 @@
-//! Key-namespaced cache view (#1227).
+//! A cache view that namespaces every key.
 //!
-//! [`Cache`](super::Cache) is a flat `&str`-keyed store. That is the
-//! right primitive, but under tenancy it is a footgun: the natural key
-//! is the leaky key. A handler (or worse, a background task with no
-//! ambient tenant) writes `"stats:monthly"` for one tenant and every
-//! other tenant reads it back.
+//! [`Cache`](super::Cache) is one flat keyspace. Under tenancy that is
+//! a trap: a handler, or a background task with no tenant in scope,
+//! writes `"stats:monthly"` for one tenant and all the others read it.
 //!
-//! [`ScopedCache`] closes that by construction — it wraps any
-//! [`BoxedCache`](super::BoxedCache) and folds a namespace into every
-//! key on the way through, so the call site cannot forget:
+//! [`ScopedCache`] wraps any [`BoxedCache`](super::BoxedCache) and
+//! folds a namespace into every key, so the call site cannot forget:
 //!
 //! ```ignore
 //! use rustango::cache::ScopedCache;
@@ -21,49 +18,44 @@
 //! cache.clear().await?;                            // other tenants keep their entries
 //! ```
 //!
-//! `ScopedCache` is itself a `Cache`, so it drops into anything that
-//! takes a `BoxedCache` — `cache_page`, `cache_fragment`, rate limiters,
-//! [`crate::distributed_lock::DistributedLock`].
+//! `ScopedCache` is itself a `Cache`, so it fits anywhere a
+//! `BoxedCache` is taken: `cache_page`, `cache_fragment`, rate
+//! limiters, [`crate::distributed_lock::DistributedLock`].
 //!
 //! ## What it does not do
 //!
-//! It is a namespace, not a security boundary: everything still lives in
-//! one backend, and code holding the *unscoped* cache can read any key.
-//! The point is that the ergonomic path is the correct one.
+//! This is a namespace, not a security boundary. Everything still
+//! lives in one backend, and code holding the unscoped cache can read
+//! any key. The point is that the easy path is the correct one.
 //!
-//! `clear()` routes through [`Cache::delete_prefix`], whose default
-//! over-deletes on backends that cannot enumerate keys (see that
-//! method's docs). Namespaced state stays correct either way; on those
-//! backends the other namespaces just pay a cache miss.
+//! `clear()` calls [`Cache::delete_prefix`] on the inner cache. A
+//! backend that does not implement that method returns an error rather
+//! than clearing other namespaces.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::{BoxedCache, Cache, CacheError};
 
-/// The prefix [`ScopedCache::for_tenant`] uses, matching the
-/// `tenant:{slug}:…` convention the tenancy layer already uses for
-/// lockout keys (`tenancy::auth_routes`).
+/// The prefix [`ScopedCache::for_tenant`] uses. Matches the
+/// `tenant:{slug}:…` shape the tenancy layer already uses.
 pub const TENANT_PREFIX: &str = "tenant";
 
-/// A [`Cache`] view that transparently namespaces every key.
-///
-/// Cheap to clone (the inner cache is an `Arc`).
+/// A [`Cache`] view that namespaces every key. Cheap to clone.
 #[derive(Clone)]
 pub struct ScopedCache {
     inner: BoxedCache,
-    /// Already includes the trailing separator, so key mapping is one
-    /// concat with no per-call formatting decisions.
+    /// Includes the trailing separator, so mapping a key is one
+    /// concat with no formatting choice per call.
     prefix: String,
 }
 
 impl ScopedCache {
-    /// Namespace `inner` under an arbitrary `namespace`.
+    /// Namespace `inner` under any `namespace`.
     ///
-    /// An empty namespace is accepted and yields keys prefixed with just
-    /// `":"` — deliberately still distinct from the unscoped keyspace, so
-    /// an accidentally-empty slug cannot silently collide with unscoped
-    /// entries.
+    /// An empty namespace is allowed and prefixes keys with just
+    /// `":"`. That is still its own keyspace, so an empty slug cannot
+    /// collide with unscoped entries by accident.
     #[must_use]
     pub fn new(inner: BoxedCache, namespace: impl AsRef<str>) -> Self {
         Self {
@@ -72,7 +64,7 @@ impl ScopedCache {
         }
     }
 
-    /// Namespace `inner` for one tenant slug — `tenant:{slug}:…`.
+    /// Namespace `inner` for one tenant slug: `tenant:{slug}:…`.
     #[must_use]
     pub fn for_tenant(inner: BoxedCache, slug: impl AsRef<str>) -> Self {
         Self::new(inner, format!("{TENANT_PREFIX}:{}", slug.as_ref()))
@@ -96,12 +88,10 @@ impl ScopedCache {
     }
 }
 
-// Every method forwards to the inner cache with a mapped key rather than
-// relying on the trait defaults. The defaults would also be *correct*
-// (they route back through `self`), but they would flatten a backend's
-// native primitives — Redis `INCRBY` / `SET NX` / `MGET` — into
-// non-atomic, one-RTT-per-key loops. Forwarding keeps whatever the inner
-// backend actually implements.
+// Every method maps the key and forwards to the inner cache. The
+// trait defaults would be correct, but they would turn a backend's
+// native `INCRBY`, `SET NX` and `MGET` into per-key loops that are
+// slower and not atomic. Forwarding keeps what the backend offers.
 #[async_trait::async_trait]
 impl Cache for ScopedCache {
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
@@ -120,8 +110,8 @@ impl Cache for ScopedCache {
         self.inner.exists(&self.k(key)).await
     }
 
-    /// Clears **only this namespace** — the whole point of the type.
-    /// Delegates to [`Cache::delete_prefix`] on the inner cache.
+    /// Clears **only this namespace**, via [`Cache::delete_prefix`]
+    /// on the inner cache.
     async fn clear(&self) -> Result<(), CacheError> {
         self.inner.delete_prefix(&self.prefix).await
     }
@@ -138,9 +128,8 @@ impl Cache for ScopedCache {
         self.inner.touch(&self.k(key), ttl).await
     }
 
-    /// The returned map is keyed by the caller's **unprefixed** keys —
-    /// the prefix is an implementation detail that must not leak back
-    /// out.
+    /// The returned map uses the caller's **unprefixed** keys. The
+    /// prefix must not leak back out.
     async fn get_many(
         &self,
         keys: &[&str],
@@ -174,8 +163,7 @@ impl Cache for ScopedCache {
         self.inner.delete_many(&refs).await
     }
 
-    /// Nested scoping composes: the outer prefix is applied on top of
-    /// this one, so `ScopedCache::new(scoped.boxed(), "x")` behaves as
+    /// Scopes nest: `ScopedCache::new(scoped.boxed(), "x")` gives
     /// `"<this>:x:"`.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         self.inner.delete_prefix(&self.k(prefix)).await
@@ -212,8 +200,7 @@ mod tests {
         assert!(!globex.exists("stats").await.unwrap());
     }
 
-    /// Scoped `clear` drops one tenant and leaves the others — the
-    /// behaviour the flat `Cache::clear` could not give.
+    /// Scoped `clear` drops one tenant and leaves the others.
     #[tokio::test]
     async fn scoped_clear_leaves_other_tenants_intact() {
         let shared = mem();
@@ -235,8 +222,7 @@ mod tests {
         );
     }
 
-    /// A slug that is a prefix of another must not be caught by the
-    /// other's clear — `tenant:acme:` vs `tenant:acme-corp:`.
+    /// Clearing `tenant:acme:` must not hit `tenant:acme-corp:`.
     #[tokio::test]
     async fn prefix_overlap_between_slugs_is_not_a_collision() {
         let shared = mem();
@@ -274,8 +260,8 @@ mod tests {
         );
     }
 
-    /// Counters are namespaced too — two tenants rate-limiting on the
-    /// same logical key must not share a budget.
+    /// Counters are namespaced, so two tenants rate-limiting on the
+    /// same key do not share a budget.
     #[tokio::test]
     async fn counters_are_namespaced() {
         let shared = mem();
@@ -313,9 +299,8 @@ mod tests {
         assert_eq!(globex.get("q").await.unwrap().as_deref(), Some("9"));
     }
 
-    /// `NullCache` must not hit the trait default's whole-cache clear
-    /// path (it has nothing to enumerate, and the warning would be
-    /// noise on every invalidation).
+    /// `NullCache` stores nothing, so a scoped clear must succeed
+    /// rather than hit the erroring trait default.
     #[tokio::test]
     async fn null_cache_prefix_delete_is_a_noop() {
         let null: BoxedCache = Arc::new(crate::cache::NullCache);

@@ -1,11 +1,12 @@
 //! HTTP Basic Auth middleware for admin routes.
 //!
-//! Wraps every request: if the `Authorization: Basic <base64>` header
-//! decodes to the configured credentials, the request proceeds. Otherwise
-//! a 401 with `WWW-Authenticate: Basic realm="Rustango Admin"` is returned.
+//! A request passes when its `Authorization: Basic <base64>` header
+//! decodes to the configured credentials. Otherwise it gets a 401 with
+//! `WWW-Authenticate: Basic realm="Rustango Admin"`.
 //!
-//! The comparison is byte-equality, **not** constant-time — fine for an
-//! admin gate but don't reuse this layer for high-security auth.
+//! The comparison is plain byte equality, **not** constant-time. That
+//! is fine for an admin gate, but do not reuse this layer where a
+//! timing side channel would matter.
 
 use std::sync::Arc;
 
@@ -53,9 +54,8 @@ async fn basic_auth_middleware(
     resp
 }
 
-/// Wrap `router` so every request requires HTTP Basic Auth with the given
-/// credentials. The browser shows a native login dialog on the first
-/// request.
+/// Wrap `router` so every request needs HTTP Basic Auth with these
+/// credentials. The browser shows its own login dialog first.
 pub fn protect_with_basic_auth(router: Router, username: &str, password: &str) -> Router {
     let creds = Arc::new(Creds {
         username: username.to_owned(),

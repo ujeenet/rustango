@@ -1,7 +1,6 @@
 #![cfg(feature = "sqlite")]
-//! Live SQLite tests for `Model::destroy(pks, pool)` —
-//! Eloquent `Model::destroy([...])` / Django
-//! `Model.objects.filter(pk__in=[...]).delete()` parity.
+//! Live SQLite tests for `Model::destroy(pks, pool)` — delete every
+//! row whose primary key is in the supplied list.
 
 use rustango::query::QuerySet;
 use rustango::sql::{sqlx, Auto, FetcherPool, Pool};

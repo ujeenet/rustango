@@ -1,33 +1,30 @@
-//! Django 6.0 ORM parity — execution-based verification.
+//! ORM join behaviour — execution-based verification.
 //! Scenario group D: multi-join queries — `select_related` chains,
 //! cross-table predicates, F() across joins, and the classic
 //! join-duplication trap.
 //!
-//! Django scenarios covered (docs.djangoproject.com/en/6.0):
+//! Scenarios covered:
 //! - `select_related("author__profile__country")` nested stitching
-//! - `filter(author__name="Ada")` relation-spanning filter — Django
-//!   joins implicitly; rustango pins the documented rejection (the
+//! - `filter("author__name", …)` relation-spanning filter — rustango
+//!   pins the documented rejection instead of joining implicitly (the
 //!   workaround is an explicit `.join()` + aliased predicate, also
 //!   exercised here)
 //! - `order_by("author__name")` relation-spanning ordering — same
 //!   story as the filter
-//! - `filter(score__gt=F("post__views"))` — F() comparing columns
-//!   across a join
-//! - `annotate(nc=Count("comments"), nl=Count("likes"))` — Django
-//!   inflates counts without `distinct=True` (the JOIN-duplication
-//!   trap); rustango lowers relation counts to correlated subqueries
-//!   so they can never inflate
+//! - `F("post__views")` comparing columns across a join
+//! - two relation counts in one query — the JOIN-duplication trap.
+//!   rustango lowers relation counts to correlated subqueries so they
+//!   can never inflate each other
 //!
-//! AUDIT NOTES:
+//! NOTES:
 //! - Two relation aggregates in ONE query now compose —
 //!   `AggregateBuilder::annotate_count` / `annotate_sum` / … chain off
 //!   the first relation annotate (#1038, shipped). Each lowers to its own
 //!   correlated subquery, so neither inflates.
 //! - Ad-hoc `.join()` now composes with `.aggregate()` —
-//!   `AggregateQuery` carries `joins`, so Django's join+GROUP BY shape
-//!   (`values("author.name").annotate(Count)`) works via an explicit
-//!   join + aliased `group_by` (#1040, shipped). The `author__name`
-//!   sugar will ride #1031's `resolve_span_chain`.
+//!   `AggregateQuery` carries `joins`, so the join + GROUP BY shape
+//!   works via an explicit join + aliased `group_by` (#1040, shipped).
+//!   The `author__name` sugar will ride #1031's `resolve_span_chain`.
 
 #[cfg(any(feature = "postgres", feature = "sqlite", feature = "mysql"))]
 mod scenarios {
@@ -126,7 +123,7 @@ mod scenarios {
         }
     }
 
-    /// Django `select_related("author__profile__country")` — one
+    /// `select_related("author__profile__country")` — one
     /// query, nested loaded objects on every hop.
     pub async fn check_three_hop_select_related_stitching(pool: &Pool) {
         let posts: Vec<Post> = Post::objects()
@@ -144,7 +141,7 @@ mod scenarios {
         assert_eq!(country.code, "US");
     }
 
-    /// Django's `filter(author__name="Ada")` implicit-join filter —
+    /// `filter("author__name", "Ada")` implicit-join filter —
     /// relation-spanning string lookups now resolve the FK chain into
     /// LEFT JOINs + an aliased predicate (#1031). Single-hop, multi-hop
     /// with a lookup suffix, and span-over-a-`select_related`-path (one
@@ -183,7 +180,7 @@ mod scenarios {
         assert_eq!(rows[0].author.value().expect("stitched").name, "Bob");
     }
 
-    /// Django's `order_by("author__name")` implicit-join ordering —
+    /// `order_by("author__name")` implicit-join ordering —
     /// relation-spanning order keys now resolve the FK chain into LEFT
     /// JOINs + an aliased ORDER BY term (#1031 Part 2), reusing the same
     /// `resolve_span_chain` walk as the `filter()` path.
@@ -297,7 +294,7 @@ mod scenarios {
         assert_eq!(posts[0].title, "Hello");
     }
 
-    /// Django `filter(score__gt=F("post__views"))` — column-to-column
+    /// `score > F("post__views")` — column-to-column
     /// comparison across a join. Post 1 has 10 views → comments with
     /// score 12 and 20 qualify.
     pub async fn check_f_comparison_across_join(pool: &Pool) {
@@ -326,9 +323,9 @@ mod scenarios {
         assert_eq!(scores, vec![12, 20]);
     }
 
-    /// The Django join-duplication trap: `annotate(nc=Count("comments"),
-    /// nl=Count("likes"))` without `distinct=True` returns 6/6 for a post
-    /// with 3 comments × 2 likes. rustango lowers relation aggregates to
+    /// The join-duplication trap: counting two relations in one query
+    /// off a shared JOIN returns 6/6 for a post with 3 comments × 2
+    /// likes. rustango lowers relation aggregates to
     /// correlated subqueries — structurally immune — and #1038 lets two
     /// of them chain in ONE query (`AggregateBuilder::annotate_count`).
     pub async fn check_relation_counts_never_inflate(pool: &Pool) {
@@ -371,8 +368,8 @@ mod scenarios {
         );
     }
 
-    /// Django's most common reporting shape — group by a RELATED column:
-    /// `Post.objects.values("author__name").annotate(n=Count("id"))`. #1040.
+    /// The common reporting shape — group by a RELATED column:
+    /// "posts per author name". #1040.
     /// Explicit `.join()` + aliased `group_by("author.name")` (the
     /// `__`-sugar will ride #1031's resolver later). Each author has one
     /// post (Ada → "Hello", Bob → "World"), so the grouped counts are 1/1.
@@ -469,7 +466,7 @@ mod pg_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("DATABASE_URL not set — skipping the PG arm of this django6 test");
+                    eprintln!("DATABASE_URL not set — skipping the PG arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;
@@ -583,7 +580,7 @@ mod mysql_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("MYSQL_TEST_URL unset — skipping MySQL django6 test");
+                    eprintln!("MYSQL_TEST_URL unset — skipping the MySQL arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;

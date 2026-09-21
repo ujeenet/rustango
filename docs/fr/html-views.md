@@ -7,9 +7,8 @@ du JSON pour des clients d'API, une vue HTML émet une page rendue pour un navig
 construits à partir du même `#[derive(Model)]`, et vous pouvez servir un modèle des *deux* façons à
 la fois.
 
-Ce sont l'équivalent dans **Rustango** des vues génériques basées sur les classes de Django
-(`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) ou des contrôleurs de
-ressources de Laravel qui renvoient des vues Blade. Elles effectuent leur rendu via des templates
+Chaque type de vue (`ListView`, `DetailView`, `CreateView`, `UpdateView`,
+`DeleteView`) couvre un cas standard et effectue son rendu via des templates
 [Tera](https://keats.github.io/tera/).
 
 [![Les vues HTML dans Rustango : un modèle alimente ListView, DetailView et CreateView/UpdateView/DeleteView, chacune effectuant le rendu d'un template Tera en une page rendue côté serveur](../img/html-views.png)](../img/html-views.png)
@@ -56,7 +55,6 @@ C'est la première décision. Les deux transforment un modèle en points d'accè
 | En cas d'entrée invalide | `400` + une carte d'erreurs JSON indexée par champ | re-rend le formulaire avec les erreurs affichées |
 | Lit une liste comme | une enveloppe JSON paginée | un `<table>`/une boucle dans votre template |
 | Authentifiée en général par | jetons / JWT / clés d'API | cookies de session |
-| Équivalent Django | DRF `ModelViewSet` | vues génériques basées sur les classes |
 
 Vous n'avez pas à choisir globalement — choisissez par ressource, et vous pouvez monter **les deux
 sur le même modèle** (voir [ci-dessous](#servir-un-modèle-des-deux-façons)). Règles empiriques :

@@ -1,13 +1,18 @@
 //! Server-side session store backed by [`crate::cache::Cache`].
 //!
-//! The cookie carries only an opaque session ID; everything else
-//! lives in the cache. Pair with `RedisCache` for cross-replica
-//! visibility, or `InMemoryCache` for single-process / tests.
+//! The cookie holds only an opaque session ID. Everything else lives
+//! in the cache. Use `RedisCache` when several replicas must share
+//! sessions, or `InMemoryCache` for one process and for tests.
 //!
-//! Different shape from JWT: sessions are revocable on the server
-//! (delete the cache entry → all replicas see it), at the cost of
-//! a cache lookup per authenticated request. Pick JWT for stateless
-//! auth, sessions for "log this user out NOW" semantics.
+//! Unlike a JWT, a session can be revoked: delete the cache entry and
+//! every replica sees the user logged out. The cost is one cache read
+//! per authenticated request.
+//!
+//! Send the cookie with `HttpOnly`, `Secure` and a `SameSite` value,
+//! and call [`SessionStore::save`](crate::sessions::SessionStore::save)
+//! again after login so the user gets
+//! a new ID. Reusing the ID across the login boundary leaves the door
+//! open to session fixation.
 //!
 //! ## Quick start
 //!
@@ -46,8 +51,8 @@ const KEY_PREFIX: &str = "session";
 const DEFAULT_TTL_SECS: u64 = 60 * 60 * 24 * 14; // 2 weeks
 const ID_BYTES: usize = 24; // 192 bits, base64 → 32 chars
 
-/// Per-request session bag. Holds typed values keyed by string, plus
-/// a dirty-bit so the store can skip a write when nothing changed.
+/// Per-request session bag: typed values under string keys, plus a
+/// dirty flag so the store can skip a write when nothing changed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Session {
     data: HashMap<String, Value>,
@@ -61,15 +66,15 @@ impl Session {
         Self::default()
     }
 
-    /// Read a typed value. Returns `None` when absent or when the
-    /// stored shape doesn't deserialize as `T`.
+    /// Read a typed value. `None` when the key is missing or the
+    /// stored value is not a `T`.
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         self.data
             .get(key)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
-    /// Store a value, marking the session dirty.
+    /// Store a value and mark the session dirty.
     pub fn set<T: Serialize>(&mut self, key: impl Into<String>, value: T) {
         if let Ok(v) = serde_json::to_value(value) {
             self.data.insert(key.into(), v);
@@ -77,7 +82,7 @@ impl Session {
         }
     }
 
-    /// Remove a key; returns the previous value if any.
+    /// Remove a key and return its old value, if there was one.
     pub fn remove(&mut self, key: &str) -> Option<Value> {
         let prev = self.data.remove(key);
         if prev.is_some() {
@@ -86,7 +91,7 @@ impl Session {
         prev
     }
 
-    /// Wipe every key. Marks dirty.
+    /// Remove every key and mark the session dirty.
     pub fn clear(&mut self) {
         if !self.data.is_empty() {
             self.dirty = true;
@@ -94,9 +99,8 @@ impl Session {
         self.data.clear();
     }
 
-    /// `true` when the in-memory state diverges from what's in the
-    /// cache (anything was set / removed / cleared since the last
-    /// load or save).
+    /// `true` when something was set, removed or cleared since the
+    /// last load or save.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
         self.dirty
@@ -141,30 +145,29 @@ impl SessionStore {
         }
     }
 
-    /// Override the per-session TTL. Default 2 weeks.
+    /// Set the per-session TTL. Default is 2 weeks.
     #[must_use]
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Arc::new(ttl);
         self
     }
 
-    /// Persist `session` and return its ID. Always generates a fresh
-    /// ID — call [`Self::save_with_id`] to update an existing session
-    /// in place (typical request-cycle pattern).
+    /// Store `session` under a new ID and return it. Use this at
+    /// login, so the user gets a fresh ID. To update a session that
+    /// already exists, use [`Self::save_with_id`].
     ///
     /// # Errors
-    /// Underlying cache or serialization error.
+    /// A cache or serialization error.
     pub async fn save(&self, session: &Session) -> Result<String, SessionError> {
         let id = generate_id();
         self.save_with_id(&id, session).await?;
         Ok(id)
     }
 
-    /// Persist `session` under the given `id` (rewriting any existing
-    /// entry).
+    /// Store `session` under `id`, replacing any existing entry.
     ///
     /// # Errors
-    /// Underlying cache or serialization error.
+    /// A cache or serialization error.
     pub async fn save_with_id(&self, id: &str, session: &Session) -> Result<(), SessionError> {
         let json = serde_json::to_string(session)
             .map_err(|e| SessionError::Serialization(e.to_string()))?;
@@ -174,12 +177,12 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Load by ID. Returns `Ok(None)` for absent / expired / corrupted
-    /// (we treat corrupt as absent to fail-open).
+    /// Load a session by ID. Missing, expired and unreadable entries
+    /// all give `Ok(None)`.
     ///
     /// # Errors
-    /// Underlying cache error. Deserialization errors are demoted to
-    /// `Ok(None)` so a cache schema change doesn't 500 every request.
+    /// A cache error. A value that fails to parse gives `Ok(None)`
+    /// instead, so a stored-format change does not 500 every request.
     pub async fn load(&self, id: &str) -> Result<Option<Session>, SessionError> {
         let Some(raw) = self.cache.get(&self.cache_key(id)).await? else {
             return Ok(None);
@@ -188,27 +191,26 @@ impl SessionStore {
             Ok(s) => s,
             Err(_) => return Ok(None),
         };
-        // Loaded session starts clean — only later modifications mark dirty.
+        // A freshly loaded session is clean until something changes it.
         session.dirty = false;
         Ok(Some(session))
     }
 
-    /// Destroy the session — typical for logout. No-op if the ID
-    /// is unknown.
+    /// Delete the session, as on logout. Does nothing for an unknown
+    /// ID.
     ///
     /// # Errors
-    /// Underlying cache error.
+    /// A cache error.
     pub async fn destroy(&self, id: &str) -> Result<(), SessionError> {
         self.cache.delete(&self.cache_key(id)).await?;
         Ok(())
     }
 
-    /// Refresh the session's TTL without rewriting its contents.
-    /// Common pattern: call on every request to keep active users
-    /// signed in (sliding expiration).
+    /// Extend the session's TTL without changing its contents. Call
+    /// it on each request to keep active users signed in.
     ///
     /// # Errors
-    /// Underlying cache error. No-op when the session doesn't exist.
+    /// A cache error. Returns `false` when the session is gone.
     pub async fn touch(&self, id: &str) -> Result<bool, SessionError> {
         let key = self.cache_key(id);
         let Some(raw) = self.cache.get(&key).await? else {
@@ -223,11 +225,10 @@ impl SessionStore {
     }
 }
 
-/// Generate a 32-character base64url session ID. 192 bits of entropy
-/// — comfortably more than the standards-recommended 128 for session
-/// tokens. Sources from [`rand::rngs::OsRng`] (the OS CSPRNG) rather
-/// than `thread_rng`; session IDs are auth-boundary material and want
-/// the strongest available source. v0.42.
+/// Make a 32-character base64url session ID with 192 bits of entropy,
+/// above the 128 bits usually recommended. It draws from the OS CSPRNG
+/// ([`rand::rngs::OsRng`]), not `thread_rng`, because a session ID is
+/// an authentication secret.
 fn generate_id() -> String {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use rand::{rngs::OsRng, RngCore};
@@ -276,7 +277,7 @@ mod tests {
     fn get_returns_none_for_wrong_type() {
         let mut s = Session::new();
         s.set("flag", "string-not-a-number");
-        // Cross-type read returns None instead of panicking.
+        // A wrong-type read returns None instead of panicking.
         assert_eq!(s.get::<i64>("flag"), None);
     }
 
@@ -372,7 +373,7 @@ mod tests {
         let mut s = Session::new();
         s.set("v", 1);
         let id = store.save(&s).await.unwrap();
-        // Mutate + save in place
+        // Change it and save under the same id.
         let mut loaded = store.load(&id).await.unwrap().unwrap();
         loaded.set("v", 2);
         store.save_with_id(&id, &loaded).await.unwrap();
@@ -401,7 +402,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // load() should NOT panic; returns None.
+        // load() must not panic; it returns None.
         assert!(store.load("corrupt").await.unwrap().is_none());
     }
 

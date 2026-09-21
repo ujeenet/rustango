@@ -1,5 +1,5 @@
 //! `HStore` — typed PostgreSQL `hstore` (string→string map) column
-//! wrapper (Django's `HStoreField`, issue #342).
+//! wrapper (issue #342).
 //!
 //! Declare an `hstore` column on a model:
 //!

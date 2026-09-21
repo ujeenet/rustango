@@ -1,42 +1,32 @@
-//! Shared helpers for list-endpoint query-parameter parsing.
+//! Query-parameter parsing shared by list endpoints.
 //!
 //! [`viewset::handle_list`](crate::viewset) and the
-//! [`ListView`](crate::template_views::ListView) CBV both consume the
-//! same URL-encoded query parameters (`?page=N`, `?ordering=col`,
-//! `?search=term`, plus per-model filter keys). Before #809 they each
-//! reimplemented the reserved-key skip list and the `-`-prefix
-//! ordering split independently, and the reserved lists had drifted:
-//! viewset skipped `cursor` and `ordering`; the ListView CBV did not,
-//! so a column literally named `ordering` would be silently treated
-//! as a filter by one layer and skipped by the other.
+//! [`ListView`](crate::template_views::ListView) CBV read the same
+//! parameters: `?page=N`, `?ordering=col`, `?search=term`, and the
+//! model's own filter keys. This module holds the parts they must
+//! agree on:
 //!
-//! This module exposes the single source of truth:
+//! * [`RESERVED_LIST_KEYS`] / [`is_reserved_list_key`] — parameters
+//!   that control paging, sorting and search, so they are never
+//!   filters.
+//! * [`parse_ordering`] — splits `?ordering=col,-col2`.
+//! * [`clamp_page_size`] — resolves `?page_size=N`.
 //!
-//! * [`RESERVED_LIST_KEYS`] / [`is_reserved_list_key`] — the param
-//!   names that are NEVER candidate filters (pagination + sort +
-//!   search controls).
-//! * [`parse_ordering`] — the `?ordering=col,-col2,col3` split with
-//!   the `-`-prefix DESC marker, allowlist filter, and schema-field
-//!   lookup.
-//! * [`clamp_page_size`] — the `?page_size=N` resolver with the
-//!   per-endpoint default + max-cap.
+//! Each layer still builds its own WHERE clause, because viewset
+//! supports a richer filter syntax than the CBV.
 //!
-//! Only the safe subset is centralized. The WHERE-clause + search
-//! builders in viewset (Django-shape `__lookup` suffixes, typed
-//! SqlValue via `parse_form_value`, IR `SearchClause`) and
-//! template_views (exact-match Eq + ILIKE OR-folded into WHERE) are
-//! intentionally divergent — merging them would regress viewset's
-//! richer filter surface.
-//!
-//! See [issue #809](https://github.com/ujeenet/rustango/issues/809).
+//! [`RESERVED_LIST_KEYS`]: crate::list_params::RESERVED_LIST_KEYS
+//! [`is_reserved_list_key`]: crate::list_params::is_reserved_list_key
+//! [`parse_ordering`]: crate::list_params::parse_ordering
+//! [`clamp_page_size`]: crate::list_params::clamp_page_size
 
 use std::collections::HashMap;
 
 use crate::core::{ModelSchema, OrderItem};
 
-/// Reserved query-string keys that NEVER match a model field — they
-/// drive pagination, sort, search, and cursor flow. List handlers
-/// must skip these when interpreting params as filter clauses.
+/// Query keys that control paging, sorting and search. A list
+/// handler must never treat one of these as a model filter, even if
+/// a column has the same name.
 pub const RESERVED_LIST_KEYS: &[&str] = &[
     "page",
     "page_size",
@@ -47,8 +37,8 @@ pub const RESERVED_LIST_KEYS: &[&str] = &[
     "offset",
 ];
 
-/// `true` when `key` is one of [`RESERVED_LIST_KEYS`]. Use to gate
-/// filter parsing:
+/// `true` when `key` is one of [`RESERVED_LIST_KEYS`]. Use it to
+/// skip these keys before parsing filters:
 ///
 /// ```ignore
 /// for (k, v) in &params {
@@ -63,26 +53,16 @@ pub fn is_reserved_list_key(key: &str) -> bool {
     RESERVED_LIST_KEYS.iter().any(|r| *r == key)
 }
 
-/// Parse the `?ordering=col,-col2,col3` URL parameter into a list of
-/// [`OrderItem`]s.
+/// Parse `?ordering=col,-col2,col3` into [`OrderItem`]s. A leading
+/// `-` means descending.
 ///
-/// Each comma-separated token may carry a leading `-` to flip the
-/// sort to DESC (Django / DRF convention). Tokens are filtered:
+/// A token is dropped, without error, when it is not in `allowlist`
+/// or when [`ModelSchema::field`] does not know it. Keep the
+/// allowlist non-empty so a client cannot sort by a column such as
+/// `password_hash`; an empty allowlist permits every known field.
 ///
-/// * If `allowlist` is non-empty, only field names present in it are
-///   honored. Off-allowlist tokens are silently dropped (matches
-///   DRF's defensive default — a hostile client can't sort on
-///   `password_hash` just because it's a column).
-/// * The field name (post-`-`-strip) must resolve via
-///   [`ModelSchema::field`]. Unknown fields are silently dropped.
-///
-/// Returns an empty `Vec` when:
-/// * `raw` is empty or all-whitespace
-/// * every token is filtered out
-///
-/// Callers can detect "no override applied" by checking the result
-/// against the raw input — or by passing `raw=None` to skip the
-/// override and use the endpoint's default ordering.
+/// The result is empty when nothing survives, and the caller should
+/// then fall back to its default ordering.
 #[must_use]
 pub fn parse_ordering(
     raw: &str,
@@ -107,18 +87,11 @@ pub fn parse_ordering(
         .collect()
 }
 
-/// Resolve the effective `page_size` from the URL: pick the
-/// `?page_size=N` value when valid + below the cap, else fall back
-/// to `default`.
+/// Work out the page size from `?page_size=N`.
 ///
-/// `default` is the endpoint's preferred page size (typically 20–50).
-/// `max` is the hard cap that protects the backend from runaway
-/// requests — passing `?page_size=999999` clamps to `max`.
-///
-/// Edge cases handled:
-/// * Missing / empty / non-parseable param → `default`.
-/// * Negative or zero → `default` (a 0-row "page" doesn't make sense).
-/// * Larger than `max` → clamped to `max`.
+/// A value above `max` is clamped to `max`, which stops a client
+/// asking for a million rows. A missing, unparseable, zero or
+/// negative value gives `default`.
 #[must_use]
 pub fn clamp_page_size(default: i64, max: i64, params: &HashMap<String, String>) -> i64 {
     params

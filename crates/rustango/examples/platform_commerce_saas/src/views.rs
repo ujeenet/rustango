@@ -1,4 +1,4 @@
-//! Project views — request handlers (Django-style "views").
+//! Project views — the request handlers this project mounts.
 
 use axum::response::Html;
 

@@ -1,18 +1,10 @@
-//! Model pruning — Eloquent `Prunable` / Django "scheduled bulk
-//! removal" parity. Issue #822.
+//! Model pruning: delete stale rows on a schedule.
 //!
-//! ## Why
-//!
-//! Long-lived tables accumulate stale rows: expired sessions,
-//! tombstoned soft-deletes past their retention window, archived
-//! audit entries, old job-queue records. Django solves this with
-//! ad-hoc management commands; Eloquent has a declarative
-//! `Prunable` / `MassPrunable` trait + `model:prune` CLI. Rustango's
-//! shape sits between the two: declare a `Prunable` impl per model
-//! (returning the queryset of rows TO DELETE), wire it via
-//! [`register_prunable!`], and either invoke `manage prune` from the
-//! CLI or call [`prune_all`] from app code (cron, background job,
-//! startup hook).
+//! Long-lived tables fill up with expired sessions, old soft-deletes,
+//! aged audit entries and finished jobs. Write a [`Prunable`] impl
+//! that returns the queryset of rows to delete, register it with
+//! [`register_prunable!`], then run `manage prune` or call
+//! [`prune_all`] from cron or a background job.
 //!
 //! ## Quick start
 //!
@@ -59,6 +51,10 @@
 //!     tracing::info!(table = %r.table, rows = r.rows, "pruned");
 //! }
 //! ```
+//!
+//! [`Prunable`]: crate::prunable::Prunable
+//! [`prune_all`]: crate::prunable::prune_all
+//! [`register_prunable!`]: crate::register_prunable
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -68,52 +64,39 @@ use crate::core::Model;
 use crate::query::QuerySet;
 use crate::sql::{delete_pool, CounterPool, ExecError, Pool};
 
-/// Boxed future returned by an inventory-registered prune /count
-/// thunk. `Send + 'a` so the inventory-iteration loop can await
-/// each entry sequentially without lifetime gymnastics.
+/// Boxed future returned by a registered prune or count thunk.
 type ResultFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ExecError>> + Send + 'a>>;
 
-/// Trait declaring "this model is prunable; here's the queryset of
-/// rows that should be deleted on the next prune run." Implementors
-/// must also call [`register_prunable!`] to advertise the impl to
-/// the inventory walker (and the `manage prune` CLI verb).
+/// Marks a model as prunable and says which rows to delete. Also call
+/// [`register_prunable!`](crate::register_prunable) so `manage prune`
+/// can find the impl.
 ///
-/// Returning an empty queryset is fine — a prune run over a model
-/// with no stale rows is a no-op.
+/// An empty queryset is fine; the run just deletes nothing.
 ///
-/// The queryset's filters / ordering / limits are honored verbatim.
-/// The framework appends nothing on top of what `prune_queryset`
-/// returns, so safety-belt filters (`deleted_at IS NOT NULL`,
-/// `created < cutoff`) MUST be set inside the impl.
+/// The queryset is used exactly as you return it. The framework adds
+/// no filter of its own, so your cutoff conditions, such as
+/// `created < cutoff` or `deleted_at IS NOT NULL`, must be in the
+/// impl. A queryset with no filter deletes the whole table.
 pub trait Prunable: Model {
-    /// The set of rows to delete on the next prune run. Called once
-    /// per CLI invocation (or once per `prune_all`).
+    /// The rows to delete. Called once per prune run.
     fn prune_queryset() -> QuerySet<Self>;
 }
 
-/// One inventory-collected prunable registration. End users don't
-/// construct these directly — go through [`register_prunable!`].
-///
-/// `name` defaults to the model's `SCHEMA.table` so CLI args
-/// (`--model <name>` / `--except <name>`) match the table name.
+/// One registration. Build it with [`register_prunable!`].
 #[doc(hidden)]
 pub struct PrunableEntry {
-    /// Canonical name — match against CLI `--model` / `--except`.
-    /// Defaults to `<T as Model>::SCHEMA.table`.
+    /// The model's table name, matched by `--model` and `--except`.
     pub name: &'static str,
-    /// Count fn used by `--pretend`. Returns the row count the
-    /// `prune` fn would delete.
+    /// Counts the rows `prune` would delete. Used by `--pretend`.
     pub count: fn(&Pool) -> ResultFuture<'_, i64>,
-    /// Prune fn — actually executes the DELETE. Returns rows
-    /// affected.
+    /// Runs the DELETE and returns rows affected.
     pub prune: fn(&Pool) -> ResultFuture<'_, u64>,
 }
 
 inventory::collect!(PrunableEntry);
 
-/// Internal helper invoked from [`register_prunable!`] to build the
-/// per-model count thunk. Public-but-hidden because it's referenced
-/// from the macro's expanded body.
+/// Count thunk for [`register_prunable!`]. Public only because the
+/// macro expands to a reference to it.
 #[doc(hidden)]
 pub fn __count_thunk<T>(pool: &Pool) -> ResultFuture<'_, i64>
 where
@@ -123,8 +106,7 @@ where
     Box::pin(async move { T::prune_queryset().count(pool).await })
 }
 
-/// Internal helper invoked from [`register_prunable!`] to build the
-/// per-model prune thunk.
+/// Prune thunk for [`register_prunable!`].
 #[doc(hidden)]
 pub fn __prune_thunk<T>(pool: &Pool) -> ResultFuture<'_, u64>
 where
@@ -136,16 +118,13 @@ where
     })
 }
 
-/// Register a [`Prunable`] impl with the inventory walker. The
-/// `manage prune` CLI verb walks every entry on each run; the
-/// in-process [`prune_all`] / [`prune_pretend`] helpers do the same.
+/// Register a [`Prunable`] impl so `manage prune`, [`prune_all`] and
+/// [`prune_pretend`] can find it. Pass the model type only; the name
+/// comes from its table.
 ///
 /// ```ignore
 /// rustango::register_prunable!(AuditEntry);
 /// ```
-///
-/// The macro takes the model type only — the registration name is
-/// inferred from `<T as Model>::SCHEMA.table`.
 #[macro_export]
 macro_rules! register_prunable {
     ($t:ty) => {
@@ -159,20 +138,17 @@ macro_rules! register_prunable {
     };
 }
 
-/// Selection knobs for [`prune_all`] / [`prune_pretend`] / the CLI.
+/// Picks which models a prune run covers.
 #[derive(Debug, Clone, Default)]
 pub struct PruneOptions {
-    /// When non-empty, only models in this list run. Names match
-    /// `PrunableEntry::name` (i.e. the model's SQL table name).
-    /// Empty (the default) means "every registered prunable."
+    /// Run only these table names. Empty means all of them.
     pub only: Vec<String>,
-    /// Models in this list are skipped even when they would
-    /// otherwise run. Takes precedence over `only`.
+    /// Always skip these table names. Wins over `only`.
     pub except: Vec<String>,
 }
 
 impl PruneOptions {
-    /// `true` when this entry should run under the current options.
+    /// `true` when this entry should run.
     fn allows(&self, name: &str) -> bool {
         if self.except.iter().any(|s| s == name) {
             return false;
@@ -184,33 +160,30 @@ impl PruneOptions {
     }
 }
 
-/// One row in the report returned by [`prune_all`] / [`prune_pretend`].
+/// One line of a prune report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PruneReport {
-    /// Model's SQL table name.
+    /// The model's table name.
     pub table: String,
-    /// Rows actually deleted (for `prune_all`) or rows the prune
-    /// WOULD delete (for `prune_pretend`).
+    /// Rows deleted, or rows that would be deleted under
+    /// [`prune_pretend`].
     pub rows: u64,
 }
 
-/// Walk every registered prunable, deleting matching rows. Honors
-/// [`PruneOptions::only`] / `except`. Returns one [`PruneReport`]
-/// per model that actually ran (skipped models produce no entry).
+/// Delete matching rows for every registered prunable that
+/// [`PruneOptions`] allows. Returns one [`PruneReport`] per model that
+/// ran. Use [`prune_pretend`] for a dry run.
 ///
-/// Use [`prune_pretend`] for the dry-run variant.
-///
-/// **Under tenancy, pass a tenant-scoped pool.** Prunable models are
-/// per-tenant, so this prunes whichever tenant `pool` points at — one
-/// pool means one tenant, and a registry pool in schema mode means only
-/// `public`. Fan out with [`crate::tenancy::for_each_tenant`] (#1226).
+/// Under tenancy, pass a tenant-scoped pool. This prunes only the
+/// tenant that `pool` points at, and in schema mode a registry pool
+/// reaches only `public`. Loop over tenants with
+/// [`crate::tenancy::for_each_tenant`] to cover them all.
 ///
 /// # Errors
 ///
-/// Each entry's prune is awaited sequentially. The FIRST error
-/// short-circuits the loop and propagates — every entry up to the
-/// failure has already executed (and its rows are deleted); the
-/// report Vec contains the successful entries.
+/// Entries run one after another and the first error stops the loop.
+/// Rows deleted before that point stay deleted, and the returned
+/// report covers only the entries that finished.
 pub async fn prune_all(pool: &Pool, opts: &PruneOptions) -> Result<Vec<PruneReport>, ExecError> {
     let mut reports = Vec::new();
     for entry in inventory::iter::<PrunableEntry> {
@@ -226,14 +199,12 @@ pub async fn prune_all(pool: &Pool, opts: &PruneOptions) -> Result<Vec<PruneRepo
     Ok(reports)
 }
 
-/// `--pretend` companion to [`prune_all`]. Walks the same registry
-/// but invokes each entry's `count` thunk instead of `prune` — no
-/// rows are deleted. Useful for previewing the impact of a prune
-/// against production data before committing.
+/// Dry run of [`prune_all`]: counts the rows instead of deleting
+/// them. Use it to preview a prune before you run it for real.
 ///
 /// # Errors
 ///
-/// Same shape as [`prune_all`] — first error short-circuits.
+/// As [`prune_all`]: the first error stops the loop.
 pub async fn prune_pretend(
     pool: &Pool,
     opts: &PruneOptions,
@@ -246,17 +217,15 @@ pub async fn prune_pretend(
         let rows = (entry.count)(pool).await?;
         reports.push(PruneReport {
             table: entry.name.to_owned(),
-            // `count` returns i64; clamp the negative-impossible
-            // case to 0 so the reporting type stays positive.
+            // `count` is i64; clamp so the report stays unsigned.
             rows: u64::try_from(rows.max(0)).unwrap_or(0),
         });
     }
     Ok(reports)
 }
 
-/// Names of every model currently registered as prunable. Useful
-/// for diagnostic CLI output ("known prunable tables: …") + for
-/// validating `--model X` / `--except X` flags at parse time.
+/// Every registered prunable table name. Use it to list them, or to
+/// check a `--model` or `--except` flag before running.
 #[must_use]
 pub fn registered_names() -> Vec<&'static str> {
     let mut seen: HashSet<&'static str> = HashSet::new();

@@ -3,7 +3,7 @@
 //! issue #825:
 //!
 //! * `refresh_from_db_pool` — re-SELECT this row by PK and overwrite
-//!   stale in-memory fields. Django's `refresh_from_db`.
+//!   stale in-memory fields.
 //! * `replicate` — clone-as-insertable. PK reset to `Auto::Unset` for
 //!   `Auto<T>` PKs so the next `save_pool` allocates a fresh
 //!   autoincrement.

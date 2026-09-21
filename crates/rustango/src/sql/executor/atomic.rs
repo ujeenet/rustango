@@ -1,5 +1,5 @@
-//! `atomic()` + `on_commit()` — Django's `transaction.atomic` +
-//! `transaction.on_commit`, rolled into one helper. Issue #44.
+//! `atomic()` + `on_commit()` — a closure-scoped transaction and its
+//! after-commit hooks, rolled into one helper. Issue #44.
 //!
 //! Extracted from `executor/mod.rs` as part of #116 step 4. The
 //! `atomic!` declarative-macro sugar lives at the crate root via
@@ -16,10 +16,8 @@ tokio::task_local! {
     static ON_COMMIT: std::sync::Mutex<Vec<Box<dyn FnOnce() + Send>>>;
 }
 
-/// Closure-scoped transaction with after-commit hooks. Django's
-/// [`transaction.atomic`](https://docs.djangoproject.com/en/6.0/topics/db/transactions/#django.db.transaction.atomic)
-/// + [`transaction.on_commit`](https://docs.djangoproject.com/en/6.0/topics/db/transactions/#performing-actions-after-commit),
-/// rolled into one helper. Auto-commits when `f` returns `Ok`,
+/// Closure-scoped transaction with after-commit hooks.
+/// Auto-commits when `f` returns `Ok`,
 /// auto-rolls-back when `f` returns `Err`. Callbacks queued via
 /// [`on_commit`] inside `f` fire **only on the commit path** —
 /// never on rollback.
@@ -46,7 +44,8 @@ tokio::task_local! {
 /// The `Box::pin(async move { … })` wrapping is the cost of an async
 /// closure that borrows `tx` mutably across `await` points on stable
 /// Rust — `&mut PoolTx<'_>` is lifetime-invariant, and `Pin<Box<dyn
-/// Future>>` is the standard escape hatch. The [`atomic!`] macro
+/// Future>>` is the standard escape hatch. The
+/// [`atomic!`](crate::atomic) macro
 /// hides the ceremony if you prefer:
 ///
 /// ```ignore

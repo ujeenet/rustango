@@ -1,7 +1,7 @@
 //! Tri-dialect emission tests for PG aggregate functions (issue #33):
 //! `array_agg`, `string_agg`, `jsonb_agg`. `array_agg` / `jsonb_agg`
 //! stay PG-only (non-PG emits `SqlError::AggregateNotSupportedInDialect`);
-//! `string_agg` is database-agnostic as of Django 6.0 (#1024) — it
+//! `string_agg` is database-agnostic (#1024) — it
 //! lowers to GROUP_CONCAT (MySQL) / group_concat (SQLite).
 
 use rustango::core::{AggregateExpr, AggregateQuery, SqlValue, WhereExpr};
@@ -115,7 +115,7 @@ fn string_agg_distinct_emits_distinct() {
 
 #[test]
 fn string_agg_lowers_on_mysql_and_sqlite() {
-    // #1024 — Django 6.0 made StringAgg database-agnostic. MySQL maps to
+    // #1024 — `string_agg` runs on every backend. MySQL maps to
     // GROUP_CONCAT (delimiter inlined into SEPARATOR), SQLite to
     // group_concat (delimiter bound as a parameter).
     let q = aggregate_query(AggregateExpr::string_agg("tag", ", "), "tags");
@@ -138,7 +138,7 @@ fn string_agg_lowers_on_mysql_and_sqlite() {
 
 #[test]
 fn any_value_emits_per_dialect() {
-    // Django 6.0 AnyValue: PG `any_value()`, MySQL `ANY_VALUE()`, SQLite
+    // `any_value`: PG `any_value()`, MySQL `ANY_VALUE()`, SQLite
     // has neither so it falls back to `min()` (deterministic).
     let q = aggregate_query(AggregateExpr::AnyValue("tag"), "any_tag");
     assert!(

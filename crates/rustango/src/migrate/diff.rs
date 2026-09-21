@@ -1,22 +1,18 @@
 //! Diff two `SchemaSnapshot`s into a list of DDL statements.
 //!
-//! v0.2 scope: detect new tables, dropped tables, new columns, dropped
-//! columns. Type / constraint changes and renames are explicitly
-//! deferred — they can't be inferred from a snapshot diff (rename vs
-//! drop+add are indistinguishable) and need a more explicit migration
-//! authoring story (Django's `RenameField` operation).
+//! Detects added and dropped tables, columns, indexes, constraints
+//! and junction tables, plus column type, nullability, default,
+//! length and uniqueness changes.
 //!
-//! Output is `Vec<String>` of fully-formed Postgres DDL the runner can
-//! execute one statement at a time. New-table CREATE TABLEs come before
-//! ADD COLUMNs (so a new table referenced by a new column already
-//! exists), and DROP COLUMNs come before DROP TABLEs for the same
-//! reason. FK constraints for new tables are emitted last.
+//! **Statement order is a contract.** `CREATE TABLE` comes before
+//! `ADD COLUMN`, so a new column can reference a new table. `DROP
+//! COLUMN` comes before `DROP TABLE` for the same reason. FK
+//! constraints for new tables come last.
 //!
-//! `ADD COLUMN ... NOT NULL` is supported only when the field carries
-//! a `default` (rendered as `DEFAULT <expr>` so Postgres can backfill
-//! existing rows). Without a default, `AddColumn` of a non-null field
-//! is rejected with an explanatory error pointing at the two fixes:
-//! make the field `Option<T>`, or set `#[rustango(default = "…")]`.
+//! `ADD COLUMN ... NOT NULL` only works when the field has a
+//! `default`, which backfills the existing rows. Without one it is
+//! an error, and the message names the two fixes: make the field
+//! `Option<T>`, or add `#[rustango(default = "…")]`.
 
 use std::fmt::Write as _;
 
@@ -24,11 +20,6 @@ use serde::{Deserialize, Serialize};
 
 use super::snapshot::{FieldSnapshot, SchemaSnapshot, TableSnapshot};
 
-/// One thing that should change to move from `prev` to `current`.
-///
-/// Serializes externally-tagged: `{"CreateTable": "foo"}`,
-/// `{"AddColumn": {"table": "foo", "column": "bar"}}`. That's what
-/// migration files store under `Operation::Schema`.
 fn default_index_method_diff() -> String {
     "btree".to_owned()
 }
@@ -37,6 +28,11 @@ fn default_exclusion_method() -> String {
     "gist".to_owned()
 }
 
+/// One thing that must change to move from `prev` to `current`.
+///
+/// Serialized externally tagged, as `{"CreateTable": "foo"}` or
+/// `{"AddColumn": {"table": "foo", "column": "bar"}}`. This is what
+/// a migration file stores under `Operation::Schema`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SchemaChange {
     CreateTable(String /* table name */),
@@ -49,60 +45,58 @@ pub enum SchemaChange {
         table: String,
         column: String,
     },
-    /// Change a column's underlying type — `i32 → i64`, `String → Uuid`, etc.
-    /// Carried as the dialect-neutral name string (matches `FieldSnapshot.ty`
-    /// rather than the closed `FieldType` enum so externally-supplied
-    /// migration files don't break when v0.4+ adds new types). Render emits
-    /// `ALTER TABLE ... ALTER COLUMN ... TYPE <pg_type> USING <col>::<pg_type>`.
+    /// Change a column's type, such as `i32` to `i64`.
+    ///
+    /// The types are the neutral name strings from
+    /// `FieldSnapshot.ty`, not the closed `FieldType` enum, so an
+    /// existing migration file keeps loading when a new type is
+    /// added.
     AlterColumnType {
         table: String,
         column: String,
         from: String,
         to: String,
     },
-    /// Toggle a column between nullable and NOT NULL. `nullable` is the
-    /// **new** state. Render emits `SET NOT NULL` (when false) or
-    /// `DROP NOT NULL` (when true).
+    /// Switch a column between nullable and NOT NULL. `nullable` is
+    /// the **new** state.
     AlterColumnNullable {
         table: String,
         column: String,
         nullable: bool,
     },
-    /// Change a column's `DEFAULT` clause. `Some(expr)` sets the default
-    /// to the given Postgres expression; `None` drops the default.
-    /// `from`/`to` is enough to invert without consulting a snapshot.
+    /// Change a column's `DEFAULT`. `Some(expr)` sets it, `None`
+    /// drops it. Both sides are carried so the op inverts without a
+    /// snapshot.
     AlterColumnDefault {
         table: String,
         column: String,
         from: Option<String>,
         to: Option<String>,
     },
-    /// Change a String column's `max_length` (VARCHAR(N) ↔ TEXT, or
-    /// between two VARCHAR sizes). Render emits `TYPE VARCHAR(N)` or
-    /// `TYPE TEXT` accordingly.
+    /// Change a string column's `max_length`, so between two
+    /// `VARCHAR` sizes or between `VARCHAR(N)` and `TEXT`.
     AlterColumnMaxLength {
         table: String,
         column: String,
         from: Option<u32>,
         to: Option<u32>,
     },
-    /// Rename a table. Not emitted by `detect_changes` — rename vs
-    /// drop+add is ambiguous from a snapshot diff (Django's reasoning).
-    /// Authored manually via `manage makemigrations --empty <name>`
-    /// then editing the JSON.
+    /// Rename a table. `detect_changes` never emits this: a snapshot
+    /// diff cannot tell a rename from a drop plus an add. Write it by
+    /// hand with `manage makemigrations --empty <name>`, then edit
+    /// the JSON.
     RenameTable {
         old_name: String,
         new_name: String,
     },
-    /// Rename a column. Same authoring constraint as `RenameTable`.
+    /// Rename a column. Hand-authored, like `RenameTable`.
     RenameColumn {
         table: String,
         old_column: String,
         new_column: String,
     },
-    /// Add or drop a `UNIQUE` constraint on a single column.
-    /// `unique` is the **new** state. Render emits
-    /// `ADD CONSTRAINT … UNIQUE` or `DROP CONSTRAINT`.
+    /// Add or drop a `UNIQUE` constraint on one column. `unique` is
+    /// the **new** state.
     AlterColumnUnique {
         table: String,
         column: String,
@@ -114,43 +108,32 @@ pub enum SchemaChange {
         table: String,
         columns: Vec<String>,
         unique: bool,
-        /// Access method as a lowercase token (`btree` / `gin` /
-        /// `gist` / …). Defaults to `"btree"` when absent — keeps
-        /// migration JSON files written before issue #34 forward-
-        /// compatible.
+        /// Access method, lowercase: `btree`, `gin`, `gist` and so
+        /// on. Missing means `btree`, so older files still load.
         #[serde(default = "default_index_method_diff")]
         method: String,
-        /// Optional partial-index `WHERE` clause — Django
-        /// `UniqueConstraint(condition=Q(...))`. Issue #265 / T1.3.
-        /// `None` for plain indexes; `Some(expr)` emits
-        /// `CREATE UNIQUE INDEX ... WHERE <expr>` on PG / SQLite.
-        /// MySQL has no partial-index syntax — the writer drops the
-        /// WHERE clause with a doc-level warning.
+        /// `WHERE` clause for a partial index. `None` gives a plain
+        /// index. **MySQL has no partial-index syntax**, so the
+        /// writer drops the clause there and warns.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         where_clause: Option<String>,
-        /// Django `Index(include=[...])` covering-index columns. PG
-        /// 11+ ships `INCLUDE (...)` syntax — non-key columns travel
-        /// with the index leaf for index-only scans. MySQL/SQLite
-        /// lack it; the renderer drops the clause with a warning.
-        /// Empty `Vec` (the default) means "no covering columns".
+        /// Covering-index columns, for Postgres 11's `INCLUDE (...)`.
+        /// **MySQL and SQLite lack it**, so the writer drops the
+        /// clause there and warns.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         include: Vec<String>,
     },
     /// Drop an index by name.
     ///
-    /// `table` is carried because **MySQL needs it** —
-    /// `DROP INDEX <name> ON <table>` — while PostgreSQL and SQLite drop
-    /// by name alone. Without it the renderer could only refuse on
-    /// MySQL, which it did, and `makemigrations` generates these ops
-    /// itself: dropping a model emitted a `DropTable` plus one
-    /// `DropIndex` per index, so an ordinary "remove a table" migration
-    /// was un-appliable on MySQL straight out of the generator (#1588).
+    /// **`table` is needed on MySQL**, whose syntax is
+    /// `DROP INDEX <name> ON <table>`. PG and SQLite drop by name
+    /// alone. `makemigrations` emits one `DropIndex` per index when
+    /// a model goes away, so without the table those migrations
+    /// cannot run on MySQL.
     ///
-    /// `#[serde(default)]` so a migration file written before #1588 —
-    /// which carries no `table` — still deserializes. Such a file is
-    /// appliable on PostgreSQL and SQLite exactly as it was, and gets a
-    /// diagnostic naming the file on MySQL rather than a serde error
-    /// that names nothing.
+    /// `#[serde(default)]` keeps older files loading. They still
+    /// apply on PG and SQLite, and give a clear message on MySQL
+    /// rather than a serde error.
     DropIndex {
         name: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -167,43 +150,38 @@ pub enum SchemaChange {
         name: String,
         table: String,
     },
-    /// Add a Postgres `EXCLUDE` constraint — Django's
-    /// `ExclusionConstraint`. **PG-only** (MySQL + SQLite have no
-    /// equivalent; render emits nothing + logs a warning so the
-    /// rest of the migration still applies). Issue #32.
+    /// Add a Postgres `EXCLUDE` constraint.
     ///
-    /// Renders as `ALTER TABLE <table> ADD CONSTRAINT <name>
-    /// EXCLUDE USING <method> (<elements>) [WHERE (<where>)]`,
-    /// where each element is a `(column, operator)` pair like
-    /// `("room_id", "=")` or `("during", "&&")`. The canonical
-    /// shape for booking-conflict prevention is:
+    /// **Postgres only.** MySQL and SQLite have no equivalent, so
+    /// the writer emits nothing and warns, and the rest of the
+    /// migration still applies.
+    ///
+    /// A typical booking-conflict constraint reads
     /// `EXCLUDE USING gist (room_id WITH =, during WITH &&)`.
     AddExclusionConstraint {
         name: String,
         table: String,
-        /// Index method (`gist` / `btree_gist` / `spgist`). Defaults
-        /// to `gist` when absent — most exclusion constraints rely
-        /// on GiST's range-overlap support.
+        /// Index method: `gist`, `btree_gist` or `spgist`. Missing
+        /// means `gist`, which supports range overlap.
         #[serde(default = "default_exclusion_method")]
         using: String,
-        /// `(column, operator)` pairs in declaration order. The
-        /// operator is the PG comparison op for that column —
-        /// usually `=` for equality columns, `&&` for range
-        /// overlap, `@>` for containment.
+        /// `(column, operator)` pairs in declaration order, where
+        /// the operator is the PG comparison for that column: `=`
+        /// for equality, `&&` for range overlap, `@>` for
+        /// containment.
         elements: Vec<(String, String)>,
-        /// Optional `WHERE` predicate that narrows the constraint
-        /// to a subset of rows (e.g. only active bookings).
-        /// `None` = unconditional.
+        /// `WHERE` predicate limiting the constraint to some rows.
+        /// `None` applies it to all of them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         where_clause: Option<String>,
     },
-    /// Drop an `EXCLUDE` constraint by name. PG-only. Issue #32.
+    /// Drop an `EXCLUDE` constraint by name. Postgres only.
     DropExclusionConstraint {
         name: String,
         table: String,
     },
-    /// Create a many-to-many junction table. Render emits a `CREATE TABLE`
-    /// with two `BIGINT NOT NULL` FK columns and a composite `PRIMARY KEY`.
+    /// Create a many-to-many junction table: two `BIGINT NOT NULL`
+    /// FK columns and a composite `PRIMARY KEY`.
     CreateM2MTable {
         through: String,
         src_table: String,
@@ -215,12 +193,10 @@ pub enum SchemaChange {
     DropM2MTable {
         through: String,
     },
-    /// Add a composite (multi-column) foreign-key constraint declared
-    /// via `#[rustango(fk_composite(...))]`. Sub-slice F.5b. Render
-    /// emits `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY (...)
-    /// REFERENCES ...(...)` and routes the statement through
-    /// `deferred_fks` so the referenced table exists by the time the
-    /// constraint is created.
+    /// Add a multi-column foreign key from
+    /// `#[rustango(fk_composite(...))]`. The statement is deferred
+    /// to the end of the batch, so the referenced table exists by
+    /// the time the constraint is created.
     AddCompositeFk {
         table: String,
         name: String,
@@ -228,30 +204,23 @@ pub enum SchemaChange {
         from: Vec<String>,
         on: Vec<String>,
     },
-    /// Drop a composite FK by constraint name. Render emits
-    /// `ALTER TABLE ... DROP CONSTRAINT IF EXISTS ...`.
+    /// Drop a composite FK by constraint name.
     DropCompositeFk {
         table: String,
         name: String,
     },
 }
 
-/// Compute the ordered list of changes from `prev` → `current`.
+/// Compute the ordered list of changes from `prev` to `current`.
 ///
-/// Order:
-/// 1. `CreateTable` (new tables)
-/// 2. `AddColumn` (new columns on existing tables)
-/// 3. `AlterColumn*` (metadata changes on same-named columns)
-/// 4. `DropColumn` (dropped columns on remaining tables)
-/// 5. `DropTable` (dropped tables)
+/// **The order is a contract:** create tables, add columns, alter
+/// columns, drop columns, drop tables.
 ///
-/// Renames (`RenameTable`, `RenameColumn`) are **never** emitted by
-/// `detect_changes` — rename vs drop+add is ambiguous from a
-/// snapshot diff (Django's reasoning). Authors hand-write rename
-/// migrations via `manage makemigrations --empty <name>` and edit
-/// the JSON directly. Likewise, FK/PK/CHECK changes still surface
-/// the v0.3.1 polish #3 hard error today; full FK/CHECK alters land
-/// in a follow-up.
+/// Renames are **never** emitted: a snapshot diff cannot tell a
+/// rename from a drop plus an add. Write those by hand with
+/// `manage makemigrations --empty <name>`. Changes this cannot
+/// express are reported by [`detect_unsupported_field_changes`]
+/// instead of being silently skipped.
 #[must_use]
 pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<SchemaChange> {
     let mut changes = Vec::new();
@@ -276,9 +245,8 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             }
         }
     }
-    // Metadata changes on same-named columns. Replaces the v0.3.1
-    // polish hard error: type/nullable/default/max_length changes
-    // now produce concrete AlterColumn ops instead of bailing.
+    // Metadata changes on columns that kept their name: type,
+    // nullability, default and max_length become AlterColumn ops.
     for ct in &current.tables {
         let Some(pt) = prev.table(&ct.name) else {
             continue;
@@ -304,28 +272,25 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             }
         }
     }
-    // Objects that hang off a table, dropped **before** the table.
+    // Objects that hang off a table must be dropped **before** the
+    // table itself.
     //
-    // Ordering, not suppression (#1598). #1588 was `DropTable` followed
-    // by `DropIndex` for an index the table owned: on MySQL the table
-    // drop auto-commits, the index drop then fails 1146, the ledger row
-    // is never written, and the re-run fails 1051 with nothing able to
-    // reconcile it.
+    // Order, never suppression. `DropTable` first then `DropIndex`
+    // fails on MySQL: the table drop commits at once, the index drop
+    // then errors, and the ledger row is never written, so the
+    // re-run cannot recover.
     //
-    // The first fix suppressed the dependent drop, which stopped that
-    // and broke rollback: the forward list became `[DropTable]` alone,
-    // `invert` produced `[CreateTable]`, and `CreateTable` renders no
-    // index DDL — so rolling back *succeeded* and silently restored the
-    // table without its indexes, UNIQUE ones included, while the
-    // predecessor snapshot still listed them. A loud failure traded for
-    // a quiet one.
+    // Dropping the index only from the op list is worse. `invert`
+    // would then produce a bare `CreateTable`, which renders no
+    // index DDL, so a rollback would quietly restore the table
+    // without its indexes, UNIQUE ones included.
     //
-    // Emitting the drop first is accepted by every dialect, because the
-    // table is still there. `invert` walks the forward list in reverse,
+    // Dropping the dependent first works on every dialect, because
+    // the table is still there. `invert` walks the list backwards,
     // so `[DropIndex, DropTable]` inverts to
-    // `[CreateTable, CreateIndex]` — the right order, for free.
+    // `[CreateTable, CreateIndex]`: the right order, for free.
     //
-    // Dropped indexes — present in prev, absent from current.
+    // Dropped indexes: in prev, not in current.
     for idx in &prev.indexes {
         if current.index(&idx.name).is_none() {
             changes.push(SchemaChange::DropIndex {
@@ -334,9 +299,8 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             });
         }
     }
-    // Dropped CHECK constraints. Same ordering rule, same reason: this
-    // loop and the EXCLUDE one below were the two #1588's fix missed,
-    // so a model carrying a table-level CHECK still reproduced it.
+    // Dropped CHECK constraints, before the table, for the same
+    // reason as indexes.
     for c in &prev.checks {
         if current.check(&c.name).is_none() {
             changes.push(SchemaChange::DropCheckConstraint {
@@ -345,11 +309,8 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
             });
         }
     }
-    // Dropped PG EXCLUDE constraints.
-    //
-    // Names rather than a lookup helper: `SchemaSnapshot` has
-    // `table`/`index`/`check` accessors but none for excludes, and the
-    // add-side below builds the mirror set for the same reason.
+    // Dropped PG EXCLUDE constraints. Compared by name, because
+    // `SchemaSnapshot` has no accessor for excludes.
     let current_exclude_names: std::collections::HashSet<&str> =
         current.excludes.iter().map(|x| x.name.as_str()).collect();
     for x in &prev.excludes {

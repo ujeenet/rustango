@@ -50,6 +50,9 @@
 //! **The completion callback.** [`crate::webhook_delivery`] needs a job
 //! queue handle, and reaching into the caller's would be guessing at
 //! their setup. The run is pollable and streamable in the meantime.
+//!
+//! [`UrlPolicy::Template`]: crate::tenancy::provision_webhook::UrlPolicy::Template
+//! [`UrlPolicy::CallerSupplied`]: crate::tenancy::provision_webhook::UrlPolicy::CallerSupplied
 
 use std::sync::Arc;
 use std::time::Duration;

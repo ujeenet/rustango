@@ -1,23 +1,22 @@
 //! Distributed rate limiting via the [`Cache`](crate::cache::Cache) trait.
 //!
-//! Pair this with `cache::RedisCache` for safe enforcement across many
-//! processes / replicas — a single shared counter per `(window, key)`
-//! pair, incremented atomically by Redis' `INCRBY`. Pair with the
-//! built-in `InMemoryCache` for testing.
+//! One counter per `(key, window)` pair, held in the cache. With
+//! `cache::RedisCache` the limit is shared: every process counts into
+//! the same bucket via `INCRBY`. With `InMemoryCache` the limit is
+//! **per process**, so N replicas allow N times the capacity — use it
+//! for tests, not for a scaled deployment.
 //!
 //! ## Algorithm: fixed-window counter
 //!
-//! For each `(key, window)` pair, the bucket id is the unix-seconds
-//! window-start (`(now / window_secs) * window_secs`). Each request
-//! increments that counter. The counter expires when its window does.
-//! Simple, fast, no per-request locks, and works across replicas because
-//! Redis owns the shared state.
+//! The bucket id is the window start in unix seconds
+//! (`(now / window_secs) * window_secs`). Each request increments that
+//! counter, and the counter expires with its window. No per-request
+//! locks.
 //!
-//! Trade vs. token-bucket: bursts can hit `2 * capacity` in a single
-//! second straddling a window edge. For most APIs this is fine — if
-//! you need leaky-bucket smoothness, stay with the in-process
-//! [`crate::rate_limit::RateLimitLayer`] (single replica) or build a
-//! sliding-window counter on top of the same [`Cache`] trait.
+//! The cost: a burst that straddles a window edge can reach
+//! `2 * capacity` in one second. If you need smoothing, use the
+//! in-process [`crate::rate_limit::RateLimitLayer`] or build a
+//! sliding-window counter on the same `Cache` trait.
 //!
 //! ## Quick start
 //!
@@ -52,15 +51,15 @@ use axum::Router;
 use crate::cache::BoxedCache;
 use crate::rate_limit::KeyBy;
 
-/// One-way hash of a bucket discriminator (#1252). A `SHA-256` prefix —
-/// enough to distribute keys and to make the same client hash the same,
-/// while never exposing a secret header value (API key / bearer token)
-/// as a readable cache key.
+/// One-way hash of a bucket discriminator. A `SHA-256` prefix is
+/// stable per client, so the counter still works, but a secret header
+/// value (API key, bearer token) never lands in the cache as a
+/// readable key.
 fn hash_discriminator(value: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(value.as_bytes());
-    // 16 hex chars (64 bits) — collision-negligible for a rate-limit
-    // keyspace, and short enough to keep cache keys compact.
+    // 16 hex chars (64 bits): collisions are negligible for a
+    // rate-limit keyspace and the key stays short.
     digest[..8]
         .iter()
         .fold(String::with_capacity(16), |mut s, b| {
@@ -70,10 +69,10 @@ fn hash_discriminator(value: &str) -> String {
         })
 }
 
-/// Warn (at most once per process) that the limiter could not derive a
-/// per-client key and is falling back to a shared bucket — a
-/// misconfiguration that turns the limiter into a site-wide throttle
-/// (#1252). Rate-limited to one line so a hot path can't flood logs.
+/// Warn once per process that the limiter could not derive a
+/// per-client key and fell back to one shared bucket, which turns it
+/// into a site-wide throttle. One line only, so a hot path cannot
+/// flood the logs.
 fn warn_missing_discriminator(what: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
@@ -131,12 +130,11 @@ impl CacheRateLimitLayer {
     fn extract_key(&self, req: &Request<Body>) -> String {
         match &self.key_by {
             KeyBy::Ip => crate::rate_limit::client_ip_key(req),
-            // Hash the header value, never store it raw (#1252). Keyed by
-            // `authorization` / `x-api-key`, the raw value is a live
-            // secret; this counter lives in a shared cache (Redis), so a
-            // raw key would leak credentials to anyone who can enumerate
-            // keys (`SCAN`, an RDB dump). A SHA-256 prefix distributes
-            // just as well and is one-way.
+            // Hash the header value, never store it raw. With
+            // `authorization` or `x-api-key` the value is a live
+            // credential, and this counter lives in a shared cache, so
+            // a raw key would hand it to anyone who can list keys
+            // (`SCAN`, an RDB dump).
             KeyBy::Header(name) => req
                 .headers()
                 .get(*name)
@@ -154,16 +152,14 @@ impl CacheRateLimitLayer {
         self.window.as_secs().max(1)
     }
 
-    /// Take one slot from the bucket for `key`. Returns
-    /// `Ok((current_count, reset_at_unix_secs))` on success,
-    /// `Err(retry_after_secs)` when over capacity.
+    /// Take one slot from the bucket for `key`. On success returns
+    /// `(current_count, reset_at_unix_secs)`.
     ///
     /// # Errors
-    /// Returns `Err(retry_after_secs)` when the limit has been hit. Any
-    /// underlying cache error is treated as "fail open" — the request is
-    /// allowed and `Ok((0, 0))` is returned. This avoids hard outages
-    /// when Redis is briefly unreachable; flip to fail-closed by reading
-    /// `cache.incr(...)` directly if your threat model requires it.
+    /// `Err(retry_after_secs)` when the limit is hit. A cache error
+    /// fails open instead: the request is allowed and `Ok((0, 0))`
+    /// returned, so a short cache outage does not block all traffic.
+    /// Call `cache.incr(...)` yourself if you need fail-closed.
     pub async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
         let window_secs = self.window_secs();
         let now = SystemTime::now()
@@ -190,7 +186,7 @@ impl CacheRateLimitLayer {
             let retry = reset_at.saturating_sub(now).max(1);
             Err(retry)
         } else {
-            // count fits in u32 because capacity is u32 and we check above.
+            // Fits in u32: capacity is u32 and the check above passed.
             Ok((u32::try_from(count).unwrap_or(u32::MAX), reset_at))
         }
     }
@@ -264,8 +260,8 @@ mod tests {
 
     #[test]
     fn header_value_is_hashed_not_stored_raw() {
-        // #1252 — a secret header value (API key / bearer token) must
-        // never appear verbatim in a cache key.
+        // A secret header value must never appear verbatim in a
+        // cache key.
         let secret = "super-secret-api-key-abc123";
         let h = hash_discriminator(secret);
         assert_ne!(h, secret, "value must be transformed");
@@ -343,10 +339,8 @@ mod tests {
 
     #[tokio::test]
     async fn fail_open_on_cache_error_is_documented_via_take_succeeding() {
-        // The InMemoryCache never errors, so we verify the success path
-        // here. Real fail-open behavior is exercised by the
-        // CacheRateLimitLayer::take() doc comment + the fact that we
-        // return Ok((0,0)) on Err.
+        // InMemoryCache never errors, so this only covers the success
+        // path; the fail-open branch has no test yet.
         let l = layer(2, 60);
         assert!(l.take("k").await.is_ok());
     }

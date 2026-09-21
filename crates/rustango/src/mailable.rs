@@ -1,24 +1,12 @@
-//! Laravel-shape `Mailable` trait — declare an email type as a struct
-//! that owns its own template + recipient logic. Pairs with
-//! [`crate::email_templates::EmailRenderer`] (template rendering) and
-//! [`crate::email_jobs`] (off-request delivery).
+//! The `Mailable` trait: one email kind, one struct, owning its own
+//! template and recipients. It renders with
+//! [`crate::email_templates::EmailRenderer`] and can be queued through
+//! [`crate::email_jobs`].
 //!
 //! ## Why
 //!
-//! Without this, building one email looks like:
-//!
-//! ```ignore
-//! let mut ctx = Context::new();
-//! ctx.insert("name", &user.name);
-//! ctx.insert("url", &reset_url);
-//! let email = renderer.render("password_reset", &ctx)?
-//!     .to(&user.email)
-//!     .from("noreply@example.com");
-//! mailer.send(&email).await?;
-//! ```
-//!
-//! With a Mailable, the email type owns the template + recipient
-//! logic, so call sites are a one-liner:
+//! Without it, each call site repeats the context, the template name
+//! and the addresses. With a Mailable, sending is one line:
 //!
 //! ```ignore
 //! PasswordReset { user: user.clone(), reset_url }
@@ -72,44 +60,42 @@ pub enum MailableError {
     Send(#[from] MailError),
 }
 
-/// One sendable email type. The struct holds whatever per-instance
-/// state it needs (recipient, IDs, URLs) and `Mailable` glues it
-/// to a Tera template + recipient + sender logic.
+/// One sendable email kind. The struct carries the per-email data,
+/// such as recipient, ids and URLs, and this trait ties it to a Tera
+/// template and to the addresses.
 pub trait Mailable {
-    /// Template basename — the renderer looks for
-    /// `{TEMPLATE}.subject.txt` + `{TEMPLATE}.txt` (+ optional
-    /// `{TEMPLATE}.html`) under this name.
+    /// Template base name. The renderer looks for
+    /// `{TEMPLATE}.subject.txt`, `{TEMPLATE}.txt` and, if present,
+    /// `{TEMPLATE}.html`.
     const TEMPLATE: &'static str;
 
-    /// Mutate the rendered [`Email`] to set recipients, sender,
-    /// reply-to, custom headers, etc. The default implementation
-    /// returns the rendered email unchanged — override to add at
-    /// least one `.to(...)` call.
+    /// Set recipients, sender, reply-to and headers on the rendered
+    /// [`Email`]. The default returns it unchanged, so override this
+    /// and add at least one `.to(...)`.
     fn build(&self, base: Email) -> Email {
         base
     }
 
-    /// Build the Tera context the template renders against. Default:
-    /// empty context (only useful for templates with no variables).
+    /// The Tera context for the template. Defaults to empty.
     fn context(&self) -> Context {
         Context::new()
     }
 
-    /// Render the email via `renderer` and return it ready-to-send.
+    /// Render the email and return it ready to send.
     ///
     /// # Errors
-    /// `Render(_)` for any template error (missing / parse failure).
+    /// `Render(_)` when the template is missing or fails to render.
     fn render(&self, renderer: &EmailRenderer) -> Result<Email, MailableError> {
         let ctx = self.context();
         let base = renderer.render(Self::TEMPLATE, &ctx)?;
         Ok(self.build(base))
     }
 
-    /// Render + send synchronously.
+    /// Render and send in the current request.
     ///
     /// # Errors
-    /// `Render(_)` for template errors, `Send(_)` for mailer errors
-    /// (refused recipient, transport failure, etc.).
+    /// `Render(_)` for template errors, `Send(_)` when the mailer
+    /// fails, for example a refused recipient or a transport error.
     fn send<'a>(
         &'a self,
         renderer: &'a EmailRenderer,
@@ -125,13 +111,12 @@ pub trait Mailable {
         })
     }
 
-    /// Render now, dispatch via the [`crate::jobs`] queue. Returns
-    /// immediately; delivery happens on a worker.
+    /// Render now and put the email on the [`crate::jobs`] queue. This
+    /// returns at once; a worker delivers it.
     ///
     /// # Errors
-    /// `Render(_)` for template errors. Queue errors bubble up via
-    /// the inner [`crate::jobs::JobError`] mapped into a `Send`
-    /// variant (string-shaped).
+    /// `Render(_)` for template errors. A queue error comes back as
+    /// `Send(_)` carrying the message text.
     #[cfg(feature = "jobs")]
     fn dispatch<'a, Q>(
         &'a self,
@@ -212,8 +197,8 @@ mod tests {
     #[tokio::test]
     async fn send_pushes_through_mailer() {
         let r = renderer();
-        // Hold a typed handle for inspection AND the Arc<dyn Mailer>
-        // we hand to send(); both point at the same InMemoryMailer.
+        // Two handles on the same InMemoryMailer: a typed one to inspect,
+        // and the boxed one that send() takes.
         let im = Arc::new(InMemoryMailer::new());
         let mailer: BoxedMailer = im.clone();
         let m = WelcomeMail {

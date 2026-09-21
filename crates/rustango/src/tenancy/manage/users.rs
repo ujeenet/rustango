@@ -274,7 +274,7 @@ where
 
 // ---------- create-superuser (v0.27.6, #77 partial) ----------
 
-/// Django-shape `create-superuser <slug> <username> [--password <s>]`.
+/// `create-superuser <slug> <username> [--password <s>]`.
 /// Convenience entrypoint that always sets `is_superuser = true` —
 /// equivalent to `create-user <slug> <username> --superuser` but
 /// with a clearer name and prompts when args are missing.

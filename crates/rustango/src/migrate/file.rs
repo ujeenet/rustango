@@ -1,16 +1,14 @@
 //! On-disk migration file format.
 //!
-//! One JSON file per migration, lex-sortable by `name`
-//! (e.g. `0001_initial.json`, `0002_add_bio_to_author.json`). Each file
-//! stores the **full schema snapshot** at that point — so any one file
-//! can stand on its own as a starting state, and future inverse-diffs
-//! have access to dropped fields' metadata without chasing predecessors.
+//! One JSON file per migration, named so a lexical sort gives the
+//! apply order (`0001_initial.json`, `0002_add_bio_to_author.json`).
+//! Each file holds the **full schema snapshot** at that point, so it
+//! can stand alone as a starting state and a rollback can recover the
+//! metadata of a dropped field without reading its predecessors.
 //!
-//! `forward` is a flat ordered list of [`Operation`]s — `Schema` and
-//! `Data` interleaved so callers can write the canonical
-//! "add nullable → backfill via SQL → set NOT NULL" recipe in one
-//! migration. Slice 3 of v0.3 will execute them in order; Slice 4 will
-//! invert this list to roll back.
+//! `forward` is one ordered list of [`Operation`]s, mixing schema and
+//! data steps. That lets one migration do the usual "add a nullable
+//! column, backfill it, then set NOT NULL".
 //!
 //! ```json
 //! {
@@ -41,43 +39,36 @@ use super::snapshot::SchemaSnapshot;
 pub struct Migration {
     /// Lex-sortable file stem, e.g. `0002_add_bio_to_author`. Apply order.
     pub name: String,
-    /// RFC3339 timestamp set by `make_migrations` when the file is written.
-    /// Informational only — the apply runner ignores it.
+    /// RFC3339 timestamp written by `make_migrations`. For humans
+    /// only; the runner ignores it.
     pub created_at: String,
     /// Predecessor migration name. `None` for `0001_initial`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub prev: Option<String>,
-    /// Wrap the migration in a transaction. Default `true`. Set `false`
-    /// for migrations that can't run inside a tx (e.g. `CREATE INDEX
-    /// CONCURRENTLY`).
+    /// Wrap the migration in a transaction. Default `true`. Set
+    /// `false` for statements that cannot run in one, such as
+    /// `CREATE INDEX CONCURRENTLY`.
     #[serde(default = "default_atomic")]
     pub atomic: bool,
-    /// Where this migration runs — registry vs tenant. Default
-    /// `Tenant` (most schema work is tenant-shaped). v0.5+ scoped
-    /// migrations use this to route between `migrate_registry` (runs
-    /// once against the registry DB) and `migrate_tenants` (fans out
-    /// across active orgs). Pre-v0.5 migrations missing the field
-    /// deserialize as `Tenant` and the runner ignores the distinction
-    /// until v0.5 Slice 3 wires it in.
+    /// Whether this runs against the registry or every tenant.
+    /// Defaults to `Tenant`, which covers most schema work.
     #[serde(default, skip_serializing_if = "MigrationScope::is_default")]
     pub scope: MigrationScope,
-    /// Django-style squash bookkeeping: the migrations this one **replaces**.
+    /// The migrations this one **replaces**, for a squash.
     ///
-    /// A squash collapses a run of historical migrations into a single file
-    /// that recreates the same end state. On a **fresh** database it simply
-    /// runs (plain `CREATE TABLE`). On an **existing** database whose history
-    /// already contains the replaced migrations, running it would collide —
-    /// so the runner *reconciles* instead: it records the squash as applied
-    /// and tombstones the replaced ledger rows, without executing any DDL.
-    /// See [`crate::migrate::migrate_pool`] and the `--fake` escape hatch.
+    /// A squash folds a run of old migrations into one file that
+    /// reaches the same end state. On a fresh database it just runs.
+    /// On a database that already applied the replaced migrations the
+    /// runner reconciles instead: it records the squash and tombstones
+    /// the old ledger rows, running no DDL. See
+    /// [`crate::migrate::migrate_pool`] and the `--fake` flag.
     ///
-    /// Empty for ordinary (non-squash) migrations, and omitted from the JSON
-    /// when empty so pre-squash migration files round-trip unchanged.
+    /// Empty for an ordinary migration, and then left out of the JSON.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaces: Vec<String>,
-    /// Full schema snapshot **after** applying `forward`.
+    /// Full schema snapshot **after** `forward` has been applied.
     pub snapshot: SchemaSnapshot,
-    /// Ordered list of operations — schema and data interleaved.
+    /// Ordered operations, schema and data mixed.
     pub forward: Vec<Operation>,
 }
 
@@ -85,20 +76,18 @@ pub struct Migration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MigrationScope {
-    /// Cross-tenant — runs once against the registry DB. Reserved
-    /// for migrations that touch `rustango_orgs`,
-    /// `rustango_operators`, audit logs, or any other registry-only
-    /// table.
+    /// Runs once against the registry database. For registry-only
+    /// tables such as `rustango_orgs` or `rustango_operators`.
     Registry,
-    /// Per-tenant — runs against every active org's storage (schema
-    /// or dedicated DB). Default; covers ~all user schema work.
+    /// Runs against every active org's storage. The default, and
+    /// almost all user schema work.
     #[default]
     Tenant,
 }
 
 impl MigrationScope {
-    /// Used by serde's `skip_serializing_if` so the default
-    /// (`Tenant`) doesn't clutter migration files.
+    /// Used by serde's `skip_serializing_if` to keep the default
+    /// (`Tenant`) out of migration files.
     #[must_use]
     pub fn is_default(&self) -> bool {
         matches!(self, Self::Tenant)
@@ -116,47 +105,41 @@ fn default_atomic() -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Operation {
-    /// A schema change — same shape as the diff IR
-    /// ([`SchemaChange`]). Routed through `render_changes` at apply time.
+    /// A schema change, in the same shape as the diff IR
+    /// ([`SchemaChange`]). Rendered by `render_changes` at apply time.
     Schema(SchemaChange),
-    /// Raw SQL the user wrote by hand, typically a backfill.
+    /// Raw SQL the user wrote by hand, usually a backfill.
     Data(DataOp),
-    /// Django-shape `RunPython` — invokes a named Rust callback at
-    /// apply time. The callback must be registered with
-    /// [`crate::register_migration_callback!`] at startup; the name
-    /// here is matched against the inventory registry.
-    /// Issue #347.
+    /// Calls a named Rust callback at apply time. Register it with
+    /// [`crate::register_migration_callback!`] at startup.
     Callback(CallbackOp),
 }
 
-/// `Operation::Callback` payload — references a registered Rust
-/// callback by name. The runner looks up the name in the
-/// [`crate::migrate::callbacks`] inventory at apply time; unknown
-/// names surface as [`crate::migrate::MigrateError::Validation`].
+/// Names the Rust callback an [`Operation::Callback`] runs. The runner
+/// looks the name up in [`crate::migrate::callbacks`] at apply time;
+/// an unknown name is a [`crate::migrate::MigrateError::Validation`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CallbackOp {
     /// Forward-callback name. Required.
     pub name: String,
-    /// Optional reverse-callback name. When `None` the migration is
-    /// effectively non-reversible at the data layer; the runner
-    /// rejects unapply attempts the same way it rejects `DataOp`
-    /// entries with `reversible: true` and no `reverse_sql`.
+    /// Reverse-callback name. With `None`, rollback fails rather than
+    /// skipping the step.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reverse_name: Option<String>,
 }
 
-/// User-authored SQL plus its inverse. Both fields are raw Postgres
-/// expressions inserted verbatim — no escaping, no parameter binding.
+/// User-written SQL plus its inverse. Both go into the statement
+/// as-is: no escaping and no parameter binding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DataOp {
     /// SQL run when the migration is applied forward.
     pub sql: String,
-    /// SQL run when the migration is rolled back. `None` is only valid
-    /// when `reversible == false`; the load step rejects the contradiction.
+    /// SQL run on rollback. `None` is valid only when `reversible` is
+    /// `false`; loading rejects the contradiction.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reverse_sql: Option<String>,
-    /// Mark a migration as one-way. Rollback fails fast on irreversible
-    /// ops rather than silently no-op'ing — Django's footgun avoided.
+    /// `false` marks the op one-way. Rollback then fails instead of
+    /// quietly skipping it.
     #[serde(default = "default_reversible")]
     pub reversible: bool,
 }
@@ -177,9 +160,8 @@ pub fn load(path: &Path) -> Result<Migration, MigrateError> {
     parse(&raw)
 }
 
-/// Parse + validate a migration from an in-memory JSON string. Used
-/// by [`load`] (after `read_to_string`) and by `migrate_embedded`
-/// (which gets the bytes via `include_str!`).
+/// Parse and validate a migration from a JSON string. Used by
+/// [`load`], and by `migrate_embedded` for `include_str!` bytes.
 ///
 /// # Errors
 /// Returns [`MigrateError::Json`] on parse failure or
@@ -194,8 +176,7 @@ pub fn parse(raw: &str) -> Result<Migration, MigrateError> {
 ///
 /// # Errors
 /// Returns [`MigrateError::Io`] on write failure or
-/// [`MigrateError::Json`] on serialization failure (extremely unlikely
-/// for our well-typed schema).
+/// [`MigrateError::Json`] on serialization failure.
 pub fn write(path: &Path, migration: &Migration) -> Result<(), MigrateError> {
     let raw = serde_json::to_string_pretty(migration)?;
     std::fs::write(path, raw)?;
@@ -205,14 +186,11 @@ pub fn write(path: &Path, migration: &Migration) -> Result<(), MigrateError> {
 /// Load every `*.json` migration in `dir`, sorted lexicographically by
 /// file name (which is the canonical apply order).
 ///
-/// A non-existent `dir` is treated as an empty list — useful for
-/// `make_migrations` against a fresh project. Each file is fully
-/// validated via [`load`], and the cross-file `prev` chain is
-/// validated via [`validate_chain`] — a migration declaring
-/// `prev: "0002_missing"` whose predecessor isn't present fails at
-/// load time with a clear "broken migration chain" error rather than
-/// surfacing as a confusing failure deep inside `unapply` or
-/// `migrate_to`.
+/// A missing `dir` gives an empty list, which is what a fresh project
+/// needs. Each file is validated by [`load`], and the `prev` chain by
+/// [`validate_chain`], so a migration naming a predecessor that is not
+/// there fails here with a clear error instead of deep inside
+/// `unapply` or `migrate_to`.
 ///
 /// # Errors
 /// Returns [`MigrateError::Io`] on read failure, [`MigrateError::Json`]
@@ -236,16 +214,13 @@ pub fn list_dir(dir: &Path) -> Result<Vec<Migration>, MigrateError> {
     Ok(out)
 }
 
-/// Multi-directory variant of [`list_dir`] — slice 9.0g's foundation
-/// for per-app migration discovery. Walks every directory in `dirs`,
-/// concatenates their `Vec<Migration>` outputs, and re-sorts the
-/// merged list lex by `name` so the apply order is deterministic
-/// regardless of which app contributed which file.
+/// [`list_dir`] over several directories. Loads each one, then sorts
+/// the merged list by `name`, so apply order does not depend on which
+/// app contributed which file.
 ///
-/// Per-directory chain validation is preserved (each dir's prev/name
-/// graph is checked in isolation by [`list_dir`]); cross-directory
-/// chains aren't required to link, since two independent apps would
-/// have no reason to chain through each other.
+/// Each directory's `prev` chain is checked on its own. Chains are not
+/// required to link across directories: two independent apps have no
+/// reason to chain through each other.
 ///
 /// # Errors
 /// Whatever [`list_dir`] returns for any of the inputs.
@@ -262,19 +237,15 @@ where
     Ok(out)
 }
 
-/// Discover every migrations directory rooted at `project_root`:
-/// the flat `<project_root>/migrations/` (project-level migrations,
-/// including bootstraps) PLUS each `<project_root>/<app>/migrations/`
-/// (per-app migrations the scaffolder drops alongside `models.rs`).
+/// Every migrations directory under `project_root`: the top-level
+/// `migrations/`, plus one per app at `<app>/migrations/`.
 ///
 /// Used by `Builder::migrate(project_root)` so a multi-app project
-/// applies all of its migrations from a single call. Returns the
-/// directories as `PathBuf` (not loaded migrations) so callers can
-/// scope-filter (e.g. tenancy's `migrate_registry` vs
-/// `migrate_tenants`) before loading.
+/// migrates in one call. Returns paths rather than loaded migrations,
+/// so a caller can filter by scope first.
 ///
-/// Order: flat dir first (registry-shaped bootstraps land before app
-/// content), then app dirs in lex order of app names.
+/// The top-level directory comes first, so its bootstraps run before
+/// app content; app directories follow in name order.
 #[must_use]
 pub fn discover_migration_dirs(project_root: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
@@ -290,13 +261,12 @@ pub fn discover_migration_dirs(project_root: &Path) -> Vec<PathBuf> {
                 if !path.is_dir() {
                     return None;
                 }
-                // Skip the flat top-level migrations dir (already added)
-                // + obvious not-an-app folders.
+                // Skip the top-level migrations dir, already added,
+                // and folders that are clearly not apps.
                 let name = path.file_name()?.to_str()?;
-                // `system` is the framework's own app; its migrations are
-                // scope-partitioned (registry vs tenant) and applied by the
-                // tenancy provisioning path under a dedicated ledger, not as
-                // a plain unscoped user-app dir here.
+                // `system` is the framework's own app. Tenancy
+                // provisioning applies its migrations by scope under
+                // a separate ledger, so it is not a plain app dir.
                 if matches!(
                     name,
                     "migrations" | "target" | "src" | ".git" | "node_modules" | "system"
@@ -318,10 +288,9 @@ pub fn discover_migration_dirs(project_root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Verify every migration's `prev` reference points to another
-/// migration in the slice. Caller passes `origin` (a dir path or a
-/// label like `"embedded slice"`) so the error message names where
-/// the migrations came from.
+/// Check that every `prev` names another migration in the same list.
+/// `origin` is a directory path or a label, and appears in the error
+/// so the reader knows where the migrations came from.
 ///
 /// # Errors
 /// Returns [`MigrateError::Validation`] on the first broken link.

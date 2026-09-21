@@ -27,7 +27,7 @@
 //! }
 //! ```
 //!
-//! ## Crate-internal layout (Django-shape, slice 6)
+//! ## Crate-internal layout
 //!
 //! - [`tenants`] — `create-tenant`, `drop-tenant`, `purge-tenant`,
 //!   `list-tenants` plus the database-mode admin-DROP helper.
@@ -62,7 +62,9 @@ mod wizard;
 /// Typed Rust API for tenancy provisioning — `create_tenant_if_missing`,
 /// `create_operator_if_missing`, `create_user_if_missing`, `find_org`.
 /// Use these from `Builder::seed_with` closures and other in-process
-/// callers; the verb dispatcher [`run_with_writer`] is the CLI surface.
+/// callers; the verb dispatcher
+/// [`run_with_writer`](crate::tenancy::manage::run_with_writer) is the
+/// CLI surface.
 pub mod api;
 
 use std::io::{self, Write};
@@ -796,10 +798,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "  startapp <name> [--into <dir>] [--with-manage-bin] [--with-bootstrap-migration]"
     )?;
-    writeln!(
-        w,
-        "                       Scaffold a Django-shape app module."
-    )?;
+    writeln!(w, "                       Scaffold an app module.")?;
     writeln!(w)?;
     writeln!(w, "EXAMPLES:")?;
     writeln!(w, "  cargo run -- migrate")?;

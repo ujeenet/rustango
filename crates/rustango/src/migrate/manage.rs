@@ -1,4 +1,4 @@
-//! Django-style `manage.py` analog for rustango projects.
+//! The `manage` command runner for rustango projects.
 //!
 //! [`run`] takes `argv` and dispatches to the right migration
 //! function. Users drop a tiny `src/bin/manage.rs` binary into their
@@ -23,8 +23,8 @@
 //! UX: `cargo run -- migrate`,
 //! `cargo run -- makemigrations [name]`, etc. The
 //! framework owns the dispatcher; the user owns the entrypoint
-//! (which must compile in their models). Same factoring as Django's
-//! `manage.py` adapted for Rust's link-by-binary model.
+//! (which must compile in their models). The split exists because
+//! Rust links models per binary.
 //!
 //! ## Subcommands
 //!
@@ -177,14 +177,13 @@ pub async fn run_with_writer<W: Write + Send>(
         "flush" => flush_cmd(pool, &args[1..], writer).await,
         // #822 — bulk pruning of stale rows from `Prunable` models.
         "prune" => prune_cmd(pool, &args[1..], writer).await,
-        // Django `manage clearsessions` parity — purges expired
-        // entries from a DatabaseCache-backed table. Works for any
+        // Purges expired entries from a DatabaseCache-backed
+        // table. Works for any
         // table written by `cache::DatabaseCache`, including the
         // sessions-backend table.
         #[cfg(feature = "cache")]
         "clear-cache" | "clearsessions" => clear_cache_cmd(pool, &args[1..], writer).await,
-        // Django `manage createcachetable` parity — idempotent
-        // `CREATE TABLE IF NOT EXISTS` for DatabaseCache.
+        // Idempotent `CREATE TABLE IF NOT EXISTS` for DatabaseCache.
         #[cfg(feature = "cache")]
         "createcachetable" | "create-cache-table" => {
             createcachetable_cmd(pool, &args[1..], writer).await
@@ -201,7 +200,7 @@ pub async fn run_with_writer<W: Write + Send>(
 }
 
 fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
-    writeln!(w, "rustango::manage — Django-style migration runner\n")?;
+    writeln!(w, "rustango::manage — migration and admin command runner\n")?;
     writeln!(w, "USAGE:")?;
     writeln!(w, "  manage <COMMAND> [args]\n")?;
     writeln!(w, "COMMANDS:")?;
@@ -345,20 +344,14 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      Purge expired rows from a DatabaseCache-backed table."
     )?;
-    writeln!(
-        w,
-        "      Default table: rustango_cache. Django parity for clearsessions.\n"
-    )?;
+    writeln!(w, "      Default table: rustango_cache.\n")?;
     writeln!(w, "  createcachetable [--table <name>]")?;
     writeln!(w, "      (alias: create-cache-table)")?;
     writeln!(
         w,
         "      Idempotent CREATE TABLE IF NOT EXISTS for DatabaseCache."
     )?;
-    writeln!(
-        w,
-        "      Default table: rustango_cache. Django parity for createcachetable.\n"
-    )?;
+    writeln!(w, "      Default table: rustango_cache. Safe to re-run.\n")?;
     writeln!(
         w,
         "  sendtestemail --to <addr> [--from <addr>] [--subject <text>]"
@@ -399,10 +392,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         "      rows with a warning; --fail-fast aborts on the first failure.\n"
     )?;
     writeln!(w, "  dumpdata [--model <name>] [--indent <N>]")?;
-    writeln!(
-        w,
-        "      Export every registered model's rows as a Django-shape JSON"
-    )?;
+    writeln!(w, "      Export every registered model's rows as a JSON")?;
     writeln!(
         w,
         "      fixture (`[{{\"model\": \"app.Model\", \"pk\": N, \"fields\": {{...}}}}]`)."
@@ -521,20 +511,11 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      source for every base table in `--schema` (default `public`)."
     )?;
-    writeln!(
-        w,
-        "      Pipe to a file the user reviews + edits. Mirrors Django's"
-    )?;
-    writeln!(
-        w,
-        "      `inspectdb` shape — adopts rustango against an existing DB"
-    )?;
+    writeln!(w, "      Pipe to a file the user reviews + edits. Adopts")?;
+    writeln!(w, "      rustango against an existing database")?;
     writeln!(w, "      without rewriting it.\n")?;
     writeln!(w, "  startapp <name> [--with-manage-bin]")?;
-    writeln!(
-        w,
-        "      Scaffold a Django-shape app module under src/<name>/"
-    )?;
+    writeln!(w, "      Scaffold an app module under src/<name>/")?;
     writeln!(
         w,
         "      (models.rs + views.rs + urls.rs + mod.rs). Idempotent;"
@@ -1183,9 +1164,8 @@ async fn downgrade<W: Write>(
     Ok(())
 }
 
-/// Django-shape `sqlmigrate <name>` — print the SQL that would run
-/// when the named migration is applied, without touching the database.
-/// Issue #345.
+/// `sqlmigrate <name>` — print the SQL that would run when the named
+/// migration is applied, without touching the database.
 ///
 /// Output format mirrors `migrate --dry-run` per-migration: a comment
 /// header (`-- <name> (atomic|non-atomic)`) followed by every emitted
@@ -1581,7 +1561,7 @@ fn describe_op(op: &Operation) -> String {
     }
 }
 
-/// `startapp <name> [--with-manage-bin]` — scaffold a Django-shape app
+/// `startapp <name> [--with-manage-bin]` — scaffold an app
 /// module under `src/<name>/` (`models.rs` + `views.rs` + `urls.rs` +
 /// `mod.rs`). Idempotent — files that already exist are reported as
 /// skipped. With `--with-manage-bin`, also writes `src/bin/manage.rs`
@@ -1668,7 +1648,7 @@ fn write_startapp_report<W: Write>(
 
 fn usage() -> String {
     "startapp <name> [--with-manage-bin]\n  \
-     Scaffold a Django-shape app module under src/<name>/ (mod.rs +\n  \
+     Scaffold an app module under src/<name>/ (mod.rs +\n  \
      models.rs + views.rs + urls.rs). Idempotent: existing files\n  \
      are left untouched. <name> must be a valid Rust identifier.\n\n  \
      --with-manage-bin\n  \
@@ -1788,7 +1768,7 @@ async fn check_cmd<W: Write>(
         // Gated by the `config` feature; no-op without it.
         #[cfg(feature = "config")]
         run_settings_audit(&mut audit);
-        // Django-parity `Meta.required_db_vendor` + `required_db_features`
+        // `required_db_vendor` + `required_db_features`
         // audit — every model declaring `required_db_vendor = "postgres"`
         // or `required_db_features = "json_path, listen_notify"` gets
         // compared against the active pool's dialect. Mismatches surface
@@ -2045,8 +2025,8 @@ fn make_viewset_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateE
     //      `rustango` dep → tenant template (auto-detected)
     //   4. Otherwise → pool template
     //
-    // The auto-detect path keeps Django-shape "you don't need a flag
-    // for the obvious thing" ergonomics: tenancy projects get
+    // The auto-detect path means you do not need a flag for the
+    // obvious thing: tenancy projects get
     // `tenant_router` without the user having to remember `--tenant`.
     let mut explicit_tenant = false;
     let mut explicit_no_tenant = false;
@@ -2117,8 +2097,7 @@ pub struct {name};
 ///
 /// Since v0.30, `tenant_router` carries the full static-router builder
 /// chain (filter / search / ordering / pagination / permissions) so
-/// the scaffold demonstrates each knob — same shape Django's class-
-/// based admin generators emit, just with `// uncomment to enable`
+/// the scaffold demonstrates each knob, with `// uncomment to enable`
 /// markers next to each one.
 fn viewset_template_tenant(name: &str, model: &str, snake: &str, crate_root: &str) -> String {
     format!(
@@ -3079,7 +3058,7 @@ fn db_info_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
 
 /// `manage dumpdata [--model app.Name] [--indent N]` — fixture
 /// export. Iterates every model registered in `inventory` and
-/// emits a Django-shape JSON array:
+/// emits a JSON array:
 ///
 /// ```json
 /// [
@@ -3158,7 +3137,7 @@ async fn dumpdata_cmd<W: Write>(
         writeln!(w)?;
         writeln!(
             w,
-            "  Export every registered model's rows as JSON in Django fixture"
+            "  Export every registered model's rows as JSON in fixture"
         )?;
         writeln!(
             w,
@@ -3227,8 +3206,8 @@ async fn dumpdata_cmd<W: Write>(
 
         for mut row in rows {
             // Pop the PK column off `fields` into the outer fixture
-            // entry's `pk` slot — Django fixtures separate identity
-            // from payload.
+            // entry's `pk` slot: a fixture separates identity from
+            // payload.
             let pk_value = match pk_field {
                 Some(pk) => row
                     .as_object_mut()
@@ -3308,7 +3287,7 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
 }
 
 /// `manage loaddata <fixture.json> [--fail-fast]` — companion to
-/// `dumpdata`. Reads a Django-shape fixture array and inserts each
+/// `dumpdata`. Reads a fixture array and inserts each
 /// row via [`crate::sql::insert_pool`]. Models are resolved by
 /// `inventory` lookup against the `"app.Model"` name in the fixture.
 ///
@@ -3650,7 +3629,7 @@ fn json_to_sql_value(
 }
 
 /// `manage showurls [--format <plain|json>]` — print every named
-/// URL pattern registered via `register_url!`. Django parity verb.
+/// URL pattern registered via `register_url!`.
 ///
 /// Defaults to plain two-column output (name, pattern). `--format
 /// json` emits a JSON array of `{"name": "...", "pattern": "..."}`
@@ -3918,7 +3897,7 @@ fn parse_flush_args(args: &[String]) -> Result<FlushArgs, MigrateError> {
 }
 
 /// `manage flush [--yes] [--app <label>] [--model <name>]` — wipe
-/// all rows from registered model tables. Django parity verb.
+/// all rows from registered model tables.
 /// Without `--yes`, prints what would happen and exits without
 /// touching the database (dry-run by default — a hand-typed
 /// `manage flush` doesn't accidentally nuke production).
@@ -4093,8 +4072,7 @@ fn parse_sendtestemail_args(args: &[String]) -> Result<SendTestEmailArgs, Migrat
 }
 
 // =====================================================================
-// `manage prune` — Eloquent `Prunable` / Django bulk-removal parity.
-// Issue #822.
+// `manage prune` — bulk removal of stale rows from `Prunable` models.
 // =====================================================================
 
 #[derive(Debug, Default, PartialEq)]
@@ -4224,9 +4202,8 @@ async fn prune_cmd<W: Write>(pool: &Pool, args: &[String], w: &mut W) -> Result<
 }
 
 // =====================================================================
-// `manage clear-cache` / `clearsessions` — DatabaseCache GC.
-// Django parity for `manage clearsessions` (when the session backend
-// is the DB cache) + the broader `manage clearcache` flow.
+// `manage clear-cache` / `clearsessions` — DatabaseCache GC, which
+// also clears sessions when the session backend is the DB cache.
 // =====================================================================
 
 #[cfg(feature = "cache")]
@@ -4272,8 +4249,7 @@ fn parse_clear_cache_args(args: &[String]) -> Result<ClearCacheArgs, MigrateErro
 /// table. Pairs with the implicit lazy GC on `get` / `exists` to
 /// reclaim space from keys nobody reads anymore.
 ///
-/// Django parity: `manage clearsessions` (when sessions are backed
-/// by the DB cache) + the broader `manage clearcache` flow.
+/// Also clears sessions when they are backed by the DB cache.
 ///
 /// Defaults the table to `rustango_cache`; pass `--table <name>` for
 /// non-default DatabaseCache tables (`rustango_sessions`, app-
@@ -4307,8 +4283,7 @@ async fn clear_cache_cmd<W: Write>(
 /// `manage createcachetable [--table <name>]` (alias
 /// `create-cache-table`) — idempotently create the
 /// [`crate::cache::DatabaseCache`] table via the dialect's
-/// `CREATE TABLE IF NOT EXISTS` DDL. Django parity for
-/// `manage createcachetable`. Safe to call at every boot.
+/// `CREATE TABLE IF NOT EXISTS` DDL. Safe to call at every boot.
 ///
 /// Defaults the table to `rustango_cache`. Pass `--table <name>` for
 /// non-default DatabaseCache tables (one per app-specific cache, or
@@ -4348,9 +4323,9 @@ async fn createcachetable_cmd<W: Write>(
 }
 
 /// `manage sendtestemail --to <addr>` — send a fixed test email
-/// through the mail backend configured in `[mail]` settings. Django
-/// parity verb for verifying SMTP credentials / mail wiring without
-/// digging into a REPL.
+/// through the mail backend configured in `[mail]` settings. Verifies
+/// SMTP credentials and mail wiring without writing a throwaway
+/// program.
 ///
 /// Requires the `config` feature so settings can be loaded. Without
 /// `--to`, errors with a usage hint. `--from` defaults to the
@@ -4815,7 +4790,7 @@ pub fn settings_audit_check(
 
     // [routes] legacy_preset = true is a deliberate choice (#85) but
     // worth surfacing in audit output so operators rationalize the
-    // `/__admin` shape against the current Django-ish default.
+    // `/__admin` shape against the current default.
     if matches!(settings.routes.legacy_preset, Some(true)) {
         out.info.push(
             "[routes] legacy_preset = true — using the pre-v0.29 `__`-prefixed URLs \
@@ -5333,7 +5308,7 @@ mod gen_tests {
         // From string.
         let v = json_to_sql_value(&serde_json::json!("123.45"), &f).unwrap();
         assert!(matches!(v, crate::core::SqlValue::Decimal(_)));
-        // From number (Django dumpdata emits as string but be forgiving).
+        // From number (dumpdata emits a string, but be forgiving).
         let v = json_to_sql_value(&serde_json::json!(42), &f).unwrap();
         assert!(matches!(v, crate::core::SqlValue::Decimal(_)));
     }

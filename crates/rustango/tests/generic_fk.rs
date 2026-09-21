@@ -183,7 +183,7 @@ async fn get_object_returns_none_for_stale_content_type_id() {
 }
 
 /// A Comment row can store a GFK and the target Post is resolved correctly.
-/// This is the Django TaggedItem/Comment pattern the issue describes.
+/// This is the tagged-item / comment pattern the issue describes.
 #[tokio::test]
 async fn comment_with_generic_fk_resolves_post() {
     contenttypes::clear_cache();

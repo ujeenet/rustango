@@ -234,7 +234,7 @@ async fn incr_resets_on_non_integer_value() {
     assert_eq!(c.incr("counter", 7, None).await.unwrap(), 7);
 }
 
-// ------------------------------------------------------------------ add (Django parity)
+// ------------------------------------------------------------------ add
 
 #[tokio::test]
 async fn add_inserts_when_key_is_absent() {
@@ -269,7 +269,7 @@ async fn add_can_re_insert_after_expiry() {
     assert_eq!(c.get("lock").await.unwrap().as_deref(), Some("fresh"));
 }
 
-// ------------------------------------------------------------------ touch (Django parity)
+// ------------------------------------------------------------------ touch
 
 #[tokio::test]
 async fn touch_extends_ttl_on_existing_key() {
@@ -319,7 +319,7 @@ async fn touch_does_not_alter_value() {
     assert_eq!(c.get("k").await.unwrap().as_deref(), Some("original"));
 }
 
-// ------------------------------------------------------------------ get_many / set_many / delete_many (Django parity)
+// ------------------------------------------------------------------ get_many / set_many / delete_many
 
 #[tokio::test]
 async fn set_many_writes_every_entry() {
@@ -387,12 +387,11 @@ async fn delete_many_ignores_missing_keys() {
     assert!(c.get("kept").await.unwrap().is_none());
 }
 
-// ------------------------------------------------------------------ has_key + decr (Django parity)
+// ------------------------------------------------------------------ has_key + decr
 
 #[tokio::test]
 async fn has_key_returns_true_when_present() {
-    // Django parity: `cache.has_key("k")` is the alias most users
-    // translate from `if "k" in cache:` — should match `exists`.
+    // `has_key` is an alias for `exists`; both must agree.
     let c = InMemoryCache::new();
     c.set("present", "v", None).await.unwrap();
     assert!(c.has_key("present").await.unwrap());
@@ -440,7 +439,7 @@ async fn decr_decrements_existing_counter() {
 
 #[tokio::test]
 async fn decr_underflows_to_negative_when_unbounded() {
-    // Django semantics: decr doesn't clamp at zero — returns whatever
+    // decr doesn't clamp at zero — it returns whatever
     // arithmetic yields. Apps that want a clamp do it client-side.
     let c = InMemoryCache::new();
     c.set("counter", "2", None).await.unwrap();
@@ -464,12 +463,11 @@ async fn decr_is_inverse_of_incr() {
     assert_eq!(after, 0);
 }
 
-// ------------------------------------------------------------------ get_or (Django parity)
+// ------------------------------------------------------------------ get_or
 
 #[tokio::test]
 async fn get_or_returns_stored_value_when_present() {
-    // Django parity: `cache.get('k', default='x')` returns the value
-    // when the key exists, not the default.
+    // A present key wins over the supplied default.
     let c = InMemoryCache::new();
     c.set("greeting", "hello", None).await.unwrap();
     assert_eq!(c.get_or("greeting", "ANON").await.unwrap(), "hello");
@@ -493,7 +491,7 @@ async fn get_or_returns_default_after_expiry() {
 
 #[tokio::test]
 async fn get_or_does_not_write_default_back() {
-    // Subtle: Django's two-arg get just returns the default — it does
+    // Subtle: `get_or` just returns the default — it does
     // NOT store it. (get_or_set is the "fetch-or-compute-and-store"
     // shape; get_or is purely a read fallback.)
     let c = InMemoryCache::new();

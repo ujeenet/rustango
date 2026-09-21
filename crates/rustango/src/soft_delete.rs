@@ -1,10 +1,9 @@
 //! Soft-delete query helpers.
 //!
-//! `#[rustango(soft_delete)]` on a model marks one column as the
-//! "deleted-at" timestamp; the admin DELETE handler already routes
-//! through it (sets the column to `NOW()` instead of running `DELETE`).
-//! This module finishes the story for the read side: helpers that
-//! filter out soft-deleted rows, restore them, or purge them.
+//! `#[rustango(soft_delete)]` marks one column as the "deleted at"
+//! timestamp. The admin delete handler sets that column instead of
+//! running a real `DELETE`. This module covers the rest: hide deleted
+//! rows from reads, restore them, or remove them for good.
 //!
 //! ## Quick start
 //!
@@ -24,18 +23,21 @@
 //! soft_delete::purge(&pool, Post::SCHEMA, "id", SqlValue::I64(42)).await?;
 //! ```
 //!
-//! For models without a soft-delete column, the helpers are no-ops:
-//! [`active_filter`] returns `None`, [`compose_with_active`] returns
-//! the input unchanged, and [`soft_delete`] errors with a clear message
-//! so callers don't silently leak rows that were supposed to be hidden.
+//! On a model with no soft-delete column, [`active_filter`] returns
+//! `None` and [`compose_with_active`] returns its input unchanged.
+//! [`soft_delete`] returns an error there rather than doing nothing
+//! quietly, so rows that should be hidden cannot slip through.
+//!
+//! [`active_filter`]: crate::soft_delete::active_filter
+//! [`compose_with_active`]: crate::soft_delete::compose_with_active
 
 use crate::core::{
     Assignment, DeleteQuery, Filter, ModelSchema, Op, SqlValue, UpdateQuery, WhereExpr,
 };
 use crate::sql::{delete_pool as sql_delete_pool, update_pool as sql_update_pool, ExecError, Pool};
 
-/// Returns `Some(<col> IS NULL)` when `model` is soft-delete-enabled,
-/// `None` otherwise. Use to filter for rows that haven't been trashed.
+/// `Some(<col> IS NULL)` for a soft-delete model, else `None`. It
+/// matches the rows that are still live.
 #[must_use]
 pub fn active_filter(model: &'static ModelSchema) -> Option<WhereExpr> {
     let col = model.soft_delete_column?;
@@ -46,9 +48,8 @@ pub fn active_filter(model: &'static ModelSchema) -> Option<WhereExpr> {
     }))
 }
 
-/// Returns `Some(<col> IS NOT NULL)` when `model` is soft-delete-enabled,
-/// `None` otherwise. Use to filter for rows that ARE trashed (e.g. a
-/// "Trash" admin page).
+/// `Some(<col> IS NOT NULL)` for a soft-delete model, else `None`. It
+/// matches the deleted rows, as a Trash page needs.
 #[must_use]
 pub fn trashed_filter(model: &'static ModelSchema) -> Option<WhereExpr> {
     let col = model.soft_delete_column?;
@@ -59,12 +60,9 @@ pub fn trashed_filter(model: &'static ModelSchema) -> Option<WhereExpr> {
     }))
 }
 
-/// Wrap `existing` so trashed rows are excluded.
-///
-/// - If the model has no soft-delete column, returns `existing` unchanged.
-/// - If `existing` is empty (`WhereExpr::And(vec![])`), returns the
-///   active filter alone.
-/// - Otherwise returns `WhereExpr::And([existing, active_filter])`.
+/// Add "not deleted" to `existing`. A model with no soft-delete column
+/// gets `existing` back unchanged, and an empty `existing` gives the
+/// active filter on its own.
 #[must_use]
 pub fn compose_with_active(model: &'static ModelSchema, existing: WhereExpr) -> WhereExpr {
     let Some(active) = active_filter(model) else {
@@ -76,7 +74,7 @@ pub fn compose_with_active(model: &'static ModelSchema, existing: WhereExpr) -> 
     WhereExpr::And(vec![existing, active])
 }
 
-/// Same as [`compose_with_active`] but selects trashed rows instead.
+/// Like [`compose_with_active`], but matches the deleted rows.
 #[must_use]
 pub fn compose_with_trashed(model: &'static ModelSchema, existing: WhereExpr) -> WhereExpr {
     let Some(trashed) = trashed_filter(model) else {
@@ -96,13 +94,13 @@ pub enum SoftDeleteError {
     Exec(#[from] ExecError),
 }
 
-/// Set `model`'s soft-delete column to `NOW()` for the row whose `pk`
-/// equals `pk_value`. Returns the number of rows affected.
+/// Mark one row deleted by setting the soft-delete column to now.
+/// Returns how many rows changed.
 ///
 /// # Errors
 /// [`SoftDeleteError::NotSoftDeleteEnabled`] when the model has no
-/// `#[rustango(soft_delete)]` field.
-/// [`SoftDeleteError::Exec`] for the underlying sqlx error.
+/// `#[rustango(soft_delete)]` field, or [`SoftDeleteError::Exec`] on a
+/// database error.
 pub async fn soft_delete(
     pool: &Pool,
     model: &'static ModelSchema,
@@ -131,13 +129,13 @@ pub async fn soft_delete(
     Ok(n)
 }
 
-/// Reverse a soft-delete: set the soft-delete column back to `NULL`.
-/// Returns the number of rows affected.
+/// Undo a soft delete by setting the column back to `NULL`. Returns
+/// how many rows changed.
 ///
 /// # Errors
 /// [`SoftDeleteError::NotSoftDeleteEnabled`] when the model has no
-/// `#[rustango(soft_delete)]` field.
-/// [`SoftDeleteError::Exec`] for the underlying sqlx error.
+/// `#[rustango(soft_delete)]` field, or [`SoftDeleteError::Exec`] on a
+/// database error.
 pub async fn restore(
     pool: &Pool,
     model: &'static ModelSchema,
@@ -166,14 +164,11 @@ pub async fn restore(
     Ok(n)
 }
 
-/// Hard-delete the row, bypassing soft-delete entirely. Use sparingly —
-/// this is the irreversible "purge from trash" operation. Returns the
-/// number of rows affected.
-///
-/// Works on any model, soft-delete-enabled or not.
+/// Really delete the row. This cannot be undone. Returns how many
+/// rows changed. Works on any model.
 ///
 /// # Errors
-/// Underlying sqlx error.
+/// A database error.
 pub async fn purge(
     pool: &Pool,
     model: &'static ModelSchema,
@@ -312,7 +307,7 @@ mod tests {
     static MODEL_WITHOUT_SD: ModelSchema = ModelSchema {
         name: "Tag",
         table: "tags",
-        fields: FIELDS_WITH_SD, // share the slice; soft_delete_column = None
+        fields: FIELDS_WITH_SD, // same fields, but no soft_delete_column
         display: None,
         app_label: None,
         admin: None,
@@ -407,7 +402,7 @@ mod tests {
         match composed {
             WhereExpr::And(items) => {
                 assert_eq!(items.len(), 2);
-                // First child is the existing predicate, second is the active filter.
+                // Existing predicate first, active filter second.
                 assert!(matches!(&items[0], WhereExpr::Predicate(f) if f.column == "title"));
                 assert!(matches!(&items[1], WhereExpr::Predicate(f) if f.column == "deleted_at"));
             }
@@ -430,8 +425,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "postgres")]
     async fn soft_delete_on_unsupported_model_returns_clear_error() {
-        // Use a connect_lazy pool — never actually dialed because the
-        // function returns the error before any SQL runs.
+        // A lazy pool: nothing connects, because the function errors
+        // before any SQL runs.
         let pg = crate::sql::sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://localhost:1/none")

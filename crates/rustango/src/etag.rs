@@ -13,21 +13,20 @@
 //!
 //! ## How it works
 //!
-//! For every successful (2xx) response with a non-empty body:
-//! 1. Compute a hash of the body bytes (64-bit FNV-1a + length)
-//! 2. Set `ETag: "<base64 hash>"` on the response
-//! 3. If the request's `If-None-Match` matches — a comma-separated list
-//!    of etags, or the wildcard `*` — reply `304 Not Modified` with an
-//!    empty body, carrying the caching headers (`Cache-Control`, `Vary`,
-//!    `Expires`, …) a matching 200 would have sent (RFC 7232 §4.1).
+//! For each 2xx response with a body:
+//! 1. Hash the body (64-bit FNV-1a plus the length).
+//! 2. Set `ETag: "<base64 hash>"`.
+//! 3. If `If-None-Match` matches — a list of etags, or `*` — reply
+//!    `304 Not Modified` with no body, keeping the caching headers a
+//!    200 would have sent (RFC 7232 §4.1).
 //!
-//! Non-2xx responses are passed through untouched.
+//! Non-2xx responses pass through.
 //!
 //! ## When to use
 //!
-//! - Read-heavy GET endpoints whose responses repeat across requests
-//! - Skip for personalized responses unless you scope by user in the cache key
-//! - Skip for streaming/large responses (the middleware buffers the body)
+//! Good for read-heavy GET endpoints that return the same bytes again
+//! and again. Skip it for per-user responses, and for large or
+//! streaming ones, because the body is buffered.
 
 use std::sync::Arc;
 
@@ -40,13 +39,14 @@ use axum::Router;
 /// ETag middleware configuration.
 #[derive(Clone, Default)]
 pub struct EtagLayer {
-    /// Hard cap on response body size for ETag computation. Responses
-    /// larger than this are passed through unmodified. Default: 4 MiB.
+    /// Biggest body to hash. A larger response passes through
+    /// unchanged. [`EtagLayer::new`] sets 4 MiB; the derived
+    /// `Default` leaves this `None`, which means no cap.
     pub max_body_bytes: Option<usize>,
 }
 
 impl EtagLayer {
-    /// Default config — hashes responses up to 4 MiB.
+    /// Hash responses up to 4 MiB.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -54,7 +54,8 @@ impl EtagLayer {
         }
     }
 
-    /// Override the maximum body size. `None` means "no cap" (use with care).
+    /// Set the maximum body size. `None` removes the cap; be careful,
+    /// the whole body is then buffered in memory.
     #[must_use]
     pub fn max_body_bytes(mut self, n: Option<usize>) -> Self {
         self.max_body_bytes = n;
@@ -62,7 +63,7 @@ impl EtagLayer {
     }
 }
 
-/// Extension trait — `.etag(layer)` ergonomics on Router.
+/// Adds `.etag(layer)` to `Router`.
 pub trait EtagRouterExt {
     #[must_use]
     fn etag(self, layer: EtagLayer) -> Self;
@@ -81,7 +82,7 @@ impl<S: Clone + Send + Sync + 'static> EtagRouterExt for Router<S> {
 }
 
 async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response<Body> {
-    // Extract client's If-None-Match before consuming the request
+    // Read If-None-Match before the request is consumed.
     let client_etag = req
         .headers()
         .get(IF_NONE_MATCH)
@@ -91,17 +92,17 @@ async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response
     let response = next.run(req).await;
     let (parts, body) = response.into_parts();
 
-    // Don't hash non-2xx responses
+    // Only 2xx responses get an ETag.
     if !parts.status.is_success() {
         return Response::from_parts(parts, body);
     }
 
-    // Buffer the body up to max_body_bytes
     let limit = cfg.max_body_bytes.unwrap_or(usize::MAX);
     let bytes = match to_bytes(body, limit).await {
         Ok(b) => b,
         Err(_) => {
-            // Body too large or stream error — pass through with empty body since we already consumed it
+            // Too large, or the stream failed. The body is gone, so
+            // send the headers with an empty one.
             return Response::from_parts(parts, Body::empty());
         }
     };
@@ -117,20 +118,18 @@ async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response
     }
 
     if let Some(client) = client_etag {
-        // `If-None-Match` is a comma-separated list, or the wildcard `*`
-        // which matches any current representation (#1258). Weak
-        // comparison applies for a conditional GET (RFC 7232 §3.2).
+        // `If-None-Match` is a list of etags, or `*` for any. A
+        // conditional GET uses weak comparison (RFC 7232 §3.2).
         let ours = normalize_etag(&etag);
         let matched = client.trim() == "*"
             || client
                 .split(',')
                 .any(|candidate| normalize_etag(candidate) == ours);
         if matched {
-            // 304 Not Modified — drop the body, but carry the headers a
-            // matching 200 would have sent that govern caching (RFC 7232
-            // §4.1), not just the ETag. Dropping `Cache-Control` / `Vary`
-            // would let a downstream cache apply the wrong freshness or
-            // vary key.
+            // Drop the body but keep the caching headers a 200 would
+            // have sent (RFC 7232 §4.1). Without `Cache-Control` and
+            // `Vary` a cache downstream picks the wrong freshness or
+            // the wrong vary key.
             let mut not_modified = Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .body(Body::empty())
@@ -155,12 +154,10 @@ async fn handle(cfg: Arc<EtagLayer>, req: Request<Body>, next: Next) -> Response
     response
 }
 
-/// Compute an ETag for `bytes` — `"<base64 of 64-bit FNV-1a hash + length>"`.
+/// ETag for `bytes`: base64 of a 64-bit FNV-1a hash plus the length.
 ///
-/// Not cryptographic — ETag collisions cause false-positive 304s, not security
-/// issues. The combined hash + length is collision-resistant enough for cache
-/// validation. (Crypto-strength ETags would force a sha2 dependency on every
-/// `admin` build.)
+/// Not a cryptographic hash. A collision only means a wrong 304, and
+/// hash plus length is good enough for cache validation.
 fn compute_etag(bytes: &[u8]) -> String {
     use base64::Engine;
     let hash = fnv1a_64(bytes);
@@ -187,7 +184,7 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Strip surrounding quotes + `W/` weak prefix for comparison purposes.
+/// Drop the quotes and any `W/` prefix so two etags can be compared.
 fn normalize_etag(s: &str) -> &str {
     let s = s.trim();
     let s = s.strip_prefix("W/").unwrap_or(s);
@@ -227,7 +224,7 @@ mod tests {
         r.headers().get(ETAG).unwrap().to_str().unwrap().to_owned()
     }
 
-    /// #1258 — `If-None-Match: *` matches any representation → 304.
+    /// `If-None-Match: *` matches anything, so 304.
     #[tokio::test]
     async fn if_none_match_wildcard_returns_304() {
         let app = app();
@@ -245,8 +242,7 @@ mod tests {
         assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
     }
 
-    /// #1258 — a comma-separated `If-None-Match` list containing our etag
-    /// must 304, not return a full 200.
+    /// An `If-None-Match` list that contains our etag must 304.
     #[tokio::test]
     async fn if_none_match_list_matches_one_entry() {
         let app = app();
@@ -270,8 +266,7 @@ mod tests {
         );
     }
 
-    /// #1258 — the 304 must carry the caching headers a 200 would
-    /// (RFC 7232 §4.1), not just the ETag.
+    /// The 304 must carry the caching headers, not just the ETag.
     #[tokio::test]
     async fn not_modified_carries_caching_headers() {
         let app = app();

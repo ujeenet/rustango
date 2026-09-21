@@ -252,7 +252,8 @@ impl<DB: Database> Builder<DB> {
     /// Size the per-tenant connection pools (#1456).
     ///
     /// `from_pool` builds `TenantPools` with
-    /// [`TenantPoolsConfig::default`], and until this existed there was
+    /// [`TenantPoolsConfig::default`](crate::tenancy::TenantPoolsConfig),
+    /// and until this existed there was
     /// no way to change it: the type was public and documented, but
     /// every route to a running server went through a constructor that
     /// ignored it, and `tenancy/pools.rs` reads no environment
@@ -391,8 +392,8 @@ impl<DB: Database> Builder<DB> {
     }
 
     /// Apply every migration discoverable from `project_root` to the
-    /// registry + every active tenant. The Django-shape one-call setup
-    /// for multi-app projects:
+    /// registry + every active tenant. One call sets up a multi-app
+    /// project:
     ///
     /// 1. Write the packaged tenancy bootstrap migrations
     ///    (`0001_rustango_registry_initial`, `0001_rustango_tenant_initial`)

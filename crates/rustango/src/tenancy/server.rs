@@ -1,4 +1,4 @@
-//! `manage run-server` — Django-style `runserver` for rustango.
+//! `manage run-server` — the development server.
 //!
 //! Boots a complete operator + tenant admin stack with sensible
 //! defaults from env. Users running `cargo run --

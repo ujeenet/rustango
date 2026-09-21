@@ -1,7 +1,8 @@
-//! Django-shape model signals — `pre_save`, `post_save`, `pre_delete`, `post_delete`.
+//! Model signals — hooks that run around a row write: `pre_save`,
+//! `post_save`, `pre_delete`, `post_delete`.
 //!
-//! Receivers register globally per model type and run sequentially when the
-//! corresponding signal is fired by a write path.
+//! Receivers are registered globally per model type. When a signal is
+//! sent, they run one after another.
 //!
 //! ## Quick start
 //!
@@ -15,37 +16,41 @@
 //!     }
 //! }));
 //!
-//! // Fire after your save call (or wire into the macro-generated save() in a follow-up slice):
+//! // Saving does not send the signal for you — send it yourself:
 //! post.save_on(&pool).await?;
 //! send_post_save(&post, PostSaveContext { created: true }).await;
 //! ```
 //!
 //! ## Available signals
 //!
-//! | Signal | Receiver signature | Fired by |
+//! | Signal | Receiver signature | Send it |
 //! |--------|---------------------|----------|
-//! | `pre_save` | `Fn(Arc<T>) -> Future` | Before INSERT or UPDATE |
-//! | `post_save` | `Fn(Arc<T>, PostSaveContext) -> Future` | After INSERT or UPDATE |
-//! | `pre_delete` | `Fn(Arc<T>) -> Future` | Before DELETE |
-//! | `post_delete` | `Fn(Arc<T>) -> Future` | After DELETE |
+//! | `pre_save` | `Fn(Arc<T>) -> Future` | Before an INSERT or UPDATE |
+//! | `post_save` | `Fn(Arc<T>, PostSaveContext) -> Future` | After an INSERT or UPDATE |
+//! | `pre_delete` | `Fn(Arc<T>) -> Future` | Before a DELETE |
+//! | `post_delete` | `Fn(Arc<T>) -> Future` | After a DELETE |
 //!
 //! ## HTTP request lifecycle
 //!
-//! Request-level signals (`request_started` / `request_finished` /
-//! `got_request_exception`) live in [`request`] — separate registry,
-//! separate connect/disconnect/send functions, plus a
-//! [`request::RequestSignalsLayer`] tower layer that fires them
-//! around every axum request. Issue #53.
+//! `request_started`, `request_finished` and `got_request_exception`
+//! live in [`request`], with their own registry and their own
+//! connect, disconnect and send functions. The
+//! [`request::RequestSignalsLayer`] tower layer sends them around
+//! every axum request, so those you do not send by hand.
 //!
-//! ## Semantics
+//! ## Rules
 //!
-//! - Receivers run **sequentially** in registration order, awaited one at a time.
-//! - Each receiver gets an `Arc<T>` clone of the instance — no borrow lifetimes.
-//! - `T: Clone + 'static` is required so the dispatcher can wrap into `Arc`.
-//! - `connect_*` returns a `ReceiverId` you can pass to `disconnect_*` later.
-//! - **Receivers must not panic.** A panicking receiver aborts the rest of the
-//!   dispatch chain and propagates up to the caller of `send_*`. If you need
-//!   isolation, wrap your receiver body in `tokio::spawn`.
+//! - Receivers run one at a time, in registration order.
+//! - Each gets an `Arc<T>` clone of the instance, so there are no
+//!   borrow lifetimes to work around. That is why `T: Clone` is
+//!   required.
+//! - `connect_*` returns a `ReceiverId` for a later `disconnect_*`.
+//! - **A receiver must not panic.** A panic stops the rest of the
+//!   chain and reaches whoever called `send_*`. For isolation, run
+//!   the body in `tokio::spawn`.
+//!
+//! [`request`]: crate::signals::request
+//! [`request::RequestSignalsLayer`]: crate::signals::request::RequestSignalsLayer
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -62,15 +67,16 @@ pub mod migrate;
 pub mod request;
 pub mod setting;
 
-/// Future returned by signal receivers. `'static` because the receiver
-/// is stored as `Box<dyn ...>` and may run after the caller has returned.
+/// The future a receiver returns. It is `'static` because the
+/// receiver is boxed and may run after the caller has returned.
 pub type ReceiverFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-/// Opaque identifier returned by `connect_*` for later use with `disconnect_*`.
+/// Handle returned by `connect_*`, for a later `disconnect_*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReceiverId(u64);
 
-/// Context passed to `post_save` receivers — distinguishes INSERT from UPDATE.
+/// Tells a `post_save` receiver whether the row was inserted or
+/// updated.
 #[derive(Debug, Clone, Copy)]
 pub struct PostSaveContext {
     /// `true` when the row was newly inserted; `false` for updates.
@@ -118,9 +124,8 @@ fn remove_receiver(key: (TypeId, SignalKind), id: ReceiverId) -> bool {
     bag.len() != before
 }
 
-/// Snapshot the receivers for `key` into a `Vec<Arc<R>>` so dispatch
-/// can release the registry lock immediately, avoiding holding it
-/// across await points.
+/// Copy the receivers for `key` out of the registry, so the lock is
+/// released before any of them is awaited.
 fn snapshot<R: Any + Send + Sync + Clone>(key: (TypeId, SignalKind)) -> Vec<R> {
     let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     let Some(bag) = reg.get(&key) else {
@@ -133,20 +138,17 @@ fn snapshot<R: Any + Send + Sync + Clone>(key: (TypeId, SignalKind)) -> Vec<R> {
 
 // ------------------------------------------------------------------ Receiver type aliases
 
-/// `pre_save` / `pre_delete` / `post_delete` receiver — takes the model only.
+/// Receiver for `pre_save`, `pre_delete` and `post_delete`: it takes
+/// only the model.
 type SimpleReceiver<T> = Arc<dyn Fn(Arc<T>) -> ReceiverFuture + Send + Sync>;
 
-/// `post_save` receiver — takes model + `PostSaveContext`.
+/// Receiver for `post_save`: it also takes a `PostSaveContext`.
 type PostSaveReceiver<T> = Arc<dyn Fn(Arc<T>, PostSaveContext) -> ReceiverFuture + Send + Sync>;
 
 // ------------------------------------------------------------------ pre_save
 
-/// Register a `pre_save` receiver for type `T`.
-///
-/// The receiver runs before every `save()` for `T`. It receives an
-/// `Arc<T>` snapshot of the instance.
-///
-/// Returns a [`ReceiverId`] for later [`disconnect_pre_save`].
+/// Register a `pre_save` receiver for `T`. It gets an `Arc<T>` copy
+/// of the instance. Returns an id for [`disconnect_pre_save`].
 pub fn connect_pre_save<T, F, Fut>(receiver: F) -> ReceiverId
 where
     T: Model + Clone + 'static,
@@ -157,15 +159,14 @@ where
     insert_receiver((TypeId::of::<T>(), SignalKind::PreSave), boxed)
 }
 
-/// Remove a previously connected `pre_save` receiver. Returns `true`
-/// when an entry was removed.
+/// Remove a `pre_save` receiver. `true` when one was removed.
 pub fn disconnect_pre_save<T: Model + 'static>(id: ReceiverId) -> bool {
     remove_receiver((TypeId::of::<T>(), SignalKind::PreSave), id)
 }
 
-/// Fire the `pre_save` signal for `instance`. Awaits every connected
-/// receiver in registration order. Becomes a no-op inside
-/// [`without_signals`] / [`save_quietly`] scopes (issue #827).
+/// Send `pre_save` for `instance`, awaiting each receiver in
+/// registration order. Does nothing inside a [`without_signals`] or
+/// [`save_quietly`] scope.
 pub async fn send_pre_save<T: Model + Clone + 'static>(instance: &T) {
     if signals_suppressed() {
         return;
@@ -180,11 +181,9 @@ pub async fn send_pre_save<T: Model + Clone + 'static>(instance: &T) {
 
 // ------------------------------------------------------------------ post_save
 
-/// Register a `post_save` receiver for type `T`.
-///
-/// The receiver runs after every successful `save()`. It receives an
-/// `Arc<T>` of the instance and a [`PostSaveContext`] indicating
-/// whether the save was an insert (`created = true`) or update.
+/// Register a `post_save` receiver for `T`. It gets an `Arc<T>` of
+/// the instance and a [`PostSaveContext`], whose `created` field is
+/// `true` for an insert.
 pub fn connect_post_save<T, F, Fut>(receiver: F) -> ReceiverId
 where
     T: Model + Clone + 'static,
@@ -196,13 +195,13 @@ where
     insert_receiver((TypeId::of::<T>(), SignalKind::PostSave), boxed)
 }
 
-/// Remove a previously connected `post_save` receiver.
+/// Remove a `post_save` receiver.
 pub fn disconnect_post_save<T: Model + 'static>(id: ReceiverId) -> bool {
     remove_receiver((TypeId::of::<T>(), SignalKind::PostSave), id)
 }
 
-/// Fire the `post_save` signal for `instance`. No-op inside
-/// [`without_signals`] / [`save_quietly`].
+/// Send `post_save` for `instance`. Does nothing inside
+/// [`without_signals`] or [`save_quietly`].
 pub async fn send_post_save<T: Model + Clone + 'static>(instance: &T, ctx: PostSaveContext) {
     if signals_suppressed() {
         return;
@@ -217,7 +216,7 @@ pub async fn send_post_save<T: Model + Clone + 'static>(instance: &T, ctx: PostS
 
 // ------------------------------------------------------------------ pre_delete
 
-/// Register a `pre_delete` receiver for type `T`.
+/// Register a `pre_delete` receiver for `T`.
 pub fn connect_pre_delete<T, F, Fut>(receiver: F) -> ReceiverId
 where
     T: Model + Clone + 'static,
@@ -228,13 +227,13 @@ where
     insert_receiver((TypeId::of::<T>(), SignalKind::PreDelete), boxed)
 }
 
-/// Remove a previously connected `pre_delete` receiver.
+/// Remove a `pre_delete` receiver.
 pub fn disconnect_pre_delete<T: Model + 'static>(id: ReceiverId) -> bool {
     remove_receiver((TypeId::of::<T>(), SignalKind::PreDelete), id)
 }
 
-/// Fire the `pre_delete` signal for `instance`. No-op inside
-/// [`without_signals`] / [`delete_quietly`].
+/// Send `pre_delete` for `instance`. Does nothing inside
+/// [`without_signals`] or [`delete_quietly`].
 pub async fn send_pre_delete<T: Model + Clone + 'static>(instance: &T) {
     if signals_suppressed() {
         return;
@@ -249,7 +248,7 @@ pub async fn send_pre_delete<T: Model + Clone + 'static>(instance: &T) {
 
 // ------------------------------------------------------------------ post_delete
 
-/// Register a `post_delete` receiver for type `T`.
+/// Register a `post_delete` receiver for `T`.
 pub fn connect_post_delete<T, F, Fut>(receiver: F) -> ReceiverId
 where
     T: Model + Clone + 'static,
@@ -260,13 +259,13 @@ where
     insert_receiver((TypeId::of::<T>(), SignalKind::PostDelete), boxed)
 }
 
-/// Remove a previously connected `post_delete` receiver.
+/// Remove a `post_delete` receiver.
 pub fn disconnect_post_delete<T: Model + 'static>(id: ReceiverId) -> bool {
     remove_receiver((TypeId::of::<T>(), SignalKind::PostDelete), id)
 }
 
-/// Fire the `post_delete` signal for `instance`. No-op inside
-/// [`without_signals`] / [`delete_quietly`].
+/// Send `post_delete` for `instance`. Does nothing inside
+/// [`without_signals`] or [`delete_quietly`].
 pub async fn send_post_delete<T: Model + Clone + 'static>(instance: &T) {
     if signals_suppressed() {
         return;
@@ -281,10 +280,8 @@ pub async fn send_post_delete<T: Model + Clone + 'static>(instance: &T) {
 
 // ------------------------------------------------------------------ Maintenance
 
-/// Remove **all** receivers for **all** model types and signal kinds.
-///
-/// Useful in tests to reset registry state between cases. Production
-/// code rarely needs this.
+/// Remove every receiver, for every model and every signal. Mostly
+/// for resetting state between tests.
 pub fn clear_all() {
     registry()
         .write()
@@ -292,8 +289,8 @@ pub fn clear_all() {
         .clear();
 }
 
-/// Number of currently registered receivers across all signals for `T`.
-/// Useful in tests to assert connection state.
+/// How many receivers are registered for `T` across all signals.
+/// Mostly useful in tests.
 pub fn receiver_count<T: Model + 'static>() -> usize {
     let reg = registry().read().unwrap_or_else(|e| e.into_inner());
     let id = TypeId::of::<T>();
@@ -308,42 +305,31 @@ pub fn receiver_count<T: Model + 'static>() -> usize {
     .sum()
 }
 
-// ------------------------------------------------------------------ Quiet writes (#827)
+// ------------------------------------------------------------------ Quiet writes
 //
-// Eloquent shape: `Model::withoutEvents(fn)` + `saveQuietly()` /
-// `deleteQuietly()`. Rust shape: a task-local boolean toggled by the
-// `without_signals` / `save_quietly` / `delete_quietly` async scope
-// helpers. Each `send_*` checks the flag and early-returns when set.
+// A task-local boolean, set by the `without_signals`,
+// `save_quietly` and `delete_quietly` scope helpers. Every `send_*`
+// checks it and returns early when it is set.
 //
-// Storage is `tokio::task_local!` rather than thread-local so an
-// async runtime that moves tasks between worker threads (default
-// multi-threaded runtime) still observes the right scope. The
-// helpers are async — they `await` the user closure inside the
-// task-local scope.
-//
-// Nested scopes compose: every entry pushes `true`; the scope's
-// outer state on exit is restored.
+// It is a `tokio::task_local!`, not a thread-local, so the scope
+// still holds when the runtime moves a task between worker threads.
+// Scopes nest: the outer state is restored on exit.
 
 tokio::task_local! {
     static SUPPRESS_SIGNALS: bool;
 }
 
-/// `true` when the current async task is executing inside a
-/// [`without_signals`] / [`save_quietly`] / [`delete_quietly`] scope.
-/// All `send_*` functions early-return when this is `true`.
+/// `true` when the current task is inside a [`without_signals`],
+/// [`save_quietly`] or [`delete_quietly`] scope.
 fn signals_suppressed() -> bool {
     SUPPRESS_SIGNALS.try_with(|v| *v).unwrap_or(false)
 }
 
-/// Suppress every `send_*` dispatch (pre/post save + pre/post delete)
-/// while awaiting `fut`. Eloquent's `Model::withoutEvents(fn)` /
-/// Django's manual signal-bypass pattern — useful when bulk-loading
-/// fixtures, running a migration that touches model rows, or
-/// performing internal bookkeeping that shouldn't trip side-effecty
-/// receivers.
+/// Turn off every `send_*` while awaiting `fut`. Use it when loading
+/// fixtures in bulk, running a migration that touches rows, or doing
+/// internal bookkeeping that should not trigger receivers.
 ///
-/// Nested calls compose — the innermost scope sets the flag; on exit
-/// the surrounding state is restored.
+/// Calls nest; the outer state comes back on exit.
 ///
 /// ```ignore
 /// use rustango::signals::without_signals;
@@ -362,9 +348,8 @@ where
     SUPPRESS_SIGNALS.scope(true, fut).await
 }
 
-/// Sugar for [`without_signals`] — name matches Eloquent's
-/// `saveQuietly()`. The actual save call is the caller's; this just
-/// wraps it in the suppression scope.
+/// [`without_signals`] under a name that reads better around a save.
+/// You still make the save call; this only wraps it.
 ///
 /// ```ignore
 /// signals::save_quietly(post.save_pool(&pool)).await?;
@@ -376,8 +361,8 @@ where
     without_signals(fut).await
 }
 
-/// Sugar for [`without_signals`] — name matches Eloquent's
-/// `deleteQuietly()`.
+/// [`without_signals`] under a name that reads better around a
+/// delete.
 pub async fn delete_quietly<F, R>(fut: F) -> R
 where
     F: std::future::Future<Output = R>,
@@ -385,22 +370,14 @@ where
     without_signals(fut).await
 }
 
-// ------------------------------------------------------------------ Observer<T> (#827)
+// ------------------------------------------------------------------ Observer<T>
 //
-// Eloquent shape: one struct implements `Observer` with default-noop
-// methods; `Model::observe(MyObserver)` wires all four signals at
-// once. Rust shape: an `Observer<T>` trait with four async default
-// methods + a free `observe::<T>(obs)` function that connects each
-// to the registry and returns a bundle of `ReceiverId`s so the user
-// can later detach the whole observer with a single
-// `disconnect_observer` call.
-//
-// The four methods take `Arc<T>` (same as the underlying
-// `connect_*` shape) so an observer impl can store state on the
-// struct and read it without holding locks.
+// One struct can carry all four hooks for a model. `observe::<T>`
+// registers each of them and hands back the ids, so
+// `disconnect_observer` can remove them all at once.
 
-/// Bundle of [`ReceiverId`]s returned by [`observe`]. Pass to
-/// [`disconnect_observer`] to detach every wired hook in one call.
+/// The four [`ReceiverId`]s from one [`observe`] call. Pass it to
+/// [`disconnect_observer`] to remove every hook at once.
 #[derive(Debug, Clone)]
 pub struct ObserverHandle {
     pub pre_save: ReceiverId,
@@ -409,16 +386,14 @@ pub struct ObserverHandle {
     pub post_delete: ReceiverId,
 }
 
-/// Eloquent-style observer trait — group all four lifecycle hooks
-/// for a model under a single struct. Every method has a no-op
-/// default; implementors override only the events they care about.
+/// Groups all four model hooks in one struct. Every method does
+/// nothing by default, so you override only the ones you need.
 ///
-/// Methods take `Arc<T>` (matching the underlying `connect_*`
-/// signatures) so an observer can hold state without lifetime
-/// gymnastics. Implementors must be `Send + Sync + 'static` — the
-/// observer is stored behind an `Arc` in the global registry.
+/// The methods take `Arc<T>`, so an observer can hold state without
+/// lifetime trouble. An implementor must be `Send + Sync + 'static`,
+/// because the registry keeps it behind an `Arc`.
 ///
-/// Wire with [`observe`]; detach with [`disconnect_observer`]. Issue #827.
+/// Register with [`observe`], remove with [`disconnect_observer`].
 ///
 /// ```ignore
 /// struct AuditLog;
@@ -432,29 +407,27 @@ pub struct ObserverHandle {
 /// rustango::signals::disconnect_observer::<Post>(&handle);
 /// ```
 pub trait Observer<T: Model + Clone + 'static>: Send + Sync + 'static {
-    /// Fired before INSERT or UPDATE. Default is a no-op.
+    /// Runs before an INSERT or UPDATE. Does nothing by default.
     fn pre_save(&self, _instance: Arc<T>) -> ReceiverFuture {
         Box::pin(async {})
     }
-    /// Fired after a successful save. `ctx.created` distinguishes
-    /// INSERT from UPDATE. Default is a no-op.
+    /// Runs after a save. `ctx.created` tells an insert from an
+    /// update. Does nothing by default.
     fn post_save(&self, _instance: Arc<T>, _ctx: PostSaveContext) -> ReceiverFuture {
         Box::pin(async {})
     }
-    /// Fired before DELETE. Default is a no-op.
+    /// Runs before a DELETE. Does nothing by default.
     fn pre_delete(&self, _instance: Arc<T>) -> ReceiverFuture {
         Box::pin(async {})
     }
-    /// Fired after DELETE. Default is a no-op.
+    /// Runs after a DELETE. Does nothing by default.
     fn post_delete(&self, _instance: Arc<T>) -> ReceiverFuture {
         Box::pin(async {})
     }
 }
 
-/// Wire every method of `obs` to its corresponding signal for model
-/// `T`. Returns an [`ObserverHandle`] carrying the four
-/// [`ReceiverId`]s; pass to [`disconnect_observer`] when you no
-/// longer want the hooks. Issue #827.
+/// Register each method of `obs` as a receiver for model `T`.
+/// Returns an [`ObserverHandle`] for [`disconnect_observer`].
 pub fn observe<T, O>(obs: O) -> ObserverHandle
 where
     T: Model + Clone + 'static,
@@ -485,9 +458,8 @@ where
     }
 }
 
-/// Detach every receiver wired by a previous [`observe`] call.
-/// Returns the count of hooks actually removed (0–4; less than 4
-/// means some had been individually disconnected already).
+/// Remove every receiver an [`observe`] call registered. Returns how
+/// many went away. Fewer than four means some were already removed.
 pub fn disconnect_observer<T: Model + 'static>(handle: &ObserverHandle) -> usize {
     [
         disconnect_pre_save::<T>(handle.pre_save),

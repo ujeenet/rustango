@@ -1,15 +1,8 @@
-//! Django-shape base62 integer encoding —
-//! [`int_to_base62`](int_to_base62) / [`base62_to_int`](base62_to_int).
+//! Base62 integer encoding: [`int_to_base62`] / [`base62_to_int`].
 //!
-//! Mirrors `django.utils.baseconv.base62` (Django removed it as a
-//! public API in 5.x but third-party projects still ship it).
-//! Uses the 62-char alphabet `[0-9A-Za-z]` for case-sensitive
-//! short integer encoding.
-//!
-//! Common use: URL-shortener IDs (YouTube video IDs, bit.ly slugs),
-//! short opaque database identifiers, public-facing record numbers.
-//! base62 gives 6.0 bits per char vs base36's 5.17 bits per char,
-//! so the encoded string is ~17% shorter for the same integer.
+//! The alphabet is `[0-9A-Za-z]` and encoding is case-sensitive.
+//! Use it for short public IDs, such as URL-shortener slugs. It
+//! packs about 17% more per character than base36.
 //!
 //! ```ignore
 //! use rustango::base62::{int_to_base62, base62_to_int};
@@ -28,15 +21,18 @@
 //! assert_eq!(base62_to_int("Z").unwrap(), 35);
 //! assert_eq!(base62_to_int("z").unwrap(), 61);
 //! ```
+//!
+//! [`int_to_base62`]: crate::base62::int_to_base62
+//! [`base62_to_int`]: crate::base62::base62_to_int
 
-/// Base62 alphabet — `[0-9A-Za-z]`. Position 0 is `'0'`, position
-/// 35 is `'Z'`, position 36 is `'a'`, position 61 is `'z'`.
+/// Base62 digits, `[0-9A-Za-z]`: `'0'` is 0, `'Z'` is 35, `'a'` is
+/// 36, `'z'` is 61.
 const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// Errors from [`base62_to_int`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Base62Error {
-    /// Empty string — no canonical decoding.
+    /// Empty string.
     #[error("base62_to_int: empty input")]
     Empty,
 
@@ -44,13 +40,13 @@ pub enum Base62Error {
     #[error("base62_to_int: invalid character `{0}` (allowed: 0-9, A-Z, a-z)")]
     InvalidChar(char),
 
-    /// Numeric overflow — value doesn't fit in `u64`.
+    /// The value does not fit in `u64`.
     #[error("base62_to_int: value overflows u64")]
     Overflow,
 }
 
-/// Encode a non-negative integer as a base62 string. Case-sensitive
-/// — distinct from base36 which folds case.
+/// Encode a non-negative integer as a base62 string. Unlike base36,
+/// the output is case-sensitive.
 ///
 /// ```ignore
 /// use rustango::base62::int_to_base62;
@@ -66,7 +62,7 @@ pub fn int_to_base62(mut n: u64) -> String {
     if n == 0 {
         return "0".to_owned();
     }
-    // u64::MAX in base62 = 11 chars (62^11 = 5.2e19 ≥ 1.8e19 = u64::MAX).
+    // u64::MAX needs 11 base62 digits.
     let mut buf: Vec<u8> = Vec::with_capacity(11);
     while n > 0 {
         buf.push(ALPHABET[(n % 62) as usize]);
@@ -77,8 +73,8 @@ pub fn int_to_base62(mut n: u64) -> String {
     String::from_utf8(buf).expect("base62 alphabet is ASCII")
 }
 
-/// Decode a base62 string into a `u64`. Strict: only `[0-9A-Za-z]`
-/// accepted; whitespace / leading `-` / non-ASCII all rejected.
+/// Decode a base62 string into a `u64`. Only `[0-9A-Za-z]` is
+/// allowed. Whitespace, a leading `-` and non-ASCII are rejected.
 ///
 /// # Errors
 /// * [`Base62Error::Empty`] — empty string.
@@ -148,8 +144,7 @@ mod tests {
 
     #[test]
     fn encode_youtube_video_id_shape() {
-        // YouTube video IDs are 11-char base62. We can encode an
-        // arbitrary integer that lands in that shape.
+        // Output stays inside the URL-safe alphabet.
         let s = int_to_base62(123_456_789);
         assert!(s.chars().all(|c| c.is_ascii_alphanumeric()));
         assert!(!s.is_empty());
@@ -170,7 +165,7 @@ mod tests {
 
     #[test]
     fn decode_case_sensitive() {
-        // Z (35) and z (61) are distinct values — distinct from base36.
+        // `Z` is 35 and `z` is 61; base36 would fold them.
         assert_ne!(base62_to_int("Z").unwrap(), base62_to_int("z").unwrap());
         assert_eq!(base62_to_int("Z").unwrap(), 35);
         assert_eq!(base62_to_int("z").unwrap(), 61);
@@ -233,9 +228,7 @@ mod tests {
 
     #[test]
     fn base62_shorter_than_base36_for_same_value() {
-        // 1_000_000 in base62 = "4c92" (4 chars), in base36 = "lfls" (4)
-        // — close, but for larger numbers base62 wins:
-        // 1e12 in base62 ≈ 7 chars, in base36 ≈ 8 chars.
+        // Small values tie; larger ones favour base62.
         let v: u64 = 1_000_000_000_000;
         let in_62 = int_to_base62(v);
         let in_36 = crate::base36::int_to_base36(v);

@@ -1,11 +1,11 @@
-//! Integration test for the host-validation middleware — Django
-//! `ALLOWED_HOSTS` parity. Mounts the layer on an axum Router, sends
+//! Integration test for the host-validation middleware, which gates
+//! requests on an allowed-hosts list. Mounts the layer on an axum Router, sends
 //! requests with various Host headers via tower's oneshot, and
 //! asserts the gate semantics:
 //!
 //! * Exact host → 200
 //! * Subdomain (via `.example.com`) → 200
-//! * Mismatched host → 400 with the Django-shape error body
+//! * Mismatched host → 400 with the documented error body
 //! * Missing Host header → 400 (allowlist is non-empty)
 //! * Empty allowlist → every host passes (DEBUG-style opt-out)
 
@@ -90,8 +90,8 @@ async fn star_passes_every_host() {
 
 #[tokio::test]
 async fn suffix_collision_does_not_match_subdomain_pattern() {
-    // `.example.com` must not match `evilexample.com` — that's a
-    // Django-bug-shaped pitfall. Verify the dot-boundary check.
+    // `.example.com` must not match `evilexample.com` — a classic
+    // suffix-match pitfall. Verify the dot-boundary check.
     let app = build_app(AllowedHostsLayer::new([".example.com"]));
     assert_eq!(
         run(app, Some("evilexample.com")).await,

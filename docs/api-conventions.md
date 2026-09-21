@@ -129,7 +129,7 @@ send_post_save(&post, ctx).await                  // ⚠️ no pool — signals 
 
 **One exception:** signals don't take a pool, because they never touch the database. The rule holds: anything that hits the DB takes the pool; anything that doesn't, doesn't.
 
-**Why pass it every time?** Rust prefers dependencies you can see over hidden global state. Django keeps the connection in thread-local storage, but that breaks down in Rust's async world, where a task can hop between threads mid-request. The downside is more typing; the upside is that you can grep for every place that touches the database.
+**Why pass it every time?** Rust prefers dependencies you can see over hidden global state. Keeping the connection in thread-local storage breaks down in Rust's async world, where a task can hop between threads mid-request. The downside is more typing; the upside is that you can grep for every place that touches the database.
 
 If you find yourself passing `&pool` through ten layers of function calls, accept `impl Executor` once at the public entry point and let the internal helpers share that single connection.
 
@@ -152,7 +152,7 @@ Post::objects().where_(Post::author_id.eq(42));
 
 | Syntax | Use when |
 |---|---|
-| HTTP query | Public API endpoints — the ViewSet parses these for you, like DRF's filter backends |
+| HTTP query | Public API endpoints — the ViewSet parses these out of the query string for you |
 | String-keyed `.filter` | Generic CRUD or admin code, where field names come from config and aren't known at compile time |
 | Typed `.where_` | Your app code — the preferred default. The compiler checks the field exists and the types match |
 
@@ -203,7 +203,7 @@ async fn handler() -> Result<Json<X>, ApiError> {
 
 `ApiError` implements `IntoResponse`, so returning it produces its JSON shape automatically: `{"error": <machine code>, "message": …, "status": …, "details": …}`.
 
-**It is not the only error shape the framework emits.** A ViewSet answers with `{"error": "<human message>"}` for its own failures and with a DRF field-keyed map for serializer validation — three envelopes in total, and `error` carries a machine code in one and a sentence in another. [ViewSets — error response shapes](viewsets.md#error-response-shapes) lists which path emits which.
+**It is not the only error shape the framework emits.** A ViewSet answers with `{"error": "<human message>"}` for its own failures and with a field-keyed map of messages for serializer validation — three envelopes in total, and `error` carries a machine code in one and a sentence in another. [ViewSets — error response shapes](viewsets.md#error-response-shapes) lists which path emits which.
 
 ---
 
@@ -264,7 +264,7 @@ Use when:
 
 ## Feature flags
 
-A *feature* is a Cargo build flag (`Cargo.toml`'s `[features]`) that switches a chunk of the crate on or off — similar to Laravel package discovery or Django's `INSTALLED_APPS`, but resolved at compile time. Every module that pulls in an extra dependency sits behind one. The default set is "you almost certainly want these":
+A *feature* is a Cargo build flag (`Cargo.toml`'s `[features]`) that switches a chunk of the crate on or off — the list of parts your build includes, resolved at compile time. Every module that pulls in an extra dependency sits behind one. The default set is "you almost certainly want these":
 
 ```toml
 default = ["postgres", "batteries"]

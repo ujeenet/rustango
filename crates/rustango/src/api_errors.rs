@@ -1,7 +1,5 @@
-//! Standardized API error responses.
-//!
-//! All errors share a consistent JSON shape so frontends can parse them
-//! uniformly. Follows the RFC 7807 "Problem Details" convention loosely:
+//! One JSON shape for every API error, so clients can parse them all
+//! the same way. It follows RFC 7807 "Problem Details" loosely:
 //!
 //! ```json
 //! {
@@ -26,15 +24,19 @@
 //! }
 //! ```
 //!
-//! `ApiError` implements `axum::response::IntoResponse`, so any handler
-//! returning `Result<T, ApiError>` produces a properly-shaped error response.
+//! `ApiError` implements `IntoResponse`, so a handler returning
+//! `Result<T, ApiError>` sends this shape on its own.
+//!
+//! The `message` and `details` go straight to the client. Keep
+//! internal detail out of them: no SQL, stack traces, file paths or
+//! secrets.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
 
-/// Standardized API error.
+/// An API error. Every field is sent to the client.
 #[derive(Debug, Clone)]
 pub struct ApiError {
     pub status: StatusCode,
@@ -44,7 +46,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    /// Build an error with explicit status, code, and message.
+    /// Build an error from a status, a code and a message.
     #[must_use]
     pub fn new(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
@@ -55,14 +57,14 @@ impl ApiError {
         }
     }
 
-    /// Attach a structured `details` payload (e.g. field-error map).
+    /// Attach a `details` payload, such as a map of field errors.
     #[must_use]
     pub fn with_details(mut self, details: Value) -> Self {
         self.details = Some(details);
         self
     }
 
-    /// Convenience: attach `{"field": "..."}` details.
+    /// Shorthand for details of `{"field": "..."}`.
     #[must_use]
     pub fn with_field(self, field: impl Into<String>) -> Self {
         self.with_details(json!({"field": field.into()}))
@@ -117,6 +119,8 @@ impl ApiError {
     }
 
     /// `500 Internal Server Error` — `code = "internal_error"`.
+    /// Pass a generic message; log the real cause instead of sending
+    /// it to the client.
     #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
@@ -132,7 +136,7 @@ impl ApiError {
         )
     }
 
-    /// Render to a JSON value (without going through `IntoResponse`).
+    /// Render the error as JSON, without building a response.
     #[must_use]
     pub fn to_json(&self) -> Value {
         let mut body = json!({

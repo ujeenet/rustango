@@ -37,7 +37,7 @@ pub struct Post {
 
 ## Why a separate crate?
 
-The [orm-extract epic (#149)](https://github.com/ujeenet/rustango/issues/149) set out to carve the rustango ORM out of the framework crate, so projects wanting Django-shaped models against an existing database could pull in the ORM bits without admin / tenancy / templates / auth.
+The [orm-extract epic (#149)](https://github.com/ujeenet/rustango/issues/149) set out to carve the rustango ORM out of the framework crate, so projects that only want derive-driven models against an existing database could pull in the ORM bits without admin / tenancy / templates / auth.
 
 **That epic is closed and the carve-out was deferred** — the runtime slice ([#144](https://github.com/ujeenet/rustango/issues/144)) is closed too, and no `rustango-orm` crate exists. The blocker is entanglement between m2m and signals/contenttypes, which cannot be split without taking those along.
 

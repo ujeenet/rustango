@@ -1,5 +1,5 @@
 //! End-to-end live test for the in-admin model reference (`/__docs`,
-//! Django `admindocs` parity, #1011). Builds an admin (no session auth →
+//! issue #1011). Builds an admin (no session auth →
 //! open routes), hits `/__docs`, and asserts the registered models +
 //! their fields / types / key-flags / relations render.
 

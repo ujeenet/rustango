@@ -1,4 +1,4 @@
-//! Django-parity #414 — `user_logged_in` / `user_logged_out` /
+//! Issue #414 — `user_logged_in` / `user_logged_out` /
 //! `user_login_failed` lifecycle signals.
 //!
 //! Pure in-memory registry test — connects a receiver per signal, fires

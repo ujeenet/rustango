@@ -1,63 +1,41 @@
-//! URL-token handoff for operator-as-superuser impersonation (#88).
+//! URL-token handoff for operator-as-superuser impersonation.
 //!
-//! ## The problem this solves
+//! The operator console and the tenant admin sit on different origins,
+//! so the console cannot set a cookie the tenant admin will read. A
+//! `Domain=.<apex>` cookie works on real DNS but not on `localhost`,
+//! which Chromium treats as a public-suffix TLD. A token in the URL
+//! works everywhere.
 //!
-//! The original `/orgs/{slug}/impersonate` flow (#78, v0.27.8) mints
-//! a tenant session cookie on the operator-console origin
-//! (`<apex>:<port>`) with `Domain=.<apex>` so subdomains receive it,
-//! then 302s to the tenant admin (`<slug>.<apex>:<port>/admin/`).
+//! ## The flow
 //!
-//! On real DNS (`example.com`), subdomain cookies cross the origin
-//! boundary and the flow Just Works. **On Chromium-family browsers
-//! against `localhost`** — and Chromium treats `localhost` as a
-//! public-suffix-list TLD — `Domain=localhost` is rejected on
-//! subdomains, so the cookie never reaches `acme.localhost`. The
-//! operator lands on the tenant login page instead of an
-//! impersonated admin. Firefox is more lenient.
+//! 1. The console mints a short-lived token, signed with HMAC-SHA256
+//!    over the tenant session secret, holding `op_id`, `slug`, `exp`
+//!    and a single-use `jti`.
+//! 2. It redirects to
+//!    `<scheme>://<sub>.<apex>:<port><handoff_url>?token=<signed>`,
+//!    setting no cookie of its own.
+//! 3. The tenant admin checks the signature, the expiry, the slug and
+//!    that the `jti` is unused. It then sets the usual
+//!    `rustango_tenant_session` cookie host-scoped, with no `Domain=`,
+//!    and redirects to the admin index.
 //!
-//! ## How the handoff works
+//! ## Security
 //!
-//! 1. Operator console mints a short-lived signed token (HMAC-SHA256
-//!    over the same secret used for tenant session cookies) with
-//!    `op_id`, `slug`, `exp`, and a single-use `jti`.
-//! 2. Redirects the browser to
-//!    `<scheme>://<sub>.<apex>:<port><handoff_url>?token=<signed>`.
-//!    No cookie is set on the operator-console origin.
-//! 3. The tenant admin handles the handoff URL: validates signature,
-//!    expiry, slug binding, and that the `jti` hasn't been redeemed
-//!    before. On success it mints the regular impersonation
-//!    `rustango_tenant_session` cookie HOST-SCOPED (no `Domain=`)
-//!    and 302s the browser to the admin index. Host-scoped cookies
-//!    are accepted even on the public-suffix `localhost` TLD.
+//! The signature stops tampering. The signed `slug` is checked against
+//! the resolved tenant, so a token cannot be replayed on another
+//! tenant. The `jti` goes into [`JtiBlacklist`] on redemption, so a
+//! second use gives [`HandoffError::AlreadyUsed`]. The token lives 60
+//! seconds; the cookie it produces keeps the normal impersonation TTL.
 //!
-//! ## Security properties
+//! The token does land in browser history. Single use and the short
+//! TTL bound that, and the handoff response sends
+//! `Referrer-Policy: no-referrer` so it does not leak through
+//! `Referer`.
 //!
-//! Equivalent to the cookie-domain path:
-//! - **Tampering rejected** — HMAC-SHA256 over the payload.
-//! - **Cross-tenant replay rejected** — `slug` is part of the signed
-//!   payload AND verified against the resolved tenant on redemption.
-//! - **Single-use** — `jti` is recorded in [`JtiBlacklist`] on
-//!   redemption; second use returns [`HandoffError::AlreadyUsed`].
-//! - **Short-TTL** — handoff tokens default to 60 seconds (the
-//!   resulting cookie has the regular impersonation TTL, default
-//!   1 hour).
-//!
-//! Browser-history risk (the URL appears in history with the token)
-//! is bounded by single-use enforcement + the 60s TTL. To prevent
-//! the token from leaking via `Referer` headers to third-party
-//! resources loaded by the admin page, the handoff response sets
-//! `Referrer-Policy: no-referrer`.
-//!
-//! ## Multi-instance deployments
-//!
-//! [`JtiBlacklist`] is process-local. In a horizontally-scaled
-//! deployment behind a load balancer, a redeemed token COULD be
-//! replayed against a different process within the TTL window. The
-//! mitigation today is the short TTL (one process likely catches
-//! both within 60s if the LB hashes consistently); proper fix is a
-//! shared store (Redis SETNX or a `rustango_used_jti` table). For
-//! the dev-localhost scenario this addresses, single-instance is
-//! the universal case.
+//! [`JtiBlacklist`] is per process. Behind a load balancer, a redeemed
+//! token could be replayed against another process inside the TTL. A
+//! shared store (Redis `SETNX`, or a `rustango_used_jti` table) would
+//! close that.
 
 use std::sync::{Arc, OnceLock};
 
@@ -68,10 +46,8 @@ use subtle::ConstantTimeEq;
 pub use super::session::SessionSecret;
 use super::session::{sign, SessionError};
 
-/// Default lifetime — 60 seconds. The handoff is "click button →
-/// browser redirects → tenant admin redeems"; nothing legitimate
-/// takes longer than that, and a longer window only widens the
-/// browser-history-leak attack surface.
+/// Token lifetime, 60 seconds. Click, redirect, redeem: nothing real
+/// takes longer, and a wider window only helps an attacker.
 pub const HANDOFF_TTL_SECS: i64 = 60;
 
 /// Errors decoding or validating a handoff token.
@@ -107,23 +83,21 @@ impl From<SessionError> for HandoffError {
 
 /// Signed payload carried in the `?token=` query parameter.
 ///
-/// Compact field names keep the URL short (operator console mints
-/// these into 302 Location headers; some intermediaries cap header
-/// size around 8KB). With i64 ids the encoded length is ~150 bytes.
+/// The field names are short so the token fits comfortably in a
+/// `Location` header: about 150 bytes encoded.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HandoffPayload {
-    /// Operator id (`rustango_operators.id` from the registry pool).
-    /// Threaded into the resulting impersonation cookie's `imp` field.
+    /// Operator id from `rustango_operators`. Ends up in the
+    /// impersonation cookie's `imp` field.
     pub op: i64,
-    /// Tenant slug the handoff was minted for. Verified against the
-    /// resolved org on redemption — defense against replay against
-    /// a different tenant even if the URL leaks.
+    /// Tenant slug this token was minted for. Checked against the
+    /// resolved org, so a leaked URL cannot be used on another tenant.
     pub slug: String,
     /// Expiry as Unix seconds.
     pub exp: i64,
-    /// Single-use token identifier. Random 16-byte value, base64url
-    /// encoded. Recorded in [`JtiBlacklist`] on redemption; second
-    /// use rejects with [`HandoffError::AlreadyUsed`].
+    /// Single-use id: 16 random bytes, base64url. Recorded in
+    /// [`JtiBlacklist`] on redemption; a second use gives
+    /// [`HandoffError::AlreadyUsed`].
     pub jti: String,
 }
 
@@ -132,10 +106,9 @@ impl HandoffPayload {
     #[must_use]
     pub fn new(op_id: i64, slug: impl Into<String>, ttl_secs: i64) -> Self {
         let now = chrono::Utc::now().timestamp();
-        // 16 random bytes is >2^64 entropy. v0.42 — sources from the
-        // OS CSPRNG: a predictable JTI here lets an operator who
-        // intercepted one handoff URL pre-mint the JTI for another,
-        // bypassing the single-use blacklist.
+        // From the OS CSPRNG. A guessable jti would let someone who saw
+        // one handoff URL predict the next and slip past the
+        // single-use check.
         use rand::{rngs::OsRng, RngCore};
         let mut bytes = [0u8; 16];
         OsRng.fill_bytes(&mut bytes[..]);
@@ -153,9 +126,8 @@ impl HandoffPayload {
     }
 }
 
-/// Sign and encode a handoff payload as `<b64(json)>.<b64(hmac)>`.
-/// Same wire format as the tenant session cookie so we share the
-/// same `sign` primitive (no separate key needed).
+/// Sign and encode a payload as `<b64(json)>.<b64(hmac)>`, the same
+/// wire format as the tenant session cookie, so both share one key.
 #[must_use]
 pub fn mint(secret: &SessionSecret, payload: &HandoffPayload) -> String {
     let json = serde_json::to_vec(payload).expect("payload serializes");
@@ -165,10 +137,11 @@ pub fn mint(secret: &SessionSecret, payload: &HandoffPayload) -> String {
     format!("{payload_b64}.{sig_b64}")
 }
 
-/// Verify, decode, and tenant-bind-check a handoff token. Does NOT
-/// check the `jti` against [`JtiBlacklist`] — caller does that
-/// separately so it can also `mark_used` atomically with the
-/// cookie-mint step.
+/// Verify a handoff token, decode it, and check it is bound to
+/// `expected_slug`.
+///
+/// It does not check the `jti`. The caller does that, so it can
+/// `mark_used` in the same step that mints the cookie.
 ///
 /// # Errors
 /// See [`HandoffError`].
@@ -199,57 +172,50 @@ pub fn decode(
     Ok(payload)
 }
 
-/// In-process single-use jti tracker. v0.47 — delegates to the
-/// pluggable [`crate::jti_store::JtiStore`] trait. `JtiBlacklist`
-/// itself stays as the consumer-facing type (back-compat with v0.46
-/// imports) but the storage is now swappable: pass an
-/// `Arc<dyn JtiStore>` to [`Self::with_store`] to share state across
-/// processes (Redis / DB).
+/// Tracks which handoff tokens have been redeemed.
+///
+/// Storage comes from [`crate::jti_store::JtiStore`]. The default is
+/// in-process; pass a shared store to [`Self::with_store`] to make it
+/// work across processes.
 pub struct JtiBlacklist {
     store: Arc<dyn crate::jti_store::JtiStore>,
 }
 
 impl JtiBlacklist {
-    /// Build a blacklist backed by an in-memory store. Suitable for
-    /// single-instance dev / tests; multi-instance deployments
-    /// should call [`Self::with_store`] with a shared store.
+    /// An in-memory store, fine for one process. Use
+    /// [`Self::with_store`] when you run more than one.
     fn new() -> Self {
         Self {
             store: Arc::new(crate::jti_store::InMemoryJtiStore::new()),
         }
     }
 
-    /// Swap the underlying store. v0.47 — pass any
-    /// `Arc<dyn JtiStore>` for multi-instance correctness.
+    /// Back the blacklist with your own store, e.g. a shared one for a
+    /// multi-process deployment.
     #[must_use]
     pub fn with_store(store: Arc<dyn crate::jti_store::JtiStore>) -> Self {
         Self { store }
     }
 
-    /// Process-wide singleton. The crate has no DI surface for this,
-    /// and the practical use case is single-instance dev where a
-    /// local map is correct. Multi-instance deployments construct
-    /// their own `JtiBlacklist::with_store(...)` and pass it into
-    /// the redeem path explicitly.
+    /// Process-wide singleton over the in-memory store. Run more than
+    /// one process and you want your own [`Self::with_store`] instead,
+    /// passed into the redeem path.
     pub fn shared() -> &'static Self {
         static INSTANCE: OnceLock<JtiBlacklist> = OnceLock::new();
         INSTANCE.get_or_init(Self::new)
     }
 
-    /// Returns `true` if the jti was previously marked used.
-    ///
-    /// Async since v0.52 — the store may be durable (#1191).
+    /// `true` if the jti was already marked used.
     pub async fn is_used(&self, jti: &str) -> bool {
         self.store.is_used(jti).await
     }
 
-    /// Atomically check + record. Returns `Err(AlreadyUsed)` if the
-    /// jti is in the store; otherwise inserts `(jti, exp)` and
-    /// returns `Ok(())`. Pruning of expired entries is the store's
-    /// responsibility — the in-memory impl does it on every call.
+    /// Check and record in one step. Gives `Err(AlreadyUsed)` if the
+    /// jti is already there, otherwise stores `(jti, exp)`. The store
+    /// prunes expired entries.
     ///
-    /// Async since v0.52 — a single-use handoff redemption is exactly the
-    /// operation that wants a durable, immediately-visible write (#1191).
+    /// # Errors
+    /// [`HandoffError::AlreadyUsed`] when the jti was already redeemed.
     pub async fn mark_used(&self, jti: &str, exp: i64) -> Result<(), HandoffError> {
         if self.store.mark_used(jti, exp).await {
             Ok(())
@@ -292,15 +258,10 @@ mod tests {
         let secret = key();
         let payload = HandoffPayload::new(7, "acme", 60);
         let token = mint(&secret, &payload);
-        // Flip a byte in the middle of the signature segment (i.e. after
-        // the `.` separator), not at `bytes.len() - 1`. The 43-char
-        // no-pad URL-safe base64 encoding of a 32-byte HMAC only allows
-        // specific trailing characters (the 4 unused bits at the tail
-        // must encode as zero), so flipping the very last byte can land
-        // on an invalid trailing char and trigger a base64 decode error
-        // → `Malformed` instead of the `BadSignature` we want to assert.
-        // A mid-signature byte is always-valid base64 and forces the
-        // `ct_eq` mismatch path.
+        // Flip a byte in the middle of the signature, not the last one.
+        // The last base64 char of a 32-byte HMAC has only some valid
+        // values, so flipping it can give `Malformed` instead of the
+        // `BadSignature` this test is about.
         let mut bytes = token.into_bytes();
         let dot = bytes
             .iter()

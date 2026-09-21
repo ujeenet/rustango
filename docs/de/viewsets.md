@@ -1,9 +1,9 @@
 # ViewSets — CRUD-REST-APIs
 
 Ein ViewSet verwandelt ein Model in eine vollständige REST-Ressource — Endpunkte zum **Auflisten,
-Erstellen, Lesen, Aktualisieren und Löschen** von Datensätzen — aus einer einzigen Deklaration. (Es ist
-das **Rustango**-Äquivalent zu einem `ModelViewSet` des Django REST Framework oder einem Laravel-
-API-Resource-Controller, falls du diese schon einmal verwendet hast.)
+Erstellen, Lesen, Aktualisieren und Löschen** von Datensätzen — aus einer einzigen Deklaration. Du
+beschreibst das Model und den gewünschten Kontrakt; das Routing, die Paginierung und die
+Serialisierung liefert das Framework.
 
 > **Neu bei REST-APIs?** Diese Anleitung setzt voraus, dass du weißt, was ein *Endpunkt*, ein *HTTP-
 > Verb* (GET / POST / …) und eine *JSON-Anfrage und -Antwort* sind. Falls dir davon etwas
@@ -14,7 +14,7 @@ Kombiniere ein ViewSet mit einem [Serializer](serializers.md) — dem Baustein, 
 JSON formt — und es schützt **beide Richtungen** auf einmal: Der Serializer formatiert jede
 **Antwort** (Felder umbenennen, verbergen, berechnen oder verschachteln) *und* regelt jede
 **Anfrage** (er validiert eingehende Daten und ignoriert stillschweigend Felder, die ein Client
-nicht setzen dürfen sollte). Abgelehnte Eingaben kommen in der vertrauten DRF-
+nicht setzen dürfen sollte). Abgelehnte Eingaben kommen in einer gut lesbaren
 Form zurück — ein JSON-Objekt mit dem Feldnamen als Schlüssel. Das funktioniert überall gleich auf PostgreSQL,
 MySQL und SQLite.
 
@@ -72,7 +72,6 @@ Darunter dasselbe Model; was sich unterscheidet, ist, was herauskommt und wer au
 | Bei ungültiger Eingabe | `400` — feldbasiert aus einem Serializer, sonst `{"error": "…"}` ([Formen](#formen-der-fehlerantwort)) | das Formular mit angezeigten Fehlern neu rendern |
 | Eine „Liste" ist | ein paginierter JSON-Umschlag | eine Schleife über Zeilen in deinem Template |
 | Üblicherweise authentifiziert per | Tokens / JWT / API-Keys | Session-Cookies |
-| Django-Entsprechung | DRF `ModelViewSet` | generische klassenbasierte Views |
 
 Wähle pro Ressource — und du kannst **beide auf demselben Model** einbinden (eine öffentliche JSON-
 API *und* interne CRUD-Seiten). Der Rest dieser Anleitung ist die JSON-/API-Seite; für
@@ -93,7 +92,7 @@ Jeder Schritt ist ein echter Befehl oder eine echte Datei.
 
 ### Schritt 1 — Die Blog-App erstellen
 
-Apps sind eigenständige Feature-Module (Djangos `startapp`):
+Apps sind eigenständige Feature-Module:
 
 ```bash
 cargo run -- startapp blog
@@ -154,8 +153,8 @@ cargo run -- migrate
 
 ### Schritt 4 — Den Serializer gerüsten
 
-Der Serializer ist das, was daraus eine *DRF*-API macht — er definiert den Anfrage-/Antwort-
-Kontrakt. Generiere das Grundgerüst:
+Der Serializer definiert den Anfrage-/Antwort-Kontrakt der API.
+Generiere das Grundgerüst:
 
 ```bash
 cargo run -- make:serializer PostSerializer --model Post
@@ -295,7 +294,7 @@ Die Antwort hat die Form des **Serializers**: `body` kam als `content` zurück, 
 berechnete `summary` erschien, und `published_at` (schreibgeschützt, servergesetzt) ist
 vorhanden.
 
-**Die Validierung lehnt ungültige Eingaben** mit einem `400` in DRF-Form ab — feldbasierte Arrays von
+**Die Validierung lehnt ungültige Eingaben** mit einem `400` ab — feldbasierte Arrays von
 Meldungen:
 
 ```bash
@@ -375,7 +374,7 @@ async fn rejects_short_title() {
         .json(&json!({"title":"hi","content":"x","author_id":1}))
         .send().await;
     assert_eq!(res.status, 400);
-    assert!(res.json_value()["title"].is_array());   // DRF field-error shape
+    assert!(res.json_value()["title"].is_array());   // field-keyed error shape
 }
 
 #[tokio::test]
@@ -430,7 +429,7 @@ Bei `create` und `update`, wenn ein Serializer registriert ist:
 1. **Die Validierung läuft.** Das `validate()` des Serializers — jedes einzelne
    `#[serializer(validate = "fn")]` pro Feld plus das feldübergreifende `validate` auf Container-
    Ebene — läuft gegen den JSON-Body. Bei Fehlschlag wird die Anfrage abgelehnt
-   mit `400 Bad Request` in der DRF-Fehlerform: ein JSON-Objekt mit dem Feldnamen als Schlüssel
+   mit `400 Bad Request` in der feldgeschlüsselten Fehlerform: ein JSON-Objekt mit dem Feldnamen als Schlüssel
    und Arrays von Meldungen, z. B. `{"title":["title must be at least 3 characters"]}`.
 2. **Filterung schreibbarer Felder.** Nur die schreibbaren Felder des Serializers werden
    gespeichert; `read_only`- und `method`-/berechnete Felder, die ein Client postet, werden
@@ -585,7 +584,7 @@ Jede Methode auf `ViewSet::for_model(SCHEMA)` (jede gibt `Self` zurück):
 Alles gesteuert über Query-Parameter am **Listen**-Endpunkt.
 
 **Filterung** — jeder `filter_fields`-Eintrag akzeptiert `?field=value` (exakt) plus
-Django-artige Lookups über ein `__suffix`:
+Lookups über ein `__suffix`:
 
 ```
 ?status=published
@@ -643,14 +642,14 @@ für sehr große Tabellen. `?cursor=<token>&page_size=20`:
 ## Validierung
 
 Mit einem **verdrahteten Serializer** führt der Create-/Update-Pfad die Validatoren des Serializers
-aus und gibt `400`er in DRF-Form zurück — der empfohlene Weg zu validieren (siehe
+aus und gibt feldgeschlüsselte `400`er zurück — der empfohlene Weg zu validieren (siehe
 [die Ehe](#die-serializer-ehe-eingabe--ausgabe) und die
 [Serializer-Anleitung](serializers.md#validierung)). Drei Schichten laufen:
 
 - **Deklarative Constraints** — `max_length` / `min_length` / `min` / `max`, und
   standardmäßig **erbt** das Feld das `max_length` / `min` / `max` /
   `choices` **des Models**. So wird eine `#[rustango(max_length = 200)]`-Spalte an der
-  API längengeprüft, ohne zusätzliche Konfiguration (Verhalten des DRF-`ModelSerializer`), wodurch
+  API längengeprüft, ohne zusätzliche Konfiguration, wodurch
   potenzielle `500`er aus DB-Constraints in freundliche `400`er verwandelt werden wie
   `{"title":["Ensure this value has at most 200 characters."]}`.
 - **Pro-Feld-** `validate = "fn"` und ein **feldübergreifender** `validate`-Hook — deine
@@ -677,7 +676,7 @@ hängt vom fehlgeschlagenen Pfad ab:
 
 | Form | Ausgegeben von | Body |
 |---|---|---|
-| **DRF-Feldmap** | nur Serializer-Validierung | `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}` |
+| **Feldgeschlüsselte Map** | nur Serializer-Validierung | `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}` |
 | **Einfache Meldung** | jeder andere ViewSet-Fehler | `{"error": "<lesbare Meldung>"}` |
 | **`ApiError`** | deine eigenen Handler, die `rustango::api_errors::ApiError` zurückgeben | `{"error": "<Maschinencode>", "message": …, "status": …, "details": …}` |
 
@@ -685,7 +684,7 @@ Die ersten beiden kommen beide aus einem ViewSet, der Unterschied zählt also:
 die oben aufgeführten `400`er aus Typkonvertierung, Erforderlich/NOT NULL und
 Datenbank-Constraints sind **keine** feldgeschlüsselten Maps — sie sind
 `{"error": "…"}`. Nur die eigenen Validatoren des Serializers erzeugen die
-DRF-Map.
+feldgeschlüsselte Map.
 
 Beachte außerdem: `error` bedeutet in der Tabelle zweierlei — einen lesbaren Satz
 in der ViewSet-Form und einen stabilen Maschinencode in `ApiError` (das den Satz
@@ -737,7 +736,7 @@ der Client-Schlüssel ist die Verbindungs-IP (oder `X-Forwarded-For` / `X-Real-I
 
 ## Eigene Aktionen jenseits von CRUD
 
-Es gibt keinen DRF-`@action`-Decorator — das ViewSet ist strikt auf die sechs CRUD-
+Es gibt kein Attribut, um weitere Routen an ein ViewSet zu hängen — es ist strikt auf die sechs CRUD-
 Routen beschränkt. Für zusätzliche Endpunkte binde deine eigenen Handler neben dem ViewSet ein:
 
 ```rust
@@ -755,7 +754,7 @@ separate Route bei.
 ### Zeilen auf den authentifizierten Principal beschränken
 
 Ein Backend läuft bei **jeder** Aktion — `list`, `retrieve`, `update`, `destroy` —
-verhält sich also wie DRFs `get_queryset()`. Eine vom Backend ausgeschlossene Zeile ergibt einen
+es engt also das Basis-Queryset für alle Routen ein. Eine vom Backend ausgeschlossene Zeile ergibt einen
 **404** auf den Item-Routen, keinen 403: Ein 403 würde bestätigen, dass die ID existiert.
 
 Die Identität muss aus der Credential kommen, niemals aus dem Query-String. Ein

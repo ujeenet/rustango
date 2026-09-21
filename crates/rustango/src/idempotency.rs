@@ -1,21 +1,16 @@
-//! Idempotency-key middleware (Stripe-shape).
+//! Idempotency-key middleware, in the shape Stripe uses.
 //!
-//! When a write request arrives with an `Idempotency-Key` header, this
-//! middleware:
+//! When a write request carries an `Idempotency-Key` header, the
+//! middleware looks the key up in the [`Cache`](crate::cache::Cache).
+//! On a hit it replays the stored response byte for byte, so a retried
+//! POST does not charge or create anything twice. On a miss it runs the
+//! handler, then stores the status, headers and body under the key for
+//! the TTL, 24 hours by default.
 //!
-//! 1. Looks up the key in the [`Cache`](crate::cache::Cache).
-//! 2. If a stored response exists, replays it byte-for-byte (so retried
-//!    POSTs don't double-charge / double-create / double-anything).
-//! 3. If not, runs the handler, captures status + headers + body, and
-//!    stores the result under the key with a configurable TTL (default
-//!    24 h).
+//! A request without the header passes through untouched.
 //!
-//! Requests without the header pass straight through unmodified.
-//!
-//! Note: the RFC 10008 `QUERY` method needs no `Idempotency-Key` — QUERY
-//! is idempotent by definition, so a retried QUERY is inherently safe.
-//! This middleware defaults to the mutating methods (POST/PUT/PATCH/DELETE)
-//! and deliberately does not cover QUERY.
+//! The RFC 10008 `QUERY` method is safe to repeat on its own, so this
+//! layer does not cover it.
 //!
 //! ## Quick start
 //!
@@ -32,21 +27,23 @@
 //!
 //! ## What gets cached
 //!
-//! Only **successful** responses (2xx). 4xx and 5xx replies are not
-//! cached so a retried request that hit a transient error can still
-//! reach a healthier replica. Override with
-//! [`IdempotencyLayer::cache_status_codes`].
+//! Only 2xx responses. A 4xx or 5xx is not stored, so a retry after a
+//! short-lived error can still reach a healthy replica. Change this
+//! with [`IdempotencyLayer::cache_status_codes`].
 //!
 //! ## What gets checked
 //!
-//! Defaults: POST, PUT, PATCH, DELETE. GET / HEAD / OPTIONS bypass
-//! the layer entirely (idempotent by spec).
+//! POST, PUT, PATCH and DELETE by default. GET, HEAD and OPTIONS skip
+//! the layer.
 //!
-//! ## Cache key shape
+//! ## Cache keys
 //!
-//! `idem:<scope>:<idempotency_key>`. Override `<scope>` via
-//! [`IdempotencyLayer::scope`] when you have multiple endpoints whose
-//! key namespaces shouldn't collide (e.g. `"charges"` vs `"refunds"`).
+//! `idem:<scope>:<idempotency_key>`. Set `<scope>` with
+//! [`IdempotencyLayer::scope`] to keep two endpoints' keys apart, for
+//! example `"charges"` and `"refunds"`.
+//!
+//! [`IdempotencyLayer::scope`]: crate::idempotency::IdempotencyLayer::scope
+//! [`IdempotencyLayer::cache_status_codes`]: crate::idempotency::IdempotencyLayer::cache_status_codes
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,8 +60,7 @@ use crate::cache::BoxedCache;
 const DEFAULT_HEADER: &str = "idempotency-key";
 const DEFAULT_BODY_CAP: usize = 4 * 1024 * 1024;
 
-/// Cached snapshot of a successful response. Lives in the cache until
-/// the TTL expires.
+/// A stored response, kept until its TTL runs out.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredResponse {
     status: u16,
@@ -84,8 +80,8 @@ pub struct IdempotencyLayer {
 }
 
 impl IdempotencyLayer {
-    /// New layer using the standard `Idempotency-Key` header, 24 h TTL,
-    /// caching every 2xx response.
+    /// New layer: the `Idempotency-Key` header, a 24 hour TTL, and
+    /// every 2xx response cached.
     #[must_use]
     pub fn new(cache: BoxedCache) -> Self {
         Self {
@@ -104,15 +100,15 @@ impl IdempotencyLayer {
         }
     }
 
-    /// Use a different request header (e.g. `"x-request-id"`).
+    /// Read the key from another header, such as `"x-request-id"`.
     #[must_use]
     pub fn header(mut self, name: &'static str) -> Self {
         self.header = name;
         self
     }
 
-    /// Namespace cache keys so two routers sharing the same Cache
-    /// don't replay each other's responses.
+    /// Prefix the cache keys, so two routers on one cache cannot
+    /// replay each other's responses.
     #[must_use]
     pub fn scope(mut self, scope: impl Into<String>) -> Self {
         self.scope = Arc::new(scope.into());
@@ -125,26 +121,24 @@ impl IdempotencyLayer {
         self
     }
 
-    /// Override which methods get the idempotency treatment. Pass an
-    /// empty vec to apply to every method.
+    /// Choose which methods the layer handles. An empty vec means all
+    /// of them.
     #[must_use]
     pub fn methods(mut self, methods: Vec<Method>) -> Self {
         self.methods = Arc::new(methods);
         self
     }
 
-    /// Cap on cached response body bytes. Bodies larger than this are
-    /// served back to the original caller as-is but NOT stored, so
-    /// retries fall through to the handler. Default: 4 MiB.
+    /// Largest body the layer will store, 4 MiB by default. A bigger
+    /// one is not stored, so a retry runs the handler again.
     #[must_use]
     pub fn body_cap(mut self, n: usize) -> Self {
         self.body_cap = n;
         self
     }
 
-    /// Predicate for "is this response cacheable?". Default: 2xx only.
-    /// Pass a closure to widen (e.g. cache 404s on PUT) or narrow
-    /// (cache only 201).
+    /// Decide which responses to store. The default stores 2xx only;
+    /// a closure can widen or narrow that.
     #[must_use]
     pub fn cache_status_codes<F>(mut self, predicate: F) -> Self
     where
@@ -185,27 +179,27 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
         return next.run(req).await;
     };
     if key.is_empty() || key.len() > 256 {
-        // Be strict — Stripe rejects > 255-char keys. Pass through to
-        // the handler, which may emit its own 4xx.
+        // Stripe rejects keys over 255 chars. Pass the request to the
+        // handler, which may answer with its own 4xx.
         return next.run(req).await;
     }
     let cache_key = format!("idem:{}:{}", cfg.scope, key);
 
-    // Replay stored response on HIT.
+    // Hit: replay the stored response.
     if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
         return rebuild(stored);
     }
 
-    // MISS — run the handler, then capture + store on success.
+    // Miss: run the handler, then store the result if it succeeded.
     let response = next.run(req).await;
     let (parts, body) = response.into_parts();
     let status = parts.status;
     let bytes = match to_bytes(body, cfg.body_cap).await {
         Ok(b) => b,
         Err(_) => {
-            // Body too large or stream error — pass response through
-            // empty (we already consumed the original) and skip
-            // caching. Honest failure mode.
+            // Body too large, or the stream broke. The original is
+            // already consumed, so return an empty body and store
+            // nothing.
             return Response::from_parts(parts, Body::empty());
         }
     };
@@ -223,8 +217,8 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
                 .collect(),
             body_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes),
         };
-        // Best-effort write — failure here is logged + ignored so the
-        // caller still gets their successful response.
+        // A failed write is logged and ignored, so the caller still
+        // gets the successful response.
         if let Ok(json) = serde_json::to_string(&stored) {
             if let Err(e) = cfg.cache.set(&cache_key, &json, Some(cfg.ttl)).await {
                 tracing::warn!(error = %e, cache_key, "idempotency: cache write failed");
@@ -258,7 +252,7 @@ fn rebuild(stored: StoredResponse) -> Response<Body> {
     let mut resp = builder
         .body(Body::from(body_bytes))
         .unwrap_or_else(|_| Response::new(Body::empty()));
-    // Mark replays so observability + clients can spot dedup'd traffic.
+    // Mark replays, so clients and dashboards can see deduped traffic.
     resp.headers_mut().insert(
         HeaderName::from_static("idempotent-replayed"),
         HeaderValue::from_static("true"),
@@ -267,13 +261,10 @@ fn rebuild(stored: StoredResponse) -> Response<Body> {
     resp
 }
 
-/// Drop any stale Content-Length we copied from the cached response —
-/// the body bytes are the same so it should still be right, but axum
-/// may want to re-compute for streaming bodies.
+/// Hook for fixing up `Content-Length` on a replayed response. It does
+/// nothing today: the cached body is already in memory, so axum works
+/// the length out on the way out.
 fn headers_align_content_length(_headers: &mut HeaderMap) -> Result<(), ()> {
-    // Reserved for future use — the cached body is already in-memory so
-    // axum recomputes Content-Length on the way out. Leaving this here
-    // keeps the call-site explicit about the invariant.
     Ok(())
 }
 
@@ -369,7 +360,7 @@ mod tests {
 
         let r2 = app.clone().oneshot(make_req()).await.unwrap();
         assert_eq!(r2.status(), 200);
-        // The replayed response should be IDENTICAL to call 0, not call 1.
+        // The replay must match call 0, not call 1.
         assert_eq!(
             r2.headers()
                 .get("idempotent-replayed")
@@ -563,8 +554,7 @@ mod tests {
                 .unwrap()
         };
 
-        // Same key, different scopes — both handlers should still run
-        // (and on a second hit, each would replay independently).
+        // Same key, different scopes, so both handlers run.
         let _ = app_a.clone().oneshot(req()).await.unwrap();
         let _ = app_b.clone().oneshot(req()).await.unwrap();
         assert_eq!(counter_a.load(Ordering::SeqCst), 1);
@@ -612,7 +602,7 @@ mod tests {
         let _ = app.clone().oneshot(make_req()).await.unwrap();
         let r2 = app.clone().oneshot(make_req()).await.unwrap();
         assert_eq!(r2.status(), 409);
-        // Conflict was cached + replayed.
+        // The 409 was stored and replayed.
         assert_eq!(
             r2.headers()
                 .get("idempotent-replayed")

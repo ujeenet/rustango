@@ -1,5 +1,5 @@
 //! End-to-end live test for `ViewSet::search_fields(...)` on SQLite
-//! (Django-parity #438 — DRF `SearchFilter`).
+//! (issue #438 — the `?search=` query filter).
 //!
 //! The DSL (`ViewSet::search_fields`) + the IR (`SearchClause`) +
 //! per-dialect writer (`Dialect::write_search` overrides for PG /

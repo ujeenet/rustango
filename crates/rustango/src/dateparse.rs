@@ -1,13 +1,8 @@
-//! Django-shape ISO 8601 / W3C datetime parsers.
+//! ISO 8601 / W3C date and time parsers.
 //!
-//! Mirrors `django.utils.dateparse.{parse_date, parse_time,
-//! parse_datetime, parse_duration}`. Each returns `Option<T>` —
-//! `None` on any parse failure, matching Django's "return None
-//! when the input doesn't conform" shape.
-//!
-//! Designed for inputs that come from JSON APIs, form fields, and
-//! URL query strings — where you've already validated "this is a
-//! string" but need to know if it's a parseable date/time/duration.
+//! Each function returns `Option<T>` and gives `None` when the input
+//! does not parse. Use them on strings from JSON bodies, form fields
+//! and query strings.
 //!
 //! ```ignore
 //! use rustango::dateparse::{parse_date, parse_time, parse_datetime, parse_duration};
@@ -16,21 +11,17 @@
 //! assert!(parse_time("12:30:00").is_some());
 //! assert!(parse_datetime("2026-06-04T12:30:00Z").is_some());
 //! assert!(parse_duration("PT1H30M").is_some()); // ISO 8601 duration
-//! assert!(parse_duration("1 day, 2:30:00").is_some()); // Django shape
+//! assert!(parse_duration("1 day, 2:30:00").is_some()); // clock shape
 //! ```
 
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 
-/// Django-parity `parse_date(value)` — parse an ISO 8601 date
-/// (`YYYY-MM-DD`) into a `NaiveDate`. Returns `None` on any
-/// formatting / out-of-range failure.
+/// Parse an ISO 8601 date (`YYYY-MM-DD`) into a `NaiveDate`.
 ///
-/// Accepts the canonical ISO 8601 calendar date form. `2026-02-30`
-/// is rejected (Feb has at most 29 days); `2026-13-01` is rejected
-/// (month overflow). Leading/trailing whitespace is rejected
-/// (Django shape — caller is responsible for trimming).
+/// Out-of-range dates such as `2026-02-30` or `2026-13-01` give
+/// `None`. Surrounding whitespace is not allowed, so trim it first.
 ///
 /// ```ignore
 /// use rustango::dateparse::parse_date;
@@ -46,10 +37,8 @@ pub fn parse_date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
 }
 
-/// Django-parity `parse_time(value)` — parse an ISO 8601 time
-/// (`HH:MM:SS[.fff]`) into a `NaiveTime`. Optional fractional
-/// seconds are accepted; the wire format does NOT include
-/// timezone.
+/// Parse an ISO 8601 time (`HH:MM:SS[.fff]`) into a `NaiveTime`.
+/// Fractional seconds are optional. A timezone is not accepted.
 ///
 /// ```ignore
 /// use rustango::dateparse::parse_time;
@@ -59,19 +48,17 @@ pub fn parse_date(s: &str) -> Option<NaiveDate> {
 /// ```
 #[must_use]
 pub fn parse_time(s: &str) -> Option<NaiveTime> {
-    // chrono accepts both `HH:MM:SS` and `HH:MM:SS%.f` via this format
     NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
         .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S"))
         .ok()
 }
 
-/// Django-parity `parse_datetime(value)` — parse an ISO 8601
-/// datetime (`YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]`) into a
-/// `DateTime<Utc>`. Both `T` and space separator between date and
-/// time are accepted (W3C profile / ISO 8601 §4.1.2.5).
+/// Parse an ISO 8601 datetime
+/// (`YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]`) into a `DateTime<Utc>`.
+/// The date and time may be split by `T` or by a space. RFC 2822 is
+/// also accepted.
 ///
-/// Timezone-naive inputs (no `Z`, no offset) are treated as UTC,
-/// matching Django's behavior when `USE_TZ` is enabled.
+/// An input with no zone is read as UTC.
 ///
 /// ```ignore
 /// use rustango::dateparse::parse_datetime;
@@ -83,16 +70,15 @@ pub fn parse_time(s: &str) -> Option<NaiveTime> {
 /// ```
 #[must_use]
 pub fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
-    // 1. RFC 3339 / ISO 8601 with explicit zone (Z or ±HH:MM).
+    // 1. RFC 3339 / ISO 8601 with an explicit zone (Z or ±HH:MM).
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Some(dt.with_timezone(&Utc));
     }
-    // 2. RFC 2822 (some APIs emit this — Django's parse_datetime
-    //    doesn't accept it but the helper is more useful with).
+    // 2. RFC 2822, which some APIs emit.
     if let Ok(dt) = DateTime::parse_from_rfc2822(s) {
         return Some(dt.with_timezone(&Utc));
     }
-    // 3. ISO 8601 with space separator instead of `T`.
+    // 3. No zone: `T` or a space between date and time.
     for fmt in [
         "%Y-%m-%d %H:%M:%S%.f",
         "%Y-%m-%d %H:%M:%S",
@@ -106,36 +92,11 @@ pub fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Django-parity `parse_duration(value)` — parse a duration string
-/// into a `std::time::Duration`. Accepts two shapes (matching
-/// Django's union):
+/// Render a `Duration` as a clock-style duration string: the
+/// inverse of [`parse_duration`].
 ///
-/// 1. **Django shape**: `"[D days, ]H:MM:SS[.fff]"` — e.g.
-///    `"1 day, 02:30:00"`, `"02:30:00"`, `"02:30:00.500"`.
-/// 2. **ISO 8601 duration**: `"PT1H30M"`, `"P1DT12H"`, `"PT45.5S"`.
-///
-/// Returns `None` on any parse failure. Negative durations are
-/// NOT supported (`std::time::Duration` is unsigned); Django
-/// `parse_duration("-1 day, 00:00:00")` returns a negative
-/// `timedelta` — rustango refuses since the underlying type can't
-/// represent it cleanly.
-///
-/// ```ignore
-/// use rustango::dateparse::parse_duration;
-/// use std::time::Duration;
-///
-/// assert_eq!(parse_duration("02:30:00"), Some(Duration::from_secs(9000)));
-/// assert_eq!(parse_duration("1 day, 02:30:00"), Some(Duration::from_secs(86400 + 9000)));
-/// assert_eq!(parse_duration("PT1H30M"), Some(Duration::from_secs(5400)));
-/// assert_eq!(parse_duration("garbage"), None);
-/// ```
-/// Django-parity inverse of [`parse_duration`] —
-/// [`django.utils.duration.duration_string(td)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.duration.duration_string).
-/// Render a `std::time::Duration` as a Django-shape duration string.
-///
-/// Output shape mirrors Django's default — `"<days> <days|day>,
-/// HH:MM:SS"` when days > 0, else `"HH:MM:SS"`. Sub-second
-/// fractions are appended as `.fff` when `subsec_nanos > 0`.
+/// The output is `"<n> day[s], HH:MM:SS"` when there is at least one
+/// day, else `"HH:MM:SS"`. A sub-second part is added as `.ffffff`.
 ///
 /// ```ignore
 /// use std::time::Duration;
@@ -167,29 +128,21 @@ pub fn duration_string(d: Duration) -> String {
     use std::fmt::Write as _;
     let _ = write!(out, "{hours:02}:{mins:02}:{secs:02}");
     if nanos > 0 {
-        // Render the most-significant 6 digits (microseconds) of the
-        // nanosecond component — Django's `timedelta.__str__` uses
-        // 6-digit microsecond precision.
+        // The fractional part is 6 digits, so use microseconds.
         let micros = nanos / 1000;
         let _ = write!(out, ".{micros:06}");
     }
     out
 }
 
-/// [`django.utils.duration.duration_iso_string(timedelta)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.duration.duration_iso_string) —
 /// ISO 8601 duration string for a [`std::time::Duration`].
 ///
-/// Shape: `P<days>DT<HH>H<MM>M<SS>[.<microseconds>]S`. Always emits
-/// the `P` prefix, the `DT` separator, and exactly the H/M/S fields;
-/// the microsecond `.ffffff` tail only appears when sub-second
-/// precision is non-zero. Matches Django's exact output —
-/// `Duration::ZERO` becomes `"P0DT00H00M00S"`, not the shorter
-/// `"PT0S"`.
+/// The shape is `P<days>DT<HH>H<MM>M<SS>[.<micros>]S`. The days and
+/// all three time fields are always printed; the `.ffffff` tail only
+/// appears for a sub-second value, so
+/// `Duration::ZERO` gives `"P0DT00H00M00S"`, not `"PT0S"`.
 ///
-/// `std::time::Duration` is unsigned, so the sign-prefix that
-/// Django emits for negative `timedelta` values doesn't apply
-/// here. Use [`duration_string`] for the Django-shape
-/// `"N days, HH:MM:SS"` form.
+/// For the `"N days, HH:MM:SS"` form use [`duration_string`].
 ///
 /// ```
 /// use std::time::Duration;
@@ -226,21 +179,39 @@ pub fn duration_iso_string(d: Duration) -> String {
     out
 }
 
+/// Parse a duration string into a `std::time::Duration`. Two shapes
+/// are accepted:
+///
+/// 1. **Clock shape**: `"[D days, ]H:MM:SS[.fff]"`, for example
+///    `"1 day, 02:30:00"` or `"02:30:00.500"`.
+/// 2. **ISO 8601**: `"PT1H30M"`, `"P1DT12H"`, `"PT45.5S"`.
+///
+/// Anything else gives `None`. A negative duration is never
+/// accepted, because `std::time::Duration` is unsigned.
+///
+/// ```ignore
+/// use rustango::dateparse::parse_duration;
+/// use std::time::Duration;
+///
+/// assert_eq!(parse_duration("02:30:00"), Some(Duration::from_secs(9000)));
+/// assert_eq!(parse_duration("1 day, 02:30:00"), Some(Duration::from_secs(86400 + 9000)));
+/// assert_eq!(parse_duration("PT1H30M"), Some(Duration::from_secs(5400)));
+/// assert_eq!(parse_duration("garbage"), None);
+/// ```
 #[must_use]
 pub fn parse_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
     if s.is_empty() {
         return None;
     }
-    // ISO 8601 duration — `P[nD]T[nH][nM][n.nS]` (also `P[nD]` with
-    // no T-section). We accept the common day+time-section subset.
+    // ISO 8601: `P[nD]T[nH][nM][n.nS]`, or `P[nD]` with no T part.
     if s.starts_with('P') || s.starts_with('p') {
         return parse_iso_duration(s);
     }
-    parse_django_duration(s)
+    parse_clock_duration(s)
 }
 
-fn parse_django_duration(s: &str) -> Option<Duration> {
+fn parse_clock_duration(s: &str) -> Option<Duration> {
     // Optional leading `N day,` / `N days,` segment.
     let (days, rest) = match s.find(", ") {
         Some(idx) => {
@@ -278,7 +249,7 @@ fn parse_django_duration(s: &str) -> Option<Duration> {
     Some(Duration::new(total_secs, frac_secs))
 }
 
-/// Parse `.fff` fractional-second part — return nanoseconds.
+/// Parse a `.fff` fractional-second part into nanoseconds.
 fn parse_frac(dot_and_digits: &str) -> Option<u32> {
     let digits = dot_and_digits.strip_prefix('.')?;
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
@@ -301,8 +272,7 @@ fn parse_iso_duration(s: &str) -> Option<Duration> {
         Some(idx) => (&body[..idx], &body[idx + 1..]),
         None => (body, ""),
     };
-    // Reject `P` (empty), `PT` (empty time section), `PTD` (no value).
-    // At least one of days_part or time_part must be non-empty.
+    // Reject `P` and `PT`: one of the two parts must carry a value.
     if days_part.is_empty() && (!has_t || time_part.is_empty()) {
         return None;
     }
@@ -312,9 +282,8 @@ fn parse_iso_duration(s: &str) -> Option<Duration> {
     let mut total_secs: u64 = 0;
     let mut nanos: u32 = 0;
 
-    // Days segment: ends with `D`. We accept `nD` only (months /
-    // weeks / years are calendar-dependent and the std::time::Duration
-    // can't represent them cleanly).
+    // Only `nD` is accepted here. Weeks, months and years depend on
+    // the calendar, so a plain `Duration` cannot hold them.
     if !days_part.is_empty() {
         let d = days_part
             .strip_suffix('D')
@@ -342,7 +311,7 @@ fn parse_iso_duration(s: &str) -> Option<Duration> {
                     total_secs = total_secs.checked_add(n.checked_mul(60)?)?;
                 }
                 'S' | 's' => {
-                    // Seconds may have a fractional component.
+                    // Seconds may be fractional.
                     if let Some(dot) = num_str.find('.') {
                         let whole: u64 = num_str[..dot].parse().ok()?;
                         nanos = parse_frac(&num_str[dot..])?;
@@ -451,7 +420,7 @@ mod tests {
         assert!(parse_datetime("").is_none());
     }
 
-    // -------- parse_duration: Django shape --------
+    // -------- parse_duration: clock shape --------
 
     #[test]
     fn duration_hms_only() {
@@ -479,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn duration_django_rejects_60_minute() {
+    fn duration_rejects_60_minute() {
         assert!(parse_duration("00:60:00").is_none());
         assert!(parse_duration("00:00:60").is_none());
     }
@@ -532,7 +501,7 @@ mod tests {
 
     use chrono::Timelike as _;
 
-    // -------- duration_string (Django parity, inverse of parse_duration) --------
+    // -------- duration_string (inverse of parse_duration) --------
 
     #[test]
     fn duration_string_zero() {
@@ -546,7 +515,7 @@ mod tests {
 
     #[test]
     fn duration_string_one_day_singular() {
-        // Django shape: "1 day, " (singular) vs "N days, " (plural).
+        // "1 day, " (singular) vs "N days, " (plural).
         assert_eq!(
             duration_string(Duration::from_secs(86400 + 9000)),
             "1 day, 02:30:00"

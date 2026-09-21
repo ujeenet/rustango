@@ -1,37 +1,34 @@
-//! Signed-cookie session primitives — HMAC-SHA256 key wrapper, sign,
-//! and verify helpers shared across the framework.
+//! Signed-cookie session primitives: the HMAC-SHA256 key wrapper plus
+//! the shared sign and verify helpers.
 //!
-//! This module deliberately holds **only the crypto primitive + key
-//! management**, never payload shape. Layers above (`tenancy::session`
-//! for operator/tenant cookies, `admin::session` for the bare-admin
-//! session cookie, …) define their own payload structs and call into
-//! [`sign`] to produce the MAC. That way two layers can share one
-//! signing key safely — they just need distinct cookie names + payload
-//! shapes so neither layer accidentally decodes the other's cookie.
+//! This module holds the key and the MAC, never the payload shape.
+//! Layers above it, such as `tenancy::session` and `admin::session`,
+//! define their own payload struct and call [`sign`]. Several layers
+//! can then share one key, as long as each uses its own cookie name
+//! and payload so it cannot decode another layer's cookie.
 //!
-//! Lives at the crate root (not under any feature flag) so the bare
-//! `admin` module can use the same primitives even when the `tenancy`
-//! feature is off — closes the duplication concern raised in #253.
+//! It sits at the crate root with no feature gate, so `admin` gets the
+//! same primitives when `tenancy` is off.
+//!
+//! [`sign`]: crate::session::sign
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;
 
-/// Error returned by [`SessionSecret::try_from_env`] when the
-/// `RUSTANGO_SESSION_SECRET` env var is set but the value isn't a
-/// valid signing key. Used by production boot paths that prefer to
-/// fail loudly over silently downgrading to an ephemeral random key.
+/// Why `RUSTANGO_SESSION_SECRET` could not be used as a signing key.
+/// Production boot paths return this instead of quietly falling back
+/// to a random key.
 #[derive(Debug)]
 pub enum SessionSecretError {
-    /// The env var isn't set at all. Returned only by the strict
-    /// [`SessionSecret::require_from_env`] (the lenient loaders treat an
-    /// unset var as "generate a random key").
+    /// The env var is not set. Only the strict
+    /// [`SessionSecret::require_from_env`] reports this; the other
+    /// loaders generate a random key instead.
     Missing,
-    /// The env var didn't decode as base64.
+    /// The value is not valid base64.
     BadBase64 { cause: String },
-    /// Decoded successfully but the resulting key is fewer than 32
-    /// bytes — too short for HMAC-SHA256.
+    /// It decoded, but to fewer than 32 bytes.
     TooShort { actual: usize },
 }
 
@@ -59,30 +56,24 @@ impl core::fmt::Display for SessionSecretError {
 
 impl std::error::Error for SessionSecretError {}
 
-/// Server-held signing key. Wrap `Vec<u8>` so callers can't
-/// accidentally print it. `Clone` is opt-in so the same secret can
-/// be shared across layers that use distinct cookie names + payload
-/// shapes (e.g. tenancy operator + tenancy tenant + bare admin —
-/// three layers, one key, three independent cookies).
+/// Server-held signing key. It wraps the bytes so they cannot be
+/// printed by accident. It is `Clone` so several cookie layers can
+/// share one key, each with its own cookie name and payload.
 #[derive(Clone)]
 pub struct SessionSecret(Vec<u8>);
 
 impl SessionSecret {
-    /// Read the secret from `RUSTANGO_SESSION_SECRET` (base64-encoded
-    /// 32+ bytes). Falls back to a randomly generated secret with a
-    /// `tracing::warn` when the var is *unset* — sessions are then
-    /// invalidated on every server restart.
+    /// Read the secret from `RUSTANGO_SESSION_SECRET`, which must be
+    /// base64 for at least 32 bytes. If the var is unset, generate a
+    /// random key and warn; sessions then end on every restart.
     ///
-    /// When the var IS set but unparseable (bad base64, fewer than
-    /// 32 bytes), we ALSO print a loud `eprintln!` to stderr in
-    /// addition to the tracing::warn (history: operators who set
-    /// the var and forgot to run it through `base64` quietly lost
-    /// session persistence on every redeploy).
+    /// If the var is set but unusable, also print to stderr, so a
+    /// mistyped secret is visible at boot and not only in the logs.
     #[must_use]
     pub fn from_env_or_random() -> Self {
         if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
-            // One definition of "valid secret", shared with build_jwt and
-            // `check --deploy` since #1396.
+            // One definition of "valid secret", shared with build_jwt
+            // and `check --deploy`.
             match Self::from_b64(&raw) {
                 Ok(secret) => return secret,
                 Err(e) => {
@@ -104,34 +95,24 @@ impl SessionSecret {
         Self(buf)
     }
 
-    /// Dev-friendly variant of [`Self::from_env_or_random`] that
-    /// persists the generated key to disk so sessions survive
-    /// server restarts even without `RUSTANGO_SESSION_SECRET` set.
+    /// Like [`Self::from_env_or_random`], but saves a generated key to
+    /// disk so dev sessions survive a restart. Order:
     ///
-    /// Resolution order:
-    /// 1. `RUSTANGO_SESSION_SECRET` env var — production path.
-    /// 2. Read `disk_path` if it exists and contains ≥ 32 bytes.
-    /// 3. Generate a random key, atomically write it to `disk_path`
-    ///    (creating parent directories as needed), and return it.
-    /// 4. If the write fails, fall back to ephemeral random + a
-    ///    `tracing::warn!`.
+    /// 1. `RUSTANGO_SESSION_SECRET`.
+    /// 2. `disk_path`, if it holds at least 32 bytes.
+    /// 3. A new random key, written to `disk_path`.
+    /// 4. If that write fails, a random key for this process only.
     ///
-    /// Used by the runserver boot path so dev `cargo run` cycles
-    /// don't sign every operator out on every reload (#69).
-    /// Production deployments should still set
-    /// `RUSTANGO_SESSION_SECRET` so the secret lives in env / a
-    /// secret-manager rather than the filesystem.
+    /// `runserver` uses this so a rebuild does not log everyone out.
+    /// In production still set `RUSTANGO_SESSION_SECRET`, so the key
+    /// comes from the environment or a secret manager, not a file.
     #[must_use]
     pub fn from_env_or_disk(disk_path: &std::path::Path) -> Self {
         if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
             match Self::from_b64(&raw) {
                 Ok(secret) => return secret,
-                // Set but unusable. This used to fall through in silence,
-                // and the "generated new session secret … set
-                // RUSTANGO_SESSION_SECRET to override" line that followed
-                // read as though the variable were unset — so a malformed
-                // real secret, or a deliberate rotation, looked applied and
-                // was not (#1359).
+                // Set but unusable. Say so loudly: otherwise a failed
+                // key rotation looks like it worked.
                 Err(e) => warn_unusable_secret(&e.to_string()),
             }
         }
@@ -195,13 +176,12 @@ impl SessionSecret {
         Ok(Self(buf))
     }
 
-    /// **Strict** variant for production boot: requires
-    /// `RUSTANGO_SESSION_SECRET` to be present, valid base64, and ≥ 32
-    /// bytes. Unlike [`Self::try_from_env`], an *unset* var is an error
-    /// ([`SessionSecretError::Missing`]) rather than a silent random
-    /// key — an ephemeral key breaks multi-instance deployments and
-    /// masks a missing-secret misconfiguration. Used by
-    /// [`load_session_secret_for_tier`] on the prod tier.
+    /// Strict variant for production boot. `RUSTANGO_SESSION_SECRET`
+    /// must be set, valid base64, and at least 32 bytes. Unlike
+    /// [`Self::try_from_env`], an unset var is
+    /// [`SessionSecretError::Missing`] and not a silent random key: a
+    /// per-process key breaks multi-instance deployments and hides the
+    /// mistake. [`load_session_secret_for_tier`] uses it on prod.
     ///
     /// # Errors
     /// [`SessionSecretError::Missing`] when unset; `BadBase64` /
@@ -213,18 +193,14 @@ impl SessionSecret {
         }
     }
 
-    /// Decode + validate a base64 secret string — **the** definition of
-    /// what `RUSTANGO_SESSION_SECRET` means.
+    /// Decode and check a base64 secret. This is the one definition of
+    /// what `RUSTANGO_SESSION_SECRET` means, and every reader in the
+    /// crate calls it, so a value `check --deploy` accepts is a value
+    /// the runtime accepts.
     ///
-    /// Public since #1396, because it was not, and two other readers
-    /// grew their own answers: `auth_routes::Config::build_jwt` signed
-    /// JWTs with the raw string bytes, and `manage check --deploy`
-    /// measured the raw string's length. A 32-character base64 secret
-    /// decodes to 24 bytes, so it passed both 32-byte floors while this
-    /// one — the runtime's — rejected it. One variable, three answers.
-    ///
-    /// Every reader now calls this, so a value `check --deploy` accepts
-    /// is a value the runtime accepts.
+    /// The 32-byte floor is on the **decoded** bytes. Measuring the
+    /// base64 text instead accepts a 32-character string that decodes
+    /// to only 24 bytes.
     ///
     /// # Errors
     /// [`SessionSecretError::BadBase64`] or `TooShort` (measured on the
@@ -241,31 +217,17 @@ impl SessionSecret {
         }
     }
 
-    /// Construct from raw bytes — useful for tests + callers that
-    /// load the key from a custom source.
+    /// Build a key from raw bytes. Use it in tests, or when the key
+    /// comes from Vault, KMS or another secret store.
     ///
     /// # Panics
-    /// If `bytes` is shorter than 32. HMAC accepts any key length —
-    /// `sign` below says so inline, right before relying on it — but a
-    /// short key is guessable, and guessing this one forges the session
-    /// cookie that authenticates the admin, the operator console and
-    /// every tenant member session. Fail closed rather than sign with
-    /// it.
+    /// If `bytes` is shorter than 32. HMAC itself takes a key of any
+    /// length, so nothing below this point will stop a short one. But
+    /// a short key can be guessed, and guessing it forges the session
+    /// cookie for the admin, the operator console and every tenant
+    /// member. Refuse it here instead of signing with it.
     ///
-    /// This floor already existed on [`Self::from_b64`] and
-    /// `from_env_or_disk`; it was missing on exactly the constructor
-    /// whose doc points at production — "callers that load the key from
-    /// a custom source" is Vault, KMS, a secrets manager. So the casual
-    /// path (paste base64 into an env var) was checked and the
-    /// deliberate one was not.
-    ///
-    /// Same reasoning, and the same 32-byte floor, as
-    /// [`crate::tenancy::jwt_lifecycle::JwtLifecycle::new`] (audit
-    /// A-06). That audit hardened the JWT signing family and left this
-    /// one alone, though a forged session cookie on the operator
-    /// console is a strictly larger blast radius than a forged JWT.
-    ///
-    /// Use [`Self::from_b64`] when you want a `Result` instead.
+    /// Use [`Self::from_b64`] if you want a `Result` instead.
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         assert!(
@@ -294,19 +256,15 @@ pub fn is_prod_tier(tier: &str) -> bool {
     )
 }
 
-/// Tier-aware session-secret loader (audit M2).
+/// Load the session secret for a deployment tier.
 ///
-/// * **prod** tier → [`SessionSecret::require_from_env`]: the secret
-///   MUST be a valid `RUSTANGO_SESSION_SECRET`. On any error (missing,
-///   bad base64, too short) this **panics** — a production server
-///   refuses to start rather than silently signing cookies + JWTs with
-///   an ephemeral per-process random key (which breaks multi-instance
-///   deployments and masks the misconfiguration).
-/// * **dev / staging / anything else** → [`SessionSecret::from_env_or_disk`]:
-///   restart-stable local development without requiring the env var.
+/// * **prod** uses [`SessionSecret::require_from_env`] and panics on
+///   any problem. The server refuses to start rather than sign
+///   cookies with a random per-process key.
+/// * **anything else** uses [`SessionSecret::from_env_or_disk`], so
+///   local sessions survive a restart with no env var.
 ///
-/// `tier` is typically `RUSTANGO_ENV`; callers read it via
-/// [`tier_from_env`].
+/// `tier` is usually `RUSTANGO_ENV`, read via [`tier_from_env`].
 ///
 /// # Panics
 /// On the prod tier when `RUSTANGO_SESSION_SECRET` is missing/invalid.
@@ -333,49 +291,45 @@ pub fn tier_from_env() -> String {
     std::env::var("RUSTANGO_ENV").unwrap_or_else(|_| "dev".to_owned())
 }
 
-/// Explicit override for the console-cookie `Secure` policy. Set once
-/// at boot by [`set_secure_cookies`] from `security.secure_cookies`; when
-/// present it wins over the tier default below (audit N2).
+/// Explicit override for the console-cookie `Secure` policy, set once
+/// at boot by [`set_secure_cookies`]. It beats the tier default.
 static SECURE_COOKIES_OVERRIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// Install the explicit console-cookie `Secure` policy (first call wins).
-/// The `manage` runner calls this from `security.secure_cookies` (which
-/// defaults to `true`) when settings are applied, so the standard boot
-/// path is **fail-closed**: cookies are `Secure` unless an operator
-/// explicitly sets `security.secure_cookies = false` (e.g. in
-/// `dev_settings.toml` for local plain-HTTP development). Returns `false`
-/// if the policy was already set.
+/// Set the console-cookie `Secure` policy. The first call wins, and
+/// later calls return `false`.
+///
+/// The `manage` runner calls this with `security.secure_cookies`,
+/// which defaults to `true`. So the normal boot path is fail-closed:
+/// cookies are `Secure` unless someone turns that off, as a local
+/// plain-HTTP dev setup would.
 pub fn set_secure_cookies(secure: bool) -> bool {
     SECURE_COOKIES_OVERRIDE.set(secure).is_ok()
 }
 
-/// Resolve the console-cookie `Secure` policy: an explicit override
-/// (from `security.secure_cookies`) wins; otherwise fall back to "secure
-/// on the prod tier." Pure helper so the precedence is unit-testable
-/// without touching the process-global / environment.
+/// Pick the `Secure` policy: the override wins, else "secure on the
+/// prod tier". A pure helper, so tests can check the order without
+/// touching globals or the environment.
 fn resolve_secure_cookies(override_flag: Option<bool>, tier: &str) -> bool {
     override_flag.unwrap_or_else(|| is_prod_tier(tier))
 }
 
-/// Whether the tenancy operator + tenant console cookies should carry the
-/// `Secure` attribute (audit H2/N2). Precedence:
-/// 1. the explicit policy set at boot via [`set_secure_cookies`] (from
-///    `security.secure_cookies`, default `true` on the `manage` path —
-///    fail-closed), else
-/// 2. "secure on the prod tier" (`RUSTANGO_ENV`) as a fallback for
-///    direct/non-`manage` use, so HTTPS prod still gets `Secure` cookies
-///    without config while local plain-HTTP dev keeps working.
+/// Whether the operator and tenant console cookies get the `Secure`
+/// attribute. In order:
+///
+/// 1. the policy set at boot by [`set_secure_cookies`], else
+/// 2. secure on the prod tier, read from `RUSTANGO_ENV`. This covers
+///    boots that skip `manage`: HTTPS prod still gets `Secure`, and
+///    plain-HTTP dev still works.
 #[must_use]
 pub fn secure_cookies() -> bool {
     resolve_secure_cookies(SECURE_COOKIES_OVERRIDE.get().copied(), &tier_from_env())
 }
 
-/// Say that `RUSTANGO_SESSION_SECRET` was set and could not be used.
+/// Report that `RUSTANGO_SESSION_SECRET` was set but unusable.
 ///
-/// Both surfaces, because the two audiences differ: `tracing` for whoever
-/// reads the deployment's logs, stderr for whoever is watching the boot.
-/// A silent fall-through here makes a failed key rotation look successful
-/// (#1359).
+/// Goes to both `tracing` (for the logs) and stderr (for whoever is
+/// watching the boot). Staying quiet here makes a failed key rotation
+/// look like it worked.
 fn warn_unusable_secret(reason: &str) {
     tracing::warn!(
         reason,
@@ -388,9 +342,8 @@ fn warn_unusable_secret(reason: &str) {
     );
 }
 
-/// Restrict the persisted session-secret file to 0600 on Unix so
-/// other users on the host can't read the signing key. Windows ACL
-/// hardening is separate (DPAPI / restricted DACL).
+/// Set the saved secret file to 0600 on Unix, so other users on the
+/// host cannot read the signing key. Windows needs its own ACL work.
 #[cfg(unix)]
 fn restrict_session_secret_perms(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -422,12 +375,8 @@ pub fn sign(secret: &SessionSecret, msg: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
 
-    /// A short key is refused, not signed with.
-    ///
-    /// The same floor and the same reasoning as `JwtLifecycle::new`
-    /// (audit A-06). `sign` builds its HMAC with
-    /// `expect("HMAC accepts any key length")` — true, and precisely
-    /// why the caller has to be the one that refuses.
+    /// A short key is refused, not signed with. `sign` would accept
+    /// it: HMAC takes any key length, so the check must be here.
     #[test]
     #[should_panic(expected = "need >= 32")]
     fn a_short_session_secret_is_refused() {
@@ -498,9 +447,8 @@ mod tests {
 
     #[test]
     fn resolve_secure_cookies_override_wins_else_tier() {
-        // Audit N2 — explicit policy (from security.secure_cookies) wins
-        // over the tier; fall back to "secure on prod tier" only when no
-        // override is set.
+        // The explicit policy wins over the tier. Fall back to
+        // "secure on the prod tier" only when nothing set it.
         assert!(resolve_secure_cookies(Some(true), "dev")); // override on, even in dev
         assert!(!resolve_secure_cookies(Some(false), "prod")); // override off, even in prod
         assert!(resolve_secure_cookies(None, "prod")); // no override → tier

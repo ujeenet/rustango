@@ -1,4 +1,4 @@
-//! Django-parity #357 — admin `raw_id_fields`.
+//! Issue #357 — admin `raw_id_fields`.
 //!
 //! Verifies the macro-emitted attr + the lookup link rendered next
 //! to the FK input on the change-form.

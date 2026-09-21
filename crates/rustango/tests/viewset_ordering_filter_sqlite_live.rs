@@ -1,10 +1,10 @@
 //! End-to-end live test for `ViewSet::ordering` + new
-//! `ordering_fields(...)` whitelist on SQLite (Django-parity #439 —
-//! DRF `OrderingFilter`).
+//! `ordering_fields(...)` whitelist on SQLite (issue #439 — the
+//! `?ordering=` query filter).
 //!
 //! The DSL (`ViewSet::ordering` for the default sort) + the `?ordering=`
 //! query-param parse have shipped since v0.30. This PR closed the
-//! remaining DRF gap: the `ordering_fields` whitelist that limits which
+//! remaining gap: the `ordering_fields` whitelist that limits which
 //! columns clients can sort by. Live tests cover both the new
 //! whitelist enforcement and the previously-untested asc/desc query
 //! parsing on a non-PG dialect.
@@ -16,7 +16,7 @@
 //! - `?ordering=-field` flips to DESC via the `-` prefix
 //! - comma-separated multi-field ordering chains correctly
 //! - `ordering_fields` whitelist silently drops off-list field names
-//!   (mirrors DRF's defensive default for unknown columns)
+//!   rather than erroring on them
 
 #![cfg(all(feature = "sqlite", feature = "tenancy", feature = "serializer"))]
 
@@ -236,7 +236,7 @@ async fn ordering_fields_whitelist_drops_off_list_names() {
 // `ordering_fields` was empty, so a ViewSet restricted to
 // `fields = "id, title, rating"` still honoured
 // `?ordering=secret_score` — a sort oracle over a column the API never
-// returns. DRF defaults to the serializer's readable fields.
+// returns. The default is now the serializer's readable fields.
 // ===================================================================
 
 /// Rows are seeded so that sorting by `secret_score` gives a *different*

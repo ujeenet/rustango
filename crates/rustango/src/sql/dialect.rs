@@ -1,27 +1,16 @@
-//! The `Dialect` trait — one implementation per database backend.
+//! The `Dialect` trait, with one implementation per backend. Every
+//! SQL writer dispatches through it.
 //!
-//! v0.8 promotes the trait from a query-compiler-only surface into the
-//! per-dialect seam every SQL writer dispatches through. Postgres is
-//! the only built-in `impl` shipped today; SQLite + MySQL slot in via
-//! v0.10's slice 10.5 by adding new `impl Dialect for SqliteDialect`
-//! and `impl Dialect for MySqlDialect` blocks alongside.
+//! Its methods fall into three groups:
 //!
-//! The methods split into three layers:
-//!
-//! * **Compilation** — `compile_select` / `_insert` / `_update` /
-//!   `_delete` / `_count` / `_bulk_insert`. Lower the dialect-neutral
-//!   query IR (`SelectQuery`, etc.) to a parameterized
-//!   [`CompiledStatement`]. Always overridden.
-//! * **DDL primitives** — `quote_ident`, `placeholder`, `serial_type`,
-//!   `bool_literal`, `supports_concurrent_index`, `supports_returning`.
-//!   Used by `migrate::ddl` when emitting `CREATE TABLE` and friends.
-//!   Most have sensible defaults (ANSI-quoted identifiers, `?`
-//!   placeholders, no `RETURNING`); Postgres overrides what differs.
-//! * **Identity** — `name()` for diagnostic logging.
-//!
-//! v0.10 will add advisory-lock helpers (`with_session_lock`,
-//! `with_xact_lock`) so `migrate::runner` can dispatch through the
-//! dialect instead of the current Postgres-typed direct calls.
+//! * **Compilation** — `compile_select` and friends lower the
+//!   dialect-neutral query IR to a [`CompiledStatement`]. Always
+//!   overridden.
+//! * **DDL primitives** — `quote_ident`, `placeholder`,
+//!   `serial_type`, `bool_literal` and the rest, used by
+//!   `migrate::ddl`. Most have an ANSI-shaped default; a dialect
+//!   overrides only what differs.
+//! * **Identity** — `name()`, for error messages and logs.
 
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
@@ -30,8 +19,8 @@ use crate::core::{
 
 use super::{CompiledStatement, SqlError};
 
-/// Postgres-shape `<col> ?| ARRAY[$1, $2, …]` / `<col> ?& ARRAY[…]`
-/// helper. Factored out so both default JSON-key methods call it.
+/// Write `<col> ?| ARRAY[$1, $2, …]`, shared by both default
+/// JSON-key methods.
 fn write_pg_array_keys(
     sql: &mut String,
     qualified_col: &str,
@@ -51,70 +40,59 @@ fn write_pg_array_keys(
     sql.push(']');
 }
 
-/// Writes a dialect-neutral query IR to a parameterized statement,
-/// plus the small bag of per-dialect DDL primitives the migration
-/// runner needs (identifier quoting, placeholder syntax, `SERIAL` /
-/// `AUTOINCREMENT` spelling, etc.).
-/// `Send + Sync` because the migration runner holds a
-/// `&'static dyn Dialect` across `await` points, and a future that
-/// does so is only `Send` if the reference is. Free to require: every
-/// implementor is a unit struct with no state to share.
+/// Turns the dialect-neutral query IR into a parameterized statement,
+/// and supplies the DDL primitives the migration runner needs.
+///
+/// It is `Send + Sync` because the migration runner holds a
+/// `&'static dyn Dialect` across `await` points. Every implementor is
+/// a unit struct, so this costs nothing.
 pub trait Dialect: Send + Sync {
-    // ====== Identity ======
-
-    /// Short identifier for this dialect — `"postgres"`, `"sqlite"`,
-    /// `"mysql"`. Used in error messages and tracing spans only;
-    /// callers should not branch on the value.
+    /// This dialect's short name: `"postgres"`, `"sqlite"` or
+    /// `"mysql"`. For error messages and logs.
     fn name(&self) -> &'static str;
 
-    // ====== DDL primitives (default-implemented to ANSI shape) ======
+    // ---- DDL primitives, defaulting to the ANSI shape ----
 
-    /// Quote an identifier (table or column name) with the dialect's
-    /// quoting rules. Default: ANSI double-quotes — works for
-    /// Postgres + SQLite; MySQL overrides to backticks. Embedded
-    /// quote characters are doubled so the result is always safe.
+    /// Quote a table or column name. The default is ANSI
+    /// double-quotes, which suit PG and SQLite; MySQL uses backticks.
+    /// A quote inside the name is doubled, so the result is safe.
     fn quote_ident(&self, name: &str) -> String {
         let escaped = name.replace('"', "\"\"");
         format!("\"{escaped}\"")
     }
 
-    /// Render the placeholder for the `n`-th bind, 1-based.
+    /// Render the placeholder for the `n`-th bind, counting from 1.
     ///
-    /// **`n` is advisory.** PostgreSQL emits `$n`; SQLite and MySQL
-    /// discard it and emit `?`. So on those two the bind vector must
-    /// follow the order the placeholders appear **in the SQL text**,
-    /// not the order the numbers suggest. Derive `n` from the bind
-    /// vector's length as you push, never from arithmetic on a separate
-    /// counter.
+    /// **`n` is advisory.** Only PostgreSQL uses it, as `$n`. SQLite
+    /// and MySQL ignore it and emit `?`, so on those backends the
+    /// binds must be pushed in the order their placeholders appear
+    /// **in the SQL text**. Take `n` from the bind vector's length as
+    /// you push, never from a separate counter.
     ///
-    /// Both ways of getting this wrong have already been shipped here:
+    /// Two mistakes follow from ignoring that, and both are silent on
+    /// PostgreSQL:
     ///
-    /// - **Out-of-order binds.** `SET ts = {p1} WHERE id IN ({p2}…)`
-    ///   with the timestamp pushed *last* binds the first id into `ts`.
-    ///   Same bind count, no error, silently wrong rows — and correct on
-    ///   PostgreSQL, so a PG-only test suite stays green.
-    /// - **Reusing a number.** `$1` twice is one bind on PostgreSQL and
-    ///   two `?` needing two binds elsewhere. See the note at
-    ///   `tenancy/permissions.rs`.
+    /// - **Binds out of order.** In `SET ts = {p1} WHERE id IN ({p2})`,
+    ///   pushing the timestamp last binds an id into `ts`. The count
+    ///   matches, so there is no error, just wrong rows.
+    /// - **Reusing a number.** `$1` twice is one bind on PostgreSQL,
+    ///   but two `?` needing two binds elsewhere.
     ///
-    /// `sql::writers::Sql::push_param` is the shape that cannot get this
-    /// wrong — it pushes the value first and takes `n` from
-    /// `params.len()` — but it is private to `sql`, so callers outside
-    /// that module hand-roll the pattern.
+    /// `sql::writers::Sql::push_param` cannot get this wrong, because
+    /// it pushes the value and then reads `params.len()`. It is
+    /// private to `sql`, so code outside writes the pattern by hand.
     fn placeholder(&self, n: usize) -> String {
         let _ = n;
         "?".to_owned()
     }
 
-    /// SQL column type for an auto-incrementing PK declared as
-    /// `Auto<T>` in the model. `field_type` is `FieldType::I32` or
-    /// `FieldType::I64`; non-integer types hit the default path
-    /// (`INTEGER` / `BIGINT`) — the macro layer rejects `Auto<T>` on
-    /// non-integers anyway.
+    /// The column type for an `Auto<T>` primary key. `field_type` is
+    /// `I32` or `I64`; the derive already rejects `Auto<T>` on other
+    /// types.
     ///
-    /// Default: ANSI-leaning `BIGINT` / `INTEGER`. Postgres overrides
-    /// to `BIGSERIAL` / `SERIAL`; SQLite to `INTEGER PRIMARY KEY
-    /// AUTOINCREMENT`; MySQL to `BIGINT AUTO_INCREMENT`.
+    /// The default is plain `INTEGER` / `BIGINT`. PG uses `SERIAL`
+    /// and `BIGSERIAL`, SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`,
+    /// MySQL `BIGINT AUTO_INCREMENT`.
     fn serial_type(&self, field_type: FieldType) -> &'static str {
         match field_type {
             FieldType::I32 => "INTEGER",
@@ -122,75 +100,57 @@ pub trait Dialect: Send + Sync {
         }
     }
 
-    /// `true` when [`Self::serial_type`]'s output already contains the
-    /// `PRIMARY KEY` clause inline — SQLite's case, where the storage
-    /// layer requires `INTEGER PRIMARY KEY AUTOINCREMENT` as one
-    /// indivisible token. Default `false`; the DDL writer separately
-    /// appends `PRIMARY KEY` for backends that don't bake it in.
+    /// `true` when [`Self::serial_type`] already includes
+    /// `PRIMARY KEY`, as SQLite does: it needs
+    /// `INTEGER PRIMARY KEY AUTOINCREMENT` as one phrase. Otherwise
+    /// the DDL writer appends `PRIMARY KEY` itself.
     fn serial_type_includes_primary_key(&self) -> bool {
         false
     }
 
-    /// `true` when the migration renderer should emit FK clauses inline
-    /// inside `CREATE TABLE` (column-level `REFERENCES …` plus table-
-    /// level `FOREIGN KEY (…) REFERENCES …` for composites) instead of
-    /// as post-hoc `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` ops.
+    /// `true` when foreign keys must go inside `CREATE TABLE` instead
+    /// of a later `ALTER TABLE … ADD CONSTRAINT`.
     ///
-    /// Default `false` (Postgres/MySQL: defer FKs so circular table
-    /// references resolve cleanly across the whole batch). SQLite
-    /// overrides to `true` — it has no `ALTER TABLE … ADD CONSTRAINT`
-    /// support, so FKs must live inside the originating CREATE.
+    /// PG and MySQL add them afterwards, so tables that reference
+    /// each other resolve across the batch. SQLite has no
+    /// `ADD CONSTRAINT`, so its FKs must be in the CREATE.
     fn inline_fks_in_create_table(&self) -> bool {
         false
     }
 
-    /// Maximum bind parameters the backend accepts in one statement.
+    /// How many binds the backend takes in one statement. A multi-row
+    /// `INSERT` reaches this at `rows × columns`.
     ///
-    /// Every backend has a ceiling, and a multi-row `INSERT` reaches it
-    /// at `rows × columns` (#1284):
-    ///
-    /// * **Postgres** — 65535, a hard protocol limit (the parameter
-    ///   count is an `int16` on the wire).
-    /// * **SQLite** — `SQLITE_MAX_VARIABLE_NUMBER`, 32766 since 3.32
-    ///   (999 before it; sqlx bundles a modern build).
-    /// * **MySQL** — no fixed cap; bounded by `max_allowed_packet`.
-    ///   65535 is a safe proxy well inside the default 64 MiB.
-    ///
-    /// The default is Postgres' figure — the most conservative of the
-    /// three that is also correct for a hard-limit backend.
+    /// * **Postgres** — 65535, a hard protocol limit.
+    /// * **SQLite** — 32766 since 3.32.
+    /// * **MySQL** — no fixed cap, only `max_allowed_packet`; 65535
+    ///   sits well inside the default.
     fn max_bind_params(&self) -> usize {
         65535
     }
 
-    /// Translate a `DEFAULT` expression authored in Postgres dialect
-    /// (the rustango canonical form) to the target backend's spelling.
-    /// `ty` is the field's `FieldType` token (e.g. `"json"`, `"datetime"`,
-    /// `"string"`) so dialects can choose syntax per column type — MySQL
-    /// in particular needs `DEFAULT ('{}')` (expression default) for
-    /// `JSON` columns since `DEFAULT '{}'` is rejected.
+    /// Translate a `DEFAULT` expression from the canonical Postgres
+    /// form into this backend's spelling. `ty` is the field type
+    /// token, since the right syntax can depend on the column type:
+    /// MySQL, for instance, needs `DEFAULT ('{}')` on a JSON column.
     ///
-    /// Default: pass-through (Postgres-native). SQLite overrides
-    /// `now()` → a parenthesised `strftime` in the canonical datetime
-    /// format and strips `::type` casts. MySQL overrides similarly plus
-    /// wraps defaults on its LOB-rendered columns (JSON / TEXT / BLOB)
-    /// in parens.
+    /// The default passes the expression through. SQLite turns
+    /// `now()` into a `strftime` call and drops `::type` casts.
     ///
-    /// `max_length` is the field's declared length cap (PG/SQLite
-    /// ignore it here); MySQL needs it to tell an unbounded `String`
-    /// (→ `TEXT`, which forbids a literal `DEFAULT`) apart from a
-    /// bounded one (→ `VARCHAR(n)`, which allows it).
+    /// `max_length` matters only to MySQL, which needs it to tell an
+    /// unbounded `String` (a `TEXT` column, which allows no literal
+    /// default) from a bounded one (a `VARCHAR(n)`, which does).
     fn translate_default_expr(&self, expr: &str, _ty: &str, _max_length: Option<u32>) -> String {
         expr.to_owned()
     }
 
-    /// The `DEFAULT` expression for "written now", per dialect.
+    /// The `DEFAULT` expression meaning "the time of the write".
     ///
-    /// Hand-written framework DDL asks here rather than copying it: on
-    /// SQLite it is not a keyword but #1464's canonical `strftime`, and
-    /// five copies had to be hand-corrected when that changed.
+    /// Hand-written DDL should call this rather than spell it out: on
+    /// SQLite it is not a keyword but a `strftime` call in the
+    /// canonical format.
     ///
-    /// A **backstop** only — every writer binds its own timestamp, and
-    /// on an upgraded SQLite file this default is unfixable anyway.
+    /// It is only a backstop. Every writer binds its own timestamp.
     fn current_timestamp_default(&self) -> String {
         self.translate_default_expr("now()", "datetime", None)
     }
@@ -205,9 +165,9 @@ pub trait Dialect: Send + Sync {
         )
     }
 
-    /// Render a boolean literal for `DEFAULT` clauses and inline
-    /// comparisons. Default: ANSI `TRUE` / `FALSE`. SQLite + MySQL
-    /// override to `1` / `0` (no native boolean type).
+    /// A boolean literal for `DEFAULT` clauses and inline
+    /// comparisons. `TRUE` / `FALSE` by default; SQLite and MySQL use
+    /// `1` / `0`, having no boolean type.
     fn bool_literal(&self, b: bool) -> &'static str {
         if b {
             "TRUE"
@@ -216,53 +176,43 @@ pub trait Dialect: Send + Sync {
         }
     }
 
-    /// `true` if `CREATE INDEX CONCURRENTLY` is honored. Postgres
-    /// overrides to `true`; default is `false` so other dialects
-    /// silently downgrade `atomic: false` migrations to a regular
+    /// `true` if `CREATE INDEX CONCURRENTLY` works. Only Postgres.
+    /// Elsewhere a non-atomic migration falls back to a plain
     /// `CREATE INDEX` with a warning.
     fn supports_concurrent_index(&self) -> bool {
         false
     }
 
-    /// `true` if `CREATE INDEX IF NOT EXISTS` is accepted. Postgres
-    /// and SQLite support the guard; MySQL does not (as of 8.x). The
-    /// migration renderer omits the `IF NOT EXISTS` token when this
-    /// returns `false`; the ledger already prevents re-runs so the
-    /// guard is belt-and-suspenders.
+    /// `true` if `CREATE INDEX IF NOT EXISTS` is accepted. MySQL has
+    /// no such form, so the renderer drops the guard there. The
+    /// migration ledger already prevents re-runs.
     fn supports_create_index_if_not_exists(&self) -> bool {
         true
     }
 
-    /// Render the `USING <method>` clause appended after the table
-    /// name in `CREATE INDEX … ON tbl <USING …> (cols)`. Returns
-    /// an empty string for the default `btree` method (the standard
-    /// "no clause" shape) and for dialects that lack `USING`
-    /// support entirely (SQLite). The dialect implementation is
-    /// responsible for sanitizing the method token — unsupported
-    /// methods on a backend should degrade to `""` so the index
-    /// still gets created as btree. Issue #34.
+    /// The `USING <method>` clause in
+    /// `CREATE INDEX … ON tbl <USING …> (cols)`. Empty for the
+    /// default btree, and for SQLite, which has no `USING`.
+    ///
+    /// An implementation must check the method token and return `""`
+    /// for one the backend does not know, so the index is still
+    /// created as a btree.
     fn index_method_clause(&self, method: &str) -> String {
-        // PG default: emit `USING <method>` for any non-default
-        // method. The dialect-specific overrides further restrict
-        // (e.g. SQLite always empty, MySQL only btree/hash).
         match method {
             "" | "btree" => String::new(),
             other => format!(" USING {other}"),
         }
     }
 
-    /// Render the "insert-or-skip" tail clause appended to `INSERT INTO
-    /// … VALUES (…)` so the caller's row inserts cleanly on first run
-    /// and is silently skipped on re-run.
+    /// The "insert or skip" tail for an `INSERT`, so the row is
+    /// written the first time and skipped on a re-run.
     ///
-    /// `conflict_cols` are the **already-quoted** column identifiers
-    /// that define the unique constraint the caller is targeting
-    /// (typically a `UNIQUE INDEX` or composite PK).
+    /// `conflict_cols` are **already-quoted** identifiers naming the
+    /// unique constraint to match on.
     ///
-    /// Defaults to Postgres/SQLite `ON CONFLICT (…) DO NOTHING`. MySQL
-    /// overrides to `ON DUPLICATE KEY UPDATE <col0> = <col0>` (no-op
-    /// write — satisfies MySQL's syntax requirement for at least one
-    /// SET expression while leaving the existing row untouched).
+    /// The default is `ON CONFLICT (…) DO NOTHING`. MySQL uses
+    /// `ON DUPLICATE KEY UPDATE <col> = <col>`, a no-op write that
+    /// satisfies its requirement for at least one SET expression.
     fn insert_on_conflict_skip(&self, conflict_cols: &[&str]) -> String {
         if conflict_cols.is_empty() {
             return String::new();
@@ -270,56 +220,39 @@ pub trait Dialect: Send + Sync {
         format!("ON CONFLICT ({}) DO NOTHING", conflict_cols.join(", "))
     }
 
-    /// `true` if `INSERT ... RETURNING <cols>` is honored. Postgres
-    /// always; SQLite ≥ 3.35; MySQL never. Drives the macro
-    /// codegen's `Auto<T>` insert path: `false` here forces the
-    /// runner to do a `last_insert_id()`-style follow-up read.
+    /// `true` if `INSERT … RETURNING` works: always on Postgres,
+    /// from 3.35 on SQLite, never on MySQL. When it is `false`, an
+    /// `Auto<T>` insert has to read the id back with a second query.
     fn supports_returning(&self) -> bool {
         false
     }
 
-    /// `true` if the dialect understands the `ORDER BY … NULLS
-    /// FIRST|LAST` keyword (issue #76). Postgres + SQLite yes;
-    /// MySQL no — there the writer emulates `NULLS FIRST/LAST`
-    /// with an `<col> IS NULL` pre-sort term:
-    ///
-    /// - `NULLS FIRST` on `ASC`: emit `<col> IS NULL DESC, <col> ASC`
-    /// - `NULLS LAST`  on `ASC`: emit `<col> IS NULL ASC,  <col> ASC`
-    /// - same pattern for DESC.
+    /// `true` if `ORDER BY … NULLS FIRST|LAST` is understood. MySQL
+    /// is the exception, so the writer sorts on `<col> IS NULL`
+    /// first: `DESC` on that term for NULLS FIRST, `ASC` for
+    /// NULLS LAST.
     fn supports_nulls_order(&self) -> bool {
         true
     }
 
-    /// SQL identifier for the dialect's "random number" function used
-    /// by `ORDER BY RANDOM()` (issue #77). PG + SQLite expose
-    /// `RANDOM()`; MySQL is the outlier with `RAND()`. Default:
-    /// `RANDOM` (covers PG + SQLite; MySQL overrides).
+    /// The name of the random-number function. `RANDOM` on PG and
+    /// SQLite, `RAND` on MySQL.
     fn random_fn(&self) -> &'static str {
         "RANDOM"
     }
 
-    /// SQL fragment to emit as the `LIMIT` clause when the query has
-    /// an explicit `OFFSET` but no `LIMIT` (#560).
+    /// The `LIMIT` clause to add when a query has an `OFFSET` but no
+    /// `LIMIT`. The writer puts it before the `OFFSET`.
     ///
-    /// MySQL's grammar requires a `LIMIT` whenever `OFFSET` is used
-    /// — `SELECT … OFFSET 10` alone is `ERROR 1064` ("you have an
-    /// error in your SQL syntax"). The documented workaround is to
-    /// pair the OFFSET with the max-`u64` literal:
-    /// `LIMIT 18446744073709551615 OFFSET 10`. PG + SQLite accept
-    /// bare `OFFSET` without a `LIMIT`, so they return `None` here
-    /// and the writer emits the offset directly.
-    ///
-    /// Returning `Some("…")` causes the writer to prepend the
-    /// fragment ahead of the `OFFSET` clause; returning `None`
-    /// (the default) means "no placeholder LIMIT required".
+    /// MySQL's grammar demands a `LIMIT` alongside any `OFFSET`, and
+    /// pairs it with the largest `u64`. PG and SQLite accept a bare
+    /// `OFFSET`, so they return `None`.
     fn offset_without_limit_clause(&self) -> Option<&'static str> {
         None
     }
 
-    /// Wrap a SUM expression in a cast back to BIGINT. PostgreSQL's
-    /// SUM(BIGINT) is NUMERIC and MySQL's is DECIMAL — both fall
-    /// through to Null in the aggregate row decoder which only tries
-    /// scalar types. Default: ANSI `CAST(<expr> AS BIGINT)`.
+    /// Cast a SUM back to BIGINT. PG returns NUMERIC and MySQL
+    /// DECIMAL, neither of which the row decoder reads.
     fn cast_aggregate_to_int(&self, expr: &str) -> String {
         format!("CAST({expr} AS BIGINT)")
     }
@@ -332,55 +265,30 @@ pub trait Dialect: Send + Sync {
         format!("CAST({expr} AS DOUBLE PRECISION)")
     }
 
-    /// SQL type to cast a `NULL` parameter to when the column type is
-    /// known. Postgres needs this — `INSERT INTO t(name) VALUES ($1)`
-    /// with `$1 = NULL` against an integer column raises
-    /// `column "x" is of type integer but expression is of type text`,
-    /// and the cast (`$1::INTEGER`) tells Postgres exactly which NULL
-    /// we mean. `MySQL` has no equivalent issue — return `None` and the
-    /// writer skips the cast. Default: `None`.
+    /// The type to cast a `NULL` parameter to when the column type is
+    /// known. Postgres needs it: an untyped `NULL` bound against an
+    /// integer column is rejected, and `$1::INTEGER` says which NULL
+    /// is meant. Other dialects return `None` and the writer skips
+    /// the cast.
     fn null_cast(&self, ty: FieldType) -> Option<&'static str> {
         let _ = ty;
         None
     }
 
-    /// `ALTER TABLE <table> DROP ...` for a named CHECK constraint.
+    /// `ALTER TABLE <table> DROP …` for a named CHECK constraint, or
+    /// `None` on a dialect with no such statement, as on SQLite.
     ///
-    /// Default is the PostgreSQL form, `DROP CONSTRAINT IF EXISTS`,
-    /// which is idempotent. MySQL overrides it: it spells this
-    /// `DROP CHECK` and accepts **no `IF EXISTS`** on any
-    /// drop-constraint form, so the statement errors (3821) when the
-    /// constraint is absent rather than doing nothing.
+    /// Every dialect must answer for itself. Postgres spells it
+    /// `DROP CONSTRAINT IF EXISTS`, which is idempotent. MySQL spells
+    /// it `DROP CHECK` and takes no `IF EXISTS`, so it errors when
+    /// the constraint is already gone.
     ///
-    /// This lives on the dialect rather than in the migration writer
-    /// because it had drifted into hand-written copies across
-    /// `migrate/diff.rs` and `migrate/ddl.rs`, some of which emitted
-    /// the PostgreSQL form to MySQL, which is `ERROR 1064` (#559).
-    /// (This said "four — two in each"; the split was never that
-    /// even, and a bare count rots the moment an arm moves, so the
-    /// files are named instead — #1507.)
-    /// A caller that cannot spell the statement itself cannot
-    /// spell it wrongly.
-    /// `None` means this dialect has no `ALTER TABLE … DROP CONSTRAINT`
-    /// at all — SQLite. Returning a `String` unconditionally meant the
-    /// default handed SQLite PostgreSQL syntax it cannot parse, safe
-    /// only because every current caller happens to reject SQLite
-    /// before asking. The next caller would not have known to.
-    ///
-    /// **The default body refuses rather than guessing.** A default
-    /// returning the PostgreSQL form is how #559 happened: MySQL
-    /// inherited `DROP CONSTRAINT IF EXISTS` and emitted SQL its parser
-    /// rejects. Keeping that default after fixing it would let a fourth
-    /// dialect inherit the same wrong answer silently.
-    ///
-    /// Removing the default outright was the first attempt, and it is a
-    /// SemVer-major change: this trait is a documented extension point
-    /// (see the module header), so every downstream `impl Dialect`
-    /// would stop compiling on a patch bump. Panicking instead keeps
-    /// source compatibility and still refuses to emit the wrong SQL —
-    /// the message names the method and the dialect, so a new backend
-    /// finds out on its first migration rather than on a server's
-    /// syntax error. All three in-tree dialects override it.
+    /// # Panics
+    /// The default body panics on purpose, naming the dialect. There
+    /// is no safe fallback: handing a new backend the PostgreSQL form
+    /// once shipped SQL that MySQL could not parse, and a panic on
+    /// the first migration is easier to find than a syntax error from
+    /// a live server.
     fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
         let _ = (table, name);
         unimplemented!(
@@ -393,14 +301,14 @@ pub trait Dialect: Send + Sync {
         )
     }
 
-    /// `ALTER TABLE <table> DROP ...` for a named foreign key.
+    /// `ALTER TABLE <table> DROP …` for a named foreign key, or
+    /// `None` where there is no such statement.
     ///
-    /// Same story as [`Dialect::drop_check_constraint_sql`]: the default
-    /// is PostgreSQL's idempotent `DROP CONSTRAINT IF EXISTS`, and MySQL
-    /// overrides it with `DROP FOREIGN KEY`, which is not idempotent.
-    /// `None` on dialects with no `ALTER TABLE … DROP CONSTRAINT`, as
-    /// for [`Dialect::drop_check_constraint_sql`] — including its
-    /// reason for refusing rather than defaulting to the PG form.
+    /// Postgres uses `DROP CONSTRAINT IF EXISTS`, MySQL the
+    /// non-idempotent `DROP FOREIGN KEY`.
+    ///
+    /// # Panics
+    /// As [`Dialect::drop_check_constraint_sql`].
     fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
         let _ = (table, name);
         unimplemented!(
@@ -411,43 +319,30 @@ pub trait Dialect: Send + Sync {
         )
     }
 
-    /// Whether `CREATE [UNIQUE] INDEX ... WHERE <expr>` partial-index
-    /// syntax is supported. PG and SQLite (3.8+) both ship it natively;
-    /// MySQL has no equivalent (the migration writer drops the WHERE
-    /// clause + emits a warning so the rest of the migration still
-    /// applies). Default `true`; MySQL overrides to `false`. Issue
-    /// #265 / T1.3.
+    /// `true` if partial indexes, `CREATE INDEX … WHERE <expr>`, are
+    /// supported. MySQL has no equivalent, so the migration writer
+    /// drops the WHERE clause there and warns.
     fn supports_partial_index(&self) -> bool {
         true
     }
 
-    /// Django-parity `Meta.required_db_features` capability query — does
-    /// this dialect advertise the given token? `manage check --deploy`
-    /// walks every model's `required_db_features` and warns when this
-    /// returns `false`, so projects can declare "needs PG `LISTEN/NOTIFY`"
-    /// or "needs MySQL 8 CTE support" and get a deploy-time signal
-    /// rather than a runtime surprise.
+    /// Does this dialect advertise the given feature token?
     ///
-    /// Default impl whitelists tokens supported by all three backends
-    /// rustango ships (`window_functions`, `recursive_cte`,
-    /// `json_extract`, `expression_index`, `partial_index` —
-    /// the last gated on [`Self::supports_partial_index`]). Per-dialect
-    /// impls extend with PG-specific (`array_type`, `range_type`,
-    /// `hstore`, `citext`, `listen_notify`, `row_security`, `gin_index`,
-    /// `gist_index`, `unique_constraint_deferred`) or MySQL/SQLite
-    /// specifics.
+    /// `manage check --deploy` reads every model's
+    /// `required_db_features` and warns where this says `false`, so a
+    /// project can declare a need like `listen_notify` and hear about
+    /// it before deploying rather than at runtime.
     ///
-    /// Unknown tokens return `false` (treat as "not supported" so the
-    /// deploy warning fires; that's the safer default for aspirational
-    /// declarations).
+    /// The default covers what all backends share; each dialect adds
+    /// its own on top. An unknown token is `false`, so the warning
+    /// fires.
     #[must_use]
     fn supports(&self, token: &str) -> bool {
         self.default_supports(token)
     }
 
-    /// Tokens supported by all three backends rustango ships against —
-    /// per-dialect overrides of [`Self::supports`] call this for the
-    /// generic baseline and then `||`-add their specifics.
+    /// The tokens every backend supports. An override of
+    /// [`Self::supports`] calls this and adds its own.
     #[must_use]
     fn default_supports(&self, token: &str) -> bool {
         matches!(
@@ -457,17 +352,12 @@ pub trait Dialect: Send + Sync {
             || (token == "returning" && self.supports_returning())
     }
 
-    /// Dialect-specific SQL type token for the rhs of `CAST(<expr> AS <ty>)`
-    /// — distinct from [`Self::null_cast`] (which is PG-specific) and
-    /// [`Self::column_type`] (DDL, which includes lengths like
-    /// `VARCHAR(N)`). Returns `None` when the dialect genuinely can't
-    /// cast to that `FieldType` (e.g. SQLite has no native UUID /
-    /// JSONB types — caller should error).
+    /// The type token for `CAST(<expr> AS <ty>)`. `None` when the
+    /// dialect cannot cast to that type at all, as SQLite cannot to
+    /// UUID or JSONB; the caller then errors.
     ///
-    /// Default returns the Postgres-standard token names (`BIGINT`,
-    /// `TEXT`, `TIMESTAMPTZ`, …). Backends with divergent CAST grammar
-    /// (MySQL's `SIGNED`/`UNSIGNED` for ints, no `CAST AS JSON`, etc.)
-    /// override.
+    /// This is neither [`Self::null_cast`], which is PG-only, nor
+    /// [`Self::column_type`], which carries lengths for DDL.
     fn cast_type(&self, ty: FieldType) -> Option<&'static str> {
         Some(match ty {
             FieldType::I16 => "SMALLINT",
@@ -484,40 +374,29 @@ pub trait Dialect: Send + Sync {
             FieldType::Decimal => "NUMERIC",
             FieldType::Binary => "BYTEA",
             FieldType::Time => "TIME",
-            // PG array CAST targets (#341).
             FieldType::Array(crate::core::ArrayElem::Text) => "text[]",
             FieldType::Array(crate::core::ArrayElem::Int) => "integer[]",
             FieldType::Array(crate::core::ArrayElem::BigInt) => "bigint[]",
-            // PG range CAST targets (#343).
             FieldType::Range(crate::core::RangeElem::Int) => "int4range",
             FieldType::Range(crate::core::RangeElem::BigInt) => "int8range",
             FieldType::Range(crate::core::RangeElem::Numeric) => "numrange",
             FieldType::Range(crate::core::RangeElem::Date) => "daterange",
             FieldType::Range(crate::core::RangeElem::DateTime) => "tstzrange",
-            // PG hstore CAST target (#342).
             FieldType::HStore => "hstore",
-            // pgvector `vector(N)` carries a dynamic dimension, so it
-            // has no `&'static` CAST spelling — casting to it isn't
-            // supported through this path (#824).
+            // `vector(N)` and `geometry(Point, srid)` carry a runtime
+            // value in the type, so they have no fixed CAST spelling.
             FieldType::Vector(_) => return None,
-            // PostGIS `geometry(Point, srid)` likewise has no `&'static`
-            // CAST spelling (#443).
             FieldType::Geometry(_) => return None,
         })
     }
 
-    /// SQL column type for a non-`Auto<T>` field, used by the DDL
-    /// writer (`CREATE TABLE`). `max_length` is honored on
-    /// [`FieldType::String`] (`VARCHAR(N)` vs unbounded text).
+    /// The `CREATE TABLE` column type for a field that is not an
+    /// `Auto<T>` PK. `max_length` turns a [`FieldType::String`] into
+    /// `VARCHAR(N)` instead of unbounded text.
     ///
-    /// Default emits Postgres-shape names (`BIGINT`, `BOOLEAN`,
-    /// `TEXT`, `TIMESTAMPTZ`, `JSONB`, `UUID`). `MySQL` overrides
-    /// because:
-    /// - `BOOLEAN` is `TINYINT(1)`
-    /// - `TEXT` works but `VARCHAR` requires explicit length
-    /// - `TIMESTAMPTZ` doesn't exist; use `DATETIME(6)` or `TIMESTAMP(6)`
-    /// - `JSONB` doesn't exist; use `JSON`
-    /// - `UUID` doesn't exist; use `CHAR(36)` (string) or `BINARY(16)` (compact)
+    /// The default uses Postgres names. MySQL overrides most of them:
+    /// it has no `TIMESTAMPTZ`, `JSONB` or `UUID`, and spells
+    /// `BOOLEAN` as `TINYINT(1)`.
     fn column_type(&self, ty: FieldType, max_length: Option<u32>) -> String {
         match ty {
             FieldType::I16 => "SMALLINT".into(),
@@ -537,52 +416,44 @@ pub trait Dialect: Send + Sync {
             FieldType::Json => "JSONB".into(),
             FieldType::Decimal => "NUMERIC".into(),
             FieldType::Binary => "BYTEA".into(),
-            // Native PG array column — `text[]` / `integer[]` /
-            // `bigint[]` (#341). `max_length` is ignored (arrays carry
-            // no length cap at the type level).
+            // An array type has no length cap, so `max_length` is
+            // ignored here.
             FieldType::Array(elem) => format!("{}[]", elem.pg_element_type()),
-            // Native PG range column (#343).
             FieldType::Range(elem) => elem.pg_range_type().to_owned(),
-            // Native PG hstore column (#342). Requires the `hstore`
-            // extension on the database.
+            // Needs the `hstore` extension.
             FieldType::HStore => "hstore".into(),
-            // pgvector `vector(N)` column (#824); `0` = unconstrained
-            // dimension. Requires the `vector` extension.
+            // Needs the `vector` extension. 0 dimensions means the
+            // column takes any size.
             FieldType::Vector(0) => "vector".into(),
             FieldType::Vector(dims) => format!("vector({dims})"),
-            // PostGIS `geometry(Point, srid)` column (#443). `0` = no
-            // SRID constraint (`geometry(Point)`). Requires `postgis`.
+            // Needs PostGIS. SRID 0 means no SRID constraint.
             FieldType::Geometry(0) => "geometry(Point)".into(),
             FieldType::Geometry(srid) => format!("geometry(Point,{srid})"),
         }
     }
 
-    /// Column type for a case-insensitive text field (Django parity
-    /// #344 — `CITextField` / `case_insensitive = true`). Default
-    /// emits ANSI `TEXT` so unknown dialects degrade gracefully (case
-    /// sensitivity is then a query-side concern). Postgres overrides
-    /// to `CITEXT`, SQLite to `TEXT COLLATE NOCASE`, MySQL to
-    /// `<VARCHAR(N)|TEXT> COLLATE utf8mb4_general_ci`.
+    /// The column type for a case-insensitive text field: `CITEXT` on
+    /// Postgres, `TEXT COLLATE NOCASE` on SQLite, a
+    /// `utf8mb4_general_ci` collation on MySQL.
+    ///
+    /// The default is plain `TEXT`, which leaves case handling to the
+    /// query. Use `LOWER(…)` there on a dialect that does not
+    /// override this.
     fn ci_text_type(&self, max_length: Option<u32>) -> String {
-        // ANSI fallback — caller is expected to use `LOWER(...)` at
-        // query time when running on a dialect that doesn't override.
         let _ = max_length;
         "TEXT".to_owned()
     }
 
-    /// One-time DDL prelude this dialect needs before any column of
-    /// the given type can be created (e.g. `CREATE EXTENSION IF NOT
-    /// EXISTS citext;` on Postgres before a `CITEXT` column can
-    /// land). `None` (default) means no prelude required.
+    /// DDL to run once before any case-insensitive column is created,
+    /// such as `CREATE EXTENSION IF NOT EXISTS citext` on Postgres.
+    /// `None` when nothing is needed.
     fn ci_text_extension_sql(&self) -> Option<&'static str> {
         None
     }
 
-    /// `true` if `op` can be lowered to SQL by this dialect. Default
-    /// `true` — every dialect ships translations for every operator
-    /// in the IR. Override to return `false` for ops that genuinely
-    /// have no equivalent (rare); the writer surfaces a clear
-    /// [`SqlError::OperatorNotSupportedInDialect`] in that case.
+    /// `true` if this dialect can write `op` as SQL. Return `false`
+    /// for an operator with no equivalent; the writer then reports
+    /// [`SqlError::OperatorNotSupportedInDialect`].
     fn supports_op(&self, op: Op) -> bool {
         let _ = op;
         true
@@ -590,35 +461,24 @@ pub trait Dialect: Send + Sync {
 
     // ---- per-operator predicate writers ----
     //
-    // Each method is handed the **already-rendered, qualified column**
-    // (e.g. `"users"."name"` on Postgres or `` `users`.`name` `` on
-    // MySQL) plus a placeholder string (e.g. `$1` or `?`). The dialect
-    // composes them into the SQL fragment its parser expects. Default
-    // implementations emit Postgres / ANSI shape; MySQL overrides the
-    // ones that need a different translation.
+    // Each of these gets the column already rendered and quoted, plus
+    // a placeholder string, and composes the fragment its parser
+    // wants. The defaults are the Postgres shape.
 
-    /// Case-insensitive LIKE: `<col> ILIKE <p>` (Postgres) or
-    /// `LOWER(<col>) LIKE LOWER(<p>)` (MySQL fallback).
+    /// Case-insensitive LIKE: `<col> ILIKE <p>` on Postgres,
+    /// `LOWER(<col>) LIKE LOWER(<p>)` elsewhere.
     fn write_ilike(&self, sql: &mut String, qualified_col: &str, placeholder: &str, negated: bool) {
         sql.push_str(qualified_col);
         sql.push_str(if negated { " NOT ILIKE " } else { " ILIKE " });
         sql.push_str(placeholder);
     }
 
-    /// POSIX regex match — Django `__regex` / `__iregex`. Issue #26.
+    /// POSIX regex match, for the `__regex` and `__iregex` lookups.
     ///
-    /// Default emits the Postgres shape:
-    /// - `case_sensitive=true`,  `negated=false`: `<col> ~ <p>`
-    /// - `case_sensitive=true`,  `negated=true`:  `<col> !~ <p>`
-    /// - `case_sensitive=false`, `negated=false`: `<col> ~* <p>`
-    /// - `case_sensitive=false`, `negated=true`:  `<col> !~* <p>`
-    ///
-    /// MySQL and SQLite override to use the `REGEXP` / `NOT REGEXP`
-    /// keyword. Neither has a native case-insensitive regex operator,
-    /// so both wrap `<col>` and `<placeholder>` in `LOWER(...)` for
-    /// the case-insensitive variants. The pattern is bound as a
-    /// single string parameter — `placeholder` is the slot it goes
-    /// into; the dialect doesn't rewrite the bound value.
+    /// The default is Postgres' `~`, `!~`, `~*` and `!~*`. MySQL and
+    /// SQLite use `REGEXP` and `NOT REGEXP`; neither has a
+    /// case-insensitive form, so both wrap the column and the
+    /// placeholder in `LOWER(…)` for those variants.
     fn write_regex(
         &self,
         sql: &mut String,
@@ -638,23 +498,13 @@ pub trait Dialect: Send + Sync {
         sql.push_str(placeholder);
     }
 
-    /// `pg_trgm` trigram similarity match — Django's
-    /// `__trigram_similar` / `__trigram_word_similar`. Issue #29.
-    ///
-    /// Default emits the Postgres shape:
-    /// - `word=false`: `<col> % <p>` (whole-string similarity)
-    /// - `word=true`:  `<col> %> <p>` (any word similar)
-    ///
-    /// Requires `CREATE EXTENSION pg_trgm` on the database.
-    ///
-    /// **MySQL and SQLite have no equivalent** — they override to
-    /// return [`SqlError::OpNotSupportedInDialect`] so the typo of
-    /// using a trigram lookup against the wrong backend surfaces
-    /// cleanly at compile time rather than as a driver syntax error.
+    /// Trigram similarity, for the `__trigram_similar` and
+    /// `__trigram_word_similar` lookups. Writes `<col> % <p>`, or
+    /// `<col> %> <p>` when `word`. Needs the `pg_trgm` extension.
     ///
     /// # Errors
-    /// `OpNotSupportedInDialect` when the dialect doesn't support
-    /// trigram operators.
+    /// [`SqlError::OpNotSupportedInDialect`] on MySQL and SQLite,
+    /// which have nothing like it.
     fn write_trigram_similar(
         &self,
         sql: &mut String,
@@ -668,23 +518,14 @@ pub trait Dialect: Send + Sync {
         Ok(())
     }
 
-    /// Postgres full-text search — Django's `__search` lookup. Issue
-    /// #28.
-    ///
-    /// Default emits the simplest portable shape:
-    /// `to_tsvector(<col>) @@ plainto_tsquery(<p>)`. The database
-    /// applies its `default_text_search_config` (typically `english`).
-    ///
-    /// **MySQL and SQLite** have their own FTS shapes (`MATCH … AGAINST`
-    /// on MySQL, FTS5 virtual-table `MATCH` on SQLite) with
-    /// incompatible semantics — they override to return
-    /// [`SqlError::OpNotSupportedInDialect`] so the typo of using
-    /// `__search` against the wrong backend surfaces cleanly at
-    /// compile time rather than as a driver syntax error.
+    /// Full-text search, for the `__search` lookup. Writes
+    /// `to_tsvector(<col>) @@ plainto_tsquery(<p>)`, so the database
+    /// picks the config from `default_text_search_config`.
     ///
     /// # Errors
-    /// `OpNotSupportedInDialect` when the dialect doesn't support
-    /// Postgres-shape FTS.
+    /// [`SqlError::OpNotSupportedInDialect`] on MySQL and SQLite.
+    /// Their full-text search works differently enough that this
+    /// shape has no meaning there.
     fn write_search(
         &self,
         sql: &mut String,
@@ -699,14 +540,9 @@ pub trait Dialect: Send + Sync {
         Ok(())
     }
 
-    /// Postgres `ArrayField` containment / overlap operators —
-    /// `@>` / `<@` / `&&`. Issue #30.
-    ///
-    /// `op` is the literal SQL operator string (`"@>"`, `"<@"`,
-    /// `"&&"`). The default impl emits the PG shape
-    /// `<col> <op> <placeholder>`. MySQL + SQLite override to
-    /// reject with [`SqlError::OpNotSupportedInDialect`] since
-    /// neither has a native array type.
+    /// Array containment and overlap: `@>`, `<@` and `&&`. `op` is
+    /// the operator itself, and the result is
+    /// `<col> <op> <placeholder>`.
     ///
     /// # Errors
     /// `OpNotSupportedInDialect` when the dialect doesn't support
@@ -726,17 +562,13 @@ pub trait Dialect: Send + Sync {
         Ok(())
     }
 
-    /// Postgres `RangeField` operators — `@>` / `<@` / `&&` / `<<` /
-    /// `>>` / `-|-`. Issue #31.
-    ///
-    /// `op` is the literal SQL operator. The default emits the PG
-    /// shape `<col> <op> <placeholder>`. MySQL + SQLite override to
-    /// reject with [`SqlError::OpNotSupportedInDialect`] since
-    /// neither has a native range type.
+    /// Range operators: `@>`, `<@`, `&&`, `<<`, `>>` and `-|-`. `op`
+    /// is the operator itself, and the result is
+    /// `<col> <op> <placeholder>`.
     ///
     /// # Errors
-    /// `OpNotSupportedInDialect` when the dialect doesn't support
-    /// PG range operators.
+    /// [`SqlError::OpNotSupportedInDialect`] on MySQL and SQLite,
+    /// which have no range type.
     fn write_range_op(
         &self,
         sql: &mut String,
@@ -779,8 +611,9 @@ pub trait Dialect: Send + Sync {
         sql.push_str("::jsonb");
     }
 
-    /// Inverse of [`write_json_contains`]: `<col> <@ <p>::jsonb` (Postgres) /
-    /// `JSON_CONTAINS(<p>, <col>)` (MySQL — argument order swapped).
+    /// The inverse of [`Self::write_json_contains`]:
+    /// `<col> <@ <p>::jsonb` on Postgres, `JSON_CONTAINS(<p>, <col>)`
+    /// on MySQL, with the arguments the other way round.
     fn write_json_contained_by(&self, sql: &mut String, qualified_col: &str, placeholder: &str) {
         sql.push_str(qualified_col);
         sql.push_str(" <@ ");
@@ -796,8 +629,8 @@ pub trait Dialect: Send + Sync {
         sql.push_str(placeholder);
     }
 
-    /// Multi-key JSON existence. `mode = "one"` matches the
-    /// Postgres `?|` "any" operator, `mode = "all"` matches `?&`.
+    /// True when the JSON value has **any** of these keys: Postgres'
+    /// `?|` operator.
     fn write_json_has_any_keys(
         &self,
         sql: &mut String,
@@ -807,7 +640,8 @@ pub trait Dialect: Send + Sync {
         write_pg_array_keys(sql, qualified_col, placeholders, " ?| ARRAY[");
     }
 
-    /// `JsonHasAllKeys` companion of [`write_json_has_any_keys`].
+    /// True when the JSON value has **all** of these keys: Postgres'
+    /// `?&` operator.
     fn write_json_has_all_keys(
         &self,
         sql: &mut String,
@@ -817,16 +651,15 @@ pub trait Dialect: Send + Sync {
         write_pg_array_keys(sql, qualified_col, placeholders, " ?& ARRAY[");
     }
 
-    /// Append the dialect's spelling of an `ON CONFLICT` / `ON DUPLICATE
-    /// KEY UPDATE` clause to `sql`. Default: error — only Postgres
-    /// supports the full `ConflictClause` shape today; `MySQL` overrides
-    /// to translate `DoNothing` and `DoUpdate { target: vec![], … }`.
+    /// Append this dialect's `ON CONFLICT` clause. Postgres takes the
+    /// full [`ConflictClause`]; MySQL handles `DoNothing` and a
+    /// `DoUpdate` with no target columns.
     ///
     /// # Errors
-    /// [`SqlError::ConflictNotSupportedInDialect`] when this dialect
-    /// can't translate the requested shape (e.g. `MySQL` + `DoUpdate`
-    /// with a non-empty `target` list — `ON DUPLICATE KEY UPDATE`
-    /// has no target-column syntax).
+    /// [`SqlError::ConflictNotSupportedInDialect`] when the dialect
+    /// cannot express the requested shape. MySQL's
+    /// `ON DUPLICATE KEY UPDATE`, for one, has no target-column
+    /// syntax.
     fn write_conflict_clause(
         &self,
         sql: &mut String,
@@ -843,67 +676,49 @@ pub trait Dialect: Send + Sync {
         })
     }
 
-    // ====== Advisory locks ======
+    // ---- Advisory locks ----
     //
-    // The migration runner serialises concurrent `migrate` /
-    // `migrate_to` / `unapply` / `downgrade` calls behind two locks:
-    // a session-scoped one held for the whole pending-list apply, and
-    // a transaction-scoped one held while creating the ledger table.
-    // Each dialect picks the spelling: Postgres uses
-    // `pg_advisory_lock` / `pg_advisory_xact_lock`; MySQL would use
-    // `GET_LOCK`; SQLite has no native advisory lock but its
-    // single-writer model + `BEGIN EXCLUSIVE` emulates the same
-    // exclusion (the SQLite impl will return `None` for both
-    // session-lock methods and rely on the driver's serialisation).
+    // The migration runner keeps concurrent runs apart with two
+    // locks: a session one held while applying the pending list, and
+    // a transaction one held while creating the ledger table. SQLite
+    // needs neither, since it has a single writer.
 
-    /// SQL to acquire a session-scoped advisory lock for `key`.
-    /// `key` is the placeholder slot — `placeholder(1)` for Postgres,
-    /// for example. Return `None` to skip the lock (SQLite); return
-    /// `Some(stmt)` to have the runner execute it on a dedicated
-    /// connection. Default returns `None` so dialects that don't
-    /// override it just don't take the lock.
+    /// SQL that takes a session-scoped advisory lock. The runner
+    /// executes it on its own connection. `None` skips the lock.
     fn acquire_session_lock_sql(&self) -> Option<String> {
         None
     }
 
-    /// SQL to release a session-scoped lock acquired via
-    /// [`acquire_session_lock_sql`]. Default `None`. Errors during
-    /// release are logged but never propagated — the original
-    /// migration error is the one users care about.
+    /// SQL that releases the lock from
+    /// [`Self::acquire_session_lock_sql`]. A failure here is logged,
+    /// not returned: the migration's own error matters more.
     fn release_session_lock_sql(&self) -> Option<String> {
         None
     }
 
-    /// SQL to acquire a transaction-scoped advisory lock for `key`,
-    /// auto-released at COMMIT/ROLLBACK. Used by the ledger
-    /// bootstrap so two peers don't both pass `CREATE TABLE IF NOT
-    /// EXISTS` and then collide on the catalog. Default `None`.
+    /// SQL that takes a transaction-scoped advisory lock, released at
+    /// COMMIT or ROLLBACK. It stops two processes from both passing
+    /// `CREATE TABLE IF NOT EXISTS` for the ledger and then colliding.
     fn acquire_xact_lock_sql(&self) -> Option<String> {
         None
     }
 
-    /// Inline column-comment fragment to splice into a CREATE TABLE
-    /// column definition for the field's `db_comment` attribute (#450).
-    /// MySQL returns `" COMMENT '<escaped>'"`; Postgres + SQLite return
-    /// `None` because they need a different mechanism (post-hoc
-    /// `COMMENT ON COLUMN` for Postgres, no-op for SQLite) — see
-    /// [`Self::column_comment_statement`].
+    /// The column comment to splice into a `CREATE TABLE` column
+    /// definition. Only MySQL writes one here; Postgres uses
+    /// [`Self::column_comment_statement`] instead, and SQLite has no
+    /// comments at all.
     ///
-    /// Implementations are responsible for properly escaping single
-    /// quotes in the supplied comment.
+    /// An implementation must escape single quotes itself.
     fn write_inline_column_comment(&self, _comment: &str) -> Option<String> {
         None
     }
 
-    /// Standalone `COMMENT ON COLUMN "<table>"."<col>" IS '<escaped>'`
-    /// statement emitted after CREATE TABLE for dialects that need it.
-    /// Postgres returns `Some(_)`; MySQL handles it inline (see
-    /// [`Self::write_inline_column_comment`]) and returns `None`;
-    /// SQLite returns `None` (no native column comments).
+    /// A `COMMENT ON COLUMN` statement to run after `CREATE TABLE`.
+    /// Only Postgres needs one; MySQL writes its comment inline in
+    /// [`Self::write_inline_column_comment`].
     ///
-    /// The migration runner calls this for every field whose
-    /// `db_comment.is_some()` after the table is created. Implementations
-    /// are responsible for properly escaping single quotes.
+    /// The runner calls this for every field that has a comment. An
+    /// implementation must escape single quotes itself.
     fn column_comment_statement(
         &self,
         _table: &str,
@@ -913,115 +728,95 @@ pub trait Dialect: Send + Sync {
         None
     }
 
-    /// Inline table-comment fragment to splice into a CREATE TABLE
-    /// trailer for the model's `db_table_comment` attribute. MySQL
-    /// returns `" COMMENT='<escaped>'"`; Postgres + SQLite return
-    /// `None` because they need a different mechanism (post-hoc
-    /// `COMMENT ON TABLE` for Postgres, no-op for SQLite) — see
-    /// [`Self::table_comment_statement`]. Implementations are
-    /// responsible for properly escaping single quotes.
+    /// The table comment to splice into the `CREATE TABLE` trailer.
+    /// [`Self::write_inline_column_comment`] for the whole table.
     fn write_inline_table_comment(&self, _comment: &str) -> Option<String> {
         None
     }
 
-    /// Standalone `COMMENT ON TABLE "<table>" IS '<escaped>'`
-    /// statement emitted after CREATE TABLE for dialects that need
-    /// it. Postgres returns `Some(_)`; MySQL handles it inline (see
-    /// [`Self::write_inline_table_comment`]) and returns `None`;
-    /// SQLite returns `None` (no native table comments). Mirrors
-    /// the field-level [`Self::column_comment_statement`].
-    ///
-    /// Implementations are responsible for properly escaping single
-    /// quotes in the supplied comment.
+    /// A `COMMENT ON TABLE` statement to run after `CREATE TABLE`.
+    /// [`Self::column_comment_statement`] for the whole table.
     fn table_comment_statement(&self, _table: &str, _comment: &str) -> Option<String> {
         None
     }
 
-    // ====== Compilation (always overridden) ======
+    // ---- Compilation, always overridden ----
 
-    /// Lower a `SelectQuery` to a `CompiledStatement` for this dialect.
+    /// Compile a `SelectQuery` for this dialect.
     ///
     /// # Errors
-    /// Returns [`SqlError`] if any filter has a value shape incompatible with
-    /// its operator (see the variants for specifics).
+    /// [`SqlError`] when a filter's value does not suit its operator.
     fn compile_select(&self, query: &SelectQuery) -> Result<CompiledStatement, SqlError>;
 
-    /// Lower an `InsertQuery` to a `CompiledStatement` for this dialect.
+    /// Compile an `InsertQuery` for this dialect.
     ///
     /// # Errors
-    /// Returns [`SqlError::EmptyInsert`] if no columns were supplied, or
-    /// [`SqlError::InsertShapeMismatch`] if `columns` and `values` differ in length.
+    /// [`SqlError::EmptyInsert`] with no columns, or
+    /// [`SqlError::InsertShapeMismatch`] when `columns` and `values`
+    /// are different lengths.
     fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError>;
 
-    /// Lower a `BulkInsertQuery` (multi-row INSERT) to one
-    /// `CompiledStatement` whose VALUES list has one tuple per input row.
+    /// Compile a `BulkInsertQuery` into one statement with a VALUES
+    /// tuple per row.
     ///
     /// # Errors
-    /// Returns [`SqlError::EmptyBulkInsert`] if `rows` is empty (the
-    /// caller should short-circuit), [`SqlError::EmptyInsert`] when
-    /// `columns` is empty without `returning`, or
-    /// [`SqlError::InsertShapeMismatch`] when any row's value count
-    /// disagrees with `columns.len()`.
+    /// [`SqlError::EmptyBulkInsert`] with no rows,
+    /// [`SqlError::EmptyInsert`] when `columns` is empty and nothing
+    /// is returned, or [`SqlError::InsertShapeMismatch`] when a row's
+    /// length does not match `columns`.
     fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError>;
 
-    /// Lower an `UpdateQuery` to a `CompiledStatement` for this dialect.
+    /// Compile an `UpdateQuery` for this dialect.
     ///
     /// # Errors
-    /// Returns [`SqlError::EmptyUpdateSet`] if `set` is empty, or any filter
+    /// [`SqlError::EmptyUpdateSet`] when `set` is empty, or a filter
     /// error from the WHERE clause.
     fn compile_update(&self, query: &UpdateQuery) -> Result<CompiledStatement, SqlError>;
 
-    /// Lower a `DeleteQuery` to a `CompiledStatement` for this dialect.
+    /// Compile a `DeleteQuery` for this dialect.
     ///
     /// # Errors
-    /// Returns [`SqlError`] for filter-shape errors in the WHERE clause.
+    /// [`SqlError`] for a bad filter in the WHERE clause.
     fn compile_delete(&self, query: &DeleteQuery) -> Result<CompiledStatement, SqlError>;
 
-    /// Lower a `CountQuery` to a `SELECT COUNT(*) … WHERE …` statement.
+    /// Compile a `CountQuery` into `SELECT COUNT(*) … WHERE …`.
     ///
     /// # Errors
-    /// Returns [`SqlError`] for filter-shape errors in the WHERE clause.
+    /// [`SqlError`] for a bad filter in the WHERE clause.
     fn compile_count(&self, query: &CountQuery) -> Result<CompiledStatement, SqlError>;
 
-    /// Lower an `AggregateQuery` to a `SELECT … GROUP BY … HAVING …` statement.
+    /// Compile an `AggregateQuery` into
+    /// `SELECT … GROUP BY … HAVING …`.
     ///
     /// # Errors
-    /// Returns [`SqlError`] for filter-shape errors in WHERE/HAVING clauses or
-    /// empty `aggregates`.
+    /// [`SqlError`] for a bad filter in WHERE or HAVING, or for empty
+    /// `aggregates`.
     fn compile_aggregate(&self, query: &AggregateQuery) -> Result<CompiledStatement, SqlError>;
 
-    /// Lower a `BulkUpdateQuery` to an
-    /// `UPDATE t SET col = data.col FROM (VALUES …) AS data(pk, col1, …) WHERE t.pk = data.pk`
-    /// statement.
+    /// Compile a `BulkUpdateQuery`, updating many rows from one
+    /// inline VALUES list joined on the primary key.
     ///
     /// # Errors
-    /// Returns [`SqlError::EmptyBulkInsert`] if `rows` is empty,
-    /// [`SqlError::EmptyUpdateSet`] if `update_columns` is empty, or
-    /// [`SqlError::MissingPrimaryKey`] if `model` has no PK.
+    /// [`SqlError::EmptyBulkInsert`] with no rows,
+    /// [`SqlError::EmptyUpdateSet`] with no columns, or
+    /// [`SqlError::MissingPrimaryKey`] when the model has no PK.
     fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError>;
 }
 
 #[cfg(test)]
 mod every_dialect_overrides_the_drop_constraint_methods {
-    //! The in-tree net for `Dialect`'s two `unimplemented!` defaults.
+    //! Catches a dialect in this crate that forgot to override one of
+    //! `Dialect`'s two panicking defaults.
     //!
-    //! Those defaults exist so a downstream `impl Dialect` still
-    //! compiles on a patch bump — a deliberate trade of a build error
-    //! for a loud runtime panic. The trade is fine; what it removed is
-    //! the guarantee the bare signatures used to give *in this crate*.
-    //!
-    //! Without this, deleting `drop_foreign_key_sql` from `mysql.rs`
-    //! leaves the crate building clean and moves the failure to a panic
-    //! mid-migration, with a half-applied schema. Checked by doing
-    //! exactly that and watching this fail.
+    //! Those defaults keep a downstream `impl Dialect` compiling, but
+    //! they also mean that dropping one of these methods from a
+    //! dialect here would still build, and fail instead as a panic
+    //! partway through a migration.
 
     use super::Dialect;
 
-    /// Every compiled-in dialect answers both, one way or the other.
-    ///
-    /// `None` is a legitimate answer — SQLite has no
-    /// `ALTER TABLE … DROP CONSTRAINT` at all. What is not legitimate
-    /// is inheriting the default, which panics.
+    /// Every dialect answers both, one way or the other. `None` is a
+    /// fine answer; inheriting the default is not.
     #[test]
     fn no_dialect_falls_through_to_the_panicking_default() {
         let dialects: Vec<&dyn Dialect> = vec![
@@ -1039,8 +834,8 @@ mod every_dialect_overrides_the_drop_constraint_methods {
         );
 
         for d in dialects {
-            // Reaching the default body panics; returning either
-            // `Some(sql)` or `None` means the dialect decided.
+            // The default body panics; any return means the dialect
+            // answered for itself.
             let _ = d.drop_check_constraint_sql("t", "c");
             let _ = d.drop_foreign_key_sql("t", "fk");
         }

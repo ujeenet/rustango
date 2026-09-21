@@ -1,8 +1,8 @@
-//! `AdminError` — request-handling failures with a uniform JSON body.
+//! `AdminError`: request-handling failures with a uniform JSON body.
 //!
-//! Every view handler returns `Result<_, AdminError>`; the `IntoResponse`
-//! impl turns each variant into the right HTTP status with a small JSON
-//! payload describing what went wrong.
+//! Every view handler returns `Result<_, AdminError>`. The
+//! `IntoResponse` impl maps each variant to an HTTP status and a small
+//! JSON payload.
 
 use crate::sql::sqlx;
 use axum::http::StatusCode;
@@ -11,23 +11,19 @@ use axum::Json;
 
 use super::forms::FormError;
 
-/// Error returned by admin handlers — including user-defined bulk
-/// action handlers registered via [`super::Builder::register_action`].
-/// Variants are non-exhaustive only for `Internal`; user code should
-/// almost always return [`AdminError::Internal`] from custom actions.
+/// Error returned by admin handlers, including bulk actions registered
+/// with [`super::Builder::register_action`]. Custom actions should
+/// almost always return [`AdminError::Internal`].
 #[derive(Debug)]
 pub enum AdminError {
-    /// The table is in the model registry but not in the URL — i.e.
-    /// the user hit a bad slug.
+    /// No such table in the model registry: the URL slug is wrong.
     TableNotFound {
         table: String,
     },
-    /// The table IS registered but the underlying SQL table doesn't
-    /// exist in the connected DB. Typically means migrations haven't
-    /// been run yet (or haven't been run for the current tenant in a
-    /// multi-tenant setup). Friendly HTML page nudges the user toward
-    /// `cargo run -- migrate` / `migrate-tenants` instead of a raw
-    /// Postgres error.
+    /// The model is registered but its SQL table is not in the
+    /// connected database, so migrations have probably not run for this
+    /// tenant yet. Renders a page pointing at `migrate` and
+    /// `migrate-tenants` instead of a raw driver error.
     TableMissing {
         table: String,
     },
@@ -38,9 +34,9 @@ pub enum AdminError {
     ReadOnly {
         table: String,
     },
-    /// #361 — Django-shape `PermissionDenied`. Raised when a
-    /// per-object permission hook (`register_admin_object_permission!`)
-    /// returns false for the current request + row. Renders as 403.
+    /// A per-object permission hook, registered with
+    /// `register_admin_object_permission!`, said no for this row.
+    /// Renders as a 403.
     Forbidden {
         table: String,
         action: &'static str,
@@ -49,13 +45,11 @@ pub enum AdminError {
     Internal(String),
 }
 
-/// PG SQLSTATE for "undefined table" — emitted when a SELECT/INSERT/
-/// etc. references a relation that doesn't exist in the connected
-/// schema. We use this to detect the "model registered but table not
-/// yet migrated" case and surface a friendly hint.
+/// Postgres SQLSTATE for "undefined table". Used to spot the "model
+/// registered but not yet migrated" case and show a hint.
 const PG_UNDEFINED_TABLE: &str = "42P01";
 
-/// MySQL error code 1146 — `ER_NO_SUCH_TABLE`.
+/// MySQL `ER_NO_SUCH_TABLE`.
 const MYSQL_NO_SUCH_TABLE: &str = "1146";
 
 fn pg_undefined_table_error(e: &sqlx::Error) -> Option<String> {
@@ -63,9 +57,8 @@ fn pg_undefined_table_error(e: &sqlx::Error) -> Option<String> {
     if db.code().as_deref() != Some(PG_UNDEFINED_TABLE) {
         return None;
     }
-    // PG's UndefinedTable doesn't populate `.table()` reliably, but the
-    // message reads `relation "<name>" does not exist`. Pull the
-    // identifier out of the quotes when present.
+    // `.table()` is not reliable here, but the message reads
+    // `relation "<name>" does not exist`. Take the quoted identifier.
     let msg = db.message();
     let name = msg
         .split_once('"')
@@ -75,17 +68,14 @@ fn pg_undefined_table_error(e: &sqlx::Error) -> Option<String> {
     Some(name)
 }
 
-/// Sqlite reports missing tables via the driver message `no such
-/// table: <name>` — no structured code. Match the message shape so
-/// host apps on the `sqlite` feature get the same friendly
-/// "TableMissing" page Postgres hosts get instead of a 500 with a
-/// raw correlation id (rustango-cms #260).
+/// SQLite has no structured code for a missing table, only the message
+/// `no such table: <name>`. Match that shape so SQLite hosts get the
+/// same `TableMissing` page as Postgres hosts, not a 500.
 fn sqlite_undefined_table_error(e: &sqlx::Error) -> Option<String> {
     let db = e.as_database_error()?;
     let msg = db.message();
     let rest = msg.strip_prefix("no such table: ")?;
-    // The message may include trailing context after the table name;
-    // take the first whitespace/punctuation-bounded identifier.
+    // Trailing context may follow the name: take the first identifier.
     let name: String = rest
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -97,9 +87,9 @@ fn sqlite_undefined_table_error(e: &sqlx::Error) -> Option<String> {
     }
 }
 
-/// MySQL reports missing tables with error code 1146 + a message like
-/// `Table 'db.table' doesn't exist`. Match the code first (most
-/// reliable) and pull the unqualified table name from the message.
+/// MySQL reports a missing table as code 1146 with a message like
+/// `Table 'db.table' doesn't exist`. Match the code first, then take
+/// the unqualified name from the message.
 fn mysql_undefined_table_error(e: &sqlx::Error) -> Option<String> {
     let db = e.as_database_error()?;
     if db.code().as_deref() != Some(MYSQL_NO_SUCH_TABLE) {
@@ -133,9 +123,8 @@ impl From<sqlx::Error> for AdminError {
 
 impl From<crate::sql::ExecError> for AdminError {
     fn from(e: crate::sql::ExecError) -> Self {
-        // ExecError wraps sqlx errors; unwrap to detect the
-        // dialect-specific undefined-table signature so sqlite +
-        // mysql hosts get the friendly TableMissing page, not a 500.
+        // Unwrap the sqlx error so the per-dialect undefined-table
+        // check still runs and hosts get `TableMissing`, not a 500.
         if let crate::sql::ExecError::Driver(sqlx_err) = &e {
             if let Some(table) = undefined_table_error(sqlx_err) {
                 return Self::TableMissing { table };
@@ -202,13 +191,11 @@ applied yet for this tenant / database.</p>
             )
                 .into_response(),
             Self::Internal(msg) => {
-                // v0.30.12 — log the raw message for the operator,
-                // return a generic body to the client. Pre-v0.30.12
-                // shape leaked DB error text (table names, column
-                // names, sometimes SQL fragments) to anyone who
-                // could trigger an internal error. The new shape
-                // emits a request-correlatable id so operators can
-                // grep their logs without exposing internals.
+                // Log the raw message for the operator and return a
+                // generic body. The raw text can hold table names,
+                // column names and SQL, so it must not reach the
+                // client. The response carries only an id the operator
+                // can grep for in the logs.
                 let id = short_correlation_id();
                 tracing::error!(
                     target: "rustango::admin",
@@ -230,11 +217,10 @@ applied yet for this tenant / database.</p>
     }
 }
 
-/// Short correlation id stamped into both the log line and the
-/// client response so operators can grep logs by the id the user
-/// reports without ever exposing internal details to that user.
-/// 8 bytes of `OsRng` rendered as 16 hex chars — collision-free
-/// for any realistic error-rate window, short enough to read aloud.
+/// Short id put in both the log line and the client response, so an
+/// operator can find the log entry from what the user reports without
+/// any internal detail reaching that user. 8 bytes of `OsRng` as 16 hex
+/// chars: short enough to read aloud.
 fn short_correlation_id() -> String {
     use rand::{rngs::OsRng, RngCore};
     let mut bytes = [0u8; 8];
@@ -258,10 +244,8 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
-    /// `short_correlation_id` returns a 16-char hex string. Two
-    /// calls return different ids (entropy check). 32 calls
-    /// produce 32 distinct ids — collision-free at the rate any
-    /// single admin instance would observe.
+    /// `short_correlation_id` returns 16 hex chars, and 32 calls give
+    /// 32 distinct ids.
     #[test]
     fn short_correlation_id_shape_and_uniqueness() {
         for _ in 0..16 {
@@ -279,11 +263,9 @@ mod tests {
         assert_eq!(seen.len(), 32, "expected all distinct correlation ids");
     }
 
-    /// v0.30.12 (security audit) — AdminError::Internal must NOT
-    /// echo the raw error text in the JSON body. Pre-fix the
-    /// `detail` field carried the SQL / table / file path text
-    /// straight to the client; post-fix it's a generic message
-    /// and the raw text only goes to the operator's log.
+    /// `AdminError::Internal` must **not** echo the raw error text in
+    /// the JSON body: SQL, table names and file paths stay in the
+    /// operator's log only.
     #[tokio::test]
     async fn internal_error_response_is_redacted() {
         let raw = "table \"sensitive_internal\" does not exist at SELECT * FROM sensitive_internal";
@@ -310,18 +292,13 @@ mod tests {
         );
     }
 
-    // rustango-cms #260 — sqlite + mysql parsers extract the table
-    // name from the dialect-specific error message shape so the
-    // friendly TableMissing page fires on every backend, not just
-    // postgres.
+    // The SQLite and MySQL parsers read the table name out of each
+    // driver's message, so `TableMissing` fires on every backend.
     #[test]
     fn sqlite_undefined_table_extracts_name_from_message() {
-        // The sqlite error string used by `libsqlite3-sys` /
-        // `sqlx::sqlite::SqliteError` is exactly this prefix.
         let raw = "(code: 1) no such table: rustango_admin_users";
-        // Strip the libsqlite3 prefix that sqlx may or may not
-        // include — what we care about is the `no such table: …`
-        // segment landing in `.message()`.
+        // sqlx may or may not include the libsqlite3 prefix. What
+        // matters is the `no such table: …` part of `.message()`.
         let msg = raw.strip_prefix("(code: 1) ").unwrap_or(raw);
         assert_eq!(
             msg.strip_prefix("no such table: ").map(|rest| {
@@ -346,9 +323,8 @@ mod tests {
         assert_eq!(name, "rustango_admin_users");
     }
 
-    /// TableMissing path is unchanged — it's already a sanitized
-    /// HTML page that mentions only the table name (which the
-    /// user already typed in the URL, so it's not a leak).
+    /// The `TableMissing` page names only the table, which the user
+    /// already typed in the URL, so it leaks nothing.
     #[tokio::test]
     async fn table_missing_response_keeps_friendly_html() {
         let err = AdminError::TableMissing {

@@ -1,8 +1,7 @@
 #![cfg(feature = "postgres")]
 //! Live PG tests for `QuerySet::in_bulk` + `in_bulk_on` (issue #24).
-//! Verifies the IN-list filter + HashMap return shape matches Django's
-//! `Model.objects.in_bulk(ids, field_name=)`. Skips silently when
-//! `DATABASE_URL` is unset.
+//! Verifies the IN-list filter and the keyed-HashMap return shape.
+//! Skips silently when `DATABASE_URL` is unset.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -73,7 +72,7 @@ fn pk_of(b: &Book) -> i64 {
     }
 }
 
-/// Default Django shape — `Book.objects.in_bulk([1, 2, 3])` keyed by PK.
+/// Default shape — `in_bulk([1, 2, 3])` keyed by PK.
 /// Subset of the inserted rows comes back, missing IDs are simply
 /// absent from the map (no error).
 #[tokio::test]
@@ -98,7 +97,7 @@ async fn in_bulk_by_pk_returns_map_keyed_by_id() {
     assert_eq!(books[&3].isbn, "isbn-3");
 }
 
-/// Django's `in_bulk(ids, field_name='isbn')` — key by a non-PK unique
+/// `in_bulk_on(ids, "isbn")` — key by a non-PK unique
 /// column. Same shape, K = String instead of i64.
 #[tokio::test]
 async fn in_bulk_by_non_pk_unique_column_keys_on_that_column() {

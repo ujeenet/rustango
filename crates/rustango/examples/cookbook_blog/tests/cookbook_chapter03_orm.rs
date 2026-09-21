@@ -59,7 +59,7 @@ async fn fresh_blog(pool: &sqlx::PgPool) -> i64 {
     // 5 posts: 3 published, 2 draft. Mix of view counts for filtering tests.
     for (i, (slug, title, published, views)) in [
         ("rust-orm", "Rust ORM", true, 100),
-        ("django-shape", "Django shape", true, 250),
+        ("typed-queries", "Typed queries", true, 250),
         ("draft-1",     "Draft one",    false, 0),
         ("axum-101",    "Axum 101",     true, 80),
         ("draft-2",     "Draft two",    false, 0),
@@ -100,10 +100,10 @@ async fn filter_with_gt_lt_op() {
         // Bind as i64 — the column is BIGINT, and `90` would otherwise
         // infer as i32 and trip rustango's TypeMismatch guard.
         .filter_op("view_count", Op::Gt, 90i64).fetch_on(&pool).await.unwrap();
-    assert_eq!(popular.len(), 2, "view_count>90: rust-orm(100) + django-shape(250)");
+    assert_eq!(popular.len(), 2, "view_count>90: rust-orm(100) + typed-queries(250)");
     let titles: Vec<&str> = popular.iter().map(|p| p.title.as_str()).collect();
     assert!(titles.contains(&"Rust ORM"));
-    assert!(titles.contains(&"Django shape"));
+    assert!(titles.contains(&"Typed queries"));
 }
 
 // §3.34 — Op::ILike for case-insensitive substring search.
@@ -163,7 +163,7 @@ async fn order_by_view_count_desc() {
         .filter_op("published", Op::Eq, true)
         // QuerySet::order_by uses (column, desc): true = DESC, false = ASC.
         .order_by(&[("view_count", true)]).fetch_on(&pool).await.unwrap();
-    assert_eq!(by_views[0].slug, "django-shape", "250 views first");
+    assert_eq!(by_views[0].slug, "typed-queries", "250 views first");
     assert_eq!(by_views[1].slug, "rust-orm", "100 views second");
     assert_eq!(by_views[2].slug, "axum-101", "80 views third");
 }
@@ -251,7 +251,7 @@ async fn raw_sql_escape_via_sqlx() {
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM cookbook_post WHERE view_count > $1"
     ).bind(100i64).fetch_one(&pool).await.unwrap();
-    assert_eq!(count, 1, "only django-shape has view_count > 100");
+    assert_eq!(count, 1, "only typed-queries has view_count > 100");
 }
 
 // §3.47 — manual transaction via sqlx for atomicity.
@@ -303,7 +303,7 @@ async fn or_nested_predicates_via_where_raw() {
         .where_raw(predicate).fetch_on(&pool).await.unwrap();
     let slugs: Vec<&str> = hits.iter().map(|p| p.slug.as_str()).collect();
     assert!(slugs.contains(&"rust-orm"), "OR-arm-1 (slug match) missing: {slugs:?}");
-    assert!(slugs.contains(&"django-shape"), "OR-arm-2 (>200 views) missing: {slugs:?}");
+    assert!(slugs.contains(&"typed-queries"), "OR-arm-2 (>200 views) missing: {slugs:?}");
     assert_eq!(hits.len(), 2, "exactly 2 posts match: {slugs:?}");
 }
 
@@ -402,9 +402,9 @@ async fn json_operator_on_jsonb_column() {
     let Some(pool) = pool().await else { return };
     let _ = fresh_blog(&pool).await;
 
-    // metadata = {"i": <index>}; index 1 == django-shape.
+    // metadata = {"i": <index>}; index 1 == typed-queries.
     let row: (String,) = sqlx::query_as(
         "SELECT slug FROM cookbook_post WHERE metadata @> '{\"i\": 1}'::jsonb"
     ).fetch_one(&pool).await.unwrap();
-    assert_eq!(row.0, "django-shape");
+    assert_eq!(row.0, "typed-queries");
 }

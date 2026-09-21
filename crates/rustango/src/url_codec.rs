@@ -1,55 +1,28 @@
-//! URL codec helpers — `application/x-www-form-urlencoded` percent
-//! decoder + RFC-3986 percent encoder + Django-shape urlsafe base64.
+//! URL codec helpers: `application/x-www-form-urlencoded` decoding,
+//! RFC 3986 percent encoding, and urlsafe base64.
 //!
-//! Three private copies of this lived in [`crate::signed_url`],
-//! [`crate::auth_flows`], and [`crate::tenancy::admin`] before the
-//! consolidation. URL decoders are a notorious source of security
-//! bugs (overlong encodings, malformed `%xx` sequences, `+`/space
-//! conflation, mixed-case hex) — keeping the implementation in one
-//! place means a fix lands everywhere at once.
+//! URL decoders are an easy place to hide a security bug, so all of it
+//! lives here and a fix lands everywhere at once.
 //!
-//! ## Behavior
+//! ## Decoding rules
 //!
-//! * `+` → `' '` (the historical query-string convention; same
-//!   behavior `serde_urlencoded` and JavaScript's `decodeURIComponent`
-//!   *do not* implement, but every browser form encoder does, and
-//!   every server-side decoder we ship needs to honor it).
-//! * `%XX` where both `X` are hex → that byte. Mixed case (`%Aa`)
-//!   accepted.
-//! * `%XX` where either `X` is non-hex → the literal `%` is kept and
-//!   parsing continues at the next byte. Same convention as
-//!   `serde_urlencoded` + RFC 3986 §2.1: malformed escapes fall
-//!   through rather than aborting.
-//! * Trailing `%` or `%X` (less than 2 bytes left) → kept as literal.
-//! * Decoded byte stream that is not valid UTF-8 → replaced with the
-//!   Unicode replacement character (`U+FFFD`) via
-//!   [`String::from_utf8_lossy`]. This is a deliberate choice over
-//!   `String::from_utf8(out).unwrap_or_default()` (the previous
-//!   `signed_url` / `auth_flows` shape) — the unwrap-or-default
-//!   variant *silently wipes the entire output* on a single bad
-//!   byte, which hid both legitimate non-UTF-8 inputs and crafted
-//!   ones. Lossy preserves the well-formed prefix and surfaces the
-//!   error to the caller as a visible replacement char.
+//! * `+` becomes a space. This is the form convention, and every
+//!   browser form encoder uses it.
+//! * `%XX` with two hex digits becomes that byte. Mixed case is fine.
+//! * A bad or truncated escape keeps the literal `%` and parsing goes
+//!   on, like `serde_urlencoded` and RFC 3986 §2.1.
+//! * Bytes that are not valid UTF-8 become `U+FFFD` through
+//!   [`String::from_utf8_lossy`]. A single bad byte must not wipe the
+//!   whole output.
 //!
-//! ## What this is *not*
-//!
-//! Not a full RFC 3986 percent-decoder. Specifically, it doesn't
-//! distinguish reserved characters by URI component (path vs query
-//! vs fragment) — every `%XX` decodes regardless of position. Use
-//! `url::Url` for parsing whole URLs; use this for body fields and
-//! query-string values where the whole input is already known to be
-//! `application/x-www-form-urlencoded`.
+//! This is not a full RFC 3986 decoder: it does not treat reserved
+//! characters differently per URI part. Use `url::Url` to parse a whole
+//! URL; use this for form bodies and query-string values.
 
-/// Percent-encode bytes outside the RFC 3986 *unreserved* set
-/// (alphanumeric + `-` `_` `.` `~`). Used by URL-building
-/// helpers that need to safely round-trip user input through a
-/// query string. Does NOT encode `+` as space (that's a decoder
-/// convention, not an encoder one) — encoders should leave the
-/// space character as `%20`, which every browser accepts.
+/// Percent-encode every byte outside the RFC 3986 unreserved set
+/// (alphanumeric and `-` `_` `.` `~`).
 ///
-/// Mirror of the inline implementations in `template_views`'s
-/// pagination URL builder. Centralizing keeps the encoder
-/// table consistent across modules.
+/// A space becomes `%20`, never `+`: `+` is a decoder convention only.
 #[must_use]
 pub fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -71,14 +44,12 @@ pub fn url_decode(s: &str) -> String {
     decode_escapes(s, true)
 }
 
-/// The byte after `%%` at `i`, when both are hex digits.
+/// The byte encoded at `i`, when the two chars after `%` are hex.
 ///
-/// `u8::from_str_radix` alone is **not** this check: it accepts a
-/// leading sign, so `from_str_radix("+5", 16)` is `Ok(5)` and `%+5`
-/// would decode to `0x05`. The module contract says a non-hex pair
-/// keeps the literal `%`, and a decoder that quietly disagrees with
-/// whatever else decoded the same string is how a gate ends up
-/// guarding a different value than the one acted on.
+/// `u8::from_str_radix` alone is not enough: it accepts a leading sign,
+/// so `%+5` would decode to `0x05`. A non-hex pair must keep the
+/// literal `%`, or a gate can end up guarding a different value than
+/// the one the handler acts on.
 fn hex_pair_at(bytes: &[u8], i: usize) -> Option<u8> {
     let pair = bytes.get(i + 1..i + 3)?;
     if !pair.iter().all(u8::is_ascii_hexdigit) {
@@ -111,17 +82,13 @@ fn decode_escapes(s: &str, plus_is_space: bool) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Decode one **path** segment: `%XX` only, `+` kept literal.
+/// Decode one path segment: `%XX` only, `+` stays literal.
 ///
-/// [`url_decode`] maps `+` to a space, which is the
-/// `x-www-form-urlencoded` convention and is wrong for a path — there
-/// `+` is an ordinary character. Routers decode path params this way
-/// (axum's `Path` included), so anything comparing a decoded segment
-/// against what a handler will see has to use this, not `url_decode`.
-///
-/// Getting that wrong is not cosmetic. A gate that decodes `/tags/a+b`
-/// as `a b` while the handler reads `a+b` is deciding about a different
-/// row than the one it is guarding.
+/// [`url_decode`] turns `+` into a space, which is right for forms and
+/// wrong for a path. Routers, axum's `Path` included, decode paths this
+/// way. So code that compares a decoded segment with what a handler
+/// sees must use this. A gate that reads `/tags/a+b` as `a b` while the
+/// handler reads `a+b` is guarding the wrong row.
 ///
 /// ```ignore
 /// use rustango::url_codec::percent_decode_path;
@@ -134,17 +101,13 @@ pub fn percent_decode_path(s: &str) -> String {
     decode_escapes(s, false)
 }
 
-/// Django-parity
-/// [`django.utils.encoding.iri_to_uri(iri)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.iri_to_uri) —
-/// convert an Internationalized Resource Identifier (IRI, per
-/// RFC 3987) to a plain URI per RFC 3986 by percent-encoding any
-/// byte outside the URI-safe set. Reserved syntax characters
-/// (`/`, `:`, `?`, `#`, `[`, `]`, `@`, `!`, `$`, `&`, `'`, `(`,
-/// `)`, `*`, `+`, `,`, `;`, `=`, `%`) are PRESERVED so caller-
-/// constructed URIs stay parseable.
+/// Turn an IRI (RFC 3987) into a plain URI (RFC 3986) by
+/// percent-encoding every byte outside the URI-safe set. Reserved
+/// syntax characters such as `/`, `?`, `#` and `%` are kept, so a URI
+/// the caller built stays parseable.
 ///
-/// Mirrors the Tera `|iriencode` filter — this is the free-function
-/// surface for handler code that doesn't go through a template.
+/// Same rules as the Tera `|iriencode` filter, for handler code that
+/// does not go through a template.
 ///
 /// ```ignore
 /// use rustango::url_codec::iri_to_uri;
@@ -159,11 +122,9 @@ pub fn percent_decode_path(s: &str) -> String {
 pub fn iri_to_uri(iri: &str) -> String {
     let mut out = String::with_capacity(iri.len());
     for byte in iri.bytes() {
-        // RFC 3987 / Django's safe set: keep RFC 3986 unreserved
-        // (alphanumeric + `-` `_` `.` `~`) PLUS the reserved syntax
-        // chars that have meaning in a parsed URI (so caller-
-        // constructed URIs round-trip), PLUS `%` (already-encoded
-        // input round-trips cleanly).
+        // The safe set: the RFC 3986 unreserved chars, the
+        // reserved syntax chars, and `%` so already-encoded input
+        // round-trips.
         let safe = matches!(
             byte,
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
@@ -182,25 +143,16 @@ pub fn iri_to_uri(iri: &str) -> String {
     out
 }
 
-/// Django-parity
-/// [`django.utils.encoding.uri_to_iri(uri)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.uri_to_iri) —
-/// converts a URI back to IRI form by percent-decoding percent-
-/// encoded sequences that produce valid Unicode characters,
-/// while preserving the URI's syntactic structure.
+/// Turn a URI back into IRI form: decode the escapes that make valid
+/// Unicode, and keep the URI's structure.
 ///
-/// Inverse of [`iri_to_uri`] for the round-trip case: any byte
-/// sequence that originally needed encoding to traverse a URI-
-/// level transport (non-ASCII, control chars, raw spaces) is
-/// decoded back. Percent-encoded forms of URI-reserved characters
-/// (`:`, `/`, `?`, `#`, `[`, `]`, `@`, `!`, `$`, `&`, `'`, `(`,
-/// `)`, `*`, `+`, `,`, `;`, `=`) stay encoded — decoding them
-/// would change the URI's meaning (e.g. `%2F` in a path segment
-/// must stay encoded to keep its "literal /" interpretation
-/// instead of becoming a path separator).
+/// Inverse of [`iri_to_uri`]. Encoded reserved characters such as `/`,
+/// `?`, `#`, `&` and `=` stay encoded, because decoding them would
+/// change what the URI means: `%2F` inside a path segment must not
+/// become a separator.
 ///
-/// Percent sequences that don't form valid UTF-8 stay encoded
-/// verbatim (no replacement char inserted). Single `%` followed
-/// by non-hex characters passes through as `%` plus the rest.
+/// An escape run that is not valid UTF-8 stays encoded as it was, with
+/// no replacement char. A `%` with no hex pair after it passes through.
 ///
 /// ```ignore
 /// use rustango::url_codec::uri_to_iri;
@@ -231,9 +183,8 @@ pub fn uri_to_iri(uri: &str) -> String {
             i += 1;
             continue;
         }
-        // Collect a contiguous run of percent-escapes so we can
-        // attempt UTF-8 decoding on the whole sequence (multi-byte
-        // chars like é are 2-byte UTF-8 = 2 percent-escapes).
+        // Collect a run of escapes and decode it as one UTF-8
+        // sequence: a char like é is two bytes, so two escapes.
         let start = i;
         let mut run: Vec<u8> = Vec::with_capacity(4);
         while i + 2 < bytes.len() + 1 && i < bytes.len() && bytes[i] == b'%' {
@@ -251,23 +202,19 @@ pub fn uri_to_iri(uri: &str) -> String {
             }
         }
         if run.is_empty() {
-            // Malformed `%` followed by non-hex — pass through.
+            // `%` with no hex pair after it: pass it through.
             out.push(bytes[start]);
             i = start + 1;
             continue;
         }
-        // Attempt UTF-8 decode of the run.
         match std::str::from_utf8(&run) {
             Ok(decoded) => {
-                // Walk the decoded chars; decode any that aren't
-                // URI-reserved. Reserved chars roll back to their
-                // percent-encoded form to preserve URI semantics.
+                // Keep the decoded chars, except reserved ones: those
+                // go back to their encoded form.
                 let mut run_idx = 0;
                 for ch in decoded.chars() {
                     let utf8_len = ch.len_utf8();
                     if is_uri_reserved(ch) {
-                        // Emit the percent-encoded form for these
-                        // bytes (re-encode from the run).
                         for &byte in &run[run_idx..run_idx + utf8_len] {
                             use std::fmt::Write as _;
                             let mut buf = String::with_capacity(3);
@@ -283,16 +230,13 @@ pub fn uri_to_iri(uri: &str) -> String {
                 }
             }
             Err(_) => {
-                // Non-UTF-8 percent-escape run — leave it encoded
-                // verbatim (the original bytes from `uri[start..i]`).
+                // Not UTF-8: keep the escapes exactly as written.
                 out.extend_from_slice(&bytes[start..i]);
             }
         }
     }
-    // The output is guaranteed to be valid UTF-8: every byte we
-    // pushed came either from the input (already UTF-8) or from a
-    // successfully UTF-8-decoded percent sequence we wrote back as
-    // its char.
+    // Always valid UTF-8: every byte came either from the input or
+    // from a char we decoded successfully.
     String::from_utf8(out).unwrap_or_default()
 }
 
@@ -319,22 +263,14 @@ fn is_uri_reserved(ch: char) -> bool {
     )
 }
 
-/// Django-parity
-/// [`django.utils.encoding.escape_uri_path(path)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.escape_uri_path) —
-/// percent-encode the *path* portion of a URI: encodes any byte
-/// outside the path-safe set, but DOES preserve `/` so the path
-/// structure stays intact.
+/// Percent-encode the path part of a URI. `/` is kept, so the path
+/// structure survives.
 ///
-/// Use this when building a URI from raw path segments and you
-/// want a fully-encoded path (every char that needs encoding is
-/// encoded) without having to escape `/`-separators yourself.
+/// Use it when you build a path from raw segments and do not want to
+/// escape the separators yourself.
 ///
-/// Differs from [`iri_to_uri`] in two ways:
-/// * Encodes `?` `#` (the query / fragment delimiters) since
-///   they shouldn't appear inside a path segment
-/// * Does NOT pre-pass-through already-encoded `%` — anything
-///   non-path-safe gets encoded, so `%` itself becomes `%25`
-///   (Django shape — the input is treated as a raw, unencoded path)
+/// Unlike [`iri_to_uri`], it also encodes `?`, `#` and `%`: the input
+/// counts as a raw, unencoded path, so a literal `%` becomes `%25`.
 ///
 /// ```ignore
 /// use rustango::url_codec::escape_uri_path;
@@ -351,9 +287,8 @@ fn is_uri_reserved(ch: char) -> bool {
 pub fn escape_uri_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for byte in path.bytes() {
-        // RFC 3986 pchar set (unreserved + sub-delims + `:` `@`) plus
-        // `/` to preserve segment separators. Excludes `?` `#` `%` —
-        // those need encoding in a path context.
+        // RFC 3986 pchar set plus `/` for the separators. `?`, `#`
+        // and `%` are left out: they need encoding inside a path.
         let safe = matches!(
             byte,
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
@@ -372,28 +307,15 @@ pub fn escape_uri_path(path: &str) -> String {
     out
 }
 
-/// Django-parity
-/// [`django.utils.encoding.filepath_to_uri(path)`](https://docs.djangoproject.com/en/6.0/ref/unicode/#django.utils.encoding.filepath_to_uri) —
-/// convert a filesystem path to a URI segment by percent-encoding
-/// chars that would otherwise have URL-syntactic meaning, and
-/// normalizing Windows-style `\` separators to `/`.
+/// Turn a filesystem path into a URI path. Windows `\` separators
+/// become `/`.
 ///
-/// Safe set: alphanumeric + `-` `_` `.` `~` + `/` `!` `*` `(`
-/// `)` `'`. Everything else (including spaces, `?`, `#`, `:`,
-/// `[`, `]`, non-ASCII) is percent-encoded.
+/// Safe set: alphanumeric plus `-` `_` `.` `~` `/` `!` `*` `(` `)` `'`.
+/// Everything else is percent-encoded, spaces and non-ASCII included.
 ///
-/// Distinct from [`escape_uri_path`]:
-/// * `escape_uri_path` encodes more aggressively (`:`, `?`, `#`,
-///   `@`, etc.) for inserting an arbitrary string INTO a path
-///   segment.
-/// * `filepath_to_uri` preserves the chars that are legal in
-///   filesystem path segments AND in URI paths — meant for direct
-///   conversion of a file path (likely already-clean ASCII or
-///   Unicode filename) into a URL segment.
-///
-/// Both are useful but for different cases. Use `filepath_to_uri`
-/// when generating static-file URLs from on-disk paths; use
-/// `escape_uri_path` when injecting operator input into a path.
+/// Use this for static-file URLs built from on-disk paths. Use
+/// [`escape_uri_path`] to put arbitrary text into a path segment; it
+/// keeps `:` and `@`, which this one encodes.
 ///
 /// ```ignore
 /// use rustango::url_codec::filepath_to_uri;
@@ -418,13 +340,11 @@ pub fn escape_uri_path(path: &str) -> String {
 /// ```
 #[must_use]
 pub fn filepath_to_uri(path: &str) -> String {
-    // Windows → POSIX path normalization (per Django source).
+    // Windows to POSIX separators.
     let normalized = path.replace('\\', "/");
     let mut out = String::with_capacity(normalized.len());
     for byte in normalized.bytes() {
-        // Default `urllib.parse.quote` safe set is alphanumeric +
-        // `-_.~` (per RFC 3986 unreserved), and Django adds
-        // `/~!*()'` via the explicit `safe` argument.
+        // The conventional safe set, plus `/~!*()'`.
         let safe = matches!(
             byte,
             b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
@@ -441,18 +361,12 @@ pub fn filepath_to_uri(path: &str) -> String {
     out
 }
 
-// ============================================================ Django urlsafe_base64
+// ============================================================ urlsafe_base64
 
-/// Django-parity
-/// [`urlsafe_base64_encode(bytes)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.urlsafe_base64_encode) —
-/// encode `bytes` as URL-safe base64 with padding stripped (per
-/// `django.utils.http.urlsafe_base64_encode`). Used in
-/// password-reset URL shape `/reset/<uidb64>/<token>/` to encode
-/// the user PK as a URL-safe string.
-///
-/// Drops the standard base64 padding (`=`) so the encoded form
-/// drops cleanly into a URL path or query parameter without
-/// escaping.
+/// Base64-encode `bytes` with the URL-safe alphabet and the `=`
+/// padding stripped, so
+/// the result drops into a URL path or query value with no escaping.
+/// Used for the `uidb64` part of `/reset/<uidb64>/<token>/`.
 ///
 /// ```ignore
 /// use rustango::url_codec::urlsafe_base64_encode;
@@ -463,9 +377,8 @@ pub fn filepath_to_uri(path: &str) -> String {
 /// assert_eq!(urlsafe_base64_encode(&[0xfb, 0xff]), "-_8");
 /// ```
 ///
-/// Gated on `_base64` (#1208): the module is otherwise pure `std`, so only
-/// the two base64 helpers depend on an optional crate — gating the pair keeps
-/// the rest of the URL/IRI surface available in every feature set.
+/// Gated on `_base64`: only the two base64 helpers need an optional crate, so
+/// the rest of the module stays available in every feature set.
 #[cfg(feature = "_base64")]
 #[must_use]
 pub fn urlsafe_base64_encode(bytes: &[u8]) -> String {
@@ -473,18 +386,13 @@ pub fn urlsafe_base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Django-parity
-/// [`urlsafe_base64_decode(s)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.http.urlsafe_base64_decode) —
-/// decode a URL-safe base64 string (padding optional) into raw
-/// bytes. Both `URL_SAFE` (padded) and `URL_SAFE_NO_PAD` inputs are
-/// accepted — Django re-pads internally before decoding so legacy
-/// senders that include `=` still work.
+/// Decode a URL-safe base64 string into raw bytes. Padding is
+/// optional, so senders that include `=` still work.
 ///
 /// # Errors
-/// Returns `None` on any decode failure (invalid alphabet, bad
-/// length, etc.). Django raises `binascii.Error`; rustango surfaces
-/// the gap as `Option::None` so callers can ergonomically `?` it
-/// out with a custom error type per call site.
+/// Returns `None` on any decode failure, such as a character outside
+/// the URL-safe alphabet or a bad length. Callers map that to their
+/// own error type.
 ///
 /// ```ignore
 /// use rustango::url_codec::urlsafe_base64_decode;
@@ -498,8 +406,7 @@ pub fn urlsafe_base64_encode(bytes: &[u8]) -> String {
 #[must_use]
 pub fn urlsafe_base64_decode(s: &str) -> Option<Vec<u8>> {
     use base64::Engine;
-    // Strip any padding the caller threaded through — Django shape
-    // accepts both forms.
+    // Drop any padding the caller sent; both forms are accepted.
     let trimmed = s.trim_end_matches('=');
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(trimmed)
@@ -532,8 +439,7 @@ mod tests {
 
     #[test]
     fn percent_2b_decodes_to_literal_plus() {
-        // `%2B` is the encoded form of `+`; round-trip must NOT be
-        // confused with the `+ → space` convention.
+        // `%2B` is the encoded `+`, not the `+ means space` rule.
         assert_eq!(url_decode("a%2Bb"), "a+b");
     }
 
@@ -555,8 +461,7 @@ mod tests {
 
     #[test]
     fn malformed_percent_kept_as_literal() {
-        // `%2X` is not a valid escape — literal `%` survives, then
-        // continues parsing at the `2`.
+        // `%2X` is not an escape: keep `%`, go on from the `2`.
         assert_eq!(url_decode("a%2Xb"), "a%2Xb");
     }
 
@@ -567,23 +472,18 @@ mod tests {
 
     /// A signed hex pair is not a valid escape.
     ///
-    /// `u8::from_str_radix` accepts a leading sign, so the previous
-    /// implementation decoded `%+5` to `0x05` and `%-5` likewise —
-    /// against this module's own stated contract. It mattered: the
-    /// media authorization gate decoded `/tags/%+5/media` to a slug of
-    /// `"\u{5}"` while the handler, which does not over-decode, queried
-    /// the literal `"%+5"`. The gate was deciding about a row the
-    /// handler was not touching.
+    /// `u8::from_str_radix` accepts a leading sign, so `%+5` once
+    /// decoded to `0x05`. The media gate then read `/tags/%+5/media`
+    /// as the slug `"\u{5}"` while the handler queried the literal
+    /// `"%+5"`, so the gate guarded a row the handler never touched.
     #[test]
     fn a_signed_hex_pair_is_not_an_escape() {
-        // Path semantics: the whole thing survives, byte for byte,
-        // which is what axum's `Path` extractor produces.
+        // Path form: every byte survives, like axum's `Path` gives.
         for raw in ["a%+5b", "a%-5b", "a%+Ab"] {
             assert_eq!(percent_decode_path(raw), raw, "{raw} was decoded");
         }
-        // Form semantics: the `%` is literal, and then `+` is a space
-        // by the form convention. Not an escape either way — the point
-        // is that no `0x05` byte is produced.
+        // Query form: the `%` is literal and `+` is a space. Either
+        // way, no `0x05` byte comes out.
         assert_eq!(url_decode("a%+5b"), "a% 5b");
         assert_eq!(url_decode("a%-5b"), "a%-5b");
         for decoded in [url_decode("a%+5b"), percent_decode_path("a%+5b")] {
@@ -592,7 +492,7 @@ mod tests {
                 "a signed hex pair produced a control byte: {decoded:?}"
             );
         }
-        // The encoded form of '+' still decodes normally.
+        // The encoded `+` still decodes.
         assert_eq!(percent_decode_path("a%2Bb"), "a+b");
     }
 
@@ -603,31 +503,26 @@ mod tests {
         assert_eq!(url_decode("a+b"), "a b");
         assert_eq!(percent_decode_path("%31"), "1");
         assert_eq!(percent_decode_path("a%2Fb"), "a/b");
-        // Truncated escapes survive as literals in both.
+        // Short escapes stay literal in both.
         assert_eq!(percent_decode_path("foo%"), "foo%");
         assert_eq!(percent_decode_path("foo%4"), "foo%4");
     }
 
     #[test]
     fn trailing_percent_kept_as_literal() {
-        // Only 1 byte after `%` — escape can't complete.
+        // Only one byte after `%`, so the escape cannot complete.
         assert_eq!(url_decode("foo%"), "foo%");
-        // Only 2 bytes after `%` but second is missing; spec says
-        // keep `%` and try `2` as a normal char. (i+2 < len fails.)
+        // Second hex digit missing: keep `%`, read `2` as a char.
         assert_eq!(url_decode("foo%2"), "foo%2");
     }
 
     #[test]
     fn invalid_utf8_is_replaced_not_dropped() {
-        // 0xC3 alone is an incomplete UTF-8 sequence (lead byte
-        // for a 2-byte char with no continuation). The OLD impl
-        // (`from_utf8(out).unwrap_or_default()`) would return ""
-        // — a silent total wipe of the rest of the input. Lossy
-        // returns the well-formed prefix + U+FFFD for the bad byte.
+        // 0xC3 alone is an incomplete UTF-8 sequence. Lossy decoding
+        // keeps the good prefix instead of wiping the whole string.
         let got = url_decode("hello%C3");
         assert!(got.starts_with("hello"), "got: {got:?}");
-        // Trailing U+FFFD or kept literal `%C3` (since `i+2 < len`
-        // fails on the 2-char tail, we hit the literal-keep arm).
+        // Either a trailing U+FFFD or the literal `%C3`.
         assert!(
             got.contains("%C3") || got.contains('\u{FFFD}'),
             "got: {got:?}"
@@ -636,10 +531,8 @@ mod tests {
 
     #[test]
     fn invalid_utf8_in_middle_keeps_well_formed_tail() {
-        // A real malformed sequence in the middle: `%C3%28` — `%C3`
-        // is a valid UTF-8 lead byte but `%28` (=`(`) is NOT a valid
-        // continuation byte. The lossy decoder must keep the prefix,
-        // emit U+FFFD for the bad byte, and KEEP DECODING the tail.
+        // `%C3` is a UTF-8 lead byte but `%28` is not a valid
+        // continuation. Keep the prefix, emit U+FFFD, decode the rest.
         let got = url_decode("a%C3%28b");
         assert!(got.starts_with('a'), "got: {got:?}");
         assert!(got.ends_with('b'), "got: {got:?}");
@@ -651,8 +544,7 @@ mod tests {
 
     #[test]
     fn no_panic_on_arbitrary_input() {
-        // Smoke: feed a few weird strings and confirm no panic +
-        // some output.
+        // Smoke test: odd input must not panic.
         for s in ["%", "%%", "%%%", "+%", "%+", "+%2", "%2+"] {
             let _ = url_decode(s);
         }
@@ -660,9 +552,8 @@ mod tests {
 
     #[test]
     fn dollar_amp_equal_unchanged() {
-        // Reserved characters that aren't `%` or `+` pass through
-        // without alteration. Caller is expected to have already
-        // split on `&` / `=` etc.
+        // Reserved chars other than `%` and `+` pass through; the
+        // caller splits on `&` and `=` first.
         assert_eq!(url_decode("a=b&c=d"), "a=b&c=d");
     }
 
@@ -682,8 +573,8 @@ mod tests {
         assert_eq!(url_encode("?#"), "%3F%23");
     }
 
-    /// Round-trip: encode then decode reproduces the input. Confirms
-    /// the encoder and decoder agree on the unreserved set.
+    /// Encode then decode gives back the input, so both sides agree
+    /// on the unreserved set.
     #[test]
     fn url_encode_decode_round_trip() {
         for input in [
@@ -701,14 +592,14 @@ mod tests {
         }
     }
 
-    // ---- urlsafe_base64 (Django parity) ----
+    // ---- urlsafe_base64 ----
     //
-    // These follow the `_base64` gate on the functions they exercise; the
-    // rest of the suite is dependency-free and runs in every feature set.
+    // Gated like the functions they cover; the rest of the suite runs
+    // in every feature set.
 
     #[cfg(feature = "_base64")]
     #[test]
-    fn urlsafe_b64_encode_matches_django_examples() {
+    fn urlsafe_b64_encode_known_vectors() {
         assert_eq!(urlsafe_base64_encode(b"foo"), "Zm9v");
         assert_eq!(urlsafe_base64_encode(b"foobar"), "Zm9vYmFy");
         assert_eq!(urlsafe_base64_encode(b""), "");
@@ -717,8 +608,7 @@ mod tests {
     #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_encode_drops_padding() {
-        // 1 byte → standard b64 would emit `==` padding; urlsafe-no-pad
-        // strips it.
+        // One byte would need `==` padding in standard base64.
         let encoded = urlsafe_base64_encode(b"f");
         assert_eq!(encoded, "Zg");
         assert!(!encoded.contains('='));
@@ -742,9 +632,8 @@ mod tests {
 
     #[cfg(feature = "_base64")]
     #[test]
-    fn urlsafe_b64_decode_accepts_padding_for_django_compat() {
-        // Django shape — `=` padding silently stripped so legacy senders
-        // that include it still decode cleanly.
+    fn urlsafe_b64_decode_accepts_optional_padding() {
+        // `=` padding is stripped, so senders that add it still work.
         assert_eq!(
             urlsafe_base64_decode("Zm9v====").as_deref(),
             Some(&b"foo"[..])
@@ -755,8 +644,8 @@ mod tests {
     #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_decode_rejects_standard_b64_chars() {
-        // Standard b64 reserved chars `+` and `/` must be rejected when
-        // they appear in input — URL-safe alphabet uses `-` and `_`.
+        // The URL-safe alphabet uses `-` and `_`, so `+` and `/` are
+        // rejected.
         assert!(urlsafe_base64_decode("a+b/c").is_none());
     }
 
@@ -773,7 +662,7 @@ mod tests {
         assert_eq!(urlsafe_base64_decode("").as_deref(), Some(&[][..]));
     }
 
-    // ---- iri_to_uri (Django parity) ----
+    // ---- iri_to_uri ----
 
     #[test]
     fn iri_to_uri_ascii_passes_through() {
@@ -783,15 +672,14 @@ mod tests {
 
     #[test]
     fn iri_to_uri_encodes_non_ascii_utf8() {
-        // `café` = `0x63 0x61 0x66 0xC3 0xA9` — the `é` (0xC3 0xA9)
-        // gets percent-encoded byte-by-byte (RFC 3987 shape).
+        // The `é` is two UTF-8 bytes, encoded one at a time.
         assert_eq!(iri_to_uri("/café"), "/caf%C3%A9");
     }
 
     #[test]
     fn iri_to_uri_preserves_reserved_syntax_chars() {
-        // Caller-constructed URI with query + fragment must survive
-        // round-trip — these chars are syntactically meaningful.
+        // A URI with a query and a fragment must survive: these
+        // chars carry syntax.
         assert_eq!(
             iri_to_uri("/path?q=hello&page=1#frag"),
             "/path?q=hello&page=1#frag"
@@ -810,14 +698,14 @@ mod tests {
 
     #[test]
     fn iri_to_uri_encodes_space_and_control_chars() {
-        // Plain space → %20. Control chars too.
+        // Spaces and control chars both encode.
         assert_eq!(iri_to_uri("a b"), "a%20b");
         assert_eq!(iri_to_uri("a\nb"), "a%0Ab");
     }
 
     #[test]
     fn iri_to_uri_handles_full_unicode_range() {
-        // Emoji codepoint (U+1F600) is 4 bytes in UTF-8 (F0 9F 98 80).
+        // U+1F600 is four UTF-8 bytes.
         let out = iri_to_uri("/😀");
         assert_eq!(out, "/%F0%9F%98%80");
     }
@@ -827,7 +715,7 @@ mod tests {
         assert_eq!(iri_to_uri(""), "");
     }
 
-    // ---- escape_uri_path (Django parity) ----
+    // ---- escape_uri_path ----
 
     #[test]
     fn escape_uri_path_preserves_slashes() {
@@ -846,21 +734,20 @@ mod tests {
 
     #[test]
     fn escape_uri_path_encodes_query_and_fragment_chars() {
-        // ? and # would break path-level parsing — must encode.
+        // `?` and `#` would break path parsing, so they encode.
         assert_eq!(escape_uri_path("/with?query"), "/with%3Fquery");
         assert_eq!(escape_uri_path("/with#frag"), "/with%23frag");
     }
 
     #[test]
     fn escape_uri_path_encodes_percent_sign() {
-        // Distinct from iri_to_uri: raw `%` is treated as input data
-        // that needs encoding, not as an escape marker.
+        // Unlike iri_to_uri, a raw `%` is data, not an escape marker.
         assert_eq!(escape_uri_path("/100%"), "/100%25");
     }
 
     #[test]
     fn escape_uri_path_preserves_sub_delims_and_colon_at() {
-        // RFC 3986 pchar set — these belong inside path segments.
+        // RFC 3986 pchar set: legal inside a path segment.
         assert_eq!(escape_uri_path("/a:b@c"), "/a:b@c");
         assert_eq!(escape_uri_path("/a!b$c&d'e(f)g"), "/a!b$c&d'e(f)g");
     }
@@ -873,7 +760,7 @@ mod tests {
     #[cfg(feature = "_base64")]
     #[test]
     fn urlsafe_b64_round_trip_for_random_bytes() {
-        // Every byte value through encode → decode lands back unchanged.
+        // Every byte value survives encode then decode.
         let mut input = Vec::with_capacity(256);
         for b in 0u8..=255 {
             input.push(b);
@@ -883,7 +770,7 @@ mod tests {
         assert_eq!(decoded, input);
     }
 
-    // ---- uri_to_iri (Django parity) ----
+    // ---- uri_to_iri ----
 
     #[test]
     fn uri_to_iri_decodes_non_ascii_utf8() {
@@ -893,18 +780,17 @@ mod tests {
 
     #[test]
     fn uri_to_iri_keeps_reserved_chars_encoded() {
-        // Slash inside a segment must stay encoded — decoding it
-        // would change the URI's path structure.
+        // Decoding a slash inside a segment would change the path.
         assert_eq!(uri_to_iri("/a%2Fb"), "/a%2Fb");
-        // Question mark, hash, ampersand, equals — all reserved.
+        // `?`, `#`, `&` and `=` are reserved too.
         assert_eq!(uri_to_iri("/q%3Fk%3Dv%26"), "/q%3Fk%3Dv%26");
     }
 
     #[test]
     fn uri_to_iri_decodes_non_reserved_ascii() {
-        // Space (0x20) is not URI-reserved → decodes back.
+        // A space is not reserved, so it decodes.
         assert_eq!(uri_to_iri("/with%20space"), "/with space");
-        // Underscore is unreserved.
+        // Same for an underscore.
         assert_eq!(uri_to_iri("/foo%5Fbar"), "/foo_bar");
     }
 
@@ -921,7 +807,7 @@ mod tests {
 
     #[test]
     fn uri_to_iri_invalid_utf8_stays_encoded() {
-        // 0xFF alone is not valid UTF-8 → stays encoded verbatim.
+        // 0xFF alone is not valid UTF-8, so it stays encoded.
         assert_eq!(uri_to_iri("/x%FFy"), "/x%FFy");
     }
 
@@ -935,14 +821,14 @@ mod tests {
 
     #[test]
     fn iri_to_uri_then_uri_to_iri_round_trip_for_unicode() {
-        // Pure unicode path → round-trips losslessly.
+        // A pure Unicode path round-trips with no loss.
         let original = "/café";
         let encoded = iri_to_uri(original);
         let decoded = uri_to_iri(&encoded);
         assert_eq!(decoded, original);
     }
 
-    // ---- filepath_to_uri (Django parity) ----
+    // ---- filepath_to_uri ----
 
     #[test]
     fn filepath_to_uri_plain_path_passes_through() {
@@ -974,14 +860,14 @@ mod tests {
 
     #[test]
     fn filepath_to_uri_keeps_safe_set_chars() {
-        // Django's safe set: `/~!*()'` + alphanumeric + `-_.~`.
+        // The safe set: alphanumeric, `-_.~` and `/~!*()'`.
         assert_eq!(filepath_to_uri("/a~b!c(d)e'f*g"), "/a~b!c(d)e'f*g");
         assert_eq!(filepath_to_uri("a-b_c.d"), "a-b_c.d");
     }
 
     #[test]
     fn filepath_to_uri_encodes_url_syntactic_chars() {
-        // `?` `#` `:` `[` `]` etc. are NOT in Django's safe set.
+        // `?`, `#`, `:`, `[` and `]` are not in the safe set.
         assert_eq!(filepath_to_uri("/x?y#z"), "/x%3Fy%23z");
         assert_eq!(filepath_to_uri("/[bracket]"), "/%5Bbracket%5D");
         assert_eq!(filepath_to_uri("a:b"), "a%3Ab");
@@ -990,13 +876,11 @@ mod tests {
 
     #[test]
     fn filepath_to_uri_distinct_from_escape_uri_path_on_colon() {
-        // `escape_uri_path` keeps `:` and `@` (RFC 3986 pchar
-        // sub-delims); `filepath_to_uri` encodes them — filesystem
-        // paths shouldn't contain `:` and Windows uses it for drive
-        // letters which must encode.
+        // `escape_uri_path` keeps `:` and `@`; `filepath_to_uri`
+        // encodes them, because a Windows drive letter must encode.
         assert_eq!(filepath_to_uri("a:b"), "a%3Ab");
         assert_eq!(escape_uri_path("a:b"), "a:b");
-        // Same with `&`, `=`, `+`, `,`, `;`.
+        // The same split applies to `&` and `=`.
         assert_eq!(filepath_to_uri("a&b=c"), "a%26b%3Dc");
         assert_eq!(escape_uri_path("a&b=c"), "a&b=c");
     }

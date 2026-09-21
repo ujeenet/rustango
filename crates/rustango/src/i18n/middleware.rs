@@ -1,11 +1,11 @@
-//! Django-shape `LocaleMiddleware` — tower layer that picks the
-//! active locale per request and injects it into request extensions.
+//! `LocaleMiddleware` — a tower layer that picks the active locale
+//! per request and injects it into request extensions.
 //!
-//! Issue #406. Mirrors Django's
-//! [`django.middleware.locale.LocaleMiddleware`](https://docs.djangoproject.com/en/6.0/ref/middleware/#django.middleware.locale.LocaleMiddleware)
-//! pick order, excluding URL prefix (see note below):
+//! The pick order, excluding URL prefix (see the note below):
 //!
-//! 1. Session / cookie (configurable cookie name; default `django_language`).
+//! 1. Session / cookie. The name is configurable; it defaults to
+//!    `django_language`, which stays as-is because deployed clients
+//!    already send that cookie.
 //! 2. `Accept-Language` header via [`super::negotiate_language`].
 //! 3. The configured default locale.
 //!
@@ -49,9 +49,8 @@
 //!     .nest("/fr", locale_router("fr"));
 //! ```
 //!
-//! This is the Django-idiomatic pattern for issue #424 too — Django
-//! generates locale-prefixed routes via `i18n_patterns()`. Composing
-//! `Router::nest` per locale is the axum-shaped equivalent.
+//! That is how you get locale-prefixed routes: compose
+//! `Router::nest` once per locale.
 
 use std::future::Future;
 use std::pin::Pin;

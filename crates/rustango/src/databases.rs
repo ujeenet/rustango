@@ -1,21 +1,17 @@
-//! Named multi-database registry — Django's `DATABASES` setting +
-//! `QuerySet.using(alias)` (issues #332 / #400).
+//! A registry of named databases, plus `QuerySet::using(alias)` to
+//! route a query to one of them.
 //!
-//! rustango is single-pool-per-call by default: every terminal takes an
-//! explicit connection (`fetch(&pool)` / `fetch_on(executor)`), so
-//! multi-DB routing is already possible by passing the right pool. This
-//! module adds the Django-shaped **named-alias** convenience on top: a
-//! process-wide registry of `alias → Pool` plus a `.using("alias")` verb
-//! that resolves the alias and runs against the matching pool — the
-//! read-replica / multi-DB ergonomics without threading a `Pool` through
-//! every call site.
+//! Every terminal normally takes a pool, so multi-database work is
+//! already possible by passing the right one. This module maps a name
+//! to a pool once at startup, so a call site can say `.using("replica")`
+//! instead of carrying a `Pool` around.
 //!
 //! ```ignore
 //! // At startup (the `DATABASES` equivalent):
 //! rustango::databases::register("default", primary_pool);
 //! rustango::databases::register("replica", replica_pool);
 //!
-//! // Route a read to the replica — Django's `.using("replica")`:
+//! // Route a read to the replica:
 //! let posts = Post::objects()
 //!     .filter("published", true)
 //!     .using("replica")
@@ -23,19 +19,17 @@
 //!     .await?;
 //! ```
 //!
-//! **Writes** still route through the explicit `fetch(&pool)` family
-//! on purpose — `.using` exposes only the read terminals so a write
-//! can't be silently sent to a read replica. Automatic per-model routing
-//! (Django's `DATABASE_ROUTERS`, #401) is a separate layer on top of this
-//! registry.
+//! `.using` offers read terminals only. That is on purpose: a write
+//! must never go to a read replica by accident, so writes keep using
+//! the explicit `fetch(&pool)` family. For automatic per-model
+//! routing, see [`DatabaseRouter`](crate::databases::DatabaseRouter).
 
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
 use crate::sql::Pool;
 
-/// The conventional alias for the primary connection (Django's
-/// `DATABASES["default"]`).
+/// The usual alias for the primary connection.
 pub const DEFAULT_ALIAS: &str = "default";
 
 static REGISTRY: OnceLock<RwLock<HashMap<String, Pool>>> = OnceLock::new();
@@ -44,9 +38,9 @@ fn registry() -> &'static RwLock<HashMap<String, Pool>> {
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Register (or replace) the connection pool under `alias`. Call once
-/// per database at startup. The `"default"` alias is the conventional
-/// primary; any other name (`"replica"`, `"analytics"`, …) is yours.
+/// Store a pool under `alias`, replacing any pool already there. Call
+/// once per database at startup. Names other than `"default"` are
+/// yours to pick.
 pub fn register(alias: impl Into<String>, pool: impl Into<Pool>) {
     registry()
         .write()
@@ -54,8 +48,8 @@ pub fn register(alias: impl Into<String>, pool: impl Into<Pool>) {
         .insert(alias.into(), pool.into());
 }
 
-/// Resolve `alias` to its pool, or `None` if nothing is registered under
-/// it. Prefer [`pool`] when the alias is expected to exist.
+/// The pool for `alias`, or `None` if nothing is registered. Use
+/// [`pool`] when the alias should always be there.
 #[must_use]
 pub fn get(alias: &str) -> Option<Pool> {
     registry()
@@ -71,10 +65,11 @@ pub fn default() -> Option<Pool> {
     get(DEFAULT_ALIAS)
 }
 
-/// Resolve `alias`, panicking with a clear message if it isn't
-/// registered — the rustango analogue of Django's
-/// `ConnectionDoesNotExist`. An unknown alias is a startup-wiring bug,
-/// so this fails loudly rather than silently picking a wrong database.
+/// The pool for `alias`.
+///
+/// # Panics
+/// If `alias` is not registered. That is a wiring bug at startup, and
+/// failing loudly beats quietly using the wrong database.
 #[must_use]
 pub fn pool(alias: &str) -> Pool {
     get(alias).unwrap_or_else(|| {
@@ -87,8 +82,7 @@ pub fn pool(alias: &str) -> Pool {
     })
 }
 
-/// Every registered alias, sorted — handy for diagnostics / `manage`
-/// introspection.
+/// Every registered alias, sorted.
 #[must_use]
 pub fn aliases() -> Vec<String> {
     let mut v: Vec<String> = registry()
@@ -101,7 +95,7 @@ pub fn aliases() -> Vec<String> {
     v
 }
 
-/// Remove every registered connection. Intended for test isolation.
+/// Drop every registered connection. For test isolation.
 pub fn clear() {
     registry()
         .write()
@@ -109,18 +103,15 @@ pub fn clear() {
         .clear();
 }
 
-// ---- DATABASE_ROUTERS (#401) -----------------------------------------
+// ---- routers ----
 
-/// A database router — Django's
-/// [`DATABASE_ROUTERS`](https://docs.djangoproject.com/en/6.0/topics/db/multi-db/#database-routers)
-/// (#401). Decides which registered alias a given model's reads / writes
-/// should target, so callers get automatic read-replica / sharding
-/// routing instead of threading an alias through every call.
+/// Picks the alias a model's reads and writes should go to.
+/// Use it for read replicas or sharding without naming an alias at
+/// each call site.
 ///
-/// Both methods default to `None` ("no opinion — defer to the next
-/// router, then the `"default"` alias"), so an implementation overrides
-/// only what it cares about. Routers are consulted in registration order;
-/// the first `Some(alias)` wins.
+/// Both methods return `None` by default, which means "no opinion".
+/// Routers run in the order you register them and the first `Some`
+/// wins; if all defer, the `"default"` alias is used.
 ///
 /// ```ignore
 /// struct ReadReplicaRouter;
@@ -152,8 +143,7 @@ fn routers() -> &'static RwLock<Vec<Box<dyn DatabaseRouter>>> {
     ROUTERS.get_or_init(|| RwLock::new(Vec::new()))
 }
 
-/// Append a router to the chain (Django's `DATABASE_ROUTERS` list).
-/// Routers are consulted in registration order.
+/// Add a router to the end of the chain.
 pub fn register_router(router: impl DatabaseRouter) {
     routers()
         .write()
@@ -161,7 +151,7 @@ pub fn register_router(router: impl DatabaseRouter) {
         .push(Box::new(router));
 }
 
-/// Remove every registered router. Intended for test isolation.
+/// Drop every registered router. For test isolation.
 pub fn clear_routers() {
     routers()
         .write()
@@ -169,9 +159,8 @@ pub fn clear_routers() {
         .clear();
 }
 
-/// The alias to **read** `model` from — the first router that returns
-/// `Some`, or `None` if every router defers (caller falls back to
-/// [`DEFAULT_ALIAS`]).
+/// The alias to read `model` from: the first router that answers, or
+/// `None` if they all defer. Callers then use [`DEFAULT_ALIAS`].
 #[must_use]
 pub fn route_read(model: &crate::core::ModelSchema) -> Option<String> {
     routers()
@@ -181,7 +170,7 @@ pub fn route_read(model: &crate::core::ModelSchema) -> Option<String> {
         .find_map(|r| r.db_for_read(model))
 }
 
-/// The alias to **write** `model` to — see [`route_read`].
+/// The alias to write `model` to. See [`route_read`].
 #[must_use]
 pub fn route_write(model: &crate::core::ModelSchema) -> Option<String> {
     routers()
@@ -191,31 +180,35 @@ pub fn route_write(model: &crate::core::ModelSchema) -> Option<String> {
         .find_map(|r| r.db_for_write(model))
 }
 
-/// Resolve the read pool for `model` via the router chain, falling back
-/// to the `"default"` alias. Panics if the chosen alias isn't registered
-/// (see [`pool`]).
+/// The read pool for `model` from the router chain, or the
+/// `"default"` alias.
+///
+/// # Panics
+/// If the chosen alias is not registered. See [`pool`].
 #[must_use]
 pub fn read_pool_for(model: &crate::core::ModelSchema) -> Pool {
     pool(&route_read(model).unwrap_or_else(|| DEFAULT_ALIAS.to_owned()))
 }
 
-/// Resolve the write pool for `model` via the router chain, falling back
-/// to the `"default"` alias.
+/// The write pool for `model`. See [`read_pool_for`].
+///
+/// # Panics
+/// If the chosen alias is not registered. See [`pool`].
 #[must_use]
 pub fn write_pool_for(model: &crate::core::ModelSchema) -> Pool {
     pool(&route_write(model).unwrap_or_else(|| DEFAULT_ALIAS.to_owned()))
 }
 
 impl<T: crate::core::Model> crate::query::QuerySet<T> {
-    /// Route this queryset to the connection registered under `alias` —
-    /// Django's [`QuerySet.using(alias)`](https://docs.djangoproject.com/en/6.0/ref/models/querysets/#using).
-    /// Issue #332.
+    /// Run this queryset against the connection registered under
+    /// `alias`.
     ///
-    /// Returns a [`UsingQuerySet`] exposing the read terminals
-    /// (`fetch` / `first` / `count` / `exists`) bound to the resolved
-    /// pool. Panics at call time if `alias` isn't registered (see
-    /// [`pool`]). Writes intentionally aren't routed here — use the
-    /// explicit `fetch(&pool)` family for those.
+    /// The returned [`UsingQuerySet`] has read terminals only. Writes
+    /// stay on the explicit `fetch(&pool)` family so one cannot reach
+    /// a read replica by mistake.
+    ///
+    /// # Panics
+    /// If `alias` is not registered. See [`pool`].
     #[must_use]
     pub fn using(self, alias: &str) -> UsingQuerySet<T> {
         UsingQuerySet {
@@ -224,16 +217,14 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
         }
     }
 
-    /// Route this read through the registered [`DatabaseRouter`] chain —
-    /// the automatic counterpart of [`Self::using`] (issue #401). The
-    /// routers' `db_for_read(T::SCHEMA)` decision picks the alias (first
-    /// `Some` wins), falling back to the `"default"` alias when every
-    /// router defers. Returns a [`UsingQuerySet`] bound to that pool.
+    /// Let the [`DatabaseRouter`] chain pick the connection. The
+    /// automatic version of [`Self::using`].
     ///
-    /// Panics if the chosen alias isn't registered (see [`pool`]). Like
-    /// [`Self::using`], this exposes only read terminals; for writes use
-    /// [`write_pool_for`] (`fetch(&write_pool_for(T::SCHEMA))`) so a
-    /// write is never silently sent to a read replica.
+    /// Read terminals only, as with [`Self::using`]. For writes call
+    /// `fetch(&write_pool_for(T::SCHEMA))`.
+    ///
+    /// # Panics
+    /// If the chosen alias is not registered. See [`pool`].
     #[must_use]
     pub fn routed(self) -> UsingQuerySet<T> {
         let pool = read_pool_for(T::SCHEMA);
@@ -241,9 +232,7 @@ impl<T: crate::core::Model> crate::query::QuerySet<T> {
     }
 }
 
-/// A queryset bound to a specific registered connection via
-/// [`QuerySet::using`]. Carries the read terminals that resolve against
-/// the chosen pool.
+/// A queryset bound to one registered connection. Read terminals only.
 pub struct UsingQuerySet<T: crate::core::Model> {
     qs: crate::query::QuerySet<T>,
     pool: Pool,
@@ -261,8 +250,7 @@ where
         + Send
         + Unpin,
 {
-    /// Run the query against the chosen connection — like
-    /// `fetch(&pool)` but routed by alias.
+    /// Run the query on the chosen connection.
     ///
     /// # Errors
     /// As [`crate::sql::FetcherPool::fetch`].
@@ -280,7 +268,7 @@ where
         Ok(self.qs.limit(1).fetch(&self.pool).await?.into_iter().next())
     }
 
-    /// `SELECT COUNT(*)` against the chosen connection.
+    /// `SELECT COUNT(*)` on the chosen connection.
     ///
     /// # Errors
     /// As [`crate::sql::CounterPool::count`].
@@ -289,7 +277,7 @@ where
         self.qs.count(&self.pool).await
     }
 
-    /// `EXISTS` against the chosen connection.
+    /// `EXISTS` on the chosen connection.
     ///
     /// # Errors
     /// As [`crate::sql::ExistsPool::exists`].

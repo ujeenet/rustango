@@ -32,7 +32,7 @@ async fn pool_with_tags() -> Pool {
     .await
     .unwrap();
     // 4 rows across 2 categories — duplicates intentional.
-    for cat in ["rust", "rust", "django", "django", "rust", "go"] {
+    for cat in ["rust", "rust", "elixir", "elixir", "rust", "go"] {
         rustango::sql::raw_execute_pool(
             &pool,
             "INSERT INTO v045_cd_tag(category) VALUES (?)",
@@ -64,7 +64,7 @@ async fn count_distinct_returns_unique_count_not_row_count() {
     let totals: Vec<(i64,)> = fetch_aggregate_pool(&pool, &total_q).await.expect("total");
     assert_eq!(totals[0].0, 6, "row count");
 
-    // Distinct categories = 3 (rust, django, go)
+    // Distinct categories = 3 (rust, elixir, go)
     let distinct_q = AggregateQuery {
         model: CdTag::SCHEMA,
         joins: Vec::new(),

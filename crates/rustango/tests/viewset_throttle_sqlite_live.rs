@@ -1,5 +1,5 @@
 //! End-to-end live test for `ViewSet` per-action throttling on SQLite
-//! (DRF `throttle_classes` parity, #1010). Fixed-window, process-local,
+//! (issue #1010). Fixed-window, process-local,
 //! keyed by client (ConnectInfo → X-Forwarded-For → global). Asserts the
 //! limit trips with a 429 + `Retry-After`, buckets are per-client, and
 //! throttles are per-action.

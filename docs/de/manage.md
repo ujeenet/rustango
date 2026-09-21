@@ -1,6 +1,6 @@
 # `manage`-CLI-Referenz
 
-Dies ist **Rustango**s Kommandozeilenwerkzeug, wie Djangos `manage.py`, Laravels
+Dies ist **Rustango**s Kommandozeilenwerkzeug, vergleichbar mit Laravels
 `artisan` oder Rails' `rails`-Befehl. In einem via `cargo rustango new`
 generierten Projekt führt ein einziges Binary jeden Befehl aus („Verb"):
 
@@ -10,7 +10,7 @@ cargo run -- migrate               # any other verb
 cargo run -- --help                # full subcommand list
 ```
 
-[![One binary runs every manage verb — server, migrations, scaffolders, database utilities, and system commands — like Django's manage.py or Laravel's artisan](../img/manage.png)](../img/manage.png)
+[![One binary runs every manage verb — server, migrations, scaffolders, database utilities, and system commands](../img/manage.png)](../img/manage.png)
 
 > **Quelle:** `rustango::manage` (`Cli`, der Verb-Dispatcher) — hinter dem
 > `manage`-Feature (standardmäßig aktiviert).
@@ -69,8 +69,8 @@ Nutzungshilfe aus.
 
 ### `makemigrations [name]`
 
-Generiert eine Migrationsdatei aus Änderungen an Ihren Modellen — wie Djangos
-`makemigrations`. Es vergleicht Ihre registrierten Modelle mit dem letzten
+Generiert eine Migrationsdatei aus Änderungen an Ihren Modellen.
+Es vergleicht Ihre registrierten Modelle mit dem letzten
 gespeicherten Schema-Snapshot in `migrations/` und schreibt eine neue
 JSON-Datei mit allen Änderungen.
 
@@ -129,7 +129,7 @@ bereits vorhandenen Constraint.
 ### `makemigrations --empty <name>`
 
 Erstellt eine leere Migration (keine `forward`-Operationen), die Sie von Hand
-ausfüllen — wie Djangos `makemigrations --empty`. Verwenden Sie sie, wenn Sie
+ausfüllen. Verwenden Sie sie, wenn Sie
 Datenoperationen oder Umbenennungsoperationen schreiben müssen, die der
 Auto-Detektor nicht generieren kann. Bearbeiten Sie das resultierende JSON
 selbst.
@@ -144,8 +144,8 @@ cargo run -- makemigrations --empty rename_status_to_state
 
 ### `makemigrations --merge`
 
-Repariert eine Migrationshistorie, die sich in zwei Zweige aufgeteilt hat —
-dieselbe Idee wie Djangos `makemigrations --merge` (Issue #346). Das passiert,
+Repariert eine Migrationshistorie, die sich in zwei Zweige aufgeteilt hat
+(Issue #346). Das passiert,
 wenn zwei Personen jeweils `makemigrations` auf ihrem eigenen Feature-Branch
 ausführen, sodass beide neuen Dateien auf denselben Elternknoten zeigen.
 Nachdem beide Branches gemergt sind, hat die Historie zwei „Blätter"
@@ -167,15 +167,14 @@ cargo run -- makemigrations --merge
 - **Bereits eine einzelne Kette** → gibt `no merge needed` aus und beendet sich
   sauber. Sicher auf einer gesunden Historie auszuführen.
 - **Wirklich getrennte Historien** (keine Branch-Kollision) → bricht mit einem
-  Fehler ab, statt einen Elternknoten zu erfinden. Dieselbe Absicherung, die
-  Django verwendet.
+  Fehler ab, statt einen Elternknoten zu erfinden.
 - **Nicht kombinierbar** mit `--empty`, `--app`, `--scope` oder einem
   positionalen Namen.
 
 ### `migrate`
 
-Wendet alle ausstehenden Migrationen der Reihe nach auf die Datenbank an — wie
-Djangos `migrate` oder Laravels `php artisan migrate`. Dies ist der Befehl, den
+Wendet alle ausstehenden Migrationen der Reihe nach auf die Datenbank an — das
+Gegenstück zu Laravels `php artisan migrate`. Dies ist der Befehl, den
 Sie nach `makemigrations` ausführen, um Ihr Schema tatsächlich zu ändern.
 
 ```bash
@@ -196,8 +195,8 @@ Sie [`migrate-registry`](#migrate-registry) /
 
 ### `migrate <target>`
 
-Migriert zu einem bestimmten Punkt in der Historie, vorwärts oder rückwärts —
-wie Djangos `migrate <app> <name>`. Nennen Sie eine Migration, um zu ihr zu
+Migriert zu einem bestimmten Punkt in der Historie, vorwärts oder rückwärts.
+Nennen Sie eine Migration, um zu ihr zu
 wechseln; das spezielle Ziel `zero` macht alles rückgängig.
 
 ```bash
@@ -234,7 +233,7 @@ Zieldatenbank bereits enthält. Er entscheidet automatisch:
 |---|---|
 | frisch — keine Historie, keine Tabellen | der Squash läuft echt |
 | jede ersetzte Migration steht im Ledger | verzeichnet, Vorgänger als erledigt markiert, **kein DDL** |
-| Tabellen existieren, aber das Ledger hat keine Historie | verzeichnet, **kein DDL** (Djangos `--fake-initial`) |
+| Tabellen existieren, aber das Ledger hat keine Historie | verzeichnet, **kein DDL** — das Ledger wird nachträglich an die vorhandenen Tabellen angeglichen |
 | nur *einige* ersetzte Zeilen / Tabellen vorhanden | **verweigert**, benennt, was fehlt |
 
 Der partielle Fall ist bewusst ein harter Fehler: keine automatische Wahl ist
@@ -289,8 +288,8 @@ cargo run -- downgrade 3                # three steps
 
 ### `showmigrations` / `status`
 
-Listet jede Migration und ob sie angewendet wurde — wie Djangos
-`showmigrations`. `[X]` bedeutet angewendet, `[ ]` bedeutet noch ausstehend.
+Listet jede Migration und ob sie angewendet wurde. `[X]` bedeutet angewendet,
+`[ ]` bedeutet noch ausstehend.
 
 ```bash
 cargo run -- showmigrations
@@ -314,7 +313,7 @@ Ausgabe:
 Fügt einer Migration einen Roh-SQL-Datenschritt hinzu, ohne das JSON von Hand
 zu bearbeiten. Greifen Sie dazu, wenn Sie vorhandene Zeilen transformieren
 müssen — eine Spalte nachfüllen, Daten bereinigen — als Teil einer Migration.
-Es ist das Äquivalent zu Djangos `RunSQL`-Datenmigration, für Sie von der
+Das Ergebnis ist eine Datenmigration, die rohes SQL ausführt — für Sie von der
 Kommandozeile aus generiert.
 
 ```bash
@@ -351,8 +350,8 @@ markiert — jeder Versuch, ihn zurückzurollen, scheitert sofort.
 
 ### `cargo rustango new <name>` *(separates Binary)*
 
-Erstellt ein brandneues **Rustango**-Projekt — wie `django-admin startproject`
-oder `laravel new`. Dies ist ein separates Werkzeug, installieren Sie es also
+Erstellt ein brandneues **Rustango**-Projekt — wie `laravel new` oder
+`rails new`. Dies ist ein separates Werkzeug, installieren Sie es also
 zuerst mit `cargo install cargo-rustango`. Wählen Sie aus drei Vorlagen:
 
 ```bash
@@ -399,8 +398,8 @@ Bootstrap-JSON. Siehe [`migrate`](#migrate) /
 
 ### `startapp <name> [flags]`
 
-Erstellt eine neue App (ein Feature-Modul) unter `src/<name>/` — genau wie
-Djangos `startapp`. Verwenden Sie es, um Modelle, Views und URLs für einen Teil
+Erstellt eine neue App (ein Feature-Modul) unter `src/<name>/`.
+Verwenden Sie es, um Modelle, Views und URLs für einen Teil
 Ihres Projekts gruppiert zu halten.
 
 ```bash
@@ -440,8 +439,7 @@ schreibt nach `src/<snake_name>.rs` (oder `tests/<snake_name>.rs` für
 
 ### `make:viewset <Name> [--model <Model>] [--tenant | --no-tenant] [--crate <path>]`
 
-Generiert einen REST-Endpunkt für ein Modell, wie ein
-Django-REST-Framework-ViewSet.
+Generiert eine vollständige CRUD-REST-Ressource für ein Modell.
 
 **Zwei Vorlagen, für Sie ausgewählt.** Das `#[derive(ViewSet)]` mit einem Pool
 fängt einen einzigen Pool beim Einbinden ein, was für ein Tenancy-Projekt falsch
@@ -484,7 +482,7 @@ für Projekte, die `rustango` unter einem anderen Namen importieren.
 ### `make:serializer <Name> [--model <Model>]`
 
 Generiert eine `#[derive(Serializer)]`-Struktur — steuert, wie ein Modell nach
-und von JSON konvertiert wird (wie ein DRF-Serializer).
+und von JSON konvertiert wird.
 
 ```bash
 cargo run -- make:serializer PostSerializer --model Post
@@ -493,7 +491,7 @@ cargo run -- make:serializer PostSerializer --model Post
 ### `make:form <Name>`
 
 Generiert eine `#[derive(Form)]`-Struktur zum Validieren und Verarbeiten von
-Formular-Eingaben — wie ein Django-`Form`.
+Formular-Eingaben.
 
 ```bash
 cargo run -- make:form ContactForm
@@ -628,7 +626,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.57.10
+rustango 0.57.11
 ```
 
 ### `about`
@@ -640,7 +638,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.57.10
+  version:        0.57.11
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -650,9 +648,8 @@ rustango
 
 ### `check [--deploy]`
 
-Führt Gesundheitsprüfungen an Ihrem Projekt durch — wie Djangos `check`. Fügen
-Sie `--deploy` für die strengeren Produktionsreife-Prüfungen hinzu, genau wie
-Djangos `check --deploy` funktioniert.
+Führt Gesundheitsprüfungen an Ihrem Projekt durch. Fügen
+Sie `--deploy` für die strengeren Produktionsreife-Prüfungen hinzu.
 
 **Immer aktive Prüfungen:**
 - ≥ 1 Modell via `inventory` registriert
@@ -760,7 +757,7 @@ cargo run -- wizard
 handgebauten Bootstrap-Migrationen mehr. Seine eigenen Tabellen
 (`rustango_orgs`, `rustango_operators`, `rustango_users`, Rollen/Berechtigungen,
 …) werden aus den kompilierten Modellen in `system/migrations/` generiert — der
-normale Django-Fluss (Modelle → `makemigrations` → `migrate`) — und von
+normale Ablauf (Modelle → `makemigrations` → `migrate`) — und von
 [`migrate`](#migrate) / [`migrate-registry`](#migrate-registry) angewendet, die
 sie bei Bedarf generieren, falls die Dateien fehlen.
 
@@ -802,7 +799,7 @@ für sich allein brauchen.
 
 ### `runserver` / `run-server`
 
-Startet den Multi-Tenant-Webserver — Djangos `runserver`. In einem
+Startet den Multi-Tenant-Webserver. In einem
 Tenancy-Projekt ist dies dasselbe wie ein nacktes `cargo run`; die benannte Form
 existiert, damit eigene Binaries, die ihre eigenen Argumente parsen, es trotzdem
 auslösen können.
@@ -1006,8 +1003,8 @@ damit ein erneut laufendes Provisioning-Skript nicht rot wird.
 
 ### `create-user <tenant> <username> --password <pwd> [--superuser]`
 
-Erstellt einen Benutzer innerhalb eines Tenants — ungefähr Djangos
-`createsuperuser`, aber auf einen einzelnen Tenant beschränkt.
+Erstellt einen Benutzer innerhalb eines Tenants — mit `--superuser` auch einen
+Administrator, aber immer auf einen einzelnen Tenant beschränkt.
 
 ```bash
 cargo run -- create-user acme alice --password hunter2 --superuser
@@ -1020,8 +1017,8 @@ Operator-Konsole.
 
 ### `create-role <tenant> <name>`
 
-Erstellt eine Rolle (ein benanntes Bündel von Berechtigungen, wie eine
-Django-Gruppe) innerhalb eines Tenants.
+Erstellt eine Rolle (ein benanntes Bündel von Berechtigungen) innerhalb eines
+Tenants.
 
 ```bash
 cargo run -- create-role acme editor
@@ -1056,7 +1053,7 @@ cargo run -- revoke-role acme alice editor
 Gewährt eine einzelne Berechtigung. Standardmäßig ist das zweite Argument ein
 **Benutzername**, sodass die Berechtigung direkt an diesen Benutzer geht; fügen
 Sie `--role` hinzu, um sie stattdessen einer Rolle zu gewähren.
-Berechtigungs-Codenames verwenden Djangos Format `<app>.<action>_<model>`
+Berechtigungs-Codenames verwenden das Format `<app>.<action>_<model>`
 (`blog.add_post`, `blog.change_post`, …). Das Feature
 `auto_create_permissions` erstellt die vier standardmäßigen CRUD-Codenames
 automatisch für jedes Modell, das mit `#[rustango(permissions)]` markiert ist.
@@ -1154,8 +1151,7 @@ Die Operator-Konsole hat dafür ebenfalls einen Button, auf der Tenant-Liste.
 
 ## Eigenes Benutzermodell (zusätzliche Spalten auf `rustango_users`)
 
-Dies ist **Rustango**s Version von Djangos „custom user model" — wie Sie Ihre
-eigenen Felder zur Benutzertabelle hinzufügen. Der eingebaute Tenant-`User` hat
+So fügen Sie der Benutzertabelle Ihre eigenen Felder hinzu. Der eingebaute Tenant-`User` hat
 sieben feste Spalten: `id`, `username`, `password_hash`, `is_superuser`,
 `active`, `created_at`, plus eine `data`-JSONB-Spalte (ein flexibler JSON-Blob)
 für beliebige zusätzliche Metadaten pro Benutzer. **Für die meisten Apps ist
@@ -1274,8 +1270,8 @@ Server-`Builder` direkt baut, ohne über `Cli` zu gehen.
 
 ## Eigene Unterbefehle
 
-Sie können Ihre eigenen Befehle hinzufügen — **Rustango**s Interpretation von
-Djangos eigenen Management-Befehlen. Der Trick besteht darin, die Argumente
+Sie können Ihre eigenen Befehle hinzufügen und sie neben den eingebauten Verben
+ausführen. Der Trick besteht darin, die Argumente
 selbst zu inspizieren und Ihren Befehl zu behandeln, bevor Sie den Rest an
 `Cli::run` weitergeben. Zwei Wege, es zu tun:
 

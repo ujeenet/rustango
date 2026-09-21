@@ -1,7 +1,7 @@
 //! Core types for rustango.
 //!
-//! This crate is dependency-light on purpose: no async, no DB drivers, no proc-macros.
-//! Anything that needs to be referenced by both the macro output and the runtime lives here.
+//! Light on purpose: no async, no database drivers, no proc-macros.
+//! Anything the macro output and the runtime both name lives here.
 
 pub mod aggregates;
 pub mod case;
@@ -41,8 +41,8 @@ pub use validate::validate_value;
 pub use value::SqlValue;
 pub use window::{FrameBoundary, FrameKind, WindowExpr, WindowFn, WindowFrame};
 
-/// Re-exported so `#[derive(Model)]` output can name `inventory` without
-/// requiring downstream crates to add their own dependency on it.
+/// Re-exported so `#[derive(Model)]` output can name `inventory`
+/// without each downstream crate depending on it directly.
 #[doc(hidden)]
 pub use inventory;
 

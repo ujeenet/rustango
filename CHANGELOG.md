@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.57.11] — 2026-09-21
+
+Two unrelated threads. The last of the `auto_now_add` timestamp bugs,
+and a documentation pass that stops explaining rustango in terms of
+another framework.
+
+**Breaking:** `Translation` gained two required fields. Details in the
+second entry below.
+
 ### Fixed — schema-driven writers stamp their own timestamps too (#1464)
 
 The entry below fixed the writers that go through `#[derive(Model)]`.
@@ -85,6 +94,46 @@ leaving the column permanently mixed.
   `CREATE TABLE IF NOT EXISTS` leaves an existing MySQL table on
   `TIMESTAMP`, still truncating to whole seconds; that needs a
   migration.
+
+### Changed — the docs no longer explain rustango in terms of Django
+
+Around 726 references to Django and DRF are gone: doc comments across
+every crate, the guides in all four languages, the examples, the
+scaffolder templates and the tests. Someone who has never used Django
+should not meet a docstring that explains a feature by naming one.
+
+The references were reworked, not deleted, because most carried real
+information. "Host-header allowlist middleware — Django `ALLOWED_HOSTS`
+parity" now reads "refuses a request whose `Host` is not on the list",
+which is what the reader needed in the first place.
+
+Three literals keep the name, because they are wire format rather than
+prose. Each now says why:
+
+- the HMAC salts `django.core.signing.Signer` and
+  `django.core.signing.TimestampSigner` in `signing.rs` — changing a
+  salt invalidates every signature already issued, which means live
+  password-reset links and signed cookies.
+- the `django_language` cookie name — browsers of a deployed site
+  already send it, and renaming it drops everyone's language choice.
+
+Also in this pass:
+
+- The eight `django6_*` ORM suites are renamed `orm_*`; CI and
+  `testkit/matrix.rs` follow. No test body changed.
+- `assert_num_queries` panicked with the camelCase text
+  `assertNumQueries`. It now names the Rust function. Two tests pinned
+  the old string and are updated.
+- The `CEIL` docstring claimed MySQL emits `CEILING`. Nothing in the
+  tree emits it.
+- `docs/django-parity-audit-2026-05-21.md` is deleted.
+- The README says up front that Rustango runs on axum and tokio, and
+  that everything it adds is a `tower` layer or an `axum::Router`.
+
+Comparisons to Laravel, Rails and the measured Python stack in
+`benchmarks.md` stay — they place rustango for a reader without
+implying a prerequisite. Older sections of this file are untouched:
+they record what shipped, and editing them would misreport history.
 
 ## [0.57.10] — 2026-09-19
 

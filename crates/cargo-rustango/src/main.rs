@@ -1,4 +1,4 @@
-//! `cargo rustango new <name>` — Django-style project scaffolder.
+//! `cargo rustango new <name>` — project scaffolder.
 //!
 //! Cargo invokes external subcommands by spawning a binary called
 //! `cargo-rustango` and passing `rustango` as the first argv. We
@@ -89,7 +89,7 @@ fn main() -> ExitCode {
 }
 
 fn print_help() {
-    println!("cargo-rustango — Django-style project scaffolder for rustango");
+    println!("cargo-rustango — project scaffolder for the rustango web framework");
     println!();
     println!("USAGE:");
     println!("  cargo rustango new <name> [--template api|fullstack|tenant]");
@@ -662,8 +662,8 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     // Instead the first `cargo run -- makemigrations` generates them
     // into `system/migrations/` from the compiled models (reflecting the
     // enabled feature flags), and `cargo run -- migrate` applies them —
-    // the normal Django flow. `.gitkeep` keeps the dir under version
-    // control until the migrations land.
+    // the same flow as any app migration. `.gitkeep` keeps the dir under
+    // version control until the migrations land.
     if matches!(template, Template::Tenant) {
         write(root, "system/migrations/.gitkeep", "")?;
     }

@@ -54,7 +54,7 @@ pub struct AdminWidget {
 /// so we can assert `list_display`, `search_fields`, `ordering`, and
 /// `list_filter` flow into the rendered list view + executed SQL.
 #[derive(Model, Debug, Clone)]
-#[rustango(table = "admin_django", display = "name")]
+#[rustango(table = "admin_showcase", display = "name")]
 #[rustango(admin(
     list_display = "name, color",
     search_fields = "name",
@@ -63,7 +63,7 @@ pub struct AdminWidget {
     ordering = "-name",
     actions = "delete_selected",
 ))]
-pub struct AdminDjango {
+pub struct AdminShowcase {
     #[rustango(primary_key)]
     id: i64,
     #[rustango(max_length = 32)]
@@ -464,8 +464,8 @@ async fn create_form_for_auto_pk_omits_id_input() {
 #[tokio::test]
 async fn create_submit_for_auto_pk_assigns_pk_and_redirects() {
     // S7 round-trip: POST to an Auto-PK model without an `id` field —
-    // server-assigned PK from `insert_returning`. v0.46+ uses
-    // Django's three-button submit row: the default `Save` redirects
+    // server-assigned PK from `insert_returning`. v0.46+ uses a
+    // three-button submit row: the default `Save` redirects
     // to the list view, `Save and continue editing` stays on the
     // detail page. We send `_continue=1` to assert PK extraction
     // from the detail URL still works.
@@ -529,7 +529,7 @@ async fn create_submit_inserts_row_and_redirects() {
     let app = rustango::admin::router(pool.clone());
     // v0.46+ — `_continue=1` keeps the historical "redirect to the
     // freshly-created row" behaviour. The default `Save` button now
-    // sends users to the list view (Django shape).
+    // sends users to the list view.
     let response = app
         .oneshot(form_request(
             Method::POST,
@@ -673,7 +673,7 @@ async fn edit_submit_updates_row_and_redirects() {
     let app = rustango::admin::router(pool.clone());
     // v0.46+ — assert the historical "stay on the row" behaviour via
     // an explicit `_continue=1`. The bare `_save` button now sends
-    // users back to the list view (Django shape).
+    // users back to the list view.
     let response = app
         .oneshot(form_request(
             Method::POST,
@@ -1740,7 +1740,7 @@ async fn pager_links_preserve_search_and_filters() {
 // Per-model `#[rustango(admin(...))]` attribute drives `list_display`,
 // `search_fields`, `list_per_page`, and `ordering` on the list view.
 
-async fn seed_admin_django(pool: &sqlx::PgPool) {
+async fn seed_admin_showcase(pool: &sqlx::PgPool) {
     migrate::drop_all(pool).await.unwrap();
     migrate::apply_all(pool).await.unwrap();
     for (id, name, color, notes) in [
@@ -1748,7 +1748,7 @@ async fn seed_admin_django(pool: &sqlx::PgPool) {
         (2, "bravo", "green", "second"),
         (3, "charlie", "blue", "third"),
     ] {
-        AdminDjango {
+        AdminShowcase {
             id,
             name: name.into(),
             color: color.into(),
@@ -1768,13 +1768,13 @@ async fn list_display_attr_renders_only_named_columns() {
     let Some(pool) = pool().await else {
         return;
     };
-    seed_admin_django(&pool).await;
+    seed_admin_showcase(&pool).await;
 
     let app = rustango::admin::router(pool.clone());
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin_django")
+                .uri("/admin_showcase")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1804,13 +1804,13 @@ async fn search_fields_attr_filters_by_named_columns() {
     let Some(pool) = pool().await else {
         return;
     };
-    seed_admin_django(&pool).await;
+    seed_admin_showcase(&pool).await;
 
     let app = rustango::admin::router(pool.clone());
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin_django?q=alpha")
+                .uri("/admin_showcase?q=alpha")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1832,13 +1832,13 @@ async fn ordering_attr_drives_sort_order() {
     let Some(pool) = pool().await else {
         return;
     };
-    seed_admin_django(&pool).await;
+    seed_admin_showcase(&pool).await;
 
     let app = rustango::admin::router(pool.clone());
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin_django")
+                .uri("/admin_showcase")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1944,13 +1944,13 @@ async fn list_filter_attr_renders_facet_card_with_distinct_values() {
     let Some(pool) = pool().await else {
         return;
     };
-    seed_admin_django(&pool).await;
+    seed_admin_showcase(&pool).await;
 
     let app = rustango::admin::router(pool.clone());
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin_django")
+                .uri("/admin_showcase")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1978,13 +1978,13 @@ async fn list_filter_active_value_highlights_and_filters_rows() {
     let Some(pool) = pool().await else {
         return;
     };
-    seed_admin_django(&pool).await;
+    seed_admin_showcase(&pool).await;
 
     let app = rustango::admin::router(pool.clone());
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin_django?color=red")
+                .uri("/admin_showcase?color=red")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2013,13 +2013,13 @@ async fn actions_attr_renders_action_picker_and_checkboxes() {
     let Some(pool) = pool().await else {
         return;
     };
-    seed_admin_django(&pool).await;
+    seed_admin_showcase(&pool).await;
 
     let app = rustango::admin::router(pool.clone());
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/admin_django")
+                .uri("/admin_showcase")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2051,7 +2051,7 @@ async fn delete_selected_action_removes_named_rows() {
     let Some(pool) = pool().await else {
         return;
     };
-    seed_admin_django(&pool).await;
+    seed_admin_showcase(&pool).await;
 
     let app = rustango::admin::router(pool.clone());
     // `axum::http::Form` doesn't support repeated keys for `Vec` —
@@ -2061,7 +2061,7 @@ async fn delete_selected_action_removes_named_rows() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/admin_django/__action")
+                .uri("/admin_showcase/__action")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(body))
                 .unwrap(),
@@ -2073,15 +2073,15 @@ async fn delete_selected_action_removes_named_rows() {
         resp.headers()
             .get(header::LOCATION)
             .and_then(|v| v.to_str().ok()),
-        Some("/__admin/admin_django"),
+        Some("/__admin/admin_showcase"),
     );
 
-    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_django")
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_showcase")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(remaining, 1, "expected 1 row left after deleting 2 of 3");
-    let last: String = sqlx::query_scalar("SELECT name FROM admin_django")
+    let last: String = sqlx::query_scalar("SELECT name FROM admin_showcase")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -2098,7 +2098,7 @@ async fn unknown_action_returns_500() {
     let Some(pool) = pool().await else {
         return;
     };
-    seed_admin_django(&pool).await;
+    seed_admin_showcase(&pool).await;
 
     let app = rustango::admin::router(pool.clone());
     let body = "action=nuke_everything&_selected=1".to_owned();
@@ -2106,7 +2106,7 @@ async fn unknown_action_returns_500() {
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/admin_django/__action")
+                .uri("/admin_showcase/__action")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(Body::from(body))
                 .unwrap(),
@@ -2114,7 +2114,7 @@ async fn unknown_action_returns_500() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_django")
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_showcase")
         .fetch_one(&pool)
         .await
         .unwrap();

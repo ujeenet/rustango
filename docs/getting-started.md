@@ -24,11 +24,8 @@ start with [Web API basics](glossary.md#web-api-basics) in the glossary. It is a
 five-minute primer on requests, routes, handlers and migrations, and it is
 written for exactly this gap. Come back here afterwards.
 
-**Django is not assumed** — but it is where the design comes from, so these docs
-compare to it constantly. Those comparisons are asides, never the explanation: if
-a Django parallel means nothing to you, skip it and the step still stands on its
-own. Where a term is doing real work, the [glossary](glossary.md) defines it in
-plain language.
+**No other framework is assumed.** Every step explains itself, and where a term
+is doing real work, the [glossary](glossary.md) defines it in plain language.
 
 ## What you need installed
 
@@ -153,7 +150,7 @@ row. MariaDB works through the same driver and the same URL scheme.
 
 ## Step 1: Install the scaffolder
 
-The scaffolder generates project and app skeletons for you, like `django-admin` or `rails new`.
+The scaffolder generates project and app skeletons for you, like `rails new`.
 
 ```bash
 cargo install cargo-rustango
@@ -165,7 +162,7 @@ This adds the `cargo rustango ...` subcommand globally. Confirm it's there:
 cargo rustango --help
 ```
 
-The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.57.10`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
+The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.57.11`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
 
 ---
 
@@ -201,7 +198,7 @@ myblog/
     └── urls.rs                 # `pub fn api()` route aggregator
 ```
 
-There is a single binary: `cargo run` boots the HTTP server, and every Django-style verb (`migrate`, `makemigrations`, `startapp`, `check`, …) flows through the same binary via `cargo run -- <verb>`. There's no separate `manage` binary.
+There is a single binary: `cargo run` boots the HTTP server, and every management verb (`migrate`, `makemigrations`, `startapp`, `check`, …) flows through the same binary via `cargo run -- <verb>`. There's no separate `manage` binary.
 
 `Cargo.toml` is the dependency manifest (like `composer.json` or a `Gemfile`). Open it and confirm `rustango` is listed under `[dependencies]`.
 
@@ -228,7 +225,7 @@ There is a single binary: `cargo run` boots the HTTP server, and every Django-st
 
 ## Step 3: Set up your environment
 
-Configuration lives in a `.env` file, just like in Django or Laravel. Copy the template:
+Configuration lives in a `.env` file. Copy the template:
 
 ```bash
 cp .env.example .env
@@ -322,7 +319,7 @@ Press Ctrl-C to stop.
 
 ## Step 7: Create an app
 
-An "app" is a self-contained feature module, exactly like a Django app. Your blog app will hold the Post model, its routes, and its templates.
+An "app" is a self-contained feature module. Your blog app will hold the Post model, its routes, and its templates.
 
 ```bash
 cargo run -- startapp blog
@@ -339,13 +336,13 @@ src/blog/
 └── tests.rs               # in-process router + inventory smoke tests
 ```
 
-`startapp` wires the new module in for you (similar to adding it to Django's `INSTALLED_APPS`): it declares `mod blog;` in `src/main.rs` and inserts a `.merge(crate::blog::urls::api())` line into the `api()` aggregator in `src/urls.rs`, so the blog's routes compose into the app automatically. No manual module registration needed.
+`startapp` wires the new module in for you: it declares `mod blog;` in `src/main.rs` and inserts a `.merge(crate::blog::urls::api())` line into the `api()` aggregator in `src/urls.rs`, so the blog's routes compose into the app automatically. No manual module registration needed.
 
 ---
 
 ## Step 8: Define a model
 
-A model is a database table described as a Rust struct, like a Django model or an Eloquent/Active Record class. Open `src/blog/models.rs` and define your `Post`. (For the full reference — every field type, custom primary keys, and all attributes — see the [Models guide](models.md).)
+A model is a database table described as a Rust struct. Open `src/blog/models.rs` and define your `Post`. (For the full reference — every field type, custom primary keys, and all attributes — see the [Models guide](models.md).)
 
 ```rust
 use rustango::{Auto, Model};
@@ -397,7 +394,7 @@ A few Rust things to note:
 
 ## Step 9: Create and apply the migration
 
-Now turn that model into a real table. First, generate the migration from your model (like `makemigrations` in Django):
+Now turn that model into a real table. First, generate the migration from your model:
 
 ```bash
 cargo run -- makemigrations
@@ -432,7 +429,7 @@ psql "$DATABASE_URL" -c "\d posts"
 
 ## Step 10: Try the ORM
 
-Let's read and write rows from code. The ORM lets you work with database rows as Rust structs instead of raw SQL, like Django's ORM, Eloquent, or Active Record.
+Let's read and write rows from code. The ORM lets you work with database rows as Rust structs instead of raw SQL.
 
 Temporarily edit `src/main.rs` to run a quick create-and-read test before booting the server. Replace the `Cli` body with an ad-hoc ORM smoke test (keep the scaffolder's `#[rustango::main]` and the `mod` declarations at the top of the file):
 
@@ -479,7 +476,7 @@ What's happening here, in plain terms:
 - `pool` is the shared database connection pool. You pass a reference to it (`&pool`) into query calls instead of opening a new connection each time.
 - Database calls are asynchronous, so each one ends in `.await` — that pauses until the result comes back, then continues. The `?` after an `.await` says "if this errored, stop and return the error."
 - `main` returns a `Result`, Rust's success-or-error type, which is why `?` and the closing `Ok(())` work.
-- To save a row, call `.save_pool(&pool)` on it. To read rows, build a query with `Post::objects()` and run it with `.fetch(&pool)` — the rough equivalent of Django's `Post.objects.all()`.
+- To save a row, call `.save_pool(&pool)` on it. To read rows, build a query with `Post::objects()` and run it with `.fetch(&pool)` — with no filters, that reads every row.
 - `.fetch(…)` comes from the `FetcherPool` trait, which is why the imports bring it in. Without that line the method does not exist and the compiler says so without explaining why.
 - These are the multi-backend calls, and everything above compiles unchanged on all three databases. There are also `.save(&pool)` and `.fetch_on(&pool)`, which take a driver-specific `sqlx::PgPool` and exist only when the `postgres` feature is on. Prefer the multi-backend pair unless you deliberately want one database. See the [ORM guide](orm.md).
 
@@ -495,7 +492,7 @@ You should see your new post id and the rows read back. Restore `src/main.rs` to
 
 ## Step 11: Turn on the auto-admin
 
-**Rustango** ships a generated admin UI for your models, just like Django admin. Building it is two small steps: a helper that turns a pool into an admin router, and one `.nest(...)` call to mount it.
+**Rustango** ships a generated admin UI for your models — browse, search and edit rows with no code of your own. Building it is two small steps: a helper that turns a pool into an admin router, and one `.nest(...)` call to mount it.
 
 Add the helper to `src/urls.rs` yourself — the scaffolder does not generate it, because nothing it generates would call it. The `admin_prefix` must match the path you'll nest it under in the next step (`/admin`) so the admin's own links and form actions resolve:
 
@@ -550,7 +547,7 @@ Open <http://localhost:8080/admin> (no trailing slash). You'll see the admin hom
 
 ## Step 12: Build the JSON API
 
-A ViewSet exposes a model as a REST API with list, create, retrieve, update, and delete endpoints, much like a Django REST Framework ViewSet or a Laravel API resource controller.
+A ViewSet exposes a model as a REST API with list, create, retrieve, update, and delete endpoints, all from one declaration.
 
 ### 12a. Generate the ViewSet
 
@@ -622,7 +619,7 @@ curl "http://localhost:8080/api/posts?status__ne=draft"                   # look
 
 ## Step 13: Shape the output with a Serializer
 
-By default the ViewSet returns every model field. A Serializer lets you control the response shape: hide internal fields, rename them, or mark some read-only. It's the same role as a DRF serializer or a Laravel API resource.
+By default the ViewSet returns every model field. A Serializer lets you control the response shape: hide internal fields, rename them, or mark some read-only.
 
 ```bash
 cargo run -- make:serializer PostSerializer --model Post
@@ -666,7 +663,7 @@ Wire the serializer into the ViewSet with the `serializer` attribute — list, r
 pub struct PostViewSet;
 ```
 
-This works identically on PostgreSQL, MySQL, and SQLite. `method` / `read_only` / `source` / `write_only` overrides all apply to the response, and **request bodies are validated through the serializer too**: `create` / `update` run its `validate()` (per-field and cross-field), returning a DRF-shape `400` (`{field: [messages]}`) on failure, and read-only / computed fields a client posts are ignored. (Note: `nested` / `many` serializer fields need the related rows loaded via `select_related`; otherwise they render as their default.) See the [ViewSets guide](viewsets.md) for the full input + output behavior.
+This works identically on PostgreSQL, MySQL, and SQLite. `method` / `read_only` / `source` / `write_only` overrides all apply to the response, and **request bodies are validated through the serializer too**: `create` / `update` run its `validate()` (per-field and cross-field), returning a `400` with one list of messages per field (`{field: [messages]}`) on failure, and read-only / computed fields a client posts are ignored. (Note: `nested` / `many` serializer fields need the related rows loaded via `select_related`; otherwise they render as their default.) See the [ViewSets guide](viewsets.md) for the full input + output behavior.
 
 ---
 
@@ -718,7 +715,7 @@ let roles: Vec<String> = claims.get("roles").unwrap_or_default();
 
 ## Step 15: Add security middleware
 
-Middleware wraps every request to add cross-cutting behavior. This one goes in `src/main.rs`: it replaces the `let api = ...` line from Step 11, so the router is fully assembled before it reaches the `Cli`. Here you stack request IDs, access logging, rate limiting, CORS, and security headers in one chain. Each `.method(...)` adds one layer, similar to Django middleware or Laravel's middleware stack. See the [Middleware guide](middleware.md) for the full layer catalog and ordering rules.
+Middleware wraps every request to add cross-cutting behavior. This one goes in `src/main.rs`: it replaces the `let api = ...` line from Step 11, so the router is fully assembled before it reaches the `Cli`. Here you stack request IDs, access logging, rate limiting, CORS, and security headers in one chain. Each `.method(...)` adds one layer. See the [Middleware guide](middleware.md) for the full layer catalog and ordering rules.
 
 ```rust
 use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt, CspBuilder};
@@ -751,7 +748,7 @@ Hand the finished `app` to the `Cli` exactly as before — `rustango::manage::Cl
 
 ## Step 16: Write tests
 
-**Rustango** includes a test client that drives your router in-process, so you can assert on real HTTP responses without starting a server, much like Django's test client or Laravel's HTTP tests. Scaffold a test file:
+**Rustango** includes a test client that drives your router in-process, so you can assert on real HTTP responses without starting a server. Scaffold a test file:
 
 ```bash
 cargo run -- make:test PostSmoke      # generates tests/post_smoke.rs
@@ -825,7 +822,7 @@ cargo test --test post_smoke
 
 ## Step 17: Run the system check
 
-Before you deploy, run the built-in checker. It flags common misconfigurations (like a weak `RUSTANGO_SESSION_SECRET` or an unreachable database), similar to Django's `check --deploy`.
+Before you deploy, run the built-in checker. It flags common misconfigurations, like a weak `RUSTANGO_SESSION_SECRET` or an unreachable database.
 
 ```bash
 cargo run -- check --deploy
@@ -891,7 +888,6 @@ Make sure your reverse proxy:
 | Performance benchmarks (vs Go) | [`docs/benchmarks.md`](benchmarks.md) |
 | API conventions (naming, builder patterns, feature gates) | [`docs/api-conventions.md`](api-conventions.md) |
 | Security features in depth | [`docs/security.md`](security.md) |
-| Django parity audit | [`docs/django-parity-audit-2026-05-21.md`](https://github.com/ujeenet/rustango/blob/develop/docs/django-parity-audit-2026-05-21.md) |
 | Multi-tenancy | [README — Multi-tenancy section](https://github.com/ujeenet/rustango/blob/develop/README.md#multi-tenancy) |
 | API docs | <https://docs.rs/rustango> |
 

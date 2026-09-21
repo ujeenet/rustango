@@ -2,7 +2,7 @@
 
 Los logs son la forma en que una aplicación en ejecución cuenta lo que hizo.
 **Rustango** se apoya en [`tracing`](https://docs.rs/tracing) — la misma forma
-que el ajuste `LOGGING` de Django o los canales de Laravel, pero estructurada:
+que una configuración de logging clásica, pero estructurada:
 un evento lleva campos con nombre (`status=500`, `tenant=acme`) en lugar de una
 frase ya formateada, de modo que un agregador de logs puede filtrar por ellos.
 

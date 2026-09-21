@@ -1,10 +1,9 @@
-//! `Server-Timing` header middleware — surface per-request stage
-//! durations to the browser DevTools "Network → Timing" panel.
+//! `Server-Timing` header middleware: show per-stage durations in the
+//! browser DevTools "Network → Timing" panel.
 //!
-//! See the [W3C Server-Timing spec](https://www.w3.org/TR/server-timing/).
-//! Chrome and Firefox both render the values in DevTools natively,
-//! making this the lowest-friction way to measure where time goes
-//! per request.
+//! Chrome and Firefox both draw these values, so it is the quickest
+//! way to see where a request spends its time. See the
+//! [W3C Server-Timing spec](https://www.w3.org/TR/server-timing/).
 //!
 //! ## Quick start
 //!
@@ -31,21 +30,16 @@
 //! Server-Timing: total;dur=18.4, db;dur=12.1, render;dur=4.2
 //! ```
 //!
-//! ## What's measured automatically
-//!
-//! - `total` — the full request lifetime (start of middleware to
-//!   response generation), always emitted.
-//! - Anything you `t.measure(name)` in a handler.
+//! `total` covers the whole request and is always sent. Everything
+//! else comes from your `t.measure(name)` calls.
 //!
 //! ## Caveats
 //!
-//! - The header value is built from per-request mutable state; durations
-//!   are recorded in the order you call `measure`. Two consecutive
-//!   `measure("db")` calls overwrite each other (last one wins).
-//! - Browsers cap header size — keep entry counts modest (<20).
-//! - Not intended for production tracing — use OpenTelemetry for
-//!   distributed propagation. This is for "what's slow in the browser
-//!   right now?" debugging.
+//! - Entries appear in the order you record them, and the same name
+//!   can appear twice.
+//! - Browsers limit header size, so keep it under about 20 entries.
+//! - This is for local debugging. For tracing across services, use
+//!   OpenTelemetry.
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -58,7 +52,7 @@ use axum::Router;
 
 const HEADER: &str = "server-timing";
 
-/// Per-request timing recorder. Cheap to clone — internal `Arc<Mutex>`.
+/// Per-request timing recorder. Cheap to clone; clones share state.
 #[derive(Clone)]
 pub struct Timings {
     inner: Arc<Mutex<TimingsInner>>,
@@ -81,8 +75,8 @@ impl Timings {
         }
     }
 
-    /// Record a stage finishing at the current instant. The duration
-    /// is from the previous `measure` (or the request start) to now.
+    /// End a stage now. Its duration runs from the previous
+    /// `measure`, or from the request start.
     pub fn measure(&self, stage: impl Into<String>) {
         let now = Instant::now();
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -91,20 +85,18 @@ impl Timings {
         g.last_mark = now;
     }
 
-    /// Add a stage with an explicit duration (e.g. for an `await` you
-    /// timed yourself). The stage doesn't move the "previous mark"
-    /// cursor — useful for sub-stage breakdowns that overlap.
+    /// Add a stage with a duration you measured yourself. It does not
+    /// move the cursor `measure` uses, so overlapping sub-stages work.
     pub fn add(&self, stage: impl Into<String>, ms: f64) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.entries.push((stage.into(), ms));
     }
 
-    /// Mark the handler as finished. Optional — the middleware does
-    /// it automatically after the handler returns. Useful when you
-    /// want the `total` measurement to exclude a final stage (e.g.
-    /// large body serialization that happens after).
+    /// Marks the end of the handler's own work. It records nothing:
+    /// the middleware computes `total` after the handler returns.
+    /// Call it only to make that point clear in your code.
     pub fn finish(&self) {
-        // No-op marker — present so call sites can advertise intent.
+        // Intentionally empty.
     }
 
     fn render(&self) -> String {
@@ -113,7 +105,7 @@ impl Timings {
         let mut parts = Vec::with_capacity(g.entries.len() + 1);
         parts.push(format!("total;dur={total_ms:.1}"));
         for (name, ms) in &g.entries {
-            // Sanitize the name — Server-Timing names must be tokens.
+            // Server-Timing names must be HTTP tokens.
             let n = sanitize_token(name);
             parts.push(format!("{n};dur={ms:.1}"));
         }
@@ -121,8 +113,7 @@ impl Timings {
     }
 }
 
-/// Trim a name down to ASCII-token characters. Server-Timing entry
-/// names follow the HTTP token rule — no spaces, no separators.
+/// Replace anything that is not an ASCII token character with `_`.
 fn sanitize_token(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for c in name.chars() {
@@ -270,7 +261,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap();
-        // Spaces + parens become underscores so the token is HTTP-valid.
+        // Spaces and parens become underscores.
         assert!(v.contains("db_query__selects_;dur=1.0"));
     }
 

@@ -18,15 +18,13 @@
 //!
 //! ## How it works
 //!
-//! Each fixture is an array of JSON objects. For each object, the loader
-//! emits an `INSERT INTO <table> (col1, col2, ...) VALUES (...)` against
-//! the pool. Column names come from the JSON object's keys; values are
-//! bound via sqlx parameter binding (no SQL injection).
+//! A fixture is an array of JSON objects. Each object becomes one
+//! `INSERT INTO <table> (col, ...) VALUES (...)`. Column names come from
+//! the object keys and are checked; values are bound as parameters, so
+//! there is no SQL injection.
 //!
-//! ## Ordering
-//!
-//! Fixtures load in registration order — register parent tables before
-//! children to satisfy FK constraints.
+//! Fixtures load in the order you register them, so load parent tables
+//! before child tables to satisfy foreign keys.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -121,11 +119,8 @@ impl Fixture {
         Ok(self)
     }
 
-    /// Insert every row into `table` against any rustango-supported
-    /// backend. Routes through the [`crate::sql::Pool`] enum +
-    /// per-dialect SQL emission (`pool.dialect().placeholder(n)` for
-    /// `$N` / `?`; `pool.dialect().quote_ident(c)` for `"col"` /
-    /// `` `col` ``).
+    /// Insert every row into `table` on any supported backend.
+    /// Placeholders and quoting come from the pool's dialect.
     ///
     /// # Errors
     /// [`FixtureError::Database`] on driver-level failures.
@@ -150,8 +145,8 @@ impl Fixture {
     }
 }
 
-/// Load multiple fixtures in registration order against any
-/// rustango-supported backend. Stops at first error.
+/// Load several fixtures in order on any supported backend. Stops at
+/// the first error.
 ///
 /// # Errors
 /// First fixture error encountered.
@@ -201,13 +196,8 @@ async fn insert_row_pool(
         cols_sql.join(", "),
         placeholders.join(", "),
     );
-    // #561 — was three byte-identical `bind_pg`/`bind_my`/`bind_sqlite`
-    // helpers each matching on `serde_json::Value` and binding the
-    // backend-specific sqlx arg. Convert each row value to a
-    // `SqlValue` once and let `raw_execute_pool` dispatch through
-    // the canonical executor binding macros — arrays / objects go
-    // through `SqlValue::Json` which the executor wraps in
-    // `sqlx::types::Json(...)` for every backend.
+    // One `SqlValue` per row value; `raw_execute_pool` binds them
+    // through the executor's per-backend macros.
     let binds: Vec<crate::core::SqlValue> = columns
         .iter()
         .map(|col| value_to_sqlvalue(&row[col.as_str()]))
@@ -218,12 +208,9 @@ async fn insert_row_pool(
     Ok(())
 }
 
-/// #561 — `serde_json::Value` → `SqlValue` adapter. Matches the
-/// behavior of the previous per-backend `bind_*` helpers:
-/// scalars route through the typed `SqlValue` variants; arrays and
-/// objects route through `SqlValue::Json` so the executor's
-/// `bind_match!` wraps in `sqlx::types::Json(...)` for JSONB / JSON
-/// / TEXT on PG / MySQL / SQLite respectively.
+/// `serde_json::Value` → `SqlValue`. Scalars map to typed variants;
+/// arrays and objects become `SqlValue::Json`, which the executor
+/// binds as JSONB, JSON or TEXT depending on the backend.
 fn value_to_sqlvalue(v: &Value) -> crate::core::SqlValue {
     use crate::core::SqlValue;
     match v {
@@ -243,9 +230,9 @@ fn value_to_sqlvalue(v: &Value) -> crate::core::SqlValue {
     }
 }
 
-/// Reject identifiers (table / column names) with characters that could
-/// break out of the quoted form. The full identifier is wrapped in `"..."`
-/// so we just need to forbid `"`, NUL, and any control char.
+/// Reject a table or column name that could break out of the quoting.
+/// The name is wrapped in quotes, so forbidding `"`, backslash, NUL and
+/// control characters is enough.
 fn validate_ident(name: &str) -> Result<(), FixtureError> {
     if name.is_empty() {
         return Err(FixtureError::Format {

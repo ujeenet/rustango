@@ -1,6 +1,6 @@
 # Migrations et le moteur de migration
 
-**Rustango** livre un moteur de migration façon Django : vous éditez vos modèles,
+**Rustango** livre un moteur de migration piloté par les modèles : vous éditez vos modèles,
 lancez `makemigrations` pour générer un fichier JSON versionné décrivant le
 changement de schéma, et `migrate` pour l'appliquer. Depuis la **0.48**, le framework
 migre même **ses propres** tables `rustango_*` via le même moteur —
@@ -77,7 +77,7 @@ automatique et dépend entièrement de ce qui est déjà présent :
 |---|---|
 | vierge — pas d'historique, pas de tables | exécute le squash pour de vrai |
 | chaque migration remplacée est dans le registre | l'enregistre, met en tombstone les prédécesseurs, **pas de DDL** |
-| les tables existent mais le registre n'a pas d'historique | l'enregistre, **pas de DDL** (le `--fake-initial` inter-registres de Django) |
+| les tables existent mais le registre n'a pas d'historique | l'enregistre, **pas de DDL** — le registre est aligné après coup sur les tables existantes |
 | seulement *certaines* lignes / tables remplacées présentes | **refusé** — nomme ce qui manque, vous dit de résoudre à la main |
 
 Le cas **partiel** est une erreur bloquante à dessein : aucun choix automatique n'y est

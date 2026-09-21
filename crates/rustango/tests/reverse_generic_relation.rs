@@ -260,7 +260,7 @@ async fn prefetch_reverse_generic_groups_children_by_parent_pk() {
     let pool = fresh_pool().await;
     let (post1_pk, _) = seed_post_with_tag(&pool, "first", "rust").await;
     add_tag_for_post(&pool, post1_pk, "web").await;
-    let (post2_pk, _) = seed_post_with_tag(&pool, "second", "django").await;
+    let (post2_pk, _) = seed_post_with_tag(&pool, "second", "async").await;
 
     let grouped = contenttypes::prefetch_reverse_generic_for::<Post>(
         &pool,
@@ -283,7 +283,7 @@ async fn prefetch_reverse_generic_groups_children_by_parent_pk() {
         .iter()
         .filter_map(|r| r.get("name").and_then(|v| v.as_str()).map(str::to_owned))
         .collect();
-    assert!(post2_tags.contains("django"));
+    assert!(post2_tags.contains("async"));
 }
 
 #[tokio::test]

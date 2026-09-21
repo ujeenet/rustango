@@ -1,4 +1,4 @@
-//! Django-parity #365 — admin `save_model` / `delete_model` hooks.
+//! Issue #365 — admin `save_model` / `delete_model` hooks.
 //!
 //! Verifies that admin signals fire on create / update / delete with
 //! the right context.

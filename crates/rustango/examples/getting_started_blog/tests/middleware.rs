@@ -50,6 +50,7 @@ async fn locale_app() -> Router {
 async fn locale_cookie_wins_over_accept_language() {
     let app = locale_app().await;
     // Cookie says fr, Accept-Language says ar → cookie wins (highest priority).
+    // The cookie name below is the layer's default; `.cookie_name(..)` overrides it.
     let resp = app
         .oneshot(
             Request::builder()

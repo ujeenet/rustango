@@ -1,6 +1,6 @@
 # Sicherheitsleitfaden
 
-Dieser Leitfaden behandelt jede Sicherheitsfunktion, die **Rustango** mitbringt, und wie man sie kombiniert. Wenn du von Django, Laravel oder Rails kommst, werden dir die meisten davon vertraut vorkommen — die Namen unterscheiden sich, aber die Ideen sind dieselben. Jede der folgenden Funktionen benötigt in der Regel eine Zeile Setup. Wenn du bereit bist, in Produktion zu gehen, führe `manage check --deploy` für ein automatisiertes Audit aus.
+Dieser Leitfaden behandelt jede Sicherheitsfunktion, die **Rustango** mitbringt, und wie man sie kombiniert. Wenn du schon einmal ein Web-Framework benutzt hast, werden dir die meisten davon vertraut vorkommen — die Namen unterscheiden sich, aber die Ideen sind dieselben. Jede der folgenden Funktionen benötigt in der Regel eine Zeile Setup. Wenn du bereit bist, in Produktion zu gehen, führe `manage check --deploy` für ein automatisiertes Audit aus.
 
 [![Der gehärtete Middleware-Stack in einer Kette verdrahtet: Request-IDs, Zugriffsprotokollierung, Rate Limiting, CORS und Security-Header](../img/security.png)](../img/security.png)
 
@@ -52,7 +52,7 @@ let app = Router::new()
 
 ## Security-Header setzen
 
-Security-Header teilen dem Browser mit, wie er deine Benutzer schützen soll (Clickjacking blockieren, HTTPS erzwingen, Content-Type-Sniffing unterbinden). `SecurityHeadersLayer` setzt das Standardset mit einer Zeile — dieselben Header, die Django standardmäßig mitbringt. (Ein „Layer" ist **Rustango**s Begriff für Middleware; du hängst sie an deinen Router an.)
+Security-Header teilen dem Browser mit, wie er deine Benutzer schützen soll (Clickjacking blockieren, HTTPS erzwingen, Content-Type-Sniffing unterbinden). `SecurityHeadersLayer` setzt das Standardset mit einer Zeile — die gängigen Schutz-Header, ohne dass du sie einzeln benennen musst. (Ein „Layer" ist **Rustango**s Begriff für Middleware; du hängst sie an deinen Router an.)
 
 > Vertiefung: [Middleware](middleware.md) behandelt, wie Layer funktionieren, ihre Reihenfolge, den vollständigen eingebauten Katalog und das Schreiben eigener Layer (locale-, zeitzonenbewusst, Header, CSRF).
 
@@ -233,7 +233,7 @@ Wenn dein Reverse Proxy `X-Forwarded-For` weiterleitet, konfiguriere ihn so, das
 > *tatsächlich* Cookies verwendet, lies das `rustango_csrf`-Cookie und gib es im `X-CSRF-Token`-
 > Header zurück.
 
-CSRF (Cross-Site Request Forgery) liegt vor, wenn eine andere Website den Browser eines eingeloggten Benutzers dazu bringt, eine Anfrage an deine App zu senden. Die Verteidigung ist ein geheimes Token in jedem Formular, genau wie Djangos `{% csrf_token %}`. Die CSRF-Middleware liegt in `rustango::forms::csrf` (hinter dem `csrf`-Feature, das durch das `admin`-Feature automatisch aktiviert wird):
+CSRF (Cross-Site Request Forgery) liegt vor, wenn eine andere Website den Browser eines eingeloggten Benutzers dazu bringt, eine Anfrage an deine App zu senden. Die Verteidigung ist ein geheimes Token in jedem Formular, das der Server bei jedem Schreibvorgang gegenprüft. Die CSRF-Middleware liegt in `rustango::forms::csrf` (hinter dem `csrf`-Feature, das durch das `admin`-Feature automatisch aktiviert wird):
 
 ```rust
 use rustango::forms::csrf;
@@ -259,7 +259,7 @@ Bis [#1395](https://github.com/ujeenet/rustango/issues/1395) behauptete dieser A
 
 XSS (Cross-Site Scripting) tritt auf, wenn Benutzereingaben als HTML gerendert werden und als Code im Browser einer anderen Person laufen. Die Lösung ist, jede Benutzereingabe zu escapen, bevor sie die Seite erreicht. **Rustango** löst das auf zwei Wegen:
 
-**1. Tera-Template-Auto-Escape** — Tera ist **Rustango**s Template-Engine (wie Django-Templates oder Blade). Jedes `{{ var }}` wird automatisch HTML-escapt — aber nur in Templates, die Tera autoescapt, also seinem Standard-Satz `.html`, `.htm` und `.xml`. Rustango setzt keine `autoescape_suffixes`, ein `.txt`-, `.j2`- oder `.tera`-Template wird also **nicht** escapt. Verwende `{{ var | safe }}`, um dich abzumelden — selten und gefährlich, also tue das nur für HTML, dem du vollständig vertraust.
+**1. Tera-Template-Auto-Escape** — Tera ist **Rustango**s Template-Engine. Jedes `{{ var }}` wird automatisch HTML-escapt — aber nur in Templates, die Tera autoescapt, also seinem Standard-Satz `.html`, `.htm` und `.xml`. Rustango setzt keine `autoescape_suffixes`, ein `.txt`-, `.j2`- oder `.tera`-Template wird also **nicht** escapt. Verwende `{{ var | safe }}`, um dich abzumelden — selten und gefährlich, also tue das nur für HTML, dem du vollständig vertraust.
 
 **2. Manueller Escape-Helper** — für den Fall, dass du HTML in Rust-Code statt in einem Template baust:
 
@@ -311,7 +311,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 ## Benutzer authentifizieren
 
-Authentifizierung ist die Art, wie du bestätigst, wer eine Anfrage stellt. **Rustango** bringt drei fertige Backends mit (Basic Auth, API-Keys und JWTs) und lässt dich eigene schreiben — ganz ähnlich wie Djangos Authentifizierungs-Backends. Du hängst sie an Routen an, und Anfragen ohne ein erkanntes Credential erhalten ein `401`.
+Authentifizierung ist die Art, wie du bestätigst, wer eine Anfrage stellt. **Rustango** bringt drei fertige Backends mit (Basic Auth, API-Keys und JWTs) und lässt dich eigene schreiben, indem du ein einziges Trait implementierst. Du hängst sie an Routen an, und Anfragen ohne ein erkanntes Credential erhalten ein `401`.
 
 > **Admin-SSO.** Um Betreibern zu erlauben, sich mit einem externen IdP (Google, Microsoft/Azure AD, GitHub oder einem beliebigen OpenID-Connect-Provider) statt mit einem Passwort im Admin anzumelden, aktiviere das `admin-sso`-Feature — siehe den [SSO-Leitfaden](sso.md). Provider werden **im Admin-UI als Zeilen verwaltet** (mehrere pro Surface; pro Tenant oder ein gemeinsames Set über Tenants hinweg), wobei das Client-Secret **verschlüsselt gespeichert** wird. Es ist Link-to-existing (die verifizierte IdP-E-Mail muss mit einem Admin-Benutzer übereinstimmen; kein Auto-Provisioning) und verwendet die bestehende Session wieder.
 

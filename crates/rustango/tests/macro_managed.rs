@@ -1,4 +1,4 @@
-//! Django-parity #321 — `#[rustango(managed = false)]` attribute on
+//! Issue #321 — `#[rustango(managed = false)]` attribute on
 //! `#[derive(Model)]`. Verifies the attribute parses and threads
 //! through to `ModelSchema::managed`.
 

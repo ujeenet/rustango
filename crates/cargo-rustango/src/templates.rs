@@ -484,8 +484,9 @@ scratch.
 {host_path}
 
 Either way: `cargo run` (no args) is `runserver`. Every other
-Django-style verb flows through the same binary via
-`rustango::manage::Cli` — see `src/main.rs`.
+management verb (`makemigrations`, `migrate`, `startapp`, `check`, …)
+flows through the same binary via `rustango::manage::Cli` — see
+`src/main.rs`.
 
 ## Project layout
 
@@ -493,7 +494,7 @@ Django-style verb flows through the same binary via
 src/
   main.rs         — Cli::new().api(urls::api()).run() boots both server + verbs
   models.rs       — every #[derive(Model)] lives here
-  views.rs        — request handlers (Django-style "views")
+  views.rs        — request handlers
   urls.rs         — pub fn api() -> Router aggregator
 
 migrations/       — JSON migration files (committed to git)
@@ -721,7 +722,7 @@ pub struct Item {
 
 // ---------------- src/views.rs ----------------
 
-pub const VIEWS_RS: &str = "//! Project views — request handlers (Django-style \"views\").
+pub const VIEWS_RS: &str = "//! Project views — the request handlers this project mounts.
 
 use axum::response::Html;
 
@@ -847,7 +848,7 @@ pub fn api() -> Router<()> {
 // The framework no longer ships hardcoded bootstrap migration JSON.
 // `cargo rustango new --template tenant` seeds an empty `system/
 // migrations/` folder; `cargo run -- makemigrations` generates the
-// framework's own tables from the compiled models (Django-style), and
+// framework's own tables from the compiled models, and
 // `cargo run -- migrate` applies them.
 
 // ---------------- Tiered settings files (#87) ----------------

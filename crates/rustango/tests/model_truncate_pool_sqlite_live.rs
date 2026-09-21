@@ -1,8 +1,6 @@
 #![cfg(feature = "sqlite")]
 //! Live SQLite tests for the macro-emitted
-//! `Model::truncate(pool)` shortcut — Eloquent
-//! `Model::truncate()` / Django `Model.objects.all().delete()`
-//! parity.
+//! `Model::truncate(pool)` shortcut — empty the model's table.
 
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::Model;

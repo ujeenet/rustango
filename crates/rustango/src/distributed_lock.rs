@@ -5,17 +5,15 @@
 //! cron N times, or wrap a long-running job whose effect should be
 //! exactly-once.
 //!
-//! ## Mechanism
+//! ## How it works
 //!
-//! Acquire is one atomic set-if-absent (`Cache::add`) of `lock:<name>`
-//! to a per-acquire token: the key is written only if absent, and the
-//! call reports whether it won. The lock auto-expires after `ttl`, so a
-//! process that crashes while holding it doesn't deadlock the system —
-//! at worst, the next acquirer waits `ttl` seconds.
+//! Acquiring writes `lock:<name>` with a token, using one atomic
+//! set-if-absent (`Cache::add`). The key expires after `ttl`, so a
+//! crash while holding the lock cannot deadlock the system: the next
+//! caller waits at most `ttl`.
 //!
-//! Release is conditional on the token: a process that lost its lock
-//! (because TTL expired and someone else acquired) does NOT
-//! accidentally release the new holder's lock.
+//! Releasing first checks the token, so a process whose TTL ran out
+//! does not free the lock the next holder now owns.
 //!
 //! ## Quick start
 //!
@@ -38,29 +36,29 @@
 //! }).await;
 //! ```
 //!
-//! ## Caveats
+//! ## Warnings
 //!
-//! - Acquire is a single atomic set-if-absent (`Cache::add`): `SET NX`
-//!   on `RedisCache` (safe across replicas) and a lock-guarded
-//!   test-and-set on `InMemoryCache` (#1254). `DatabaseCache`'s `add`
-//!   is still the non-atomic default, so a DB-backed lock is safe only
-//!   within one process — use Redis for multi-replica locking.
-//! - This is "best-effort exactly-once" — fine for cron-style work,
-//!   not a substitute for a transaction when correctness matters. The
-//!   one residual race is release: it reads the key then deletes it, so
-//!   a lock whose TTL expired mid-release could in principle be freed
-//!   just as another holder takes it. Bounded by the TTL, which the
-//!   design already relies on; a compare-and-delete script would close
-//!   it if you need stricter guarantees.
-//! - TTL must be longer than the worst-case execution time of the
-//!   protected work, OR the work must be idempotent. A too-short TTL
-//!   means another replica could grab the lock mid-execution.
-//! - **Under tenancy, scope the lock.** Lock names are global by
-//!   default, so looping tenants around one `with_lock("daily_report")`
-//!   lets the first tenant win and skips the rest for the whole TTL —
-//!   silently, since a refused acquire is the expected outcome. Use
-//!   [`DistributedLock::for_tenant`] so each tenant gets its own lock
-//!   (#1228). Leave it unscoped only for genuinely process-wide work.
+//! - **The lock is advisory and best-effort.** It suits cron-style
+//!   work. It is not a replacement for a transaction where
+//!   correctness matters. One race remains: release reads the key and
+//!   then deletes it, so a lock whose TTL ran out during release could
+//!   be freed just as the next holder takes it. A compare-and-delete
+//!   script would close that window.
+//! - **Use Redis across replicas.** `RedisCache` does `SET NX`, which
+//!   is atomic between machines. `InMemoryCache` holds its own lock
+//!   across the test-and-set. `DatabaseCache::add` is not atomic, so
+//!   a DB-backed lock is only safe inside one process.
+//! - **Set `ttl` above the worst-case run time of the guarded work**,
+//!   or make that work idempotent. With a short TTL another replica
+//!   can take the lock while the first is still running.
+//! - **Under tenancy, scope the lock.** Names are global by default,
+//!   so looping over tenants with one `with_lock("daily_report")`
+//!   lets the first tenant win and skips the rest for a whole TTL,
+//!   and nothing is logged, because a refused acquire is normal. Use
+//!   [`DistributedLock::for_tenant`] to give each tenant its own
+//!   lock. Stay unscoped only for process-wide work.
+//!
+//! [`DistributedLock::for_tenant`]: crate::distributed_lock::DistributedLock::for_tenant
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,8 +71,8 @@ const KEY_PREFIX: &str = "lock";
 #[derive(Clone)]
 pub struct DistributedLock {
     cache: BoxedCache,
-    /// Folded into every lock name. Empty for a process-wide lock;
-    /// `tenant:{slug}` after [`Self::for_tenant`] (#1228).
+    /// Prefix on every lock name. `None` is process-wide;
+    /// [`Self::for_tenant`] sets `tenant:{slug}`.
     scope: Option<String>,
 }
 
@@ -84,43 +82,29 @@ impl DistributedLock {
         Self { cache, scope: None }
     }
 
-    /// A lock factory whose names are scoped to one tenant, so the same
-    /// lock name in two tenants is two independent locks (#1228).
+    /// Scope every lock name to one tenant, so the same name in two
+    /// tenants gives two separate locks.
     ///
-    /// Without this, the natural per-tenant cron —
-    ///
-    /// ```ignore
-    /// for org in active_orgs {
-    ///     lock.with_lock("daily_report", ttl, || async { report(&org).await }).await;
-    /// }
-    /// ```
-    ///
-    /// — has every tenant contend for one `lock:daily_report`. The first
-    /// tenant wins and the rest are skipped for the whole TTL, which
-    /// (with a TTL correctly sized to the work) means most tenants never
-    /// get their report. Nothing is logged, because a refused acquire is
-    /// the documented, expected outcome.
-    ///
-    /// Scoped, each tenant gets `lock:tenant:{slug}:daily_report` and
-    /// they no longer collide. Follows the `tenant:{slug}:…` convention
-    /// the tenancy layer already uses for lockout keys.
+    /// Use this for any per-tenant job. Unscoped, a loop over tenants
+    /// makes them all contend for one `lock:daily_report`: the first
+    /// wins and the rest are skipped for a whole TTL, without a log
+    /// line. Scoped, each gets `lock:tenant:{slug}:daily_report`.
     ///
     /// ```ignore
     /// let lock = DistributedLock::new(cache).for_tenant(&org.slug);
     /// lock.with_lock("daily_report", ttl, || async { … }).await;
     /// ```
     ///
-    /// Keep using the unscoped form for genuinely process-wide work —
-    /// registry cleanup, a cross-tenant rollup — where "exactly one
-    /// replica, ever" is the point.
+    /// Stay unscoped only when "one replica, ever" is the point, such
+    /// as registry cleanup or a cross-tenant rollup.
     #[must_use]
     pub fn for_tenant(mut self, slug: impl AsRef<str>) -> Self {
         self.scope = Some(format!("tenant:{}", slug.as_ref()));
         self
     }
 
-    /// Scope lock names under an arbitrary namespace. [`Self::for_tenant`]
-    /// is this with the `tenant:` convention applied.
+    /// Scope lock names under any namespace. [`Self::for_tenant`] is
+    /// this with a `tenant:` prefix.
     #[must_use]
     pub fn scoped(mut self, namespace: impl AsRef<str>) -> Self {
         self.scope = Some(namespace.as_ref().to_owned());
@@ -135,24 +119,18 @@ impl DistributedLock {
         }
     }
 
-    /// Try to acquire `name` for `ttl`. Returns:
-    /// - `Some(LockGuard)` when we got it. Call `release()` when done
-    ///   (drop without release leaves the lock to expire on TTL —
-    ///   safe but slightly wasteful of contention slots).
-    /// - `None` when someone else holds it.
+    /// Try to take `name` for `ttl`. Gives `None` when someone else
+    /// holds it, or when the cache is unreachable.
+    ///
+    /// Call [`LockGuard::release`] when the work is done. Dropping
+    /// the guard instead is safe, but the lock then stays taken until
+    /// the TTL runs out.
     pub async fn try_acquire(&self, name: &str, ttl: Duration) -> Option<LockGuard> {
         let key = self.key_for(name);
-        // A single atomic set-if-absent (#1254). `add` writes the key
-        // ONLY when it is absent and returns whether it did — the whole
-        // acquire in one operation. On `RedisCache` it is `SET NX EX`
-        // (atomic across replicas); on `InMemoryCache` it holds the
-        // store lock across the test-and-set. This replaces the old
-        // incr-counter + separate token dance, which had three bugs: a
-        // non-atomic acquire off Redis, a crash window between the
-        // counter and the token that wedged the lock until TTL, and a
-        // counter that, once left above zero, could never be acquired
-        // again. The key's *value* is the token, so there is nothing to
-        // desynchronise.
+        // The whole acquire is one atomic set-if-absent: `add` writes
+        // the key only when it is absent and says whether it did. The
+        // key's value IS the token, so there is no second write that
+        // could fall out of step with it.
         let token = format!(
             "{}-{}",
             std::process::id(),
@@ -167,18 +145,17 @@ impl DistributedLock {
                 token: Arc::new(token),
                 released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
-            // `Ok(false)` — someone else holds it. `Err` — cache
-            // unreachable; treat as "could not acquire" (fail closed:
-            // better to skip the work than run it unguarded).
+            // `Ok(false)`: another holder. `Err`: the cache is down.
+            // Both fail closed — skip the work rather than run it
+            // unguarded.
             _ => None,
         }
     }
 
-    /// Acquire-or-skip helper: runs `body` only if we got the lock.
-    /// Returns `Some(R)` when body ran, `None` when another holder
-    /// blocked us. The lock is released after body finishes (or on
-    /// panic, via the guard's Drop — which is best-effort since we
-    /// can't call async fns from Drop).
+    /// Run `body` only if we get the lock, then release it. Gives
+    /// `Some(R)` when the body ran and `None` when another holder
+    /// blocked it. If the body panics, the lock is left to its TTL,
+    /// because `Drop` cannot await the delete.
     pub async fn with_lock<F, Fut, R>(&self, name: &str, ttl: Duration, body: F) -> Option<R>
     where
         F: FnOnce() -> Fut,
@@ -200,8 +177,8 @@ pub struct LockGuard {
 }
 
 impl LockGuard {
-    /// Release the lock if we still hold it. Safe to call multiple
-    /// times; the second call is a no-op.
+    /// Release the lock, if we still hold it. Calling it again does
+    /// nothing.
     pub async fn release(self) {
         self.release_inner().await;
     }
@@ -213,13 +190,10 @@ impl LockGuard {
         {
             return;
         }
-        // The lock key's value IS our token. Only delete it if it is
-        // still ours: if our TTL expired and someone else re-acquired,
-        // the value is their token and we must not free their lock.
-        // (A get-then-delete has a small window on Redis — a compare-
-        // and-delete Lua script would close it — but this is a
-        // best-effort lock: the residual case is bounded by the TTL,
-        // which the whole design already leans on.)
+        // Delete only if the stored value is still our token. If our
+        // TTL ran out and someone else took the lock, the value is
+        // theirs and we must not free it. Get-then-delete leaves a
+        // small window; a compare-and-delete script would close it.
         let stored = self.cache.get(&self.key).await.ok().flatten();
         if stored.as_deref() == Some(self.token.as_str()) {
             let _ = self.cache.delete(&self.key).await;
@@ -229,9 +203,8 @@ impl LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        // Best-effort: if the holder forgot to call release(), the
-        // TTL will eventually free the lock. We can't do an async
-        // delete from Drop, but a sync warning is informative.
+        // Drop cannot await the delete, so the TTL frees the lock.
+        // Log it, since the caller probably meant to release.
         if !self.released.load(std::sync::atomic::Ordering::SeqCst) {
             tracing::debug!(
                 key = %self.key,
@@ -252,9 +225,7 @@ mod tests {
         DistributedLock::new(cache)
     }
 
-    /// #1254 — under contention exactly ONE of many racing acquirers
-    /// may win. The old incr-counter acquire could hand the lock to two
-    /// callers that both read `1`; the atomic `add` cannot.
+    /// Under contention exactly one of many racing callers may win.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn only_one_of_many_racing_acquirers_wins() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
@@ -266,9 +237,8 @@ mod tests {
                 l.try_acquire("hot", Duration::from_secs(30))
                     .await
                     .map(|g| {
-                        // hold it — never release — so a second winner
-                        // would be a true double-acquire, not a
-                        // release/re-acquire.
+                        // Never release, so a second winner would be
+                        // a real double-acquire.
                         std::mem::forget(g);
                     })
                     .is_some()
@@ -283,9 +253,7 @@ mod tests {
         assert_eq!(winners, 1, "exactly one acquirer must win; got {winners}");
     }
 
-    /// #1254 — a released lock is immediately re-acquirable. The old
-    /// design could leave the counter above zero so the lock was never
-    /// grantable again; the value-is-token design frees cleanly.
+    /// A released lock can be taken again right away, every time.
     #[tokio::test]
     async fn lock_is_reacquirable_after_release() {
         let l = lock();
@@ -354,9 +322,8 @@ mod tests {
 
     #[tokio::test]
     async fn release_is_idempotent_at_least_once() {
-        // The release call consumes the guard, so calling it twice
-        // requires re-acquiring + dropping — verify the inner method
-        // is safe to call twice.
+        // `release` consumes the guard, so test the inner method,
+        // which is the one that can be called twice.
         let l = lock();
         let g = l.try_acquire("job", Duration::from_secs(5)).await.unwrap();
         g.release_inner().await;
@@ -368,10 +335,9 @@ mod tests {
         let l = lock();
         let g = l.try_acquire("job", Duration::from_millis(50)).await;
         assert!(g.is_some());
-        // Forget the guard so we can't release explicitly; wait past TTL.
+        // Forget the guard so only the TTL can free the lock.
         std::mem::forget(g);
         tokio::time::sleep(Duration::from_millis(120)).await;
-        // After expiry the lock is reacquireable.
         let g2 = l.try_acquire("job", Duration::from_millis(50)).await;
         assert!(g2.is_some(), "TTL expiry should free the lock");
     }
@@ -388,9 +354,8 @@ mod tests {
         // Someone else acquires.
         let g2 = l.try_acquire("job", Duration::from_secs(5)).await;
         assert!(g2.is_some(), "new acquirer can claim after TTL");
-        // Now g1 belatedly releases — this MUST NOT clobber g2.
+        // g1 releases late; it must not clear g2's lock.
         g1.release().await;
-        // g2 must still hold the lock.
         let g3 = l.try_acquire("job", Duration::from_secs(5)).await;
         assert!(
             g3.is_none(),
@@ -410,9 +375,8 @@ mod tests {
         assert!(g.is_some());
     }
 
-    /// The bug from #1228: two tenants, one lock name, unscoped — the
-    /// second is refused. Pinned so the distinction between the scoped
-    /// and unscoped forms stays deliberate rather than accidental.
+    /// Unscoped, two tenants share one lock name and the second is
+    /// refused. Pinned so the scoped/unscoped split stays on purpose.
     #[tokio::test]
     async fn unscoped_lock_is_shared_across_tenants() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
@@ -428,8 +392,7 @@ mod tests {
         assert!(acme.is_some(), "first caller takes the lock");
         assert!(
             globex.is_none(),
-            "unscoped, a second tenant contends for the same name — this is the \
-             starvation #1228 is about"
+            "unscoped, a second tenant contends for the same name and starves"
         );
     }
 
@@ -452,8 +415,7 @@ mod tests {
         assert!(globex.is_some(), "globex gets its own lock, not acme's");
     }
 
-    /// Within one tenant the lock still excludes — scoping must not
-    /// weaken the guarantee it exists for.
+    /// Scoping must not weaken the guarantee inside a tenant.
     #[tokio::test]
     async fn scoped_lock_still_excludes_within_a_tenant() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
@@ -470,8 +432,8 @@ mod tests {
         assert!(second.is_none(), "one holder at a time, per tenant");
     }
 
-    /// A tenant scope must not let one slug's lock name collide with
-    /// another's by prefix (`acme` vs `acme-corp`).
+    /// One slug must not collide with another by prefix, such as
+    /// `acme` against `acme-corp`.
     #[tokio::test]
     async fn tenant_scopes_are_separated_by_slug() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());

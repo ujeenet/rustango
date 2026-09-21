@@ -20,9 +20,9 @@
 //!
 //! ## Configuration
 //!
-//! All functions accept `step_secs` (default 30 seconds), `digits`
-//! (default 6), and `window` (number of past/future steps to accept,
-//! default 1 → tolerates ±30 seconds of clock drift).
+//! Every function takes `step_secs` (usually 30), `digits` (usually
+//! 6) and `window`, the number of steps before and after now that are
+//! still accepted. A `window` of 1 allows about 30 seconds of drift.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,15 +31,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct TotpSecret(pub Vec<u8>);
 
 impl TotpSecret {
-    /// Generate a 20-byte random secret (RFC 4226 minimum).
+    /// Generate a 20-byte random secret, the RFC 4226 minimum.
     ///
-    /// Uses [`rand::rngs::OsRng`] — the OS CSPRNG — rather than
-    /// `thread_rng`. `thread_rng` is seeded from `OsRng` but is a
-    /// userspace ChaCha PRNG that doesn't satisfy "cryptographic key
-    /// material" guarantees on every platform; for 2FA shared secrets
-    /// the OS CSPRNG is the right default. Matches the rest of the
-    /// framework's crypto sites (sessions, CSP nonce, CSRF token,
-    /// signed URLs).
+    /// It uses [`rand::rngs::OsRng`], the OS random source, not
+    /// `thread_rng`. `thread_rng` is a userspace PRNG and is not
+    /// guaranteed to be safe for key material on every platform. The
+    /// rest of the framework's crypto code uses `OsRng` too.
     #[must_use]
     pub fn generate() -> Self {
         use rand::rngs::OsRng;
@@ -49,8 +46,8 @@ impl TotpSecret {
         Self(bytes)
     }
 
-    /// Encode the secret as base32 (no padding) — the standard format
-    /// understood by Google Authenticator, Authy, 1Password, etc.
+    /// Encode the secret as base32 with no padding. Authenticator
+    /// apps all read this format.
     #[must_use]
     pub fn to_base32(&self) -> String {
         base32_encode(&self.0)
@@ -81,10 +78,8 @@ pub fn generate_at(secret: &TotpSecret, unix_secs: u64, step_secs: u64, digits: 
     hotp(&secret.0, counter, digits)
 }
 
-/// Verify a user-supplied code against `secret`. Accepts codes from
-/// `[now - window, now + window]` to tolerate clock drift.
-///
-/// `window = 1` (default) tolerates ±1 step (±30 seconds at default step).
+/// Check a code the user typed. It accepts any code from `window`
+/// steps before now to `window` steps after, to allow clock drift.
 #[must_use]
 pub fn verify(secret: &TotpSecret, code: &str, step_secs: u64, digits: u32, window: i64) -> bool {
     let now = SystemTime::now()
@@ -120,8 +115,8 @@ pub fn verify_at(
     false
 }
 
-/// Build the `otpauth://` URI for a TOTP secret. Encode this as a QR code
-/// to make enrollment one-tap for the user.
+/// Build the `otpauth://` URI for a secret. Show it as a QR code so
+/// the user can enrol with one scan.
 #[must_use]
 pub fn otpauth_url(issuer: &str, account: &str, secret: &TotpSecret) -> String {
     let label = format!("{}:{}", url_encode(issuer), url_encode(account));
@@ -201,10 +196,8 @@ fn base32_decode(input: &str) -> Option<Vec<u8>> {
 
 // ------------------------------------------------------------------ helpers
 
-// #806 — was byte-identical to `crate::url_codec::url_encode`
-// (RFC 3986 unreserved set — the right alphabet for an otpauth URI's
-// label/issuer query-parameter encoding). Route through the canonical
-// codec.
+// The otpauth label and issuer use the RFC 3986 unreserved set, so
+// route through the shared `crate::url_codec::url_encode`.
 use crate::url_codec::url_encode;
 
 #[cfg(test)]
@@ -312,12 +305,12 @@ mod tests {
         assert!(url.contains("period=30"));
     }
 
-    // ---- v0.42 regressions: lock in OsRng quality ----
+    // ---- pin the RNG quality ----
 
     #[test]
     fn generate_produces_full_20_byte_secrets() {
-        // Defends against future regressions where someone shortens
-        // the secret below RFC 4226's 160-bit minimum.
+        // Catches a change that shortens the secret below the RFC
+        // 4226 minimum of 160 bits.
         for _ in 0..16 {
             let s = TotpSecret::generate();
             assert_eq!(s.0.len(), 20, "TOTP secret must be exactly 20 bytes");
@@ -326,10 +319,9 @@ mod tests {
 
     #[test]
     fn generate_produces_unique_secrets() {
-        // 64 secrets * 20 bytes = 160 bits of entropy each. Collisions
-        // at this rate would mean ~1 in 2^80 per pair — astronomically
-        // impossible with a working CSPRNG. A regression to a constant
-        // / counter / weakly-seeded PRNG would surface immediately.
+        // Each secret holds 160 bits, so a real collision is
+        // impossible. A duplicate means the RNG became a constant, a
+        // counter, or a badly seeded PRNG.
         use std::collections::HashSet;
         let mut seen: HashSet<Vec<u8>> = HashSet::new();
         for _ in 0..64 {
@@ -340,8 +332,8 @@ mod tests {
 
     #[test]
     fn generate_does_not_produce_trivial_secrets() {
-        // No all-zero, no all-0xff, no fixed-byte secrets — those are
-        // the failure modes a broken RNG would exhibit.
+        // An all-zero, all-0xff or single-value secret is what a
+        // broken RNG produces.
         let s = TotpSecret::generate();
         assert!(s.0.iter().any(|&b| b != 0), "all-zero secret");
         assert!(s.0.iter().any(|&b| b != 0xff), "all-ones secret");

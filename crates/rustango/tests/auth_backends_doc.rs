@@ -54,6 +54,14 @@ fn basic(user: &str, pass: &str) -> String {
     format!("Basic {}", b64(&format!("{user}:{pass}")))
 }
 
+/// Every test here drops and re-seeds the *same* `cache=shared` database, so
+/// they cannot run unserialised — one test's `DROP TABLE` lands between a
+/// neighbour's seed and its read.
+fn lock() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// In-memory SQLite with the user table + permission tables, two users, and a
 /// `post.add` grant for alice.
 async fn setup() -> (Pool, i64) {
@@ -130,7 +138,7 @@ async fn admin_only() -> &'static str {
 
 /// Resolver that hands every request the same single-tenant Org.
 ///
-/// `require_auth` takes no pool as of GHSA-c4gg-mvfq-h268 — it reads
+/// `require_auth` takes no pool as of 0.57.11 — it reads
 /// the tenant resolved for each request, so even a one-tenant app has
 /// to mount a context for it to read. That is the cost of the fix and
 /// it is deliberate: a pool chosen once per process is exactly what
@@ -218,6 +226,7 @@ async fn call(app: &Router, path: &str, auth: Option<&str>) -> (StatusCode, Stri
 
 #[tokio::test]
 async fn require_auth_rejects_anonymous_and_accepts_basic() {
+    let _g = lock().lock().await;
     let (_keep, _) = setup().await;
     let app = app();
 
@@ -237,6 +246,7 @@ async fn require_auth_rejects_anonymous_and_accepts_basic() {
 
 #[tokio::test]
 async fn api_key_backend_authenticates_bearer() {
+    let _g = lock().lock().await;
     let (pool, alice_id) = setup().await;
     // Issue a key for alice — the plaintext token is returned once.
     let token = create_api_key(alice_id, "ci-key", None, &pool)
@@ -256,6 +266,7 @@ async fn api_key_backend_authenticates_bearer() {
 
 #[tokio::test]
 async fn require_perm_gates_by_codename() {
+    let _g = lock().lock().await;
     let (_keep, _) = setup().await;
     let app = app();
 

@@ -4,15 +4,13 @@
 //! Foreign-key constraints are emitted separately as `ALTER TABLE` so the
 //! caller doesn't have to topologically sort tables.
 //!
-//! ## v0.23.0-batch10 — bi-dialect dispatch
+//! ## Picking a dialect
 //!
-//! All emitters now have a `_with_dialect` variant that takes
-//! `&dyn Dialect`. The existing PG-typed entry points
-//! (`create_table_sql`, `drop_table_sql`, `create_constraints_sql`)
-//! delegate to the new variants with [`crate::sql::Postgres`] —
-//! every existing call site stays byte-identical. New code that
-//! has a [`crate::sql::Pool`] picks `pool.dialect()` and emits the
-//! right shape for the active backend.
+//! Every emitter has a `_with_dialect` variant taking `&dyn Dialect`.
+//! The plain names (`create_table_sql`, `drop_table_sql`,
+//! `create_constraints_sql`) are shims that pass
+//! [`crate::sql::Postgres`]. Code holding a [`crate::sql::Pool`] should
+//! pass `pool.dialect()` instead.
 //!
 //! ## Type mapping
 //!
@@ -45,15 +43,15 @@ use crate::sql::{Dialect, Postgres};
 
 // ============================================================ Postgres-typed shims (existing API)
 
-/// `CREATE TABLE "model.table" ( … )` without FK constraints. Postgres
-/// shape — for bi-dialect emission see
+/// `CREATE TABLE "model.table" ( … )` without FK constraints, in
+/// Postgres shape. For other backends use
 /// [`create_table_sql_with_dialect`].
 #[must_use]
 pub fn create_table_sql(model: &ModelSchema) -> String {
     create_table_sql_with_dialect(&Postgres, model)
 }
 
-/// `CREATE TABLE IF NOT EXISTS …` — handy for idempotent dev bootstrapping.
+/// `CREATE TABLE IF NOT EXISTS …`, for repeatable dev bootstrapping.
 #[must_use]
 pub fn create_table_if_not_exists_sql(model: &ModelSchema) -> String {
     create_table_if_not_exists_sql_with_dialect(&Postgres, model)
@@ -71,11 +69,10 @@ pub fn create_constraints_sql(model: &ModelSchema) -> Vec<String> {
     create_constraints_sql_with_dialect(&Postgres, model)
 }
 
-// ============================================================ dialect-aware emitters (batch 10)
+// ============================================================ dialect-aware emitters
 
-/// `CREATE TABLE` for `model` using `dialect`'s identifier quoting +
-/// type names + `Auto<T>` serial spelling. Identical output to the
-/// PG-typed shim when `dialect` is [`crate::sql::Postgres`].
+/// `CREATE TABLE` for `model`, using `dialect` for identifier quoting,
+/// type names and the `Auto<T>` serial spelling.
 #[must_use]
 pub fn create_table_sql_with_dialect(dialect: &dyn Dialect, model: &ModelSchema) -> String {
     let mut s = String::new();
@@ -90,13 +87,10 @@ pub fn create_table_sql_with_dialect(dialect: &dyn Dialect, model: &ModelSchema)
         first = false;
         write_column_def(&mut s, dialect, field);
     }
-    // For dialects that REQUIRE FKs inline in CREATE TABLE (SQLite —
-    // `ALTER TABLE ADD CONSTRAINT FOREIGN KEY` doesn't exist), emit
-    // every FK clause inside the same CREATE TABLE statement. PG +
-    // MySQL get nothing here; their FKs continue to be emitted as
-    // post-hoc `ALTER TABLE ADD CONSTRAINT` via
-    // [`create_constraints_sql_with_dialect`] so cross-table cycles
-    // resolve cleanly within a single migration batch.
+    // SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN KEY`, so its
+    // FKs must go inside this statement. PG and MySQL get theirs
+    // afterwards from `create_constraints_sql_with_dialect`, which
+    // lets cross-table cycles resolve in one migration batch.
     if dialect.inline_fks_in_create_table() {
         for clause in inline_fk_clauses(dialect, model) {
             s.push_str(", ");
@@ -104,7 +98,7 @@ pub fn create_table_sql_with_dialect(dialect: &dyn Dialect, model: &ModelSchema)
         }
     }
     s.push(')');
-    // Django-shape `Meta.db_table_comment` — MySQL spells it as an
+    // `db_table_comment` — MySQL spells it as an
     // inline trailer (`) COMMENT='...'`); PG + SQLite emit nothing
     // inline (PG runs a post-hoc `COMMENT ON TABLE`, SQLite is a
     // no-op). See `table_comment_statements_with_dialect`.
@@ -148,11 +142,10 @@ pub fn create_table_if_not_exists_sql_with_dialect(
 }
 
 /// `DROP TABLE [IF EXISTS] …` using `dialect`'s identifier quoting.
-/// Note: `CASCADE` isn't supported on `DROP TABLE` in `MySQL`
-/// (`MySQL` `DROP TABLE` always cascades FKs internally and rejects
-/// the keyword); this emitter writes the keyword regardless and
-/// relies on the caller to know whether the dialect accepts it.
-/// Future batch will gate on a `Dialect::supports_drop_cascade()`.
+///
+/// **`cascade` is not checked against the dialect.** `MySQL` rejects
+/// the `CASCADE` keyword on `DROP TABLE`, so only pass `true` when you
+/// know the backend accepts it.
 #[must_use]
 pub fn drop_table_sql_with_dialect(
     dialect: &dyn Dialect,
@@ -166,9 +159,8 @@ pub fn drop_table_sql_with_dialect(
     }
     s.push_str(&dialect.quote_ident(model.table));
     if cascade {
-        // PG accepts CASCADE; MySQL silently ignores when emitted in
-        // some clients but rejects on the wire. The runner currently
-        // only invokes this on Postgres.
+        // PG accepts CASCADE, MySQL rejects it. The runner only asks
+        // for it on Postgres.
         s.push_str(" CASCADE");
     }
     s
@@ -178,19 +170,16 @@ pub fn drop_table_sql_with_dialect(
 /// per FK / O2O field and per composite FK, dropping the constraint that
 /// the create emitter named `{table}_{column}_fkey`.
 ///
-/// Needed because `DROP TABLE` is only FK-safe on two of the three
-/// dialects: Postgres has `CASCADE`, SQLite leaves `foreign_keys` off by
-/// default, but MySQL enforces FKs and rejects `CASCADE` — so dropping a
-/// parent before its child fails outright (#1277). Dropping constraints
-/// first makes table drop order irrelevant, mirroring the way
-/// [`create_constraints_sql_with_dialect`] makes create order irrelevant.
+/// Run these before dropping tables so drop order does not matter.
+/// Postgres has `DROP TABLE ... CASCADE` and SQLite leaves
+/// `foreign_keys` off by default, but **MySQL enforces FKs and has no
+/// `CASCADE`**, so dropping a parent before its child fails there.
 ///
-/// Returns empty for dialects that inline FKs in `CREATE TABLE` (SQLite):
-/// there is no named constraint to drop, and the table drop is unimpeded.
+/// Empty for dialects that inline FKs in `CREATE TABLE` (SQLite):
+/// there is no named constraint to drop.
 ///
-/// The statements are best-effort by nature — a constraint may already be
-/// gone, and only Postgres can say `IF EXISTS` here (MySQL's
-/// `DROP FOREIGN KEY` has no such form), so callers should ignore errors.
+/// Callers should ignore errors. A constraint may already be gone, and
+/// only Postgres accepts `IF EXISTS` here.
 #[must_use]
 pub fn drop_constraints_sql_with_dialect(
     dialect: &dyn Dialect,
@@ -199,15 +188,10 @@ pub fn drop_constraints_sql_with_dialect(
     if dialect.inline_fks_in_create_table() {
         return Vec::new();
     }
-    // The spelling lives on the dialect — `DROP FOREIGN KEY` on MySQL,
-    // `DROP CONSTRAINT IF EXISTS` elsewhere. This function knew that
-    // first and `migrate/diff.rs` did not, which is how two arms there
-    // shipped Postgres syntax to MySQL (#559). One owner now.
-    // `extend` rather than `push`: the dialect returns `None` when it has
-    // no drop-constraint syntax. The early return above already excludes
-    // SQLite, so this is belt-and-braces — but it is the kind of
-    // belt-and-braces that stops a future dialect silently emitting
-    // PostgreSQL DDL.
+    // The dialect owns the spelling: `DROP FOREIGN KEY` on MySQL,
+    // `DROP CONSTRAINT IF EXISTS` elsewhere. `extend`, not `push`,
+    // because a dialect with no drop-constraint syntax returns `None`
+    // and must emit nothing rather than Postgres DDL.
     let mut out = Vec::new();
     let mut push = |name: String| out.extend(dialect.drop_foreign_key_sql(model.table, &name));
     for field in model.scalar_fields() {
@@ -221,21 +205,16 @@ pub fn drop_constraints_sql_with_dialect(
     out
 }
 
-/// One `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` per FK / O2O field,
-/// plus one per composite FK declared via `#[rustango(fk_composite(...))]`
-/// (sub-slice F.2 of the v0.15.0 ContentType plan). MySQL accepts the
-/// same FK syntax — only the identifier quoting differs.
+/// One `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` per FK or O2O
+/// field, plus one per `#[rustango(fk_composite(...))]`. PG and MySQL
+/// share the syntax; only identifier quoting differs.
 #[must_use]
 pub fn create_constraints_sql_with_dialect(
     dialect: &dyn Dialect,
     model: &ModelSchema,
 ) -> Vec<String> {
-    // SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN KEY` — FKs
-    // were emitted inline in CREATE TABLE via `inline_fk_clauses`.
-    // Returning the post-hoc ALTER statements here would silently
-    // fail at apply time AND, worse, the previous workaround skipped
-    // FKs entirely on SQLite (silent loss of referential integrity).
-    // Return empty so the runner skips the post-hoc emission cleanly.
+    // SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN KEY`. Its FKs
+    // already went inline via `inline_fk_clauses`, so emit nothing.
     if dialect.inline_fks_in_create_table() {
         return Vec::new();
     }
@@ -262,8 +241,8 @@ pub fn create_constraints_sql_with_dialect(
         }
         out.push(s);
     }
-    // Composite FKs — `(col_a, col_b, …) REFERENCES target (col_x, col_y, …)`.
-    // The macro ensures `from.len() == on.len()` at compile time.
+    // Composite FKs. The derive macro already checks that `from` and
+    // `on` have the same length.
     for rel in model.composite_relations {
         let mut s = String::from("ALTER TABLE ");
         s.push_str(&dialect.quote_ident(model.table));
@@ -293,20 +272,11 @@ pub fn create_constraints_sql_with_dialect(
 
 // ============================================================ internals
 
-/// Emit FK clauses for inclusion inside a `CREATE TABLE (...)` —
-/// used on dialects where `inline_fks_in_create_table()` is true
-/// (currently SQLite). Output is a `Vec<String>` whose entries are
-/// joined into the CREATE TABLE body with `, `.
+/// FK clauses to join with `, ` into a `CREATE TABLE (...)` body, for
+/// dialects where `inline_fks_in_create_table()` is true (SQLite).
 ///
-/// Two kinds of clauses emitted:
-/// * Single-column FK / O2O — one `CONSTRAINT <name> FOREIGN KEY
-///   (<col>) REFERENCES <to> (<on>) [ON DELETE <action>]` per
-///   field that carries `Relation::Fk` or `Relation::O2O`.
-/// * Composite FK — one `CONSTRAINT <name> FOREIGN KEY (col_a,
-///   col_b, ...) REFERENCES <to> (col_x, col_y, ...)` per
-///   `composite_relations` entry.
-///
-/// Identifier quoting goes through `dialect.quote_ident()`.
+/// One clause per single-column FK or O2O field, and one per
+/// `composite_relations` entry.
 fn inline_fk_clauses(dialect: &dyn Dialect, model: &ModelSchema) -> Vec<String> {
     let mut out = Vec::new();
     for field in model.scalar_fields() {
@@ -358,10 +328,8 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
     s.push_str(&dialect.quote_ident(field.column));
     s.push(' ');
     s.push_str(&sql_type(dialect, field));
-    // Generated columns: emit `GENERATED ALWAYS AS (<expr>) STORED`
-    // and skip DEFAULT / PRIMARY KEY / UNIQUE / CHECK — Postgres
-    // rejects all of these on generated columns. NOT NULL is still
-    // permitted (the expression must always evaluate to non-NULL).
+    // A generated column takes no DEFAULT, PRIMARY KEY, UNIQUE or
+    // CHECK: Postgres rejects all of them here. NOT NULL is allowed.
     if let Some(expr) = field.generated_as {
         let _ = write!(s, " GENERATED ALWAYS AS ({expr}) STORED");
         if !field.nullable {
@@ -371,17 +339,13 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
     }
     if let Some(expr) = field.default {
         let ty_name = crate::migrate::snapshot::field_type_name(field.ty);
-        // An empty-string default (`#[rustango(default = "")]`) means the
-        // literal empty string, not an empty raw expression — render it as
-        // `''` rather than nothing, or we emit `DEFAULT  NOT NULL` which the
-        // driver rejects with `near "NOT": syntax error` (#1161). `''` is a
-        // valid empty-string literal in Postgres, MySQL, and SQLite.
+        // `#[rustango(default = "")]` means the empty string, not an
+        // empty expression, so render `''`. Writing nothing would give
+        // `DEFAULT  NOT NULL`, which every driver rejects.
         //
-        // Still route the `''` literal through `translate_default_expr` so a
-        // LOB column (MySQL TEXT/JSON/BLOB) gets the parenthesized
-        // expression form `DEFAULT ('')` it requires — MySQL rejects a
-        // *literal* default on those types (error 1101), only the 8.0.13+
-        // expression form is legal. PG/SQLite leave `''` untouched (#1174).
+        // Still pass `''` through `translate_default_expr`: MySQL
+        // rejects a literal default on a LOB column (TEXT/JSON/BLOB)
+        // and needs the `DEFAULT ('')` form. PG and SQLite keep `''`.
         let expr_to_render = if expr.is_empty() { "''" } else { expr };
         let rendered = dialect.translate_default_expr(expr_to_render, ty_name, field.max_length);
         let _ = write!(s, " DEFAULT {rendered}");
@@ -389,10 +353,9 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
     if !field.nullable {
         s.push_str(" NOT NULL");
     }
-    // SQLite's `Auto<T>` PK type is `INTEGER PRIMARY KEY AUTOINCREMENT`
-    // — the PRIMARY KEY clause is part of the type name itself. Skip
-    // the standalone `PRIMARY KEY` append in that case so we don't
-    // emit it twice.
+    // On SQLite the `Auto<T>` PK type is `INTEGER PRIMARY KEY
+    // AUTOINCREMENT`, so PRIMARY KEY is already in the type name.
+    // Appending it again gives a doubled clause SQLite cannot parse.
     let serial_pk_inline = field.auto
         && matches!(field.ty, FieldType::I16 | FieldType::I32 | FieldType::I64)
         && dialect.serial_type_includes_primary_key();
@@ -403,10 +366,9 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
         s.push_str(" UNIQUE");
     }
     write_check_constraint(s, dialect, field);
-    // #450 — MySQL splices `COMMENT '...'` into the column line. PG +
-    // SQLite get nothing here; PG gets a separate `COMMENT ON COLUMN`
-    // statement via `column_comment_statements_with_dialect`, SQLite
-    // is a no-op (no native column comments).
+    // MySQL puts `COMMENT '...'` on the column line. PG uses a
+    // separate `COMMENT ON COLUMN` statement from
+    // `column_comment_statements_with_dialect`; SQLite has none.
     if let Some(comment) = field.db_comment {
         if let Some(inline) = dialect.write_inline_column_comment(comment) {
             s.push_str(&inline);
@@ -414,9 +376,9 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
     }
 }
 
-/// Per-model post-CREATE-TABLE statements for `db_comment` (#450) — one
-/// `COMMENT ON COLUMN "<table>"."<col>" IS '...'` per field on Postgres;
-/// empty `Vec` on MySQL (already inlined) and SQLite (no-op).
+/// Statements to run after `CREATE TABLE` for `db_comment`: one
+/// `COMMENT ON COLUMN` per field on Postgres. Empty on MySQL, which
+/// inlines them, and on SQLite, which has no column comments.
 #[must_use]
 pub fn column_comment_statements_with_dialect(
     dialect: &dyn Dialect,
@@ -455,30 +417,21 @@ fn write_check_constraint(s: &mut String, dialect: &dyn Dialect, field: &FieldSc
     s.push(')');
 }
 
-/// Per-field SQL type — integer `Auto<T>` PKs delegate to
-/// [`Dialect::serial_type`] (PG: `BIGSERIAL`/`SERIAL`, MySQL: `BIGINT
-/// AUTO_INCREMENT`/`INT AUTO_INCREMENT`); non-integer Auto fields
-/// (`Auto<Uuid>` w/ `auto_uuid`, `Auto<DateTime<Utc>>` w/
-/// `auto_now_add`/`auto_now`) fall through to [`Dialect::column_type`]
-/// — they're DB-default-supplied via the explicit `default`
-/// expression on the field, NOT a sequence.
+/// SQL type for one field.
 ///
-/// Without this gate, a column like
-/// `#[rustango(auto_now_add)] created_at: Auto<DateTime<Utc>>`
-/// gets emitted as `BIGSERIAL DEFAULT now() NOT NULL` — Postgres'
-/// `BIGSERIAL` macro already supplies `DEFAULT nextval(...)`, so the
-/// CREATE TABLE rejects with `multiple default values specified for
-/// column "created_at"`. The migration-replay path
-/// (`crate::migrate::diff::sql_type_for_field`) already had this
-/// guard; this mirror brings the apply_all (ephemeral / test) path
-/// in line.
+/// Only an **integer** `Auto<T>` primary key becomes a serial type via
+/// [`Dialect::serial_type`]. Other `Auto` fields (`Auto<Uuid>`,
+/// `Auto<DateTime<Utc>>`) use [`Dialect::column_type`]: their value
+/// comes from the field's own `default` expression, not a sequence.
+///
+/// Without that split, `#[rustango(auto_now_add)] created_at:
+/// Auto<DateTime<Utc>>` would emit `BIGSERIAL DEFAULT now()`, and
+/// Postgres rejects two defaults on one column.
 fn sql_type(dialect: &dyn Dialect, field: &FieldSchema) -> String {
     if field.auto && matches!(field.ty, FieldType::I16 | FieldType::I32 | FieldType::I64) {
         return dialect.serial_type(field.ty).to_owned();
     }
-    // #344 — CITextField / case-insensitive string columns. Only
-    // meaningful for `String`; other types fall through to the
-    // normal type emit.
+    // Case-insensitive text only means something for `String`.
     if field.case_insensitive && matches!(field.ty, FieldType::String) {
         return dialect.ci_text_type(field.max_length);
     }
@@ -487,22 +440,13 @@ fn sql_type(dialect: &dyn Dialect, field: &FieldSchema) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! Regression tests for the `auto = true` × non-integer field-type
-    //! case that crashed `apply_all` against `rustango_api_keys` in
-    //! v0.24.0 — `Auto<DateTime<Utc>>` with `auto_now_add` was
-    //! rendering as `BIGSERIAL DEFAULT now()` and Postgres rejected
-    //! the duplicate default.
+    //! `auto = true` on a non-integer field must not emit a serial
+    //! type, or the column ends up with two DEFAULT clauses and
+    //! Postgres rejects the `CREATE TABLE`.
     //!
-    //! Coverage:
-    //! 1. `Auto<i32>` / `Auto<i64>` PKs still emit SERIAL / BIGSERIAL
-    //!    (no regression on the integer path).
-    //! 2. `Auto<DateTime>` with `auto_now_add` emits `TIMESTAMPTZ`
-    //!    (column type only) so the field's `DEFAULT now()` lands
-    //!    cleanly.
-    //! 3. `Auto<Uuid>` with `auto_uuid` emits `UUID` so the field's
-    //!    `DEFAULT gen_random_uuid()` lands cleanly.
-    //! 4. The end-to-end CREATE TABLE has exactly one DEFAULT clause
-    //!    per column (smoke test against full DDL).
+    //! Covers: integer `Auto` PKs still emit SERIAL / BIGSERIAL;
+    //! `Auto<DateTime>` emits `TIMESTAMPTZ` and `Auto<Uuid>` emits
+    //! `UUID`; and the full DDL has one DEFAULT per column.
 
     use super::*;
     use crate::core::FieldType;
@@ -557,10 +501,8 @@ mod tests {
 
     #[test]
     fn auto_datetime_emits_timestamptz_not_bigserial() {
-        // Regression for the `multiple default values specified for
-        // column "created_at"` panic: `Auto<DateTime<Utc>>` w/
-        // auto_now_add fed `BIGSERIAL` into Postgres which already
-        // supplies `DEFAULT nextval(...)`.
+        // `BIGSERIAL` here would collide with the field's own
+        // `DEFAULT now()`, and Postgres rejects two defaults.
         let f = fld("created_at", FieldType::DateTime, true, Some("now()"));
         assert_eq!(sql_type(&pg(), &f), "TIMESTAMPTZ");
     }
@@ -573,14 +515,11 @@ mod tests {
 
     #[test]
     fn empty_string_default_renders_as_quoted_empty_literal() {
-        // #1161 — `#[rustango(default = "")]` must emit `DEFAULT ''`, not
-        // `DEFAULT ` (nothing), which collapses to `DEFAULT  NOT NULL` and the
-        // driver rejects with `near "NOT": syntax error`. `''` is a valid
-        // empty-string literal on Postgres, MySQL, and SQLite.
+        // `default = ""` must emit `DEFAULT ''`. Writing nothing gives
+        // `DEFAULT  NOT NULL`, a syntax error on every backend.
         let mut f = fld("name", FieldType::String, false, Some(""));
         f.max_length = Some(64);
-        // Postgres is always available in this build; MySQL/SQLite are
-        // feature-gated, so add them only when compiled in.
+        // Postgres is always built; the others are feature-gated.
         let mut dialects: Vec<&dyn Dialect> = vec![&crate::sql::Postgres];
         #[cfg(feature = "mysql")]
         dialects.push(&crate::sql::MySql);
@@ -604,11 +543,9 @@ mod tests {
 
     #[test]
     fn empty_string_default_on_lob_uses_mysql_expression_form() {
-        // #1174 — an empty-string default on a MySQL LOB column (TEXT/JSON/
-        // BLOB, i.e. `String` with no `max_length`) must emit the
-        // parenthesized expression form `DEFAULT ('')`; MySQL rejects a
-        // *literal* default on those types (error 1101). PG/SQLite still emit
-        // the plain `DEFAULT ''` (they accept literal defaults on TEXT).
+        // MySQL rejects a literal default on a LOB column, so an
+        // empty default there must be `DEFAULT ('')`. PG and SQLite
+        // accept the plain literal.
         let f = fld("body", FieldType::String, false, Some("")); // no max_length → TEXT
         #[cfg(feature = "mysql")]
         {
@@ -638,17 +575,13 @@ mod tests {
 
     #[test]
     fn full_create_table_has_single_default_per_column() {
-        // Smoke: render a full CREATE TABLE for a table that mixes
-        // `Auto<i64>` PK + `auto_now_add` timestamp, and confirm no
-        // column carries two DEFAULT clauses.
         let mut col_def = String::new();
         write_column_def(
             &mut col_def,
             &pg(),
             &fld("created_at", FieldType::DateTime, true, Some("now()")),
         );
-        // Should be: `"created_at" TIMESTAMPTZ DEFAULT now() NOT NULL`
-        // — exactly one " DEFAULT " token.
+        // Expect `"created_at" TIMESTAMPTZ DEFAULT now() NOT NULL`.
         let n_defaults = col_def.matches(" DEFAULT ").count();
         assert_eq!(
             n_defaults, 1,
@@ -678,9 +611,8 @@ mod tests {
 
     #[test]
     fn auto_i64_default_clause_passthrough() {
-        // Sanity: an `Auto<i64>` PK with no explicit default still
-        // emits `BIGSERIAL` and NO `DEFAULT` clause (BIGSERIAL implies
-        // its own nextval default).
+        // `BIGSERIAL` brings its own nextval default, so no explicit
+        // `DEFAULT` clause should appear.
         let mut col_def = String::new();
         write_column_def(&mut col_def, &pg(), &fld("id", FieldType::I64, true, None));
         assert!(col_def.contains("BIGSERIAL"), "got: {col_def}");
@@ -693,11 +625,8 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_auto_pk_does_not_double_emit_primary_key() {
-        // SQLite's `Auto<T>` PK must emit `INTEGER PRIMARY KEY
-        // AUTOINCREMENT` (PK clause inline with the type) and NOT
-        // an additional `PRIMARY KEY` keyword from the standard
-        // append path. Doubled-PK CREATE TABLE crashes the SQLite
-        // parser.
+        // `INTEGER PRIMARY KEY AUTOINCREMENT` already carries the PK
+        // clause. A second `PRIMARY KEY` breaks the SQLite parser.
         let dialect = crate::sql::Sqlite;
         let mut col_def = String::new();
         let mut field = fld("id", FieldType::I64, true, None);
@@ -714,10 +643,8 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_non_auto_pk_still_appends_primary_key() {
-        // A plain (non-Auto) PK column on SQLite still wants the
-        // standard PRIMARY KEY append — the inline-pk shortcut only
-        // applies when the type itself is `INTEGER PRIMARY KEY
-        // AUTOINCREMENT`.
+        // The inline-PK shortcut only applies to the AUTOINCREMENT
+        // type, so a plain PK column still gets the appended clause.
         let dialect = crate::sql::Sqlite;
         let mut col_def = String::new();
         let mut field = fld("slug", FieldType::String, false, None);
@@ -726,17 +653,12 @@ mod tests {
         assert!(col_def.contains(" PRIMARY KEY"), "got: {col_def}");
     }
 
-    // -------- Inline FK on SQLite (#559: silent referential-integrity loss) --------
+    // -------- Inline FK on SQLite --------
     //
-    // Before this PR, SQLite tables were created without FK clauses
-    // and `create_constraints_sql_with_dialect` would (separately)
-    // emit `ALTER TABLE ADD CONSTRAINT FOREIGN KEY` — which SQLite
-    // doesn't support. The earlier workaround skipped FKs entirely
-    // on SQLite, silently losing referential integrity.
-    //
-    // Fix: when `dialect.inline_fks_in_create_table()` is true, the
-    // FK clauses are emitted INSIDE the CREATE TABLE statement and
-    // `create_constraints_sql_with_dialect` returns empty.
+    // SQLite has no `ALTER TABLE ADD CONSTRAINT FOREIGN KEY`, so when
+    // `inline_fks_in_create_table()` is true the FK clauses must be
+    // inside `CREATE TABLE` and `create_constraints_sql_with_dialect`
+    // must return empty. Otherwise SQLite tables get no FKs at all.
 
     fn fk_model() -> ModelSchema {
         let mut fk_field = fld("author_id", FieldType::I64, false, None);
@@ -800,8 +722,8 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_returns_empty_post_hoc_constraint_list() {
-        // The runner asks for post-hoc ALTER ADD CONSTRAINT — return
-        // empty since the FK is already in CREATE TABLE.
+        // The FK is already in CREATE TABLE, so there is nothing for
+        // the runner's post-hoc ALTER step to do.
         let model = fk_model();
         let post_hoc = create_constraints_sql_with_dialect(&crate::sql::Sqlite, &model);
         assert!(
@@ -812,8 +734,8 @@ mod tests {
 
     #[test]
     fn postgres_keeps_post_hoc_alter_path() {
-        // PG path unchanged — FKs go through post-hoc ALTER ADD
-        // CONSTRAINT so cross-table cycles resolve cleanly.
+        // PG keeps FKs in post-hoc ALTER ADD CONSTRAINT so
+        // cross-table cycles resolve cleanly.
         let model = fk_model();
         let sql = create_table_sql_with_dialect(&crate::sql::Postgres, &model);
         assert!(

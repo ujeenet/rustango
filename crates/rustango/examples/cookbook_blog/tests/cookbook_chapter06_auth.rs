@@ -95,8 +95,8 @@ fn permission_codename_for_model_resolves_app_action_model() {
     let change = codename_for::<Author>("change");
     let delete = codename_for::<Author>("delete");
 
-    // Codename format is `{app}.{action}_{model}` matching Django's
-    // permission convention. The app label falls back to "project"
+    // Codename format is `{app}.{action}_{model}`.
+    // The app label falls back to "project"
     // when the macro can't infer it from the module path; the model
     // name is the lowercased struct ident.
     for (name, action) in [(&view, "view"), (&add, "add"), (&change, "change"), (&delete, "delete")] {

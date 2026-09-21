@@ -1,4 +1,4 @@
-//! Django parity — `Meta.default_related_name` lets a model override
+//! `Meta.default_related_name` lets a model override
 //! the convention reverse-relation managers use when an FK / M2M
 //! field doesn't pass `related_name="..."` itself.
 //!
@@ -7,7 +7,7 @@
 //! The value is stored on `ModelSchema::default_related_name` and the
 //! macro validates snake_case ASCII identifier shape at derive time so
 //! the string is safe for any future code that turns it back into an
-//! ident (reverse-manager codegen, DRF schema emit, admin templates).
+//! ident (reverse-manager codegen, REST schema emit, admin templates).
 //!
 //! Today rustango doesn't auto-emit reverse managers; this PR lays the
 //! declarative foundation.

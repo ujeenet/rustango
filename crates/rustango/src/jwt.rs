@@ -1,22 +1,17 @@
 //! Minimal JWT (HS256) — sign, verify, decode.
 //!
-//! Standalone alternative to [`crate::tenancy::jwt_lifecycle`] (which
-//! wraps this with refresh + JTI blacklist + sliding rotation, but is
-//! gated on the `tenancy` feature). Reach for this module when you
-//! want plain JWTs for:
+//! Use this for plain JWTs: magic-link tokens, service-to-service
+//! tokens, or a token you hand to a third party.
 //!
-//! - Magic-link tokens that carry a few claims (user id, purpose, exp)
-//! - Service-to-service tokens (sister to [`crate::hmac_auth`] —
-//!   pick HMAC for AWS-style request signing, JWT for stateless
-//!   bearer tokens)
-//! - Single-sign-on tokens you hand to a third party
+//! For refresh tokens, a JTI blocklist and sliding rotation, use
+//! [`crate::tenancy::jwt_lifecycle`], which wraps this module but
+//! needs the `tenancy` feature.
 //!
 //! ## Algorithm
 //!
-//! HS256 only — symmetric, single shared secret. RS256 / ES256 (public
-//! / private keypair) are out of scope: the rustls / ring deps would
-//! triple the always-on dep tree, and most callers picking JWT in a
-//! single-service codebase use HS256 anyway.
+//! HS256 only, so both sides share one secret. RS256 and ES256 would
+//! pull in a much larger dependency tree, and a single service rarely
+//! needs a key pair.
 //!
 //! ## Quick start
 //!
@@ -63,9 +58,8 @@ pub enum JwtError {
     Decode(String),
 }
 
-/// JWT claims — wraps a JSON object so callers can mix standard
-/// claims (`sub`, `exp`, `iat`, `iss`, `aud`, `nbf`, `jti`) with
-/// arbitrary extension fields.
+/// JWT claims. A JSON object, so you can mix the standard claims
+/// (`sub`, `exp`, `iat`, `iss`, `aud`, `nbf`, `jti`) with your own.
 #[derive(Debug, Clone, Default)]
 pub struct Claims {
     inner: Map<String, Value>,
@@ -81,8 +75,8 @@ impl Claims {
         c
     }
 
-    /// Empty claims (no subject, no iat). Useful when callers want
-    /// total control over the payload.
+    /// Empty claims: no subject, no `iat`. Use it when you want full
+    /// control over the payload.
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
@@ -149,8 +143,8 @@ impl Claims {
         c
     }
 
-    /// Set `jti` — token id, useful for blacklisting after use
-    /// (typical magic-link pattern).
+    /// Set `jti`, the token id. Use it to block a token after one
+    /// use, as a magic link does.
     #[must_use]
     pub fn jti(self, jti: impl Into<String>) -> Self {
         let mut c = self;
@@ -173,10 +167,9 @@ impl Claims {
 /// three-part base64url-encoded token: `header.payload.signature`.
 ///
 /// # Errors
-/// [`JwtError::Decode`] when `secret.len() < 32`. HMAC accepts any key
-/// length, but a short/empty key is guessable and the resulting token
-/// is forgeable, so we refuse to sign with one (audit N5; matches the
-/// 32-byte floor `tenancy::auth_routes` enforces).
+/// [`JwtError::Decode`] when `secret.len() < 32`. HMAC itself accepts
+/// any key length, but a short key can be guessed, and then anyone
+/// can forge a token. So this refuses to sign with one.
 pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
     if secret.len() < 32 {
         return Err(JwtError::Decode(
@@ -194,13 +187,14 @@ pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
 
 /// Decode + verify an HS256 JWT. Checks signature, `exp`, and `nbf`.
 ///
-/// Does NOT check `iss` / `aud` — if you set them when issuing, you
-/// **MUST** validate them yourself against expected values on the
-/// returned claims; a valid signature alone does not prove the token
-/// was minted for *your* service/audience (audit L1). There is also no
-/// clock-skew leeway: `exp`/`nbf` are compared against the exact current
-/// second. If your issuer and verifier clocks can drift, add a small
-/// tolerance via [`decode_at`] with an adjusted `now`.
+/// It does **not** check `iss` or `aud`. If you set them when
+/// issuing, you must check them yourself on the returned claims. A
+/// valid signature alone does not prove the token was made for your
+/// service.
+///
+/// There is no clock-skew leeway either: `exp` and `nbf` are compared
+/// to the exact current second. If your clocks can drift, call
+/// [`decode_at`] with an adjusted `now`.
 ///
 /// # Errors
 /// See [`JwtError`].
@@ -263,12 +257,12 @@ pub fn decode_at(token: &str, secret: &[u8], now: u64) -> Result<Claims, JwtErro
     Ok(claims)
 }
 
-/// Decode WITHOUT verifying the signature or temporal claims. Useful
-/// for inspecting a token to find which key id signed it (when you
-/// rotate keys), then calling [`decode`] with the right secret.
+/// Read a token without checking its signature or its `exp`/`nbf`.
+/// Use it to find which key signed a token during key rotation, then
+/// call [`decode`] with that secret.
 ///
-/// **Never trust the result for authorization** — there's no integrity
-/// guarantee.
+/// **Never use the result for authorization.** Nothing here proves
+/// the token is genuine.
 ///
 /// # Errors
 /// See [`JwtError`].
@@ -283,8 +277,7 @@ pub fn decode_unverified(token: &str) -> Result<Claims, JwtError> {
     Claims::from_json(&payload_bytes)
 }
 
-// HMAC-SHA256 lives in [`crate::crypto`] — same shape, one
-// implementation for hmac_auth + jwt + storage::s3 to share.
+// HMAC-SHA256 lives in `crate::crypto`, shared by every caller.
 use crate::crypto::hmac_sha256;
 
 fn now_secs() -> u64 {
@@ -319,8 +312,8 @@ mod tests {
 
     #[test]
     fn short_secret_rejected() {
-        // Audit N5 — a sub-32-byte key is guessable/forgeable; encode
-        // must refuse it, not just the empty case.
+        // A key under 32 bytes is guessable, so `encode` must refuse
+        // it, not only an empty one.
         let c = Claims::new("x");
         assert!(matches!(
             encode(&c, b"only-31-bytes-not-enough-yikes!"),

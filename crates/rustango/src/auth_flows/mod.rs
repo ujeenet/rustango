@@ -44,6 +44,10 @@
 //!
 //! Same pattern with [`EmailVerification`] — issue the URL after signup,
 //! verify on the callback, mark the user's `email_verified_at` column.
+//!
+//! [`EmailVerification`]: crate::auth_flows::EmailVerification
+//! [`PasswordReset::issue`]: crate::auth_flows::PasswordReset::issue
+//! [`PasswordReset::verify`]: crate::auth_flows::PasswordReset::verify
 
 use std::time::Duration;
 
@@ -152,9 +156,9 @@ impl PasswordReset {
     }
 }
 
-/// Django-shape `PasswordResetConfirmView` — verifies a reset URL,
-/// validates the new password, hashes it, and updates the named
-/// user row. Returns the `user_id` on success. Issue #391.
+/// Finish a password reset: verify the reset URL, validate the new
+/// password, hash it, and update the named user row. Returns the
+/// `user_id` on success.
 ///
 /// Sensible defaults:
 /// - `user_table` = `"rustango_users"`

@@ -1,6 +1,6 @@
 # Migraciones y el motor de migraciones
 
-**Rustango** incluye un motor de migraciones al estilo de Django: editas tus
+**Rustango** incluye un motor de migraciones dirigido por los modelos: editas tus
 modelos, ejecutas `makemigrations` para generar un archivo JSON versionado que
 describe el cambio de esquema, y `migrate` para aplicarlo. Desde la **0.48** el
 framework incluso migra **sus propias** tablas `rustango_*` a través del mismo
@@ -80,7 +80,7 @@ automática y depende por completo de lo que ya esté presente:
 |---|---|
 | nueva — sin historial, sin tablas | ejecuta el squash de verdad |
 | todas las migraciones reemplazadas están en el registro | lo registra, marca como tombstone a las predecesoras, **sin DDL** |
-| las tablas existen pero el registro no tiene historial | lo registra, **sin DDL** (el `--fake-initial` entre registros de Django) |
+| las tablas existen pero el registro no tiene historial | lo registra, **sin DDL** — el registro se alinea a posteriori con las tablas existentes |
 | solo *algunas* de las filas/tablas reemplazadas presentes | **rechazado** — indica qué falta y te dice que lo resuelvas a mano |
 
 El caso **parcial** es un error grave a propósito: ninguna elección automática

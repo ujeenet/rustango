@@ -1,12 +1,12 @@
-//! Django parity — `Meta.base_manager_name` names the Manager
-//! subclass that `<instance>.<relation>_set` uses when resolving
+//! `Meta.base_manager_name` names the Manager
+//! type that `<instance>.<relation>_set` uses when resolving
 //! reverse-relation managers (distinct from `default_manager_name`,
 //! which is what `Model.objects` returns at the class level).
 //!
 //! rustango spells the attribute as
 //! `#[rustango(base_manager_name = "...")]` on the model container.
 //! Stored on `ModelSchema::base_manager_name`. Declarative-only today;
-//! future reverse-manager codegen + DRF schema emit read the
+//! future reverse-manager codegen + REST schema emit read the
 //! metadata directly off the schema.
 
 use rustango::Model;

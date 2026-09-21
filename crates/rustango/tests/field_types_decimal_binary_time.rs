@@ -1,6 +1,6 @@
 //! Universal `FieldType::Decimal` / `Binary` / `Time` emission +
-//! parsing tests. PR for #30 / #31 prerequisite — adds the universal
-//! Django field types that work on every backend.
+//! parsing tests. PR for #30 / #31 prerequisite — adds the field
+//! types that work on every backend.
 //!
 //! ORM-extractability principle: all new types live in `core/` + per-
 //! dialect emitters under `sql/`. No tenancy / admin / forms coupling.

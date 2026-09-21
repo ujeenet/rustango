@@ -1,10 +1,9 @@
 //! Real-IP extraction middleware for apps behind a trusted reverse proxy.
 //!
-//! `axum::extract::ConnectInfo<SocketAddr>` always reports the
-//! immediate peer — useless when your app sits behind nginx /
-//! Cloudflare / ELB. This middleware parses one of the common
-//! forwarded-for headers and stuffs the resolved client IP into the
-//! request extensions as a [`RealIp`] value.
+//! `axum::extract::ConnectInfo<SocketAddr>` reports the immediate
+//! peer, which behind nginx, Cloudflare or an ELB is the proxy. This
+//! middleware reads a forwarded-for header instead and puts the
+//! result in the request extensions as a [`RealIp`].
 //!
 //! ## Quick start
 //!
@@ -23,12 +22,14 @@
 //! }
 //! ```
 //!
-//! ## Important security note
+//! ## Security note
 //!
-//! **Never trust forwarded-for headers from the open internet** — any
-//! client can set them. Apply this layer ONLY when a proxy you
-//! control terminates inbound requests and rewrites these headers,
-//! and configure that proxy to scrub them on the way in.
+//! **A forwarded-for header is only a claim.** Any client can send
+//! one. Use this layer only when a proxy you control receives every
+//! request and rewrites the header, and set that proxy to strip any
+//! header the client sent.
+//!
+//! [`RealIp`]: crate::real_ip::RealIp
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -62,14 +63,13 @@ pub enum HeaderStrategy {
     Auto,
 }
 
-/// A client IP resolved from a header sent by a **trusted** proxy — the
-/// connecting socket matched [`RealIpLayer::trust_proxies`] (#1398).
+/// A client IP from a header sent by a **trusted** proxy: the
+/// connecting socket matched [`RealIpLayer::trust_proxies`].
 ///
-/// [`RealIp`] says only "some header claimed this". Any client can claim
-/// anything, so that value must never key a security decision. This one
-/// carries the extra fact that the claim arrived over a hop the operator
-/// declared trusted, which is what makes it safe for
-/// [`crate::rate_limit`] to bucket on.
+/// A [`RealIp`] only means "a header claimed this", and any client can
+/// claim anything, so never base a security decision on it. This type
+/// adds the fact that the claim came over a hop the operator trusts,
+/// which is what makes it safe for [`crate::rate_limit`] to key on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrustedRealIp(pub IpAddr);
 
@@ -99,19 +99,18 @@ impl RealIpLayer {
         }
     }
 
-    /// Declare which networks' forwarding headers to believe, so the
-    /// resolved address can key a security decision (#1398).
+    /// Name the networks whose forwarding headers you believe, so the
+    /// resolved address can be used for security decisions.
     ///
-    /// Without this, a forwarding header is just a claim by whoever sent
-    /// it, and [`RealIp`] is only safe for logging. Name the addresses
-    /// your ingress actually connects from — your load balancer, your
-    /// nginx, your CDN's egress ranges — and a request arriving from one
-    /// of them additionally gets a [`TrustedRealIp`], which
-    /// [`crate::rate_limit::RateLimitLayer::per_ip`] will bucket on.
+    /// Without this, a forwarding header is only a claim and [`RealIp`]
+    /// is safe for logging alone. List the addresses your ingress
+    /// connects from: the load balancer, nginx, your CDN egress ranges.
+    /// A request from one of those also gets a [`TrustedRealIp`], which
+    /// [`crate::rate_limit::RateLimitLayer::per_ip`] keys on.
     ///
-    /// A request from anywhere else is unaffected: it still gets
-    /// `RealIp`, never `TrustedRealIp`, so a client cannot win itself a
-    /// private rate-limit bucket by inventing an `X-Forwarded-For`.
+    /// Any other request still gets `RealIp` but never
+    /// `TrustedRealIp`, so a client cannot claim its own rate-limit
+    /// bucket by inventing an `X-Forwarded-For`.
     ///
     /// ```no_run
     /// # use rustango::real_ip::RealIpLayer;
@@ -153,11 +152,9 @@ impl<S: Clone + Send + Sync + 'static> RealIpRouterExt for Router<S> {
                 let cfg = cfg.clone();
                 async move {
                     if let Some(ip) = extract(&req, &cfg.strategy) {
-                        // The claim, for logging — unchanged, and never
-                        // trusted on its own.
+                        // The bare claim: fine for logs, never trusted.
                         req.extensions_mut().insert(RealIp(ip));
-                        // The claim plus the fact that it came over a hop
-                        // the operator declared trusted (#1398).
+                        // Trusted form, only if the peer is a named proxy.
                         let peer = req
                             .extensions()
                             .get::<ConnectInfo<std::net::SocketAddr>>()

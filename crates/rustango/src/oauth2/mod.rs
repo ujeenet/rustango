@@ -4,9 +4,9 @@
 //! and OpenID Connect (Google, Microsoft, Apple, Keycloak, Auth0, Okta) by
 //! treating the provider's `/userinfo` endpoint as the identity source. We
 //! skip `id_token` JWT verification on purpose — TLS to a discovered
-//! `userinfo_endpoint` is the trust anchor, exactly like Django-allauth's
-//! default flow. That trade buys uniform handling across both protocol
-//! shapes and avoids pulling a JWT/JWKS stack into the dep tree.
+//! `userinfo_endpoint` is the trust anchor instead. That trade buys
+//! uniform handling across both protocol shapes and avoids pulling a
+//! JWT/JWKS stack into the dep tree.
 //!
 //! ## Security notes (audit L2)
 //!
@@ -53,6 +53,10 @@
 //! [`OAuth2Provider::from_discovery`] fetches `.well-known/openid-configuration`
 //! and populates `auth_url`, `token_url`, `userinfo_url` automatically. Use it
 //! for any conformant OIDC provider — Keycloak, Auth0, Okta, etc.
+//!
+//! [`OAuth2Registry`]: crate::oauth2::OAuth2Registry
+//! [`OAuth2Provider`]: crate::oauth2::OAuth2Provider
+//! [`OAuth2Provider::from_discovery`]: crate::oauth2::OAuth2Provider::from_discovery
 
 use std::collections::HashMap;
 use std::sync::Arc;

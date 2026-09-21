@@ -2,7 +2,8 @@
 //! ORDER BY, per-query opt-in. Closes #291 / T2.5.
 //!
 //! Pins:
-//!   1. Default queryset emits **no** ORDER BY (no Django stickiness).
+//!   1. Default queryset emits **no** ORDER BY — the default never
+//!      sticks to a query that didn't ask for it.
 //!   2. `.with_default_order()` opts in to the schema's default.
 //!   3. `.order_by(...)` after `.with_default_order()` appends as
 //!      secondary sort keys.

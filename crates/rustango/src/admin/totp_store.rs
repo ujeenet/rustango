@@ -1,22 +1,22 @@
-//! Persistence for admin TOTP (two-factor) devices — issue #367.
+//! Storage for admin TOTP (two-factor) devices.
 //!
-//! The RFC 6238 crypto lives in [`crate::totp`]; this module is the
-//! admin-side storage + lookup that the enrollment page and the login
-//! challenge share. One device per admin user, keyed by `user_id`.
+//! The RFC 6238 crypto lives in [`crate::totp`]. This module is the
+//! storage the enrollment page and the login challenge share: one
+//! device per admin user, keyed by `user_id`.
 //!
-//! The table is **operator-managed** (`#[rustango(managed = false)]`) and
-//! bootstrapped idempotently via [`ensure_table`] (the same pattern as
-//! the audit log), so it never enters the migration graph. Gated behind
-//! the `totp` feature; admin builds without `totp` are unchanged (no
-//! 2FA challenge).
+//! The table is `managed = false` and created by [`ensure_table`], the
+//! same pattern as the audit log, so it never joins the migration
+//! graph. Without the `totp` feature there is no 2FA challenge.
+//!
+//! [`ensure_table`]: crate::admin::totp_store::ensure_table
 
 use crate::sql::Pool;
 use crate::totp::TotpSecret;
 use crate::Model;
 
-/// One admin TOTP device. `confirmed = false` is a half-finished
-/// enrollment (secret generated + QR shown, code not yet verified);
-/// only a `confirmed` device gates login.
+/// One admin TOTP device. `confirmed = false` means enrollment is
+/// half done: the secret exists but no code has been verified yet.
+/// Only a confirmed device gates login.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "rustango_admin_totp", managed = false)]
 #[allow(dead_code)]
@@ -34,18 +34,17 @@ pub struct AdminTotp {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Idempotently create the `rustango_admin_totp` table for the active
-/// backend.
+/// Create the `rustango_admin_totp` table for the active backend. Safe
+/// to call repeatedly.
 ///
-/// Drift-free: rendered from [`AdminTotp::SCHEMA`] through the migration
-/// engine's dialect emitter — the same path `makemigrations`/`migrate`
-/// use — instead of hand-written per-dialect DDL. The model is
-/// `managed = false` (ensure-based, outside the migration set), so this
-/// helper is its only DDL path.
+/// The DDL is rendered from `AdminTotp::SCHEMA` by the migration
+/// engine's dialect emitter, the same path `migrate` uses, so it
+/// cannot drift. The model is `managed = false`, so this is its only
+/// DDL path.
 ///
 /// # Errors
-/// Driver / SQL failures (other than the duplicate-object errors this
-/// swallows to stay idempotent).
+/// Driver or SQL failures. Duplicate-object errors are ignored, so
+/// repeat calls succeed.
 pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
     use crate::core::Model as _;
     let snapshot = crate::migrate::SchemaSnapshot::from_models_forced(&[AdminTotp::SCHEMA]);
@@ -80,9 +79,9 @@ pub async fn device(pool: &Pool, user_id: i64) -> Option<AdminTotp> {
         .and_then(|rows| rows.into_iter().next())
 }
 
-/// The user's **confirmed** TOTP secret, decoded — `None` when the user
-/// has no device or an unconfirmed (pending) one. This is the gate the
-/// login challenge checks.
+/// The user's **confirmed** TOTP secret, decoded. `None` when there is
+/// no device, or when the device is still pending. The login challenge
+/// checks this.
 pub async fn confirmed_secret(pool: &Pool, user_id: i64) -> Option<TotpSecret> {
     let d = device(pool, user_id).await?;
     if !d.confirmed {
@@ -91,17 +90,17 @@ pub async fn confirmed_secret(pool: &Pool, user_id: i64) -> Option<TotpSecret> {
     TotpSecret::from_base32(&d.secret_base32)
 }
 
-/// Start (or restart) enrollment: store a fresh, unconfirmed secret for
-/// `user_id`, replacing any existing device. Returns the stored secret.
+/// Start or restart enrollment: store a fresh unconfirmed secret for
+/// `user_id`, replacing any device that is already there.
 ///
 /// # Errors
-/// Driver / SQL failures.
+/// Driver or SQL failures.
 pub async fn start_enrollment(
     pool: &Pool,
     user_id: i64,
     secret: &TotpSecret,
 ) -> Result<(), crate::sql::ExecError> {
-    // One device per user — clear any prior (pending or confirmed) row.
+    // One device per user, so drop any earlier row first.
     let del = AdminTotp::objects()
         .filter("user_id", user_id)
         .compile_delete()?;
@@ -116,11 +115,11 @@ pub async fn start_enrollment(
     Ok(())
 }
 
-/// Mark the user's device confirmed (called once a code verifies during
-/// enrollment). No-op if there's no pending device.
+/// Mark the user's device confirmed, once a code has verified during
+/// enrollment. Does nothing when there is no pending device.
 ///
 /// # Errors
-/// Driver / SQL failures.
+/// Driver or SQL failures.
 pub async fn confirm(pool: &Pool, user_id: i64) -> Result<(), crate::sql::ExecError> {
     use crate::sql::UpdaterPool as _;
     AdminTotp::objects()

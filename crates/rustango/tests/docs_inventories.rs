@@ -31,10 +31,9 @@ const TESTING_PAGES: &[&str] = &[
 /// std macros that appear in the pages' Rust samples. They are not
 /// helpers and never were.
 ///
-/// The `assert_` prefix does the rest of the work: it is what keeps out
-/// Django's `assertContains` / `assertRedirects`, which the page names
-/// deliberately when drawing the comparison, and the English words
-/// "assertion" and "assertions".
+/// The `assert_` prefix does the rest of the work: it keeps out
+/// camelCase `assertFoo` helper names a page may quote from elsewhere,
+/// and the English words "assertion" and "assertions".
 const STD_MACROS: &[&str] = &["assert_eq", "assert_ne"];
 
 fn repo_root() -> PathBuf {

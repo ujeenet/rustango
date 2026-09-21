@@ -136,7 +136,7 @@ fn parse_api_key(output: &std::process::Output) -> String {
 /// Resolves every request to the one schema-mode tenant this chapter
 /// provisions. A real app resolves from the host; the point here is
 /// that `require_auth` reads *a resolved tenant* rather than a pool
-/// the router captured at construction time (GHSA-c4gg-mvfq-h268).
+/// the router captured at construction time.
 #[derive(Clone)]
 struct CookbookTenant;
 
@@ -285,9 +285,8 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
     // hand-built `search_path` pool into the middleware at
     // route-construction time — ten lines below an assertion that a
     // cross-tenant cookie must not authenticate. That recipe *was* the
-    // cross-tenant authentication bypass (GHSA-c4gg-mvfq-h268): one
-    // pool for every request means one tenant's database answers every
-    // host's credentials.
+    // cross-tenant authentication bypass: one pool for every request
+    // means one tenant's database answers every host's credentials.
 
     // Issue an API key for alice via `manage create-api-key`. This
     // exercises the schema-mode tenant pool fix in
@@ -322,8 +321,8 @@ async fn session_user_resolves_browser_cookie_and_falls_back_to_anonymous() {
             None => (StatusCode::UNAUTHORIZED, "anonymous").into_response(),
         }
     }
-    // `require_auth` takes no pool as of GHSA-c4gg-mvfq-h268. The
-    // tenant context below is what it reads instead, per request.
+    // `require_auth` takes no pool as of 0.57.11. The tenant context
+    // below is what it reads instead, per request.
     let ctx = std::sync::Arc::new(rustango::extractors::TenantContext {
         pools: std::sync::Arc::new(rustango::tenancy::TenantPools::new(
             sqlx::PgPool::connect(&db).await.expect("registry pool"),

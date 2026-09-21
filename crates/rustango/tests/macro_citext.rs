@@ -1,4 +1,4 @@
-//! Django-parity #344 — `#[rustango(citext)]` field attribute that
+//! Issue #344 — `#[rustango(citext)]` field attribute that
 //! routes the migration DDL through `dialect.ci_text_type` instead
 //! of the plain `column_type` mapping.
 //!

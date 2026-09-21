@@ -127,9 +127,9 @@ async fn left_join_sub_keeps_unmatched_rows() {
 /// table. The inner query ranks each customer's orders by `total` DESC
 /// with `ROW_NUMBER() OVER (PARTITION BY customer_id ...)`; the outer
 /// query joins that ranked derived table back to the base rows and keeps
-/// only rank ≤ 2. Django's `annotate(rank=Window(...)).filter(rank__lte=2)`
-/// idiom, which previously had no rustango equivalent (windows compile to
-/// an `AggregateQuery`, which `join_sub` didn't accept).
+/// only rank ≤ 2. "Rank, then keep rank ≤ N" previously had no
+/// equivalent here: windows compile to an `AggregateQuery`, which
+/// `join_sub` didn't accept.
 #[tokio::test]
 async fn window_derived_table_yields_top_n_per_group() {
     let pool = make_pool().await;

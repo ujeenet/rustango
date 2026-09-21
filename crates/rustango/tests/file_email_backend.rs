@@ -1,4 +1,4 @@
-//! Django-parity #417 — file-based email backend.
+//! Issue #417 — file-based email backend.
 //!
 //! Verifies `FileMailer` writes `.eml` files containing the rendered
 //! email headers + body, gives each send a unique filename, validates

@@ -1,31 +1,8 @@
-//! Django `django.utils.dates` parity — month / weekday name maps.
+//! English month and weekday names.
 //!
-//! Django ships six lookup tables under `django.utils.dates`:
-//!
-//! * `MONTHS` — full English month names (`January`..`December`)
-//! * `MONTHS_3` — three-char lowercase ASCII abbreviation
-//!   (`jan`..`dec`) — used by Django's URL `<archive>/<jan>/`
-//!   patterns and by `dateformat`'s `b` code
-//! * `MONTHS_AP` — Associated Press style with periods (`Jan.`,
-//!   `Feb.`, but `March`, `April`, `May`, `June`, `July`,
-//!   `Sept.`, `Oct.`, `Nov.`, `Dec.` — see Django source for the
-//!   exact list)
-//! * `MONTHS_ALT` — alternate full forms (in English same as
-//!   `MONTHS`; differs in other locales when translated)
-//! * `WEEKDAYS` — full weekday names (`Monday`..`Sunday`)
-//! * `WEEKDAYS_ABBR` — three-char abbreviated weekday names
-//!   (`Mon`..`Sun`)
-//!
-//! rustango exposes these as plain functions taking a 1-indexed
-//! month or a `chrono::Weekday`. The function shape sidesteps
-//! const-initialization issues that a Rust `HashMap` would have
-//! while keeping the calling code expressive
-//! (`month_full(d.month())` instead of inlining the lookup table
-//! every time).
-//!
-//! Per-locale translation is a separate concern (Fluent/gettext
-//! integration deferred). These return English by design — match
-//! `dateformat` behavior.
+//! Months take a 1-indexed number, weekdays take a
+//! `chrono::Weekday`. The names are always English, which is what
+//! `dateformat` expects; translation is handled elsewhere.
 //!
 //! ```
 //! use chrono::Weekday;
@@ -41,11 +18,8 @@
 
 use chrono::Weekday;
 
-/// Django `MONTHS` lookup — full English month name for a
-/// 1-indexed month (`1..=12`). Returns `""` for out-of-range
-/// input (Django would raise `KeyError`; we prefer the empty-
-/// string fallback so callers can chain into format strings
-/// without panicking).
+/// Full month name for `1..=12`. Any other
+/// number gives `""`, so formatting code never panics.
 #[must_use]
 pub fn month_full(month: u32) -> &'static str {
     match month {
@@ -65,10 +39,8 @@ pub fn month_full(month: u32) -> &'static str {
     }
 }
 
-/// Django `MONTHS_3` lookup — three-char lowercase ASCII month
-/// abbreviation (`"jan"`..`"dec"`) for a 1-indexed month. Used
-/// internally by `dateformat`'s `b` code and by Django's date-
-/// archive URL patterns.
+/// Lowercase three-letter month name, `"jan"` to `"dec"`. Used by
+/// `dateformat`'s `b` code and by date-archive URLs.
 #[must_use]
 pub fn month_abbr(month: u32) -> &'static str {
     match month {
@@ -88,14 +60,9 @@ pub fn month_abbr(month: u32) -> &'static str {
     }
 }
 
-/// Django `MONTHS_AP` lookup — Associated Press style with
-/// trailing periods on abbreviated months and full names for
-/// March / April / May / June / July (the AP style guide says
-/// these are short enough to spell out).
-///
-/// Mirrors Django 6.0 source character-for-character:
-/// `Jan.`, `Feb.`, `March`, `April`, `May`, `June`, `July`,
-/// `Aug.`, `Sept.`, `Oct.`, `Nov.`, `Dec.`.
+/// Associated Press style month name:
+/// `Jan.`, `Feb.`, `March`, `April`, `May`, `June`, `July`, `Aug.`,
+/// `Sept.`, `Oct.`, `Nov.`, `Dec.`.
 #[must_use]
 pub fn month_ap(month: u32) -> &'static str {
     match month {
@@ -115,10 +82,9 @@ pub fn month_ap(month: u32) -> &'static str {
     }
 }
 
-/// Django `WEEKDAYS` lookup — full English weekday name. Takes
-/// a `chrono::Weekday` rather than a numeric index to avoid the
-/// 0-vs-1-indexed and Mon-vs-Sun-first ambiguity that bites
-/// callers translating from Django's numeric API.
+/// Full weekday name. It takes a
+/// `chrono::Weekday`, not a number, so there is no confusion about
+/// where the week starts or whether the index is 0- or 1-based.
 #[must_use]
 pub fn weekday_full(day: Weekday) -> &'static str {
     match day {
@@ -132,8 +98,7 @@ pub fn weekday_full(day: Weekday) -> &'static str {
     }
 }
 
-/// Django `WEEKDAYS_ABBR` lookup — three-char weekday
-/// abbreviation (`"Mon"`..`"Sun"`).
+/// Three-letter weekday name, `"Mon"` to `"Sun"`.
 #[must_use]
 pub fn weekday_abbr(day: Weekday) -> &'static str {
     match day {
@@ -179,14 +144,13 @@ mod tests {
         ];
         for (i, name) in expected.iter().enumerate() {
             assert_eq!(month_abbr(i as u32 + 1), *name);
-            // All chars are ASCII lowercase.
             assert!(name.chars().all(|c| c.is_ascii_lowercase()));
         }
     }
 
     #[test]
     fn month_ap_includes_periods_only_for_abbreviated() {
-        // Abbreviated months have trailing periods.
+        // Short forms end with a period.
         assert!(month_ap(1).ends_with('.'));
         assert!(month_ap(2).ends_with('.'));
         assert!(month_ap(8).ends_with('.'));
@@ -194,7 +158,7 @@ mod tests {
         assert!(month_ap(10).ends_with('.'));
         assert!(month_ap(11).ends_with('.'));
         assert!(month_ap(12).ends_with('.'));
-        // March..July are spelled out (no period).
+        // March to July are spelled out.
         for m in 3..=7 {
             assert!(!month_ap(m).ends_with('.'));
         }

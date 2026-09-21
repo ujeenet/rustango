@@ -6,31 +6,26 @@
 //! # What this router is for
 //!
 //! Uploading, deleting, moving, tagging and browsing the library, from
-//! inside your app or your admin. Every one of its routes is an
-//! operator action on the library, and every response carrying a media
-//! row carries a **presigned** URL with it — which is why the whole
-//! surface ships `Cache-Control: no-store`.
+//! inside your app or your admin. Every route is an operator action,
+//! and every response with a media row carries a **presigned** URL.
+//! That is why the whole surface sends `Cache-Control: no-store`.
 //!
 //! # What it is not for
 //!
-//! **Serving media to the public.** There is no anonymous route here
-//! and no read that is cheaper than the others; [`MediaPerms`] answers
-//! `401` to a request with no principal, on every path. That is not an
-//! oversight to work around — a public page showing an uploaded image
-//! does not call this API at all.
-//!
-//! It renders a URL its own handler computed:
+//! **Serving media to the public.** No route here is anonymous;
+//! [`MediaPerms`] answers `401` when there is no principal. A public
+//! page showing an uploaded image does not call this API. It renders a
+//! URL its own handler computed:
 //!
 //! ```ignore
 //! // your own public route, outside this router
 //! let url = manager.public_url(id).await?;   // CDN address, no signature
 //! ```
 //!
-//! See [`crate::media::MediaManager::public_url`], and `docs/files.md`
-//! for the two delivery models side by side. If you reached for an
-//! `AllowAll` [`MediaAuthorizer`] to get a public page working, that is
-//! the wrong end of the problem — it opens all sixteen routes,
-//! including `DELETE` and the presigned `PUT`, to everyone.
+//! See [`crate::media::MediaManager::public_url`] and `docs/files.md`.
+//! Do not reach for an `AllowAll` [`MediaAuthorizer`] to make a public
+//! page work: it opens all sixteen routes, including `DELETE` and the
+//! presigned `PUT`, to everyone.
 //!
 //! # This router requires an authorization policy
 //!
@@ -38,22 +33,19 @@
 //! [`MediaAuthorizer`]. [`media_router`] is deprecated and refuses
 //! every request — it does not serve.
 //!
-//! That is a behaviour change in 0.57.7, and the reason is worth
-//! stating plainly: before it, these 16 routes took **no**
-//! authentication, authorization or tenant extractor at all. An
-//! anonymous caller could walk the integer id space collecting
-//! presigned S3 download links, delete rows by id, and mint a
-//! presigned PUT for a key prefix of their choosing. An integrator who
-//! copied the quick start below shipped an open bucket.
+//! Without a policy these routes take no authentication and no tenant.
+//! An anonymous caller could walk the id space collecting presigned S3
+//! download links, delete rows by id, and mint a presigned PUT for any
+//! key prefix.
 //!
-//! A blanket `.layer(auth)` in front is **not** sufficient for a
+//! A blanket `.layer(auth)` in front is **not** enough for a
 //! multi-tenant deployment: no handler carries a tenant, so an
 //! authenticated tenant-A user still reads tenant B's row by id.
 //! [`MediaTarget`] names the row so the decision can be made per row.
 //!
-//! Mounted under any prefix you like; the conventional choice is
-//! `/media`. All responses are JSON (no auto-CSRF — you wire that
-//! at the outer router level via [`crate::forms::csrf`]).
+//! Mount it under any prefix; `/media` is conventional. All responses
+//! are JSON (no auto-CSRF — wire that on the outer router via
+//! [`crate::forms::csrf`]).
 //!
 //! ## Endpoints
 //!
@@ -69,36 +61,34 @@
 //! | POST   | `/collections`                    | Create: body `{name, slug, parent_id?, description?}`. Authorized as `Add(NewCollection)`. |
 //! | GET    | `/collections`                    | List every non-deleted collection. |
 //! | GET    | `/collections/{id}`               | Single collection. |
-//! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` to include sub-folders. Authorized as `Read(CollectionContents { recursive })` — media rows, not a collection read, and the flag rides along so the wide form can never ask for less. |
-//! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside orphaned, NOT deleted). Authorized as `Delete(CollectionSubtree)`, not `Delete(Collection)`. |
-//! | POST   | `/tags`                           | Create / upsert: body `{slug}`. Authorized as `Add(NewTag)` — a different decision from creating a collection. |
+//! | GET    | `/collections/{id}/contents`      | Media in the collection. `?recursive=true` includes sub-folders. Authorized as `Read(CollectionContents { recursive })` — a media read, not a collection read. |
+//! | DELETE | `/collections/{id}`               | Soft-delete a collection **and its descendants** (Media inside is orphaned, not deleted). Authorized as `Delete(CollectionSubtree)`, not `Delete(Collection)`. |
+//! | POST   | `/tags`                           | Create / upsert: body `{slug}`. Authorized as `Add(NewTag)`. |
 //! | GET    | `/tags`                           | All tags. |
 //! | GET    | `/tags/popular`                   | Top tags by usage count. `?limit=N`. |
 //! | GET    | `/tags/{slug}/media`              | Media carrying the tag. `?limit=N&offset=N`. |
 //!
 //! ## Quick start
 //!
-//! Implementing [`MediaAuthorizer`] needs the `async-trait` attribute;
-//! the crate re-exports it as [`crate::media::async_trait`] so you do
-//! not add the dependency yourself and the versions cannot drift.
+//! Implementing [`MediaAuthorizer`] needs the `async-trait` attribute.
+//! The crate re-exports it as [`crate::media::async_trait`], so you do
+//! not add the dependency yourself and versions cannot drift.
 //!
 //! ```ignore
 //! use rustango::media::{MediaManager, router::media_router_with};
 //! use rustango::storage::StorageRegistry;
 //!
-//! // Tables come from the framework's system migrations (run during
-//! // provisioning / `migrate_framework`) — no per-boot bootstrap needed.
+//! // Tables come from the framework's system migrations.
 //!
-//! // `new_pool` takes `sql::Pool` and works on all three backends;
-//! // `MediaManager::new` is Postgres-only and takes a `PgPool`.
+//! // `new_pool` works on all three backends; `MediaManager::new` is
+//! // Postgres-only and takes a `PgPool`.
 //! let manager = MediaManager::new_pool(pool.clone(), registry);
 //! let app = axum::Router::new()
 //!     .nest("/media", media_router_with(manager, MyAuthorizer));
 //! ```
 //!
 //! `MyAuthorizer` is yours — see [`MediaAuthorizer`]. With the
-//! **`tenancy`** feature on there is a shipped one, so the secure path
-//! is a one-liner:
+//! **`tenancy`** feature there is a shipped one:
 //!
 //! ```ignore
 //! use rustango::media::router::{media_router_with, MediaPerms};
@@ -131,11 +121,9 @@ const DEFAULT_PRESIGN_TTL_SECS: u64 = 3600;
 
 /// What a request names — the row an authorizer is deciding about.
 ///
-/// The kind is part of the value on purpose. A bare `Option<i64>` is
-/// ambiguous across this route table: `/media/7` and `/collections/7`
-/// are different rows in different tables, and an authorizer handed a
-/// naked `7` cannot tell them apart. The first version of this API
-/// made exactly that mistake.
+/// The kind is part of the value on purpose. `/media/7` and
+/// `/collections/7` are different rows in different tables, so an
+/// authorizer handed a bare `7` could not tell them apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MediaTarget {
@@ -146,40 +134,19 @@ pub enum MediaTarget {
     /// The **media inside** one collection — `GET
     /// /collections/{id}/contents`, with or without `?recursive`.
     ///
-    /// Separate from [`Self::Collection`] because the two routes return
-    /// different tables. This one answers `Vec<MediaResponse>`: media
-    /// rows, each carrying a presigned GET URL. Classifying it as a
-    /// collection read meant a policy granting "may browse folders" —
-    /// `rustango_media_collections.view` under [`MediaPerms`] — read
-    /// every media row in the library one collection at a time, and
-    /// harvested a signed download link for each.
+    /// Separate from [`Self::Collection`] because this route returns
+    /// media rows, each with a presigned GET URL. Granting it is a
+    /// decision about media, not just about browsing folders. The id
+    /// still names a collection, so a policy that scopes collections by
+    /// owner can use it the same way it uses [`Self::Collection`].
     ///
-    /// The id still names a collection, so a policy that scopes
-    /// collections by owner can use it exactly as it uses
-    /// [`Self::Collection`]. What changed is that granting it is also a
-    /// decision about media.
-    ///
-    /// **`recursive` widens the same read, it does not replace it.** A
-    /// recursive listing returns the media in every descendant
-    /// collection too, so it is strictly more rows than the same request
-    /// without it. It used to classify as [`Self::Listing`] instead —
-    /// which dropped the id, leaving a row-scoping authorizer nothing to
-    /// scope by, and under [`MediaPerms`] asked for *one* codename where
-    /// the narrow read asks for two. Adding `?recursive=true` to a
-    /// refused request made it succeed.
-    ///
-    /// Any policy deciding this must be at least as strict for
-    /// `recursive: true` as for `recursive: false`.
+    /// **`recursive` widens the same read.** It also returns the media
+    /// in every descendant collection, so it is always more rows. Any
+    /// policy must be at least as strict for `recursive: true` as for
+    /// `recursive: false`.
     ///
     /// Match as `MediaTarget::CollectionContents { id, recursive }`, or
     /// `{ id, .. }` when the width does not change the answer.
-    ///
-    /// Unlike [`Self::NewUpload`] this variant is constructible from
-    /// outside the crate: it names an existing row, like
-    /// [`Self::Collection`] beside it, and a policy is worth unit
-    /// testing against a target the test can build. The body-derived
-    /// variants stay `#[non_exhaustive]` because they have more of the
-    /// request left to surface; this one does not.
     CollectionContents {
         /// The collection named in the path.
         id: i64,
@@ -188,25 +155,18 @@ pub enum MediaTarget {
         recursive: bool,
     },
     /// A collection **and everything under it** — what
-    /// `DELETE /collections/{id}` actually reaches.
+    /// `DELETE /collections/{id}` really reaches.
     ///
-    /// Separate from [`Self::Collection`] because the two are different
-    /// decisions and the difference is not visible from the request.
     /// Deleting a collection soft-deletes every descendant collection
-    /// and sets `collection_id = NULL` on the media in all of them, so
-    /// one authorized id can destroy a subtree of any size and re-parent
-    /// rows a per-row policy would have refused individually.
-    ///
-    /// The shape of that subtree is not under the deleting caller's
-    /// control: `POST /collections` takes `parent_id` in the body, so
-    /// anyone who may create a collection can attach one under someone
-    /// else's. The realistic case is not an attacker — it is a shared
-    /// library where a colleague parented their folder under yours, and
-    /// deleting yours takes theirs with it.
+    /// and sets `collection_id = NULL` on the media in all of them. One
+    /// authorized id can destroy a subtree of any size. The caller does
+    /// not control that shape either: `POST /collections` takes
+    /// `parent_id`, so anyone who may create a collection can attach one
+    /// under someone else's.
     ///
     /// **Granting this is not the same as granting `Delete(Collection)`.**
-    /// A policy that ends on `_ => false`, as the example below does,
-    /// denies it until someone opts in deliberately.
+    /// A policy that ends on `_ => false` denies it until someone opts
+    /// in.
     CollectionSubtree(i64),
     /// One tag, by slug. A slug is caller-chosen text — including
     /// text that looks like a number — so it is never an id.
@@ -214,27 +174,20 @@ pub enum MediaTarget {
     /// `POST /uploads/begin`. Names no existing row: it mints a
     /// presigned `PUT` for a caller-chosen disk and key prefix.
     ///
-    /// **Grant this narrowly.** It is a write primitive into storage,
-    /// and the caller picks the disk and key prefix. `/uploads/{id}/
-    /// finalize` is *not* this — it mutates an existing row and
-    /// classifies as `Change(Media(id))`.
+    /// **Grant this narrowly.** It is a write primitive into storage.
+    /// `/uploads/{id}/finalize` is *not* this — it mutates an existing
+    /// row and classifies as `Change(Media(id))`.
     ///
-    /// The fields are what the caller **asked for**, read out of the
-    /// request body before the handler runs — so a policy can allow-list
-    /// a disk, pin a key prefix per tenant, or refuse an upload
-    /// attributed to someone else. Without them `rustango_media.add`
-    /// means "write anywhere in any bucket", which is not a decision
-    /// anyone intended to grant.
-    ///
-    /// They are **unvalidated caller input**, not facts. A body that
-    /// does not parse arrives as empty strings and `None` rather than a
-    /// `400`, because authorization is decided before validation is —
-    /// the handler rejects a malformed body afterwards, on its own
-    /// terms.
+    /// The fields are what the caller **asked for**, read from the body
+    /// before the handler runs, so a policy can allow-list a disk, pin a
+    /// key prefix per tenant, or refuse an upload attributed to someone
+    /// else. They are **unvalidated input**, not facts: a body that does
+    /// not parse arrives as empty strings and `None`, because
+    /// authorization runs before validation. The handler rejects a bad
+    /// body afterwards.
     ///
     /// Match it as `MediaTarget::NewUpload { disk, .. }`, with the
-    /// trailing `..`. It stays `#[non_exhaustive]` so more of the body
-    /// can be surfaced here without breaking a policy written today.
+    /// trailing `..`.
     #[non_exhaustive]
     NewUpload {
         /// Requested `disk` — a key into the [`crate::storage::StorageRegistry`].
@@ -249,42 +202,32 @@ pub enum MediaTarget {
         uploaded_by_id: Option<i64>,
     },
     /// `POST /collections`. Names no existing row: it creates one,
-    /// optionally under a `parent_id` taken from the body.
+    /// optionally under a `parent_id` from the body.
     ///
-    /// That `parent_id` is why this is worth its own decision.
-    /// Collections nest, `DELETE /collections/{id}` takes a whole
-    /// subtree, and anyone who may create a collection may attach one
-    /// under someone else's — see [`Self::CollectionSubtree`].
+    /// That `parent_id` is why it is its own decision. Collections
+    /// nest, `DELETE /collections/{id}` takes a whole subtree, and
+    /// anyone who may create a collection may attach one under someone
+    /// else's — see [`Self::CollectionSubtree`].
     ///
-    /// Match as `MediaTarget::NewCollection { .. }`, with the braces —
-    /// an empty struct variant so the requested `parent_id` and `slug`
-    /// can be added here later without breaking policies written today.
+    /// Match as `MediaTarget::NewCollection { .. }`, with the braces.
     #[non_exhaustive]
     NewCollection {},
     /// `POST /tags`. Creates (or upserts) a tag by slug.
     ///
-    /// Separate from [`Self::NewCollection`] because the two are
-    /// different tables and different decisions. They used to arrive as
-    /// the same `Add(Listing)`, so a policy could not tell "may create
-    /// a folder" from "may create a tag" — the same "one value, two
-    /// tables" confusion that `Media(7)` and `Collection(7)` were split
-    /// to remove.
-    ///
-    /// Match as `MediaTarget::NewTag { .. }`, with the braces.
+    /// Separate from [`Self::NewCollection`]: different table,
+    /// different decision. Match as `MediaTarget::NewTag { .. }`, with
+    /// the braces.
     #[non_exhaustive]
     NewTag {},
     /// A read that enumerates rather than naming a row — `GET
     /// /collections`, `GET /tags` and `GET /tags/popular`.
     ///
-    /// A `?recursive` contents listing is **not** one of these. It names
-    /// a collection, so it keeps it: see
+    /// A `?recursive` contents listing is **not** one of these; it
+    /// names a collection, so it keeps the id. See
     /// [`Self::CollectionContents`].
     ///
-    /// **Granting this is not harmless.** Listings enumerate, and
-    /// enumeration is what turns "guess an id" into "read the index".
-    ///
-    /// It no longer covers creates: `POST /collections` and `POST
-    /// /tags` are [`Self::NewCollection`] and [`Self::NewTag`].
+    /// **Granting this is not harmless.** Enumeration turns "guess an
+    /// id" into "read the index".
     Listing,
 }
 
@@ -306,21 +249,16 @@ pub enum MediaAction {
     Delete(MediaTarget),
 }
 
-/// What a [`MediaAuthorizer`] decided, and therefore what the client is
-/// told.
+/// What a [`MediaAuthorizer`] decided, and so what the client is told.
 ///
-/// Three-valued rather than `bool` because **"nobody is signed in" and
-/// "signed in, and may not do this" are different answers**, and a
-/// client acts on them differently: a token client treats `401` as its
-/// cue to refresh, so answering `403` to an anonymous request means the
-/// refresh never fires and the member is silently logged out. #1193
-/// settled this for `ViewSet`s; media answered `403` to everyone until
-/// this existed.
+/// Three-valued rather than `bool`: "nobody is signed in" and "signed
+/// in, but may not do this" are different answers. A token client
+/// treats `401` as its cue to refresh, so answering `403` to an
+/// anonymous request silently logs the member out.
 ///
 /// `From<bool>` is implemented, so a policy that already computes a
-/// boolean can `return allowed.into()` — `false` becomes
-/// [`Self::Forbidden`], which is the conservative reading of a bare
-/// `false` and matches the old behaviour exactly.
+/// boolean can `return allowed.into()`; `false` becomes
+/// [`Self::Forbidden`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MediaDecision {
@@ -329,8 +267,8 @@ pub enum MediaDecision {
     /// No authenticated principal. The client is told `401` so it knows
     /// to authenticate.
     ///
-    /// Return this only when there is genuinely no identity. A signed-in
-    /// user who lacks the permission is [`Self::Forbidden`]: answering
+    /// Return this only when there is no identity at all. A signed-in
+    /// user who lacks the permission is [`Self::Forbidden`]; answering
     /// `401` there sends a token client into a refresh loop that cannot
     /// succeed.
     Unauthenticated,
@@ -343,9 +281,8 @@ impl From<bool> for MediaDecision {
     /// `true` → [`MediaDecision::Allow`], `false` →
     /// [`MediaDecision::Forbidden`].
     ///
-    /// Never `Unauthenticated`: a bare `false` carries no information
-    /// about whether a principal existed, and guessing `401` from it
-    /// would invite the refresh loop the variant exists to avoid.
+    /// Never `Unauthenticated`: a bare `false` says nothing about
+    /// whether a principal existed.
     fn from(allowed: bool) -> Self {
         if allowed {
             Self::Allow
@@ -357,17 +294,14 @@ impl From<bool> for MediaDecision {
 
 /// Decides whether a request may touch the media surface.
 ///
-/// **There is no default implementation, deliberately.** Before this
-/// existed, `media_router` mounted 16 routes and not one handler took
-/// an authentication, authorization or tenant extractor: an anonymous
-/// caller could walk the integer id space harvesting presigned S3
-/// download links, delete by id, and mint a presigned PUT for a
-/// caller-chosen key prefix. An integrator who copied the quick start
-/// shipped an open bucket.
+/// **There is no default implementation, on purpose.** Without a
+/// policy these 16 routes take no identity and no tenant, so an
+/// anonymous caller could harvest presigned S3 links, delete by id,
+/// and mint a presigned PUT for any key prefix.
 ///
-/// Implement this against whatever your app uses for identity, and
-/// scope by tenant here if you are multi-tenant — [`MediaTarget`]
-/// names the row for exactly that.
+/// Implement it against whatever your app uses for identity, and scope
+/// by tenant here if you are multi-tenant — [`MediaTarget`] names the
+/// row for exactly that.
 ///
 /// ```ignore
 /// struct SessionAuthorizer;
@@ -417,26 +351,18 @@ impl From<bool> for MediaDecision {
 ///
 /// Note the trailing `_ => false` arms. [`MediaAction`] and
 /// [`MediaTarget`] are both `#[non_exhaustive]`, so a future route
-/// reaches your policy as a variant you have not written an arm for.
-/// Ending on `false` means that arrives denied rather than allowed —
-/// and `false.into()` is [`MediaDecision::Forbidden`], never
-/// `Unauthenticated`.
+/// reaches your policy as a variant you have no arm for. Ending on
+/// `false` denies it.
 ///
 /// # Your impl runs on every request, and nothing bounds it
 ///
-/// Two measured consequences worth designing around:
-///
-/// - **There is no timeout here.** A policy that hangs pins its request
-///   indefinitely. The gate itself touches no pool, so a wedged request
-///   holds no database connection — but a policy that queries holds one
-///   from its own pool for as long as it hangs. Mount
-///   [`crate::request_timeout`] on the outer router if you want a
-///   bound; it covers this layer.
+/// - **There is no timeout here.** A policy that hangs pins its
+///   request. The gate touches no pool, but a policy that queries holds
+///   a connection from its own pool while it hangs. Mount
+///   [`crate::request_timeout`] on the outer router for a bound.
 /// - **Do not hold a lock across the `.await`.** "Check a cache, else
-///   hit the database" is the natural shape and it compiles, but a
-///   `tokio::sync::Mutex` held across the await serializes the whole
-///   media surface: eight concurrent requests taking 50 ms each under
-///   one lock measured 417 ms rather than ~50 ms. Take the lock, read,
+///   hit the database" compiles, but a `tokio::sync::Mutex` held across
+///   the await serializes the whole media surface. Take the lock, read,
 ///   drop it, then await.
 #[async_trait::async_trait]
 pub trait MediaAuthorizer: Send + Sync + 'static {
@@ -445,8 +371,7 @@ pub trait MediaAuthorizer: Send + Sync + 'static {
     /// [`MediaDecision::Forbidden`] for `403`.
     ///
     /// A policy that already computes a boolean can return
-    /// `allowed.into()` — `false` is `Forbidden`, which is exactly what
-    /// this returned before it was three-valued.
+    /// `allowed.into()`; `false` is `Forbidden`.
     async fn authorize(
         &self,
         parts: &axum::http::request::Parts,
@@ -473,9 +398,8 @@ struct DenyAll;
 #[async_trait::async_trait]
 impl MediaAuthorizer for DenyAll {
     async fn authorize(&self, _: &axum::http::request::Parts, _: MediaAction) -> MediaDecision {
-        // `Forbidden`, not `Unauthenticated`: the deprecated constructor
-        // refuses regardless of who is asking, so telling a client to
-        // authenticate would be a lie it could retry forever.
+        // `Forbidden`, not `Unauthenticated`: it refuses whoever asks,
+        // so telling a client to authenticate would invite a retry loop.
         MediaDecision::Forbidden
     }
 }
@@ -483,13 +407,12 @@ impl MediaAuthorizer for DenyAll {
 /// The permission codenames a [`MediaPerms`] request must satisfy —
 /// **all** of them, not any.
 ///
-/// `None` means "this variant has no mapping", which
-/// [`MediaPerms`] treats as a refusal. That is the case a future
-/// `MediaTarget` lands in, and denying it is the point: a new route
-/// must not inherit a grant written before it existed.
+/// `None` means "no mapping", which [`MediaPerms`] treats as a
+/// refusal. A future `MediaTarget` lands there, so a new route cannot
+/// inherit a grant written before it existed.
 ///
-/// Kept as a free function, and public, so the mapping is readable and
-/// testable without standing a router up.
+/// Public and free-standing so the mapping is testable without
+/// standing a router up.
 #[cfg(feature = "tenancy")]
 #[must_use]
 pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str]> {
@@ -498,38 +421,19 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
     Some(match action {
         // `GET /tags/{slug}/media` returns **media** rows, so it is a
         // media read. The tag is the filter, not the subject.
-        //
-        // `Read(Collection(id))` is two routes, and they are not the
-        // same decision: `GET /collections/{id}` returns the collection
-        // row, while `GET /collections/{id}/contents` returns
-        // `Vec<MediaResponse>` — media rows, each carrying a presigned
-        // GET URL. Both used to take the collection codename alone, so
-        // "may browse folders" read the library. They are separate
-        // targets now; see [`MediaTarget::CollectionContents`].
         A::Read(T::Media(_) | T::Tag(_)) => &["rustango_media.view"],
         A::Read(T::Collection(_)) => &["rustango_media_collections.view"],
-        // The listing is of media, so it takes the media permission —
-        // and the collection permission too, because the id names a
-        // collection the caller must be allowed to open at all.
-        //
-        // Both widths take the same two. `recursive` is on the variant
-        // so a custom policy can be *stricter* about the wide one; what
-        // it must never be is looser, which is what routing it to
-        // `Listing` did — one codename for strictly more rows, so
-        // appending `?recursive=true` turned a 403 into a 200.
+        // Contents returns media rows, so it takes the media permission
+        // — plus the collection one, since the id names a collection
+        // the caller must be allowed to open. Both widths take the same
+        // two; `recursive` is on the variant so a custom policy can be
+        // stricter about the wide one, never looser.
         A::Read(T::CollectionContents { .. }) => {
             &["rustango_media_collections.view", "rustango_media.view"]
         }
-        // `Listing` spans three tables — `GET /collections`, `GET
-        // /tags` and `GET /tags/popular`. The group takes the media
-        // permission: every listing here exists to browse the library,
-        // and requiring the widest is the fail-closed reading of a
-        // target that cannot say which.
-        //
-        // Kept separate from the `Media | Tag` arm above even though the
-        // answer coincides: these are two different reasons for the same
-        // codename, and merging them would lose the one that needs
-        // stating.
+        // `Listing` spans three tables, so it takes the widest
+        // permission of the group. Kept separate from the `Media | Tag`
+        // arm: same codename, different reason.
         #[allow(clippy::match_same_arms)]
         A::Read(T::Listing) => &["rustango_media.view"],
         A::Add(T::NewUpload { .. }) => &["rustango_media.add"],
@@ -537,12 +441,9 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
         A::Add(T::NewTag { .. }) => &["rustango_media_tags.add"],
         A::Change(T::Media(_)) => &["rustango_media.change"],
         A::Delete(T::Media(_)) => &["rustango_media.delete"],
-        // Two, and both are needed. Deleting a collection soft-deletes
-        // every descendant *and* sets `collection_id = NULL` on the
-        // media in all of them — so it writes to `rustango_media`, and
-        // a caller who may not change media rows may not do it by
-        // deleting the folder they sit in. #1558 is this same point at
-        // the target level; this is its codename.
+        // Both are needed. Deleting a collection soft-deletes every
+        // descendant *and* sets `collection_id = NULL` on the media in
+        // all of them, so it writes to `rustango_media` too.
         A::Delete(T::CollectionSubtree(_)) => {
             &["rustango_media_collections.delete", "rustango_media.change"]
         }
@@ -554,10 +455,9 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
 /// `{table}.{action}` names the admin and `auto_create_permissions`
 /// already use.
 ///
-/// This exists so the **secure** path is the one-liner. `media_router`
-/// refuses every request, and the fastest way back to green from those
-/// 403s is an `AllowAll` trait impl — which is the original hole with
-/// extra steps (#1546).
+/// This exists so the **secure** path is the one-liner. Do not reach
+/// for an `AllowAll` trait impl to clear the 403s `media_router` gives
+/// you — that is the original hole with extra steps.
 ///
 /// ```ignore
 /// use rustango::media::router::{media_router_with, MediaPerms};
@@ -567,50 +467,40 @@ pub fn required_codenames(action: &MediaAction) -> Option<&'static [&'static str
 /// ```
 ///
 /// Mount it **inside** [`crate::tenancy::middleware::RouterAuthExt::require_auth`],
-/// which is what injects the `AuthenticatedUser` this reads. Without
-/// that extension every request is [`MediaDecision::Unauthenticated`] —
-/// a `401`, so the symptom names its own cause.
+/// which injects the `AuthenticatedUser` this reads. Without it every
+/// request is [`MediaDecision::Unauthenticated`] — a `401`.
 ///
-/// **Not `optional_auth`.** It compiles, and then answers `401` to
-/// every anonymous request anyway, because this policy has no
-/// anonymous path — the check above runs before any other. Earlier
-/// versions of this sentence offered it as an alternative, which sends
-/// someone building a public page down a road that dead-ends in
-/// unexplained 401s. `optional_auth` is only meaningful under a
-/// **custom** [`MediaAuthorizer`] that deliberately allows some
-/// anonymous action; for a public *page*, do not mount this router at
+/// **Not `optional_auth`.** This policy has no anonymous path, so it
+/// still answers `401` to every anonymous request. `optional_auth`
+/// only helps under a **custom** [`MediaAuthorizer`] that allows some
+/// anonymous action. For a public *page*, do not mount this router at
 /// all (see the module header).
 ///
 /// # What it checks
 ///
 /// [`required_codenames`] has the full mapping. Superusers
-/// short-circuit to allow, matching every other gate in this codebase —
-/// with one exception, [`Self::allow_disks`], which is checked first and
-/// applies to them too. `is_superuser` is per-tenant, and that list is
-/// the only thing keeping one tenant's admin out of another tenant's
-/// bucket.
+/// short-circuit to allow, except for [`Self::allow_disks`], which is
+/// checked first and applies to them too. `is_superuser` is
+/// per-tenant, and that disk list is the only thing keeping one
+/// tenant's admin out of another tenant's bucket.
 ///
 /// # What it cannot check
 ///
-/// **Codenames are table-level, so this is not row-level.** It cannot
-/// express "is this media row yours" or "is this collection in your
-/// tenant": a grant of `rustango_media.view` is a grant to read *any*
-/// media row by id. `MediaManager` holds a single [`crate::sql::Pool`],
-/// so a multi-tenant deployment still has to scope rows itself — that
-/// is what [`MediaAuthorizer`] is for, and this type is the floor, not
-/// the ceiling.
+/// **Codenames are table-level, so this is not row-level.** A grant of
+/// `rustango_media.view` reads *any* media row by id. `MediaManager`
+/// holds a single [`crate::sql::Pool`], so a multi-tenant deployment
+/// must still scope rows itself with its own [`MediaAuthorizer`]. This
+/// type is the floor, not the ceiling.
 ///
-/// The codenames are seeded by `auto_create_permissions`, which runs
-/// during tenant provisioning and on migrate. An app upgrading into
-/// this can re-seed without a migrate cycle via the `seed-permissions`
-/// manage command — the catalog's `UNIQUE (content_type_id, codename)`
-/// makes it a no-op on a populated one.
+/// `auto_create_permissions` seeds the codenames during tenant
+/// provisioning and on migrate. To re-seed without a migrate cycle,
+/// use the `seed-permissions` manage command; it is a no-op on an
+/// already-populated catalog.
 ///
 /// # Cost
 ///
 /// One indexed permission lookup per required codename, per request,
-/// on the pool handed to [`Self::new`]. A superuser pays none. The
-/// subtree delete is the only action needing two.
+/// on the pool given to [`Self::new`]. A superuser pays none.
 #[cfg(feature = "tenancy")]
 pub struct MediaPerms {
     pool: crate::sql::Pool,
@@ -621,16 +511,13 @@ pub struct MediaPerms {
 impl MediaPerms {
     /// Check permissions against `pool`.
     ///
-    /// Under tenancy this should be the tenant's pool, not the
-    /// registry's — it is where `rustango_user_permissions` and
-    /// `rustango_user_roles` are read from, so the wrong pool means the
-    /// wrong tenant's grants.
+    /// Under tenancy pass the tenant's pool, not the registry's. It is
+    /// where `rustango_user_permissions` and `rustango_user_roles` are
+    /// read, so the wrong pool reads the wrong tenant's grants.
     ///
-    /// Every disk in the [`crate::storage::StorageRegistry`] is
-    /// writable by anyone holding `rustango_media.add` until you call
-    /// [`Self::allow_disks`]. See that method — on a multi-tenant
-    /// deployment it is the difference between "may upload" and "may
-    /// upload into any tenant's bucket".
+    /// Until you call [`Self::allow_disks`], anyone holding
+    /// `rustango_media.add` can write to every disk in the
+    /// [`crate::storage::StorageRegistry`].
     #[must_use]
     pub fn new(pool: crate::sql::Pool) -> Self {
         Self {
@@ -644,29 +531,23 @@ impl MediaPerms {
     /// `disk` is caller-supplied and goes straight into
     /// `StorageRegistry::disk`, and the registry is **process-wide**:
     /// pool-per-tenant isolates the database, not the object store. So
-    /// on a multi-tenant deployment a bare `rustango_media.add` grant
-    /// mints a presigned `PUT` into *any* registered bucket, which is
-    /// what [`MediaTarget::NewUpload`]'s own docs call "write anywhere
-    /// in any bucket".
-    ///
-    /// A codename cannot express "this disk" — that is why this is a
-    /// list here rather than a permission. It is checked **in addition
-    /// to** `rustango_media.add`, never instead of it.
+    /// a bare `rustango_media.add` grant mints a presigned `PUT` into
+    /// *any* registered bucket. A codename cannot say "this disk",
+    /// which is why this is a list. It is checked **in addition to**
+    /// `rustango_media.add`, never instead of it.
     ///
     /// **It also binds superusers**, alone among the checks here.
-    /// `is_superuser` elevates inside one tenant; the disk allow-list is
-    /// what stops that reaching another tenant's storage. Leave it unset
-    /// if org admins should be exempt.
+    /// `is_superuser` elevates inside one tenant; this list is what
+    /// stops that reaching another tenant's storage. Leave it unset if
+    /// org admins should be exempt.
     ///
     /// ```ignore
     /// MediaPerms::new(pool).allow_disks(["user-uploads"])
     /// ```
     ///
-    /// Leave it unset only where one disk serves everyone. Prefixes
-    /// within a disk are still not expressible here — for
-    /// "your own prefix on a shared bucket", implement
-    /// [`MediaAuthorizer`], which is handed `key_prefix` for exactly
-    /// that.
+    /// Prefixes within a disk are not expressible here. For "your own
+    /// prefix on a shared bucket", implement [`MediaAuthorizer`], which
+    /// is handed `key_prefix`.
     #[must_use]
     pub fn allow_disks<I, S>(mut self, disks: I) -> Self
     where
@@ -677,9 +558,8 @@ impl MediaPerms {
         self
     }
 
-    /// `true` when `disk` may be written to. Unset means every disk,
-    /// which is the documented default and the reason
-    /// [`Self::allow_disks`] exists.
+    /// `true` when `disk` may be written to. Unset means every disk —
+    /// see [`Self::allow_disks`].
     fn disk_allowed(&self, disk: &str) -> bool {
         match &self.allowed_disks {
             Some(allowed) => allowed.iter().any(|d| d == disk),
@@ -701,29 +581,17 @@ impl MediaAuthorizer for MediaPerms {
             .get::<crate::tenancy::middleware::AuthenticatedUser>()
         else {
             // No principal at all — 401, so a token client refreshes
-            // rather than treating the refusal as final (#1193). This is
-            // also what a router mounted outside `require_auth` looks
-            // like, and 401 names that mistake better than 403 would.
+            // instead of treating the refusal as final. It also names
+            // the mistake of mounting outside `require_auth`.
             return MediaDecision::Unauthenticated;
         };
-        // `/uploads/begin` mints a presigned PUT for a disk and key
-        // prefix the caller chooses, and `StorageRegistry` is
-        // process-wide — pool-per-tenant isolates the database, not the
-        // object store. A codename cannot express "this disk", so a
-        // codename check alone is the grant `MediaTarget::NewUpload`'s
-        // own docs call "write anywhere in any bucket". Whatever
-        // `allowed_disks` says is applied on top of the codename, never
-        // instead of it.
-        //
-        // **Ahead of the superuser short-circuit, and only this check.**
-        // `is_superuser` is the per-tenant flag — an org admin inside
-        // one tenant, not an operator — so short-circuiting first let
-        // any tenant's admin mint a presigned PUT into any *other*
-        // tenant's bucket. Skipping a permission lookup for a superuser
-        // stays inside that tenant's database; skipping this one leaves
-        // it, and `allow_disks` is the only thing standing between the
-        // two. A deployment that wants an admin exempt can leave
-        // `allow_disks` unset, which is still the default.
+        // The disk allow-list runs **ahead of the superuser
+        // short-circuit**, and it is the only check that does.
+        // `is_superuser` is per-tenant, and `StorageRegistry` is
+        // process-wide, so short-circuiting first would let any
+        // tenant's admin mint a presigned PUT into another tenant's
+        // bucket. It is applied on top of the codename, never instead
+        // of it. Leave `allow_disks` unset to exempt admins.
         if let MediaAction::Add(MediaTarget::NewUpload { disk, .. }) = &action {
             if !self.disk_allowed(disk) {
                 tracing::debug!(
@@ -750,9 +618,8 @@ impl MediaAuthorizer for MediaPerms {
             return MediaDecision::Forbidden;
         };
         // An empty slice would fall straight through the loop to
-        // `Allow`. Nothing in `required_codenames` returns one today,
-        // and this is what keeps that true tomorrow: a mapping that
-        // requires nothing is a mistake, not a grant.
+        // `Allow`. A mapping that requires nothing is a mistake, not a
+        // grant.
         if codenames.is_empty() {
             tracing::warn!(
                 target: "rustango::media::auth",
@@ -766,9 +633,7 @@ impl MediaAuthorizer for MediaPerms {
                 Ok(true) => {}
                 Ok(false) => return MediaDecision::Forbidden,
                 Err(e) => {
-                    // Fail closed. A driver error is not a grant, and
-                    // treating it as one would turn a database blip into
-                    // an open bucket.
+                    // Fail closed. A driver error is not a grant.
                     tracing::warn!(
                         target: "rustango::media::auth",
                         codename = %cn,
@@ -788,11 +653,9 @@ impl MediaAuthorizer for MediaPerms {
 /// policy can see what the caller asked for.
 ///
 /// Every field defaults, and a body that does not parse falls back to
-/// the whole struct's default. That is deliberate: the gate must not
-/// answer `400`. Authorization is decided first, on whatever the caller
-/// sent; the handler validates afterwards, on its own terms. A gate
-/// that rejected malformed JSON would be deciding validity before
-/// anyone had been asked whether the caller may be here at all.
+/// the struct's default. That is on purpose: the gate must not answer
+/// `400`. Authorization is decided first, on whatever the caller sent;
+/// the handler validates afterwards.
 #[derive(Debug, Default, Deserialize)]
 struct UploadRequestDetail {
     #[serde(default)]
@@ -807,25 +670,21 @@ struct UploadRequestDetail {
 
 /// The most the gate will buffer from a body it has to read.
 ///
-/// An upload-ticket body is a handful of short JSON fields — a few
-/// hundred bytes. 16 KiB is far above any real one and far below
-/// anything worth calling a denial-of-service primitive, which is what
-/// buffering an unbounded body inside an authorization layer would be.
-/// Only [`wants_upload_body`] routes are read at all; everything else
-/// streams through untouched.
+/// An upload-ticket body is a few hundred bytes of JSON. 16 KiB is far
+/// above any real one and small enough that buffering it in an
+/// authorization layer is not a denial-of-service primitive. Only
+/// [`wants_upload_body`] routes are read; the rest stream through.
 const MAX_GATE_BODY_BYTES: usize = 16 * 1024;
 
 /// Does this request's body have to be read before it can be
 /// classified?
 ///
-/// True for `POST /uploads/begin` alone. That route mints a presigned
-/// `PUT` for a **caller-chosen** disk and key prefix, and both live in
-/// the body — so a gate that never reads a body cannot tell a policy
-/// where the write is going.
+/// True for `POST /uploads/begin` alone. That route takes a
+/// caller-chosen disk and key prefix in the body, and the policy needs
+/// both.
 ///
-/// Kept as its own function because the middleware has to decide
-/// whether to buffer *before* it can call [`classify`], and the route
-/// table must not be spelled twice.
+/// Its own function because the middleware must decide whether to
+/// buffer *before* it can call [`classify`].
 fn wants_upload_body(method: &axum::http::Method, path: &str) -> bool {
     let seg: Vec<String> = path
         .split('/')
@@ -837,30 +696,24 @@ fn wants_upload_body(method: &axum::http::Method, path: &str) -> bool {
 
 /// Classify a request so the authorizer sees what it is deciding about.
 ///
-/// `None` means "this does not match any route in this table", and the
-/// caller must refuse. Fail-closed is the whole point: an unrecognised
-/// shape that fell through to a permissive default is how a gate gets
-/// walked around.
+/// `None` means the request matches no route in this table, and the
+/// caller must refuse. Fail closed.
 ///
-/// Segments are matched **positionally** against the route table and
-/// percent-decoded first. Both matter, and the first version of this
-/// function got both wrong — it scanned for the first integer-parsable
-/// segment in the raw path, so `/media/%31` yielded no id at all while
-/// the handler served row 1, and `/tags/2024/media` yielded `2024` as
-/// if a caller-chosen tag slug were an object id.
+/// Segments are percent-decoded, then matched **positionally** against
+/// the route table. Both matter: scanning for the first
+/// integer-parsable segment of a raw path misses `/media/%31` and
+/// mistakes the `2024` in `/tags/2024/media` for an id.
 ///
-/// `query` is read for one thing only: `?recursive` on a collection's
-/// contents reaches media in descendant collections, so the request
-/// touches more rows than the one its path names. That widening rides
-/// on [`MediaTarget::CollectionContents`] rather than replacing the
-/// target, so the id survives it and no policy can end up asking less
-/// of the wide form than of the narrow one.
+/// `query` is read for one thing: `?recursive` on a collection's
+/// contents reaches media in descendant collections. That widening
+/// rides on [`MediaTarget::CollectionContents`] instead of replacing
+/// the target, so the id survives and no policy can ask less of the
+/// wide form than of the narrow one.
 ///
 /// `upload` carries the parsed body for the one route that needs it —
-/// see [`wants_upload_body`]. It is `None` for every other route, and a
-/// `None` on `POST /uploads/begin` yields a target with empty fields
-/// rather than no target: a body the gate could not read is still an
-/// upload request, and the policy is what should refuse it.
+/// see [`wants_upload_body`]. A `None` on `POST /uploads/begin` gives
+/// a target with empty fields, not no target: an unreadable body is
+/// still an upload request, and the policy should refuse it.
 fn classify(
     method: &axum::http::Method,
     path: &str,
@@ -888,23 +741,15 @@ fn classify(
         method
     };
 
-    // Presence, not value: the handler rejects a non-boolean, and a
-    // caller who names the parameter at all is asking to widen.
+    // Presence, not value: naming the parameter at all is a request to
+    // widen, and the handler rejects a non-boolean itself. Being
+    // stricter than the handler is the safe direction here.
     //
-    // The **key is decoded first**, with form semantics, because that is
-    // what the handler's `Query` extractor does — `serde_urlencoded`
-    // goes through `form_urlencoded::parse`, which percent-decodes the
-    // key and turns `+` into a space. Matching the raw bytes here let
-    // `?%72ecursive=true` reach the handler as a subtree walk while the
-    // gate classified it as a read of the one collection named, which is
-    // the same disagreement `percent_decode_path` was introduced to
-    // close on the path segments. The query side was left raw.
-    //
-    // Presence still wins over value, so a bare `?recursive` is treated
-    // as widening even though the handler answers 400 to it. The gate
-    // being *stricter* than the handler is the safe direction, and
-    // loosening this to match the handler exactly would reopen the gap
-    // from the other side.
+    // The key is **decoded first**, with form semantics, to match the
+    // handler's `Query` extractor: `serde_urlencoded` parses through
+    // `form_urlencoded`, which percent-decodes the key and turns `+`
+    // into a space. Matching raw bytes let `?%72ecursive=true` reach
+    // the handler as a subtree walk while the gate saw a single read.
     let recursive = query.is_some_and(|q| {
         q.split('&').any(|p| {
             let key = p.split('=').next().unwrap_or(p);
@@ -922,10 +767,8 @@ fn classify(
                 uploaded_by_id: d.uploaded_by_id,
             }))
         }
-        // Finalize mutates the media row it names — `finalize_upload`
-        // loads `rustango_media` by this id — so it is a `Media`
-        // target, not a kind of its own. An `Upload(i64)` variant here
-        // said "different row" about the same row.
+        // Finalize mutates the media row it names, so it is a `Media`
+        // target rather than a kind of its own.
         (&Method::POST, ["uploads", raw, "finalize"]) => {
             Some(MediaAction::Change(MediaTarget::Media(id(raw)?)))
         }
@@ -947,15 +790,9 @@ fn classify(
             Some(MediaAction::Read(MediaTarget::Collection(id(raw)?)))
         }
         // The media inside it — a different table, and a presigned URL
-        // per row. Sharing `Collection` with the arm above is what let
-        // `rustango_media_collections.view` read the library.
-        //
-        // One arm for both widths. `?recursive` reaches descendants the
-        // authorizer is never asked about, but that is a reason to hand
-        // it the flag, not to drop the id: routing the wide one to
-        // `Listing` left a row-scoping policy with nothing to scope by,
-        // and left `MediaPerms` asking less of it than of the narrow
-        // one.
+        // per row, so it cannot share `Collection` with the arm above.
+        // One arm for both widths: `?recursive` rides on the target as
+        // a flag so the id survives for a row-scoping policy.
         (&Method::GET, ["collections", raw, "contents"]) => {
             Some(MediaAction::Read(MediaTarget::CollectionContents {
                 id: id(raw)?,
@@ -963,9 +800,7 @@ fn classify(
             }))
         }
         // Not `Collection` — this route deletes the whole subtree and
-        // orphans the media under every level of it. Naming one id in a
-        // target that means "one row" understated it by however many
-        // descendants the tree happens to hold.
+        // orphans the media at every level of it.
         (&Method::DELETE, ["collections", raw]) => Some(MediaAction::Delete(
             MediaTarget::CollectionSubtree(id(raw)?),
         )),
@@ -997,31 +832,15 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                 let auth = Arc::clone(&auth);
                 async move {
                     let (parts, body) = req.into_parts();
-                    // No classification means no route in this table matches
-                    // (or an id that cannot be a row id). Refuse: passing an
-                    // unrecognised shape through is how a gate is walked
-                    // around.
-                    //
-                    // Mounted at the root this also covers the fallback, so
-                    // a probe gets 403 instead of a 404 that maps the
-                    // surface. Mounted with `nest` — which is what the
-                    // quick start recommends — it does not: `nest` keeps
-                    // the outer router's fallback, so an unmatched path
-                    // under the prefix 404s before reaching here. Nothing
-                    // is served either way; the difference is only how much
-                    // an unauthenticated prober can infer.
-                    //
-                    // One route needs its body to be classified, and it
-                    // is the one that mints a presigned PUT into
-                    // storage. Buffered under a cap and handed straight
-                    // back to the handler, so nothing downstream can
-                    // tell — except that the policy now knows which
+                    // One route needs its body to be classified: the one
+                    // that mints a presigned PUT. Buffered under a cap
+                    // and handed straight back, so nothing downstream
+                    // notices — except that the policy now knows which
                     // disk and prefix it is being asked to allow.
                     let (upload, body) = if wants_upload_body(&parts.method, parts.uri.path()) {
-                        // Over the cap, or the stream failed. Nothing
-                        // legitimate sends 16 KiB of upload-ticket JSON,
-                        // and refusing here is what keeps the gate from
-                        // being a place to make a server buffer.
+                        // Over the cap, or the stream failed. Refusing
+                        // keeps the gate from being a place to make a
+                        // server buffer.
                         let Ok(bytes) = axum::body::to_bytes(body, MAX_GATE_BODY_BYTES).await
                         else {
                             tracing::debug!(
@@ -1039,16 +858,18 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                                 .into_response();
                         };
                         // A body that does not parse is still an upload
-                        // request. It arrives at the policy with empty
-                        // fields rather than as a 400 — the gate decides
-                        // authorization, the handler decides validity,
-                        // in that order.
+                        // request. It reaches the policy with empty
+                        // fields, not as a 400: the gate decides
+                        // authorization, the handler decides validity.
                         let detail = serde_json::from_slice::<UploadRequestDetail>(&bytes)
                             .unwrap_or_default();
                         (Some(detail), axum::body::Body::from(bytes))
                     } else {
                         (None, body)
                     };
+                    // No classification means no route here matches, or
+                    // the id cannot be a row id. Refuse rather than
+                    // pass an unrecognised shape through.
                     let Some(action) =
                         classify(&parts.method, parts.uri.path(), parts.uri.query(), upload)
                     else {
@@ -1068,9 +889,8 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                     };
                     let decision = auth.authorize(&parts, action.clone()).await;
                     if decision != MediaDecision::Allow {
-                        // `debug`, so it costs nothing in production. Without
-                        // it a subtly-wrong policy is only debuggable by
-                        // instrumenting inside the integrator's own impl.
+                        // `debug`, so it costs nothing in production, but
+                        // a subtly-wrong policy stays debuggable.
                         tracing::debug!(
                             target: "rustango::media::auth",
                             ?action,
@@ -1079,10 +899,9 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                             path = %parts.uri.path(),
                             "refused by the authorization policy"
                         );
-                        // 401 means "authenticate", 403 means "you cannot do
-                        // this". A token client treats 401 as its cue to
-                        // refresh; answering 403 to an anonymous request
-                        // means the refresh never fires (#1193).
+                        // 401 means "authenticate", 403 means "you may
+                        // not". A token client treats 401 as its cue to
+                        // refresh.
                         let (status, message) = match decision {
                             MediaDecision::Unauthenticated => {
                                 (StatusCode::UNAUTHORIZED, "authentication required")
@@ -1100,52 +919,42 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                 }
             },
         ))
-        // Outermost, so it also covers the gate's own early 403s — the
-        // last `.layer` wraps the ones before it. Applied inside the
-        // gate, a refusal returned before ever reaching this.
+        // Outermost, so it also covers the gate's own early 403s: the
+        // last `.layer` wraps the ones before it.
         .layer(axum::middleware::from_fn(no_store))
 }
 
 /// `Cache-Control: no-store` and `Vary` on every response.
 ///
 /// These routes hand out **presigned URLs** — short-lived bearer
-/// credentials, valid for anyone holding them until the TTL expires.
-/// Without a directive, a 200 `GET` with no explicit freshness is
-/// heuristically cacheable (RFC 9111 §4.2.2), and with no `Vary` the
-/// cache key is method plus URI.
+/// credentials that work for anyone holding them until the TTL
+/// expires. Without a directive, a 200 `GET` with no explicit
+/// freshness is heuristically cacheable (RFC 9111 §4.2.2), and with no
+/// `Vary` the cache key is just method plus URI.
 ///
-/// That matters because RFC 9111 §3.5 keeps a shared cache off a
-/// response whose request carried `Authorization`, and says **nothing
-/// about `Cookie`** — while the authorizer this module documents is
-/// cookie/session shaped. A CDN in front of such a deployment could
-/// store one user's signed link and serve it to the next caller of the
-/// same URI.
+/// RFC 9111 §3.5 keeps a shared cache off a response whose request
+/// carried `Authorization`, but says **nothing about `Cookie`** — and
+/// the authorizer this module documents is cookie/session shaped. So a
+/// CDN could store one user's signed link and serve it to the next
+/// caller of the same URI.
 ///
-/// Applied to the whole surface rather than only the routes that embed
-/// a signature today, so a route added later cannot quietly opt out.
-/// `no-store` rather than `private`: `private` still permits a browser
-/// cache to keep the credential on disk.
+/// Applied to the whole surface, not just the routes that embed a
+/// signature today, so a new route cannot opt out by accident.
+/// `no-store` rather than `private`, because `private` still lets a
+/// browser keep the credential on disk.
 ///
 /// # Scope
 ///
-/// This covers the JSON **carrying** a presigned URL. It says nothing
-/// about the subsequent fetch of the object through that URL, which is
-/// a different request to a different origin under its own cache rules.
+/// This covers the JSON **carrying** a presigned URL, not the later
+/// fetch of the object through that URL — a different request to a
+/// different origin, under its own cache rules.
 ///
-/// It also cannot reach a response this router never produced. Mounted
-/// with `nest` — the quick start's shape — an unmatched path under the
-/// prefix is answered by the *outer* router's fallback and carries
-/// neither header. Nothing is served there, so no credential leaks; it
-/// is an inconsistency rather than a hole.
-///
-/// Giving this router its own `.fallback()` would close that, and was
-/// considered. Measured against axum 0.8: nested it does close it
-/// (404 → 403), and a path outside the prefix still 404s correctly.
-/// But `Router::merge` does **not** reject two fallbacks — an
-/// integrator who merges instead of nesting silently gets 403 for every
-/// unknown URL in their whole application. Trading a bodyless 404 for a
-/// silent, hard-to-debug hijack of someone else's routing is the wrong
-/// side of that deal.
+/// Mounted with `nest`, an unmatched path under the prefix is answered
+/// by the *outer* router's fallback and carries neither header.
+/// Nothing is served there, so no credential leaks. Adding a
+/// `.fallback()` here would close that, but `Router::merge` does not
+/// reject two fallbacks, so an integrator who merges would silently
+/// get 403 for every unknown URL in their app.
 async fn no_store(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let mut resp = next.run(req).await;
     // `insert`, not `append`. A handler that set its own `Cache-Control`
@@ -1155,23 +964,15 @@ async fn no_store(req: axum::extract::Request, next: axum::middleware::Next) -> 
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),
     );
-    // `Vary` as well as `Cache-Control`, because the two are not the
-    // same kind of instruction. `no-store` *asks* a cache not to store;
-    // `Vary` *compels* it, by changing the cache key rather than
-    // requesting permission.
+    // `Vary` as well, because it works differently: `no-store` asks a
+    // cache not to store, while `Vary` changes the cache key. CDNs
+    // routinely override origin directives (nginx
+    // `proxy_ignore_headers`, Cloudflare "Cache Everything", Fastly
+    // VCL), and each of those drops `no-store`. Ignoring `Vary` takes
+    // a separate, deliberate step. Losing hit rate here is the point.
     //
-    // That distinction is the whole point here. The deployment this
-    // guards against — a CDN in front of a cookie-authenticated app —
-    // is exactly the population where overriding origin directives is
-    // routine: nginx `proxy_ignore_headers Cache-Control`, Cloudflare
-    // "Cache Everything", Fastly VCL setting its own TTL. In each of
-    // those `no-store` is discarded and the original bug is back.
-    // Ignoring `Vary` takes a separate, deliberate second step.
-    //
-    // The usual objection — that high-cardinality values destroy hit
-    // rate — is the intended outcome on this surface, so it inverts
-    // into an argument for it. Both header names, because the
-    // authorizer reads `Parts` and may key off either.
+    // Both header names, because the authorizer reads `Parts` and may
+    // key off either.
     resp.headers_mut().insert(
         axum::http::header::VARY,
         axum::http::HeaderValue::from_static("Cookie, Authorization"),
@@ -1184,9 +985,6 @@ async fn no_store(req: axum::extract::Request, next: axum::middleware::Next) -> 
 /// # This refuses every request
 ///
 /// It mounts a refuse-everything policy, so every route answers `403`.
-/// That is deliberate and it is a behaviour change: this constructor
-/// used to serve the whole media surface to anyone who could reach it.
-///
 /// Use [`media_router_with`] and supply a [`MediaAuthorizer`].
 #[deprecated(
     since = "0.57.7",
@@ -1588,9 +1386,7 @@ async fn collection_contents_handler(
         }
         None => manager.list_in_collection(id, q.recursive).await?,
     };
-    // One tag query for the whole page rather than one per row. The
-    // loop below used to run `tags_for` per row, so a page cost
-    // 1 + N round trips.
+    // One tag query for the whole page, not one per row.
     let ids: Vec<i64> = media
         .iter()
         .filter_map(|m| match m.id {
@@ -1622,8 +1418,8 @@ async fn create_tag_handler(
 async fn list_tags_handler(
     State(manager): State<Arc<MediaManager>>,
 ) -> Result<Json<Vec<TagResponse>>, MediaError> {
-    // No dedicated `list_all_tags` method on the manager — popular()
-    // with a high limit covers the same ground, sorted by usage.
+    // The manager has no `list_all_tags`; `popular_tags` with a high
+    // limit covers the same ground, sorted by usage.
     let pairs = manager.popular_tags(1000).await?;
     Ok(Json(pairs.into_iter().map(|(t, _)| t.into()).collect()))
 }
@@ -1657,13 +1453,6 @@ async fn media_with_tag_handler(
 ) -> Result<Json<Vec<MediaResponse>>, MediaError> {
     let rows = manager.list_with_tag(&slug, q.limit, q.offset).await?;
     // One tag query for the whole page, same as the contents listing.
-    //
-    // `tags_for_many` was added in this release to remove exactly this
-    // N+1 and was wired into `collection_contents_handler` fifty lines
-    // above — this handler kept the per-row `from_row`, so at
-    // `?limit=1000` the route cost ~1001 round trips plus 1000 presign
-    // operations. The fix landed on one of the two handlers that needed
-    // it.
     let ids: Vec<i64> = rows
         .iter()
         .filter_map(|m| match m.id {
@@ -1684,7 +1473,6 @@ async fn media_with_tag_handler(
     Ok(Json(out))
 }
 
-// Avoid an unused-import warning if MediaStatus isn't referenced
-// elsewhere in the module after future trims.
+// Keeps the `MediaStatus` import used even if no handler names it.
 #[allow(dead_code)]
 fn _media_status_marker(_: MediaStatus) {}

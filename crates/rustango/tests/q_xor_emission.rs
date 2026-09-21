@@ -1,9 +1,9 @@
 //! Tri-dialect SQL-emission tests for `WhereExpr::Xor` (issue #27).
-//! Django 4.1+ added `Q(a) ^ Q(b)` — "odd number of operands evaluate
-//! to true". Native logical XOR exists on MySQL but not PG / SQLite,
+//! `Q(a) ^ Q(b)` means "an odd number of operands evaluate to true".
+//! Native logical XOR exists on MySQL but not PG / SQLite,
 //! so the writer emits a portable rewrite uniformly:
 //! - 2 children → `(a AND NOT b) OR (NOT a AND b)` canonical form.
-//! - 3+ children → CASE-WHEN tally `% 2 = 1` (Django's odd-parity).
+//! - 3+ children → CASE-WHEN tally `% 2 = 1`, the odd-parity form.
 
 use rustango::core::{Column as _, Filter, Model as _, Op, SelectQuery, SqlValue, WhereExpr};
 use rustango::sql::{Dialect, MySql, Postgres, SqlError, Sqlite};
@@ -92,7 +92,7 @@ fn binary_xor_emits_canonical_form_on_sqlite() {
     );
 }
 
-// ---------- N-ary XOR — Django's odd-parity tally ----------
+// ---------- N-ary XOR — the odd-parity tally ----------
 
 #[test]
 fn ternary_xor_emits_parity_tally_on_pg() {
@@ -225,7 +225,7 @@ fn typed_expr_xor_method_produces_xor_node() {
 
 /// Chained `.xor()` flattens into a single N-ary `Xor` node (mirrors
 /// how `.and()` / `.or()` flatten). The result emits the parity tally,
-/// not a nested binary rewrite — Django's "odd number of trues"
+/// not a nested binary rewrite — the "odd number of trues"
 /// semantic for N-ary XOR.
 #[test]
 fn chained_xor_flattens_to_nary_parity_tally() {

@@ -1,9 +1,7 @@
 # ViewSets — CRUD REST APIs
 
 A ViewSet turns a model into a full REST resource — endpoints to **list,
-create, read, update and delete** records — from one declaration. (It's
-**Rustango**'s equivalent of a Django REST Framework `ModelViewSet` or a Laravel
-API resource controller, if you've used those.)
+create, read, update and delete** records — from one declaration.
 
 > **New to REST APIs?** This guide assumes you know what an *endpoint*, an *HTTP
 > verb* (GET / POST / …) and a *JSON request and response* are. If any of those
@@ -14,9 +12,8 @@ Pair a ViewSet with a [serializer](serializers.md) — the piece that shapes you
 JSON — and it guards **both directions** at once: the serializer formats every
 **response** (rename, hide, compute or nest fields) *and* governs every
 **request** (it validates incoming data and silently ignores fields a client
-shouldn't be allowed to set). Rejected input comes back in the familiar DRF
-shape — a JSON object keyed by field name. It all works the same on PostgreSQL,
-MySQL and SQLite.
+shouldn't be allowed to set). Rejected input comes back as a JSON object keyed
+by field name. It all works the same on PostgreSQL, MySQL and SQLite.
 
 This guide is tutorial-first: we **build a complete REST blog API** end to end —
 scaffolding, models, a serializer, the ViewSet, all six CRUD endpoints, input
@@ -72,7 +69,6 @@ Same model underneath; what differs is what comes out and who's calling.
 | On bad input | `400` — field-keyed from a serializer, `{"error": "…"}` otherwise ([shapes](#error-response-shapes)) | re-render the form with the errors shown |
 | A "list" is | a paginated JSON envelope | a loop over rows in your template |
 | Usually authed by | tokens / JWT / API keys | session cookies |
-| Django analogue | DRF `ModelViewSet` | generic class-based views |
 
 Pick per resource — and you can mount **both on the same model** (a public JSON
 API *and* internal CRUD pages). The rest of this guide is the JSON/API side; for
@@ -93,7 +89,7 @@ Every step is a real command or file.
 
 ### Step 1 — Create the blog app
 
-Apps are self-contained feature modules (Django's `startapp`):
+Apps are self-contained feature modules:
 
 ```bash
 cargo run -- startapp blog
@@ -154,8 +150,7 @@ cargo run -- migrate
 
 ### Step 4 — Scaffold the serializer
 
-The serializer is what makes this a *DRF* API — it defines the request/response
-contract. Generate the skeleton:
+The serializer defines the request/response contract. Generate the skeleton:
 
 ```bash
 cargo run -- make:serializer PostSerializer --model Post
@@ -295,8 +290,7 @@ The response is the **serializer's** shape: `body` came back as `content`, the
 computed `summary` appeared, and `published_at` (read-only, server-set) is
 present.
 
-**Validation rejects bad input** with a DRF-shape `400` — field-keyed arrays of
-messages:
+**Validation rejects bad input** with a `400` — field-keyed arrays of messages:
 
 ```bash
 curl -i -X POST localhost:8080/api/posts \
@@ -377,7 +371,7 @@ async fn rejects_short_title() {
         .json(&json!({"title":"hi","content":"x","author_id":1}))
         .send().await;
     assert_eq!(res.status, 400);
-    assert!(res.json_value()["title"].is_array());   // DRF field-error shape
+    assert!(res.json_value()["title"].is_array());   // field-keyed error shape
 }
 
 #[tokio::test]
@@ -432,8 +426,9 @@ On `create` and `update`, when a serializer is registered:
 1. **Validation runs.** The serializer's `validate()` — every per-field
    `#[serializer(validate = "fn")]` plus the container-level cross-field
    `validate` — runs against the JSON body. On failure the request is rejected
-   `400 Bad Request` with the DRF error shape: a JSON object keyed by field name
-   with arrays of messages, e.g. `{"title":["title must be at least 3 characters"]}`.
+   `400 Bad Request` with the field-keyed error shape: a JSON object keyed by
+   field name with arrays of messages, e.g.
+   `{"title":["title must be at least 3 characters"]}`.
 2. **Writable-field filtering.** Only the serializer's writable fields are
    persisted; `read_only` and `method`/computed fields a client posts are
    **ignored** (not written), and `source` renames are resolved to the model
@@ -587,7 +582,7 @@ Every method on `ViewSet::for_model(SCHEMA)` (each returns `Self`):
 All driven by query params on the **list** endpoint.
 
 **Filtering** — each `filter_fields` entry accepts `?field=value` (exact) plus
-Django-style lookups via a `__suffix`:
+richer lookups via a `__suffix`:
 
 ```
 ?status=published
@@ -649,15 +644,15 @@ bool, json or blob column panics at build time rather than failing per request.
 ## Validation
 
 With a **serializer wired**, the create/update path runs the serializer's
-validators and returns DRF-shape `400`s — the recommended way to validate (see
+validators and returns field-keyed `400`s — the recommended way to validate (see
 [the marriage](#the-serializer-marriage-input--output) and the
 [serializers guide](serializers.md#validation)). Three layers run:
 
 - **Declarative constraints** — `max_length` / `min_length` / `min` / `max`, and
   by default the field **inherits the model's** `max_length` / `min` / `max` /
   `choices`. So a `#[rustango(max_length = 200)]` column is length-checked on the
-  API with no extra config (DRF `ModelSerializer` behaviour), turning would-be
-  DB-constraint `500`s into friendly `400`s like
+  API with no extra config, turning would-be DB-constraint `500`s into friendly
+  `400`s like
   `{"title":["Ensure this value has at most 200 characters."]}`.
 - **Per-field** `validate = "fn"` and a **cross-field** `validate` hook — your
   custom rules (formats, cross-field, business logic).
@@ -682,14 +677,14 @@ others. **Three** ship, and which one you get depends on the path that failed:
 
 | Shape | Emitted by | Body |
 |---|---|---|
-| **DRF field map** | serializer validation only | `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}` |
+| **Field map** | serializer validation only | `{"title": ["Ensure this value has at most 200 characters."], "non_field_errors": [ … ]}` |
 | **Plain message** | every other ViewSet failure | `{"error": "<human-readable message>"}` |
 | **`ApiError`** | your own handlers returning `rustango::api_errors::ApiError` | `{"error": "<machine code>", "message": …, "status": …, "details": …}` |
 
 The first two both come out of a ViewSet, so the distinction matters: the
 type-coercion, required/NOT NULL and database-constraint `400`s listed above are
 **not** field-keyed maps — they are `{"error": "…"}`. Only the serializer's own
-validators produce the DRF map.
+validators produce the field map.
 
 Note also that `error` means two different things across the table: a
 human-readable sentence in the ViewSet shape, and a stable machine code in
@@ -741,8 +736,8 @@ the client key is the connection IP (or `X-Forwarded-For` / `X-Real-IP`).
 
 ## Custom actions beyond CRUD
 
-There's no DRF `@action` decorator — the ViewSet is strictly the six CRUD
-routes. For extra endpoints, mount your own handlers alongside the ViewSet:
+You can't add an extra action to the ViewSet itself — it is strictly the six
+CRUD routes. For extra endpoints, mount your own handlers alongside it:
 
 ```rust
 use axum::{Router, routing::{get, post}};
@@ -759,8 +754,8 @@ separate route.
 ### Scoping rows to the authenticated principal
 
 A backend runs on **every** action — `list`, `retrieve`, `update`, `destroy` —
-so it behaves like DRF's `get_queryset()`. A row the backend excludes is a
-**404** on the item routes, not a 403: a 403 would confirm the id exists.
+so it narrows the rows the whole resource can reach. A row the backend excludes
+is a **404** on the item routes, not a 403: a 403 would confirm the id exists.
 
 Identity must come from the credential, never from the query string. A
 `?owner_id=` filter is not a scope — it is a parameter the caller chooses.

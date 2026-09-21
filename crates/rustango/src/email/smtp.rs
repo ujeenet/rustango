@@ -178,7 +178,7 @@ impl SmtpMailerBuilder {
         self
     }
 
-    /// Django-shape `EMAIL_TIMEOUT` — SMTP connection timeout. `None`
+    /// SMTP connection timeout. `None`
     /// defers to lettre's default (no explicit limit). Set this on
     /// every production deployment — a wedged relay otherwise stalls
     /// request workers waiting on the transport for the kernel's
@@ -450,9 +450,9 @@ mod tests {
 
     #[tokio::test]
     async fn from_settings_accepts_smtp_timeout_secs() {
-        // Django EMAIL_TIMEOUT parity — the TOML field has to thread
-        // through from_settings without choking the build. Real
-        // timeout enforcement happens at send-time inside lettre.
+        // The `smtp_timeout_secs` TOML field has to thread through
+        // from_settings. Real timeout enforcement happens at
+        // send-time inside lettre.
         let mut s = crate::config::MailSettings::default();
         s.smtp_host = Some("localhost".into());
         s.smtp_tls = Some("none".into());

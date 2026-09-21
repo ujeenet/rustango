@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
-//! Live PostgreSQL round-trip for `HStore` columns — Django
-//! `HStoreField` (#342). Proves the typed field wrapper writes a native
+//! Live PostgreSQL round-trip for `HStore` columns
+//! (#342). Proves the typed field wrapper writes a native
 //! `hstore` (no text-literal escaping) on INSERT and decodes it back
 //! into `HStore` on SELECT.
 //!

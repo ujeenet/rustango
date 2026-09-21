@@ -1,6 +1,6 @@
 # Security guide
 
-This guide covers every security feature **Rustango** ships and how to combine them. If you come from Django, Laravel, or Rails, most of these will feel familiar — the names differ, but the ideas are the same. Each feature below is usually one line of setup. When you're ready to ship, run `manage check --deploy` for an automated audit.
+This guide covers every security feature **Rustango** ships and how to combine them. If you come from Laravel or Rails, most of these will feel familiar — the names differ, but the ideas are the same. Each feature below is usually one line of setup. When you're ready to ship, run `manage check --deploy` for an automated audit.
 
 [![The hardened middleware stack wired in one chain: request IDs, access logging, rate limiting, CORS, and security headers](img/security.png)](img/security.png)
 
@@ -52,7 +52,7 @@ let app = Router::new()
 
 ## Setting security headers
 
-Security headers tell the browser how to protect your users (block clickjacking, force HTTPS, stop content-type sniffing). `SecurityHeadersLayer` sets the standard set with one line — the same headers Django ships by default. (A "layer" is **Rustango**'s term for middleware; you attach it to your router.)
+Security headers tell the browser how to protect your users (block clickjacking, force HTTPS, stop content-type sniffing). `SecurityHeadersLayer` sets a safe default set with one line, and you can override any single header. (A "layer" is **Rustango**'s term for middleware; you attach it to your router.)
 
 > Deep dive: [Middleware](middleware.md) covers how layers work, ordering, the full built-in catalog, and writing your own (locale-, timezone-aware, headers, CSRF).
 
@@ -233,7 +233,7 @@ If your reverse proxy forwards `X-Forwarded-For`, configure it to set `RemoteAdd
 > use cookies, read the `rustango_csrf` cookie and echo it in the `X-CSRF-Token`
 > header.
 
-CSRF (cross-site request forgery) is when another site tricks a logged-in user's browser into submitting a request to your app. The defense is a secret token on every form, just like Django's `{% csrf_token %}`. The CSRF middleware lives in `rustango::forms::csrf` (behind the `csrf` feature, which is turned on automatically by the `admin` feature):
+CSRF (cross-site request forgery) is when another site tricks a logged-in user's browser into submitting a request to your app. The defense is a secret token on every form, which the middleware checks on every unsafe request. The CSRF middleware lives in `rustango::forms::csrf` (behind the `csrf` feature, which is turned on automatically by the `admin` feature):
 
 ```rust
 use rustango::forms::csrf;
@@ -259,7 +259,7 @@ Until [#1395](https://github.com/ujeenet/rustango/issues/1395) this paragraph cl
 
 XSS (cross-site scripting) happens when user input is rendered as HTML and runs as code in someone else's browser. The fix is to escape any user input before it reaches the page. **Rustango** handles this two ways:
 
-**1. Tera template auto-escape** — Tera is **Rustango**'s template engine (like Django templates or Blade). Every `{{ var }}` is HTML-escaped automatically — but only in templates Tera autoescapes, which is its default set of `.html`, `.htm` and `.xml`. Rustango sets no `autoescape_suffixes`, so a `.txt`, `.j2` or `.tera` template is **not** escaped. Use `{{ var | safe }}` to opt out — rare, and dangerous, so only do it for HTML you fully trust.
+**1. Tera template auto-escape** — Tera is **Rustango**'s template engine (like Jinja or Blade). Every `{{ var }}` is HTML-escaped automatically — but only in templates Tera autoescapes, which is its default set of `.html`, `.htm` and `.xml`. Rustango sets no `autoescape_suffixes`, so a `.txt`, `.j2` or `.tera` template is **not** escaped. Use `{{ var | safe }}` to opt out — rare, and dangerous, so only do it for HTML you fully trust.
 
 **2. Manual escape helper** — for when you build HTML in Rust code instead of a template:
 
@@ -311,7 +311,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 ## Authenticating users
 
-Authentication is how you confirm who is making a request. **Rustango** ships three ready-made backends (Basic auth, API keys, and JWTs) and lets you write your own — much like Django's authentication backends. You attach them to routes, and requests without a recognized credential get a `401`.
+Authentication is how you confirm who is making a request. **Rustango** ships three ready-made backends (Basic auth, API keys, and JWTs) and lets you write your own. You attach them to routes, and requests without a recognized credential get a `401`.
 
 > **Admin SSO.** To let operators sign in to the admin with an external IdP (Google, Microsoft/Azure AD, GitHub, or any OpenID Connect provider) instead of a password, enable the `admin-sso` feature — see the [SSO guide](sso.md). Providers are **managed from the admin UI as rows** (multiple per surface; per-tenant, or a shared set across tenants), with the client secret **encrypted at rest**. It's link-to-existing (the verified IdP email must match an admin user; no auto-provisioning) and reuses the existing session.
 
@@ -340,7 +340,8 @@ let app = Router::new()
     .merge(posts)
     .require_auth(backends);       // outer: resolves the user first
 // No pool: the credential is checked against the tenant resolved from
-// the request's own host. Passing one is GHSA-c4gg-mvfq-h268.
+// the request's own host. Taking one let a credential from one tenant
+// authenticate on another's — fixed in 0.57.11.
 ```
 
 The middleware tries each backend in order. The first one that succeeds wins; the first one that returns a hard error stops the chain.

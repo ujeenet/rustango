@@ -1,4 +1,4 @@
-//! Django-parity #366 — recent-actions widget on the admin home.
+//! Issue #366 — recent-actions widget on the admin home.
 //!
 //! Verifies the admin's `/` index page surfaces the newest audit-log
 //! entries written by create / update / delete flows.

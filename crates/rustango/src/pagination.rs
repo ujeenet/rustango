@@ -1,9 +1,9 @@
-//! Pagination helpers — three shapes for different surfaces.
+//! Pagination helpers, in three shapes.
 //!
-//! ## API-layer shape: `Link` headers + cursor parameters
+//! ## API layer: `Link` headers and cursor parameters
 //!
-//! Pairs with the ViewSet's built-in pagination, but is also useful for
-//! hand-written endpoints that want consistent pagination headers.
+//! Used by the ViewSet's own pagination, and by hand-written endpoints
+//! that want the same headers.
 //!
 //! ```ignore
 //! use rustango::pagination::{LinkHeaderBuilder, PageInfo};
@@ -16,12 +16,10 @@
 //! //    </api/posts?page=3>; rel=\"next\", </api/posts?page=5>; rel=\"last\""
 //! ```
 //!
-//! ## Page-number shape: [`Paginator`] + [`Page`]
+//! ## Page numbers: [`Paginator`] and [`Page`]
 //!
-//! For server-side rendered list views (Tera / template_views), pure-
-//! metadata `Paginator` + `Page` types. The `Page` holds no rows — the
-//! caller computes `page.offset()` and `page.limit()` and feeds them
-//! into a `QuerySet` `.offset(...).limit(...).fetch(...)` call.
+//! For server-rendered list views. These types hold metadata only, no
+//! rows. Pass `page.offset()` and `page.limit()` to a `QuerySet`.
 //!
 //! ```ignore
 //! use rustango::pagination::Paginator;
@@ -39,19 +37,18 @@
 //! for mark in paginator.get_elided_page_range(page.number, 3, 2) { … }
 //! ```
 //!
-//! `get_elided_page_range` short-circuits when total pages
-//! `<= (on_each_side + on_ends) * 2`, emitting every page without
-//! ellipsis markers.
+//! When total pages are `<= (on_each_side + on_ends) * 2`,
+//! `get_elided_page_range` emits every page with no ellipsis marker.
 //!
-//! ## Cursor shape: [`CursorPaginator`] + [`Cursor`] + [`CursorPage`]
+//! ## Cursors: [`CursorPaginator`], [`Cursor`], [`CursorPage`]
 //!
-//! For large tables where `COUNT(*) + OFFSET N` is prohibitively
-//! expensive, cursor (keyset / seek) pagination walks the table by a
-//! stable ordering key — no count, no offset, O(log N) per page.
+//! For large tables where `COUNT(*)` plus `OFFSET N` costs too much.
+//! Cursor (keyset) pagination walks the table by a stable ordering
+//! key: no count, no offset, O(log N) per page.
 //!
-//! The caller owns the SQL — the paginator hands back an opaque token
-//! and a direction; the caller writes `WHERE (pos) > cursor.position`
-//! (or `<` for backward) plus a matching `ORDER BY`.
+//! The caller owns the SQL. The paginator returns an opaque token and
+//! a direction; you write `WHERE (pos) > cursor.position` (or `<` for
+//! backward) and a matching `ORDER BY`.
 //!
 //! ```ignore
 //! use rustango::pagination::{Cursor, CursorPaginator};
@@ -76,6 +73,12 @@
 //! // page.items — up to N rows
 //! // page.next  — Some(Cursor) if more pages, None at end
 //! ```
+//!
+//! [`Paginator`]: crate::pagination::Paginator
+//! [`Page`]: crate::pagination::Page
+//! [`CursorPaginator`]: crate::pagination::CursorPaginator
+//! [`Cursor`]: crate::pagination::Cursor
+//! [`CursorPage`]: crate::pagination::CursorPage
 
 use std::collections::BTreeMap;
 
@@ -96,8 +99,8 @@ pub struct LinkHeaderBuilder {
 }
 
 impl LinkHeaderBuilder {
-    /// Start a builder for `base_url` (path with optional existing query).
-    /// The base URL appears in every emitted link.
+    /// Start a builder for `base_url`, a path with an optional query.
+    /// It appears in every emitted link.
     #[must_use]
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
@@ -107,15 +110,16 @@ impl LinkHeaderBuilder {
         }
     }
 
-    /// Preserve a query parameter across pagination links (e.g. `?search=foo`).
-    /// Add filters/search/ordering values here so the next/prev links carry them.
+    /// Keep a query parameter on every link. Add filter, search and
+    /// ordering values here so `next`/`prev` carry them.
     #[must_use]
     pub fn keep_param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra_query.insert(key.into(), value.into());
         self
     }
 
-    /// Auto-populate `first`/`prev`/`next`/`last` rel links from page-number info.
+    /// Fill in the `first`, `prev`, `next` and `last` links from page
+    /// numbers.
     #[must_use]
     pub fn with_page_info(mut self, info: PageInfo) -> Self {
         if info.total_pages > 1 {
@@ -174,21 +178,16 @@ impl LinkHeaderBuilder {
     }
 }
 
-// #806 — was a byte-identical copy of `crate::url_codec::url_encode`.
-// Re-aliased to keep all pagination call sites inside this module
-// without churning their `url_encode(k)` shape, while routing through
-// the canonical codec.
 use crate::url_codec::url_encode;
 
 // =====================================================================
-// PageLinks — JSON-friendly URL bundle for inline `_links` responses
+// PageLinks — JSON URL bundle for inline `_links` responses
 // =====================================================================
 
 const MAX_PAGE_SIZE: usize = 1000;
 
-/// Standard pagination link bundle. Pairs with [`LinkHeaderBuilder`]
-/// (header form) — `PageLinks` is the JSON-body form most APIs embed
-/// inline under `_links` or alongside the result set.
+/// Pagination links for a JSON body, usually under `_links`.
+/// [`LinkHeaderBuilder`] is the header form of the same thing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PageLinks {
     pub current: Option<String>,
@@ -199,8 +198,7 @@ pub struct PageLinks {
 }
 
 impl PageLinks {
-    /// Render the bundle as a JSON object — embed under `_links` or
-    /// similar in your list response.
+    /// Render the bundle as a JSON object to embed in a list response.
     #[must_use]
     pub fn to_value(&self) -> serde_json::Value {
         let mut m = serde_json::Map::new();
@@ -242,13 +240,12 @@ impl PageLinks {
     }
 }
 
-/// Build page-number links from base URL + current page (1-based) +
-/// page size + total row count.
+/// Build page-number links from a base URL, the 1-based current page,
+/// the page size and the total row count.
 ///
-/// Returns sensible nones for edges (no `prev` on page 1, no `next`
-/// when on the last page, `first`/`last` omitted when count is 0).
-/// Existing query parameters in `base` (filters, search, ordering)
-/// are preserved on every emitted link.
+/// Edges return `None`: no `prev` on page 1, no `next` on the last
+/// page, no `first`/`last` when the count is 0. Query parameters
+/// already in `base` are kept on every link.
 #[must_use]
 pub fn page_number_links(base: &str, page: usize, page_size: usize, count: usize) -> PageLinks {
     let page = page.max(1);
@@ -271,8 +268,8 @@ pub fn page_number_links(base: &str, page: usize, page_size: usize, count: usize
     links
 }
 
-/// Cursor links — only `next` / `current` / `first` are meaningful
-/// since cursor pagination doesn't carry a total count.
+/// Cursor links. Only `current`, `first` and `next` are set: cursor
+/// pagination has no total count, so there is no `prev` or `last`.
 #[must_use]
 pub fn cursor_links(
     base: &str,
@@ -316,7 +313,7 @@ fn base_params(base: &str) -> BTreeMap<String, String> {
                 continue;
             }
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            // Drop the params we'll override below.
+            // Drop the params overridden below.
             if !matches!(k, "page" | "page_size" | "cursor") {
                 out.insert(k.to_owned(), v.to_owned());
             }
@@ -592,29 +589,23 @@ mod tests {
 }
 
 // ============================================================================
-// Page-number Paginator + Page (issue #12)
+// Page-number Paginator + Page
 //
-// Pure-metadata types for server-side rendered list views.
-//
-// Distinct from the `LinkHeaderBuilder` / `PageLinks` API-layer shape
-// above. Pick the right tool: API endpoints emit RFC 5988 `Link`
-// headers + cursor params; HTML list views render `<nav>` with the
-// `Paginator` / `Page` types.
+// Metadata-only types for server-rendered list views. Use these to
+// render an HTML `<nav>`; use `LinkHeaderBuilder` / `PageLinks` above
+// for API responses.
 // ============================================================================
 
-/// One element of [`Paginator::get_elided_page_range`] — either a page
-/// number or an ellipsis marker. Templates render the marker as
-/// "…" (or whatever skipped-pages indicator the design calls for).
+/// One element of [`Paginator::get_elided_page_range`]: a page number
+/// or an ellipsis marker. Templates usually render the marker as "…".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageMark {
     Number(usize),
     Ellipsis,
 }
 
-/// Errors from [`Paginator::page`] / [`Page::next_page_number`] /
-/// [`Page::previous_page_number`]. Three variants:
-/// `PageNotAnInteger` (page < 1), `EmptyPage` (count == 0 with empty
-/// first page disallowed), and `OutOfRange` (page > num_pages).
+/// Errors from [`Paginator::page`], [`Page::next_page_number`] and
+/// [`Page::previous_page_number`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PaginatorError {
     #[error("page number must be a positive integer (got 0)")]
@@ -625,26 +616,25 @@ pub enum PaginatorError {
     OutOfRange { requested: usize, last: usize },
 }
 
-/// Page-number paginator. Pure metadata — holds no rows.
+/// Page-number paginator. Metadata only, holds no rows.
 ///
-/// Build with [`Paginator::new`] from a `count` + `per_page`. Optional
-/// builder methods narrow the behaviour:
-/// - [`Paginator::orphans`] — if the last page would have <= `orphans`
-///   items, roll them into the second-to-last page so the trailing
-///   `<nav>` doesn't show a near-empty page.
-/// - [`Paginator::allow_empty_first_page`] — when `count == 0`, return
-///   page 1 as a valid empty page (default `true`).
+/// Build it with [`Paginator::new`] from a `count` and `per_page`. Two
+/// options change the behaviour:
+/// - [`Paginator::orphans`]: roll a last page of `<= orphans` items
+///   into the page before it.
+/// - [`Paginator::allow_empty_first_page`]: when `count == 0`, treat
+///   page 1 as a valid empty page. Default `true`.
 ///
-/// Call [`Paginator::page`] for explicit error handling, or
-/// [`Paginator::get_page`] for the "clamp to valid range" shape.
+/// Use [`Paginator::page`] to handle a bad page number yourself, or
+/// [`Paginator::get_page`] to clamp it into range.
 #[derive(Debug, Clone, Copy)]
 pub struct Paginator {
     /// Total number of items across all pages.
     pub count: usize,
-    /// Maximum items per page. Always >= 1 (constructor clamps).
+    /// Maximum items per page. The constructor clamps it to >= 1.
     pub per_page: usize,
-    /// Items on the last page get rolled into the previous page when
-    /// the count is `<= orphans`. Default 0.
+    /// A last page of `<= orphans` items is rolled into the page
+    /// before it. Default 0.
     pub orphans: usize,
     /// When `count == 0`, treat page 1 as a valid empty page. Default
     /// `true`.
@@ -652,8 +642,8 @@ pub struct Paginator {
 }
 
 impl Paginator {
-    /// Build a paginator. `per_page` is clamped to at least 1 (rather
-    /// than panicking on a divide-by-zero downstream).
+    /// Build a paginator. `per_page` is clamped to at least 1, so a
+    /// zero cannot cause a divide-by-zero later.
     #[must_use]
     pub fn new(count: usize, per_page: usize) -> Self {
         Self {
@@ -664,15 +654,15 @@ impl Paginator {
         }
     }
 
-    /// Set the orphan threshold. Items on the last page that number
-    /// `<= orphans` get rolled into the previous page.
+    /// Set the orphan threshold: a last page of `<= orphans` items is
+    /// rolled into the page before it.
     #[must_use]
     pub fn orphans(mut self, orphans: usize) -> Self {
         self.orphans = orphans;
         self
     }
 
-    /// Toggle the "page 1 is valid when count == 0" behaviour.
+    /// Choose whether page 1 is valid when `count == 0`.
     #[must_use]
     pub fn allow_empty_first_page(mut self, allow: bool) -> Self {
         self.allow_empty_first_page = allow;
@@ -710,13 +700,11 @@ impl Paginator {
         }
         let last = self.num_pages();
         if last == 0 {
-            // count == 0 + allow_empty_first_page == false — every
-            // page is invalid.
+            // count == 0 and empty first page disallowed: no page is
+            // valid.
             return Err(PaginatorError::EmptyPage(number));
         }
         if number > last {
-            // Special case: count == 0, allow_empty_first_page == true
-            // (so last == 1) — page > 1 is still out of range.
             return Err(PaginatorError::OutOfRange {
                 requested: number,
                 last,
@@ -737,9 +725,9 @@ impl Paginator {
         })
     }
 
-    /// Build a [`Page`] for `number`, clamping out-of-range values to
-    /// page 1 (negative / zero) or the last page (too large). Never
-    /// returns an error.
+    /// Build a [`Page`] for `number`. A number below 1 clamps to page
+    /// 1 and a number too large clamps to the last page, so this never
+    /// fails.
     #[must_use]
     pub fn get_page(&self, number: i64) -> Page<'_> {
         let last = self.num_pages().max(1);
@@ -754,17 +742,16 @@ impl Paginator {
         }
     }
 
-    /// Yield a "1, 2, …, 12, 13, 14, …, 49, 50"-style elided page
-    /// range for rendering a `<nav>` pager:
-    /// - Short-circuits when `num_pages <= (on_each_side + on_ends) * 2`
-    ///   and emits every page directly with no ellipsis.
-    /// - Otherwise emits the left edge, a window around `number`, and
-    ///   the right edge, with [`PageMark::Ellipsis`] markers in the
-    ///   gaps.
+    /// Build a "1, 2, …, 12, 13, 14, …, 49, 50" page range for a
+    /// `<nav>` pager.
     ///
-    /// Recommended defaults: `on_each_side=3, on_ends=2`. An invalid
-    /// `number` is clamped to page 1 to match `get_page`'s forgiving
-    /// shape.
+    /// When `num_pages <= (on_each_side + on_ends) * 2` every page is
+    /// emitted with no ellipsis. Otherwise you get the left edge, a
+    /// window around `number` and the right edge, with
+    /// [`PageMark::Ellipsis`] in the gaps.
+    ///
+    /// Good defaults are `on_each_side = 3, on_ends = 2`. An invalid
+    /// `number` clamps to page 1, like `get_page`.
     #[must_use]
     pub fn get_elided_page_range(
         &self,
@@ -778,8 +765,7 @@ impl Paginator {
         }
         let number = self.validate_number(number).unwrap_or(1);
 
-        // Short-circuit: small enough that every page fits in the
-        // left + right windows. Emit them all without ellipsis.
+        // Small enough that every page fits in the two windows.
         let threshold = on_each_side.saturating_add(on_ends).saturating_mul(2);
         if last <= threshold {
             return (1..=last).map(PageMark::Number).collect();
@@ -787,10 +773,9 @@ impl Paginator {
 
         let mut out = Vec::new();
 
-        // ---- Left half (everything up to and including `number`) ----
-        // If number > (1 + on_each_side + on_ends) + 1, emit
-        // [1..on_ends] + ELL + [number - on_each_side .. number].
-        // Else emit [1 .. number].
+        // Left half, up to and including `number`: either
+        // [1..on_ends] + ellipsis + [number - on_each_side ..= number],
+        // or just [1 ..= number] when there is no gap.
         let left_gap_trigger = 1usize
             .saturating_add(on_each_side)
             .saturating_add(on_ends)
@@ -809,10 +794,9 @@ impl Paginator {
             }
         }
 
-        // ---- Right half (everything after `number`) ----
-        // If number < (num_pages - on_each_side - on_ends) - 1,
-        // emit [number+1 .. number+on_each_side] + ELL + [last-on_ends+1 .. last].
-        // Else emit [number+1 .. last].
+        // Right half, after `number`: either
+        // [number+1 ..= number+on_each_side] + ellipsis + the last
+        // `on_ends` pages, or just [number+1 ..= last].
         let right_gap_trigger = last
             .saturating_sub(on_each_side)
             .saturating_sub(on_ends)
@@ -842,8 +826,7 @@ impl Paginator {
 pub struct Page<'a> {
     /// 1-based page number.
     pub number: usize,
-    /// Back-reference to the paginator (for `count` / `num_pages` /
-    /// `per_page` lookups).
+    /// The paginator this page came from.
     pub paginator: &'a Paginator,
 }
 
@@ -860,13 +843,13 @@ impl<'a> Page<'a> {
         self.number > 1
     }
 
-    /// `true` if there's at least one other page.
+    /// `true` if there is at least one other page.
     #[must_use]
     pub fn has_other_pages(&self) -> bool {
         self.has_next() || self.has_previous()
     }
 
-    /// Next page number, or `OutOfRange` if we're on the last page.
+    /// Next page number, or an error on the last page.
     ///
     /// # Errors
     /// [`PaginatorError::OutOfRange`] when `!self.has_next()`.
@@ -880,7 +863,7 @@ impl<'a> Page<'a> {
         Ok(self.number + 1)
     }
 
-    /// Previous page number, or `OutOfRange` if we're on page 1.
+    /// Previous page number, or an error on page 1.
     ///
     /// # Errors
     /// [`PaginatorError::OutOfRange`] when `!self.has_previous()`.
@@ -894,8 +877,8 @@ impl<'a> Page<'a> {
         Ok(self.number - 1)
     }
 
-    /// 1-based index of the first item on this page. `0` when
-    /// `count == 0`. Useful for "Showing 41–60 of 200" UI lines.
+    /// 1-based index of the first item on this page, or `0` when
+    /// `count == 0`. Use it for "Showing 41-60 of 200" lines.
     #[must_use]
     pub fn start_index(&self) -> usize {
         if self.paginator.count == 0 {
@@ -904,9 +887,8 @@ impl<'a> Page<'a> {
         (self.number - 1) * self.paginator.per_page + 1
     }
 
-    /// 1-based index of the last item on this page (inclusive). On
-    /// the last page, equal to `count` (so the trailing-partial-page
-    /// case is exact).
+    /// 1-based index of the last item on this page, inclusive. On the
+    /// last page this is `count`, so a partial page is exact.
     #[must_use]
     pub fn end_index(&self) -> usize {
         if self.paginator.count == 0 {
@@ -930,10 +912,9 @@ impl<'a> Page<'a> {
         (self.number - 1) * self.paginator.per_page
     }
 
-    /// Slice a fully-fetched item list for this page. Convenient for
-    /// in-memory paging when you've already pulled everything via a
-    /// single `fetch` and want to render one page at a time
-    /// without round-trips. For DB-backed paging, prefer
+    /// Slice an already-fetched list down to this page. Use it when
+    /// you fetched everything once and render one page at a time. For
+    /// database paging prefer
     /// `.limit([page.limit()]).offset([page.offset()])` on the queryset.
     ///
     /// [page.limit()]: Self::limit
@@ -952,10 +933,9 @@ impl<'a> Page<'a> {
 
 /// Direction of cursor traversal.
 ///
-/// `Forward` walks the table in the natural order (`pos > cursor.position`);
-/// `Backward` walks it in reverse (`pos < cursor.position`). Bidirectional
-/// callers typically encode the direction into the cursor itself so a
-/// "previous page" link round-trips cleanly.
+/// `Forward` means `pos > cursor.position`, `Backward` means
+/// `pos < cursor.position`. The direction travels inside the cursor,
+/// so a "previous page" link round-trips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CursorDirection {
     #[serde(rename = "f")]
@@ -968,31 +948,29 @@ pub enum CursorDirection {
 /// Errors from [`Cursor::decode`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CursorError {
-    /// Cursor string contained a non-hex byte or odd length.
+    /// The cursor string had a non-hex byte or an odd length.
     #[error("invalid cursor encoding: {0}")]
     Decode(String),
-    /// Cursor payload didn't deserialize into the expected position
-    /// shape (usually a schema change between cursor mint + use).
+    /// The payload did not match the expected position shape, usually
+    /// because it changed between minting the cursor and using it.
     #[error("invalid cursor payload: {0}")]
     Json(String),
 }
 
-/// An opaque, URL-safe cursor token carrying a position payload `T`
-/// plus a traversal direction.
+/// An opaque, URL-safe cursor token holding a position `T` and a
+/// direction.
 ///
-/// `T` is any `serde::Serialize + serde::de::DeserializeOwned` value
-/// — usually a small struct holding the column(s) used in the
-/// `ORDER BY` (e.g. `{ id: i64 }` or `{ created_at: DateTime, id: i64 }`
-/// for stable tie-breaking).
+/// `T` is usually a small struct with the `ORDER BY` columns, such as
+/// `{ id: i64 }` or `{ created_at: DateTime, id: i64 }` for a stable
+/// tie-break.
 ///
-/// The wire format is hex-encoded JSON. Clients should treat the
-/// string as opaque; the server is free to change the position shape
-/// across releases (an old cursor that fails to decode just falls
-/// through to "start from the beginning").
+/// The wire format is hex-encoded JSON. Clients must treat the string
+/// as opaque, so the server can change the position shape: an old
+/// cursor that fails to decode just starts from the beginning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor<T> {
-    /// The "last seen" position. For `Forward` direction, the next
-    /// page starts strictly after this; for `Backward`, strictly before.
+    /// The last seen position. `Forward` starts strictly after it,
+    /// `Backward` strictly before it.
     pub position: T,
     /// Direction this cursor was minted for.
     pub direction: CursorDirection,
@@ -1030,8 +1008,8 @@ where
     /// Encode this cursor as an opaque URL-safe string.
     ///
     /// # Panics
-    /// Panics only if `T` produces invalid JSON via `serde_json` — for
-    /// well-formed `Serialize` impls this never fires.
+    /// Only if `T` fails to serialize to JSON, which a well-formed
+    /// `Serialize` impl never does.
     #[must_use]
     pub fn encode(&self) -> String {
         let wire = CursorWire {
@@ -1047,11 +1025,11 @@ impl<T> Cursor<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    /// Parse a cursor string previously produced by [`Cursor::encode`].
+    /// Parse a cursor string made by [`Cursor::encode`].
     ///
     /// # Errors
-    /// - [`CursorError::Decode`] when `s` isn't valid lowercase hex.
-    /// - [`CursorError::Json`] when the decoded bytes don't match the
+    /// - [`CursorError::Decode`] when `s` is not valid hex.
+    /// - [`CursorError::Json`] when the bytes do not match the
     ///   expected position shape.
     pub fn decode(s: &str) -> Result<Self, CursorError> {
         let bytes = hex_decode(s).map_err(CursorError::Decode)?;
@@ -1064,9 +1042,9 @@ where
     }
 }
 
-/// Cursor (keyset) paginator. Pure metadata — holds no rows and owns
-/// no SQL. Knows only the page size and the "over-fetch by one"
-/// trick used to detect whether a next page exists.
+/// Cursor (keyset) paginator. Metadata only: no rows, no SQL. It
+/// knows the page size and the over-fetch-by-one trick that detects
+/// whether a next page exists.
 #[derive(Debug, Clone, Copy)]
 pub struct CursorPaginator {
     /// Visible page size. Always >= 1.
@@ -1082,23 +1060,22 @@ impl CursorPaginator {
         }
     }
 
-    /// SQL `LIMIT` value the caller should use. Equals `page_size + 1`
-    /// — one extra row, peeled off in [`Self::build_page`] to detect
-    /// the presence of a next page without an expensive count.
+    /// SQL `LIMIT` to use: `page_size + 1`. [`Self::build_page`] drops
+    /// the extra row and uses it to tell whether a next page exists,
+    /// with no count query.
     #[must_use]
     pub fn fetch_limit(&self) -> usize {
         self.page_size + 1
     }
 
-    /// Convert an over-fetched batch into a [`CursorPage`]. If `rows`
-    /// has more than `page_size` items, the extra trailing row is
-    /// dropped and `page.next` is `Some(Cursor::forward(...))`; the
-    /// position payload is built from the *last visible* row via
+    /// Turn an over-fetched batch into a [`CursorPage`]. When `rows`
+    /// holds more than `page_size` items, the extra row is dropped and
+    /// `page.next` is built from the last visible row with
     /// `extract_position`.
     ///
-    /// The previous cursor is not auto-derived (keyset pagination
-    /// doesn't have a natural "previous"); call [`Self::build_page_with`]
-    /// to supply it explicitly.
+    /// There is no automatic `previous`: keyset pagination has no
+    /// natural backward step. Use [`Self::build_page_with`] to pass
+    /// one in.
     #[must_use]
     pub fn build_page<T, P, F>(self, rows: Vec<T>, extract_position: F) -> CursorPage<T, P>
     where
@@ -1107,9 +1084,9 @@ impl CursorPaginator {
         self.build_page_with(rows, extract_position, None)
     }
 
-    /// Like [`Self::build_page`] but lets the caller provide a
-    /// `previous` cursor (typically minted from the first row of the
-    /// current page, wrapped as `Cursor::backward`).
+    /// Like [`Self::build_page`], but you supply the `previous`
+    /// cursor. It is usually `Cursor::backward` on the first row of
+    /// the current page.
     #[must_use]
     pub fn build_page_with<T, P, F>(
         self,
@@ -1140,10 +1117,10 @@ impl CursorPaginator {
 
 /// One page of cursor-paginated results.
 ///
-/// - `items`: visible rows (at most `page_size`).
-/// - `next`: forward cursor for the next request, or `None` at tail.
-/// - `previous`: backward cursor passed in by the caller, or `None`.
-/// - `page_size`: the requested page size (echoed for templating).
+/// - `items`: the visible rows, at most `page_size`.
+/// - `next`: forward cursor for the next request, `None` at the end.
+/// - `previous`: backward cursor the caller passed in, or `None`.
+/// - `page_size`: the requested page size, echoed for templates.
 #[derive(Debug, Clone)]
 pub struct CursorPage<T, P> {
     pub items: Vec<T>,
@@ -1167,22 +1144,20 @@ impl<T, P> CursorPage<T, P> {
 }
 
 impl<T, P: serde::Serialize> CursorPage<T, P> {
-    /// Encoded form of [`Self::next`], for embedding in JSON / Link headers.
+    /// Encoded [`Self::next`], for a JSON body or a `Link` header.
     #[must_use]
     pub fn next_token(&self) -> Option<String> {
         self.next.as_ref().map(Cursor::encode)
     }
 
-    /// Encoded form of [`Self::previous`], for embedding in JSON / Link headers.
+    /// Encoded [`Self::previous`], for a JSON body or a `Link` header.
     #[must_use]
     pub fn previous_token(&self) -> Option<String> {
         self.previous.as_ref().map(Cursor::encode)
     }
 }
 
-// #562 — single `hex_encode` implementation lives in `crate::hex`;
-// pagination used to ship its own copy. `hex_decode` stays local —
-// the shared module doesn't (yet) ship a decoder.
+// `hex_decode` stays local: `crate::hex` has no decoder.
 use crate::hex::hex_encode;
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {

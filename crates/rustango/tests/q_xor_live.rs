@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
 //! Live PG test for `WhereExpr::Xor` runtime semantics (issue #27).
-//! Verifies the canonical binary rewrite + Django's N-ary odd-parity
+//! Verifies the canonical binary rewrite + the N-ary odd-parity
 //! tally produce the right row counts end-to-end. Skips silently when
 //! `DATABASE_URL` is unset.
 
