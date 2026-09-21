@@ -1,4 +1,4 @@
-//! Django-parity #338 — `FilePathField` equivalent via
+//! Issue #338 — a filesystem-path field via
 //! `#[rustango(validators = "filepath")]`. Structural-only check:
 //! non-empty, no NUL, no `..` segments.
 
@@ -15,7 +15,7 @@ pub struct Doc {
     #[rustango(max_length = 500, validators = "filepath")]
     pub path: String,
 
-    /// Django-shape alias for verbatim translation.
+    /// `filepath_field` is an accepted alias for the same validator.
     #[rustango(max_length = 500, validators = "filepath_field")]
     pub legacy_alias: String,
 }

@@ -6,8 +6,8 @@
 //! so verification is self-describing — the parameters travel with the
 //! hash. Default parameters come from `argon2::Argon2::default()` —
 //! Argon2id with the OWASP-recommended cost (m=19456, t=2, p=1 as of
-//! 2026); good enough for hobby/demo deployments. Operators can opt
-//! into stronger parameters via [`hash_with`].
+//! 2026). There is no hook for stronger parameters yet: [`hash`] uses
+//! the defaults.
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;

@@ -6,8 +6,8 @@ synchronisieren. Es inline zu tun lässt den Benutzer warten und koppelt die
 Response an einen unzuverlässigen externen Aufruf. Ein **Hintergrund-Job**
 verschiebt diese Arbeit auf eine Queue: der Handler kehrt sofort zurück, und ein
 Pool von Workern führt den Job Augenblicke später aus, mit **automatischen
-Retries** und einem **Dead-Letter**-Pfad für Fehlschläge. Das ist Django-Q /
-Celery / Laravel-Queues, in Rust.
+Retries** und einem **Dead-Letter**-Pfad für Fehlschläge — eine Task-Queue,
+vollständig in Rust.
 
 [![Background jobs in Rustango: a handler dispatches a Job onto a queue, worker tasks run it, retryable failures back off and retry, fatal ones go to a dead-letter handler](../img/jobs.png)](../img/jobs.png)
 

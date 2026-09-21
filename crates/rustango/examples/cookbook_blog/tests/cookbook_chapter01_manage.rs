@@ -10,7 +10,7 @@ fn project_root() -> PathBuf {
 
 // §1.1 ────────────────────────────────────────────────────────────
 #[test]
-fn layout_matches_django_shape() {
+fn layout_matches_scaffolder_shape() {
     let root = project_root();
     for required in [
         "src/main.rs",

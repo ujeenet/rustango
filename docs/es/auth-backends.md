@@ -4,7 +4,7 @@ Un **backend de autenticación** responde a una única pregunta: *dada una petic
 entrante, ¿quién es el usuario?* **Rustango** te permite apilar varios — HTTP
 Basic, clave de API, JWT — en una cadena que el middleware de autenticación
 prueba en orden, de modo que una misma aplicación puede aceptar humanos y
-máquinas en las mismas rutas. Es la idea de `AUTHENTICATION_BACKENDS` de Django,
+máquinas en las mismas rutas. La cadena no es más que una lista de configuración,
 cableada a axum. Combínalo con `require_auth` / `require_perm` para restringir
 rutas y el extractor `CurrentUser` para leer el resultado.
 
@@ -214,8 +214,8 @@ posea que conceda el codename pasa. Concede con
 Por separado, `rustango::auth_backends` (nota: raíz del crate, **no** `tenancy`)
 es un pequeño registro **independiente del framework** — una cadena
 `Credentials` → `Principal` con su propio trait `AuthBackend`. No tiene ningún
-pegamento HTTP/axum; úsalo cuando quieras una capacidad de conexión de backends
-al estilo Django dentro de tu propio código de autenticación:
+pegamento HTTP/axum; úsalo cuando quieras backends de autenticación
+intercambiables dentro de tu propio código de autenticación:
 
 ```rust
 use rustango::auth_backends::{AuthBackendChain, Credentials, RemoteUserBackend};

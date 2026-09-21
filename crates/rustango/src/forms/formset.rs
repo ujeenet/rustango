@@ -1,11 +1,9 @@
-//! Form sets — Django's `formset_factory` / `modelformset_factory`
-//! shape. Issue #49.
+//! Form sets — parse N copies of the same [`crate::forms::Form`]
+//! from a single HTTP request payload.
 //!
-//! Parse N copies of the same [`crate::forms::Form`] from a single
-//! HTTP request payload. Each row is keyed
-//! `<prefix>-<N>-<field>` (Django convention: prefix `form` by
-//! default, so `form-0-title`, `form-1-title`, `form-2-title` for
-//! three rows of a `Title` field).
+//! Each row is keyed `<prefix>-<N>-<field>`. The usual prefix is
+//! `form`, so three rows of a `title` field arrive as `form-0-title`,
+//! `form-1-title` and `form-2-title`.
 //!
 //! ```ignore
 //! use rustango::forms::formset::parse_formset;
@@ -27,8 +25,8 @@
 //!
 //! ## Management form
 //!
-//! Django requires every formset payload to carry a "management
-//! form" — three integer fields that bound the row range:
+//! Every payload also carries a "management form" — three integer
+//! fields that bound the row range:
 //!
 //! - `<prefix>-TOTAL_FORMS`: how many rows the client submitted.
 //!   **Required** — `parse_formset` errors if missing or malformed.

@@ -1,18 +1,16 @@
-//! HTTP method override — rewrite POST → PUT / PATCH / DELETE based on
-//! a hidden form field or header.
+//! Method override: turn a POST into PUT, PATCH or DELETE from a
+//! hidden form field or a header.
 //!
-//! HTML `<form>` only emits GET or POST — no PUT, PATCH, or DELETE.
-//! The standard Laravel / Express convention is a hidden `_method`
-//! field (or `X-HTTP-Method-Override` header) carrying the intended
-//! verb; the server rewrites the request before routing.
+//! An HTML `<form>` can only send GET or POST. The usual workaround,
+//! from Laravel and Express, is a hidden `_method` field or an
+//! `X-HTTP-Method-Override` header naming the real verb, which the
+//! server applies before routing.
 //!
-//! ## Why a tower Layer (not Router::layer)
+//! ## Why a tower Layer, not `Router::layer`
 //!
-//! axum 0.8's `Router::layer(...)` runs the middleware AROUND the
-//! selected handler — after routing. To rewrite the method BEFORE
-//! routing dispatches, the layer must wrap the entire Router. Use
-//! [`tower::ServiceBuilder`] (or call `MethodOverrideLayer::layer`
-//! directly) to compose:
+//! `Router::layer(...)` runs after routing, around the chosen handler.
+//! The method has to change before routing, so the layer must wrap the
+//! whole Router. Use [`tower::ServiceBuilder`]:
 //!
 //! ```ignore
 //! use rustango::method_override::MethodOverrideLayer;
@@ -37,23 +35,25 @@
 //!
 //! ## Strategies
 //!
-//! Tried in this order (whichever fires first wins):
+//! The first one that matches wins:
 //!
-//! 1. `X-HTTP-Method-Override` header (preferred — works for any
-//!    Content-Type, cheaper than parsing the body).
-//! 2. `_method` form field, when the request is
-//!    `application/x-www-form-urlencoded` AND the body is small enough.
-//!    Body-parse limit is configurable (default 64 KiB).
+//! 1. The `X-HTTP-Method-Override` header. Preferred: it works with
+//!    any Content-Type and needs no body parse.
+//! 2. The `_method` form field, when the request is
+//!    `application/x-www-form-urlencoded` and the body fits the limit
+//!    (64 KiB by default).
 //!
 //! ## Safety
 //!
-//! - Only POST requests are rewritten — never GET / HEAD / OPTIONS,
-//!   regardless of what the client claims.
-//! - The override target must be in the configured allow-list. Default:
-//!   PUT, PATCH, DELETE. Anything else is ignored.
-//! - The body is read once into memory when checking the form-field
-//!   strategy — large uploads should use the header strategy and skip
-//!   the body parse entirely.
+//! - Only POST is rewritten. GET, HEAD and OPTIONS never are, whatever
+//!   the client sends.
+//! - The target verb must be in the allow-list. Default: PUT, PATCH,
+//!   DELETE. Anything else is ignored.
+//! - **Keep CSRF protection on.** A form now picks the verb, so a
+//!   cross-site POST can reach a DELETE route. A rewritten request is
+//!   no safer than the POST it arrived as.
+//! - The form-field path reads the whole body into memory. For large
+//!   uploads, use the header instead.
 
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -68,8 +68,8 @@ const DEFAULT_HEADER: &str = "x-http-method-override";
 const DEFAULT_FORM_FIELD: &str = "_method";
 const DEFAULT_BODY_LIMIT: usize = 64 * 1024;
 
-/// Configuration for [`MethodOverrideService`]. Implements
-/// [`tower::Layer`] so it composes with `ServiceBuilder`.
+/// Settings for [`MethodOverrideService`]. It is a [`tower::Layer`],
+/// so it works with `ServiceBuilder`.
 #[derive(Clone)]
 pub struct MethodOverrideLayer {
     cfg: Arc<MethodOverrideConfig>,
@@ -139,8 +139,8 @@ impl<S> tower::Layer<S> for MethodOverrideLayer {
     }
 }
 
-/// The wrapped service. Inspects each incoming POST for an override
-/// strategy and rewrites the method before forwarding to `inner`.
+/// The wrapped service. It checks each POST for an override and
+/// changes the method before calling `inner`.
 #[derive(Clone)]
 pub struct MethodOverrideService<S> {
     inner: S,
@@ -179,21 +179,21 @@ async fn maybe_rewrite(req: Request<Body>, cfg: &MethodOverrideConfig) -> Reques
         return req;
     }
 
-    // 1. Header strategy — cheap, no body parse.
+    // 1. Header: cheap, no body parse.
     if let Some(target) = header_method(req.headers(), cfg.header_name) {
         if cfg.allowed.contains(&target) {
             return swap_method(req, target);
         }
     }
 
-    // 2. Form-field strategy — parse the body if it's a form payload.
+    // 2. Form field: only for a urlencoded body.
     if is_form_content_type(req.headers()) {
         let (parts, body) = req.into_parts();
         let bytes = match to_bytes(body, cfg.body_limit).await {
             Ok(b) => b,
             Err(_) => {
-                // Body too large or stream error — pass through with
-                // an empty body since we already consumed it.
+                // Body too large, or the stream broke. It is already
+                // consumed, so forward an empty one.
                 return Request::from_parts(parts, Body::empty());
             }
         };
@@ -296,8 +296,7 @@ mod tests {
     use std::sync::Arc as StdArc;
     use tower::{Layer, ServiceExt};
 
-    /// Wrap an inner Router with the layer (so routing sees the
-    /// rewritten method).
+    /// Wrap a Router so routing sees the rewritten method.
     fn wrap(
         inner: Router,
         layer: MethodOverrideLayer,

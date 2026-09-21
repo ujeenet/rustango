@@ -1,24 +1,17 @@
-//! Django-shape DEBUG template-error overlay — issue #386.
+//! Template error page for development.
 //!
-//! When Tera fails to render a template at request time, the default
-//! `template_views::render` fallback emits a 500 whose body says only
-//! "template render error" — fine for production, where the operator
-//! pulls the full error from the tracing log, but hostile to local
-//! dev where the developer wants to *see* what broke without leaving
-//! the browser.
+//! In production a failed Tera render returns a plain 500 and the
+//! operator reads the details from the log. That is no help locally,
+//! where the developer wants to see the failure in the browser.
 //!
-//! This module provides the inverse path. [`enabled`] decides whether
-//! the current process should serve debug overlays based on the
-//! tiered-settings convention ([`RUSTANGO_ENV`] != `"prod"`, or the
-//! explicit `RUSTANGO_TEMPLATE_DEBUG=1` override). [`error_page_html`]
-//! renders a styled HTML page from a Tera error.
+//! [`enabled`] says whether this process should show the page.
+//! [`error_page_html`] builds it from a Tera error.
 //!
-//! The page intentionally pulls every field [`tera::Error`] exposes
-//! — `Display`, kind discriminator, source chain — so the dev sees
-//! the same diagnostic the tracing log gets. The styling is
-//! inline-CSS so it works in any vanilla browser without a static
-//! asset round-trip (which might fail for the same reason the
-//! template did).
+//! **The page shows internal details, so never turn it on in
+//! production.** It prints everything [`tera::Error`] carries: the
+//! message, the debug form and the full source chain. The CSS is
+//! inline, so the page needs no static asset that might fail for the
+//! same reason the template did.
 //!
 //! ## Wiring
 //!
@@ -45,38 +38,40 @@
 //! }
 //! ```
 //!
-//! The framework's own `template_views::render` is updated for this
-//! in the same slice as the helper — see the call site for the
-//! reference wiring.
+//! `template_views::render` already does this. It also checks
+//! `error::disclose_server_errors()`, so a locked-down process keeps
+//! the plain 500.
+//!
+//! [`enabled`]: crate::template_debug::enabled
+//! [`error_page_html`]: crate::template_debug::error_page_html
 
-/// `true` when the current process should serve debug overlays on
-/// template render errors. Resolution order:
+/// `true` when this process should show the debug page instead of a
+/// plain 500. Two inputs, in order:
 ///
-/// 1. `RUSTANGO_TEMPLATE_DEBUG` env var, when set to a truthy value
-///    (`1` / `true` / `yes` / `on` — case-insensitive) — forces ON.
-///    Setting it to a falsy value (`0` / `false` / `no` / `off`)
-///    forces OFF.
-/// 2. Otherwise, `RUSTANGO_ENV` — `prod` (or `production`) →  OFF,
-///    anything else (including absent) → ON.
+/// 1. `RUSTANGO_TEMPLATE_DEBUG`. A truthy value (`1`, `true`, `yes`,
+///    `on`) forces it on; a falsy one (`0`, `false`, `no`, `off`)
+///    forces it off. Case does not matter.
+/// 2. Otherwise `RUSTANGO_ENV`: `prod` or `production` means off,
+///    anything else (or nothing) means on.
 ///
-/// Reading the env on every call is cheap (single `std::env::var`)
-/// and avoids a startup-time vs. config-load-time ordering hazard.
-/// Callers that want compile-time control can wrap their call site
-/// in `#[cfg(debug_assertions)]`.
+/// Reading the env each call is cheap and avoids a load-order problem
+/// with config. For a compile-time switch, guard the call site with
+/// `#[cfg(debug_assertions)]`.
 ///
-/// The resolution lives in `error.rs` — every 5xx path needs the same
-/// answer, and this module is gated on `_tera` (#1525).
+/// The answer comes from `error.rs`, because every 5xx path needs the
+/// same one and this module is gated on `_tera`.
 #[must_use]
 pub fn enabled() -> bool {
     crate::error::debug_details_enabled()
 }
 
-/// Render a styled HTML page describing a template render failure.
-/// Layout: red header banner, monospace error body, template-name
-/// + error-kind discriminator, full source-chain walk. Inline CSS
-/// so it works without an external stylesheet (the same template
-/// system that failed isn't trustworthy for re-rendering its own
-/// error page).
+/// Build an HTML page describing a template render failure: the
+/// template name, the error, and the full source chain. The CSS is
+/// inline, since the template system that just failed cannot be
+/// trusted to render its own error page.
+///
+/// The page exposes internal details, so only serve it when
+/// [`enabled`] is true.
 #[must_use]
 pub fn error_page_html(err: &tera::Error, template_name: &str) -> String {
     use std::error::Error as _;
@@ -126,17 +121,16 @@ pre {{ background: #fff; border: 1px solid #ddd;
         escape_html(&err.to_string()),
     );
 
-    // `tera::Error::kind` is a private field; `Debug` on the error
-    // value itself surfaces the kind variant + any wrapped payload
-    // for the same diagnostic value.
+    // `tera::Error::kind` is private, but `Debug` on the error shows the
+    // kind and any wrapped payload.
     let _ = write!(
         buf,
         "<section><h2>Debug</h2><pre>{}</pre></section>\n",
         escape_html(&format!("{err:?}")),
     );
 
-    // Walk the source chain to pick up parse-error line numbers and
-    // any underlying I/O failure that Tera wraps.
+    // Walk the source chain for parse line numbers and any I/O error
+    // Tera wrapped.
     let mut chain: Vec<String> = Vec::new();
     let mut current: Option<&dyn std::error::Error> = err.source();
     while let Some(e) = current {
@@ -164,9 +158,8 @@ plain-text 500 response.</p>
     buf
 }
 
-/// Minimal HTML-escape — enough for showing raw error strings on
-/// the debug page without ever crossing back into a Tera render
-/// (which is what failed in the first place).
+/// Small HTML escape, enough to print raw error text safely without
+/// going back through Tera, which is what just failed.
 fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -186,9 +179,8 @@ fn escape_html(s: &str) -> String {
 mod tests {
     use super::*;
 
-    // The tier env vars are also read by `error::server_error_body`,
-    // so the lock is shared with that module's tests rather than
-    // duplicated here (#1525).
+    // `error::server_error_body` reads the same env vars, so share its
+    // test lock instead of adding a second one.
     use crate::error::test_env::{lock as env_lock, with as with_env};
 
     #[test]
@@ -230,7 +222,7 @@ mod tests {
     #[test]
     fn explicit_template_debug_override_wins_over_env_tier() {
         let _g = env_lock();
-        // prod tier + explicit "1" → forced ON.
+        // prod tier plus explicit "1" forces it on.
         with_env("RUSTANGO_ENV", Some("prod"), || {
             with_env("RUSTANGO_TEMPLATE_DEBUG", Some("1"), || {
                 assert!(enabled(), "explicit `1` forces debug on in prod");
@@ -239,7 +231,7 @@ mod tests {
                 assert!(enabled());
             });
         });
-        // dev tier + explicit "0" → forced OFF.
+        // dev tier plus explicit "0" forces it off.
         with_env("RUSTANGO_ENV", Some("dev"), || {
             with_env("RUSTANGO_TEMPLATE_DEBUG", Some("0"), || {
                 assert!(!enabled(), "explicit `0` forces debug off in dev");
@@ -266,9 +258,9 @@ mod tests {
             page.contains("Failed to parse") || page.contains("parse"),
             "should surface the parse failure text, got: {page}"
         );
-        // Inline CSS so the page works without a static-asset hop.
+        // Inline CSS, so the page needs no static asset.
         assert!(page.contains("<style>"));
-        // No raw < / > leak through from the error message.
+        // No raw angle brackets leak from the error message.
         assert!(
             !page.contains("<%"),
             "any `<` in error text must be escaped"
@@ -277,8 +269,7 @@ mod tests {
 
     #[test]
     fn error_page_escapes_html_in_template_name() {
-        // Defensive — a malicious or accidental template name with
-        // angle brackets shouldn't break out of the page.
+        // A template name with angle brackets must not break the page.
         let mut tera = tera::Tera::default();
         let err = tera
             .add_raw_template("x", "{% if %}{% endif %}")

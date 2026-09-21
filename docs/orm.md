@@ -1,6 +1,6 @@
 # ORM cookbook
 
-Patterns for the **Rustango** ORM beyond the basics. If you come from Django's ORM, Laravel Eloquent, or Rails ActiveRecord, the shapes here will feel familiar. Most examples assume you already have a `Post` model from `Getting Started`.
+Patterns for the **Rustango** ORM beyond the basics. If you come from Laravel Eloquent or Rails ActiveRecord, the shapes here will feel familiar. Most examples assume you already have a `Post` model from `Getting Started`.
 
 [![Type-checked ORM queries: chained filters, ordering, limits, and aggregation — all without raw SQL](img/orm.png)](img/orm.png)
 
@@ -18,18 +18,18 @@ A few Rust terms recur throughout. `&pool` is a shared reference to a database c
 
 ## Recent additions
 
-Recent releases added a batch of Django-parity features that aren't yet woven into every section below. Quick pointers:
+Recent releases added a batch of features that aren't yet woven into every section below. Quick pointers:
 
-- **`Q!` macro + `Qb` runtime builder** (#269, #263) — compile-time-safe Django-shape filters. `User::objects().where_(Q!(User.email__icontains = "alice"))` fails to build on a typo'd field name. Runtime-composable variant for admin filter chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
+- **`Q!` macro + `Qb` runtime builder** (#269, #263) — compile-time-safe filters. `User::objects().where_(Q!(User.email__icontains = "alice"))` fails to build on a typo'd field name. Runtime-composable variant for admin filter chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
 - **`.distinct_on(&["author_id"])`** (#264) — PG native; portable window-function fallback on MySQL / SQLite. "Latest per group" patterns.
-- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — Django `bulk_create(update_conflicts=True)`. Tri-dialect ON CONFLICT / ON DUPLICATE KEY UPDATE.
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — insert many rows, updating the ones that already exist. Tri-dialect ON CONFLICT / ON DUPLICATE KEY UPDATE.
 - **`explain_pool()`** (#272) — tri-dialect EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
 - **DB function library** (#266) — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Per-dialect emission with clear errors where SQLite lacks the function.
 - **Field types** — `rust_decimal::Decimal` (PG/MySQL native, SQLite via Decode shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) now accepted by `#[derive(Model)]` (#524, v0.42).
-- **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — Django `save(commit=False)`. Validate now, mutate the prepared write set, commit when ready.
+- **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — validate now, mutate the prepared write set, commit when ready.
 - **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — partial unique constraints. "Unique email per non-deleted row" / "Unique slug per tenant".
-- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — Django-shape custom-manager extension trait emitted next to the model. (Also the Rust shape of Django proxy models — same physical table, multiple "personalities" via per-trait methods. See `inheritance.rs:98-127`.)
-- **`manage makemigrations --merge`** (#346, v0.42) — Django-shape merge node for divergent branch chains. See [`docs/manage.md`](manage.md#makemigrations---merge).
+- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — a custom-manager extension trait emitted next to the model, so you can hang your own query shortcuts off it. It also lets one physical table carry several "personalities" through per-trait methods. See `inheritance.rs:98-127`.
+- **`manage makemigrations --merge`** (#346, v0.42) — a merge node that reunites divergent branch chains. See [`docs/manage.md`](manage.md#makemigrations---merge).
 
 The CHANGELOG carries the full ticket index for each release.
 
@@ -57,7 +57,7 @@ The CHANGELOG carries the full ticket index for each release.
 
 ## Querying
 
-Read rows from the database. `Post::objects()` starts a query (like Django's `Post.objects`); you chain filters and ordering, then call `.fetch(&pool).await?` to run it and get back a `Vec<Post>`. `.where_(...)` adds an AND-joined condition.
+Read rows from the database. `Post::objects()` starts a query; you chain filters and ordering, then call `.fetch(&pool).await?` to run it and get back a `Vec<Post>`. `.where_(...)` adds an AND-joined condition.
 
 ```rust
 use rustango::core::Column as _;
@@ -92,8 +92,8 @@ let qs = Post::objects().where_raw(WhereExpr::Or(vec![
     Post::status.eq("review").into(),
 ]));
 
-// XOR — Django 4.1+ `Q(a) ^ Q(b)`. Matches rows where an odd number
-// of operands evaluate to true (binary case = "exactly one is true").
+// XOR — matches rows where an odd number of operands evaluate to
+// true (binary case = "exactly one is true").
 // Issue #27.
 let either_but_not_both = Post::objects()
     .where_(Post::status.eq("draft").xor(Post::author_id.eq(42)))
@@ -106,7 +106,7 @@ let either_but_not_both = Post::objects()
 
 ### Comparison filters
 
-The everyday filter methods, one per SQL operator. These are Django's field lookups (`__gt`, `__in`, `__icontains`, and so on) in typed form.
+The everyday filter methods, one per SQL operator. These are the field lookups (`__gt`, `__in`, `__icontains`, and so on) in typed form.
 
 ```rust
 Post::objects().where_(Post::view_count.gt(100)).fetch(&pool).await?;
@@ -168,7 +168,7 @@ Use `.order_by_with_nulls(...)` / `.order_by_expr_with_nulls(...)` to pin the pl
 
 ### Random ordering
 
-Return rows in random order — Django's `.order_by('?')`. Use `.order_random()`. It emits `ORDER BY RANDOM()` on PG and SQLite, `ORDER BY RAND()` on MySQL. Handy for banner rotation, sampling, or A/B-test bucket assignment without pulling rows into the app to shuffle them.
+Return rows in random order with `.order_random()`. It emits `ORDER BY RANDOM()` on PG and SQLite, `ORDER BY RAND()` on MySQL. Handy for banner rotation, sampling, or A/B-test bucket assignment without pulling rows into the app to shuffle them.
 
 ```rust
 // Three random posts.
@@ -222,13 +222,13 @@ For HTTP-side cursor pagination, use `ViewSet::cursor_pagination("id")` instead.
 
 ### Fetching rows into a map
 
-Look up many rows by a list of values and get them back as a `HashMap` keyed by that column. This is Django's `in_bulk(ids, field_name=)`. Use `.in_bulk(...)` for "fetch these N rows in one round trip, indexed by id." A `HashMap<K, V>` is Rust's dictionary/hash table.
+Look up many rows by a list of values and get them back as a `HashMap` keyed by that column. Use `.in_bulk(...)` for "fetch these N rows in one round trip, indexed by id." A `HashMap<K, V>` is Rust's dictionary/hash table.
 
 ```rust
 use std::collections::HashMap;
 use rustango::sql::Auto;
 
-// Default Django shape: keyed by the Auto<i64> PK.
+// Default shape: keyed by the Auto<i64> PK.
 let books: HashMap<i64, Book> = Book::objects()
     .in_bulk(Book::id, [1_i64, 2, 3], |b| match b.id {
         Auto::Set(v) => v,
@@ -249,7 +249,7 @@ Tenant-scoped sibling: `in_bulk_on(column, ids, extract, &executor)` takes any s
 
 ### Locking rows for update
 
-Lock the rows you select so no other transaction can change them until you commit — the standard way to claim work or prevent lost updates. This is Django's `select_for_update(skip_locked=, nowait=, of=, no_key=)`. Call `.select_for_update()`; it appends `SELECT … FOR UPDATE` (or a variant) and the lock lasts for the surrounding transaction.
+Lock the rows you select so no other transaction can change them until you commit — the standard way to claim work or prevent lost updates. Call `.select_for_update()`; it appends `SELECT … FOR UPDATE` (or a variant) and the lock lasts for the surrounding transaction.
 
 ```rust
 // Canonical "claim next available row" pattern. Worker A grabs the
@@ -275,7 +275,7 @@ tx.commit().await?;
 - `.no_key()` — emit `FOR NO KEY UPDATE` instead (PG 9.3+). Weaker lock that doesn't block writers touching only non-key columns.
 - `.of(&["table_or_alias", …])` — restrict the lock to specific tables when the query JOINs.
 
-Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prior `.select_for_update()` implicitly enables the lock, matching Django's ergonomics.
+Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prior `.select_for_update()` implicitly enables the lock.
 
 **Tri-dialect behaviour:**
 
@@ -289,7 +289,7 @@ Calling `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` without a prio
 
 ### Combining queries (union, intersection, difference)
 
-Merge two or more queries over the same model with SQL set operators. These are Django's `.union()`, `.intersection()`, and `.difference()`.
+Merge two or more queries over the same model with SQL set operators: `.union()`, `.intersection()`, and `.difference()`.
 
 ```rust
 // Posts that are EITHER drafts OR currently in review.
@@ -333,11 +333,11 @@ let mixed = qs_a
 
 **Tri-dialect**: PostgreSQL + SQLite support all four operators on every version **Rustango** supports. MySQL 8.0+ supports `UNION`/`UNION ALL`; `INTERSECT`/`EXCEPT` landed in MySQL 8.0.31. Older MySQL versions surface the driver's syntax error at fetch time — there's no client-side gate.
 
-**Error path on the typed builder**: `.union(other_qs)` (and `.intersection()` / `.difference()`) compiles the branch eagerly and panics if the branch fails to compile (typo'd column, etc.). For fallible composition where the caller wants a `Result`, compile the branch first and pass it via `.with_compound(SetOp::Union, branch)` — one generic entry point covers every operator. The panic shape matches Django's: a bad branch is a programmer error, not a runtime data condition.
+**Error path on the typed builder**: `.union(other_qs)` (and `.intersection()` / `.difference()`) compiles the branch eagerly and panics if the branch fails to compile (typo'd column, etc.). For fallible composition where the caller wants a `Result`, compile the branch first and pass it via `.with_compound(SetOp::Union, branch)` — one generic entry point covers every operator. The panic is deliberate: a bad branch is a programmer error, not a runtime data condition.
 
 ### Streaming large result sets
 
-Process a huge table without loading it all into memory. This is Django's `.iterator(chunk_size=2000)`. Call `.iterator(chunk_size)`; it fetches `chunk_size` rows at a time (via `LIMIT N OFFSET M`) and never buffers the whole result set. Reach for it on million-row exports, ETL pipelines, and batch jobs.
+Process a huge table without loading it all into memory. Call `.iterator(chunk_size)`; it fetches `chunk_size` rows at a time (via `LIMIT N OFFSET M`) and never buffers the whole result set. Reach for it on million-row exports, ETL pipelines, and batch jobs.
 
 ```rust
 // 1. Whole-chunk loop — process N rows at a time.
@@ -397,30 +397,30 @@ tx.commit().await?;
 
 A future `iterator_on(&mut *tx, chunk_size)` companion (issue follow-up) would close this gap. Not in scope for issue #23.
 
-**`chunk_size` must be > 0.** Zero or negative values panic. Pick a value that fits your row-size budget (Django's default is `2000`; reasonable for narrow rows, lower for wide TEXT/JSONB columns).
+**`chunk_size` must be > 0.** Zero or negative values panic. Pick a value that fits your row-size budget (`2000` is a good start; reasonable for narrow rows, lower for wide TEXT/JSONB columns).
 
 ### Selecting specific columns
 
-Fetch just a few columns instead of whole `Post` structs — Django's `.values('col')` and `.values_list('col', flat=True)`. Use these when you only need a couple of columns off a wide table, or when the result feeds dynamic code (templates, CSV export, JSON). You get maps, tuples, or a flat typed list back instead of model instances.
+Fetch just a few columns instead of whole `Post` structs. Use these when you only need a couple of columns off a wide table, or when the result feeds dynamic code (templates, CSV export, JSON). You get maps, tuples, or a flat typed list back instead of model instances.
 
 ```rust
 use rustango::core::SqlValue;
 use std::collections::HashMap;
 
-// 1. Column-keyed map per row — Django's `.values('id', 'title')`.
+// 1. Column-keyed map per row.
 let rows: Vec<HashMap<String, SqlValue>> = Post::objects()
     .where_(Post::published.eq(true))
     .order_by(&[("id", false)])
     .values_dict(&["id", "title"])
     .fetch(&pool).await?;
 
-// 2. Ordered tuple per row — Django's `.values_list('id', 'title')`.
+// 2. Ordered tuple per row.
 //    Cell ordering matches the column-list argument.
 let rows: Vec<Vec<SqlValue>> = Post::objects()
     .values_list(&["title", "id"])  // title first, id second
     .fetch(&pool).await?;
 
-// 3. Single-column typed scalar — Django's `.values_list('id', flat=True)`.
+// 3. Single-column typed scalar.
 //    Returns Vec<U> directly via sqlx's typed scalar path.
 let ids: Vec<i64> = Post::objects()
     .where_(Post::published.eq(true))
@@ -448,7 +448,7 @@ let ids: Vec<i64> = Post::objects()
 
 ### Including or excluding columns
 
-Same idea as the previous section, but in Django's include/exclude shape: `.only('id', 'name')` keeps only the named columns, `.defer('big_field')` keeps everything except them. Use these on wide tables where large TEXT / BLOB / JSONB columns make list views expensive to read:
+Same idea as the previous section, but in include/exclude shape: `.only("id", "name")` keeps only the named columns, `.defer("big_field")` keeps everything except them. Use these on wide tables where large TEXT / BLOB / JSONB columns make list views expensive to read:
 
 ```rust
 // .only(...) — fetch only the named columns.
@@ -464,15 +464,15 @@ let rows: Vec<HashMap<String, SqlValue>> = Post::objects()
     .fetch(&pool).await?;
 ```
 
-**Semantics**: `.only(&[cols])` is a synonym for `.values_dict(cols)` — same IR, same return shape, separate entry point for Django-shape readability. `.defer(&[cols])` computes the complement against the model schema (every scalar column on the model EXCEPT the listed ones) and routes to the same path.
+**Semantics**: `.only(&[cols])` is a synonym for `.values_dict(cols)` — same IR, same return shape, separate entry point that reads better at the call site. `.defer(&[cols])` computes the complement against the model schema (every scalar column on the model EXCEPT the listed ones) and routes to the same path.
 
-**Caveat — return type differs from Django.** Django's `.only()` / `.defer()` return partially-hydrated `Model` instances where the deferred fields lazy-load on attribute access. **Rustango** has no equivalent of Python's descriptor magic; the return shape is `Vec<HashMap<String, SqlValue>>` (or `Vec<Vec<SqlValue>>` if you swap in `.values_list(...)` instead). Typed partial-row decode is queued for a future slice.
+**Caveat — you do not get model structs back.** `.only()` / `.defer()` return `Vec<HashMap<String, SqlValue>>` (or `Vec<Vec<SqlValue>>` if you swap in `.values_list(...)` instead), not partially-filled `Post` values, and nothing lazy-loads the columns you left out. Typed partial-row decode is queued for a future slice.
 
 **Typo-safety**: `.defer(&["nope_col"])` surfaces `QueryError::UnknownField` at `.compile()` time — the typo doesn't silently turn into "project all columns." `.only(&[])` surfaces `QueryError::EmptyValuesProjection`; `.defer(&[])` is a semantic no-op (projects every column).
 
 ### Matching with regular expressions
 
-Match a column against a regex pattern — Django's `__regex` / `__iregex`. `.regex()` is case-sensitive, `.iregex()` case-insensitive, and `.not_regex()` / `.not_iregex()` are the negated forms.
+Match a column against a regex pattern. `.regex()` is case-sensitive, `.iregex()` case-insensitive, and `.not_regex()` / `.not_iregex()` are the negated forms.
 
 ```rust
 use rustango::core::Column as _;
@@ -492,7 +492,7 @@ User::objects()
     .where_(User::name.not_regex("^admin"))
     .fetch(&pool).await?;
 
-// Django-shape lookup-suffix form.
+// Lookup-suffix string form.
 User::objects()
     .filter("name__iregex", "^bob")
     .fetch(&pool).await?;
@@ -527,7 +527,7 @@ Without one, the query emits valid `REGEXP` SQL that SQLite rejects at execution
 
 ## Computed values & database functions
 
-Let the database compute things instead of pulling rows into the app, mutating them, and writing them back. `F("col")` refers to a column by name (Django's `F()` object), and the `funcs::*` builders wrap scalar SQL functions like `LOWER` or `COALESCE`. Together they unlock three patterns that plain value-based `.set()` / `.where_()` can't express:
+Let the database compute things instead of pulling rows into the app, mutating them, and writing them back. `F("col")` refers to a column by name, and the `funcs::*` builders wrap scalar SQL functions like `LOWER` or `COALESCE`. Together they unlock three patterns that plain value-based `.set()` / `.where_()` can't express:
 
 ### Atomic increments (no read-modify-write race)
 
@@ -737,7 +737,7 @@ Order::objects()
 
 ### CASE WHEN expressions
 
-Build a SQL `CASE WHEN … THEN … ELSE … END` with the `case()` / `.when()` / `value()` builders — Django's `Case`/`When`. Use it for custom orderings, derived columns in `annotate`, computed defaults in `update`, and (paired with `Sum`) conditional aggregates.
+Build a SQL `CASE WHEN … THEN … ELSE … END` with the `case()` / `.when()` / `value()` builders. Use it for custom orderings, derived columns in `annotate`, computed defaults in `update`, and (paired with `Sum`) conditional aggregates.
 
 ```rust
 use rustango::core::case::{case, value};
@@ -794,7 +794,7 @@ Post::objects()
 - `.when(condition, then)` — append a branch. `condition` is anything `Into<WhereExpr>` (typically `Column::eq()`, `.and()`, `.or()`); `then` is anything `Into<Expr>` (literal, `F()`, function call, nested `case()`).
 - `.default(expr)` — set the optional `ELSE` branch. Omitting it produces a `CASE` that returns `NULL` for unmatched rows (SQL standard).
 - `.build()` or `.into()` — finalize into an `Expr` for `set_expr` / `eq_expr` / `annotate`.
-- `value(literal)` — Django-style sugar for `Expr::Literal(...)`. Optional — bare literals coerce via `Into<Expr>`, but `value("…")` reads explicitly as "this is a string literal, not a column ref".
+- `value(literal)` — sugar for `Expr::Literal(...)`. Optional — bare literals coerce via `Into<Expr>`, but `value("…")` reads explicitly as "this is a string literal, not a column ref".
 
 **Tri-dialect emission:**
 
@@ -808,7 +808,7 @@ Post::objects()
 
 ### Subqueries (EXISTS, IN, scalar)
 
-Embed one query inside another — Django's `Exists`, `Subquery`, and `OuterRef`. These builders cover most "does a related row exist?" and "is this value in that set?" patterns:
+Embed one query inside another. These builders cover most "does a related row exist?" and "is this value in that set?" patterns:
 
 | Builder | Shape | Use it for |
 |---|---|---|
@@ -876,7 +876,7 @@ The table above is a selection, not the whole set. `funcs` also has `cast`, the 
 
 ## Aggregations
 
-Count, sum, average, and group rows. `.count()`, `.sum()`, `.avg()`, `.min()`, and `.max()` return a single number; `.annotate(...)` plus `.values(...)` builds GROUP BY queries (Django's `aggregate` / `annotate`). Aggregate results come back as `Vec<HashMap<String, SqlValue>>` rather than typed structs, since the shape is dynamic.
+Count, sum, average, and group rows. `.count()`, `.sum()`, `.avg()`, `.min()`, and `.max()` return a single number; `.annotate(...)` plus `.values(...)` builds GROUP BY queries. Aggregate results come back as `Vec<HashMap<String, SqlValue>>` rather than typed structs, since the shape is dynamic.
 
 ```rust
 use rustango::sql::CounterPool as _;
@@ -892,7 +892,7 @@ let total_views = Post::objects().sum::<i64>("view_count", &pool).await?;
 let avg_views = Post::objects().avg::<f64>("view_count", &pool).await?;
 let max_views = Post::objects().max::<i64>("view_count", &pool).await?;
 
-// Annotate + GROUP BY (issue #75 — Django-shape auto-inference)
+// Annotate + GROUP BY (issue #75 — the GROUP BY is inferred)
 use rustango::core::aggregates::{count_all, sum};
 
 // "Posts per author" — `.values()` lists the GROUP BY columns.
@@ -906,7 +906,7 @@ let rows = rustango::sql::fetch_aggregate_dict(&pool, &by_author).await?;
 
 ### How GROUP BY is inferred
 
-You rarely write `GROUP BY` yourself — **Rustango** infers it from the query's shape, just like Django. You only call `.group_by(...)` to override that inference. The table shows what each shape produces:
+You rarely write `GROUP BY` yourself — **Rustango** infers it from the query's shape. You only call `.group_by(...)` to override that inference. The table shows what each shape produces:
 
 | Shape | Builder | Resulting `GROUP BY` |
 |---|---|---|
@@ -943,7 +943,7 @@ Post::objects()
 
 ### Conditional & statistical aggregates
 
-Count or sum only the rows that match a condition, supply a fallback for empty results, and compute standard deviation / variance. These mirror Django's `Count('id', filter=...)`, `Sum('price', default=0)`, and `StdDev`. Chain `.filter(...)` and `.default(...)` onto any aggregate builder.
+Count or sum only the rows that match a condition, supply a fallback for empty results, and compute standard deviation / variance. Chain `.filter(...)` and `.default(...)` onto any aggregate builder.
 
 ```rust
 use rustango::core::aggregates::{avg, count, count_all, stddev, sum};
@@ -1003,11 +1003,11 @@ Calling both chains as `Coalesced` outside `Filtered`: `COALESCE(SUM(col) FILTER
 
 The writer applies the dialect's int/float cast (`::bigint`, `CAST(... AS SIGNED)`, etc.) around the whole `FILTER` expression — `SUM(col)::bigint FILTER (...)` is a PG parse error, so the emitted form is `(SUM(col) FILTER (...))::bigint`. Same shape for `STDDEV_SAMP` / `VAR_SAMP` (they return NUMERIC on PG for bigint input).
 
-**SQLite + StdDev/Variance:** SQLite has no built-in statistical aggregates, so the writer rejects with `SqlError::AggregateNotSupported { aggregate, dialect: "sqlite" }`. Compute the variance formula in app code if portable stats are needed (same posture Django takes).
+**SQLite + StdDev/Variance:** SQLite has no built-in statistical aggregates, so the writer rejects with `SqlError::AggregateNotSupported { aggregate, dialect: "sqlite" }`. Compute the variance formula in app code if portable stats are needed.
 
 ### Window functions
 
-Compute running totals, rankings, and row-over-row deltas without collapsing rows — Django's `Window(expression, partition_by=, order_by=, frame=)`. Eight functions (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`) plus ROWS/RANGE frames. Every backend **Rustango** supports (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25) ships native `OVER (…)` syntax, so emission is uniform.
+Compute running totals, rankings, and row-over-row deltas without collapsing rows. Eight functions (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`) plus ROWS/RANGE frames. Every backend **Rustango** supports (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25) ships native `OVER (…)` syntax, so emission is uniform.
 
 ```rust
 use rustango::core::aggregates::max;
@@ -1134,11 +1134,11 @@ let frame = WindowFrame {
 **Caveats:**
 
 - **`FILTER` + `Window` not yet supported**: combining `.filter(...)` with a window function raises `SqlError::NestedAggregateWrapper { wrapper: "Filtered(Window)" }` — the underlying syntax varies by function kind (PG allows `agg_fn() FILTER (WHERE …) OVER (…)` for aggregate-window funcs but not for ranking ones), and the writer hasn't been taught the dispatch. Filed for a follow-up if demand surfaces.
-- **`PercentRank` / `CumeDist` / `NthValue`** aren't in v1 — Django's complete set is bigger. v1 ships the 8 most-used variants; the missing three can be added incrementally with the same builder shape.
+- **`PercentRank` / `CumeDist` / `NthValue`** aren't in v1. It ships the 8 most-used variants; the missing three can be added incrementally with the same builder shape.
 
 ### Filtering on aggregates (HAVING)
 
-A `.filter(...)` call after `.annotate(...)` lands in either `WHERE` or `HAVING`, depending on whether the name matches an aggregate alias — exactly Django's behavior. So filtering on a real column adds a `WHERE`, while filtering on an annotation like `post_count` adds a `HAVING`:
+A `.filter(...)` call after `.annotate(...)` lands in either `WHERE` or `HAVING`, depending on whether the name matches an aggregate alias. So filtering on a real column adds a `WHERE`, while filtering on an annotation like `post_count` adds a `HAVING`:
 
 ```rust
 use rustango::core::aggregates::count_all;
@@ -1169,7 +1169,7 @@ HAVING COUNT(*) > $2
 
 **The aggregate expression is lifted into HAVING, not the SELECT alias.** PG strictly disallows aliases in HAVING (only the expression resolves); MySQL + SQLite are more lenient. The writer emits the lifted form uniformly across all three so the same query works everywhere.
 
-**Chain ordering matters in v1.** Call `.annotate(alias, ...)` BEFORE the corresponding `.filter(alias, ...)`. If the order is reversed, `filter()` looks up an empty annotation registry and routes to `WHERE` — and the `resolve_pending` validator surfaces `UnknownField` at `compile()` because the alias isn't a real model column. Django defers this resolution to query-construction time; a v0.50 follow-up may match that posture.
+**Chain ordering matters in v1.** Call `.annotate(alias, ...)` BEFORE the corresponding `.filter(alias, ...)`. If the order is reversed, `filter()` looks up an empty annotation registry and routes to `WHERE` — and the `resolve_pending` validator surfaces `UnknownField` at `compile()` because the alias isn't a real model column. A v0.50 follow-up may resolve the alias later, so the order stops mattering.
 
 **Validator gap (matches existing aggregate posture)**: alias-routed HAVING predicates skip the model-schema column walk. Typo'd aliases surface at the database, not at `compile()`. Same gap as `Sum("typo_col")` — pre-existing and orthogonal.
 
@@ -1212,7 +1212,7 @@ SQL semantic is unchanged (the same row counts come back), but `stmt.params.len(
 
 ## Joins & preloading related rows
 
-Pull a foreign-key target along with the main row in a single query, so you don't fire one extra query per row (the N+1 problem). `.select_related("author")` is Django's `select_related` / Eloquent's eager loading. A `ForeignKey<T>` field then arrives already populated instead of needing a separate lookup.
+Pull a foreign-key target along with the main row in a single query, so you don't fire one extra query per row (the N+1 problem). `.select_related("author")` joins the related table and reads it in the same round trip. A `ForeignKey<T>` field then arrives already populated instead of needing a separate lookup.
 
 ```rust
 let posts = Post::objects()
@@ -1308,7 +1308,7 @@ The `Join.project` field tells the writer to emit `<alias>"."<col>" AS "<alias>_
 
 | Need | Tool |
 |---|---|
-| Pull related rows along with the main row | `select_related` (Django shape) |
+| Pull related rows along with the main row | `select_related` |
 | Filter main rows by a related-table predicate | `exists(...)` / `not_exists(...)` |
 | Filter via INNER instead of LEFT, or with extra ON predicates | `.join(...)` |
 | Self-join (e.g. `employee.manager_id = manager.id`) | `.join(...)` |
@@ -1324,7 +1324,7 @@ The `Join.project` field tells the writer to emit `<alias>"."<col>" AS "<alias>_
 
 ## Saving only some fields
 
-Write just the fields you changed instead of every column — Django's `save(update_fields=[...])`. A normal save rewrites every non-PK column; `save_partial(&[...], &pool)` rewrites only the ones you name.
+Write just the fields you changed instead of every column. A normal save rewrites every non-PK column; `save_partial(&[...], &pool)` rewrites only the ones you name.
 
 ```rust
 let mut post = Post::objects().fetch(&pool).await?.pop().unwrap();
@@ -1350,7 +1350,7 @@ b.status = "from-B".into();
 b.save_partial(&["status"], &pool).await?;
 ```
 
-**Field names are Rust-side struct fields**, not SQL columns — `["author_id"]` (not `["author"]` for an FK-typed field). Unknown field names return `ExecError::Query(QueryError::UnknownField)`. An empty list is a no-op (returns `Ok(())` and logs a `tracing::warn!`), matching Django's "nothing to do" semantic. Audited models (`#[rustango(audit(...))]`) narrow the audit-log snapshot to the same column set — the log reflects exactly what was written.
+**Field names are Rust-side struct fields**, not SQL columns — `["author_id"]` (not `["author"]` for an FK-typed field). Unknown field names return `ExecError::Query(QueryError::UnknownField)`. An empty list is a no-op: it returns `Ok(())` and logs a `tracing::warn!`. Audited models (`#[rustango(audit(...))]`) narrow the audit-log snapshot to the same column set — the log reflects exactly what was written.
 
 **Auto-PK note.** `save_partial` is UPDATE-only; calling it on an `Auto::Unset` PK is a user error (use `insert_pool` / `save_pool` for that case). Unlike `save_pool` which auto-dispatches `Unset → insert_pool`, this method assumes you've already inserted.
 
@@ -1389,7 +1389,7 @@ Internally lowers to `save_partial` — same audit narrowing, same `Auto::Unset`
 > per-row validation. Use them for speed; drop to per-row `save()` / `delete()`
 > when you need those side effects.
 
-Insert, update, or delete many rows in one statement instead of one per row — Django's `bulk_create`, `QuerySet.update()`, and `QuerySet.delete()`. The `as _` import brings a trait's methods into scope without naming the trait directly.
+Insert, update, or delete many rows in one statement instead of one per row. The `as _` import brings a trait's methods into scope without naming the trait directly.
 
 ```rust
 // Bulk INSERT — rows FIRST (a `&mut [Self]`), executor/pool second.
@@ -1415,7 +1415,7 @@ Post::objects()
 
 ## Insert or update (upsert)
 
-Insert a row, or update it if a row with the same key already exists — Django's `update_or_create` / Rails' `upsert`. It emits the database's native `ON CONFLICT … DO UPDATE`.
+Insert a row, or update it if a row with the same key already exists. It emits the database's native `ON CONFLICT … DO UPDATE`.
 
 The single-instance `.upsert_on(executor)` conflicts on the **primary key**: with an `Auto::Unset` PK the server assigns a new key (equivalent to `insert`); with an `Auto::Set` PK the row is inserted if absent or all non-PK columns are overwritten if present.
 
@@ -1425,7 +1425,7 @@ The single-instance `.upsert_on(executor)` conflicts on the **primary key**: wit
 post.upsert_on(&pool).await?;
 ```
 
-To upsert on an arbitrary unique key (Django `bulk_create(update_conflicts=True, unique_fields=…, update_fields=…)`), use the bulk helper — it takes the rows, the conflict-target columns, the columns to update on conflict, and the pool LAST:
+To upsert on an arbitrary unique key, use the bulk helper — it takes the rows, the conflict-target columns, the columns to update on conflict, and the pool LAST:
 
 ```rust
 // ON CONFLICT (external_id) DO UPDATE SET title = EXCLUDED.title
@@ -1458,7 +1458,7 @@ Post::bulk_upsert_pool(
 > *second* connection and can deadlock the pool under load. Thread the `tx`
 > through, or use `rustango::sql::atomic`.
 
-Run several writes as a unit that either all succeed or all roll back — Django's `transaction.atomic()`. Open one with `pool.begin()` and run every statement against the transaction's connection via the `_on` methods (`fetch_on`, `save_on`), so the work lands on the in-flight transaction rather than a fresh pooled connection.
+Run several writes as a unit that either all succeed or all roll back. Open one with `pool.begin()` and run every statement against the transaction's connection via the `_on` methods (`fetch_on`, `save_on`), so the work lands on the in-flight transaction rather than a fresh pooled connection.
 
 ```rust
 let mut tx = pool.begin().await?;
@@ -1480,13 +1480,13 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Drop the `tx` without calling `commit()` (e.g. on an early `?` return) and the transaction rolls back. For an after-commit hook (Django's `transaction.on_commit`) the scope is `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, which auto-commits on `Ok` and auto-rolls-back on `Err` — and the hook itself is `rustango::sql::on_commit(|| { … })`, called **inside** that closure. `atomic` drains the queue after the commit lands; calling `on_commit` outside an `atomic` scope panics rather than dropping the callback.
+Drop the `tx` without calling `commit()` (e.g. on an early `?` return) and the transaction rolls back. For a hook that runs only after the commit lands, the scope is `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, which auto-commits on `Ok` and auto-rolls-back on `Err` — and the hook itself is `rustango::sql::on_commit(|| { … })`, called **inside** that closure. `atomic` drains the queue after the commit lands; calling `on_commit` outside an `atomic` scope panics rather than dropping the callback.
 
 ---
 
 ## Many-to-many
 
-Relate many rows to many others through a junction table — Django's `ManyToManyField`. Declare the relation on the model, then use the generated accessor to add, remove, set, or list the linked ids.
+Relate many rows to many others through a junction table. Declare the relation on the model, then use the generated accessor to add, remove, set, or list the linked ids.
 
 ```rust
 #[rustango(
@@ -1514,7 +1514,7 @@ Junction table (`post_tags`) is auto-created by `make_migrations` with composite
 
 ## JSON / JSONB
 
-Store and query a JSON document in a column — Django's `JSONField`. Declare the field as `serde_json::Value` (the generic JSON type), then query into it with `json_contains` or a path filter.
+Store and query a JSON document in a column. Declare the field as `serde_json::Value` (the generic JSON type), then query into it with `json_contains` or a path filter.
 
 ```rust
 #[derive(Model)]
@@ -1554,7 +1554,7 @@ Read/write Rust types via `serde_json::from_value` / `to_value`.
 
 ## Soft delete
 
-Mark a row as deleted by setting a timestamp instead of removing it — like Django's `django-safedelete` or Laravel's `SoftDeletes`. Mark the timestamp column with the `#[rustango(soft_delete)]` attribute (a derive annotation that tells the macro how to treat the field):
+Mark a row as deleted by setting a timestamp instead of removing it — like Laravel's `SoftDeletes`. Mark the timestamp column with the `#[rustango(soft_delete)]` attribute (a derive annotation that tells the macro how to treat the field):
 
 ```rust
 #[derive(Model)]
@@ -1583,7 +1583,7 @@ The admin's "Delete" button auto-routes to `soft_delete_on` for any model that h
 
 ## Audit trail
 
-Record who changed which fields and when, automatically on every save and delete — like Django's `django-simple-history` or Laravel's auditing packages. Annotate the model with the fields to track:
+Record who changed which fields and when, automatically on every save and delete. Annotate the model with the fields to track:
 
 ```rust
 #[derive(Model)]
@@ -1621,7 +1621,7 @@ manage audit-cleanup --keep-last 50 --tenant acme
 
 ## Raw SQL escape hatch
 
-Drop to hand-written SQL when the query builder can't express what you need — Django's `Model.objects.raw()` / `connection.cursor()`. The `sqlx` macros run a query and decode the result into a tuple, a typed `Model`, or nothing:
+Drop to hand-written SQL when the query builder can't express what you need. The `sqlx` macros run a query and decode the result into a tuple, a typed `Model`, or nothing:
 
 ```rust
 use rustango::sql::sqlx;
@@ -1658,7 +1658,7 @@ let count = rows.first().map(|r| r.0).unwrap_or(0);
 
 ## Lazy FK loading
 
-A foreign key starts out holding just the related id (`Unloaded`), and you fetch the full related row only when you ask for it — Django's lazy related-object access. `match` on the `ForeignKey` to handle both states, or call `.get(&pool)` to load it on demand. For a whole batch, use `select_related` (above) to preload them in one query and skip the per-row fetch.
+A foreign key starts out holding just the related id (`Unloaded`), and you fetch the full related row only when you ask for it. `match` on the `ForeignKey` to handle both states, or call `.get(&pool)` to load it on demand. For a whole batch, use `select_related` (above) to preload them in one query and skip the per-row fetch.
 
 ```rust
 let mut post = Post::objects().find_or_fail(1, &pool).await?;
@@ -1680,13 +1680,13 @@ Use `select_related("author")` on the queryset to pre-load a batch.
 
 ## Four ways to filter
 
-There are four ways to express a filter; pick by context. Typed columns are checked at compile time and best for app code; the `field__lookup` string form is Django's familiar syntax for admin and generic CRUD; `filter_op` is for when you already hold an `Op`; the HTTP query string drives the public API.
+There are four ways to express a filter; pick by context. Typed columns are checked at compile time and best for app code; the `field__lookup` string form suits admin and generic CRUD, where the field name is only known at runtime; `filter_op` is for when you already hold an `Op`; the HTTP query string drives the public API.
 
 ```rust
 // 1. HTTP query string (set via ViewSet filter_fields)
 //    GET /api/posts?author_id=42&status__ne=archived
 
-// 2. Django-shape string lookup (the same `field__lookup` grammar your
+// 2. String lookup (the same `field__lookup` grammar your
 //    URL parser uses, but inside Rust). Suffix decides the operator
 //    and value-shape; bare key is exact-eq. Field name is validated
 //    at `.compile()`.
@@ -1703,7 +1703,7 @@ Post::objects().filter_op("author_id", Op::Eq, SqlValue::I64(42));
 Post::objects().where_(Post::author_id.eq(42));
 ```
 
-**Convention:** typed in app code, Django-shape in admin / generic CRUD code, `filter_op` only when you've already computed an `Op` (e.g. from a request parser), HTTP query for the public API surface.
+**Convention:** typed in app code, `field__lookup` strings in admin / generic CRUD code, `filter_op` only when you've already computed an `Op` (e.g. from a request parser), HTTP query for the public API surface.
 
 ### Supported lookup suffixes
 
@@ -1724,11 +1724,11 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__between` / `__range` | `BETWEEN … AND …` | 2-elt `SqlValue::List` | inclusive on both ends |
 | `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | string | case-insensitive emulated on MySQL/SQLite via `LOWER()` wrap; SQLite needs a `regexp` user-function |
 
-> **LIKE metacharacters are escaped.** `__contains` / `__startswith` / `__endswith` (and their `i` variants) treat the value as a **literal** substring — a `%` or `_` in it matches itself, not as a wildcard, matching Django. The framework escapes them and emits `ESCAPE '!'`, honored on all three dialects (#1257). For a raw pattern where you place your own `%` / `_`, use `__like` / `__ilike`, which bind the value verbatim.
+> **LIKE metacharacters are escaped.** `__contains` / `__startswith` / `__endswith` (and their `i` variants) treat the value as a **literal** substring — a `%` or `_` in it matches itself, not as a wildcard. The framework escapes them and emits `ESCAPE '!'`, honored on all three dialects (#1257). For a raw pattern where you place your own `%` / `_`, use `__like` / `__ilike`, which bind the value verbatim.
 
 **Errors surface at `.compile()`, not at `.filter()` call time** — value-shape mismatches (e.g. `__in` with a scalar, `__isnull` with a non-bool, `__between` with the wrong arity) and unknown suffixes (`status__nope`) return `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` from `.compile()` so the fluent chain stays type-clean. Chained traversals (`author__name__icontains`) are **not** supported in v0.39 — the splitter takes the suffix after the first `__`, so the whole tail `name__icontains` is treated as an unknown suffix.
 
-Each filter call AND-joins to any preceding ones; mix Django-shape, `filter_op`, and `where_` freely on the same queryset.
+Each filter call AND-joins to any preceding ones; mix string lookups, `filter_op`, and `where_` freely on the same queryset.
 
 ---
 
@@ -1760,7 +1760,7 @@ MySQL or SQLite build `fetch` is the only one of the two that exists.
 
 ## Signals
 
-Run a callback when something happens — Django's signals. There are two independent registries: one for model writes, one for HTTP requests.
+Run a callback when something happens. There are two independent registries: one for model writes, one for HTTP requests.
 
 ### Model lifecycle
 
@@ -1780,7 +1780,7 @@ connect_post_save::<Post, _, _>(|post, ctx| async move {
 
 ### Request lifecycle
 
-Fire a hook around every HTTP request: `request_started`, `request_finished`, `got_request_exception`. Add the `RequestSignalsLayer` middleware to your router, then connect callbacks. Useful for tracing, audit, request-time metrics, and Django-style error reporting.
+Fire a hook around every HTTP request: `request_started`, `request_finished`, `got_request_exception`. Add the `RequestSignalsLayer` middleware to your router, then connect callbacks. Useful for tracing, audit, request-time metrics, and error reporting.
 
 ```rust
 use axum::Router;

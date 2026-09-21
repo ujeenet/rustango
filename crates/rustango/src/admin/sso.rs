@@ -1,23 +1,19 @@
-//! Bare-admin SSO login wiring — the `admin-sso` feature.
+//! Bare-admin SSO login wiring, behind the `admin-sso` feature.
 //!
-//! The reusable, admin-INDEPENDENT SSO core (types, `build_provider`,
-//! `verified_email`, the oauth2 re-exports, `SSO_FLOW_COOKIE`, …) now
-//! lives in [`crate::sso`]. This module keeps only the **bare-admin
-//! wiring**: the global-config SSO login router + handlers that build a
-//! [`ResolvedSso`] from a [`SsoProvider`](crate::sso::SsoProvider) row,
-//! run the handshake, link the verified email to an [`AdminUser`], and
-//! mint the admin session cookie.
+//! The reusable SSO core (types, `build_provider`, `verified_email`,
+//! `SSO_FLOW_COOKIE`) lives in [`crate::sso`]. This module only wires
+//! it to the bare admin: it builds a
+//! [`ResolvedSso`](crate::sso::ResolvedSso) from an
+//! [`SsoProvider`](crate::sso::SsoProvider) row, runs the handshake,
+//! links the verified email to an [`AdminUser`], and mints the admin
+//! session cookie.
 //!
-//! Access is **link-to-existing** — SSO never auto-provisions an admin;
-//! an unknown or unverified email is refused.
+//! Access is **link-to-existing**: SSO never creates an admin account.
+//! An unknown or unverified email is refused.
 //!
-//! The `pub use crate::sso::*;` re-export below preserves the historical
-//! `crate::admin::sso::{build_provider, ResolvedSso, …}` paths for
-//! downstream callers (e.g. [`crate::tenancy::sso`]).
+//! The re-export below keeps the older `crate::admin::sso::…` paths
+//! working for callers such as [`crate::tenancy::sso`].
 
-// Back-compat: re-export the admin-independent SSO core so the historical
-// `crate::admin::sso::*` paths keep resolving. The core moved to
-// `crate::sso` (the `sso` feature) to decouple member SSO from the admin.
 pub use crate::sso::*;
 
 use axum::{
@@ -41,10 +37,10 @@ struct CallbackParams {
     error: Option<String>,
 }
 
-/// Routes for the bare-admin SSO flow, mounted alongside `/login`.
+/// Routes for the bare-admin SSO flow, mounted next to `/login`.
 /// `GET /login/sso/{slug}` starts the handshake for one configured
-/// [`SsoProvider`](super::sso_provider::SsoProvider); `.../callback`
-/// completes it.
+/// [`SsoProvider`](super::sso_provider::SsoProvider), and
+/// `.../callback` completes it.
 pub(crate) fn sso_router(state: AppState) -> Router {
     Router::new()
         .route("/login/sso/{slug}", get(sso_begin))
@@ -61,9 +57,9 @@ fn login_path(state: &AppState) -> String {
     }
 }
 
-/// Absolute per-provider callback URL derived from the request host —
-/// `{scheme}://{host}{login_path}/sso/{slug}/callback`. Scheme honors
-/// `X-Forwarded-Proto`, else `https`.
+/// Per-provider callback URL built from the request host:
+/// `{scheme}://{host}{login_path}/sso/{slug}/callback`. The scheme
+/// comes from `X-Forwarded-Proto`, or `https` when that is absent.
 fn derive_bare_redirect(headers: &HeaderMap, state: &AppState, slug: &str) -> Option<String> {
     let host = headers.get(header::HOST)?.to_str().ok()?;
     let scheme = headers
@@ -100,7 +96,7 @@ fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|(_, v)| v.to_owned())
 }
 
-// GET /login/sso/{slug} — start the handshake for one provider.
+// GET /login/sso/{slug}: start the handshake for one provider.
 async fn sso_begin(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -140,7 +136,8 @@ async fn sso_begin(
     resp
 }
 
-// GET /login/sso/{slug}/callback — finish the handshake, link, mint.
+// GET /login/sso/{slug}/callback: finish the handshake, link the
+// account, mint the session.
 async fn sso_callback(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -194,7 +191,7 @@ async fn sso_callback(
         Err(_) => return login_error(&state, "unverified"),
     };
 
-    // Link to an existing admin user by email — never auto-provision.
+    // Link to an existing admin user by email. Never create one.
     let Some(user) = find_admin_user_by_email(&state.pool, &email).await else {
         tracing::warn!(target: "rustango::admin::sso", "no admin account for {email}");
         return login_error(&state, "nouser");
@@ -203,8 +200,8 @@ async fn sso_callback(
         return login_error(&state, "inactive");
     }
 
-    // Mint the *existing* admin session bound to the user's stored
-    // password hash — identical to a successful password login.
+    // Mint the normal admin session, bound to the user's stored
+    // password hash, exactly as a successful password login does.
     let auth_hash = session::password_fingerprint(secret, &user.password_hash);
     let cookie_value = session::encode(
         secret,
@@ -245,8 +242,8 @@ struct LinkedAdmin {
     active: bool,
 }
 
-/// Look up an [`AdminUser`] by its (lowercased) email. Returns `None`
-/// when no row matches — the caller refuses the login (link-to-existing).
+/// Look up an [`AdminUser`] by its lowercased email. `None` means no
+/// row matched, and the caller must refuse the login.
 async fn find_admin_user_by_email(pool: &crate::sql::Pool, email: &str) -> Option<LinkedAdmin> {
     use crate::core::{SelectQuery, SqlValue};
     let select = SelectQuery::by_pk(

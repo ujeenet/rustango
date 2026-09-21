@@ -40,7 +40,7 @@ const ALLOWED: &[(&str, &str)] = &[
     (CANONICAL, "the one hardened implementation"),
     (
         "src/urls.rs",
-        "the public Django-parity helper, hardened in #1526",
+        "the public redirect helper, hardened in #1526",
     ),
 ];
 

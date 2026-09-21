@@ -1,4 +1,4 @@
-//! Django-parity #394 — file-based session backend.
+//! Issue #394 — file-based session backend.
 //!
 //! Rustango's `SessionStore` is a thin wrapper over the `Cache`
 //! trait, so any `Cache` implementation becomes a session backend

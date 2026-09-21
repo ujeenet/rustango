@@ -1,4 +1,4 @@
-//! Django-parity #435 — DRF `ListSerializer(many=True)` shape.
+//! Issue #435 — the many-at-once serializer shape.
 //! `POST <prefix>` with a JSON array body bulk-creates every entry
 //! and returns the created rows in submission order. Validation
 //! is atomic: a single bad entry rejects the whole bulk before

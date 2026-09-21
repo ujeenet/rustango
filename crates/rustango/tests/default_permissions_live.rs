@@ -1,5 +1,5 @@
-//! Django parity — `Meta.default_permissions = ('view', 'change')`
-//! lets a model opt out of the default `add` / `delete` CRUD
+//! `Meta.default_permissions` lets a model opt out of some of the
+//! default `add` / `change` / `delete` / `view` CRUD
 //! codenames. rustango spells the attribute as
 //! `#[rustango(default_permissions = "view,change")]` and
 //! `auto_create_permissions_pool` filters the four-action seed loop

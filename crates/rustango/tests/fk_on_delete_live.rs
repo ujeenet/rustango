@@ -1,5 +1,5 @@
-//! Django parity — `ForeignKey(on_delete=...)`. rustango spells the
-//! attribute as `#[rustango(fk = "<table>", on_delete = "cascade")]`.
+//! Referential actions on a foreign key, spelled as
+//! `#[rustango(fk = "<table>", on_delete = "cascade")]`.
 //! The migration writer renders `ON DELETE <action>` after the FK
 //! constraint clause; the runtime DB enforces the action when the
 //! referenced row goes.

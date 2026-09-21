@@ -1,11 +1,9 @@
-//! Django-shape `RunPython` — named Rust callbacks invoked during a
-//! migration's apply / unapply walk. Issue #347.
+//! Named Rust callbacks run during a migration's apply or unapply
+//! walk, for data changes that DDL alone cannot express.
 //!
-//! Where Django's `RunPython(forward_func, reverse_func)` takes Python
-//! function references inside the migration file, rustango migration
-//! files are JSON — they can't carry function pointers. Instead, the
-//! callback is registered at startup via [`register_migration_callback!`]
-//! and referenced by name in the JSON:
+//! Migration files are JSON, so they cannot hold function pointers.
+//! Register the callback at startup with
+//! [`register_migration_callback!`] and refer to it by name:
 //!
 //! ```json
 //! {
@@ -37,10 +35,11 @@
 //! rustango::register_migration_callback!("backfill_locale", backfill_locale);
 //! ```
 //!
-//! Names are inventory-collected; the lookup is `O(N)` over the global
-//! registry but `N` is small (bounded by the number of declared
-//! callbacks across the binary). Unknown names surface
-//! [`MigrateError::Validation`] at apply time.
+//! Names are collected by `inventory`. Lookup scans the registry, but
+//! it only holds the callbacks declared in the binary. An unknown name
+//! raises [`MigrateError::Validation`] at apply time.
+//!
+//! [`register_migration_callback!`]: crate::register_migration_callback
 
 use std::future::Future;
 use std::pin::Pin;
@@ -49,32 +48,29 @@ use crate::migrate::MigrateError;
 use crate::sql::Pool;
 
 /// Future returned by a migration callback. `'static` because the
-/// callback is stored as a `fn` pointer and may run after the caller
-/// has returned.
+/// callback may run after the caller has returned.
 pub type MigrationCallbackFut =
     Pin<Box<dyn Future<Output = Result<(), MigrateError>> + Send + 'static>>;
 
-/// Function signature a migration callback implements. Takes an owned
-/// `Pool` (cheap — internally `Arc<...>`) so the future can outlive
-/// the surrounding stack frame.
+/// Signature a migration callback implements. The `Pool` is owned but
+/// cheap to clone, so the future can outlive the calling frame.
 pub type MigrationCallbackFn = fn(Pool) -> MigrationCallbackFut;
 
-/// One callback registration. Inventory-collected; submit via the
-/// [`register_migration_callback!`] macro.
+/// One callback registration. Submit it with the
+/// [`register_migration_callback!`](crate::register_migration_callback)
+/// macro.
 pub struct MigrationCallback {
-    /// Name referenced from migration JSON `{"callback": {"name": "..."}}`.
+    /// Name used in migration JSON: `{"callback": {"name": "..."}}`.
     pub name: &'static str,
-    /// The function pointer invoked on the migration's forward apply.
-    /// Failures are surfaced as [`MigrateError::Validation`] / driver
-    /// errors per the helper used inside the callback.
+    /// The function the runner calls when it reaches this operation.
     pub forward: MigrationCallbackFn,
 }
 
 inventory::collect!(MigrationCallback);
 
-/// Look up a registered callback by name. Returns `None` when no
-/// callback with that name was submitted to the inventory — the runner
-/// surfaces this as a validation error at apply time.
+/// Look up a registered callback by name. `None` means nothing
+/// registered under that name; the runner turns that into a validation
+/// error at apply time.
 #[must_use]
 pub fn find(name: &str) -> Option<&'static MigrationCallback> {
     inventory::iter::<MigrationCallback>
@@ -113,8 +109,7 @@ mod tests {
 
     #[test]
     fn iter_compiles_with_zero_entries() {
-        // No `register_migration_callback!` in this test binary →
-        // unknown lookups return None.
+        // Nothing registered in this test binary, so lookups miss.
         assert!(find("nonexistent").is_none());
     }
 }

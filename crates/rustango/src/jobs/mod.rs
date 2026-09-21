@@ -32,34 +32,27 @@
 //! queue.shutdown().await;
 //! ```
 //!
-//! ## Backends shipped
+//! ## Backends
 //!
 //! | Backend | When to use |
 //! |---|---|
-//! | [`InMemoryJobQueue`] | Single-process apps, dev, tests. Jobs lost on restart. |
-//!
-//! ## Backends planned
-//!
-//! - **`DbJobQueue`** — Postgres-backed using `SELECT ... FOR UPDATE SKIP LOCKED`
-//!   for multi-process / multi-replica deployments
-//! - **`RedisJobQueue`** — Redis-backed using `BRPOPLPUSH` for high-throughput / language-agnostic queues
+//! | [`InMemoryJobQueue`] | One process: dev, tests, small apps. Jobs are lost on restart. |
+//! | `pg::PgJobQueue` (feature `jobs-postgres`) | Many processes or replicas. Runs on PostgreSQL, MySQL 8+ or SQLite. |
 //!
 //! ## Retry policy
 //!
-//! Jobs that return `Err(JobError::Retryable(_))` are retried with
-//! exponential backoff (1s, 2s, 4s, 8s, ...) up to `max_attempts` — a
-//! **total**-attempt ceiling, so the default of 5 is one run plus four
-//! retries. `Err(JobError::Fatal(_))` skips the retry queue and goes
-//! straight to the dead-letter handler.
+//! A job that returns `Err(JobError::Retryable(_))` is retried with
+//! growing backoff (1s, 2s, 4s, 8s, …). `max_attempts` counts **all**
+//! runs, so the default of 5 means one run plus four retries.
+//! `Err(JobError::Fatal(_))` goes straight to the dead-letter handler.
+//!
+//! [`InMemoryJobQueue`]: crate::jobs::InMemoryJobQueue
 
 #[cfg(feature = "jobs-postgres")]
 pub mod pg;
 
-/// v0.41 — forward-looking alias for [`pg::PgJobQueue`]. The struct
-/// itself is tri-dialect since v0.38; the `Pg` prefix is purely
-/// historical (it was the original PG-only impl name). New code should
-/// reach for `DatabaseJobQueue`; existing `PgJobQueue` call-sites
-/// keep working unchanged.
+/// Alias for [`pg::PgJobQueue`]. The queue is not PG-only — the `Pg`
+/// prefix is historical. Prefer this name in new code.
 #[cfg(feature = "jobs-postgres")]
 pub type DatabaseJobQueue = pg::PgJobQueue;
 
@@ -97,23 +90,20 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     /// Stable identifier for this job kind. Routes payloads to handlers.
     const NAME: &'static str;
 
-    /// Maximum **total** attempts before giving up — not retries. The
-    /// default of 5 is one initial run plus four retries; setting it to
-    /// 3 gives two retries (#1410).
+    /// Cap on **total** runs, not extra retries. The default of 5 is
+    /// one run plus four retries; 3 gives two retries.
     const MAX_ATTEMPTS: u32 = 5;
 
     /// Run the job. Return `Ok(())` on success, `Err(Retryable(_))` to
-    /// retry with backoff, `Err(Fatal(_))` to dead-letter immediately.
+    /// retry with backoff, `Err(Fatal(_))` to dead-letter at once.
     ///
-    /// **No ambient context reaches here.** Workers are spawned with
+    /// **No ambient context reaches here.** Workers run under
     /// [`tokio::spawn`], which does not inherit `tokio::task_local!`
-    /// state, so every scope the request path sets up is absent: the
-    /// audit source falls back to [`crate::audit::AuditSource::System`],
-    /// the active timezone falls back to the default, and there is no
-    /// admin session. Anything a job needs must travel in its payload
-    /// (#1229). For the audit case a job can re-enter the scope itself
-    /// with [`crate::audit::with_source`]. Tenant scoping is the same
-    /// story and is tracked separately in #1223.
+    /// state. So there is no admin session, the timezone is the
+    /// default, and the audit source falls back to
+    /// [`crate::audit::AuditSource::System`]. Put everything the job
+    /// needs in its payload. A job can re-enter the audit scope itself
+    /// with [`crate::audit::with_source`].
     async fn run(&self) -> Result<(), JobError>;
 }
 
@@ -197,23 +187,19 @@ pub struct JobDeadLetter {
 /// 1s, 2s, 4s, 8s, … capped at 2^10 s.
 ///
 /// `failed_attempt` is **0-based** — the index of the run that just
-/// failed — so the first retry waits 1s. It shifted off the 1-based
-/// `next_attempt` until #1410, making every wait twice what the module
-/// doc, the guide and the comment above the line all said.
-///
-/// Shared by both backends deliberately: they carried the same
-/// expression in two files and agreed with each other while disagreeing
-/// with every description of them.
+/// failed — so the first retry waits 1s. Shared by both backends so
+/// they cannot drift apart.
 pub(crate) fn retry_backoff_ms(failed_attempt: u32) -> u64 {
     1000u64.saturating_mul(1u64 << failed_attempt.min(10))
 }
 
 // ------------------------------------------------------------------ InMemoryJobQueue
 
-/// In-process job queue using tokio mpsc channels.
+/// In-process job queue built on tokio mpsc channels.
 ///
-/// **Persistence: none.** Jobs in flight or queued at process restart are lost.
-/// Use the (planned) `DbJobQueue` for production multi-process deployments.
+/// **Nothing is persisted.** Queued and in-flight jobs are lost when
+/// the process restarts. For production or multi-process deploys use
+/// `pg::PgJobQueue` (feature `jobs-postgres`).
 pub struct InMemoryJobQueue {
     tx: mpsc::UnboundedSender<JobEnvelope>,
     rx: Mutex<Option<mpsc::UnboundedReceiver<JobEnvelope>>>,
@@ -264,18 +250,16 @@ impl Default for InMemoryJobQueue {
     }
 }
 
-/// Build an [`InMemoryJobQueue`] sized from a loaded
-/// [`crate::config::JobsSettings`] section (#87 wiring, v0.29).
-/// Honors `s.concurrency` (defaults to 4 workers when unset).
+/// Build an [`InMemoryJobQueue`] from a loaded
+/// [`crate::config::JobsSettings`]. Uses `s.concurrency`, or 4 workers
+/// when it is unset.
 ///
-/// ## Why memory-only?
+/// ## Why only the in-memory backend?
 ///
-/// The [`JobQueue`] trait is **not object-safe** — its `register<T:
-/// Job>` and `dispatch<T: Job>` methods are generic, so `Arc<dyn
-/// JobQueue>` can't compile. That precludes a runtime backend
-/// picker that returns a single shared type. Projects wanting
-/// [`pg::PgJobQueue`] (or any third-party backend) wire it
-/// directly:
+/// [`JobQueue`] is not object-safe: `register<T>` and `dispatch<T>`
+/// are generic, so `Arc<dyn JobQueue>` does not compile. There can be
+/// no runtime backend picker with one shared return type. Wire any
+/// other backend yourself:
 ///
 /// ```ignore
 /// let queue = match cfg.jobs.backend.as_deref() {
@@ -284,9 +268,7 @@ impl Default for InMemoryJobQueue {
 /// };
 /// ```
 ///
-/// `s.backend` is **read-only** at this layer; `manage check
-/// --deploy` warns if a non-memory value is set without a backend
-/// shipped to consume it.
+/// This function only reads `s.backend` to warn on a mismatch.
 #[cfg(feature = "config")]
 #[must_use]
 pub fn inmemory_from_settings(s: &crate::config::JobsSettings) -> Arc<InMemoryJobQueue> {
@@ -352,9 +334,8 @@ impl JobQueue for InMemoryJobQueue {
     }
 
     async fn shutdown(&self) {
-        // Drop the inbound channel by replacing it with a fresh one
-        // (the workers' rx will see the channel close and exit naturally).
-        // Since rx is held inside a Mutex, we can't easily replace; just abort.
+        // The receiver lives behind a Mutex, so we cannot close the
+        // channel to let workers exit on their own. Abort them instead.
         let mut workers = self.workers.lock().await;
         for h in workers.drain(..) {
             h.abort();
@@ -457,14 +438,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// The sequence the module doc, `docs/jobs.md` and the comment above
-    /// the line all promised, pinned somewhere executable (#1410).
-    ///
-    /// It was `2s, 4s, 8s, 16s` — the shift ran off the 1-based
-    /// `next_attempt` — so every wait was double the documented one and
-    /// the first retry took twice as long as anyone reading expected.
-    /// Described in four places and asserted in none, which is why it
-    /// survived.
+    /// Pins the documented 1s, 2s, 4s, 8s sequence.
     #[test]
     fn retry_backoff_starts_at_one_second_and_doubles() {
         // `failed_attempt` is 0-based: the run that just failed.
@@ -592,8 +566,7 @@ mod tests {
         })
         .await
         .unwrap();
-        // Backoff: ~1s after first failure, ~2s after second (#1410); the
-        // 7s sleep is deliberately well clear of that.
+        // Backoff is ~1s then ~2s; 7s leaves plenty of room.
         tokio::time::sleep(Duration::from_millis(7000)).await;
         let succ = SUCCESSES.lock().unwrap();
         assert!(succ.contains(&marker), "expected marker, got {succ:?}");
@@ -635,8 +608,7 @@ mod tests {
         assert_eq!(q.pending_count().await, 3);
     }
 
-    /// `inmemory_from_settings` honors `concurrency` and defaults
-    /// to 4 workers when unset (#87 wiring).
+    /// `inmemory_from_settings` uses `concurrency` when it is set.
     #[cfg(feature = "config")]
     #[test]
     fn inmemory_from_settings_uses_configured_concurrency() {

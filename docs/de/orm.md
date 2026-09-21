@@ -1,6 +1,6 @@
 # ORM-Kochbuch
 
-Muster für das **Rustango**-ORM jenseits der Grundlagen. Wenn du von Djangos ORM, Laravel Eloquent oder Rails ActiveRecord kommst, werden dir die Formen hier vertraut vorkommen. Die meisten Beispiele setzen voraus, dass du bereits ein `Post`-Model aus `Getting Started` hast.
+Muster für das **Rustango**-ORM jenseits der Grundlagen. Wenn du schon einmal mit einem ORM gearbeitet hast, werden dir die Formen hier vertraut vorkommen. Die meisten Beispiele setzen voraus, dass du bereits ein `Post`-Model aus `Getting Started` hast.
 
 [![Typgeprüfte ORM-Abfragen: verkettete Filter, Sortierung, Limits und Aggregation — alles ohne rohes SQL](../img/orm.png)](../img/orm.png)
 
@@ -18,18 +18,18 @@ Ein paar Rust-Begriffe tauchen durchgehend auf. `&pool` ist eine geteilte Refere
 
 ## Neuere Ergänzungen
 
-Jüngste Releases haben eine Reihe von Django-Paritäts-Features hinzugefügt, die noch nicht in jeden Abschnitt weiter unten eingearbeitet sind. Kurze Hinweise:
+Jüngste Releases haben eine Reihe von Features hinzugefügt, die noch nicht in jeden Abschnitt weiter unten eingearbeitet sind. Kurze Hinweise:
 
-- **`Q!`-Makro + `Qb`-Laufzeit-Builder** (#269, #263) — kompilierzeitsichere Filter in Django-Form. `User::objects().where_(Q!(User.email__icontains = "alice"))` lässt sich bei einem falsch geschriebenen Feldnamen nicht bauen. Laufzeit-komponierbare Variante für Admin-Filter-Chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
+- **`Q!`-Makro + `Qb`-Laufzeit-Builder** (#269, #263) — kompilierzeitsichere Filter. `User::objects().where_(Q!(User.email__icontains = "alice"))` lässt sich bei einem falsch geschriebenen Feldnamen nicht bauen. Laufzeit-komponierbare Variante für Admin-Filter-Chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
 - **`.distinct_on(&["author_id"])`** (#264) — PG-nativ; portabler Fallback per Fensterfunktion auf MySQL / SQLite. Muster nach dem Schema "Neuestes pro Gruppe".
-- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — Djangos `bulk_create(update_conflicts=True)`. Tri-dialektisches ON CONFLICT / ON DUPLICATE KEY UPDATE.
+- **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** (#267) — viele Zeilen in einem Statement einfügen oder bei Konflikt aktualisieren. Tri-dialektisches ON CONFLICT / ON DUPLICATE KEY UPDATE.
 - **`explain_pool()`** (#272) — tri-dialektisches EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
 - **DB-Funktionsbibliothek** (#266) — `Cast`, `LPad`, `RPad`, `MD5`, `SHA1`, `SHA256`, `Position`, `Repeat`, `Reverse`, `Sign`, `Mod`, `Power`, `Sqrt`. Emission pro Dialekt mit klaren Fehlern dort, wo SQLite die Funktion nicht hat.
 - **Feldtypen** — `rust_decimal::Decimal` (PG/MySQL-nativ, SQLite über einen Decode-Shim), `chrono::NaiveTime`, `Vec<u8>` (`FieldType::Binary`) werden jetzt von `#[derive(Model)]` akzeptiert (#524, v0.42).
-- **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — Djangos `save(commit=False)`. Jetzt validieren, das vorbereitete Schreib-Set mutieren, committen, wenn bereit.
+- **`ModelForm::prepare_save()` / `PreparedSave`** (#375, v0.42) — validieren, ohne sofort zu schreiben. Jetzt validieren, das vorbereitete Schreib-Set mutieren, committen, wenn bereit.
 - **`#[rustango(unique_when(columns = "...", condition = "..."))]`** (#265) — partielle Unique-Constraints. "Eindeutige E-Mail pro nicht-gelöschter Zeile" / "Eindeutiger Slug pro Mandant".
-- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — Erweiterungs-Trait für benutzerdefinierte Manager in Django-Form, emittiert neben dem Model. (Auch die Rust-Form von Djangos Proxy-Models — dieselbe physische Tabelle, mehrere "Persönlichkeiten" über per-Trait-Methoden. Siehe `inheritance.rs:98-127`.)
-- **`manage makemigrations --merge`** (#346, v0.42) — Merge-Knoten in Django-Form für divergente Branch-Ketten. Siehe [`docs/manage.md`](manage.md#makemigrations---merge).
+- **`#[rustango(manager(ext = "FooManagerExt"))]`** (#271) — Erweiterungs-Trait für benutzerdefinierte Manager, emittiert neben dem Model. (Damit lassen sich auch mehrere "Persönlichkeiten" auf derselben physischen Tabelle abbilden, über per-Trait-Methoden. Siehe `inheritance.rs:98-127`.)
+- **`manage makemigrations --merge`** (#346, v0.42) — Merge-Knoten für divergente Branch-Ketten. Siehe [`docs/manage.md`](manage.md#makemigrations---merge).
 
 Das CHANGELOG führt den vollständigen Ticket-Index für jedes Release.
 
@@ -57,7 +57,7 @@ Das CHANGELOG führt den vollständigen Ticket-Index für jedes Release.
 
 ## Abfragen
 
-Zeilen aus der Datenbank lesen. `Post::objects()` startet eine Abfrage (wie Djangos `Post.objects`); du verkettest Filter und Sortierung und rufst dann `.fetch(&pool).await?` auf, um sie auszuführen und ein `Vec<Post>` zurückzubekommen. `.where_(...)` fügt eine per-AND verknüpfte Bedingung hinzu.
+Zeilen aus der Datenbank lesen. `Post::objects()` startet eine Abfrage; du verkettest Filter und Sortierung und rufst dann `.fetch(&pool).await?` auf, um sie auszuführen und ein `Vec<Post>` zurückzubekommen. `.where_(...)` fügt eine per-AND verknüpfte Bedingung hinzu.
 
 ```rust
 use rustango::core::Column as _;
@@ -92,7 +92,7 @@ let qs = Post::objects().where_raw(WhereExpr::Or(vec![
     Post::status.eq("review").into(),
 ]));
 
-// XOR — Django 4.1+ `Q(a) ^ Q(b)`. Matches rows where an odd number
+// XOR. Matches rows where an odd number
 // of operands evaluate to true (binary case = "exactly one is true").
 // Issue #27.
 let either_but_not_both = Post::objects()
@@ -106,7 +106,7 @@ let either_but_not_both = Post::objects()
 
 ### Vergleichsfilter
 
-Die alltäglichen Filtermethoden, eine pro SQL-Operator. Das sind Djangos Feld-Lookups (`__gt`, `__in`, `__icontains` und so weiter) in typisierter Form.
+Die alltäglichen Filtermethoden, eine pro SQL-Operator. Das sind die Feld-Lookups (`__gt`, `__in`, `__icontains` und so weiter) in typisierter Form.
 
 ```rust
 Post::objects().where_(Post::view_count.gt(100)).fetch(&pool).await?;
@@ -168,7 +168,7 @@ Verwende `.order_by_with_nulls(...)` / `.order_by_expr_with_nulls(...)`, um die 
 
 ### Zufällige Sortierung
 
-Gib Zeilen in zufälliger Reihenfolge zurück — Djangos `.order_by('?')`. Verwende `.order_random()`. Es emittiert `ORDER BY RANDOM()` auf PG und SQLite, `ORDER BY RAND()` auf MySQL. Praktisch für Banner-Rotation, Sampling oder A/B-Test-Bucket-Zuweisung, ohne Zeilen in die App zu ziehen, um sie zu mischen.
+Gib Zeilen in zufälliger Reihenfolge zurück. Verwende `.order_random()`. Es emittiert `ORDER BY RANDOM()` auf PG und SQLite, `ORDER BY RAND()` auf MySQL. Praktisch für Banner-Rotation, Sampling oder A/B-Test-Bucket-Zuweisung, ohne Zeilen in die App zu ziehen, um sie zu mischen.
 
 ```rust
 // Three random posts.
@@ -222,13 +222,13 @@ Für Cursor-Paginierung auf HTTP-Seite verwende stattdessen `ViewSet::cursor_pag
 
 ### Zeilen in eine Map laden
 
-Schlag viele Zeilen anhand einer Werteliste nach und bekomme sie als `HashMap` zurück, geschlüsselt nach dieser Spalte. Das ist Djangos `in_bulk(ids, field_name=)`. Verwende `.in_bulk(...)` für "hol diese N Zeilen in einem Roundtrip, indiziert nach ID". Eine `HashMap<K, V>` ist Rusts Dictionary/Hash-Tabelle.
+Schlag viele Zeilen anhand einer Werteliste nach und bekomme sie als `HashMap` zurück, geschlüsselt nach dieser Spalte. Verwende `.in_bulk(...)` für "hol diese N Zeilen in einem Roundtrip, indiziert nach ID". Eine `HashMap<K, V>` ist Rusts Dictionary/Hash-Tabelle.
 
 ```rust
 use std::collections::HashMap;
 use rustango::sql::Auto;
 
-// Default Django shape: keyed by the Auto<i64> PK.
+// Default shape: keyed by the Auto<i64> PK.
 let books: HashMap<i64, Book> = Book::objects()
     .in_bulk(Book::id, [1_i64, 2, 3], |b| match b.id {
         Auto::Set(v) => v,
@@ -249,7 +249,7 @@ Mandantengebundenes Geschwister: `in_bulk_on(column, ids, extract, &executor)` n
 
 ### Zeilen zum Aktualisieren sperren
 
-Sperre die Zeilen, die du auswählst, sodass keine andere Transaktion sie ändern kann, bis du committest — der Standardweg, um Arbeit zu beanspruchen oder verlorene Updates zu verhindern. Das ist Djangos `select_for_update(skip_locked=, nowait=, of=, no_key=)`. Rufe `.select_for_update()` auf; es hängt `SELECT … FOR UPDATE` (oder eine Variante) an, und die Sperre dauert für die umgebende Transaktion.
+Sperre die Zeilen, die du auswählst, sodass keine andere Transaktion sie ändern kann, bis du committest — der Standardweg, um Arbeit zu beanspruchen oder verlorene Updates zu verhindern. Rufe `.select_for_update()` auf; es hängt `SELECT … FOR UPDATE` (oder eine Variante) an, und die Sperre dauert für die umgebende Transaktion.
 
 ```rust
 // Canonical "claim next available row" pattern. Worker A grabs the
@@ -275,7 +275,7 @@ tx.commit().await?;
 - `.no_key()` — emittiert stattdessen `FOR NO KEY UPDATE` (PG 9.3+). Schwächere Sperre, die Schreiber nicht blockiert, die nur Nicht-Schlüsselspalten anfassen.
 - `.of(&["table_or_alias", …])` — beschränke die Sperre auf bestimmte Tabellen, wenn die Abfrage JOINt.
 
-`.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` ohne ein vorheriges `.select_for_update()` aufzurufen, aktiviert die Sperre implizit — passend zu Djangos Ergonomie.
+`.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` ohne ein vorheriges `.select_for_update()` aufzurufen, aktiviert die Sperre implizit — der Aufruf bleibt so kurz wie möglich.
 
 **Tri-dialektisches Verhalten:**
 
@@ -289,7 +289,7 @@ tx.commit().await?;
 
 ### Abfragen kombinieren (Vereinigung, Schnitt, Differenz)
 
-Führe zwei oder mehr Abfragen über dasselbe Model mit SQL-Mengenoperatoren zusammen. Das sind Djangos `.union()`, `.intersection()` und `.difference()`.
+Führe zwei oder mehr Abfragen über dasselbe Model mit SQL-Mengenoperatoren zusammen: `.union()`, `.intersection()` und `.difference()`.
 
 ```rust
 // Posts that are EITHER drafts OR currently in review.
@@ -333,11 +333,11 @@ let mixed = qs_a
 
 **Tri-dialektisch**: PostgreSQL + SQLite unterstützen alle vier Operatoren auf jeder Version, die **Rustango** unterstützt. MySQL 8.0+ unterstützt `UNION`/`UNION ALL`; `INTERSECT`/`EXCEPT` kamen in MySQL 8.0.31 dazu. Ältere MySQL-Versionen liefern den Syntaxfehler des Treibers zur Fetch-Zeit — es gibt kein clientseitiges Gate.
 
-**Fehlerpfad auf dem typisierten Builder**: `.union(other_qs)` (und `.intersection()` / `.difference()`) kompiliert den Zweig sofort und panickt, wenn der Zweig sich nicht kompilieren lässt (falsch geschriebene Spalte etc.). Für fehlbare Komposition, bei der der Aufrufer ein `Result` will, kompiliere den Zweig zuerst und übergib ihn per `.with_compound(SetOp::Union, branch)` — ein generischer Einstiegspunkt deckt jeden Operator ab. Die Panic-Form entspricht Djangos: ein fehlerhafter Zweig ist ein Programmierfehler, keine Laufzeit-Datenbedingung.
+**Fehlerpfad auf dem typisierten Builder**: `.union(other_qs)` (und `.intersection()` / `.difference()`) kompiliert den Zweig sofort und panickt, wenn der Zweig sich nicht kompilieren lässt (falsch geschriebene Spalte etc.). Für fehlbare Komposition, bei der der Aufrufer ein `Result` will, kompiliere den Zweig zuerst und übergib ihn per `.with_compound(SetOp::Union, branch)` — ein generischer Einstiegspunkt deckt jeden Operator ab. Die Panic-Form ist Absicht: ein fehlerhafter Zweig ist ein Programmierfehler, keine Laufzeit-Datenbedingung.
 
 ### Große Ergebnismengen streamen
 
-Verarbeite eine riesige Tabelle, ohne sie komplett in den Speicher zu laden. Das ist Djangos `.iterator(chunk_size=2000)`. Rufe `.iterator(chunk_size)` auf; es holt `chunk_size` Zeilen auf einmal (per `LIMIT N OFFSET M`) und puffert nie die gesamte Ergebnismenge. Greif danach bei Millionen-Zeilen-Exporten, ETL-Pipelines und Batch-Jobs.
+Verarbeite eine riesige Tabelle, ohne sie komplett in den Speicher zu laden. Rufe `.iterator(chunk_size)` auf; es holt `chunk_size` Zeilen auf einmal (per `LIMIT N OFFSET M`) und puffert nie die gesamte Ergebnismenge. Greif danach bei Millionen-Zeilen-Exporten, ETL-Pipelines und Batch-Jobs.
 
 ```rust
 // 1. Whole-chunk loop — process N rows at a time.
@@ -397,30 +397,30 @@ tx.commit().await?;
 
 Ein zukünftiges `iterator_on(&mut *tx, chunk_size)`-Gegenstück (Issue-Nachfolge) würde diese Lücke schließen. Nicht im Umfang von Issue #23.
 
-**`chunk_size` muss > 0 sein.** Null oder negative Werte panicken. Wähle einen Wert, der zu deinem Zeilengrößen-Budget passt (Djangos Standard ist `2000`; sinnvoll für schmale Zeilen, niedriger für breite TEXT/JSONB-Spalten).
+**`chunk_size` muss > 0 sein.** Null oder negative Werte panicken. Wähle einen Wert, der zu deinem Zeilengrößen-Budget passt (`2000` ist ein guter Ausgangspunkt für schmale Zeilen, niedriger für breite TEXT/JSONB-Spalten).
 
 ### Bestimmte Spalten auswählen
 
-Hol nur ein paar Spalten statt ganzer `Post`-Structs — Djangos `.values('col')` und `.values_list('col', flat=True)`. Verwende diese, wenn du nur ein paar Spalten aus einer breiten Tabelle brauchst, oder wenn das Ergebnis dynamischen Code speist (Templates, CSV-Export, JSON). Du bekommst Maps, Tupel oder eine flache typisierte Liste zurück statt Model-Instanzen.
+Hol nur ein paar Spalten statt ganzer `Post`-Structs, über `.values(...)` und `.values_list(...)`. Verwende diese, wenn du nur ein paar Spalten aus einer breiten Tabelle brauchst, oder wenn das Ergebnis dynamischen Code speist (Templates, CSV-Export, JSON). Du bekommst Maps, Tupel oder eine flache typisierte Liste zurück statt Model-Instanzen.
 
 ```rust
 use rustango::core::SqlValue;
 use std::collections::HashMap;
 
-// 1. Column-keyed map per row — Django's `.values('id', 'title')`.
+// 1. Column-keyed map per row.
 let rows: Vec<HashMap<String, SqlValue>> = Post::objects()
     .where_(Post::published.eq(true))
     .order_by(&[("id", false)])
     .values_dict(&["id", "title"])
     .fetch(&pool).await?;
 
-// 2. Ordered tuple per row — Django's `.values_list('id', 'title')`.
+// 2. Ordered tuple per row.
 //    Cell ordering matches the column-list argument.
 let rows: Vec<Vec<SqlValue>> = Post::objects()
     .values_list(&["title", "id"])  // title first, id second
     .fetch(&pool).await?;
 
-// 3. Single-column typed scalar — Django's `.values_list('id', flat=True)`.
+// 3. Single-column typed scalar.
 //    Returns Vec<U> directly via sqlx's typed scalar path.
 let ids: Vec<i64> = Post::objects()
     .where_(Post::published.eq(true))
@@ -448,7 +448,7 @@ let ids: Vec<i64> = Post::objects()
 
 ### Spalten einschließen oder ausschließen
 
-Dieselbe Idee wie im vorherigen Abschnitt, aber in Djangos include/exclude-Form: `.only('id', 'name')` behält nur die genannten Spalten, `.defer('big_field')` behält alles außer ihnen. Verwende diese bei breiten Tabellen, wo große TEXT / BLOB / JSONB-Spalten Listenansichten teuer im Lesen machen:
+Dieselbe Idee wie im vorherigen Abschnitt, aber als Einschluss-/Ausschluss-Paar: `.only('id', 'name')` behält nur die genannten Spalten, `.defer('big_field')` behält alles außer ihnen. Verwende diese bei breiten Tabellen, wo große TEXT / BLOB / JSONB-Spalten Listenansichten teuer im Lesen machen:
 
 ```rust
 // .only(...) — fetch only the named columns.
@@ -464,15 +464,15 @@ let rows: Vec<HashMap<String, SqlValue>> = Post::objects()
     .fetch(&pool).await?;
 ```
 
-**Semantik**: `.only(&[cols])` ist ein Synonym für `.values_dict(cols)` — gleiche IR, gleiche Rückgabeform, separater Einstiegspunkt für Lesbarkeit in Django-Form. `.defer(&[cols])` berechnet das Komplement gegen das Model-Schema (jede Skalarspalte des Models AUSSER den aufgelisteten) und leitet auf denselben Pfad.
+**Semantik**: `.only(&[cols])` ist ein Synonym für `.values_dict(cols)` — gleiche IR, gleiche Rückgabeform, separater Einstiegspunkt der Lesbarkeit halber. `.defer(&[cols])` berechnet das Komplement gegen das Model-Schema (jede Skalarspalte des Models AUSSER den aufgelisteten) und leitet auf denselben Pfad.
 
-**Vorbehalt — Rückgabetyp unterscheidet sich von Django.** Djangos `.only()` / `.defer()` geben teilweise hydrierte `Model`-Instanzen zurück, bei denen die aufgeschobenen Felder beim Attributzugriff lazy geladen werden. **Rustango** hat kein Äquivalent zu Pythons Descriptor-Magie; die Rückgabeform ist `Vec<HashMap<String, SqlValue>>` (oder `Vec<Vec<SqlValue>>`, wenn du stattdessen `.values_list(...)` einwechselst). Typisiertes Teilzeilen-Decode ist für eine zukünftige Iteration vorgemerkt.
+**Vorbehalt — die Rückgabe ist kein `Model`.** Es gibt keine teilweise hydrierten Model-Instanzen, die fehlende Felder beim Attributzugriff nachladen; die Rückgabeform ist `Vec<HashMap<String, SqlValue>>` (oder `Vec<Vec<SqlValue>>`, wenn du stattdessen `.values_list(...)` einwechselst). Typisiertes Teilzeilen-Decode ist für eine zukünftige Iteration vorgemerkt.
 
 **Tippfehlersicherheit**: `.defer(&["nope_col"])` liefert `QueryError::UnknownField` zur `.compile()`-Zeit — der Tippfehler verwandelt sich nicht stillschweigend in "alle Spalten projizieren". `.only(&[])` liefert `QueryError::EmptyValuesProjection`; `.defer(&[])` ist eine semantische No-op (projiziert jede Spalte).
 
 ### Mit regulären Ausdrücken abgleichen
 
-Gleiche eine Spalte gegen ein Regex-Muster ab — Djangos `__regex` / `__iregex`. `.regex()` ist case-sensitiv, `.iregex()` case-insensitiv, und `.not_regex()` / `.not_iregex()` sind die negierten Formen.
+Gleiche eine Spalte gegen ein Regex-Muster ab, über die Lookups `__regex` / `__iregex`. `.regex()` ist case-sensitiv, `.iregex()` case-insensitiv, und `.not_regex()` / `.not_iregex()` sind die negierten Formen.
 
 ```rust
 use rustango::core::Column as _;
@@ -492,7 +492,7 @@ User::objects()
     .where_(User::name.not_regex("^admin"))
     .fetch(&pool).await?;
 
-// Django-shape lookup-suffix form.
+// Lookup-suffix string form.
 User::objects()
     .filter("name__iregex", "^bob")
     .fetch(&pool).await?;
@@ -527,7 +527,7 @@ Ohne eine solche emittiert die Abfrage valides `REGEXP`-SQL, das SQLite bei der 
 
 ## Berechnete Werte & Datenbankfunktionen
 
-Lass die Datenbank Dinge berechnen, statt Zeilen in die App zu ziehen, sie zu mutieren und zurückzuschreiben. `F("col")` verweist auf eine Spalte per Name (Djangos `F()`-Objekt), und die `funcs::*`-Builder umschließen skalare SQL-Funktionen wie `LOWER` oder `COALESCE`. Zusammen schalten sie drei Muster frei, die reines wertbasiertes `.set()` / `.where_()` nicht ausdrücken kann:
+Lass die Datenbank Dinge berechnen, statt Zeilen in die App zu ziehen, sie zu mutieren und zurückzuschreiben. `F("col")` verweist auf eine Spalte per Name, und die `funcs::*`-Builder umschließen skalare SQL-Funktionen wie `LOWER` oder `COALESCE`. Zusammen schalten sie drei Muster frei, die reines wertbasiertes `.set()` / `.where_()` nicht ausdrücken kann:
 
 ### Atomare Inkremente (kein Read-Modify-Write-Race)
 
@@ -737,7 +737,7 @@ Order::objects()
 
 ### CASE-WHEN-Ausdrücke
 
-Baue ein SQL `CASE WHEN … THEN … ELSE … END` mit den `case()` / `.when()` / `value()`-Buildern — Djangos `Case`/`When`. Verwende es für benutzerdefinierte Sortierungen, abgeleitete Spalten in `annotate`, berechnete Defaults in `update` und (gepaart mit `Sum`) bedingte Aggregate.
+Baue ein SQL `CASE WHEN … THEN … ELSE … END` mit den `case()` / `.when()` / `value()`-Buildern. Verwende es für benutzerdefinierte Sortierungen, abgeleitete Spalten in `annotate`, berechnete Defaults in `update` und (gepaart mit `Sum`) bedingte Aggregate.
 
 ```rust
 use rustango::core::case::{case, value};
@@ -794,7 +794,7 @@ Post::objects()
 - `.when(condition, then)` — hängt einen Zweig an. `condition` ist alles `Into<WhereExpr>` (typischerweise `Column::eq()`, `.and()`, `.or()`); `then` ist alles `Into<Expr>` (Literal, `F()`, Funktionsaufruf, verschachteltes `case()`).
 - `.default(expr)` — setzt den optionalen `ELSE`-Zweig. Ihn wegzulassen erzeugt ein `CASE`, das `NULL` für nicht passende Zeilen zurückgibt (SQL-Standard).
 - `.build()` oder `.into()` — finalisiert zu einem `Expr` für `set_expr` / `eq_expr` / `annotate`.
-- `value(literal)` — Zucker im Django-Stil für `Expr::Literal(...)`. Optional — nackte Literale werden per `Into<Expr>` gecoerct, aber `value("…")` liest sich explizit als "das ist ein String-Literal, keine Spaltenreferenz".
+- `value(literal)` — Kurzform für `Expr::Literal(...)`. Optional — nackte Literale werden per `Into<Expr>` gecoerct, aber `value("…")` liest sich explizit als "das ist ein String-Literal, keine Spaltenreferenz".
 
 **Tri-dialektische Emission:**
 
@@ -808,7 +808,7 @@ Post::objects()
 
 ### Unterabfragen (EXISTS, IN, skalar)
 
-Bette eine Abfrage in eine andere ein — Djangos `Exists`, `Subquery` und `OuterRef`. Diese Builder decken die meisten "existiert eine verwandte Zeile?"- und "ist dieser Wert in dieser Menge?"-Muster ab:
+Bette eine Abfrage in eine andere ein, mit den Buildern `Exists`, `Subquery` und `OuterRef`. Diese Builder decken die meisten "existiert eine verwandte Zeile?"- und "ist dieser Wert in dieser Menge?"-Muster ab:
 
 | Builder | Form | Verwende es für |
 |---|---|---|
@@ -876,7 +876,7 @@ Die Tabelle oben ist eine Auswahl, nicht der ganze Satz. `funcs` hat außerdem `
 
 ## Aggregationen
 
-Zeilen zählen, summieren, mitteln und gruppieren. `.count()`, `.sum()`, `.avg()`, `.min()` und `.max()` geben eine einzelne Zahl zurück; `.annotate(...)` plus `.values(...)` baut GROUP-BY-Abfragen (Djangos `aggregate` / `annotate`). Aggregatergebnisse kommen als `Vec<HashMap<String, SqlValue>>` zurück statt als typisierte Structs, da die Form dynamisch ist.
+Zeilen zählen, summieren, mitteln und gruppieren. `.count()`, `.sum()`, `.avg()`, `.min()` und `.max()` geben eine einzelne Zahl zurück; `.annotate(...)` plus `.values(...)` baut GROUP-BY-Abfragen. Aggregatergebnisse kommen als `Vec<HashMap<String, SqlValue>>` zurück statt als typisierte Structs, da die Form dynamisch ist.
 
 ```rust
 use rustango::sql::CounterPool as _;
@@ -892,7 +892,7 @@ let total_views = Post::objects().sum::<i64>("view_count", &pool).await?;
 let avg_views = Post::objects().avg::<f64>("view_count", &pool).await?;
 let max_views = Post::objects().max::<i64>("view_count", &pool).await?;
 
-// Annotate + GROUP BY (issue #75 — Django-shape auto-inference)
+// Annotate + GROUP BY (issue #75 — auto-inferred grouping)
 use rustango::core::aggregates::{count_all, sum};
 
 // "Posts per author" — `.values()` lists the GROUP BY columns.
@@ -906,7 +906,7 @@ let rows = rustango::sql::fetch_aggregate_dict(&pool, &by_author).await?;
 
 ### Wie GROUP BY inferiert wird
 
-Du schreibst `GROUP BY` selten selbst — **Rustango** inferiert es aus der Form der Abfrage, genau wie Django. Du rufst `.group_by(...)` nur auf, um diese Inferenz zu überschreiben. Die Tabelle zeigt, was jede Form erzeugt:
+Du schreibst `GROUP BY` selten selbst — **Rustango** inferiert es aus der Form der Abfrage. Du rufst `.group_by(...)` nur auf, um diese Inferenz zu überschreiben. Die Tabelle zeigt, was jede Form erzeugt:
 
 | Form | Builder | Resultierendes `GROUP BY` |
 |---|---|---|
@@ -943,7 +943,7 @@ Post::objects()
 
 ### Bedingte & statistische Aggregate
 
-Zähle oder summiere nur die Zeilen, die eine Bedingung erfüllen, liefere einen Fallback für leere Ergebnisse und berechne Standardabweichung / Varianz. Diese spiegeln Djangos `Count('id', filter=...)`, `Sum('price', default=0)` und `StdDev`. Verkette `.filter(...)` und `.default(...)` an jeden Aggregat-Builder.
+Zähle oder summiere nur die Zeilen, die eine Bedingung erfüllen, liefere einen Fallback für leere Ergebnisse und berechne Standardabweichung / Varianz. Verkette `.filter(...)` und `.default(...)` an jeden Aggregat-Builder.
 
 ```rust
 use rustango::core::aggregates::{avg, count, count_all, stddev, sum};
@@ -1003,11 +1003,11 @@ Beide Ketten als `Coalesced` außerhalb `Filtered` aufzurufen: `COALESCE(SUM(col
 
 Der Writer wendet den Int/Float-Cast des Dialekts (`::bigint`, `CAST(... AS SIGNED)` etc.) um den gesamten `FILTER`-Ausdruck an — `SUM(col)::bigint FILTER (...)` ist ein PG-Parse-Fehler, sodass die emittierte Form `(SUM(col) FILTER (...))::bigint` ist. Gleiche Form für `STDDEV_SAMP` / `VAR_SAMP` (sie geben NUMERIC auf PG für bigint-Input zurück).
 
-**SQLite + StdDev/Variance:** SQLite hat keine eingebauten statistischen Aggregate, sodass der Writer mit `SqlError::AggregateNotSupported { aggregate, dialect: "sqlite" }` ablehnt. Berechne die Varianzformel im App-Code, wenn portable Statistik benötigt wird (dieselbe Haltung, die Django einnimmt).
+**SQLite + StdDev/Variance:** SQLite hat keine eingebauten statistischen Aggregate, sodass der Writer mit `SqlError::AggregateNotSupported { aggregate, dialect: "sqlite" }` ablehnt. Berechne die Varianzformel im App-Code, wenn portable Statistik benötigt wird.
 
 ### Fensterfunktionen
 
-Berechne laufende Summen, Rankings und Zeile-über-Zeile-Deltas, ohne Zeilen zu kollabieren — Djangos `Window(expression, partition_by=, order_by=, frame=)`. Acht Funktionen (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`) plus ROWS/RANGE-Frames. Jedes Backend, das **Rustango** unterstützt (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25), liefert native `OVER (…)`-Syntax, sodass die Emission uniform ist.
+Berechne laufende Summen, Rankings und Zeile-über-Zeile-Deltas, ohne Zeilen zu kollabieren — über `Window(expression, partition_by=, order_by=, frame=)`. Acht Funktionen (`row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`, `last_value`, `ntile`) plus ROWS/RANGE-Frames. Jedes Backend, das **Rustango** unterstützt (PG ≥ 9.0, MySQL ≥ 8.0, SQLite ≥ 3.25), liefert native `OVER (…)`-Syntax, sodass die Emission uniform ist.
 
 ```rust
 use rustango::core::aggregates::max;
@@ -1134,11 +1134,11 @@ let frame = WindowFrame {
 **Vorbehalte:**
 
 - **`FILTER` + `Window` noch nicht unterstützt**: das Kombinieren von `.filter(...)` mit einer Fensterfunktion wirft `SqlError::NestedAggregateWrapper { wrapper: "Filtered(Window)" }` — die zugrunde liegende Syntax variiert je nach Funktionsart (PG erlaubt `agg_fn() FILTER (WHERE …) OVER (…)` für Aggregat-Fensterfunktionen, aber nicht für Ranking-Funktionen), und dem Writer wurde der Dispatch noch nicht beigebracht. Für eine Nachfolge vorgemerkt, falls Nachfrage aufkommt.
-- **`PercentRank` / `CumeDist` / `NthValue`** sind nicht in v1 — Djangos vollständige Menge ist größer. v1 liefert die 8 meistgenutzten Varianten; die fehlenden drei können inkrementell mit derselben Builder-Form hinzugefügt werden.
+- **`PercentRank` / `CumeDist` / `NthValue`** sind nicht in v1 — SQL kennt mehr Fensterfunktionen, als hier abgedeckt sind. v1 liefert die 8 meistgenutzten Varianten; die fehlenden drei können inkrementell mit derselben Builder-Form hinzugefügt werden.
 
 ### Auf Aggregaten filtern (HAVING)
 
-Ein `.filter(...)`-Aufruf nach `.annotate(...)` landet entweder in `WHERE` oder `HAVING`, je nachdem, ob der Name einem Aggregat-Alias entspricht — genau Djangos Verhalten. So fügt das Filtern auf einer echten Spalte ein `WHERE` hinzu, während das Filtern auf einer Annotation wie `post_count` ein `HAVING` hinzufügt:
+Ein `.filter(...)`-Aufruf nach `.annotate(...)` landet entweder in `WHERE` oder `HAVING`, je nachdem, ob der Name einem Aggregat-Alias entspricht. So fügt das Filtern auf einer echten Spalte ein `WHERE` hinzu, während das Filtern auf einer Annotation wie `post_count` ein `HAVING` hinzufügt:
 
 ```rust
 use rustango::core::aggregates::count_all;
@@ -1169,7 +1169,7 @@ HAVING COUNT(*) > $2
 
 **Der Aggregatausdruck wird in HAVING gehoben, nicht der SELECT-Alias.** PG verbietet Aliase in HAVING strikt (nur der Ausdruck löst auf); MySQL + SQLite sind nachsichtiger. Der Writer emittiert die gehobene Form uniform über alle drei, sodass dieselbe Abfrage überall funktioniert.
 
-**Die Kettenreihenfolge ist in v1 wichtig.** Rufe `.annotate(alias, ...)` VOR dem entsprechenden `.filter(alias, ...)` auf. Ist die Reihenfolge umgekehrt, schlägt `filter()` eine leere Annotationsregistrierung nach und leitet auf `WHERE` — und der `resolve_pending`-Validator liefert `UnknownField` bei `compile()`, weil der Alias keine echte Model-Spalte ist. Django schiebt diese Auflösung auf die Query-Konstruktionszeit; eine v0.50-Nachfolge könnte dieser Haltung entsprechen.
+**Die Kettenreihenfolge ist in v1 wichtig.** Rufe `.annotate(alias, ...)` VOR dem entsprechenden `.filter(alias, ...)` auf. Ist die Reihenfolge umgekehrt, schlägt `filter()` eine leere Annotationsregistrierung nach und leitet auf `WHERE` — und der `resolve_pending`-Validator liefert `UnknownField` bei `compile()`, weil der Alias keine echte Model-Spalte ist. Eine v0.50-Nachfolge könnte diese Auflösung auf die Query-Konstruktionszeit verschieben und die Reihenfolge damit egal machen.
 
 **Validator-Lücke (entspricht der bestehenden Aggregat-Haltung)**: alias-geroutete HAVING-Prädikate überspringen den Model-Schema-Spaltendurchlauf. Falsch geschriebene Aliase tauchen bei der Datenbank auf, nicht bei `compile()`. Gleiche Lücke wie `Sum("typo_col")` — vorbestehend und orthogonal.
 
@@ -1212,7 +1212,7 @@ Die SQL-Semantik ist unverändert (dieselben Zeilenzahlen kommen zurück), aber 
 
 ## Joins & Vorladen verwandter Zeilen
 
-Zieh ein Foreign-Key-Ziel zusammen mit der Hauptzeile in einer einzigen Abfrage, sodass du nicht eine zusätzliche Abfrage pro Zeile abfeuerst (das N+1-Problem). `.select_related("author")` ist Djangos `select_related` / Eloquents Eager Loading. Ein `ForeignKey<T>`-Feld kommt dann bereits befüllt an, statt einen separaten Lookup zu brauchen.
+Zieh ein Foreign-Key-Ziel zusammen mit der Hauptzeile in einer einzigen Abfrage, sodass du nicht eine zusätzliche Abfrage pro Zeile abfeuerst (das N+1-Problem). `.select_related("author")` lädt die Relation vorab mit (Eager Loading). Ein `ForeignKey<T>`-Feld kommt dann bereits befüllt an, statt einen separaten Lookup zu brauchen.
 
 ```rust
 let posts = Post::objects()
@@ -1308,7 +1308,7 @@ Das `Join.project`-Feld weist den Writer an, `<alias>"."<col>" AS "<alias>__<col
 
 | Bedarf | Werkzeug |
 |---|---|
-| Verwandte Zeilen zusammen mit der Hauptzeile ziehen | `select_related` (Django-Form) |
+| Verwandte Zeilen zusammen mit der Hauptzeile ziehen | `select_related` |
 | Hauptzeilen nach einem Prädikat der verwandten Tabelle filtern | `exists(...)` / `not_exists(...)` |
 | Per INNER statt LEFT filtern oder mit zusätzlichen ON-Prädikaten | `.join(...)` |
 | Self-Join (z. B. `employee.manager_id = manager.id`) | `.join(...)` |
@@ -1324,7 +1324,7 @@ Das `Join.project`-Feld weist den Writer an, `<alias>"."<col>" AS "<alias>__<col
 
 ## Nur einige Felder speichern
 
-Schreib nur die Felder, die du geändert hast, statt jeder Spalte — Djangos `save(update_fields=[...])`. Ein normales Speichern überschreibt jede Nicht-PK-Spalte; `save_partial(&[...], &pool)` überschreibt nur die, die du benennst.
+Schreib nur die Felder, die du geändert hast, statt jeder Spalte. Ein normales Speichern überschreibt jede Nicht-PK-Spalte; `save_partial(&[...], &pool)` überschreibt nur die, die du benennst.
 
 ```rust
 let mut post = Post::objects().fetch(&pool).await?.pop().unwrap();
@@ -1350,7 +1350,7 @@ b.status = "from-B".into();
 b.save_partial(&["status"], &pool).await?;
 ```
 
-**Feldnamen sind Struct-Felder auf Rust-Seite**, keine SQL-Spalten — `["author_id"]` (nicht `["author"]` für ein FK-typisiertes Feld). Unbekannte Feldnamen geben `ExecError::Query(QueryError::UnknownField)` zurück. Eine leere Liste ist eine No-op (gibt `Ok(())` zurück und loggt ein `tracing::warn!`), passend zu Djangos "nichts zu tun"-Semantik. Auditierte Models (`#[rustango(audit(...))]`) verengen den Audit-Log-Snapshot auf dieselbe Spaltenmenge — das Log spiegelt genau das wider, was geschrieben wurde.
+**Feldnamen sind Struct-Felder auf Rust-Seite**, keine SQL-Spalten — `["author_id"]` (nicht `["author"]` für ein FK-typisiertes Feld). Unbekannte Feldnamen geben `ExecError::Query(QueryError::UnknownField)` zurück. Eine leere Liste ist eine No-op (gibt `Ok(())` zurück und loggt ein `tracing::warn!`) — es gibt schlicht nichts zu schreiben. Auditierte Models (`#[rustango(audit(...))]`) verengen den Audit-Log-Snapshot auf dieselbe Spaltenmenge — das Log spiegelt genau das wider, was geschrieben wurde.
 
 **Auto-PK-Hinweis.** `save_partial` ist nur UPDATE; es auf einem `Auto::Unset`-PK aufzurufen ist ein Benutzerfehler (verwende dafür `insert_pool` / `save_pool`). Anders als `save_pool`, das automatisch `Unset → insert_pool` dispatcht, nimmt diese Methode an, dass du bereits eingefügt hast.
 
@@ -1390,7 +1390,7 @@ Senkt intern zu `save_partial` ab — gleiche Audit-Verengung, gleiche `Auto::Un
 > keine Per-Zeile-Validierung aus. Verwende sie für Geschwindigkeit; wechsle zu Per-Zeile-`save()` / `delete()`,
 > wenn du diese Seiteneffekte brauchst.
 
-Füge viele Zeilen in einem Statement ein, aktualisiere oder lösche sie, statt eine pro Zeile — Djangos `bulk_create`, `QuerySet.update()` und `QuerySet.delete()`. Der `as _`-Import bringt die Methoden eines Traits in Scope, ohne den Trait direkt zu benennen.
+Füge viele Zeilen in einem Statement ein, aktualisiere oder lösche sie, statt eine Anweisung pro Zeile abzusetzen. Der `as _`-Import bringt die Methoden eines Traits in Scope, ohne den Trait direkt zu benennen.
 
 ```rust
 // Bulk INSERT — rows FIRST (a `&mut [Self]`), executor/pool second.
@@ -1416,7 +1416,7 @@ Post::objects()
 
 ## Einfügen oder aktualisieren (Upsert)
 
-Füge eine Zeile ein oder aktualisiere sie, wenn eine Zeile mit demselben Schlüssel bereits existiert — Djangos `update_or_create` / Rails' `upsert`. Es emittiert das native `ON CONFLICT … DO UPDATE` der Datenbank.
+Füge eine Zeile ein oder aktualisiere sie, wenn eine Zeile mit demselben Schlüssel bereits existiert — ein Upsert. Es emittiert das native `ON CONFLICT … DO UPDATE` der Datenbank.
 
 Das Einzelinstanz-`.upsert_on(executor)` kollidiert auf dem **Primärschlüssel**: mit einem `Auto::Unset`-PK weist der Server einen neuen Schlüssel zu (äquivalent zu `insert`); mit einem `Auto::Set`-PK wird die Zeile eingefügt, wenn abwesend, oder alle Nicht-PK-Spalten werden überschrieben, wenn vorhanden.
 
@@ -1426,7 +1426,7 @@ Das Einzelinstanz-`.upsert_on(executor)` kollidiert auf dem **Primärschlüssel*
 post.upsert_on(&pool).await?;
 ```
 
-Um auf einem beliebigen Unique-Schlüssel zu upserten (Django `bulk_create(update_conflicts=True, unique_fields=…, update_fields=…)`), verwende den Bulk-Helper — er nimmt die Zeilen, die Konfliktziel-Spalten, die bei Konflikt zu aktualisierenden Spalten und den Pool ZULETZT:
+Um auf einem beliebigen Unique-Schlüssel zu upserten, verwende den Bulk-Helper — er nimmt die Zeilen, die Konfliktziel-Spalten, die bei Konflikt zu aktualisierenden Spalten und den Pool ZULETZT:
 
 ```rust
 // ON CONFLICT (external_id) DO UPDATE SET title = EXCLUDED.title
@@ -1460,7 +1460,7 @@ Post::bulk_upsert_pool(
 > *zweite* Verbindung aus und kann den Pool unter Last deadlocken. Fädle die `tx`
 > durch, oder verwende `rustango::sql::atomic`.
 
-Führe mehrere Schreibvorgänge als eine Einheit aus, die entweder alle gelingen oder alle zurückrollen — Djangos `transaction.atomic()`. Öffne eine mit `pool.begin()` und führe jedes Statement gegen die Verbindung der Transaktion über die `_on`-Methoden (`fetch_on`, `save_on`) aus, sodass die Arbeit auf der laufenden Transaktion landet statt auf einer frischen gepoolten Verbindung.
+Führe mehrere Schreibvorgänge als eine Einheit aus, die entweder alle gelingen oder alle zurückrollen — eine Transaktion. Öffne eine mit `pool.begin()` und führe jedes Statement gegen die Verbindung der Transaktion über die `_on`-Methoden (`fetch_on`, `save_on`) aus, sodass die Arbeit auf der laufenden Transaktion landet statt auf einer frischen gepoolten Verbindung.
 
 ```rust
 let mut tx = pool.begin().await?;
@@ -1482,13 +1482,13 @@ b.save_on(&mut *tx).await?;
 tx.commit().await?;
 ```
 
-Verwirf die `tx`, ohne `commit()` aufzurufen (z. B. bei einem frühen `?`-Return), und die Transaktion rollt zurück. Für einen Nach-Commit-Hook (Djangos `transaction.on_commit`) ist der Scope `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, der bei `Ok` automatisch committet und bei `Err` zurückrollt — der Hook selbst ist `rustango::sql::on_commit(|| { … })` und wird **innerhalb** dieser Closure aufgerufen. `atomic` leert die Queue, nachdem der Commit durch ist; ein `on_commit` außerhalb eines `atomic`-Scopes paniert, statt den Callback zu verwerfen.
+Verwirf die `tx`, ohne `commit()` aufzurufen (z. B. bei einem frühen `?`-Return), und die Transaktion rollt zurück. Für einen Nach-Commit-Hook ist der Scope `rustango::sql::atomic(&pool, |tx| Box::pin(async move { … }))`, der bei `Ok` automatisch committet und bei `Err` zurückrollt — der Hook selbst ist `rustango::sql::on_commit(|| { … })` und wird **innerhalb** dieser Closure aufgerufen. `atomic` leert die Queue, nachdem der Commit durch ist; ein `on_commit` außerhalb eines `atomic`-Scopes paniert, statt den Callback zu verwerfen.
 
 ---
 
 ## Many-to-many
 
-Verknüpfe viele Zeilen mit vielen anderen über eine Verknüpfungstabelle — Djangos `ManyToManyField`. Deklariere die Relation auf dem Model, verwende dann den generierten Accessor, um die verknüpften IDs hinzuzufügen, zu entfernen, zu setzen oder aufzulisten.
+Verknüpfe viele Zeilen mit vielen anderen über eine Verknüpfungstabelle — eine Many-to-many-Relation. Deklariere die Relation auf dem Model, verwende dann den generierten Accessor, um die verknüpften IDs hinzuzufügen, zu entfernen, zu setzen oder aufzulisten.
 
 ```rust
 #[rustango(
@@ -1516,7 +1516,7 @@ Die Verknüpfungstabelle (`post_tags`) wird von `make_migrations` automatisch er
 
 ## JSON / JSONB
 
-Speichere und frage ein JSON-Dokument in einer Spalte ab — Djangos `JSONField`. Deklariere das Feld als `serde_json::Value` (den generischen JSON-Typ), frage es dann mit `json_contains` oder einem Pfadfilter ab.
+Speichere und frage ein JSON-Dokument in einer Spalte ab. Deklariere das Feld als `serde_json::Value` (den generischen JSON-Typ), frage es dann mit `json_contains` oder einem Pfadfilter ab.
 
 ```rust
 #[derive(Model)]
@@ -1556,7 +1556,7 @@ Lies/schreibe Rust-Typen über `serde_json::from_value` / `to_value`.
 
 ## Soft Delete
 
-Markiere eine Zeile als gelöscht, indem du einen Zeitstempel setzt, statt sie zu entfernen — wie Djangos `django-safedelete` oder Laravels `SoftDeletes`. Markiere die Zeitstempel-Spalte mit dem `#[rustango(soft_delete)]`-Attribut (eine Derive-Annotation, die dem Makro sagt, wie das Feld zu behandeln ist):
+Markiere eine Zeile als gelöscht, indem du einen Zeitstempel setzt, statt sie zu entfernen — ein Soft Delete. Markiere die Zeitstempel-Spalte mit dem `#[rustango(soft_delete)]`-Attribut (eine Derive-Annotation, die dem Makro sagt, wie das Feld zu behandeln ist):
 
 ```rust
 #[derive(Model)]
@@ -1585,7 +1585,7 @@ Der "Löschen"-Button des Admins routet automatisch zu `soft_delete_on` für jed
 
 ## Audit-Trail
 
-Zeichne auf, wer welche Felder wann geändert hat, automatisch bei jedem Speichern und Löschen — wie Djangos `django-simple-history` oder Laravels Auditing-Pakete. Annotiere das Model mit den zu verfolgenden Feldern:
+Zeichne auf, wer welche Felder wann geändert hat, automatisch bei jedem Speichern und Löschen — ein Änderungsprotokoll pro Zeile. Annotiere das Model mit den zu verfolgenden Feldern:
 
 ```rust
 #[derive(Model)]
@@ -1623,7 +1623,7 @@ manage audit-cleanup --keep-last 50 --tenant acme
 
 ## Raw-SQL-Notausstieg
 
-Steig auf handgeschriebenes SQL um, wenn der Query-Builder nicht ausdrücken kann, was du brauchst — Djangos `Model.objects.raw()` / `connection.cursor()`. Die `sqlx`-Makros führen eine Abfrage aus und dekodieren das Ergebnis in ein Tupel, ein typisiertes `Model` oder nichts:
+Steig auf handgeschriebenes SQL um, wenn der Query-Builder nicht ausdrücken kann, was du brauchst. Die `sqlx`-Makros führen eine Abfrage aus und dekodieren das Ergebnis in ein Tupel, ein typisiertes `Model` oder nichts:
 
 ```rust
 use rustango::sql::sqlx;
@@ -1660,7 +1660,7 @@ let count = rows.first().map(|r| r.0).unwrap_or(0);
 
 ## Lazy-FK-Laden
 
-Ein Foreign Key hält anfangs nur die verwandte ID (`Unloaded`), und du holst die volle verwandte Zeile erst, wenn du danach fragst — Djangos Lazy-Zugriff auf verwandte Objekte. `match` auf den `ForeignKey`, um beide Zustände zu behandeln, oder rufe `.get(&pool)` auf, um ihn bei Bedarf zu laden. Für einen ganzen Batch verwende `select_related` (oben), um sie in einer Abfrage vorzuladen und den Per-Zeile-Fetch zu überspringen.
+Ein Foreign Key hält anfangs nur die verwandte ID (`Unloaded`), und du holst die volle verwandte Zeile erst, wenn du danach fragst (Lazy Loading). `match` auf den `ForeignKey`, um beide Zustände zu behandeln, oder rufe `.get(&pool)` auf, um ihn bei Bedarf zu laden. Für einen ganzen Batch verwende `select_related` (oben), um sie in einer Abfrage vorzuladen und den Per-Zeile-Fetch zu überspringen.
 
 ```rust
 let mut post = Post::objects().find_or_fail(1, &pool).await?;
@@ -1682,13 +1682,13 @@ Verwende `select_related("author")` auf dem Queryset, um einen Batch vorzuladen.
 
 ## Vier Wege zu filtern
 
-Es gibt vier Wege, einen Filter auszudrücken; wähle nach Kontext. Typisierte Spalten werden zur Kompilierzeit geprüft und sind am besten für App-Code; die `field__lookup`-String-Form ist Djangos vertraute Syntax für Admin und generisches CRUD; `filter_op` ist dafür, wenn du bereits ein `Op` hältst; der HTTP-Query-String treibt die öffentliche API.
+Es gibt vier Wege, einen Filter auszudrücken; wähle nach Kontext. Typisierte Spalten werden zur Kompilierzeit geprüft und sind am besten für App-Code; die `field__lookup`-String-Form ist die passende Syntax für Admin und generisches CRUD; `filter_op` ist dafür, wenn du bereits ein `Op` hältst; der HTTP-Query-String treibt die öffentliche API.
 
 ```rust
 // 1. HTTP query string (set via ViewSet filter_fields)
 //    GET /api/posts?author_id=42&status__ne=archived
 
-// 2. Django-shape string lookup (the same `field__lookup` grammar your
+// 2. String lookup (the same `field__lookup` grammar your
 //    URL parser uses, but inside Rust). Suffix decides the operator
 //    and value-shape; bare key is exact-eq. Field name is validated
 //    at `.compile()`.
@@ -1705,7 +1705,7 @@ Post::objects().filter_op("author_id", Op::Eq, SqlValue::I64(42));
 Post::objects().where_(Post::author_id.eq(42));
 ```
 
-**Konvention:** typisiert im App-Code, Django-Form in Admin- / generischem CRUD-Code, `filter_op` nur, wenn du bereits ein `Op` berechnet hast (z. B. aus einem Request-Parser), HTTP-Query für die öffentliche API-Oberfläche.
+**Konvention:** typisiert im App-Code, String-Form in Admin- / generischem CRUD-Code, `filter_op` nur, wenn du bereits ein `Op` berechnet hast (z. B. aus einem Request-Parser), HTTP-Query für die öffentliche API-Oberfläche.
 
 ### Unterstützte Lookup-Suffixe
 
@@ -1726,11 +1726,11 @@ Post::objects().where_(Post::author_id.eq(42));
 | `__between` / `__range` | `BETWEEN … AND …` | 2-elementige `SqlValue::List` | an beiden Enden inklusiv |
 | `__regex` / `__iregex` | PG `~` / `~*`, MySQL/SQLite `REGEXP` | String | case-insensitiv emuliert auf MySQL/SQLite über `LOWER()`-Umschließung; SQLite braucht eine `regexp`-User-Funktion |
 
-> **LIKE-Metazeichen werden escaped.** `__contains` / `__startswith` / `__endswith` (und ihre `i`-Varianten) behandeln den Wert als **wörtlichen** Teilstring — ein `%` oder `_` darin passt auf sich selbst, nicht als Platzhalter, wie in Django. Das Framework escaped sie und gibt `ESCAPE '!'` aus, auf allen drei Dialekten wirksam (#1257). Für ein rohes Muster mit eigenen `%` / `_` nutze `__like` / `__ilike`, die den Wert wörtlich binden.
+> **LIKE-Metazeichen werden escaped.** `__contains` / `__startswith` / `__endswith` (und ihre `i`-Varianten) behandeln den Wert als **wörtlichen** Teilstring — ein `%` oder `_` darin passt auf sich selbst, nicht als Platzhalter. Das Framework escaped sie und gibt `ESCAPE '!'` aus, auf allen drei Dialekten wirksam (#1257). Für ein rohes Muster mit eigenen `%` / `_` nutze `__like` / `__ilike`, die den Wert wörtlich binden.
 
 **Fehler tauchen bei `.compile()` auf, nicht zur `.filter()`-Aufrufzeit** — Wertform-Diskrepanzen (z. B. `__in` mit einem Skalar, `__isnull` mit einem Nicht-Bool, `__between` mit falscher Stelligkeit) und unbekannte Suffixe (`status__nope`) geben `QueryError::UnknownLookup` / `QueryError::InvalidLookupValue` von `.compile()` zurück, sodass die fluente Kette typsauber bleibt. Verkettete Traversierungen (`author__name__icontains`) werden in v0.39 **nicht** unterstützt — der Splitter nimmt das Suffix nach dem ersten `__`, sodass der ganze Schwanz `name__icontains` als unbekanntes Suffix behandelt wird.
 
-Jeder Filteraufruf wird per AND mit allen vorhergehenden verknüpft; mische Django-Form, `filter_op` und `where_` frei auf demselben Queryset.
+Jeder Filteraufruf wird per AND mit allen vorhergehenden verknüpft; mische String-Form, `filter_op` und `where_` frei auf demselben Queryset.
 
 ---
 
@@ -1763,7 +1763,7 @@ auf einem MySQL- oder SQLite-Build existiert von beiden also nur `fetch`.
 
 ## Signale
 
-Führe einen Callback aus, wenn etwas passiert — Djangos Signale. Es gibt zwei unabhängige Registrierungen: eine für Model-Schreibvorgänge, eine für HTTP-Requests.
+Führe einen Callback aus, wenn etwas passiert — Signale. Es gibt zwei unabhängige Registrierungen: eine für Model-Schreibvorgänge, eine für HTTP-Requests.
 
 ### Model-Lebenszyklus
 
@@ -1783,7 +1783,7 @@ connect_post_save::<Post, _, _>(|post, ctx| async move {
 
 ### Request-Lebenszyklus
 
-Feure einen Hook um jeden HTTP-Request: `request_started`, `request_finished`, `got_request_exception`. Füge die `RequestSignalsLayer`-Middleware zu deinem Router hinzu, verbinde dann Callbacks. Nützlich für Tracing, Audit, Request-Zeit-Metriken und Fehlerberichterstattung im Django-Stil.
+Feure einen Hook um jeden HTTP-Request: `request_started`, `request_finished`, `got_request_exception`. Füge die `RequestSignalsLayer`-Middleware zu deinem Router hinzu, verbinde dann Callbacks. Nützlich für Tracing, Audit, Request-Zeit-Metriken und Fehlerberichterstattung.
 
 ```rust
 use axum::Router;

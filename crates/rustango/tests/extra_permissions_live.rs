@@ -1,5 +1,5 @@
-//! Django parity — `Meta.permissions = [(codename, name), ...]`
-//! lets a model declare custom authorization buckets alongside the
+//! A model can declare custom authorization buckets — pairs of
+//! codename and label — alongside the
 //! auto-generated CRUD codenames. rustango spells the attribute as
 //! `#[rustango(extra_permissions = "codename:label, codename:label")]`
 //! and `auto_create_permissions_pool` seeds the

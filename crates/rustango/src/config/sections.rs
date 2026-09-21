@@ -6,92 +6,77 @@
 
 use serde::Deserialize;
 
-/// Top-level config — every section is optional and defaults to its
-/// type's `Default` impl. The loader fills sections from
-/// `config/default.toml` + `config/{env}_settings.toml` (or the
-/// legacy `{env}.toml`) + `RUSTANGO__*` env-var overrides.
+/// The whole config. Every section is optional and falls back to its
+/// `Default`. The loader fills it from `config/default.toml`, then
+/// `config/{env}_settings.toml`, then `RUSTANGO__*` env vars.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Settings {
-    /// `[database]` — connection URL, pool sizing, TLS.
+    /// `[database]`: connection URL, pool sizing, TLS.
     pub database: DatabaseSettings,
 
-    /// `[secret_key]` — base64-encoded HMAC key for session cookies.
-    /// Lives at top level (not nested under a section header) when
-    /// it's a bare string in TOML; the loader normalises both shapes.
+    /// `[secret_key]`: base64 HMAC key for session cookies. It can be
+    /// a bare top-level string or a section; the loader accepts both.
     pub secret_key: Option<String>,
 
-    /// `[admin]` — auto-admin allowlist + read-only marker.
+    /// `[admin]`: which tables the admin shows, and branding.
     pub admin: AdminSettings,
 
-    /// `[tenancy]` — apex domain, secrets resolver style.
+    /// `[tenancy]`: apex domain and secrets resolver style.
     pub tenancy: TenancySettings,
 
-    /// `[cache]` — in-memory / Redis / Postgres backend selection.
+    /// `[cache]`: which cache backend to use.
     pub cache: CacheSettings,
 
-    /// `[jobs]` — background-jobs runner config.
+    /// `[jobs]`: background job runner.
     pub jobs: JobsSettings,
 
-    /// `[mail]` — mailer config.
+    /// `[mail]`: mailer.
     pub mail: MailSettings,
 
-    /// `[server]` — HTTP listener bind address + request timeout (#87).
+    /// `[server]`: HTTP bind address and request timeout.
     pub server: ServerSettings,
 
-    /// `[auth]` — JWT TTLs, password hashing cost, account lockout
-    /// thresholds (#87).
+    /// `[auth]`: JWT lifetimes, password hashing cost, lockout.
     pub auth: AuthSettings,
 
-    /// `[brand]` — operator console + tenant admin display strings
-    /// (name, tagline, logo URL, accent color) (#87, mirrors #72).
+    /// `[brand]`: display strings for the admin and operator console.
     pub brand: BrandSettings,
 
-    /// `[security]` — security-headers preset, CSP, CORS allowed
-    /// origins (#87).
+    /// `[security]`: headers preset, CSP, allowed CORS origins.
     pub security: SecuritySettings,
 
-    /// `[routes]` — URL-prefix overrides for login / admin / audit /
-    /// static / brand / change-password / impersonation handoff (#87,
-    /// mirrors #74 + #88). Sections of `tenancy::RouteConfig` exposed
-    /// declaratively so projects don't need to call
-    /// `Cli::routes(RouteConfig::legacy())` from code.
+    /// `[routes]`: URL prefixes for login, admin, audit, static files
+    /// and the rest, so a project need not set them up in code.
     pub routes: RoutesSettings,
 
-    /// `[audit]` — retention + redaction policy (#87).
+    /// `[audit]`: retention and redaction policy.
     pub audit: AuditSettings,
 
-    /// `[logging]` — tracing-subscriber config: level filter,
-    /// pretty vs JSON output, optional rolling file sink. v0.30.11
-    /// (roadmap #8). Fields are `Option`-typed so missing keys
-    /// fall through to `logging::Setup::new()` defaults.
+    /// `[logging]`: level filter, pretty or JSON output, optional
+    /// rolling file. Unset fields keep the `logging::Setup` defaults.
     pub logging: LoggingSettings,
 
-    /// `[i18n]` — Django-shape `LANGUAGE_CODE` / `LANGUAGES` /
-    /// `LOCALE_PATHS` (#403). Bootstraps a [`crate::i18n::Translator`]
-    /// from TOML so deployments don't have to instantiate it in
-    /// code; see [`crate::i18n::Translator::from_settings`].
+    /// `[i18n]`: default language, supported languages and locale
+    /// paths. Builds a [`crate::i18n::Translator`] from TOML; see
+    /// [`crate::i18n::Translator::from_settings`].
     pub i18n: I18nSettings,
 
-    /// `[mcp]` — Model Context Protocol server knobs: mount prefix,
-    /// agent-token TTL, SSE toggle, CORS origins, rate limit, and the
-    /// `tools/list` cap. Epic #1013, Slice 6 (#1019). Inert unless the
-    /// `mcp` feature is compiled in.
+    /// `[mcp]`: Model Context Protocol server. Does nothing unless
+    /// the `mcp` feature is compiled in.
     pub mcp: McpSettings,
-    /// `[sso]` — global admin SSO (OpenID Connect / social OAuth) for a
-    /// non-tenanted app. Inert unless the `admin-sso` feature is
-    /// compiled in; multi-tenant apps configure SSO per-`Org`.
+    /// `[sso]`: admin SSO for an app with no tenants. Does nothing
+    /// unless the `admin-sso` feature is compiled in. Multi-tenant
+    /// apps set SSO per `Org` instead.
     pub sso: SsoSettings,
 }
 
 impl Settings {
-    /// List of cargo features compiled into this `rustango` build.
-    /// Useful for telemetry, version pages, and deployment audits
-    /// ("the prod binary doesn't have `oauth2` enabled — auth will
-    /// 500 on the social-login button"). Lazy-evaluated against
-    /// `#[cfg(feature = "...")]` so the list reflects what's
-    /// actually linked, not what the project's `Cargo.toml`
-    /// declares (which could differ in a multi-crate workspace).
+    /// The cargo features compiled into this build. Handy on version
+    /// pages and in deploy audits, for example to spot that a prod
+    /// binary lacks `oauth2` before the login button 500s. The list
+    /// comes from `#[cfg(feature = …)]`, so it shows what is really
+    /// linked, not what a `Cargo.toml` asks for.
     #[must_use]
     pub fn detected_features() -> Vec<&'static str> {
         let mut out: Vec<&'static str> = Vec::new();
@@ -145,11 +130,10 @@ impl Settings {
     }
 }
 
-/// `[mcp]` — Model Context Protocol server configuration (epic #1013).
-/// All fields are optional; accessors supply the framework defaults.
+/// `[mcp]`: Model Context Protocol server. Every field is optional;
+/// the accessors below supply the defaults.
 ///
-/// Example `config/default.toml` (all keys shown with their defaults; uncomment
-/// to override):
+/// Example `config/default.toml`, showing each key at its default:
 ///
 /// ```toml
 /// [mcp]
@@ -175,8 +159,8 @@ pub struct McpSettings {
     pub rate_limit_per_minute: Option<u32>,
     /// Max tools returned by `tools/list` (`None` = unlimited).
     pub max_tools_listed: Option<usize>,
-    /// Max JSON-RPC request body in bytes. Default 1 MiB — raise it when a
-    /// tool accepts inline payloads (e.g. base64 media uploads).
+    /// Largest JSON-RPC request body, in bytes. Default 1 MiB. Raise
+    /// it when a tool takes inline data, such as base64 uploads.
     pub max_body_bytes: Option<usize>,
 }
 
@@ -203,11 +187,11 @@ impl McpSettings {
     }
 }
 
-/// Global SSO (OpenID Connect / social OAuth) for the admin login on a
-/// non-tenanted app (`admin-sso` feature). Read at boot by the admin
-/// `Builder`; the verified IdP email must match an existing admin user
-/// — SSO authenticates but never auto-provisions. Multi-tenant apps
-/// configure SSO per-`Org` instead of here.
+/// SSO for the admin login on an app with no tenants (`admin-sso`
+/// feature). The admin `Builder` reads it at boot. The email the
+/// provider returns must already belong to an admin user: SSO signs
+/// people in but never creates accounts. Multi-tenant apps configure
+/// SSO per `Org` instead.
 ///
 /// ```toml
 /// [sso]
@@ -221,22 +205,22 @@ impl McpSettings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SsoSettings {
-    /// Turns on the "Sign in with <provider>" button on the admin login.
+    /// Shows the "Sign in with …" button on the admin login page.
     pub enabled: Option<bool>,
-    /// Provider key: `"google"` / `"microsoft"` / `"github"` /
-    /// `"gitlab"` / `"discord"`, or `"oidc"` for a generic OpenID
-    /// Connect provider configured via `issuer_url`.
+    /// Which provider: `"google"`, `"microsoft"`, `"github"`,
+    /// `"gitlab"`, `"discord"`, or `"oidc"` for any OpenID Connect
+    /// provider named by `issuer_url`.
     pub provider: Option<String>,
-    /// OIDC issuer base URL (used with `provider = "oidc"`).
+    /// OIDC issuer base URL, used with `provider = "oidc"`.
     pub issuer_url: Option<String>,
-    /// OAuth2 client id from the IdP.
+    /// OAuth2 client id from the provider.
     pub client_id: Option<String>,
-    /// OAuth2 client secret. Prefer the `RUSTANGO__SSO__CLIENT_SECRET`
-    /// env overlay over committing it to TOML.
+    /// OAuth2 client secret. Set it through
+    /// `RUSTANGO__SSO__CLIENT_SECRET` rather than committing it.
     pub client_secret: Option<String>,
-    /// Redirect URI registered with the IdP; must match the mounted
-    /// callback route. When unset, the admin derives it from the
-    /// request host + login prefix.
+    /// Redirect URI registered with the provider. It must match the
+    /// mounted callback route. When unset, the admin builds it from
+    /// the request host and the login prefix.
     pub redirect_uri: Option<String>,
 }
 
@@ -257,59 +241,52 @@ impl SsoSettings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct DatabaseSettings {
-    /// Connection URL. Required at runtime; loader doesn't enforce
-    /// presence so callers can ship a config that overrides this from
-    /// `RUSTANGO__DATABASE__URL` only. Supported schemes: `postgres://`,
-    /// `mysql://`, `sqlite:` — [`crate::sql::Pool::connect`] dispatches
-    /// per-backend by URL scheme.
+    /// Connection URL. Needed at runtime, but the loader does not
+    /// require it here, so a config can leave it to
+    /// `RUSTANGO__DATABASE__URL`. Schemes: `postgres://`, `mysql://`,
+    /// `sqlite:`. [`crate::sql::Pool::connect`] picks the driver from
+    /// the scheme.
     pub url: Option<String>,
-    /// Explicit backend selector — `"postgres"` / `"mysql"` / `"sqlite"`.
-    /// **Optional.** When unset, the backend is inferred from the URL
-    /// scheme at [`crate::sql::Pool::connect`] time; the inferred
-    /// value is reflected back here by
-    /// [`DatabaseSettings::resolved_backend`] so admin/templates can
-    /// branch on dialect without owning the [`crate::sql::Pool`].
+    /// Which backend this deploy expects: `"postgres"`, `"mysql"` or
+    /// `"sqlite"`. Optional. When unset,
+    /// [`DatabaseSettings::resolved_backend`] reads it from the URL
+    /// scheme, so admin and template code can branch on dialect
+    /// without holding a [`crate::sql::Pool`].
     ///
-    /// Explicit values that don't match the URL scheme are flagged by
-    /// `manage check --deploy` as a misconfiguration; they DON'T
-    /// override the URL — sqlx still binds the backend dictated by
-    /// the URL prefix. This field is a deploy-intent assertion, not
-    /// an override.
+    /// This is an assertion, not an override: sqlx still uses the
+    /// backend the URL names. `manage check --deploy` reports a value
+    /// that disagrees with the URL.
     pub backend: Option<String>,
-    /// Maximum number of pooled connections. `None` means use sqlx's
-    /// default of 10 — usually too small for a web server under load,
-    /// and far more than a SQLite file can use.
+    /// Largest number of pooled connections. `None` uses sqlx's
+    /// default of 10, which is usually too small for a web server and
+    /// far more than a SQLite file needs.
     pub pool_max_size: Option<u32>,
-    /// Minimum number of pooled connections kept warm. `None` =
-    /// driver default of 0, so the first request after a quiet period
-    /// pays the connect round-trip.
+    /// How many connections stay open when idle. `None` means 0, so
+    /// the first request after a quiet spell pays to connect.
     pub pool_min_size: Option<u32>,
-    /// Seconds a caller waits for a pooled connection before erroring —
-    /// covers both dialling a new connection and queueing for a free
-    /// one. `None` uses rustango's 5s default, deliberately tighter
-    /// than sqlx's 30s: on a request path, 30s means one unreachable
-    /// database pins a worker for half a minute per request and
-    /// saturates the server.
+    /// Seconds to wait for a connection before erroring, covering
+    /// both dialling a new one and queueing for a free one. `None`
+    /// uses rustango's 5s, tighter than sqlx's 30s on purpose: on a
+    /// request path, 30s lets one unreachable database tie up a
+    /// worker for half a minute per request.
     pub pool_acquire_timeout_secs: Option<u64>,
-    /// Seconds a connection may sit idle before it is closed. Defends
-    /// against a load balancer or `idle_in_transaction_session_timeout`
-    /// cutting it from the other end. `None` leaves sqlx's default.
+    /// Seconds a connection may sit idle before it is closed. Guards
+    /// against a load balancer or server timeout cutting it from the
+    /// other end. `None` keeps sqlx's default.
     pub pool_idle_timeout_secs: Option<u64>,
-    /// Seconds a connection may live regardless of use. The knob that
-    /// matters behind a failover or a credential rotation: without it a
-    /// pool can keep connections to a server that is no longer current,
-    /// or with credentials that have since been revoked. `None` leaves
-    /// sqlx's default.
+    /// Seconds a connection may live, used or not. This matters after
+    /// a failover or a credential rotation: without it a pool can
+    /// hold connections to the old server, or with revoked
+    /// credentials. `None` keeps sqlx's default.
     pub pool_max_lifetime_secs: Option<u64>,
 }
 
 impl DatabaseSettings {
     /// This section as pool tuning, for [`crate::sql::configure_pools`].
     ///
-    /// Lives next to the fields it reads on purpose: adding a knob to
-    /// the section and forgetting to forward it here is exactly how
-    /// `pool_max_size` came to be parsed, tested, and applied to
-    /// nothing at all (#1373).
+    /// Kept next to the fields it reads. Adding a knob above and
+    /// forgetting to forward it here is how a setting ends up parsed,
+    /// tested, and applied to nothing.
     #[must_use]
     pub fn pool_tuning(&self) -> crate::sql::PoolTuning {
         use std::time::Duration;
@@ -324,15 +301,14 @@ impl DatabaseSettings {
 }
 
 impl DatabaseSettings {
-    /// Resolve the backend kind: explicit `self.backend` wins, else
-    /// sniff the scheme from `self.url`. Returns `None` when neither
-    /// is set. Output is normalized: `"postgres"` / `"mysql"` /
-    /// `"sqlite"` (aliases like `"postgresql"`, `"mariadb"` collapse
-    /// to canonical names).
+    /// Work out the backend: `self.backend` if set, else the scheme
+    /// of `self.url`. `None` when neither is given. The result is
+    /// always `"postgres"`, `"mysql"` or `"sqlite"`; aliases such as
+    /// `"postgresql"` and `"mariadb"` collapse into those.
     ///
-    /// Use this in admin/template code that wants to branch on
-    /// dialect at config-load time — the pool isn't always reachable
-    /// from the rendering path, but Settings is.
+    /// Use it in admin or template code that must branch on dialect.
+    /// The pool is not always reachable from a render, but the
+    /// settings are.
     #[must_use]
     pub fn resolved_backend(&self) -> Option<&'static str> {
         if let Some(b) = self.backend.as_deref() {
@@ -349,245 +325,203 @@ impl DatabaseSettings {
     }
 }
 
-/// Normalize backend aliases to the canonical string. Returns the
-/// input unchanged when the alias isn't recognized — caller decides
-/// how to handle unknown backends.
+/// Map a backend alias to its canonical name.
 fn canonicalize_backend(raw: &str) -> &'static str {
     match raw.to_ascii_lowercase().as_str() {
         "postgres" | "postgresql" | "pg" => "postgres",
         "mysql" | "mariadb" => "mysql",
         "sqlite" | "sqlite3" => "sqlite",
-        _ => "postgres", // safest fallback — most existing deploys are PG
+        _ => "postgres", // safest guess: most deploys are PG
     }
 }
 
-/// Auto-admin tweaks read at boot. Mirrors the `admin::Builder`
-/// flags so `Settings`-driven projects don't need to hand-wire them.
-///
-/// v0.36 expansion (#87 admin section) — branding + URL prefix +
-/// session knobs that previously required imperative builder calls.
-/// `admin::Builder::from_settings(pool, &Settings)` walks these
-/// fields and applies each non-`None` value through the existing
-/// builder methods; imperative overrides after `from_settings`
-/// still win.
+/// Admin settings read at boot. They mirror the `admin::Builder`
+/// methods, so a config-driven project need not call them by hand.
+/// `admin::Builder::from_settings(pool, &Settings)` applies every
+/// field that is not `None`. Builder calls made after that still win.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AdminSettings {
-    /// Tables visible in the admin. Empty / missing = every
-    /// registered model.
+    /// Tables the admin shows. Empty means every registered model.
     pub allowed_tables: Vec<String>,
-    /// Tables whose mutating routes are blocked. Empty / missing =
-    /// every table is read-write.
+    /// Tables whose write routes are blocked. Empty means all tables
+    /// are read-write.
     pub read_only_tables: Vec<String>,
 
-    // ---- v0.36 — branding + chrome (#87) ----------------------
-    /// Title rendered in the sidebar + `<title>` tag. Falls through
-    /// to `Settings.brand.name` then the framework default
-    /// `"Rustango Admin"` when unset.
+    // ---- branding and chrome ---------------------------------
+    /// Title in the sidebar and the `<title>` tag. Falls back to
+    /// `Settings.brand.name`, then `"Rustango Admin"`.
     pub title: Option<String>,
-    /// Tagline rendered under the brand name in the sidebar.
-    /// Falls through to `Settings.brand.tagline`.
+    /// Tagline under the brand name. Falls back to
+    /// `Settings.brand.tagline`.
     pub subtitle: Option<String>,
-    /// Logo URL rendered next to the title. Falls through to
-    /// `Settings.brand.logo_url`, then the embedded
-    /// `/__static__/rustango.png`.
+    /// Logo URL next to the title. Falls back to
+    /// `Settings.brand.logo_url`, then the built-in asset.
     pub logo_url: Option<String>,
-    /// Hex-encoded accent color (e.g. `"#2c6fb0"`). Falls through to
+    /// Accent color in hex, such as `"#2c6fb0"`. Falls back to
     /// `Settings.brand.primary_color`. `manage check --deploy`
-    /// validates the format.
+    /// checks the format.
     pub primary_color: Option<String>,
-    /// `"auto"` (default), `"light"`, `"dark"`. Falls through to
+    /// `"auto"` (default), `"light"` or `"dark"`. Falls back to
     /// `Settings.brand.theme_mode`.
     pub theme_mode: Option<String>,
-    /// Admin URL prefix. When set, overrides `Settings.routes.admin_url`
-    /// and the framework default (`/admin` in friendly preset,
-    /// `/__admin` in legacy). Useful for projects that want
-    /// admin-section-only prefix overrides without flipping the
+    /// Admin URL prefix. Overrides `Settings.routes.admin_url` and
+    /// the default, so you can move the admin without changing the
     /// whole route preset.
     pub url_prefix: Option<String>,
 
-    // ---- v0.36 — deploy + session knobs (#87) -----------------
-    /// `true` (default in prod) = CSRF cookie is `Secure` (HTTPS
-    /// only). `false` is dev-only. `manage check --deploy` flags
-    /// `false` in prod as an error.
+    // ---- deploy and session ----------------------------------
+    /// `true` marks the CSRF cookie `Secure`, so it is sent over
+    /// HTTPS only. `false` is for dev; `manage check --deploy`
+    /// reports it as an error in prod.
     pub csrf_cookie_secure: Option<bool>,
-    /// Admin session idle timeout in minutes. `None` = framework
-    /// default (60 minutes today). 0 = no idle timeout (browser
-    /// session only).
+    /// Idle timeout for an admin session, in minutes. `None` uses
+    /// the default of 60. `0` means no idle timeout, so the session
+    /// lasts as long as the browser keeps it.
     pub session_timeout_minutes: Option<u32>,
 }
 
-/// Multi-tenancy operator-side settings. Tenant-side resolver
-/// config is per-Org row in the registry; this section is for the
-/// host-wide knobs.
+/// Host-wide tenancy settings. Per-tenant resolver config lives on
+/// the `Org` row in the registry.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TenancySettings {
-    /// Apex domain for subdomain-based tenant resolution. Mirror of
-    /// the `RUSTANGO_APEX_DOMAIN` env var; the env-var path stays as
-    /// a fallback for the `tenancy_manage` example binary.
+    /// Apex domain for subdomain-based tenant resolution. Mirrors the
+    /// `RUSTANGO_APEX_DOMAIN` env var, which still works as a
+    /// fallback.
     pub apex_domain: Option<String>,
 }
 
-/// Cache-backend selection. Slice 10.3 lights up; the section is
-/// in v0.8 so config files written today survive the v0.10 upgrade.
+/// Which cache backend to build.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CacheSettings {
-    /// `"memory"` (the default, and what an unset value means),
-    /// `"null"` / `"none"`, `"file"`, `"redis"`, `"db"` / `"database"`.
+    /// One of `"memory"` (the default), `"null"` / `"none"`,
+    /// `"file"`, `"redis"`, or `"db"` / `"database"`. Note that the
+    /// database backend is `"db"`, not `"postgres"`.
     ///
-    /// This used to read `"postgres"`, which the resolver has never
-    /// matched — it fell through to the unknown-value branch and
-    /// quietly produced an in-memory cache. The DB backend is spelled
-    /// `"db"` or `"database"`.
-    ///
-    /// `"redis"` and `"db"` cannot be built by
-    /// [`cache::from_settings`](crate::cache::from_settings), which is
-    /// sync; it panics rather than substitute a different backend
-    /// (#1400). Use `cache::from_settings_async` for `"redis"`, and
-    /// build the DB backend where the `Pool` is.
+    /// [`cache::from_settings`](crate::cache::from_settings) is sync
+    /// and cannot build `"redis"` or `"db"`; it panics rather than
+    /// swap in another backend. Use `cache::from_settings_async` for
+    /// redis, and build the DB backend where the `Pool` is.
     pub backend: Option<String>,
     /// Redis connection URL when `backend = "redis"`.
     pub redis_url: Option<String>,
-    /// Django-shape `CACHES["default"]["LOCATION"]` for the
-    /// file-system cache backend (#408). Directory the `"file"` cache
-    /// backend stores entries under, one file per key. When unset
-    /// while `backend = "file"`, the resolver falls back to
-    /// `InMemoryCache` with a tracing warning so a misconfig doesn't
-    /// block boot.
+    /// Directory the `"file"` backend stores entries in, one file per
+    /// key. If
+    /// `backend = "file"` but this is unset, the resolver warns and
+    /// uses `InMemoryCache` so boot is not blocked.
     pub file_cache_dir: Option<std::path::PathBuf>,
 }
 
-/// Background-jobs runner config. Slice 10.1 lights up.
+/// Background job runner.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct JobsSettings {
-    /// `"pg"` (default), `"redis"`, `"memory"`.
+    /// Which queue to use. Only `jobs::inmemory_from_settings` reads
+    /// this, and it builds an in-memory queue whatever the value, so
+    /// anything but `"memory"` only earns a warning. Wire another
+    /// backend yourself; see [`crate::jobs`].
     pub backend: Option<String>,
-    /// Worker concurrency — number of jobs processed in parallel.
-    /// `None` = single-threaded.
+    /// How many jobs run at once. `None` means one at a time.
     pub concurrency: Option<u32>,
 }
 
-/// Mailer config. Slice 10.2 lights up.
+/// Mailer.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MailSettings {
-    /// `"smtp"`, `"console"` (default for dev), `"memory"` (tests).
+    /// `"smtp"`, `"console"` (the dev default) or `"memory"` (tests).
     pub backend: Option<String>,
     /// SMTP host. Required when `backend = "smtp"`.
     pub smtp_host: Option<String>,
-    /// SMTP port. Defaults vary by TLS mode — 25 for `none`, 587 for
-    /// `starttls`, 465 for `implicit`. Issue #48.
+    /// SMTP port. The default follows the TLS mode: 25 for `none`,
+    /// 587 for `starttls`, 465 for `implicit`.
     pub smtp_port: Option<u16>,
-    /// SMTP AUTH username. Set alongside `smtp_password` to enable
-    /// PLAIN/LOGIN auth — both must be present, otherwise the
-    /// transport connects anonymously. Issue #48.
+    /// SMTP username. Set it with `smtp_password` to use PLAIN or
+    /// LOGIN auth. Without both, the transport connects anonymously.
     pub smtp_username: Option<String>,
-    /// SMTP AUTH password. Prefer reading from an env var rather than
-    /// committing to TOML — the config loader's env-overlay (see
-    /// [`crate::config`]) makes `RUSTANGO_MAIL__SMTP_PASSWORD` Just
-    /// Work. Issue #48.
+    /// SMTP password. Set it through an env var such as
+    /// `RUSTANGO_MAIL__SMTP_PASSWORD` rather than committing it.
     pub smtp_password: Option<String>,
-    /// TLS mode: `"none"`, `"starttls"` (default — RFC 3207 upgrade
-    /// on port 587), `"implicit"` (SMTPS — TLS from byte one on
-    /// port 465). Unknown values fall back to `"starttls"` with a
-    /// warning. Issue #48.
+    /// TLS mode: `"none"`, `"starttls"` (the default, an upgrade on
+    /// port 587) or `"implicit"` (TLS from the first byte, port 465).
+    /// An unknown value warns and uses `"starttls"`.
     pub smtp_tls: Option<String>,
-    /// Django-shape `EMAIL_TIMEOUT` — SMTP connection timeout in
-    /// seconds. `None` defers to lettre's default (no explicit
-    /// timeout). Set this on every prod deployment — a wedged
-    /// SMTP relay otherwise stalls request workers waiting on the
-    /// transport for the kernel-default TCP timeout (several
-    /// minutes).
+    /// SMTP connection timeout in seconds.
+    /// `None` leaves lettre with no timeout. Set it in production: a
+    /// stuck relay otherwise holds request workers for minutes.
     #[serde(default)]
     pub smtp_timeout_secs: Option<u64>,
-    /// Django-shape `DEFAULT_FROM_EMAIL` — the `From:` address on
-    /// regular outgoing mail (`send_pool`, `send_many_pool`).
-    /// `from_address` is the historical alias rustango shipped
-    /// first; both names read the same field — `default_from_email`
+    /// The `From:` address on normal outgoing mail.
+    /// `default_from_email` is the other name for this field and
     /// wins when both are set.
     pub from_address: Option<String>,
-    /// Django-shape `SERVER_EMAIL` — the `From:` address on
-    /// server-generated mail (`mail_admins`, `mail_managers`,
-    /// future error-mail paths). Falls back to `from_address`
-    /// when unset (Django's default behavior). Setting it
-    /// separately lets ops surface admin mail under a distinct
-    /// sender — `noreply@example.com` for users, `alerts@example.com`
-    /// for ops.
+    /// The `From:` address on mail the server generates, such as
+    /// `mail_admins`. Falls back to
+    /// `from_address`. Set it to send ops mail from its own address.
     #[serde(default)]
     pub server_email: Option<String>,
-    /// Django-shape `EMAIL_SUBJECT_PREFIX` — string prepended to
-    /// subjects sent via `mail_admins` / `mail_managers`. Django
-    /// default is `"[Django] "`; rustango omits it by default so
-    /// projects opt into branded prefixes consciously. Set to
-    /// `"[Acme] "` (note trailing space) to match Django's shape.
+    /// Text put in front of subjects sent by `mail_admins` and
+    /// `mail_managers`. Empty by
+    /// default. Use something like `"[Acme] "`, with the space.
     #[serde(default)]
     pub email_subject_prefix: Option<String>,
-    /// Django-shape `ADMINS` — list of email addresses that
-    /// `email::mail_admins(...)` sends to. Typically the project's
-    /// site operators (the "5xx pages me at 3am" cohort). Issue #416.
+    /// Addresses `email::mail_admins` writes to — usually the people
+    /// paged for a 5xx.
     #[serde(default)]
     pub admins: Vec<String>,
-    /// Django-shape `MANAGERS` — list of email addresses that
-    /// `email::mail_managers(...)` sends to. Conventionally a
-    /// broader-but-less-urgent ops list than `admins`. Issue #416.
+    /// Addresses `email::mail_managers` writes to — a wider, less
+    /// urgent list than `admins`.
     #[serde(default)]
     pub managers: Vec<String>,
-    /// Django-shape `EMAIL_FILE_PATH` — directory the `"file"` mail
-    /// backend writes outgoing `.eml` files to (instead of sending).
-    /// Set alongside `backend = "file"`; if `backend = "file"` is
-    /// requested but this is unset, the resolver falls back to
-    /// `ConsoleMailer` with a tracing warning. Issue #417.
+    /// Directory the `"file"` mail backend writes `.eml` files to
+    /// instead of sending. If
+    /// `backend = "file"` but this is unset, the resolver warns and
+    /// uses `ConsoleMailer`.
     pub file_email_dir: Option<std::path::PathBuf>,
 }
 
-/// HTTP server bind + request-timeout knobs (#87).
+/// HTTP bind address and request timeout.
 ///
-/// The framework reads `RUSTANGO_BIND` today as a fallback when
-/// `bind` is unset — set both during a migration to confirm the
-/// new path picks the same value before retiring the env var.
+/// `RUSTANGO_BIND` is still read when `bind` is unset. Set both while
+/// migrating to check the new path picks the same value.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ServerSettings {
-    /// Listener address. Default `"127.0.0.1:8080"` for dev,
-    /// `"0.0.0.0:8080"` for prod (the latter exposes the bind
-    /// publicly — make sure the deployment puts a reverse proxy
-    /// in front).
+    /// Listener address. `"127.0.0.1:8080"` in dev and
+    /// `"0.0.0.0:8080"` in prod. The prod value is reachable from
+    /// outside, so put a reverse proxy in front of it.
     pub bind: Option<String>,
-    /// Per-request handler timeout in seconds. `None` = no timeout
-    /// (axum default). Production deployments typically set this to
-    /// 30s so a wedged handler can't hold a worker hostage.
+    /// Handler timeout in seconds. `None` means no timeout. Set it
+    /// to about 30 in production so one stuck handler cannot hold a
+    /// worker.
     pub request_timeout_secs: Option<u64>,
-    /// Maximum body bytes accepted on POST/PUT/PATCH. `None` =
-    /// 2 MiB (axum default). Raise for file-upload routes.
+    /// Largest body accepted on POST, PUT and PATCH. `None` means
+    /// 2 MiB. Raise it for upload routes.
     pub max_body_bytes: Option<u64>,
 }
 
-/// Authentication knobs (#87) — JWT lifetimes, password hashing
-/// cost, account lockout policy. Each field has a sensible default
-/// matching the framework's hardcoded values, so existing
-/// deployments don't behave differently after upgrading.
+/// Authentication: JWT lifetimes, password hashing cost and account
+/// lockout. Every default matches what the framework already did, so
+/// an upgrade changes nothing on its own.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AuthSettings {
-    /// JWT-related lifetimes + behavior. Mirrors
-    /// `rustango::tenancy::auth_routes::Config` field names so a
-    /// `Settings`-driven project can hand the section straight to
-    /// `auth_routes::jwt_router(...)`.
+    /// JWT lifetimes. The field names match
+    /// `rustango::tenancy::auth_routes::Config`, so this section can
+    /// go straight to `auth_routes::jwt_router(...)`.
     pub jwt: JwtSettings,
-    /// Argon2id memory cost (KiB). Default `19456` (~19 MiB) — the
-    /// OWASP-recommended floor for password hashing as of 2024.
-    /// Lower values speed up login at the cost of brute-force
-    /// resistance. Keep ≥ 15 MiB in prod.
+    /// Argon2id memory cost in KiB. Default `19456`, about 19 MiB,
+    /// which is the OWASP floor. Less memory means faster logins and
+    /// weaker resistance to brute force. Stay at or above 15 MiB.
     pub argon2_memory_kib: Option<u32>,
-    /// Argon2id iteration count. Default `2`. OWASP recommends
-    /// `≥ 2` paired with `≥ 19456 KiB` memory.
+    /// Argon2id iteration count. Default `2`, which OWASP pairs with
+    /// 19456 KiB of memory.
     pub argon2_iterations: Option<u32>,
-    /// Argon2id parallelism (lanes). Default `1` — single-threaded
-    /// hashing is fastest on a busy server because parallel hashing
-    /// just trades one core's bandwidth for another's.
+    /// Argon2id lanes. Default `1`. On a busy server one lane is
+    /// fastest overall, since extra lanes only move work between
+    /// cores.
     pub argon2_parallelism: Option<u32>,
     /// Failed-login attempts before lockout. Default `5`.
     pub lockout_threshold: Option<u32>,
@@ -595,7 +529,7 @@ pub struct AuthSettings {
     pub lockout_duration_secs: Option<u64>,
 }
 
-/// JWT lifetime knobs (#87). Defaults match
+/// JWT lifetimes. The defaults match
 /// `rustango::tenancy::auth_routes::Config::default()`.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
@@ -610,111 +544,97 @@ pub struct JwtSettings {
     pub audience: Option<String>,
 }
 
-/// Operator console + tenant admin display strings (#87, mirrors
-/// #72). The framework today reads these via `RUSTANGO_OPERATOR_*`
-/// env vars; declaring them in TOML makes per-tier branding
-/// (different staging vs prod logo) cleaner. Per-tenant branding
-/// stays on the `Org` row.
+/// Display strings for the operator console and tenant admin. These
+/// also come from `RUSTANGO_OPERATOR_*` env vars; putting them in
+/// TOML makes per-tier branding easier, such as a different logo in
+/// staging. Per-tenant branding stays on the `Org` row.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct BrandSettings {
-    /// Display name shown on the operator console + tenant admin
-    /// chrome (e.g. `"Acme Operator"`). Default `"Rustango"`.
+    /// Name shown in the operator console and admin, such as
+    /// `"Acme Operator"`. Default `"Rustango"`.
     pub name: Option<String>,
-    /// Optional tagline rendered under the brand name.
+    /// Tagline under the brand name.
     pub tagline: Option<String>,
-    /// Logo URL (operator console). Defaults to the embedded
-    /// `/__static__/rustango.png` asset.
+    /// Logo URL for the operator console. Defaults to the built-in
+    /// asset.
     pub logo_url: Option<String>,
-    /// Hex-encoded accent color (e.g. `"#2c6fb0"`). Picked by the
-    /// theme tokens to tint primary buttons / links.
+    /// Accent color in hex, such as `"#2c6fb0"`. The theme uses it
+    /// to tint primary buttons and links.
     pub primary_color: Option<String>,
-    /// `"auto"` (default), `"light"`, `"dark"` — initial theme mode
-    /// for the operator console. Tenant admin reads this too, but
-    /// per-tenant override on `Org.theme_mode` wins.
+    /// Starting theme: `"auto"` (default), `"light"` or `"dark"`.
+    /// The tenant admin reads it too, but `Org.theme_mode` wins.
     pub theme_mode: Option<String>,
 }
 
-/// Security-headers + CSP + CORS knobs (#87). The defaults map
-/// straight to `SecurityHeadersLayer::strict()`; per-section
-/// overrides let staging/dev relax specific constraints (e.g. allow
-/// inline scripts during local development).
+/// Security headers, CSP and CORS. The defaults match
+/// `SecurityHeadersLayer::strict()`. Override single fields in dev or
+/// staging, for example to allow inline scripts locally.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SecuritySettings {
     /// `"strict"` (default), `"relaxed"`, `"dev"`, `"none"`. Picks
-    /// the [`SecurityHeadersLayer`] preset.
+    /// the [`SecurityHeadersLayer`](crate::security_headers::SecurityHeadersLayer)
+    /// preset.
     pub headers_preset: Option<String>,
-    /// Content-Security-Policy header value. `None` = no CSP set.
-    /// Use one CSP for the public app and a stricter one for the
-    /// admin if needed (per-router layer).
+    /// Content-Security-Policy header. `None` sends no CSP. You can
+    /// mount a stricter one on the admin router alone.
     pub csp: Option<String>,
-    /// HSTS `max-age` in seconds. Default `31536000` (1 year).
-    /// `0` disables HSTS — useful in dev where you might switch
-    /// between http and https.
+    /// HSTS `max-age` in seconds. Default `31536000`, one year. `0`
+    /// turns HSTS off, which helps in dev when switching between
+    /// http and https.
     pub hsts_max_age_secs: Option<u64>,
-    /// CORS allowed origins. Empty / missing = no CORS layer
-    /// added. `["*"]` is permissive (browsers don't allow it with
-    /// credentials).
+    /// Origins allowed by CORS. Empty means no CORS layer. `["*"]`
+    /// allows everything, though browsers reject it with
+    /// credentials.
     pub cors_allowed_origins: Vec<String>,
-    /// Django-parity `ALLOWED_HOSTS` — host-header allowlist enforced
-    /// by [`crate::host_validation::AllowedHostsLayer`]. Each entry
-    /// is a hostname, `.example.com` subdomain wildcard, or `*`
-    /// catch-all. Empty = layer disabled (DEBUG-style opt-out).
-    /// `manage check --deploy` flags an empty list as a warning on
-    /// the prod tier.
+    /// Allowed Host headers, enforced by
+    /// [`crate::host_validation::AllowedHostsLayer`]. An entry is a
+    /// hostname, a `.example.com` wildcard, or `*`. Empty turns the
+    /// layer off, which `manage check --deploy` warns about in prod.
     pub allowed_hosts: Vec<String>,
-    /// Django-parity `CSRF_TRUSTED_ORIGINS` — extra origins that
-    /// pass the CSRF Origin-header check in addition to same-host
-    /// requests. Each entry is scheme+host, e.g.
-    /// `"https://app.example.com"` or `"https://*.example.com"`.
-    /// Empty disables the Origin-header check (back-compat with
-    /// pre-v0.43 pure double-submit-cookie CSRF).
-    /// Wired via [`crate::forms::csrf::CsrfConfig::with_trusted_origins`].
+    /// Extra origins that pass the CSRF Origin check, on top of
+    /// same-host requests. Each
+    /// entry is scheme plus host, such as `"https://app.example.com"`
+    /// or `"https://*.example.com"`. Empty skips the Origin check.
+    /// Used by
+    /// [`crate::forms::csrf::CsrfConfig::with_trusted_origins`].
     pub csrf_trusted_origins: Vec<String>,
-    /// Django-parity `SECURE_SSL_REDIRECT` — `true` mounts the
-    /// [`crate::ssl_redirect::SslRedirectLayer`] which 301-redirects
-    /// every plain-HTTP request to HTTPS. Default `false`.
+    /// `true` mounts [`crate::ssl_redirect::SslRedirectLayer`], which
+    /// redirects plain HTTP to HTTPS. Default `false`.
     pub secure_ssl_redirect: Option<bool>,
-    /// Django-parity `SECURE_REDIRECT_EXEMPT` — URL-path prefixes
-    /// that bypass the SSL redirect even when
-    /// [`Self::secure_ssl_redirect`] is on. Useful for behind-the-LB
-    /// health checks that hit plain HTTP.
+    /// Path prefixes that skip the SSL redirect even when
+    /// [`Self::secure_ssl_redirect`] is on. Useful for health checks
+    /// that arrive over plain HTTP.
     pub secure_redirect_exempt: Vec<String>,
-    /// Django-parity `SECURE_PROXY_SSL_HEADER` — `(header_name,
-    /// expected_value)` pair the reverse proxy sets to indicate the
-    /// upstream request was HTTPS. Wired into both
-    /// [`crate::ssl_redirect::SslRedirectLayer::proxy_ssl_header`]
-    /// (avoids redirect loops behind a TLS-terminating LB) and the
-    /// real-IP / Host validation chain. Two-element vec; ignored if
-    /// not exactly length 2.
+    /// The header name and value a reverse proxy sets to say the
+    /// original request was HTTPS. It feeds
+    /// [`crate::ssl_redirect::SslRedirectLayer::proxy_ssl_header`],
+    /// so there is no redirect loop behind a TLS-terminating load
+    /// balancer, and the real-IP and Host checks. Must hold exactly
+    /// two entries; otherwise it is ignored.
     pub secure_proxy_ssl_header: Vec<String>,
-    /// Django-parity `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` —
-    /// when `true`, the framework's auth cookies (admin session, OAuth
-    /// flow, operator + tenant console) carry the `Secure` attribute so
-    /// browsers only send them over HTTPS. `None` is treated as `true`
-    /// by consumers (secure by default); set `false` in
-    /// `dev_settings.toml` for local plain-HTTP development.
-    /// `manage check --deploy` flags `false` on the prod tier.
+    /// `true` marks the framework's auth cookies `Secure`, so
+    /// browsers send them over HTTPS only. `None`
+    /// counts as `true`. Set `false` in `dev_settings.toml` for local
+    /// HTTP; `manage check --deploy` reports `false` in prod.
     pub secure_cookies: Option<bool>,
 }
 
-/// URL-prefix overrides for the framework's built-in routes (#87,
-/// mirrors `tenancy::RouteConfig` from #74). Declaring these in
-/// TOML lets ops change the admin path without touching code.
+/// URL prefixes for the framework's built-in routes, so the admin
+/// path can move without a code change.
 ///
-/// Fields default to the friendly v0.29 preset (`/login`, `/admin`,
-/// `/audit`, `/_static`, `/_brand`, `/_impersonation_handoff`).
-/// Set `legacy_preset = true` to flip to `/__login` / `/__admin` /
-/// etc. without listing every field.
+/// The defaults are `/login`, `/admin`, `/audit`, `/_static`,
+/// `/_brand` and `/_impersonation_handoff`. Set
+/// `legacy_preset = true` to switch to the `__`-prefixed names
+/// without listing each field.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct RoutesSettings {
-    /// Set `true` to apply `RouteConfig::legacy()` (the v0.28
-    /// `__`-prefixed shape) before per-field overrides. Default
-    /// `false` (friendly preset, post-#85).
+    /// `true` applies `RouteConfig::legacy()`, the `__`-prefixed
+    /// names, before the per-field overrides below. Default `false`.
     pub legacy_preset: Option<bool>,
-    /// `/login` (friendly) / `/__login` (legacy).
+    /// `/login` (default) or `/__login` (legacy).
     pub login_url: Option<String>,
     /// `/logout` / `/__logout`.
     pub logout_url: Option<String>,
@@ -728,129 +648,96 @@ pub struct RoutesSettings {
     pub brand_url: Option<String>,
     /// `/change-password` / `/__change-password`.
     pub change_password_url: Option<String>,
-    /// `/_impersonation_handoff` / `/__impersonation_handoff` (#88).
+    /// `/_impersonation_handoff` or `/__impersonation_handoff`.
     pub impersonation_handoff_url: Option<String>,
 }
 
-/// Audit-log retention + redaction policy (#87).
+/// How long audit rows are kept, and what is redacted.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AuditSettings {
-    /// Retention in days. `None` = keep forever (cron `audit-cleanup
-    /// --days <N>` is the operator-managed alternative). Production
-    /// deployments typically set 90-365 depending on compliance.
+    /// Retention in days. `None` keeps rows forever; you can still
+    /// run `audit-cleanup --days <N>` from cron. Most deployments
+    /// set 90 to 365, depending on their rules.
     pub retention_days: Option<u32>,
-    /// Extra query-param names whose values should be redacted in
-    /// access logs (in addition to the framework's built-in
-    /// `password` / `token` / `secret` / `api_key` / `access_token`
-    /// / `refresh_token` / `signature` defaults).
+    /// More query-parameter names to redact in access logs. The
+    /// built-in list already covers `password`, `token`, `secret`,
+    /// `api_key`, `access_token`, `refresh_token` and `signature`.
     pub redact_query_params: Vec<String>,
 }
 
-/// Tracing-subscriber config — level + format + optional rolling
-/// file sink (roadmap #8, v0.30.11). Drives
-/// [`crate::logging::Setup::from_settings`] which is the same
-/// builder users construct manually for ad-hoc setups; installing
-/// via Settings + [`crate::manage::Cli::with_logging`] just
-/// removes the boilerplate.
-/// # Constructing one by hand
+/// Logging: level, format and an optional rolling file. Feeds
+/// [`crate::logging::Setup::from_settings`], the same builder you
+/// would otherwise write by hand.
 ///
-/// Build the default and assign — the fields are `pub`:
+/// # Building one in code
+///
+/// Start from the default and assign; the fields are `pub`:
 ///
 /// ```ignore
 /// let mut logging = rustango::config::LoggingSettings::default();
 /// logging.level = Some("debug".into());
 /// ```
 ///
-/// **Not** `LoggingSettings { level, ..Default::default() }`. This
-/// struct is `#[non_exhaustive]`, and that attribute forbids *every*
-/// struct expression outside the defining crate — functional update
-/// syntax included. An earlier version of this doc recommended exactly
-/// that form; it fails with `error[E0639]: cannot create
-/// non-exhaustive struct using struct expression`, which is a
-/// particularly bad thing to get wrong here, because the reader is
-/// looking at it *because* their struct literal just broke.
-///
-/// This release added `color` and `access_log`, and a struct literal
-/// naming every field stopped compiling — a SemVer-major change shipped
-/// in a patch. Marking it `#[non_exhaustive]` now means that is the
-/// *last* time: a field added later cannot break a caller at all. The
-/// struct is deserialized from `[logging]` in practice, so this costs
-/// almost nobody anything.
+/// Do **not** write `LoggingSettings { level, ..Default::default() }`.
+/// The struct is `#[non_exhaustive]`, which forbids every struct
+/// expression outside this crate, including that one. It is marked
+/// that way so a new field can never break your code.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct LoggingSettings {
-    /// `RUST_LOG`-style env filter applied when the actual
-    /// `RUST_LOG` env var isn't set. Examples: `"info"`,
-    /// `"info,sqlx=warn"`, `"debug,hyper=warn,h2=warn"`. Default
-    /// (`None`) lets `logging::Setup::new()` choose `"info,sqlx=warn"`.
+    /// A `RUST_LOG`-style filter, used when the `RUST_LOG` env var
+    /// itself is unset. For example `"info"`, `"info,sqlx=warn"` or
+    /// `"debug,hyper=warn,h2=warn"`. `None` gives `"info,sqlx=warn"`.
     pub level: Option<String>,
-    /// Output format. Recognised values: `"full"` (default,
-    /// single-line), `"pretty"` (multi-line, one field per line),
-    /// `"compact"` (terser single-line), `"json"` (production / log
-    /// aggregators). Unknown values fall back to `full` with a
-    /// `tracing::warn!`.
-    ///
-    /// Before #1480 `"pretty"` and `"compact"` were both accepted and
-    /// both produced the `full` formatter — `install()` called neither
-    /// `.pretty()` nor `.compact()`, so two of the three documented
-    /// values were the same output.
+    /// Output format: `"full"` (default, one line), `"pretty"`
+    /// (several lines, one field each), `"compact"` (a shorter
+    /// single line) or `"json"` for log aggregators. An unknown
+    /// value warns and uses `full`.
     pub format: Option<String>,
-    /// Terminal colour: `"auto"` (default), `"always"`, `"never"`.
+    /// Terminal colour: `"auto"` (default), `"always"` or `"never"`.
     ///
     /// `auto` colours only when stdout is a terminal, so piping to a
-    /// file or running under CI stays plain without configuration. The
-    /// file sink and JSON output are never coloured regardless — escape
-    /// codes in a log file or a JSON string help nobody.
-    ///
-    /// Before #1480 there was no colour at all: the `ansi` feature was
-    /// not compiled in, so this setting would have had nothing to
-    /// switch.
+    /// file or running in CI stays plain with no extra config. The
+    /// file sink and JSON output are never coloured.
     pub color: Option<String>,
     /// Include thread IDs in events. Default off.
     pub with_thread_ids: Option<bool>,
-    /// Include source-file line numbers in events. Default off.
-    /// Useful in dev, noisy in prod.
+    /// Include source line numbers. Default off: handy in dev, noisy
+    /// in prod.
     pub with_line_numbers: Option<bool>,
-    /// Hide event targets (the module path) in pretty output.
-    /// Default false (targets shown).
+    /// Hide the module path on each event in pretty output. Default
+    /// `false`, so paths are shown.
     pub without_targets: Option<bool>,
-    /// When set, tee logs to a rolling file in this directory in
-    /// addition to stdout. Created on first write. Required to
-    /// activate the file sink — leave `None` to log to stdout only.
+    /// Also write logs to a rolling file in this directory. The
+    /// directory is created on first write. Leave it `None` to log
+    /// to stdout only.
     pub file_dir: Option<String>,
-    /// Filename prefix for the rolling file. Default `"app"`.
-    /// Files land at `{file_dir}/{file_prefix}.YYYY-MM-DD` (or
-    /// the equivalent for the chosen rotation).
+    /// Filename prefix for the rolling file. Default `"app"`, giving
+    /// `{file_dir}/{file_prefix}.YYYY-MM-DD` or the equivalent for
+    /// the chosen rotation.
     pub file_prefix: Option<String>,
-    /// File rotation cadence: `"daily"` (default), `"hourly"`,
-    /// `"minutely"`, `"never"`. Unknown values fall back to
-    /// `daily` with a `tracing::warn!`.
+    /// How often to rotate: `"daily"` (default), `"hourly"`,
+    /// `"minutely"` or `"never"`. An unknown value warns and uses
+    /// `daily`.
     pub file_rotation: Option<String>,
-    /// When `true` AND `file_dir` is set, drop the stdout layer so
-    /// logs land in the file ONLY. Useful for headless workers /
-    /// daemonized processes. No-op when `file_dir` is unset.
+    /// With `file_dir` set, `true` drops the stdout layer so logs go
+    /// only to the file. Good for headless workers. Does nothing
+    /// when `file_dir` is unset.
     pub file_only: Option<bool>,
-    /// One INFO line per request, plus the enclosing span that carries
-    /// `tenant` into every event a handler emits. Default `true`.
+    /// One INFO line per request, plus a span that carries `tenant`
+    /// into every event a handler emits. Default `true`.
     ///
-    /// Set `false` for a service that does its own request logging at
-    /// the edge, or one whose traffic makes per-request lines
-    /// unaffordable.
-    ///
-    /// Before #1480 this was effectively `false` for most projects and
-    /// there was no way to say so: the access log mounted only inside
-    /// the settings layers, so it depended on calling
-    /// `.with_settings_from_env()`, which no scaffolder template does.
+    /// Set `false` when something at the edge already logs requests,
+    /// or when the traffic makes per-request lines too costly.
     pub access_log: Option<bool>,
 }
 
-/// `[i18n]` — Django-shape `LANGUAGE_CODE` / `LANGUAGES` /
-/// `LOCALE_PATHS` settings (#403). Used by
-/// [`crate::i18n::Translator::from_settings`] to bootstrap a
-/// `Translator` directly from TOML so deployments don't have to
-/// hard-code locale wiring in `src/main.rs`.
+/// `[i18n]`: the default language, the supported languages and the
+/// locale paths. [`crate::i18n::Translator::from_settings`] builds
+/// a `Translator` from them, so locale wiring stays out of
+/// `src/main.rs`.
 ///
 /// Example `config/default.toml`:
 ///
@@ -862,39 +749,32 @@ pub struct LoggingSettings {
 /// fallback_chain = ["en"]
 /// ```
 ///
-/// Every field defaults to its `Default::default()` so an absent
-/// `[i18n]` section is equivalent to "no i18n configured" — the
-/// runtime `Translator::new(Locale::new("en"))` still works.
+/// An absent `[i18n]` section means no i18n is configured;
+/// `Translator::new(Locale::new("en"))` still works at runtime.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct I18nSettings {
-    /// Django `LANGUAGE_CODE` — the default locale identifier
-    /// used when no other resolver (URL prefix / cookie /
-    /// Accept-Language) picks a value. Defaults to `"en"` at
-    /// the `from_settings` call site when `None`.
+    /// The locale used when nothing else picks one: no URL prefix,
+    /// cookie or Accept-Language match. `None` means `"en"`.
     pub default_locale: Option<String>,
 
-    /// Django `LANGUAGES` — the list of active locale codes the
-    /// project knows about. `LocaleMiddleware` uses this as the
-    /// allowlist when negotiating Accept-Language. Empty list
-    /// means "every catalog discovered via `locale_paths` is
-    /// active"; an explicit list narrows the active set.
+    /// The locales the project supports.
+    /// `LocaleMiddleware` treats this as the allowlist when reading
+    /// Accept-Language. An empty list activates every catalog found
+    /// under `locale_paths`.
     pub languages: Vec<String>,
 
-    /// Django `LOCALE_PATHS` — directories scanned for
-    /// per-locale catalog files (`<dir>/<lang>.json`).
-    /// Searched in order; later paths can shadow earlier
-    /// entries for the same key. Empty list skips the
-    /// directory-loader entirely (apps that build their
-    /// `Translator` programmatically via `add_locale` don't
-    /// need this).
+    /// Directories holding catalog files at `<dir>/<lang>.json`.
+    /// They are searched in order, so a
+    /// later path can shadow an earlier one for the same key. An
+    /// empty list skips the loader, which suits apps that call
+    /// `add_locale` themselves.
     pub locale_paths: Vec<String>,
 
-    /// Optional explicit fallback chain (#425) — list of
-    /// locales tried in order when a key isn't in the requested
-    /// locale's catalog AND isn't in the base-language catalog.
-    /// Apps that need finer fallback than `default_locale` (e.g.
-    /// "fr-CA missing → fr → pt → en") set this here.
+    /// Locales to try, in order, when a key is in neither the
+    /// requested locale's catalog nor its base language. Use it when
+    /// `default_locale` alone is too blunt, such as
+    /// "fr-CA, then fr, then pt, then en".
     pub fallback_chain: Vec<String>,
 }
 
@@ -949,8 +829,8 @@ mod tests {
         assert_eq!(s.resolved_backend(), None);
     }
 
-    // v0.36 slice 7 — AdminSettings extended fields default to None
-    // so projects upgrading from v0.35 keep their existing TOML.
+    // The optional AdminSettings fields default to None, so an
+    // existing TOML file keeps working after an upgrade.
     #[test]
     fn admin_settings_extended_fields_default_to_none() {
         let s = AdminSettings::default();

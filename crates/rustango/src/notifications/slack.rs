@@ -1,4 +1,4 @@
-//! Slack webhook provider for [`super::BroadcastFn`] (Django parity #418).
+//! Slack webhook provider for [`super::BroadcastFn`].
 //!
 //! Apps wire Slack as the broadcast channel by passing the helper into
 //! [`super::NotificationContext::with_broadcast`]:

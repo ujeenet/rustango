@@ -1,4 +1,4 @@
-//! Tenancy variant of `startapp` — same Django-shape file layout as
+//! Tenancy variant of `startapp` — same file layout as
 //! `rustango::migrate::manage startapp`, with one twist: when
 //! `--with-manage-bin` is passed, the generated `src/bin/manage.rs`
 //! wires `crate::tenancy::manage::run` instead of the single-
@@ -196,7 +196,7 @@ fn write_report<W: Write>(
 
 fn usage() -> String {
     "startapp <name> [--into <dir>] [--with-manage-bin] [--with-bootstrap-migration]\n  \
-     Scaffold a Django-shape app module under <dir>/<name>/ (mod.rs +\n  \
+     Scaffold an app module under <dir>/<name>/ (mod.rs +\n  \
      models.rs + views.rs + urls.rs). Idempotent: existing files are\n  \
      left untouched. <name> must be a valid Rust identifier.\n\n  \
      --into <dir>\n  \

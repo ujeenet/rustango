@@ -56,11 +56,11 @@ pub const CSRF_COOKIE: &str = "rustango_csrf";
 const CSRF_HEADER: &str = "X-CSRF-Token";
 
 /// Form-field name the middleware looks for on
-/// `application/x-www-form-urlencoded` bodies. Matches Django's
-/// `csrfmiddlewaretoken` semantics, renamed for rustango.
+/// `application/x-www-form-urlencoded` bodies. Templates render it as
+/// a hidden input carrying the same token as the cookie.
 pub const CSRF_FORM_FIELD: &str = "_csrf";
 
-/// Create the CSRF middleware as a tower [`Layer`].
+/// Create the CSRF middleware as a [`tower::Layer`].
 ///
 /// Defaults are sensible: 32-byte tokens, Lax SameSite, HttpOnly
 /// off (the SPA must read the cookie). Override via [`CsrfConfig`]
@@ -101,10 +101,10 @@ pub struct CsrfConfig {
     /// `manage check --deploy` continues to warn when this is `false`
     /// on a prod tier.
     pub secure: bool,
-    /// Django-parity `CSRF_TRUSTED_ORIGINS` — extra origins that may
-    /// submit cross-origin POSTs without being rejected by the
-    /// Origin-header check. Each entry is a scheme+host (optionally
-    /// with port), e.g. `"https://app.example.com"` or
+    /// Extra origins that may submit cross-origin POSTs without being
+    /// rejected by the Origin-header check. Each entry is a
+    /// scheme+host (optionally with port), e.g.
+    /// `"https://app.example.com"` or
     /// `"https://*.example.com"` for a wildcard subdomain.
     ///
     /// Default `[]` (empty) — disables the Origin-header check
@@ -174,8 +174,7 @@ impl CsrfConfig {
     }
 
     /// Builder — append a trusted origin (scheme+host, optionally
-    /// `*.` wildcard subdomain). Django-parity for
-    /// `CSRF_TRUSTED_ORIGINS`.
+    /// `*.` wildcard subdomain) to [`Self::trusted_origins`].
     #[must_use]
     pub fn trust_origin(mut self, origin: impl Into<String>) -> Self {
         self.trusted_origins.push(origin.into());
@@ -342,7 +341,7 @@ fn origin_allowed(req: &Request<Body>, trusted: &[String]) -> bool {
     false
 }
 
-/// The tower [`Layer`] implementation. Wraps inner services with
+/// The [`tower::Layer`] implementation. Wraps inner services with
 /// [`CsrfService`].
 #[derive(Clone)]
 pub struct CsrfLayer {

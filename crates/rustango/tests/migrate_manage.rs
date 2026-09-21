@@ -1,6 +1,6 @@
 #![cfg(feature = "postgres")]
-//! Tests for `rustango::migrate::manage::run` — the Django-style
-//! `manage.py` analog.
+//! Tests for `rustango::migrate::manage::run` — the `manage`
+//! subcommand dispatcher.
 //!
 //! Most of `manage::run` is glue over already-tested runner functions,
 //! so these tests focus on:

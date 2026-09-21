@@ -1,4 +1,4 @@
-//! Django-parity #325 — `QuerySet::reverse()`. Flip the direction of
+//! Issue #325 — `QuerySet::reverse()`. Flip the direction of
 //! every `ORDER BY` entry pending on the queryset.
 
 #![cfg(all(feature = "sqlite", feature = "tenancy"))]

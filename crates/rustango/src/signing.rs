@@ -1,9 +1,8 @@
-//! Django-shape generic value signer.
+//! Value signer.
 //!
-//! Mirrors `django.core.signing` — produces and verifies signed
-//! string values with tamper detection. Used internally by
-//! password-reset URLs, email verification tokens, magic-link
-//! authentication, signed cookies.
+//! Signs string values and detects tampering on the way back. Used by
+//! password-reset URLs, email verification tokens, magic links and
+//! signed cookies.
 //!
 //! ```ignore
 //! use rustango::signing::{Signer, TimestampSigner};
@@ -23,18 +22,18 @@
 //! assert_eq!(val, "password-reset:42");
 //! ```
 //!
-//! ## Architecture
+//! How it works:
 //!
-//! * **HMAC primitive**: `salted_hmac(salt, value, secret)` from
-//!   [`crate::crypto`] — purpose-isolated per `salt`.
-//! * **Encoding**: tag rendered as URL-safe base64 (no padding).
-//! * **Format**: `<value><sep><tag>` for `Signer`,
-//!   `<value><sep><base62-timestamp><sep><tag>` for `TimestampSigner`.
-//! * **Constant-time comparison**: `crypto::constant_time_compare`
-//!   used to verify tags so timing leaks can't recover the secret.
+//! * Tags come from `salted_hmac(salt, value, secret)` in
+//!   [`crate::crypto`]. A different `salt` gives a different key, so
+//!   one purpose cannot forge another's tokens.
+//! * The tag is URL-safe base64, no padding.
+//! * Format is `<value><sep><tag>`, or
+//!   `<value><sep><base62 timestamp><sep><tag>` with a timestamp.
+//! * Tags are checked with `crypto::constant_time_compare`. Never
+//!   compare them with `==`: the timing difference leaks the tag.
 //!
-//! Default separator is `:` (Django shape). Configurable per-Signer
-//! for callers that need a different field separator.
+//! The separator defaults to `:` and can be changed per signer.
 
 use std::time::Duration;
 
@@ -44,25 +43,24 @@ use crate::url_codec::urlsafe_base64_encode;
 /// Errors returned by [`Signer::unsign`] / [`TimestampSigner::unsign`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SignError {
-    /// Input is missing the separator + tag — not a valid signed value.
+    /// No separator and tag, so this is not a signed value.
     #[error("signing: malformed value (missing tag separator)")]
     Malformed,
-    /// HMAC tag doesn't match — value was tampered with.
+    /// The tag does not match. The value was tampered with.
     #[error("signing: bad signature (tampered or wrong secret)")]
     BadSignature,
-    /// `TimestampSigner::unsign(value, Some(max_age))` failed because
-    /// the timestamp embedded in `value` is older than `max_age`.
+    /// The embedded timestamp is older than the `max_age` passed to
+    /// [`TimestampSigner::unsign`].
     #[error("signing: signature expired (age {age_secs} > max_age {max_age_secs})")]
     Expired { age_secs: u64, max_age_secs: u64 },
-    /// `TimestampSigner` value's timestamp segment doesn't parse as
-    /// base62 — value was tampered with or never timestamped.
+    /// The timestamp segment is not base62. The value was tampered
+    /// with, or it was never timestamped.
     #[error("signing: bad timestamp in signed value")]
     BadTimestamp,
 }
 
-/// Generic value signer — mirrors `django.core.signing.Signer`.
-/// Wraps a `secret` + `salt` (purpose tag) into a sign / unsign
-/// pair using salted HMAC-SHA256 for tamper detection.
+/// Value signer. Holds a secret and a salt, and signs or verifies
+/// with salted HMAC-SHA256.
 #[derive(Clone, Debug)]
 pub struct Signer {
     secret: Vec<u8>,
@@ -71,10 +69,12 @@ pub struct Signer {
 }
 
 impl Signer {
-    /// Construct a signer with the canonical Django defaults:
-    /// `sep = ':'`, `salt = "django.core.signing.Signer"`. Callers
-    /// who want to isolate purposes (e.g. one secret backing many
-    /// token types) should construct via [`Signer::with_salt`].
+    /// Signer with the default separator `':'` and the default salt.
+    /// If one secret backs several token types, add
+    /// [`Signer::with_salt`].
+    ///
+    /// The default salt string is fixed wire format: changing it
+    /// invalidates every signature already issued.
     #[must_use]
     pub fn new(secret: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -84,41 +84,38 @@ impl Signer {
         }
     }
 
-    /// Override the per-Signer salt — derives a purpose-specific
-    /// HMAC key so distinct callers can't forge each other's tokens
-    /// against the shared secret.
+    /// Set the salt. Each salt derives its own HMAC key, so callers
+    /// sharing one secret cannot forge each other's tokens.
     #[must_use]
     pub fn with_salt(mut self, salt: impl Into<Vec<u8>>) -> Self {
         self.salt = salt.into();
         self
     }
 
-    /// Override the separator between `<value>` and `<tag>`. Default
-    /// `:`. Use a char that can't appear inside `value` (Django shape).
+    /// Set the separator between `<value>` and `<tag>`. Defaults to
+    /// `:`. Pick a char that cannot appear inside `value`.
     #[must_use]
     pub fn with_sep(mut self, sep: char) -> Self {
         self.sep = sep;
         self
     }
 
-    /// Sign `value` — produce `"<value><sep><base64-tag>"`. The
-    /// returned string is safe to embed in URL paths / query
-    /// parameters / cookie values (base64-url-safe alphabet).
+    /// Sign `value`, returning `"<value><sep><base64 tag>"`. The tag
+    /// uses the URL-safe base64 alphabet, so the result drops into a
+    /// URL path, query parameter or cookie as-is.
     #[must_use]
     pub fn sign(&self, value: &str) -> String {
         let tag = self.compute_tag(value.as_bytes());
         format!("{}{}{}", value, self.sep, urlsafe_base64_encode(&tag))
     }
 
-    /// Verify a previously-signed value. Returns the original
-    /// `value` portion on success.
+    /// Verify a signed value and return the original `value`.
     ///
     /// # Errors
-    /// * [`SignError::Malformed`] — input missing separator + tag.
+    /// * [`SignError::Malformed`] — no separator and tag.
     /// * [`SignError::BadSignature`] — tag mismatch (tampering).
     pub fn unsign(&self, signed: &str) -> Result<String, SignError> {
-        // Split on the LAST occurrence of `sep` — value may itself
-        // contain `sep` chars (Django shape: split from the right).
+        // Split on the LAST `sep`: the value may contain `sep` too.
         let idx = signed
             .char_indices()
             .rev()
@@ -141,21 +138,21 @@ impl Signer {
     }
 }
 
-/// Timestamped signer — mirrors `django.core.signing.TimestampSigner`.
-/// Adds a base62-encoded Unix timestamp between value and tag so
-/// `unsign` can enforce a max-age (TTL) at verification time.
+/// Timestamped signer.
+/// It puts a base62 Unix timestamp between the value and the tag so
+/// `unsign` can expire old values.
 ///
-/// The shape: `<value><sep><base62 ts><sep><base64 tag>`. The tag
-/// is computed over `<value><sep><base62 ts>` so both the value
-/// AND the timestamp are tamper-protected.
+/// Shape: `<value><sep><base62 ts><sep><base64 tag>`. The tag covers
+/// `<value><sep><base62 ts>`, so the timestamp is protected too and
+/// an attacker cannot roll it back.
 #[derive(Clone, Debug)]
 pub struct TimestampSigner {
     inner: Signer,
 }
 
 impl TimestampSigner {
-    /// Construct with the canonical Django default salt
-    /// (`"django.core.signing.TimestampSigner"`).
+    /// Signer with the default timestamped salt. Like
+    /// [`Signer::new`], that salt is fixed wire format.
     #[must_use]
     pub fn new(secret: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -163,7 +160,7 @@ impl TimestampSigner {
         }
     }
 
-    /// Override the salt — same purpose-isolation as
+    /// Set the salt. Same purpose isolation as
     /// [`Signer::with_salt`].
     #[must_use]
     pub fn with_salt(mut self, salt: impl Into<Vec<u8>>) -> Self {
@@ -171,20 +168,18 @@ impl TimestampSigner {
         self
     }
 
-    /// Sign `value` at the current Unix epoch. The timestamp is
-    /// taken from `SystemTime::now()` and base62-encoded.
+    /// Sign `value` with the current time from `SystemTime::now()`.
     ///
     /// # Panics
-    /// Panics if the system clock is set before 1970-01-01 (which
-    /// would make `duration_since(UNIX_EPOCH)` fail). Production
-    /// machines never hit this; embedded targets with no RTC might.
+    /// Panics if the system clock reads before 1970-01-01. Only a
+    /// machine with no real-time clock is likely to hit this.
     #[must_use]
     pub fn sign(&self, value: &str) -> String {
         self.sign_at(value, current_unix_seconds())
     }
 
-    /// Same as [`Self::sign`] but takes an explicit `unix_seconds`
-    /// timestamp — used by tests + replay protection.
+    /// [`Self::sign`] with an explicit `unix_seconds`. Used by tests
+    /// and replay protection.
     #[must_use]
     pub fn sign_at(&self, value: &str, unix_seconds: u64) -> String {
         let ts = crate::base62::int_to_base62(unix_seconds);
@@ -198,38 +193,35 @@ impl TimestampSigner {
         )
     }
 
-    /// Verify `signed`, optionally enforcing a max age.
+    /// Verify `signed` and return the value.
     ///
-    /// * `max_age = None` — verify tag only, don't check timestamp.
-    ///   Useful when the embedded timestamp is informational only.
-    /// * `max_age = Some(duration)` — verify tag AND assert the
-    ///   timestamp embedded in `signed` is no older than `duration`
-    ///   ago. Returns [`SignError::Expired`] when the value has
-    ///   aged out.
+    /// * `max_age = Some(d)` — check the tag, then reject a value
+    ///   older than `d` with [`SignError::Expired`].
+    /// * `max_age = None` — check the tag only. The value never
+    ///   expires, so pass a duration for anything security-sensitive
+    ///   such as a reset link or a magic link.
     ///
     /// # Errors
-    /// * [`SignError::Malformed`] — input missing separator(s) / tag.
+    /// * [`SignError::Malformed`] — missing separator or tag.
     /// * [`SignError::BadSignature`] — tag mismatch (tampering).
-    /// * [`SignError::BadTimestamp`] — timestamp segment doesn't
-    ///   parse as base62.
-    /// * [`SignError::Expired`] — `max_age` set and timestamp too old.
+    /// * [`SignError::BadTimestamp`] — timestamp is not base62.
+    /// * [`SignError::Expired`] — value older than `max_age`.
     pub fn unsign(&self, signed: &str, max_age: Option<Duration>) -> Result<String, SignError> {
         self.unsign_at(signed, max_age, current_unix_seconds())
     }
 
-    /// Same as [`Self::unsign`] but takes an explicit `now_secs`
-    /// reference timestamp — used by tests + replay protection.
+    /// [`Self::unsign`] with an explicit `now_secs`. Used by tests
+    /// and replay protection.
     pub fn unsign_at(
         &self,
         signed: &str,
         max_age: Option<Duration>,
         now_secs: u64,
     ) -> Result<String, SignError> {
-        // First peel off `<tag>` from the end — the inner `Signer`
-        // takes care of that.
+        // The inner `Signer` strips and checks the trailing tag.
         let payload = self.inner.unsign(signed)?;
-        // Now `payload = "<value><sep><base62 ts>"`. Split off the
-        // timestamp on the LAST `sep`.
+        // `payload` is now "<value><sep><base62 ts>": split the
+        // timestamp off the LAST `sep`.
         let idx = payload
             .char_indices()
             .rev()
@@ -253,23 +245,16 @@ impl TimestampSigner {
     }
 }
 
-/// Django-parity
-/// [`django.core.signing.dumps(obj, key=None, salt='django.core.signing',
-/// serializer=JSONSerializer, compress=False)`](https://docs.djangoproject.com/en/6.0/topics/signing/#django.core.signing.dumps) —
-/// serialize `value` as JSON, URL-safe-base64 encode the bytes,
-/// then [TimestampSigner]-sign the result with `salt` and
-/// `secret`.
+/// Serialize `value` as JSON, encode it as URL-safe base64, then
+/// sign it with a [TimestampSigner] built from `salt` and `secret`.
 ///
-/// Output shape: `"<base64-encoded JSON>:<base62 ts>:<base64 tag>"`.
-/// Drops into URL paths / query params / cookies without further
-/// escaping. The base64 encoding step lets the payload contain
-/// arbitrary JSON (incl. the `:` separator) without breaking
-/// the signed-value parser.
+/// Output is `"<base64 JSON>:<base62 ts>:<base64 tag>"` and needs no
+/// escaping in a URL or cookie. The base64 step means the JSON can
+/// hold `:` without confusing the parser.
 ///
 /// # Errors
-/// Returns [`serde_json::Error`] on serialization failure — only
-/// fires when `value` contains a `serde::Serialize` impl that
-/// errors (e.g. NaN floats in a struct that rejects them).
+/// Returns [`serde_json::Error`] if `value` fails to serialize, for
+/// example a struct that rejects NaN floats.
 ///
 /// ```ignore
 /// use rustango::signing::{dumps, loads};
@@ -299,20 +284,17 @@ pub fn dumps<T: serde::Serialize>(
     Ok(signer.sign(&payload))
 }
 
-/// Django-parity
-/// [`django.core.signing.loads(s, key=None, salt='django.core.signing',
-/// serializer=JSONSerializer, max_age=None)`](https://docs.djangoproject.com/en/6.0/topics/signing/#django.core.signing.loads) —
-/// inverse of [`dumps`]. Verify + base64-decode + deserialize.
+/// The inverse of [`dumps`]: verify, base64-decode, deserialize.
 ///
-/// `max_age` enforces a TTL on the embedded timestamp; pass `None`
-/// to skip the freshness check (verify tag only).
+/// `max_age` expires the token. `None` skips that check, so the
+/// token lives forever. Pass a duration for reset links and other
+/// security-sensitive tokens.
 ///
 /// # Errors
-/// * [`LoadsError::Sign`] — tag mismatch / malformed / expired
-///   (forwards [`SignError`])
-/// * [`LoadsError::Decode`] — payload isn't valid URL-safe base64
-/// * [`LoadsError::Deserialize`] — JSON parsing failed
-///   (wrong shape for `T`, malformed JSON, etc.)
+/// * [`LoadsError::Sign`] — tampered, malformed or expired; the
+///   inner [`SignError`] says which.
+/// * [`LoadsError::Decode`] — payload is not URL-safe base64.
+/// * [`LoadsError::Deserialize`] — JSON did not parse as `T`.
 pub fn loads<T: serde::de::DeserializeOwned>(
     signed: &str,
     salt: &str,
@@ -328,21 +310,20 @@ pub fn loads<T: serde::de::DeserializeOwned>(
 /// Failure modes for [`loads`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LoadsError {
-    /// Signature verification failed — tampering / wrong salt /
-    /// expired. Inner [`SignError`] carries the exact cause.
+    /// Verification failed: tampering, wrong salt, or expired. The
+    /// inner [`SignError`] gives the exact cause.
     #[error("loads: {0}")]
     Sign(#[from] SignError),
-    /// Base64 decode failed — payload not URL-safe base64.
+    /// The payload is not URL-safe base64.
     #[error("loads: base64 decode failed")]
     Decode,
-    /// JSON deserialization failed — wrong shape for the target
-    /// type, malformed JSON, etc.
+    /// The JSON did not parse into the target type.
     #[error("loads: JSON deserialize failed: {0}")]
     Deserialize(String),
 }
 
-/// Current Unix epoch seconds. Panics on pre-1970 system clocks
-/// (same shape as `SystemTime::duration_since`).
+/// Current Unix epoch seconds. Panics if the clock reads before
+/// 1970.
 fn current_unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -374,7 +355,7 @@ mod tests {
     fn signer_detects_tampering() {
         let s = Signer::new(b"secret");
         let signed = s.sign("hello");
-        // Modify one byte of the value portion.
+        // Change one byte of the value.
         let tampered = signed.replacen('h', "H", 1);
         assert_eq!(s.unsign(&tampered), Err(SignError::BadSignature));
     }
@@ -399,7 +380,7 @@ mod tests {
         let a = Signer::new(b"secret-1");
         let b = Signer::new(b"secret-2");
         let signed_a = a.sign("hello");
-        // Signer B with a different secret can't unsign A's value.
+        // A different secret cannot unsign A's value.
         assert_eq!(b.unsign(&signed_a), Err(SignError::BadSignature));
     }
 
@@ -409,14 +390,13 @@ mod tests {
         let b = Signer::new(b"shared-secret").with_salt("purpose-B");
         let signed = a.sign("user=42");
         assert!(a.unsign(&signed).is_ok());
-        // B's salt is different → can't verify A's signature.
+        // B has another salt, so it cannot verify A's signature.
         assert_eq!(b.unsign(&signed), Err(SignError::BadSignature));
     }
 
     #[test]
     fn signer_value_can_contain_separator() {
-        // Value with internal `:` — we split on LAST `:`, so the value
-        // survives intact.
+        // We split on the LAST `:`, so an internal `:` survives.
         let s = Signer::new(b"secret");
         let signed = s.sign("user:42:active");
         assert_eq!(s.unsign(&signed).unwrap(), "user:42:active");
@@ -444,7 +424,7 @@ mod tests {
     fn timestamp_signer_round_trip_at_now() {
         let s = TimestampSigner::new(b"secret");
         let signed = s.sign("user=42");
-        // No max_age check — round-trips regardless of how stale.
+        // No max_age, so age does not matter.
         assert_eq!(s.unsign(&signed, None).unwrap(), "user=42");
     }
 
@@ -452,7 +432,7 @@ mod tests {
     fn timestamp_signer_within_max_age_passes() {
         let s = TimestampSigner::new(b"secret");
         let signed = s.sign_at("user=42", 1_000);
-        // Now is 30s later — well within 1h max_age.
+        // 30s later, well inside the 1h max_age.
         assert_eq!(
             s.unsign_at(&signed, Some(Duration::from_secs(3600)), 1_030)
                 .unwrap(),
@@ -464,7 +444,7 @@ mod tests {
     fn timestamp_signer_past_max_age_expired() {
         let s = TimestampSigner::new(b"secret");
         let signed = s.sign_at("user=42", 1_000);
-        // Now is 7200s later — past 3600s max_age.
+        // 7200s later, past the 3600s max_age.
         let err = s
             .unsign_at(&signed, Some(Duration::from_secs(3600)), 8_200)
             .unwrap_err();
@@ -493,21 +473,18 @@ mod tests {
 
     #[test]
     fn timestamp_signer_detects_timestamp_tampering() {
-        // Attacker can't roll back the embedded timestamp by editing
-        // the base62 segment — the tag covers the whole payload.
+        // The tag covers the whole payload, so an attacker cannot
+        // roll the timestamp back by editing the base62 segment.
         let s = TimestampSigner::new(b"secret");
         let signed = s.sign_at("user=42", 8_000);
-        // Find the timestamp segment and swap a digit.
-        // Signed = "user=42:<base62 8000>:<tag>"
-        // Tamper the last char of the base62 timestamp segment by
-        // swapping in a different valid base62 char.
+        // Signed = "user=42:<base62 8000>:<tag>". Swap the last char
+        // of the timestamp for another valid base62 char.
         let parts: Vec<&str> = signed.rsplitn(2, ':').collect();
         let head = parts[1]; // value:ts
         let tag = parts[0]; // tag
         let head_parts: Vec<&str> = head.rsplitn(2, ':').collect();
         let ts = head_parts[0];
         let value = head_parts[1];
-        // Replace last char of timestamp: e.g. '0' → '1', else 'a' → 'b'.
         let mut tampered_ts: String = ts.to_owned();
         let last = tampered_ts.pop().unwrap();
         tampered_ts.push(if last == '0' { '1' } else { '0' });
@@ -520,7 +497,7 @@ mod tests {
 
     #[test]
     fn timestamp_signer_max_age_none_skips_check() {
-        // Even a year-old token verifies when max_age = None.
+        // With max_age = None, even a year-old token verifies.
         let s = TimestampSigner::new(b"secret");
         let signed = s.sign_at("user=42", 1_000);
         let one_year_later = 1_000 + 365 * 86_400;
@@ -541,7 +518,7 @@ mod tests {
         );
     }
 
-    // -------- dumps / loads (Django parity) --------
+    // -------- dumps / loads --------
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
     struct ResetPayload {
@@ -567,7 +544,7 @@ mod tests {
             action: "x".into(),
         };
         let token = dumps(&v, "salt", b"secret").unwrap();
-        // Flip a char in the value portion (first char of the base64).
+        // Flip the first char of the base64 payload.
         let tampered = if let Some(stripped) = token.strip_prefix('e') {
             format!("X{stripped}")
         } else {
@@ -601,7 +578,7 @@ mod tests {
 
     #[test]
     fn dumps_loads_wrong_type_surfaces_as_deserialize_error() {
-        // Sign one shape, try to deserialize as another → JSON error.
+        // Sign one shape, read it back as another: JSON error.
         #[derive(serde::Serialize)]
         struct Wrong {
             user: String, // string instead of u64
@@ -620,7 +597,7 @@ mod tests {
 
     #[test]
     fn dumps_loads_works_with_simple_types() {
-        // Plain integer, string, list — all JSON-serializable.
+        // Plain integer, string and list all serialize as JSON.
         let token = dumps(&42u64, "salt", b"secret").unwrap();
         let got: u64 = loads(&token, "salt", b"secret", None).unwrap();
         assert_eq!(got, 42);

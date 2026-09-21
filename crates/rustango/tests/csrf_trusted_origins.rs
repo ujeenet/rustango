@@ -1,4 +1,4 @@
-//! Django parity — `CSRF_TRUSTED_ORIGINS` setting. Adds Origin-header
+//! The `CSRF_TRUSTED_ORIGINS` setting. Adds Origin-header
 //! defense-in-depth to the CSRF middleware on top of the existing
 //! double-submit-cookie token check.
 //!

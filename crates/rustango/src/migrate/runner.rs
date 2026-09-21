@@ -8,8 +8,8 @@
 //! * [`migrate`] applies pending migration files from a directory,
 //!   using the `__rustango_migrations__` ledger table to skip files
 //!   that have already been applied. Each file runs in its own
-//!   transaction by default (Django-style — partial progress across
-//!   files is recoverable).
+//!   transaction by default, so partial progress across files is
+//!   recoverable.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -253,7 +253,7 @@ pub fn registered_models() -> Vec<&'static ModelSchema> {
 
 /// The subset of [`registered_models`] the inventory-walk bootstrap
 /// (`apply_all*` / `drop_all*`) should touch: framework-managed tables
-/// only. Django `Meta.managed = False` (#321) means the framework
+/// only. A model marked `managed = false` means the framework
 /// neither creates nor drops the table — the snapshot / migration path
 /// already filters these (see `snapshot.rs`), and the bootstrap walk
 /// must match. Otherwise a `managed = false` model (e.g.
@@ -367,7 +367,7 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
             crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
         }
     }
-    // Django Meta.db_table_comment — same shape as column-level:
+    // `db_table_comment` — same shape as column-level:
     // PG emits a post-hoc `COMMENT ON TABLE`, MySQL inlined it in
     // CREATE TABLE, SQLite emits nothing.
     for model in &models {
@@ -721,7 +721,7 @@ async fn migrate_dry_run_with_ledger(
     Ok(out)
 }
 
-/// Django-shape `sqlmigrate <name>` — Compute the SQL the named
+/// `sqlmigrate <name>` — compute the SQL the named
 /// migration would emit when applied, without touching the database.
 /// Pure file I/O + render — no ledger read required.
 ///
@@ -1708,7 +1708,7 @@ enum ReconcileAction {
 ///   history it must not re-run:
 ///   - every replaced migration present in the ledger → [`Fake`] (same-ledger)
 ///   - none present, but all the tables it creates already exist → [`Fake`]
-///     (cross-ledger, Django's `--fake-initial`)
+///     (cross-ledger, the guarded fake-initial reconcile)
 ///   - a *partial* match either way → **error**, because the database is in
 ///     a state no automatic choice can safely resolve
 ///   - otherwise (fresh database) → [`Run`]
@@ -1864,8 +1864,8 @@ pub(crate) fn without_tables(mig: &Migration, existing: &[String]) -> Migration 
 /// Beyond the obvious "not in the ledger" filter, this drops anything that an
 /// **applied squash** declares it `replaces`. Once a squash is recorded, its
 /// predecessors' ledger rows are tombstoned, but their *files* usually remain
-/// on disk for a release or two (Django keeps them so older deployments can
-/// still migrate forward). Without this filter those files would look pending
+/// on disk for a release or two, so older deployments can still migrate
+/// forward. Without this filter those files would look pending
 /// on the very next run and try to recreate tables that already exist.
 fn pending_migrations(all: Vec<Migration>, applied: &HashSet<String>) -> Vec<Migration> {
     let superseded: HashSet<&str> = all
@@ -2199,9 +2199,8 @@ async fn apply_atomic_pool(
             // have to manually un-do the partially-applied DDL OR fix
             // the migration to be re-runnable from where it failed.
             //
-            // This is a MySQL engine limitation, not a rustango bug,
-            // and matches Django's `migrate` behavior against MySQL
-            // (Django docs note the same caveat). Tracked in #559.
+            // This is a MySQL engine limitation, not a rustango bug:
+            // MySQL does not roll back DDL. Tracked in #559.
             // The runner emits a `tracing::warn!` so operators see
             // the caveat in logs when they invoke `atomic: true` on
             // MySQL.

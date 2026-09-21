@@ -1,4 +1,4 @@
-//! Tri-dialect emission tests for Django-shape GROUP BY auto-inference
+//! Tri-dialect emission tests for GROUP BY auto-inference
 //! (issue #75). The inference rule:
 //!   * `.values(cols).annotate(agg)` → `GROUP BY cols` (Shape 2)
 //!   * `.annotate(agg)` alone        → `GROUP BY` every scalar column (Shape 3)

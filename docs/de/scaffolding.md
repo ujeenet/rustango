@@ -1,6 +1,6 @@
 # Scaffolding
 
-**Rustango** hat zwei Ebenen der Codegenerierung, beide nach den Generatoren modelliert, die du von Django und Laravel kennst — sodass du selten Boilerplate von Hand verdrahtest:
+**Rustango** hat zwei Ebenen der Codegenerierung — sodass du selten Boilerplate von Hand verdrahtest:
 
 1. **Der Projektgenerator** — `cargo rustango new` erstellt ein komplett neues Projekt aus einer Vorlage.
 2. **Projektinterne Generatoren** — `manage startapp` und die `manage make:*`-Familie fügen Apps, Views, Serializer, Jobs und mehr in einem bestehenden Projekt hinzu.
@@ -26,7 +26,7 @@
 cargo install cargo-rustango
 ```
 
-Das legt ein `cargo-rustango`-Binary in deinem `PATH` ab; Cargo stellt es dann als `cargo rustango` bereit (auf dieselbe Weise, wie `django-admin` oder der `laravel`-Installer dir einen globalen Befehl geben).
+Das legt ein `cargo-rustango`-Binary in deinem `PATH` ab; Cargo stellt es dann als `cargo rustango` bereit — ein globaler Befehl, der überall verfügbar ist, auch außerhalb eines Projekts.
 
 ### Die Version des Generators ist die, die dein Projekt bekommt
 
@@ -206,7 +206,7 @@ Wie sich die Vorlagen innerhalb von `main.rs` / `urls.rs` unterscheiden:
 
 - **api** — kein Admin; `urls::api()` aggregiert schlicht deine eigenen Routen.
 - **fullstack** — dieselbe `urls.rs`, plus das einkompilierte Admin-Feature. Der Admin wird **nicht** für dich verdrahtet: Nichts Generiertes würde ihn aufrufen, also gibt der Generator keinen `admin_router` aus. Füge selbst einen hinzu und hänge ihn ein — [Erste Schritte, Schritt 11](getting-started.md#schritt-11-den-auto-admin-einschalten) erklärt es Schritt für Schritt. Nimm `rustango::sql::Pool` entgegen, damit der Helfer keinen Treiber benennt.
-- **tenant** — `main.rs` ergänzt `.tenancy()`, bedient die Operator-Konsole auf der Apex-Domain und jeden Tenant unter seiner eigenen Subdomain. Die eigenen Tabellen des Frameworks werden beim ersten `cargo run -- migrate` aus den kompilierten Modellen (Django-Stil) in einen **`system/migrations/`**-Ordner generiert — kein handgeliefertes Bootstrap-JSON, sodass das allererste migrate ohne zusätzliche Einrichtung funktioniert.
+- **tenant** — `main.rs` ergänzt `.tenancy()`, bedient die Operator-Konsole auf der Apex-Domain und jeden Tenant unter seiner eigenen Subdomain. Die eigenen Tabellen des Frameworks werden beim ersten `cargo run -- migrate` aus den kompilierten Modellen in einen **`system/migrations/`**-Ordner generiert — kein handgeliefertes Bootstrap-JSON, sodass das allererste migrate ohne zusätzliche Einrichtung funktioniert.
 
 ### Geschichtete Konfiguration
 
@@ -227,7 +227,7 @@ cargo run -- --help         # see every manage verb
 
 ## Ein Feature-Modul hinzufügen: `manage startapp`
 
-Das ist Djangos `startapp` — scaffolde ein in sich geschlossenes Modul aus zusammengehörigen Modellen, Views und Routen:
+Scaffolde ein in sich geschlossenes Modul aus zusammengehörigen Modellen, Views und Routen:
 
 ```sh
 cargo run -- startapp blog
@@ -246,16 +246,16 @@ Optionen:
 
 Innerhalb eines Projekts scaffolden die `make:*`-Verben jeweils eine Datei. Die vollständige Referenz pro Flag findest du in der [manage-CLI-Referenz](manage.md); die gängigen Formen sind:
 
-| Befehl | Generiert | Vergleichbar mit |
-|---|---|---|
-| `make:viewset <Name> [--model <M>]` | Ein DRF-artiges CRUD-ViewSet | DRF `ViewSet` |
-| `make:serializer <Name> [--model <M>]` | Ein Serializer zum Formen von Request/Response | DRF-Serializer |
-| `make:api_routes <app>` | Ein API-Routen-Aggregator für eine App | — |
-| `make:form <Name>` | Ein HTML-Formular mit Validierung | Django `Form` |
-| `make:job <Name>` | Ein Handler für einen Hintergrund-Job | Laravel-/Celery-Job |
-| `make:notification <Name>` | Eine Mehrkanal-Benachrichtigung | Laravel-Notification |
-| `make:middleware <Name>` | Ein Middleware-Gerüst | Django-/Laravel-Middleware |
-| `make:test <Name>` | Ein Testmodul mit dem In-process-Testclient | — |
+| Befehl | Generiert |
+|---|---|
+| `make:viewset <Name> [--model <M>]` | Ein CRUD-ViewSet |
+| `make:serializer <Name> [--model <M>]` | Ein Serializer zum Formen von Request/Response |
+| `make:api_routes <app>` | Ein API-Routen-Aggregator für eine App |
+| `make:form <Name>` | Ein HTML-Formular mit Validierung |
+| `make:job <Name>` | Ein Handler für einen Hintergrund-Job |
+| `make:notification <Name>` | Eine Mehrkanal-Benachrichtigung |
+| `make:middleware <Name>` | Ein Middleware-Gerüst |
+| `make:test <Name>` | Ein Testmodul mit dem In-process-Testclient |
 
 ```sh
 cargo run -- make:viewset PostViewSet --model Post

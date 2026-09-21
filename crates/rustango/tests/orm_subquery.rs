@@ -1,24 +1,24 @@
-//! Django 6.0 ORM parity — execution-based verification.
-//! Scenario group B: correlated subqueries — `Exists` / `OuterRef` /
-//! `Subquery` / `IN (SELECT …)` and Django's exclude-on-multi-valued-
-//! relation semantics.
+//! ORM correlated subqueries — execution-based verification.
+//! Scenario group B: `Exists` / `OuterRef` / `Subquery` /
+//! `IN (SELECT …)` and exclude-over-a-multi-valued-relation
+//! semantics.
 //!
-//! Django scenarios covered (docs.djangoproject.com/en/6.0):
-//! - `filter(Exists(Book.objects.filter(author=OuterRef("pk"))))`
-//! - the relation-spanning exclude trap: `exclude(books__published=False)`
-//!   means "authors with NO unpublished book" (NOT EXISTS), not
-//!   "authors having some book that isn't unpublished"
-//! - `filter(author__in=Subquery(...))` → `where_in_subquery`
-//! - count comparator over a relation (`annotate(Count) + filter` /
-//!   Eloquent `has('books', '>=', 2)`)
-//! - `annotate(books_count=Count("books"))` eager count column
-//! - scalar `Subquery()` embedded in a WHERE comparison
-//! - scalar `Subquery()` projected as an annotation column
-//!   (`annotate(newest=Subquery(...))`) via `annotate_subquery` /
-//!   `scalar_subquery` (#1036)
+//! Scenarios covered:
+//! - `where_exists` over a correlated child queryset
+//! - the relation-spanning exclude trap: "exclude books that are
+//!   unpublished" means "authors with NO unpublished book"
+//!   (NOT EXISTS), not "authors having some book that isn't
+//!   unpublished"
+//! - `author IN (SELECT …)` → `where_in_subquery`
+//! - count comparator over a relation (annotate a count, then filter
+//!   on it)
+//! - eager relation-count column
+//! - scalar subquery embedded in a WHERE comparison
+//! - scalar subquery projected as an annotation column, via
+//!   `annotate_subquery` / `scalar_subquery` (#1036)
 //! - `OuterRef` outside a subquery is a programming error (pinned)
 //!
-//! AUDIT NOTES (compile-time API absences, no runtime pin possible):
+//! NOTES (compile-time API absences, no runtime pin possible):
 //! - Composite `(a, b) IN (SELECT …)` tuple-membership has no API;
 //!   the workaround is a correlated `EXISTS` with a multi-predicate
 //!   WHERE (exactly what `where_has_filter` emits — see
@@ -82,9 +82,8 @@ mod scenarios {
         rows.into_iter().map(|a| a.name).collect()
     }
 
-    /// Django: `Author.objects.filter(Exists(Book.objects.filter(
-    /// author=OuterRef("pk"))))` — hand-built correlated EXISTS via
-    /// `outer_ref` + `where_exists`.
+    /// "Authors who have at least one book" — hand-built correlated
+    /// EXISTS via `outer_ref` + `where_exists`.
     pub async fn check_exists_with_outer_ref(pool: &Pool) {
         let inner = Book::objects()
             .where_raw(WhereExpr::ExprCompare {
@@ -105,7 +104,7 @@ mod scenarios {
 
     /// Same scenario through the typed-column form
     /// (`Book::author_id.eq_expr(outer_ref("id"))`) and negated via
-    /// `where_not_exists` — Django `~Exists(...)`.
+    /// `where_not_exists`.
     pub async fn check_not_exists_typed_outer_ref(pool: &Pool) {
         use rustango::core::Column as _;
         let inner = Book::objects()
@@ -120,16 +119,15 @@ mod scenarios {
         assert_eq!(names(rows), vec!["Cara"]);
     }
 
-    /// The Django relation-spanning exclude trap. With Ada holding
+    /// The relation-spanning exclude trap. With Ada holding
     /// BOTH a published and an unpublished book:
-    /// - `filter(books__published=False)` keeps authors with at least
-    ///   one unpublished book → Ada, Dan (rustango:
-    ///   `where_has_filter`).
-    /// - `exclude(books__published=False)` keeps authors with NO
-    ///   unpublished book at all → Bob, Cara — *including* bookless
-    ///   Cara (rustango: `where_doesnt_have_filter` emits the same
-    ///   NOT EXISTS Django lowers to). String-keyed `exclude()` itself
-    ///   is missing despite the audit claim — issue #1030.
+    /// - "has an unpublished book" keeps authors with at least
+    ///   one unpublished book → Ada, Dan (`where_has_filter`).
+    /// - the *exclusion* keeps authors with NO unpublished book at
+    ///   all → Bob, Cara — *including* bookless Cara
+    ///   (`where_doesnt_have_filter`, which emits NOT EXISTS rather
+    ///   than a negated join predicate). String-keyed `exclude()` over
+    ///   a relation is still missing — issue #1030.
     pub async fn check_exclude_relation_spanning_semantics(pool: &Pool) {
         let unpublished = || {
             Book::objects()
@@ -158,8 +156,7 @@ mod scenarios {
         );
     }
 
-    /// Django: `Book.objects.filter(author__in=Author.objects.filter(
-    /// active=True).values("id"))` → `IN (SELECT id FROM …)`.
+    /// "Books whose author is active" → `IN (SELECT id FROM …)`.
     pub async fn check_in_subquery(pool: &Pool) {
         let active_ids = Author::objects()
             .filter("active", true)
@@ -186,8 +183,7 @@ mod scenarios {
         assert_eq!(rows.len(), 1, "only Bob's book");
     }
 
-    /// Django: `annotate(n=Count("books")).filter(n__gte=2)` /
-    /// Eloquent `has('books', '>=', 2)` — correlated COUNT comparator.
+    /// "Authors with two or more books" — correlated COUNT comparator.
     pub async fn check_where_has_count(pool: &Pool) {
         let rows: Vec<Author> = Author::objects()
             .where_has_count("books", Op::Gte, 2)
@@ -198,7 +194,7 @@ mod scenarios {
         assert_eq!(names(rows), vec!["Ada", "Dan"]);
     }
 
-    /// Django: `annotate(books_count=Count("books"))` — projected
+    /// `annotate_count("books")` — projected
     /// eager count. rustango lowers to a correlated scalar subquery
     /// (never a JOIN), so it can't double-count.
     pub async fn check_annotate_count(pool: &Pool) {
@@ -219,8 +215,7 @@ mod scenarios {
         assert_eq!(counts, vec![2, 1, 0, 3], "Ada, Bob, Cara, Dan");
     }
 
-    /// Django: `filter(author=Subquery(Author.objects.order_by(
-    /// "-id").values("id")[:1]))` — scalar subquery embedded in a
+    /// "Books by the newest author" — scalar subquery embedded in a
     /// WHERE comparison. Newest author by id is Dan (id 4).
     pub async fn check_scalar_subquery_in_where(pool: &Pool) {
         let newest_author = Author::objects()
@@ -241,9 +236,7 @@ mod scenarios {
         assert_eq!(rows.len(), 3, "Dan's 3 books");
     }
 
-    /// Django: `Author.objects.annotate(newest=Subquery(
-    /// Book.objects.filter(author=OuterRef("pk")).order_by("-id")
-    /// .values("title")[:1]))` — a correlated scalar subquery projected
+    /// A correlated scalar subquery projected
     /// as a column (#1036). Each author's newest book title; bookless
     /// Cara projects NULL. Lowers through `RelatedAggregate` — same
     /// per-row scalar path as `annotate_count`, no JOIN, no writer
@@ -286,7 +279,7 @@ mod scenarios {
 
     /// `OuterRef` outside any subquery wrapper is a programming error
     /// — pinned: the writer rejects it with a clear error instead of
-    /// emitting broken SQL (Django raises ValueError at evaluation).
+    /// emitting broken SQL.
     pub async fn check_outer_ref_outside_subquery_errors(pool: &Pool) {
         let err = Author::objects()
             .where_raw(WhereExpr::ExprCompare {
@@ -358,7 +351,7 @@ mod pg_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("DATABASE_URL not set — skipping the PG arm of this django6 test");
+                    eprintln!("DATABASE_URL not set — skipping the PG arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;
@@ -480,7 +473,7 @@ mod mysql_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("MYSQL_TEST_URL unset — skipping MySQL django6 test");
+                    eprintln!("MYSQL_TEST_URL unset — skipping the MySQL arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;

@@ -1,4 +1,4 @@
-//! Django-parity #353 — `admin.search_help_text` renders a caption
+//! Issue #353 — `admin.search_help_text` renders a caption
 //! beside the list view's search box. Empty string suppresses it.
 
 #![cfg(all(feature = "sqlite", feature = "admin", feature = "tenancy"))]

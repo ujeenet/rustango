@@ -93,7 +93,7 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {
 
 /// The pool this request's credential must be checked against — the
 /// tenant resolved from **this request's** host, never one captured
-/// when the router was built (GHSA-c4gg-mvfq-h268).
+/// when the router was built.
 ///
 /// Erased over the backend because the two context types are generic
 /// and this middleware is not; whichever the app mounted answers.
@@ -209,7 +209,7 @@ async fn auth_middleware(
         .unwrap_or_else(|_| axum::http::Request::new(()));
     let (dummy_parts, _) = dummy.into_parts();
 
-    // The tenant for THIS request, not for the router (#GHSA-c4gg).
+    // The tenant for THIS request, not for the router.
     let pool = match tenant_pool(&dummy_parts, req.extensions()).await {
         Ok(p) => p,
         Err(resp) => return resp,
@@ -261,7 +261,7 @@ async fn perm_middleware(
     let Some(user) = user else {
         return (StatusCode::UNAUTHORIZED, "authentication required").into_response();
     };
-    // Same tenant as the credential was checked against (#GHSA-c4gg) —
+    // Same tenant as the credential was checked against —
     // a permission read against the wrong database is how tenant A's
     // admin became tenant B's admin.
     let (parts, body) = req.into_parts();
@@ -304,8 +304,8 @@ async fn perm_middleware(
 /// ```
 ///
 /// The pool now comes from the tenant resolved for each request. A
-/// caller-supplied one authenticated every host against one database
-/// (GHSA-c4gg-mvfq-h268), so no variant accepts one.
+/// caller-supplied one authenticated every host against one database,
+/// so no variant accepts one.
 ///
 /// The tenancy layer must be mounted outside these — without a
 /// `TenantContext` in extensions they fail closed with a 500 rather

@@ -1,32 +1,22 @@
-//! Live-input helpers for the `manage` CLI.
+//! Prompts for the `manage` CLI.
 //!
-//! Every prompt returns `Ok(None)` when stdin is **not** a TTY —
-//! programmatic callers (the multitenant_demo bootstrap, tests,
-//! scripts piping into the CLI) keep the existing
-//! `Validation("--password required")` error path. Interactive
-//! shells fall through to `Some(value)` after asking the user.
-//!
-//! Why this shape: the existing `manage::run` API takes
-//! `args: impl IntoIterator<Item = String>` and returns a result —
-//! tests + the demo lean on that contract. Adding a `Prompter` trait
-//! parameter would ripple through every callsite. Wrapping live
-//! input in TTY-gated helpers preserves the API and makes the
-//! interactive UX opt-in via "did stdin come from a terminal?".
+//! Every prompt returns `Ok(None)` when stdin is not a terminal, so
+//! scripts and tests still get the usual "argument required" error
+//! instead of blocking. In a real shell the prompt runs and returns
+//! `Some(value)`. This keeps the `manage::run` signature unchanged
+//! and makes the interactive path opt in by itself.
 
 use std::io::{self, BufRead, IsTerminal as _, Write as _};
 
-/// One line of input, however the caller obtains it.
+/// One line of input, from wherever the caller reads it.
 ///
-/// The wizard and the menu prompt between verb calls, and the verbs
-/// prompt for themselves through [`ask`]. Holding a `StdinLock` across
-/// that boundary deadlocks: the outer loop owns the lock and the reader's
-/// buffer while the verb tries to read the same stream underneath it
-/// (#1360). So the outer loops take a `LineSource` instead, and the
-/// stdin implementation locks per read — leaving the stream free between
-/// prompts for whatever they call.
+/// The wizard and the menu prompt between commands, and a command
+/// may prompt again through [`ask`]. Holding a `StdinLock` across
+/// that boundary deadlocks, so the loops take a `LineSource` and
+/// the stdin version locks for one read at a time.
 ///
-/// A `BufRead` is still a `LineSource`, which is what lets tests drive
-/// both loops with a `Cursor` and no terminal at all.
+/// Any `BufRead` is a `LineSource`, so tests can drive the loops
+/// from a `Cursor` with no terminal.
 pub trait LineSource {
     /// Read one line, including its newline. `Ok(0)` means EOF.
     ///
@@ -41,10 +31,8 @@ impl<R: BufRead> LineSource for R {
     }
 }
 
-/// Reads stdin by locking it for that read only.
-///
-/// The lock is released before the caller does anything else, so a verb
-/// invoked between two prompts can take it itself.
+/// Reads stdin, locking it for one read only. The lock is free
+/// again before the caller does anything else.
 pub struct SharedStdin;
 
 impl LineSource for SharedStdin {
@@ -53,16 +41,15 @@ impl LineSource for SharedStdin {
     }
 }
 
-/// Read a non-empty trimmed line from stdin. Returns `Ok(None)` if
-/// stdin isn't a TTY, the user typed nothing, or EOF was hit. The
-/// caller decides whether `None` is fatal or merely "no answer".
+/// Read one trimmed, non-empty line from stdin. `Ok(None)` means
+/// stdin is not a terminal, the user typed nothing, or we hit EOF;
+/// the caller decides if that is an error.
 ///
-/// Output is written to **stderr** so prompts don't interleave with
-/// machine-readable stdout (e.g. when the operator pipes manage
-/// output into another tool).
+/// The prompt goes to stderr, so it does not mix into stdout when
+/// someone pipes the output elsewhere.
 ///
 /// # Errors
-/// Returns [`io::Error`] for terminal write/read failures.
+/// [`io::Error`] if the terminal read or write fails.
 pub fn ask(prompt: &str) -> io::Result<Option<String>> {
     if !io::stdin().is_terminal() {
         return Ok(None);
@@ -74,7 +61,7 @@ pub fn ask(prompt: &str) -> io::Result<Option<String>> {
     let mut buf = String::new();
     let n = io::stdin().read_line(&mut buf)?;
     if n == 0 {
-        // EOF — Ctrl+D before any input.
+        // Ctrl+D before any input.
         return Ok(None);
     }
     let trimmed = buf.trim().to_owned();
@@ -85,15 +72,14 @@ pub fn ask(prompt: &str) -> io::Result<Option<String>> {
     }
 }
 
-/// Like [`ask`] but reads a password without echoing to the
-/// terminal. Uses `rpassword` which calls `tcsetattr` on Unix and
-/// the equivalent on Windows.
+/// Like [`ask`], but the typed characters are not shown on screen.
+/// `rpassword` turns echo off for the read.
 ///
-/// Returns `Ok(None)` for non-TTY stdin OR empty input — same shape
-/// as [`ask`] so callers can use one match arm.
+/// `Ok(None)` for a non-terminal stdin or empty input, the same as
+/// [`ask`].
 ///
 /// # Errors
-/// Returns [`io::Error`] for terminal-mode toggle or read failures.
+/// [`io::Error`] if switching terminal mode or reading fails.
 pub fn ask_password(prompt: &str) -> io::Result<Option<String>> {
     if !io::stdin().is_terminal() {
         return Ok(None);

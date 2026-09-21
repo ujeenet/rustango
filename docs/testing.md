@@ -5,8 +5,8 @@ booting a server or touching the network. **Rustango**'s `TestClient` runs your
 router **in-process**: you call `client.get("/path")`, it routes the request
 through the real stack (extractors, middleware, handlers) and hands back the
 response to assert on. Add transaction-rollback isolation for database tests and
-a set of response assertions, and you have Django's test client + `TestCase`, in
-Rust.
+a set of response assertions, and a whole request flow is testable without a
+socket.
 
 [![Testing in Rustango: TestClient wraps your Router and sends in-process requests through the real handler stack; the TestResponse exposes status, text, and JSON to assert on — no socket, no server](img/testing.png)](img/testing.png)
 
@@ -214,7 +214,7 @@ louder and more honest signal than a skip.
 ## Response assertion helpers
 
 For raw `axum::Response` values (e.g. from `tower::oneshot`), `test_assertions`
-reads like Django's `assertContains` / `assertRedirects`:
+gives ready-made checks for status, redirects and cookies:
 
 ```rust
 use rustango::test_assertions::{assert_status_2xx, assert_redirects, assert_cookie_set};

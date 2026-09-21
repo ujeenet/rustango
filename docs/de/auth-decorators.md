@@ -1,7 +1,7 @@
 # Zugriffs-Dekoratoren
 
 Sobald ein Benutzer authentifiziert ist, sichern Sie Routen ab. **Rustango**
-liefert Djangos `@login_required`-Familie als komponierbare axum-**Layer**:
+liefert dafür eine Familie komponierbarer axum-**Layer**:
 hängen Sie einen an einen Router, und anonyme Anfragen werden abgewiesen — per
 302 auf Ihre Anmeldeseite umgeleitet (Browser-Ablauf) oder mit 401/403
 beantwortet (API-Ablauf) —, bevor sie je den Handler erreichen.

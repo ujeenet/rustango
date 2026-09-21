@@ -6,8 +6,8 @@ tierce. Le faire en ligne fait attendre l'utilisateur et couple la réponse à u
 appel externe instable. Une **tâche d'arrière-plan** déplace ce travail sur une
 file : le handler retourne immédiatement, et un pool de workers exécute la tâche
 quelques instants plus tard, avec des **nouvelles tentatives automatiques** et
-un chemin **dead-letter** pour les échecs. C'est Django-Q / Celery / les queues
-de Laravel, en Rust.
+un chemin **dead-letter** pour les échecs — une file de tâches, entièrement
+en Rust.
 
 [![Background jobs in Rustango: a handler dispatches a Job onto a queue, worker tasks run it, retryable failures back off and retry, fatal ones go to a dead-letter handler](../img/jobs.png)](../img/jobs.png)
 

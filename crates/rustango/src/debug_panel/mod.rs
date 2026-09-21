@@ -1,8 +1,7 @@
 //! Debug profiling panel — `/__debug__/` for development.
 //!
-//! Inspired by Django Debug Toolbar / Laravel Telescope. Captures
-//! per-request telemetry (SQL queries + durations, cache hits, signals,
-//! response time) and serves a UI to inspect them.
+//! Captures per-request telemetry (SQL queries + durations, cache
+//! hits, signals, response time) and serves a UI to inspect them.
 //!
 //! ## Quick start
 //!

@@ -1,75 +1,54 @@
-//! Per-tenant fan-out for background sweeps (#1226).
+//! Per-tenant fan-out for background sweeps.
 //!
-//! Every "run this from the [`scheduler`](crate::scheduler)" helper the
-//! framework ships — [`crate::media::MediaManager::purge_orphans`],
-//! [`crate::audit::cleanup_older_than_pool`],
-//! [`crate::prunable::prune_all`] — takes **one pool**. In a
-//! single-tenant app that is the whole story. Under tenancy each of
-//! those tables is per-tenant, so a sweep wired to one pool cleans one
-//! tenant (or, on the registry pool in schema mode, only `public`) and
-//! reports success while every other tenant's rows accumulate forever.
-//!
-//! The scheduler cannot help: [`crate::scheduler::Scheduler::every`]
-//! takes `Fn() -> Future` with no context, so there is nowhere for a
-//! tenant to come from. This module is the missing loop.
+//! The framework's cleanup helpers — [`crate::media::MediaManager::purge_orphans`],
+//! [`crate::audit::cleanup_older_than_pool`], [`crate::prunable::prune_all`]
+//! — each take one pool. Under tenancy their tables are per-tenant, so
+//! running one against a single pool cleans one tenant and leaves the
+//! rest growing. [`crate::scheduler::Scheduler::every`] takes a closure
+//! with no context, so it cannot supply the tenant. This module is that
+//! missing loop.
 //!
 //! ```ignore
 //! use rustango::tenancy::sweep::for_each_tenant;
 //!
-//! // Nightly, one prune per tenant. `opts` is borrowed, not moved:
-//! // the closure is `Fn` (it runs once per tenant), so an `async move`
-//! // body may only capture `Copy` values — and `&PruneOptions` is.
+//! // Borrow `opts`: the closure is `Fn`, so an `async move` body can
+//! // only capture `Copy` values, and `&PruneOptions` is one.
 //! let opts = &opts;
 //! let sweep = for_each_tenant(&pools, move |_org, pool| async move {
 //!     rustango::prunable::prune_all(&pool, opts).await
 //! })
 //! .await?;
 //!
-//! // `Ok` means the sweep RAN, not that every tenant succeeded —
-//! // always inspect the report, or a permanently-failing tenant is
-//! // exactly the silent under-coverage this exists to prevent.
+//! // `Ok` means the sweep ran, not that every tenant succeeded.
+//! // Always read the report.
 //! tracing::info!(ok = sweep.succeeded(), failed = sweep.failed(), "prune sweep");
 //! for (slug, err) in sweep.errors() {
 //!     tracing::warn!(%slug, %err, "tenant prune failed");
 //! }
 //! ```
 //!
-//! ## Semantics
+//! ## What it does
 //!
-//! - **Active tenants only.** Inactive orgs are skipped, matching
-//!   [`crate::tenancy::migrate`]'s fan-out.
-//! - **One tenant's failure does not stop the sweep.** A broken tenant
-//!   (unreachable database, rotated credential, unknown storage mode)
-//!   is recorded and the loop continues — the opposite of `?`, which
-//!   would let one bad tenant starve every tenant after it.
-//! - **Sequential.** Sweeps are background work competing with request
-//!   traffic for the same upstream; a fan-out that opened N tenant pools
-//!   at once is how you turn a nightly prune into an incident. Callers
-//!   who want concurrency can drive [`active_tenants`] themselves.
-//! - **Pools are resolved per tenant** through
-//!   [`TenantPools::scoped_pool_dyn`], so schema-mode tenants get a pool
-//!   with `search_path` in its connect options and database-mode tenants
-//!   get their own pool. The registry pool is never handed to the
-//!   closure.
+//! - Visits active tenants only, like [`crate::tenancy::migrate`].
+//! - Never stops on one tenant's failure. A broken tenant is recorded
+//!   and the loop goes on, so one bad tenant cannot starve the rest.
+//! - Runs one tenant at a time. Opening N tenant pools at once turns a
+//!   nightly prune into an incident. For concurrency, drive
+//!   [`active_tenants`] yourself.
+//! - Resolves each pool with [`TenantPools::scoped_pool_dyn`], so the
+//!   closure never sees the registry pool.
 //!
-//! ## The pool-cache cap applies
+//! ## Watch the pool-cache cap
 //!
-//! Database-mode pools come from `TenantPools`' cache, which is bounded
-//! by [`TenantPoolsConfig::max_cached_database_pools`] (default **64**)
-//! and does not evict — past the cap, `pool_for_org` errors rather than
-//! silently dropping someone's pool.
+//! Database-mode pools come from the `TenantPools` cache, capped by
+//! `max_cached_database_pools` (default 64). The cache does not evict:
+//! past the cap, resolving a pool errors.
 //!
-//! For a sweep that means: with more active database-mode tenants than
-//! the cap, the tail of the list fails to resolve on **every run** and
-//! is recorded as [`SweepError::Pool`], while `for_each_tenant` still
-//! returns `Ok` — the unbounded-growth problem this module exists to
-//! solve, quietly reintroduced for those tenants.
-//!
-//! So: raise `max_cached_database_pools` to at least the number of
-//! active tenants before scheduling a sweep, and treat a non-zero
-//! [`TenantSweep::failed`] as alertable rather than informational.
-//! (A real LRU evictor is a `TenantPools` follow-up; until it lands the
-//! cap is a hard ceiling, not a soft one.)
+//! So with more active database-mode tenants than the cap, the tail of
+//! the list fails on every run as [`SweepError::Pool`] while the sweep
+//! still returns `Ok`. Raise the cap to at least the number of active
+//! tenants before you schedule a sweep, and alert on a non-zero
+//! [`TenantSweep::failed`].
 
 use crate::core::Column as _;
 use crate::sql::sqlx::Database;
@@ -142,9 +121,8 @@ impl<T, E> TenantSweep<T, E> {
 
 /// Every active tenant, read from the registry.
 ///
-/// Exposed so callers who need something this module's loop does not do
-/// — concurrency, ordering, batching, a subset — can build it without
-/// re-deriving the query.
+/// Public so a caller who wants concurrency, ordering, batching or a
+/// subset can build its own loop.
 ///
 /// # Errors
 /// Driver error reading `rustango_orgs` from the registry pool.
@@ -162,11 +140,10 @@ where
 
 /// Run `f` once per active tenant, against that tenant's own pool.
 ///
-/// Never short-circuits: a tenant whose pool cannot be resolved, or
-/// whose closure errors, is recorded in the returned
-/// [`TenantSweep`] and the loop moves on. The only `Err` this returns is
-/// a failure to read the tenant list itself, which means there is no
-/// sweep to run.
+/// It never stops early. A tenant whose pool fails to resolve, or whose
+/// closure errors, is recorded in the returned [`TenantSweep`] and the
+/// loop continues. The only `Err` is a failure to read the tenant list,
+/// which means there is no sweep to run at all.
 ///
 /// # Errors
 /// As [`active_tenants`].
@@ -207,9 +184,8 @@ where
             Err(e) => Err(SweepError::Sweep(e)),
         };
         if let Err(SweepError::Sweep(ref e)) = result {
-            // `E` is not `Display`-bound (sweep closures return whatever
-            // their helper returns), so log the slug and let the caller
-            // render the error from `TenantSweep::errors`.
+            // `E` has no `Display` bound, so log only the slug; the
+            // caller renders the error from `TenantSweep::errors`.
             let _ = e;
             tracing::warn!(
                 target: "rustango::tenancy::sweep",
@@ -227,8 +203,8 @@ where
 mod tests {
     use super::*;
 
-    /// `succeeded` / `failed` / `errors` / `values` partition the same
-    /// set — the accounting a caller alerts on must not double-count.
+    /// `succeeded`, `failed`, `errors` and `values` split the same set
+    /// with no overlap, so an alert cannot double-count.
     #[test]
     fn sweep_accounting_partitions_outcomes() {
         let sweep: TenantSweep<u64, String> = TenantSweep {

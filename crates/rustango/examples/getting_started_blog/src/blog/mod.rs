@@ -1,4 +1,4 @@
-//! `blog` — Django-shape app module.
+//! `blog` — one app module: models, urls, views side by side.
 //!
 //! Add `mod blog;` (or `pub mod blog;`) to your
 //! `src/main.rs` / `src/lib.rs` so these submodules are

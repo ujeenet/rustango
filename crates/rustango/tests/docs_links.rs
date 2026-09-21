@@ -275,8 +275,8 @@ fn every_locale_has_every_published_page() {
 ///
 /// This cannot see whether `main` has the path yet, only whether the
 /// repo does. That still catches the common cause: a typo, a rename, or
-/// a delete. The reporter's own report had one (`django-party-audit`
-/// for `django-parity-audit`).
+/// a delete — the report that prompted this test had a typo of its own
+/// in a filename.
 #[test]
 fn every_repo_link_names_a_path_that_exists() {
     let root = repo_root();

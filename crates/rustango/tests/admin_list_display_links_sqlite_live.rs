@@ -1,4 +1,4 @@
-//! Django-parity #350 — `admin.list_display_links` wraps the named
+//! Issue #350 — `admin.list_display_links` wraps the named
 //! cells in `<a href=…>` linking to the detail view.
 
 #![cfg(all(feature = "sqlite", feature = "admin", feature = "tenancy"))]

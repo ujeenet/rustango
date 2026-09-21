@@ -1,4 +1,4 @@
-//! Django-parity #331 — `QuerySet::none()` returns an empty queryset.
+//! Issue #331 — `QuerySet::none()` returns an empty queryset.
 //!
 //! Verifies that every terminal op short-circuits to the empty
 //! result without violating typing or panicking. Hits sqlite live so
@@ -81,8 +81,8 @@ fn compile_update_appends_pk_is_null() {
 
 #[test]
 fn chained_filters_preserved_alongside_none() {
-    // .none() does NOT cancel filters appended before/after — Django's
-    // semantic is "still a queryset, just empty". The marker rides
+    // .none() does NOT cancel filters appended before/after — it is
+    // "still a queryset, just empty". The marker rides
     // independently so a later .all() (if we shipped one) could
     // reasonably resurrect; for v1 we just preserve filters.
     let q = QuerySet::<QsnPost>::new()

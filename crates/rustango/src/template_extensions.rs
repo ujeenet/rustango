@@ -1,18 +1,11 @@
-//! Django-shape custom template tags + filters — issue #383.
+//! Custom template filters and functions.
 //!
-//! Django lets app code register custom filters / functions / block
-//! tags via the `@register.filter` / `@register.simple_tag` /
-//! `@register.tag` decorators, which load automatically when the
-//! app is in `INSTALLED_APPS`. This module ships the equivalent for
-//! Tera: an inventory-collected registry of filters + functions
-//! that the framework's Tera builders apply at template-engine
-//! construction time.
+//! Register them once with the macros below and every Tera instance
+//! the framework builds picks them up.
 //!
-//! Tera doesn't expose a block-tag plugin API (no parser-level
-//! extension point — see [`crate::cache_fragment`] for the same
-//! limitation surface). So Django's `{% mytag %}` block-tag shape
-//! stays out of reach; filters + functions are everything app code
-//! actually needs in practice.
+//! Tera has no plugin API for block tags, so a custom
+//! `{% mytag %}…{% endmytag %}` is not available. See
+//! [`crate::cache_fragment`] for the same limit.
 //!
 //! ## Usage
 //!
@@ -40,15 +33,10 @@
 //! {{ build_version() }}      {# → the running crate's version #}
 //! ```
 //!
-//! Filters + functions register globally — every Tera instance the
-//! framework builds (admin, template_views, email_templates) picks
-//! them up via [`apply_to_tera`].
+//! ## Your own Tera instances
 //!
-//! ## Wiring into your own Tera instances
-//!
-//! Apps building their own `Tera` (outside the framework's CBVs)
-//! must call [`apply_to_tera`] explicitly. It's a no-op when no
-//! extensions are registered, so call it unconditionally:
+//! If you build a `Tera` yourself, call [`apply_to_tera`] on it. It
+//! does nothing when no extensions are registered, so call it always:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::new("templates/**/*.html")?;
@@ -56,30 +44,24 @@
 //! rustango::template_extensions::apply_to_tera(&mut tera);
 //! ```
 //!
-//! ## Why inventory storage requires `fn` pointers
+//! Registrations must be plain `fn` pointers, not `Arc<dyn Fn>`,
+//! because `inventory::submit!` stores them in a `static`. The macros
+//! coerce your expression to the right pointer type for you.
 //!
-//! Same reason as [`crate::admin::custom_views::CustomViewHandler`]
-//! and [`crate::template_context_processors::ContextProcessorFn`]:
-//! `inventory::submit!`'s `static` storage can only hold const-
-//! constructible values, so the registration MUST be a plain
-//! `fn` pointer rather than `Arc<dyn Fn>`. Both registry macros
-//! coerce the user's expression to the typed pointer up front so
-//! closure-body type inference still works.
+//! [`apply_to_tera`]: crate::template_extensions::apply_to_tera
 
 use std::collections::HashMap;
 
 use serde_json::Value;
 use tera::Tera;
 
-/// Tera filter signature. Matches the type Tera's
-/// `register_filter` expects when given a plain fn.
+/// Signature Tera's `register_filter` expects from a plain fn.
 pub type TeraFilterFn = fn(&Value, &HashMap<String, Value>) -> tera::Result<Value>;
 
-/// Tera function signature. Matches the type Tera's
-/// `register_function` expects when given a plain fn.
+/// Signature Tera's `register_function` expects from a plain fn.
 pub type TeraFunctionFn = fn(&HashMap<String, Value>) -> tera::Result<Value>;
 
-/// One filter registration. Inventory-collected via
+/// One filter registration. Build it with
 /// [`crate::register_template_filter!`].
 pub struct TemplateFilter {
     /// Name templates use: `{{ value | foo }}`.
@@ -90,11 +72,10 @@ pub struct TemplateFilter {
 
 inventory::collect!(TemplateFilter);
 
-/// One function registration. Inventory-collected via
+/// One function registration. Build it with
 /// [`crate::register_template_function!`].
 pub struct TemplateFunction {
-    /// Name templates use: `{{ foo(arg1=...) }}` or
-    /// `{% set x = foo() %}`.
+    /// Name templates use: `{{ foo(arg=...) }}`.
     pub name: &'static str,
     /// The callable.
     pub function: TeraFunctionFn,
@@ -102,14 +83,11 @@ pub struct TemplateFunction {
 
 inventory::collect!(TemplateFunction);
 
-/// Apply every inventory-registered filter + function to `tera`.
-/// Idempotent — Tera's `register_filter` / `register_function`
-/// overwrite the previous binding with the same name, so calling
-/// `apply_to_tera` twice is safe.
+/// Add every registered filter and function to `tera`. Safe to call
+/// twice, since a repeat registration just replaces the old one.
 ///
-/// Re-registering a built-in name (`length`, `upper`, …) replaces
-/// the built-in with the user version. Same trade-off Django
-/// makes; document accordingly if you override a stock filter.
+/// A registration that reuses a built-in name, such as `length` or
+/// `upper`, replaces that built-in.
 pub fn apply_to_tera(tera: &mut Tera) {
     for entry in inventory::iter::<TemplateFilter> {
         tera.register_filter(entry.name, entry.filter);
@@ -119,8 +97,7 @@ pub fn apply_to_tera(tera: &mut Tera) {
     }
 }
 
-/// Register a custom Tera filter globally. Picked up by
-/// [`apply_to_tera`] at template-engine construction time.
+/// Register a Tera filter. [`apply_to_tera`] installs it.
 ///
 /// ```ignore
 /// use std::collections::HashMap;
@@ -146,8 +123,7 @@ macro_rules! register_template_filter {
     };
 }
 
-/// Register a custom Tera function globally. Picked up by
-/// [`apply_to_tera`] at template-engine construction time.
+/// Register a Tera function. [`apply_to_tera`] installs it.
 ///
 /// ```ignore
 /// use std::collections::HashMap;
@@ -179,14 +155,10 @@ mod tests {
 
     #[test]
     fn apply_to_tera_is_a_noop_with_no_registrations() {
-        // Lib unit-test binary has no `register_template_filter!`
-        // calls, so the apply walks empty iters and leaves Tera
-        // untouched. Smoke-checks that the inventory link doesn't
-        // panic when nothing's submitted.
+        // This test binary registers nothing, so the walk is empty.
         let mut tera = Tera::default();
         apply_to_tera(&mut tera);
-        // A built-in filter still resolves — sanity that we didn't
-        // somehow corrupt the Tera registry.
+        // A built-in filter still works.
         tera.add_raw_template("smoke.html", "{{ [1,2,3] | length }}")
             .unwrap();
         let rendered = tera
@@ -197,18 +169,14 @@ mod tests {
 
     #[test]
     fn apply_to_tera_is_idempotent_when_called_twice() {
-        // Defensive: registering the same filter twice should be
-        // safe (Tera::register_filter overwrites).
         let mut tera = Tera::default();
         apply_to_tera(&mut tera);
         apply_to_tera(&mut tera);
-        // Nothing crashed, that's the test.
+        // Not panicking is the assertion.
     }
 
-    /// Spot-check the macro shape on a synthetic non-inventory
-    /// registration — proves the typed fn-pointer coercion works.
-    /// Real inventory-tying happens in the live test file because
-    /// `inventory::submit!` can't live inside a function body.
+    /// The fn-pointer coercion works. `inventory::submit!` cannot go
+    /// in a function body, so the real wiring is tested elsewhere.
     #[test]
     fn fn_pointer_coercion_smoke_test() {
         fn upper(v: &Value, _args: &HashMap<String, Value>) -> tera::Result<Value> {

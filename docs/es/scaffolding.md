@@ -1,6 +1,6 @@
 # Andamiaje
 
-**Rustango** tiene dos capas de generación de código, ambas inspiradas en los generadores que conoces de Django y Laravel — así rara vez conectas boilerplate a mano:
+**Rustango** tiene dos capas de generación de código — así rara vez conectas boilerplate a mano:
 
 1. **El generador de proyectos** — `cargo rustango new` crea un proyecto entero nuevo a partir de una plantilla.
 2. **Generadores dentro del proyecto** — `manage startapp` y la familia `manage make:*` añaden apps, vistas, serializers, jobs y más dentro de un proyecto existente.
@@ -26,7 +26,7 @@
 cargo install cargo-rustango
 ```
 
-Eso coloca un binario `cargo-rustango` en tu `PATH`; Cargo lo expone entonces como `cargo rustango` (del mismo modo que `django-admin` o el instalador `laravel` te dan un comando global).
+Eso coloca un binario `cargo-rustango` en tu `PATH`; Cargo lo expone entonces como `cargo rustango` — un comando global disponible en cualquier parte, incluso fuera de un proyecto.
 
 ### La versión del propio generador es la que obtiene tu proyecto
 
@@ -202,7 +202,7 @@ Cómo difieren las plantillas dentro de `main.rs` / `urls.rs`:
 
 - **api** — sin admin; `urls::api()` simplemente agrega tus propias rutas.
 - **fullstack** — el mismo `urls.rs`, más la funcionalidad de admin compilada dentro. El admin **no** queda cableado por ti: nada de lo generado lo llamaría, así que el generador no emite ningún `admin_router`. Añade uno tú mismo y anídalo — [Primeros pasos, Paso 11](getting-started.md#paso-11-activar-el-auto-admin) lo explica con detalle. Recibe un `rustango::sql::Pool` para que el ayudante no nombre ningún driver.
-- **tenant** — `main.rs` añade `.tenancy()`, sirviendo la consola de operador en el dominio ápice y cada tenant bajo su propio subdominio. Las propias tablas del framework se generan en una carpeta **`system/migrations/`** a partir de los modelos compilados (al estilo de Django) en el primer `cargo run -- migrate` — sin JSON de bootstrap entregado a mano, así que la primerísima migración funciona sin configuración adicional.
+- **tenant** — `main.rs` añade `.tenancy()`, sirviendo la consola de operador en el dominio ápice y cada tenant bajo su propio subdominio. Las propias tablas del framework se generan en una carpeta **`system/migrations/`** a partir de los modelos compilados en el primer `cargo run -- migrate` — sin JSON de bootstrap entregado a mano, así que la primerísima migración funciona sin configuración adicional.
 
 ### Configuración por capas
 
@@ -223,7 +223,7 @@ cargo run -- --help         # see every manage verb
 
 ## Añadir un módulo de funcionalidad: `manage startapp`
 
-Este es el `startapp` de Django — genera un módulo autocontenido de modelos, vistas y rutas relacionados:
+Genera un módulo autocontenido de modelos, vistas y rutas relacionados:
 
 ```sh
 cargo run -- startapp blog
@@ -242,16 +242,16 @@ Opciones:
 
 Dentro de un proyecto, los verbos `make:*` generan el andamiaje de un archivo cada vez. La referencia completa por flag vive en la [referencia de la CLI de manage](manage.md); las formas comunes son:
 
-| Comando | Genera | Comparable a |
-|---|---|---|
-| `make:viewset <Name> [--model <M>]` | Un ViewSet CRUD al estilo de DRF | `ViewSet` de DRF |
-| `make:serializer <Name> [--model <M>]` | Un serializer para dar forma a request/response | serializer de DRF |
-| `make:api_routes <app>` | Un agregador de rutas de API para una app | — |
-| `make:form <Name>` | Un formulario HTML con validación | `Form` de Django |
-| `make:job <Name>` | Un handler de job en segundo plano | job de Laravel / Celery |
-| `make:notification <Name>` | Una notificación multicanal | notificación de Laravel |
-| `make:middleware <Name>` | Un esqueleto de middleware | middleware de Django / Laravel |
-| `make:test <Name>` | Un módulo de pruebas usando el cliente de pruebas en el mismo proceso | — |
+| Comando | Genera |
+|---|---|
+| `make:viewset <Name> [--model <M>]` | Un ViewSet CRUD |
+| `make:serializer <Name> [--model <M>]` | Un serializer para dar forma a request/response |
+| `make:api_routes <app>` | Un agregador de rutas de API para una app |
+| `make:form <Name>` | Un formulario HTML con validación |
+| `make:job <Name>` | Un handler de job en segundo plano |
+| `make:notification <Name>` | Una notificación multicanal |
+| `make:middleware <Name>` | Un esqueleto de middleware |
+| `make:test <Name>` | Un módulo de pruebas usando el cliente de pruebas en el mismo proceso |
 
 ```sh
 cargo run -- make:viewset PostViewSet --model Post

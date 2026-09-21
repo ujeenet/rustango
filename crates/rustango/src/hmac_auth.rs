@@ -5,10 +5,9 @@
 //! request. The shared key is never transmitted, and replay attacks
 //! are bounded by a configurable `X-Date` tolerance window.
 //!
-//! Distinct from [`crate::api_keys`] (bearer-token style — the key
-//! itself rides the wire on every call): pick HMAC when callers can
-//! sign and you don't trust the channel; pick bearer when TLS is
-//! enough and you want the simplest possible client.
+//! With [`crate::api_keys`] the key itself travels on every call.
+//! Pick HMAC when callers can sign and you do not trust the channel.
+//! Pick bearer tokens when TLS is enough and clients must stay simple.
 //!
 //! ## Wire format
 //!
@@ -28,9 +27,8 @@
 //! <HEX-SHA256(BODY)>
 //! ```
 //!
-//! Sorted query so `?b=2&a=1` and `?a=1&b=2` produce the same
-//! signature. Body is hashed (SHA-256 hex) — saves the verifier from
-//! buffering and re-hashing inside HMAC.
+//! The query is sorted, so `?b=2&a=1` and `?a=1&b=2` sign the same.
+//! The body is hashed first, so the verifier hashes it only once.
 //!
 //! ## Quick start
 //!
@@ -54,6 +52,8 @@
 //!
 //! Use [`sign_request`] to build the `Authorization` header value
 //! that this layer will accept.
+//!
+//! [`sign_request`]: crate::hmac_auth::sign_request
 
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -73,9 +73,8 @@ const SCHEME: &str = "HMAC-SHA256";
 const DEFAULT_TOLERANCE_SECS: u64 = 300; // 5 min — RFC convention
 const DEFAULT_BODY_LIMIT: usize = 10 * 1024 * 1024;
 
-/// Closure that maps `key_id` → `Option<secret>`. Implementors typically
-/// look up the key in a DB / cache. Returning `None` rejects the
-/// request with 401.
+/// Maps a `key_id` to its secret, usually from a database or cache.
+/// Return `None` to reject the request with 401.
 pub type KeyResolver = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
 #[derive(Clone)]
@@ -88,11 +87,10 @@ struct HmacAuthConfig {
     resolver: KeyResolver,
     tolerance_secs: u64,
     body_limit: usize,
-    /// Audit M5 — optional replay defense. When set, each authentic
-    /// request's signature is recorded in the cache (TTL = the tolerance
-    /// window) and a repeat within that window is rejected. The X-Date
-    /// window alone only *bounds* replay; this closes it. Opt-in because
-    /// it needs a shared cache and the `cache` feature.
+    /// Optional replay defence. When set, each valid signature is
+    /// stored for the tolerance window and a repeat is rejected. The
+    /// `X-Date` window alone only limits how long a replay works;
+    /// this stops it. Opt-in, because it needs a shared cache.
     #[cfg(feature = "cache")]
     nonce_store: Option<Arc<dyn crate::cache::Cache>>,
 }
@@ -118,15 +116,14 @@ impl HmacAuthLayer {
         self
     }
 
-    /// Audit M5 — enable replay protection backed by a shared
-    /// [`crate::cache::Cache`]. After a request's signature verifies, it
-    /// is recorded for `tolerance_secs`; a replay carrying the same
-    /// signature within that window is rejected with 401. Use a shared
-    /// backend (Redis / DB) across instances; an in-process cache only
-    /// protects a single replica.
+    /// Turn on replay protection backed by a [`crate::cache::Cache`].
+    /// A verified signature is stored for `tolerance_secs`, and the
+    /// same signature again in that window gets a 401.
     ///
-    /// Defense-in-depth on top of the X-Date window — without it, a
-    /// captured signed request is replayable until the window expires.
+    /// **Use a shared backend such as Redis.** An in-process cache
+    /// only protects one replica, so a replay sent to another replica
+    /// still works. Without this, a captured request can be replayed
+    /// until the `X-Date` window closes.
     #[cfg(feature = "cache")]
     #[must_use]
     pub fn nonce_store(mut self, store: Arc<dyn crate::cache::Cache>) -> Self {
@@ -134,8 +131,8 @@ impl HmacAuthLayer {
         self
     }
 
-    /// Cap the body size we'll buffer for hashing. Requests over this
-    /// are rejected with 413. Default 10 MiB.
+    /// Largest body this will buffer for hashing. A bigger request
+    /// gets a 413. Default 10 MiB.
     #[must_use]
     pub fn body_limit(mut self, n: usize) -> Self {
         Arc::make_mut(&mut self.inner).body_limit = n;
@@ -231,13 +228,12 @@ async fn verify_request(
         return Err(deny("signature mismatch"));
     }
 
-    // Audit M5 — replay defense (only after the signature is proven, so
-    // an unauthenticated attacker can't flood the cache). The signature
-    // is unique per (method, path, query, date, body), so a replay
-    // carries the identical signature; record it for the tolerance
-    // window and reject a repeat. exists+set isn't atomic — two truly
-    // concurrent identical requests could race — but that window is
-    // sub-millisecond and this is defense-in-depth over X-Date.
+    // Replay defence. It runs only after the signature checks out, so
+    // an unauthenticated attacker cannot fill the cache. A signature
+    // is unique per method, path, query, date and body, so a replay
+    // carries the same one. `exists` then `set` is not atomic, so two
+    // truly simultaneous copies can race, but the window is tiny and
+    // `X-Date` still bounds it.
     #[cfg(feature = "cache")]
     if let Some(store) = &cfg.nonce_store {
         let nonce_key = format!(
@@ -248,13 +244,11 @@ async fn verify_request(
             Ok(true) => return Err(deny("replayed request")),
             Ok(false) => {
                 let ttl = std::time::Duration::from_secs(cfg.tolerance_secs);
-                // Fail open on a cache write error — the X-Date window
-                // still bounds replay; don't make auth depend on the
-                // cache being writable.
+                // A failed write does not block the request: auth must
+                // not depend on the cache, and X-Date still bounds it.
                 let _ = store.set(&nonce_key, "1", Some(ttl)).await;
             }
-            // Fail open on a cache read error (availability over the
-            // narrow in-window replay risk); the X-Date check still ran.
+            // Same for a failed read. The X-Date check already ran.
             Err(_) => {}
         }
     }
@@ -343,9 +337,7 @@ fn sort_query(q: &str) -> String {
     pairs.join("&")
 }
 
-// SHA-256 / HMAC-SHA256 / hex-encode helpers live in
-// [`crate::crypto`] — re-exported as the same names so the existing
-// call sites read unchanged.
+// The SHA-256, HMAC and hex helpers live in `crate::crypto`.
 use crate::crypto::{hmac_sha256, sha256_hex};
 
 fn date_within_tolerance(date_str: &str, tolerance_secs: u64) -> bool {
@@ -365,10 +357,8 @@ fn date_within_tolerance(date_str: &str, tolerance_secs: u64) -> bool {
 // =====================================================================
 
 /// Build the `Authorization` header value for a request signed with
-/// `secret` for key id `key_id`. Caller is responsible for setting
-/// `X-Date` to a matching RFC 3339 timestamp.
-///
-/// `body` may be empty for GET/DELETE requests.
+/// `secret` under `key_id`. You must also set `X-Date` to the same
+/// RFC 3339 timestamp. `body` may be empty for GET or DELETE.
 #[must_use]
 pub fn sign_request(
     key_id: &str,
@@ -386,8 +376,8 @@ pub fn sign_request(
     format!("{SCHEME} keyId={key_id},signature={sig_b64}")
 }
 
-/// Convenience: pick `now()` as the date and return both headers
-/// (the date + the authorization). Date is RFC 3339 / ISO 8601.
+/// Sign with the current time and return both headers: the RFC 3339
+/// date and the authorization value.
 #[must_use]
 pub fn sign_now(
     key_id: &str,

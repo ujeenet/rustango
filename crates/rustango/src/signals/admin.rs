@@ -1,13 +1,11 @@
-//! Django-shape admin lifecycle signals — analogs to
-//! `ModelAdmin.save_model()` / `ModelAdmin.delete_model()` hooks.
-//! Django-parity #365.
+//! Save and delete signals that fire only for writes made through
+//! the bundled admin.
 //!
-//! `post_save` / `pre_save` (declared in [`crate::signals`]) fire for
-//! every ORM write across the codebase. These admin-scoped signals
-//! only fire from the bundled admin's create / update / delete
-//! handlers, giving operators a seam for admin-only side effects
-//! (audit attribution, owner-stamping, notifications) without
-//! sprinkling `if request.is_admin()` everywhere.
+//! The signals in [`crate::signals`] cover every ORM write anywhere.
+//! These ones come only from the bundled admin's create, update and
+//! delete handlers, so admin-only side effects — audit attribution,
+//! owner stamping, notifications — need no `if request.is_admin()`
+//! check.
 //!
 //! ## Quick start
 //!
@@ -25,12 +23,12 @@
 //! }));
 //! ```
 //!
-//! ## Semantics
+//! ## Rules
 //!
-//! - Receivers run **sequentially** in registration order.
-//! - Pre-save fires before the DB write attempt; post-save only
-//!   after a successful write. Same for delete.
-//! - A panicking receiver aborts the chain and propagates.
+//! - Receivers run one at a time, in registration order.
+//! - A pre-save runs before the write is attempted; a post-save only
+//!   after it succeeds. Delete works the same way.
+//! - A panic in a receiver stops the rest of the chain.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -46,22 +44,20 @@ pub struct ReceiverId(u64);
 
 // ---------------------------------------------------------------- Context types
 
-/// Payload delivered to `admin_pre_save` / `admin_post_save` receivers.
+/// What an `admin_pre_save` or `admin_post_save` receiver gets.
 #[derive(Debug, Clone)]
 pub struct AdminSaveContext {
-    /// SQL table name of the model being saved.
+    /// Table name of the model being saved.
     pub table: &'static str,
-    /// String form of the row's primary key. Empty on `admin_pre_save`
-    /// for create when the PK is server-assigned (`Auto<T>`) — the
-    /// `admin_post_save` context carries the resolved PK.
+    /// The primary key as a string. It is empty on `admin_pre_save`
+    /// for a create with a server-assigned key; `admin_post_save`
+    /// then carries the real one.
     pub pk: String,
-    /// `true` when this save is an update (edit form), `false` for a
-    /// create (new form). Mirrors Django's `change` argument.
+    /// `true` for an edit, `false` for a create.
     pub change: bool,
 }
 
-/// Payload delivered to `admin_pre_delete` / `admin_post_delete`
-/// receivers.
+/// What an `admin_pre_delete` or `admin_post_delete` receiver gets.
 #[derive(Debug, Clone)]
 pub struct AdminDeleteContext {
     pub table: &'static str,
@@ -208,8 +204,8 @@ pub async fn send_admin_post_delete(ctx: AdminDeleteContext) {
 
 // ---------------------------------------------------------------- Introspection
 
-/// Number of registered receivers across all four admin signals.
-/// Useful for tests that need to wait for or assert connection state.
+/// How many receivers are registered across the four admin signals.
+/// Mostly useful in tests.
 pub fn receiver_count() -> usize {
     let r = registry();
     r.pre_save.read().unwrap().len()
@@ -218,8 +214,7 @@ pub fn receiver_count() -> usize {
         + r.post_delete.read().unwrap().len()
 }
 
-/// Drop every registered receiver. Tests use this to isolate state
-/// between cases.
+/// Remove every receiver. Tests use it to isolate cases.
 pub fn clear_all() {
     let r = registry();
     r.pre_save.write().unwrap().clear();
@@ -228,7 +223,7 @@ pub fn clear_all() {
     r.post_delete.write().unwrap().clear();
 }
 
-// `Any` import keeps the file aligned with sibling signal modules in
-// case a future context grows a typed-extras bag.
+// Keeps the `Any` import, so this file matches the other signal
+// modules if a context ever grows a typed extras bag.
 #[allow(dead_code)]
 fn _ensure_any_imported(_: &dyn Any) {}

@@ -1,13 +1,13 @@
 # Serializers
 
 Un serializer transforme une instance de modèle en une forme typée, prête pour le
-JSON — et inversement à l'entrée. C'est la réponse de **Rustango** à un
-`ModelSerializer` de Django REST Framework ou à une API Resource de Laravel :
+JSON — et inversement à l'entrée. C'est la couche entre vos modèles et la
+surface JSON de votre API :
 déclarer une structure, annoter ses champs, et l'on obtient une sortie contrôlée
 (renommage, masquage, calcul, imbrication), une validation au niveau du champ et
 de l'objet, ainsi qu'un point d'ancrage propre vers les ViewSets.
 
-Une chose à intégrer d'emblée, car elle diffère de DRF : un serializer Rustango
+Une chose à intégrer d'emblée : un serializer Rustango
 **façonne les données, il ne les persiste pas**. Il n'existe pas de
 `serializer.save()` qui écrit dans la base de données — c'est l'ORM qui s'en
 charge. Le serializer met en correspondance un modèle avec du JSON (`from_model` →
@@ -15,7 +15,7 @@ charge. Le serializer met en correspondance un modèle avec du JSON (`from_model
 compose avec l'ORM et les ViewSets plutôt que d'acheminer les écritures *à
 travers* lui.
 
-> **Un terme nouveau ici ?** — *serializer*, *model*, *ORM*, *DRF* ? Le
+> **Un terme nouveau ici ?** — *serializer*, *model*, *ORM* ? Le
 > [glossaire](glossary.md) définit chacun en langage clair.
 
 [![Un serializer Rustango : read_only, renommage via source, un champ méthode calculé, une FK imbriquée et un champ write_only — déclarés sur une seule structure](../img/serializers.png)](../img/serializers.png)
@@ -153,7 +153,7 @@ n'est pas accessible en écriture, on le renseigne donc à la main après
 
 ## Champs calculés
 
-`method = "fn"` est l'équivalent du `SerializerMethodField` de DRF. Déclarer le
+Avec `method = "fn"`, le champ est calculé au lieu d'être lu dans une colonne. Déclarer le
 champ, puis écrire une fonction associée `fn(&Model) -> FieldType` ; elle est
 appelée durant `from_model` :
 
@@ -239,7 +239,7 @@ let json = s.to_value();
 
 ## Champs slug
 
-`slug = "name"` est l'équivalent du `SlugRelatedField` de DRF : au lieu d'un id de
+`slug = "name"` expose une relation via un champ lisible : au lieu d'un id de
 FK ou d'un objet imbriqué complet, émettre un unique champ nommé extrait du parent
 chargé.
 
@@ -263,16 +263,15 @@ lorsqu'elle n'est pas chargée ; il est en affichage seul (non accessible en
 ## Validation
 
 Trois couches, toutes remontant sous forme de `rustango::forms::FormErrors` (et,
-lors d'une écriture via ViewSet, un `400` à la forme DRF). Elles s'exécutent dans
+lors d'une écriture via ViewSet, un `400` avec une carte d'erreurs par champ). Elles s'exécutent dans
 cet ordre : contraintes déclaratives, puis validateurs par champ, puis le point
 d'ancrage inter-champs.
 
-**Contraintes déclaratives (les `validators` de DRF, hérités automatiquement).**
+**Contraintes déclaratives (héritées automatiquement du modèle).**
 `max_length`, `min_length`, `min` et `max` sont des attributs de champ — et
 lorsqu'on les omet, un champ **hérite des** `max_length` / `min` / `max` /
 `choices` du modèle. Ainsi, une colonne `#[rustango(max_length = 200)]` voit sa
-longueur vérifiée sans aucun attribut de serializer (comportement du
-`ModelSerializer` de DRF). Elles sont vérifiées sur chaque champ accessible en
+longueur vérifiée sans aucun attribut de serializer. Elles sont vérifiées sur chaque champ accessible en
 écriture, transformant des `500` de contrainte de base de données potentiels en
 aimables `400` :
 
@@ -287,7 +286,7 @@ struct WidgetSerializer {
 }
 ```
 
-Les messages correspondent à ceux de Django/DRF :
+Les messages sont les suivants :
 `"Ensure this value has at most N characters."`,
 `"Ensure this value has at least N characters."`, `"Ensure this value is ≥ N."` /
 `"≤ N"`, et `"Select a valid choice."`. (`min_length` est propre au serializer ;
@@ -345,16 +344,15 @@ contraintes déclaratives ci-dessus (`max_length` / `min_length` / `min` / `max`
 pas de magie `email`/regex, ce qui garde la validation personnalisée explicite et
 testable. Hors d'un ViewSet, le framework ne rend pas automatiquement les
 `FormErrors` dans un corps HTTP ; les mettre en correspondance avec votre réponse
-400 (la séparation champ/hors-champ s'aligne sur le JSON d'erreur de DRF).
+400 (la séparation champ/hors-champ s'aligne sur le JSON d'erreur émis par un ViewSet).
 
 ---
 
 ## Validation d'unicité combinée
 
-Pour le `UniqueTogetherValidator` de Django — une vérification avant
-enregistrement qu'une ligne candidate n'entrera pas en collision sur un index
-d'unicité multi-colonnes — appeler `check_unique_together_pool` avant
-l'enregistrement :
+Pour vérifier avant enregistrement qu'une ligne candidate n'entrera pas en
+collision sur un index d'unicité multi-colonnes, appeler
+`check_unique_together_pool` avant l'enregistrement :
 
 ```rust
 use std::collections::HashMap;
@@ -433,7 +431,7 @@ pub struct PostViewSet;
   via `from_model`, si bien que `source` / `method` / `read_only` / `write_only`
   façonnent le JSON.
 - **Entrée** — `create` / `update` exécutent le `validate()` du serializer (un
-  échec est un `400` à la forme DRF, `{field: [msgs]}`), et seuls les champs
+  échec est un `400` avec une carte d'erreurs par champ, `{field: [msgs]}`), et seuls les champs
   accessibles en écriture sont écrits — les champs `read_only` / calculés qu'un
   client poste sont ignorés, résolus via `source` vers la colonne du modèle.
 

@@ -1,11 +1,9 @@
-//! Django-shape access decorators — `login_required` middleware +
-//! `?next=` round-trip helpers. Issue #11.
+//! Access gates: `login_required` middleware and `?next=` round-trip
+//! helpers.
 //!
-//! Gates a handler so anonymous requests get 302'd to a login URL
-//! with the original URL preserved in `?next=`. After the user
-//! authenticates, the login handler reads `?next=` and 302s back —
-//! the canonical "click-through-then-resume" UX every Django app
-//! ships.
+//! An anonymous request is redirected to a login URL with the original
+//! URL kept in `?next=`. After the user signs in, the login handler
+//! reads `?next=` and sends them back where they were going.
 //!
 //! ## Wiring
 //!
@@ -20,7 +18,7 @@
 //!     .route("/about", get(about));                  // public (added after layer)
 //! ```
 //!
-//! Or scope the gate to a sub-router (the more idiomatic shape):
+//! Or scope the gate to a sub-router, which is usually cleaner:
 //!
 //! ```ignore
 //! let private = Router::new()
@@ -35,9 +33,10 @@
 //!
 //! ## Login-handler side
 //!
-//! The login handler reads `?next=` to know where to send the user
-//! after a successful auth. Use [`extract_next`] for the read +
-//! [`safe_next`] to defend against open-redirect attacks:
+//! The login handler reads `?next=` to know where to send the user.
+//! Read it with [`extract_next`], then pass it through [`safe_next`].
+//! Skipping `safe_next` turns your login handler into an open
+//! redirect an attacker can use for phishing.
 //!
 //! ```ignore
 //! async fn login_post(Query(q): Query<HashMap<String, String>>, …) -> Response {
@@ -49,16 +48,16 @@
 //! }
 //! ```
 //!
-//! ## Out of scope (queued as follow-ups)
+//! ## Scope
 //!
-//! - `permission_required(perm)` — needs the tenancy permission
-//!   registry; pairs naturally with `login_required` but warrants its
-//!   own slice once the auth-flow API stabilizes.
-//! - `LoginRequiredMixin` on the CBV surface — small wiring on
-//!   `TemplateView` / `DetailView` etc.
-//! - Single-tenant / non-tenancy variant — `login_required` today
-//!   pulls `SessionUser` which is tenancy-shaped. Apps using
-//!   non-session auth (JWT, basic auth) plug their own predicate.
+//! Every gate here reads `SessionUser`, so they need the `tenancy`
+//! feature and session cookies. Apps on JWT or basic auth should
+//! write their own gate and reuse [`redirect_to_login`] and
+//! [`safe_next`].
+//!
+//! [`redirect_to_login`]: crate::auth_decorators::redirect_to_login
+//! [`safe_next`]: crate::auth_decorators::safe_next
+//! [`extract_next`]: crate::auth_decorators::extract_next
 
 use std::collections::HashMap;
 #[cfg(feature = "tenancy")]
@@ -72,7 +71,7 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 
-/// Configuration for [`login_required`]. Defaults match Django:
+/// Configuration for [`login_required`]. Defaults:
 /// `login_url = "/login"`, `redirect_field = "next"`.
 #[derive(Debug, Clone)]
 pub struct LoginRequiredConfig {
@@ -91,17 +90,13 @@ impl Default for LoginRequiredConfig {
     }
 }
 
-/// Construct an [`axum::middleware::FromFnLayer`] that 302s
-/// anonymous requests to `login_url` with the original URL preserved
-/// in `?next=`. Equivalent to Django's
-/// `@login_required(login_url=login_url)`. Issue #11.
+/// Middleware layer that redirects anonymous requests to `login_url`,
+/// keeping the original URL in `?next=`.
 ///
-/// "Anonymous" means `SessionUser.0.is_none()` — the existing tenancy
-/// extractor returns `None` when no session cookie is present or the
-/// cookie is for a different tenant. Apps using non-session auth
-/// (JWT, basic) need a different gating shape (queued).
+/// "Anonymous" means `SessionUser` resolved to `None`: no session
+/// cookie, or a cookie for a different tenant.
 ///
-/// See the module-level docs for full wiring + login-handler examples.
+/// See the module docs for wiring and login-handler examples.
 #[cfg(feature = "tenancy")]
 pub fn login_required(
     login_url: impl Into<String>,
@@ -127,17 +122,12 @@ pub fn login_required(
     })
 }
 
-/// Predicate-based access gate. Django's
-/// `@user_passes_test(test_func, login_url=…)`. Runs `predicate`
-/// against the resolved [`crate::extractors::SessionUser`]; on
-/// `true` the request continues, on `false` (or anonymous) it 302s
-/// to `login_url` with `?next=` preserved — same shape as
-/// [`login_required`].
+/// Predicate-based access gate.
 ///
-/// The predicate receives a reference to the
-/// [`crate::tenancy::auth::User`] row so it can inspect any field
-/// (`is_superuser`, `active`, role flags, custom permissions
-/// expressed on the row, etc.).
+/// `predicate` runs against the [`crate::tenancy::auth::User`] row, so
+/// it can read any field. On `true` the request continues. On `false`,
+/// or when the request is anonymous, it redirects to `login_url` with
+/// `?next=`, like [`login_required`].
 ///
 /// ```ignore
 /// use rustango::auth_decorators::user_passes_test;
@@ -148,10 +138,8 @@ pub fn login_required(
 ///     .layer(user_passes_test("/login", |u| u.is_superuser));
 /// ```
 ///
-/// Note that anonymous requests don't reach the predicate — they
-/// short-circuit straight to the login redirect. Pair with
-/// [`login_required`] only if you want anonymous to be the *only*
-/// reason for the redirect (this gate already handles it).
+/// Anonymous requests never reach the predicate: they redirect
+/// straight away. You do not need to add [`login_required`] as well.
 #[cfg(feature = "tenancy")]
 pub fn user_passes_test<F>(
     login_url: impl Into<String>,
@@ -204,7 +192,7 @@ where
             return next.run(req).await;
         }
     }
-    // Anonymous OR predicate failed — redirect to login with ?next=.
+    // Anonymous, or the predicate said no: redirect to login.
     let original = parts
         .uri
         .path_and_query()
@@ -213,16 +201,12 @@ where
     redirect_to_login(&cfg.login_url, &cfg.redirect_field, &original)
 }
 
-/// Predicate-based access gate that returns `403 Forbidden` on
-/// failure instead of redirecting to a login page. Same shape as
-/// [`user_passes_test`] but suited to JSON API endpoints where a
-/// 302 to `/login` makes no sense — clients can't follow it and
-/// shouldn't render an HTML login page.
+/// Like [`user_passes_test`], but returns `403 Forbidden` instead of
+/// redirecting. Use it for JSON APIs, where a 302 to an HTML login
+/// page is no use to the client.
 ///
-/// Anonymous requests get 401 (Unauthorized) so the client can
-/// distinguish "you need to authenticate" from "you authenticated
-/// but lack the required permission" — matches IETF's RFC 7231
-/// guidance.
+/// An anonymous request gets 401 so the client can tell "sign in
+/// first" apart from "signed in, but not allowed".
 ///
 /// ```ignore
 /// use rustango::auth_decorators::user_passes_test_or_403;
@@ -282,11 +266,8 @@ where
     }
 }
 
-/// Authentication-only gate that returns 401 on anonymous requests
-/// (instead of redirecting). The API-endpoint counterpart to
-/// [`login_required`]; equivalent to
-/// `user_passes_test_or_403(|_| true)` but reads tighter at call
-/// sites.
+/// Gate that returns 401 for anonymous requests instead of
+/// redirecting. The API counterpart to [`login_required`].
 #[cfg(feature = "tenancy")]
 pub fn login_required_or_401() -> impl tower::Layer<
     axum::routing::Route,
@@ -303,12 +284,10 @@ pub fn login_required_or_401() -> impl tower::Layer<
     user_passes_test_or_403(|_| true)
 }
 
-/// Convenience wrapper: gate a route to active superusers only.
-/// Equivalent to
-/// `user_passes_test(login_url, |u| u.is_superuser && u.active)`
-/// but reads tighter at call sites and pins the common
-/// "is_superuser && active" predicate so individual handlers don't
-/// silently diverge on whether `active = false` users still count.
+/// Gate a route to active superusers only, that is
+/// `is_superuser && active`. Using this instead of a hand-written
+/// predicate keeps every call site agreeing that a deactivated
+/// superuser is locked out.
 ///
 /// ```ignore
 /// use rustango::auth_decorators::superuser_required;
@@ -335,9 +314,8 @@ pub fn superuser_required(
     user_passes_test(login_url, |u| u.is_superuser && u.active)
 }
 
-/// API-endpoint variant of [`superuser_required`] — returns
-/// 401 for anonymous and 403 for non-superuser, instead of
-/// redirecting.
+/// API variant of [`superuser_required`]: 401 for anonymous, 403 for
+/// anyone who is not an active superuser.
 #[cfg(feature = "tenancy")]
 pub fn superuser_required_or_403() -> impl tower::Layer<
     axum::routing::Route,
@@ -354,22 +332,13 @@ pub fn superuser_required_or_403() -> impl tower::Layer<
     user_passes_test_or_403(|u| u.is_superuser && u.active)
 }
 
-/// Convenience wrapper: gate a route to active users only.
-/// Anonymous sessions and deactivated accounts (`active = false`)
-/// are 302'd to `login_url`. Equivalent to
-/// `user_passes_test(login_url, |u| u.active)`.
+/// Gate a route to active users only. Anonymous sessions and
+/// deactivated accounts (`active = false`) are redirected to
+/// `login_url`.
 ///
-/// Useful when a route should be open to any logged-in user, but
-/// the operator console has marked some accounts as inactive
-/// (suspended billing, security freeze, etc.) and those shouldn't
-/// be able to access ANYTHING.
-///
-/// Note that [`login_required`] already only counts logged-in
-/// users — but if the underlying SessionUser extractor was extended
-/// to surface deactivated accounts (it currently filters them out
-/// via `u.active` already), this gate would still be correct. Use
-/// it when you want the active-only invariant explicit at the call
-/// site.
+/// The `SessionUser` extractor already drops inactive accounts, so
+/// this is a second layer. Use it when a route must state the
+/// active-only rule at the call site.
 #[cfg(feature = "tenancy")]
 pub fn active_required(
     login_url: impl Into<String>,
@@ -388,9 +357,8 @@ pub fn active_required(
     user_passes_test(login_url, |u| u.active)
 }
 
-/// API-endpoint variant of [`active_required`] — returns 401 for
-/// anonymous and 403 for deactivated accounts, instead of
-/// redirecting.
+/// API variant of [`active_required`]: 401 for anonymous, 403 for a
+/// deactivated account.
 #[cfg(feature = "tenancy")]
 pub fn active_required_or_403() -> impl tower::Layer<
     axum::routing::Route,
@@ -407,15 +375,14 @@ pub fn active_required_or_403() -> impl tower::Layer<
     user_passes_test_or_403(|u| u.active)
 }
 
-/// Permission-codename access gate. Issue #311.
+/// Permission-codename access gate.
 ///
-/// Asynchronous counterpart to [`user_passes_test`] — the predicate
-/// is a permission check against the tenant's perm engine rather
-/// than a sync closure over the `User` row. Anonymous requests 302
-/// to `login_url` with the original URL in `?next=`; authenticated
-/// users without the codename receive `403 Forbidden`. Superusers
-/// bypass the codename check entirely (the bypass is baked into
-/// [`crate::tenancy::permissions::has_perm_pool`]).
+/// Like [`user_passes_test`], but the check is a permission lookup in
+/// the tenant's perm engine instead of a closure over the `User` row.
+/// Anonymous requests redirect to `login_url` with `?next=`. A signed-in
+/// user without the codename gets `403 Forbidden`. Superusers skip the
+/// codename check: the bypass lives in
+/// [`crate::tenancy::permissions::has_perm_pool`].
 ///
 /// ```ignore
 /// use rustango::auth_decorators::permission_required;
@@ -431,16 +398,12 @@ pub fn active_required_or_403() -> impl tower::Layer<
 /// ```
 ///
 /// **Tenant resolution**: the gate extracts [`crate::extractors::Tenant`]
-/// to obtain the tenant-scoped pool that `has_perm_pool` queries.
-/// Routes that compose this middleware MUST therefore be mounted under
-/// the tenant context (Settings-driven `TenantContext` in extensions);
-/// untenant'd routes get a 500.
+/// for the pool that `has_perm_pool` queries. Routes using this
+/// middleware MUST be mounted under the tenant context. A route
+/// without one gets a 500, never an allow.
 ///
-/// **Per-request cost**: one extractor call for `SessionUser` + one for
-/// `Tenant` + one `has_perm_pool` round-trip (three indexed lookups on
-/// PG/MySQL/SQLite). For high-RPS admin surfaces, the perm result can
-/// be cached at the session layer in a follow-up; today every request
-/// pays the lookup.
+/// **Cost**: every request pays two extractor calls and one
+/// `has_perm_pool` query. There is no caching.
 #[cfg(feature = "tenancy")]
 pub fn permission_required(
     login_url: impl Into<String>,
@@ -467,10 +430,9 @@ pub fn permission_required(
     })
 }
 
-/// API-endpoint counterpart to [`permission_required`] — returns 401
-/// for anonymous and 403 for authenticated-but-unauthorized requests
-/// instead of redirecting to a login page. Same codename semantics +
-/// superuser bypass as [`permission_required`].
+/// API variant of [`permission_required`]: 401 for anonymous, 403 for
+/// a signed-in user without the codename. Same codename rules and
+/// superuser bypass.
 ///
 /// ```ignore
 /// use rustango::auth_decorators::permission_required_or_403;
@@ -512,7 +474,7 @@ async fn handle_permission_required(
         .await
         .unwrap_or(crate::extractors::SessionUser(None));
     let Some(u) = user.0.as_ref() else {
-        // Anonymous → redirect to login with ?next=.
+        // Anonymous: redirect to login with ?next=.
         let original = parts
             .uri
             .path_and_query()
@@ -523,18 +485,17 @@ async fn handle_permission_required(
     let uid = match u.id.get().copied() {
         Some(id) => id,
         None => {
-            // Auto<i64> with no value — a session pointing at an unsaved
-            // user is a framework bug. Treat as 500 so it gets investigated.
+            // A session pointing at an unsaved user is a framework
+            // bug. Fail with 500 rather than guess.
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Body::empty())
                 .expect("500 + empty body is always valid");
         }
     };
-    // Need the tenant-scoped pool to query the perm engine. Tenant
-    // resolution failure (missing TenantContext, unknown tenant)
-    // surfaces as 500 — the user IS authenticated but we can't tell
-    // whether they're authorised.
+    // The perm engine needs the tenant pool. If the tenant cannot be
+    // resolved we cannot tell whether the user is authorised, so fail
+    // closed with 500.
     let tenant =
         match crate::extractors::Tenant::<crate::tenancy::DefaultTenantDb>::from_request_parts(
             &mut parts,
@@ -575,7 +536,7 @@ async fn handle_permission_required_or_403(
         .await
         .unwrap_or(crate::extractors::SessionUser(None));
     let Some(u) = user.0.as_ref() else {
-        // Anonymous → 401 (RFC 7231: "you need to authenticate").
+        // Anonymous: 401 means "sign in first".
         return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .body(Body::empty())
@@ -584,8 +545,8 @@ async fn handle_permission_required_or_403(
     let uid = match u.id.get().copied() {
         Some(id) => id,
         None => {
-            // Auto<i64> with no value — a session pointing at an unsaved
-            // user is a framework bug. Treat as 500 so it gets investigated.
+            // A session pointing at an unsaved user is a framework
+            // bug. Fail with 500 rather than guess.
             return Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Body::empty())
@@ -627,9 +588,8 @@ async fn handle_login_required(
     next: Next,
 ) -> Response {
     use axum::extract::FromRequestParts as _;
-    // Run the SessionUser extractor manually so we don't have to pass
-    // it as a `from_fn` argument (which would require SessionUser to
-    // implement `FromRequest`, not just `FromRequestParts`).
+    // Run the SessionUser extractor by hand: as a `from_fn` argument
+    // it would need `FromRequest`, not just `FromRequestParts`.
     let (mut parts, body) = req.into_parts();
     let user = crate::extractors::SessionUser::from_request_parts(&mut parts, &())
         .await
@@ -638,7 +598,7 @@ async fn handle_login_required(
         let req = Request::from_parts(parts, body);
         return next.run(req).await;
     }
-    // Anonymous — build the 302 target from the original URL.
+    // Anonymous: build the 302 target from the original URL.
     let original = parts
         .uri
         .path_and_query()
@@ -647,10 +607,8 @@ async fn handle_login_required(
     redirect_to_login(&cfg.login_url, &cfg.redirect_field, &original)
 }
 
-/// Build the 302 response that points at `login_url` with `?next=`
-/// carrying the URL-encoded `original` path. Surfaces as `pub` so
-/// non-session auth flavors that gate handlers manually can reuse
-/// the same redirect shape.
+/// Build the 302 to `login_url` with the URL-encoded `original` path
+/// in `?next=`. Public so hand-written gates can reuse it.
 #[must_use]
 pub fn redirect_to_login(login_url: &str, redirect_field: &str, original: &str) -> Response {
     let target = build_login_url(login_url, redirect_field, original);
@@ -672,16 +630,15 @@ fn build_login_url(login_url: &str, redirect_field: &str, original: &str) -> Str
 
 // ------------------------------------------------------------------ login-handler helpers
 
-/// Read the `next` query parameter out of a `Query<HashMap<...>>`-like
-/// map. Returns `None` when absent or empty (callers fall back to a
-/// default destination — typically `"/"`).
+/// Read the `next` query parameter from a query map. Returns `None`
+/// when it is missing or empty, so the caller can fall back to `"/"`.
 #[must_use]
 pub fn extract_next(query: &HashMap<String, String>) -> Option<String> {
     extract_next_named(query, "next")
 }
 
-/// Same as [`extract_next`] but with a custom field name to match a
-/// non-default [`LoginRequiredConfig::redirect_field`].
+/// Like [`extract_next`], but with a custom field name matching
+/// [`LoginRequiredConfig::redirect_field`].
 #[must_use]
 pub fn extract_next_named(query: &HashMap<String, String>, field: &str) -> Option<String> {
     query
@@ -690,15 +647,14 @@ pub fn extract_next_named(query: &HashMap<String, String>, field: &str) -> Optio
         .filter(|s| !s.is_empty())
 }
 
-/// Open-redirect defense: returns `Some(next)` only when `next` is
-/// safe to redirect to — a same-origin, root-relative path. Rejects:
+/// Open-redirect defence. Returns `Some(next)` only for a
+/// same-origin, root-relative path. Rejects:
 ///
-/// - Scheme-prefixed URLs (`http://evil.example/`, `//evil.example/x`)
-/// - Backslash variants the browser normalizes to a host
-///   (`/\evil.example/x`)
-/// - Percent-encoded variants of the above
+/// - URLs with a scheme (`http://evil.example/`, `//evil.example/x`)
+/// - Backslash forms a browser turns into a host (`/\evil.example/x`)
+/// - Percent-encoded forms of those
 ///   (`%2F%2Fevil.example/x` decodes to `//evil.example/x`)
-/// - Empty / whitespace
+/// - Control characters, empty and whitespace-only values
 ///
 /// ```rust
 /// use rustango::auth_decorators::safe_next;
@@ -710,32 +666,26 @@ pub fn extract_next_named(query: &HashMap<String, String>, field: &str) -> Optio
 /// assert_eq!(safe_next(""), None);
 /// ```
 ///
-/// **Does NOT validate** that the path resolves to a real route —
-/// that's a feature, not a bug. A 404 after login is far better than
-/// shipping a phishing redirect through your auth handler.
+/// It does **not** check that the path is a real route. That is
+/// intended: a 404 after login is far better than a phishing
+/// redirect.
 #[must_use]
 pub fn safe_next(next: &str) -> Option<String> {
     let trimmed = next.trim();
     if trimmed.is_empty() {
         return None;
     }
-    // Raw control characters are the dangerous form, and they are
-    // screened over the whole value without allocating. A *raw* TAB
-    // makes `/<TAB>/evil` leave as protocol-relative once the browser
-    // strips it (WHATWG URL §4.1), and a raw CR/LF makes
-    // `HeaderValue` construction fail. A percent-encoded one is
-    // inert, because this returns `trimmed` — still encoded — so it
-    // reaches the header as literal `%09` and the browser reads it as
-    // path content. Form decoding upstream is what turns `%09` into a
-    // raw tab, and by then it is raw here too.
+    // Raw control characters are the dangerous form. A browser strips
+    // a raw TAB while parsing, so `/<TAB>/evil` leaves as the
+    // protocol-relative `//evil`; a raw CR or LF breaks `HeaderValue`.
+    // An encoded one is inert, since this returns the still-encoded
+    // value.
     if trimmed.chars().any(char::is_control) {
         return None;
     }
     // Only the first two bytes decide the shape, so decode a bounded
-    // prefix rather than the whole caller-supplied value. Decoding all
-    // of it to read two bytes cost 36x on a pre-auth path whose body
-    // limit is 2 MiB, or unbounded on the admin login which takes a
-    // raw `Body` (#1604 review, performance-001).
+    // prefix. Decoding the whole caller-supplied value to read two
+    // bytes is costly on a pre-auth path.
     const SHAPE_PREFIX: usize = 24;
     let head: String = trimmed.chars().take(SHAPE_PREFIX).collect();
     if !is_safe_path(&crate::url_codec::url_decode(&head)) {
@@ -749,30 +699,21 @@ pub fn safe_next(next: &str) -> Option<String> {
     Some(trimmed.to_owned())
 }
 
-/// Shared check used on both the raw and percent-decoded forms of
-/// the `next` value. Path must start with `/` and must NOT start
-/// with `//` (scheme-relative) or `/\` (backslash-host).
+/// Shared check for the raw and the decoded form of `next`. The path
+/// must start with `/` and must NOT start with `//` (scheme-relative)
+/// or `/\` (backslash host).
 fn is_safe_path(s: &str) -> bool {
     // Control characters first. A browser strips TAB, CR and LF while
-    // parsing a URL (WHATWG URL §4.1), so `/<TAB>/evil.example/x`
-    // arrives here looking path-shaped and leaves as the
-    // protocol-relative `//evil.example/x`. `HeaderValue` accepts
-    // 0x09, so nothing downstream catches it either.
-    //
-    // This is the check that made `urls::url_has_allowed_host_and_scheme`
-    // the stronger of the two copies. Three live sanitizers were
-    // pointed at *this* function without it (#1604 review,
-    // security-001); CR and LF additionally make
-    // `member_auth::redirect_with_cookie`'s builder return `Err`,
-    // which it `.expect()`s (security-002).
+    // parsing a URL, so `/<TAB>/evil.example/x` looks path-shaped here
+    // and leaves as the protocol-relative `//evil.example/x`.
+    // `HeaderValue` accepts TAB, so nothing downstream catches it.
+    // Other callers rely on this check, so do not move it.
     if s.chars().any(char::is_control) {
         return false;
     }
-    // Byte comparison rather than `replace('\\', "/")`: the decision
-    // reads two bytes, and allocating a normalised copy of a
-    // caller-sized value to read them is what made this expensive.
-    // `\` is rewritten to `/` by the browser, so `//` and `/\` are
-    // both protocol-relative once the request leaves.
+    // Compare bytes instead of normalising a copy: the decision needs
+    // only two bytes. A browser rewrites `\` to `/`, so `//` and `/\`
+    // are both protocol-relative once the request leaves.
     let b = s.as_bytes();
     if b.first() != Some(&b'/') {
         return false;
@@ -819,11 +760,10 @@ mod tests {
 
     #[test]
     fn redirect_to_login_drops_location_on_crlf_attempt() {
-        // CRLF in original URL is a response-splitting vector. The
-        // builder percent-encodes the value before insertion so no
-        // raw CRLF reaches the header — that's the safety invariant
-        // worth asserting (not the specific encoded form, which is
-        // a url_encode implementation detail).
+        // CRLF in the original URL is a response-splitting vector.
+        // The value is percent-encoded first, so no raw CRLF reaches
+        // the header. That invariant is what is asserted, not the
+        // exact encoded form.
         let res = redirect_to_login("/login", "next", "/profile\r\nSet-Cookie: pwned=1");
         assert_eq!(res.status(), StatusCode::FOUND);
         let loc = res
@@ -878,24 +818,22 @@ mod tests {
         assert_eq!(safe_next("http://evil.example/x"), None);
         assert_eq!(safe_next("https://evil.example/x"), None);
         assert_eq!(safe_next("ftp://evil.example/"), None);
-        // Scheme-relative (network-path reference) is a phishing
-        // vector — browsers route this to <host>/x.
+        // Scheme-relative is a phishing vector: a browser routes
+        // this to <host>/x.
         assert_eq!(safe_next("//evil.example/x"), None);
     }
 
     #[test]
     fn safe_next_rejects_backslash_variant() {
-        // `/\evil.example/x` — some browsers normalize the backslash
-        // to a forward slash, producing `//evil.example/x` which
-        // routes to the attacker's host.
+        // A browser rewrites the backslash to `/`, giving
+        // `//evil.example/x`, which routes to the attacker's host.
         assert_eq!(safe_next("/\\evil.example/x"), None);
     }
 
     #[test]
     fn safe_next_rejects_percent_encoded_bypass() {
-        // The raw `next` value passes the path-starts-with-`/` check
-        // but percent-decodes to `//evil.example/x` — a phishing
-        // redirect. Defense: decode before validating.
+        // These start with `/` but decode to `//evil.example/x`, a
+        // phishing redirect. The fix is to decode before checking.
         assert_eq!(safe_next("%2F%2Fevil.example/x"), None);
         assert_eq!(safe_next("%2f%2fevil.example/x"), None);
         // Double-slash with the second slash encoded.
@@ -906,9 +844,8 @@ mod tests {
 
     #[test]
     fn safe_next_accepts_legitimate_percent_encodes_in_path() {
-        // A path containing literal `%20` (encoded space) should still
-        // be valid — `safe_next` doesn't reject every percent-encode,
-        // just the ones that decode to host-routing patterns.
+        // Only percent-encodes that decode to a host pattern are
+        // rejected. A literal `%20` in the path stays valid.
         assert_eq!(
             safe_next("/profile/hello%20world"),
             Some("/profile/hello%20world".to_owned())
@@ -953,8 +890,8 @@ mod tests {
             .await
             .unwrap();
 
-        // No SessionUser → no TenantContext → extractor returns None
-        // → middleware 302s to /login?next=/profile.
+        // No TenantContext, so SessionUser is None and the gate
+        // redirects to /login?next=/profile.
         assert_eq!(res.status(), StatusCode::FOUND);
         let loc = res
             .headers()
@@ -976,8 +913,7 @@ mod tests {
             "staff zone"
         }
 
-        // Predicate is never called when the request is anonymous —
-        // the gate short-circuits to the redirect.
+        // The predicate never runs for an anonymous request.
         let app = Router::new()
             .route("/admin/dashboard", get(staff_only))
             .layer(user_passes_test("/login", |u| u.is_superuser));
@@ -1004,8 +940,8 @@ mod tests {
     #[cfg(feature = "tenancy")]
     #[test]
     fn user_passes_test_signature_compiles_with_closure_predicate() {
-        // Compile-only: pin the signature so the predicate can be
-        // a closure capturing locals. The body never runs.
+        // Compile-only: pin the signature so the predicate can be a
+        // closure over locals. The body never runs.
         let _ = || {
             let _layer = user_passes_test("/login", |u: &crate::tenancy::auth::User| {
                 u.is_superuser && u.active
@@ -1039,17 +975,15 @@ mod tests {
             .await
             .unwrap();
 
-        // No SessionUser → 401 (not authenticated). Distinct from
-        // 403 (authenticated-but-not-allowed) so clients can
-        // distinguish.
+        // No SessionUser means 401, not the 403 a signed-in but
+        // unauthorised user would get.
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[cfg(feature = "tenancy")]
     #[test]
     fn login_required_or_401_signature_compiles() {
-        // Compile-only: the no-arg variant is sugar over
-        // `user_passes_test_or_403(|_| true)`. Pin the signature.
+        // Compile-only: pin the no-arg variant's signature.
         let _ = || {
             let _layer = login_required_or_401();
         };

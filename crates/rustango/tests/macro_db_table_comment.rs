@@ -1,4 +1,5 @@
-//! Django parity — `Meta.db_table_comment` (Django 4.2+). Verifies the
+//! `Meta.db_table_comment` — a comment attached to the table itself.
+//! Verifies the
 //! macro parses the attribute, threads it onto `ModelSchema`, and the
 //! migration DDL writer emits the right shape per dialect.
 

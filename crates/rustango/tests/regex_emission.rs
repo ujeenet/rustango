@@ -1,6 +1,6 @@
 //! Tri-dialect emission tests for `__regex` / `__iregex` lookups
-//! (issue #26). Django parity for `Q(name__regex='^foo.*')` /
-//! `Q(name__iregex=...)` plus the negated forms. PG uses native
+//! (issue #26) — `Q::regex("name", "^foo.*")` / `Q::iregex(...)`
+//! plus the negated forms. PG uses native
 //! `~` / `~*` / `!~` / `!~*` POSIX operators; MySQL uses `REGEXP`
 //! (with LOWER fallback for case-insensitive); SQLite uses
 //! `REGEXP` (delegating to the loaded `regexp` user-function),
@@ -178,11 +178,11 @@ fn iregex_wraps_lower_on_sqlite() {
     );
 }
 
-// ---------- Django-shape lookup-suffix parser ----------
+// ---------- lookup-suffix parser ----------
 
 #[test]
 fn regex_lookup_via_filter_string_parser() {
-    // `.filter("name__regex", pattern)` — Django's string-keyed form
+    // `.filter("name__regex", pattern)` — the string-keyed form
     // (issue #71 parser). Should route to Op::Regex.
     let q = User::objects()
         .filter("name__regex", "^foo.*")

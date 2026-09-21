@@ -1,9 +1,9 @@
-//! `SessionUser` and `SessionOperator` extractors — read the current
-//! user / operator from the browser session cookie.
+//! The `SessionUser` and `SessionOperator` extractors read the
+//! current user or operator from the browser's session cookie.
 //!
-//! Both are infallible (`Rejection = Infallible`) — they return `None`
-//! for anonymous requests rather than rejecting, so public routes can
-//! still use them without forcing every visitor to be logged in.
+//! Neither can fail. An anonymous request gives `None` rather than a
+//! rejection, so a public route can use them without forcing every
+//! visitor to log in.
 //!
 //! # Usage
 //!
@@ -44,16 +44,16 @@ use super::TenantContext;
 
 // ------------------------------------------------------------------ SessionUser
 
-/// Reads the `rustango_tenant_session` browser cookie and returns the
-/// corresponding [`User`] row, or `None` for anonymous / expired sessions.
+/// Reads the `rustango_tenant_session` cookie and returns the
+/// matching [`User`], or `None` when the session is missing or has
+/// expired. It never rejects.
 ///
-/// Requires the [`crate::server::Builder`] stack — the extractor reads
-/// the session secret and resolver from the `Arc<TenantContext>` extension
-/// that `Builder::serve` injects. Returns `None` (never rejects) so it
-/// composes safely with public routes.
+/// It needs the [`crate::server::Builder`] stack, because it takes
+/// the session secret and the resolver from the `TenantContext`
+/// extension that `Builder::serve` adds.
 ///
-/// The resolved org's slug is used to validate the tenant binding in the
-/// cookie — a cookie minted for `acme` will never authenticate on `globex`.
+/// The cookie is bound to the tenant slug, so a cookie minted for
+/// `acme` never authenticates on `globex`.
 pub struct SessionUser(pub Option<User>);
 
 impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
@@ -64,8 +64,8 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             return Ok(SessionUser(None));
         };
 
-        // Resolve the tenant — needed for the slug binding check and the
-        // pool to look up the user row.
+        // Resolve the tenant: needed for the slug check, and for the
+        // pool that holds the user row.
         let org = match ctx
             .resolver
             .resolve(parts, &ctx.pools.registry_pool())
@@ -85,11 +85,8 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             Err(_) => return Ok(SessionUser(None)),
         };
 
-        // v0.41 (#317) — route through the tri-dialect Pool enum
-        // instead of acquiring a backend-specific TenantConn. This
-        // lets `SessionUser` resolve on sqlite + mysql tenancy builds
-        // the same way `SessionOperator` already does (via
-        // `fetch` on the registry pool below).
+        // Go through the `Pool` enum rather than a backend-specific
+        // `TenantConn`, so this works on SQLite and MySQL too.
         let pool = match ctx.pools.scoped_pool_dyn(&org).await {
             Ok(p) => p,
             Err(_) => return Ok(SessionUser(None)),
@@ -104,10 +101,10 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             .unwrap_or_default();
 
         let user = users.into_iter().next().filter(|u| u.active);
-        // Audit P4 — reject a session minted before the user's last
-        // password change (parity with the tenant-admin gate at
-        // `tenancy::admin::validate_session`). `password_changed_at IS
-        // NULL` (never rotated since the column existed) stays valid.
+        // Reject a session minted before the user's last password
+        // change, as `tenancy::admin::validate_session` does. A null
+        // `password_changed_at` means it never changed, so it stays
+        // valid.
         let user = user.filter(|u| match u.password_changed_at {
             Some(changed) => payload.iat >= changed.timestamp(),
             None => true,
@@ -118,11 +115,12 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
 
 // ------------------------------------------------------------------ SessionOperator
 
-/// Reads the `rustango_op_session` browser cookie and returns the
-/// corresponding [`Operator`] row, or `None` for anonymous / expired sessions.
+/// Reads the `rustango_op_session` cookie and returns the matching
+/// [`Operator`], or `None` when the session is missing or has
+/// expired. It never rejects.
 ///
-/// Uses the `operator_secret` stored in [`TenantContext`] by
-/// [`crate::server::Builder`]. Returns `None` (never rejects).
+/// It uses the `operator_secret` that [`crate::server::Builder`] put
+/// in [`TenantContext`].
 pub struct SessionOperator(pub Option<Operator>);
 
 impl<S: Send + Sync> FromRequestParts<S> for SessionOperator {

@@ -1,16 +1,12 @@
-//! `GET <admin_prefix>/__docs` — in-admin model reference (Django
-//! `django.contrib.admindocs` parity, #1011).
+//! `GET <admin_prefix>/__docs`: an in-admin model reference page.
 //!
-//! Renders a read-only reference of every registered, *visible* model
-//! grouped by Django-shape app label, with each field's column / type /
-//! key / nullability / relation. The data is what the admin registry
-//! already holds (the `ModelEntry` inventory + each `ModelSchema`), so
-//! this is pure presentation — no DB I/O.
+//! Lists every registered, visible model, grouped by app label, with
+//! each field's column, type, key, nullability and relation. All of it
+//! comes from the admin registry, so the page does no database work.
 //!
-//! Scope: the **models** reference. Django's admindocs also documents
-//! views and template tags/filters; those are out of scope for v1
-//! (axum routes aren't enumerable at runtime the way Django's URLconf
-//! is, and the Tera filter/tag set isn't introspectable).
+//! Only models are documented. Axum gives no way to list the mounted
+//! routes at runtime, and the Tera filter and tag set cannot be
+//! inspected either.
 
 use axum::extract::State;
 use axum::response::Html;
@@ -22,13 +18,13 @@ use super::urls::AppState;
 use crate::core::Relation;
 
 pub(crate) async fn docs_view(State(state): State<AppState>) -> Html<String> {
-    // Group registered models by app label — same grouping the sidebar
-    // uses — preserving registration order within each app.
+    // Group models by app label, as the sidebar does, keeping
+    // registration order inside each app.
     let mut by_app: indexmap::IndexMap<String, Vec<serde_json::Value>> = indexmap::IndexMap::new();
     for entry in inventory_entries_dedup_by_table() {
         let schema = entry.schema;
-        // Respect the admin's table visibility allow/deny config so the
-        // docs page never reveals a model the operator hid.
+        // Honour the admin's visibility config, so this page never
+        // reveals a model the operator hid.
         if !state.is_visible(schema.table) {
             continue;
         }
@@ -69,8 +65,8 @@ pub(crate) async fn docs_view(State(state): State<AppState>) -> Html<String> {
     Html(render_with_chrome(
         "docs.html",
         &mut ctx,
-        // `__docs` highlights the sidebar "Model reference" link and
-        // matches no real table, so no model row is falsely activated.
+        // `__docs` highlights the sidebar "Model reference" link. It
+        // matches no real table, so no model row lights up.
         chrome_context(&state, Some("__docs")),
     ))
 }

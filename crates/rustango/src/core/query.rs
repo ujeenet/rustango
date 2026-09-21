@@ -1,8 +1,9 @@
 //! Dialect-neutral query IR.
 //!
-//! The query crate compiles a typed `QuerySet<T>` into a [`SelectQuery`].
-//! The SQL crate then walks that IR and writes a parameterized statement
-//! per dialect. Anything in this module is therefore visible to both.
+//! The query crate compiles a typed `QuerySet<T>` into a
+//! [`SelectQuery`]. The SQL crate then walks that IR and writes one
+//! parameterized statement per dialect, so both crates use the types
+//! in this module.
 
 use std::borrow::Cow;
 
@@ -30,32 +31,32 @@ pub enum Op {
     ILike,
     /// Case-insensitive `NOT ILIKE` (Postgres).
     NotILike,
-    /// Case-sensitive `LIKE` whose bound value was produced by
-    /// [`escape_like`] — emitted as `LIKE ? ESCAPE '!'` so the escaping
-    /// is honored on every dialect (#1257). SQLite has **no** default
-    /// LIKE escape character, so escaped values are meaningless there
-    /// without the explicit clause; `!` (rather than `\`) because MySQL
-    /// treats `\` as a string-literal escape, making `ESCAPE '\'`
-    /// non-portable. Used by the `contains` / `startswith` / `endswith`
-    /// lookups, which wrap **user input** in wildcards — a plain
-    /// [`Op::Like`] is for caller-owned patterns and is never escaped.
+    /// Case-sensitive `LIKE` over a value escaped by [`escape_like`].
+    /// Emits `LIKE ? ESCAPE '!'`, so the escaping holds on every
+    /// dialect: SQLite has **no** default LIKE escape, and `ESCAPE '\'`
+    /// is not portable because MySQL reads `\` as a string escape.
+    /// Used by the `contains` / `startswith` / `endswith` lookups,
+    /// which wrap **user input** in wildcards. Plain [`Op::Like`] is
+    /// for caller-owned patterns and is never escaped.
     LikeEscaped,
-    /// Case-insensitive sibling of [`Op::LikeEscaped`] — the dialect's
+    /// Case-insensitive form of [`Op::LikeEscaped`]: the dialect's
     /// ILIKE shape plus `ESCAPE '!'`.
     ILikeEscaped,
     /// Range check. The bound value must be `SqlValue::List([lo, hi])`.
     /// Emits `col BETWEEN $lo AND $hi`.
     Between,
-    /// Negated range check. Bound value shape matches [`Between`]
+    /// Negated range check. Same value shape as [`Op::Between`]
     /// (`SqlValue::List([lo, hi])`). Emits `col NOT BETWEEN $lo AND
-    /// $hi`. Eloquent `whereNotBetween` parity.
+    /// $hi`.
     NotBetween,
-    /// Compares against `NULL`. The bound value must be `SqlValue::Bool` —
-    /// `true` means `IS NULL`, `false` means `IS NOT NULL`.
+    /// Compares against `NULL`. The bound value must be
+    /// `SqlValue::Bool`: `true` means `IS NULL`, `false` means
+    /// `IS NOT NULL`.
     IsNull,
-    /// Null-safe equality: `IS DISTINCT FROM`. Unlike `<>`, this treats
-    /// `NULL` as a comparable value — `NULL IS NOT DISTINCT FROM NULL` is
-    /// `true`. Bind any `SqlValue`.
+    /// Null-safe inequality: `IS DISTINCT FROM`. Unlike `<>`, it
+    /// treats `NULL` as a comparable value, so
+    /// `NULL IS NOT DISTINCT FROM NULL` is `true`. Bind any
+    /// `SqlValue`.
     IsDistinctFrom,
     /// Null-safe equality: `IS NOT DISTINCT FROM`. The inverse of
     /// [`IsDistinctFrom`](Op::IsDistinctFrom).
@@ -74,126 +75,104 @@ pub enum Op {
     /// JSONB `?&` — all of the text keys exist. Bind a `SqlValue::List`
     /// of `SqlValue::String`.
     JsonHasAllKeys,
-    /// POSIX regex match — Django's `__regex` lookup. Case-sensitive.
-    /// Bind a `SqlValue::String` containing the regex pattern.
-    /// Tri-dialect: PG `~`, MySQL `REGEXP`, SQLite `REGEXP`. SQLite's
-    /// `REGEXP` delegates to a `regexp(pattern, value)` user-function
-    /// the connection must register — sqlx-sqlite does not register
-    /// it automatically. Issue #26.
+    /// POSIX regex match, case-sensitive — the `__regex` lookup. Bind a
+    /// `SqlValue::String` holding the pattern. PG `~`, MySQL `REGEXP`,
+    /// SQLite `REGEXP`. On SQLite the connection must register a
+    /// `regexp(pattern, value)` function; sqlx-sqlite does not add it.
     Regex,
-    /// POSIX regex non-match — Django's `~Q(name__regex=...)` shape
-    /// rolled into a single op. PG `!~`, MySQL `NOT REGEXP`,
-    /// SQLite `NOT REGEXP` (same user-function caveat as [`Op::Regex`]).
-    /// Issue #26.
+    /// POSIX regex non-match. PG `!~`, MySQL `NOT REGEXP`, SQLite
+    /// `NOT REGEXP` (same SQLite caveat as [`Op::Regex`]).
     NotRegex,
-    /// Case-insensitive POSIX regex match — Django's `__iregex`.
-    /// PG `~*` (native ASCII-folded match). MySQL and SQLite have
-    /// no native case-insensitive regex operator, so the writer
-    /// unconditionally wraps both sides in `LOWER(...)` for
-    /// collation-independent ASCII case folding. Issue #26.
+    /// Case-insensitive regex match — the `__iregex` lookup. PG `~*`.
+    /// MySQL and SQLite have no such operator, so the writer wraps
+    /// both sides in `LOWER(...)` for ASCII case folding.
     IRegex,
-    /// Case-insensitive POSIX regex non-match — Django's
-    /// `~Q(name__iregex=...)`. PG `!~*`. MySQL and SQLite use
-    /// `LOWER(<col>) NOT REGEXP LOWER(<pattern>)` for the same
-    /// reason as [`Op::IRegex`]. Issue #26.
+    /// Case-insensitive regex non-match. PG `!~*`. MySQL and SQLite
+    /// use `LOWER(<col>) NOT REGEXP LOWER(<pattern>)`, for the same
+    /// reason as [`Op::IRegex`].
     NotIRegex,
-    /// pg_trgm trigram similarity — Django's `__trigram_similar`
-    /// lookup. PG emits `<col> % <pattern>` using the `%` operator
-    /// supplied by the `pg_trgm` extension (default similarity
-    /// threshold is `0.3`; adjust via `SET pg_trgm.similarity_threshold`).
-    /// Requires `CREATE EXTENSION pg_trgm` on the database.
-    /// **PG-only** — MySQL / SQLite have no equivalent and reject
-    /// at compile time. Bind a `SqlValue::String`. Issue #29.
+    /// pg_trgm similarity — the `__trigram_similar` lookup. Emits
+    /// `<col> % <pattern>`; bind a `SqlValue::String`. Needs
+    /// `CREATE EXTENSION pg_trgm` (default threshold `0.3`, change it
+    /// with `SET pg_trgm.similarity_threshold`). **PG-only** — MySQL
+    /// and SQLite reject it when the query compiles.
     TrigramSimilar,
-    /// pg_trgm word-similarity — Django's `__trigram_word_similar`
-    /// lookup. PG emits `<col> %> <pattern>` using the `%>` operator.
-    /// Matches when any **word** in `<col>` is trigram-similar to the
-    /// pattern (the bare `%` requires the WHOLE string be similar).
-    /// **PG-only**, same `pg_trgm` extension requirement. Issue #29.
+    /// pg_trgm word similarity — the `__trigram_word_similar` lookup.
+    /// Emits `<col> %> <pattern>`, which matches when any single
+    /// **word** in the column is similar; the bare `%` needs the whole
+    /// string to be similar. **PG-only**, same extension requirement.
     TrigramWordSimilar,
-    /// Postgres full-text search — Django's `__search` lookup. PG
-    /// emits `to_tsvector(<col>) @@ plainto_tsquery(<pattern>)`,
-    /// using the database's default text-search config (typically
-    /// `english`). This is the simplest FTS shape — for explicit
-    /// language config, weighted SearchVectors, or websearch-style
-    /// query parsing, build the SearchVector / SearchQuery exprs
-    /// directly (follow-up work for issue #28). Bind a
-    /// `SqlValue::String`. **PG-only** — MySQL has `MATCH … AGAINST`
-    /// and SQLite has FTS5 `MATCH`, both with incompatible semantics,
-    /// so both reject at compile time. Issue #28.
+    /// Postgres full-text search — the `__search` lookup. Emits
+    /// `to_tsvector(<col>) @@ plainto_tsquery(<pattern>)` with the
+    /// database's default text-search config; bind a
+    /// `SqlValue::String`. For a chosen language, weighted vectors or
+    /// websearch syntax, build the query with [`crate::core::fts`].
+    /// **PG-only** — MySQL `MATCH … AGAINST` and SQLite FTS5 `MATCH`
+    /// mean something different, so both reject at compile time.
     Search,
-    /// Postgres array containment — Django's `__contains` lookup on
-    /// `ArrayField`. PG emits `<col> @> <value>` where the rhs is
-    /// the bound array literal. Returns rows whose array column
-    /// fully contains every element of the value array. **PG-only**
-    /// — MySQL and SQLite have no native array type and reject at
-    /// compile time with `OpNotSupportedInDialect`. Issue #30.
+    /// Postgres array containment — the `__array_contains` lookup.
+    /// Emits `<col> @> <value>`: rows whose array holds
+    /// every element of the value array. **PG-only** — MySQL and
+    /// SQLite have no array type and reject with
+    /// `OpNotSupportedInDialect`.
     ArrayContains,
-    /// Inverse of [`Self::ArrayContains`]: `<col> <@ <value>` —
-    /// rows whose array column is fully contained by the value
-    /// array. Django's `__contained_by` lookup. **PG-only**.
-    /// Issue #30.
+    /// Inverse of [`Self::ArrayContains`]: `<col> <@ <value>`, rows
+    /// whose array is held by the value array — the
+    /// `__array_contained_by` lookup. **PG-only**.
     ArrayContainedBy,
-    /// Postgres array overlap — `<col> && <value>`. Rows whose
-    /// array shares at least one element with the value array.
-    /// Django's `__overlap` lookup. **PG-only**. Issue #30.
+    /// Postgres array overlap — `<col> && <value>`: the two arrays
+    /// share at least one element — the `__array_overlap` lookup.
+    /// **PG-only**.
     ArrayOverlap,
-    /// Postgres range containment — `<col> @> <value>`. Django's
-    /// `__range_contains` lookup on a `RangeField`. The rhs is
-    /// either a single element (range contains scalar) or a range
-    /// literal (range contains range). Same SQL operator as
-    /// [`Self::ArrayContains`] — separate enum variant keeps the
-    /// call-site intent clear and lets the bind path stamp the
-    /// right value shape (`SqlValue::RangeLiteral` for range-vs-
-    /// range, scalar for range-vs-element). **PG-only** — MySQL
-    /// and SQLite reject at compile time. Issue #31.
+    /// Postgres range containment — `<col> @> <value>`, the
+    /// `__range_contains` lookup. The right side is a
+    /// single element or a range literal. Same SQL operator as
+    /// [`Self::ArrayContains`], but a separate variant so the intent
+    /// is clear and the bind path can pick the value shape
+    /// (`SqlValue::RangeLiteral` for range-vs-range, a scalar for
+    /// range-vs-element). **PG-only**.
     RangeContains,
     /// Inverse of [`Self::RangeContains`]: `<col> <@ <value>`.
-    /// Django's `__range_contained_by`. **PG-only**. Issue #31.
+    /// The `__range_contained_by` lookup. **PG-only**.
     RangeContainedBy,
-    /// Range overlap — `<col> && <value>`. Rows whose range
-    /// overlaps the value range. Django's `__range_overlap`.
-    /// **PG-only**. Issue #31.
+    /// Range overlap — `<col> && <value>`, the
+    /// `__range_overlap` lookup. **PG-only**.
     RangeOverlap,
-    /// Range strictly-left-of — `<col> << <value>`. Rows whose
-    /// entire range falls below the value range. **PG-only**.
-    /// Issue #31.
+    /// Range strictly left of — `<col> << <value>`: the whole range
+    /// falls below the value range. **PG-only**.
     RangeStrictlyLeft,
-    /// Range strictly-right-of — `<col> >> <value>`. **PG-only**.
-    /// Issue #31.
+    /// Range strictly right of — `<col> >> <value>`. **PG-only**.
     RangeStrictlyRight,
-    /// Range adjacent — `<col> -|- <value>`. Rows whose range
-    /// abuts the value range (no overlap, no gap). **PG-only**.
-    /// Issue #31.
+    /// Range adjacent — `<col> -|- <value>`: the ranges touch, with
+    /// no overlap and no gap. **PG-only**.
     RangeAdjacent,
 }
 
-/// The LIKE escape character used by [`Op::LikeEscaped`] /
-/// [`Op::ILikeEscaped`] — `!`, because it is portable: `ESCAPE '\'`
-/// breaks on MySQL (backslash is its string-literal escape) and SQLite
-/// has no default escape at all (#1257).
+/// The LIKE escape character for [`Op::LikeEscaped`] /
+/// [`Op::ILikeEscaped`]. `!` is the portable choice: `ESCAPE '\'`
+/// breaks on MySQL, where `\` is the string escape, and SQLite has no
+/// default escape at all.
 pub const LIKE_ESCAPE_CHAR: char = '!';
 
-/// The SQL suffix the escaped ops emit after their `LIKE` — pairs with
-/// [`LIKE_ESCAPE_CHAR`] (a unit test pins the two together, so neither
-/// can drift alone).
+/// The SQL suffix the escaped ops add after their `LIKE`. A unit test
+/// pins it to [`LIKE_ESCAPE_CHAR`], so the two cannot drift apart.
 pub const LIKE_ESCAPE_CLAUSE: &str = " ESCAPE '!'";
 
-/// Escape LIKE metacharacters in **user input** so `%` and `_` match
-/// literally (#1257, Django parity: `__contains` treats the value as a
-/// literal substring, not a pattern).
+/// Escape LIKE metacharacters in **user input**, so `%` and `_` match
+/// as plain characters — `__contains` means a literal substring,
+/// not a pattern.
 ///
-/// The output is only meaningful under [`LIKE_ESCAPE_CLAUSE`], i.e.
-/// bound to an [`Op::LikeEscaped`] / [`Op::ILikeEscaped`] predicate —
-/// pair them. Wildcards the *caller* adds around the escaped value (the
-/// `%…%` of a contains) stay unescaped and keep their meaning.
+/// The result only means anything under [`LIKE_ESCAPE_CLAUSE`], so
+/// bind it to an [`Op::LikeEscaped`] / [`Op::ILikeEscaped`] predicate.
+/// Wildcards the *caller* adds around the escaped value (the `%…%` of
+/// a contains) stay unescaped and keep their meaning.
 #[must_use]
 pub fn escape_like(input: &str) -> String {
     let e = LIKE_ESCAPE_CHAR;
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
-        // Escape the escape character itself, and the two LIKE
-        // metacharacters. Single pass, derived from the one const.
+        // Escape the escape character itself and the two LIKE
+        // metacharacters.
         if ch == e || ch == '%' || ch == '_' {
             out.push(e);
         }
@@ -211,24 +190,23 @@ pub struct Filter {
     pub value: SqlValue,
 }
 
-/// `WHERE` predicate that compares two columns from the same row —
-/// the rustango analog of Django's `F()` on the right side of a filter.
+/// `WHERE` predicate that compares two columns of the same row, such
+/// as `WHERE updated_at > created_at`.
 ///
-/// Emits `<left_col> <op> <right>` where `right` is an arbitrary
-/// [`Expr`] (typically `Expr::Column` for a plain column-vs-column
-/// compare, or a `BinOp` tree for column-vs-arithmetic). The lhs is
-/// the model column being filtered on; the rhs lives in the `Expr`.
+/// Emits `<column> <op> <rhs>`. The left side is the model column
+/// being filtered; `rhs` is any [`Expr`], usually `Expr::Column` for a
+/// plain column-vs-column compare or a `BinOp` tree for arithmetic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnFilter {
     /// Left-hand column (the field being filtered on, schema-resolved).
     pub column: &'static str,
-    /// Comparison operator. Subset of [`Op`] — only the binary
-    /// comparison variants make sense here (`Eq`, `Ne`, `Lt`, `Lte`,
-    /// `Gt`, `Gte`). Other ops (`In`, `Between`, `IsNull`, JSON ops, etc.)
-    /// are rejected at compile/emit time.
+    /// Comparison operator. Only the binary compares in [`Op`] make
+    /// sense here (`Eq`, `Ne`, `Lt`, `Lte`, `Gt`, `Gte`); the rest
+    /// (`In`, `Between`, `IsNull`, the JSON ops) are rejected when the
+    /// query is emitted.
     pub op: Op,
-    /// Right-hand side. Most commonly `Expr::Column(other)` for the
-    /// column-vs-column case; can be any expression tree.
+    /// Right-hand side. Usually `Expr::Column(other)`, but any
+    /// expression tree works.
     pub rhs: Expr,
 }
 
@@ -243,13 +221,10 @@ pub struct ColumnFilter {
 /// ])
 /// ```
 ///
-/// Empty conjunctions and disjunctions are valid. By convention they
-/// represent SQL `TRUE` and `FALSE` respectively, but you should
-/// usually avoid building them — `WhereExpr::And(vec![])` is the
-/// "no filters" case used internally to represent a query with an
-/// unfiltered WHERE clause; the writer skips emitting `WHERE` for it.
-/// `WhereExpr::Or(vec![])` is rejected by the writer as it would
-/// silently match nothing.
+/// An empty `And` or `Or` is allowed and means `TRUE` and `FALSE`.
+/// `And(vec![])` is the internal "no filters" shape and the writer
+/// emits no `WHERE` for it. `Or(vec![])` would quietly match nothing,
+/// so the writer rejects it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WhereExpr {
     /// Leaf — a single column predicate.
@@ -264,64 +239,49 @@ pub enum WhereExpr {
     Or(Vec<WhereExpr>),
     /// Logical negation. Emits `NOT (child)`.
     Not(Box<WhereExpr>),
-    /// Logical XOR — Django `Q(a) ^ Q(b)` (added in Django 4.1). Issue
-    /// #27. Matches rows for which an odd number of children evaluate
-    /// to `true`. Binary form is the common case and emits the
-    /// canonical SQL-92 rewrite `(a AND NOT b) OR (NOT a AND b)`; the
-    /// N-ary form (3+) folds to a CASE-WHEN-1/0 sum compared `% 2 = 1`
-    /// to mirror Django's "odd number of trues" semantic.
+    /// Logical XOR. True when an odd number of
+    /// children are true. Only MySQL has a native XOR, so the writer
+    /// always rewrites: two children become
+    /// `(a AND NOT b) OR (NOT a AND b)`, three or more fold into a
+    /// CASE-WHEN-1/0 sum tested with `% 2 = 1`. No children matches
+    /// nothing and is rejected, like `Or(vec![])`; one child means the
+    /// child itself.
     ///
-    /// Native logical XOR exists on MySQL but not on PG or SQLite —
-    /// the rewrite is portable across every backend, so the writer
-    /// uses it uniformly. Empty children = vacuously false (rejected
-    /// by the writer, same as `Or(vec![])`). Single child is
-    /// equivalent to the child itself.
-    ///
-    /// **Double-eval caveat (binary form only)**: the 2-child rewrite
-    /// emits each operand twice, so the database evaluates each
-    /// predicate twice. Deterministic predicates are unaffected, but
-    /// volatile expressions (`RANDOM()`, `NOW()`, correlated subqueries
-    /// with side effects) may return different values across the two
-    /// evaluations. If single-evaluation semantics matter, force the
-    /// parity-tally branch by adding a `FALSE` third child:
-    /// `Xor([a, b, WhereExpr::And(vec![WhereExpr::Predicate(..)])])`
-    /// or build via `a.xor(b).xor(c)` chains where the typed builder
-    /// flattens to ≥3 children. The N-ary form evaluates each child
-    /// exactly once.
+    /// The two-child rewrite prints each operand twice, so the
+    /// database evaluates each one twice. That only matters for
+    /// volatile expressions such as `RANDOM()` or `NOW()`. Three or
+    /// more children evaluate each child exactly once.
     Xor(Vec<WhereExpr>),
-    /// `EXISTS (<subquery>)` — issue #5. True when the inner
-    /// `SelectQuery` returns at least one row. Boxed because
-    /// `SelectQuery` already carries its own `WhereExpr`, which would
-    /// make the enum size unbounded otherwise.
+    /// `EXISTS (<subquery>)` — true when the inner `SelectQuery`
+    /// returns at least one row. Boxed because `SelectQuery` carries
+    /// its own `WhereExpr`, which would make the enum unbounded.
     Exists(Box<SelectQuery>),
-    /// `NOT EXISTS (<subquery>)` — issue #5. Django's `~Exists` shorthand.
+    /// `NOT EXISTS (<subquery>)` — the negation of [`Self::Exists`].
     NotExists(Box<SelectQuery>),
-    /// `<col> IN (<subquery>)` / `<col> NOT IN (<subquery>)` — issue
-    /// #5. Sibling to `Op::In` / `Op::NotIn` over a literal list, but
-    /// the RHS is a correlated or non-correlated SELECT.
+    /// `<col> IN (<subquery>)` / `<col> NOT IN (<subquery>)`. Like
+    /// `Op::In` / `Op::NotIn` over a literal list, but the right side
+    /// is a `SELECT`, correlated or not.
     InSubquery {
         column: &'static str,
         negated: bool,
         subquery: Box<SelectQuery>,
     },
-    /// `<lhs-expr> <op> <rhs-expr>` — both sides arbitrary [`Expr`]s
-    /// (issue #80). Used inside JOIN `ON` predicates where one or
-    /// both sides typically need to be qualified with a table alias
-    /// (via [`Expr::AliasedColumn`]) — outside JOIN context the
-    /// narrower [`ColumnFilter`] variant remains the right tool.
+    /// `<lhs> <op> <rhs>` with any [`Expr`] on both sides. Used in
+    /// JOIN `ON` predicates, where a side usually needs a table alias
+    /// ([`Expr::AliasedColumn`]). Outside a JOIN, use the narrower
+    /// [`ColumnFilter`].
     ///
-    /// Only the binary-comparison ops (`Eq`, `Ne`, `Lt`, `Lte`,
-    /// `Gt`, `Gte`) make sense here; the writer rejects other ops
-    /// the same way it does for `ColumnFilter`.
+    /// Only the binary compares (`Eq`, `Ne`, `Lt`, `Lte`, `Gt`,
+    /// `Gte`) make sense here; the writer rejects the rest, as it does
+    /// for `ColumnFilter`.
     ExprCompare { lhs: Expr, op: Op, rhs: Expr },
-    /// `[NOT ]EXISTS (SELECT 1 FROM <table> WHERE <correlation>)` over a
-    /// **raw table** — the M2M / GFK arm of the relation-existence
-    /// family (issue #830). Unlike [`Self::Exists`] it doesn't embed a
-    /// [`SelectQuery`] (which would need a `ModelSchema` to project): an
-    /// M2M junction table has no model, and the GFK case only needs a
-    /// literal `SELECT 1`. The correlation back to the outer row (and,
-    /// for GFK, the content-type discriminator) lives in
-    /// [`RelCorrelation`].
+    /// `[NOT ]EXISTS (SELECT 1 FROM <table> WHERE <correlation>)` over
+    /// a **raw table** — the M2M / GFK arm of the relation-existence
+    /// family. It holds no [`SelectQuery`], unlike [`Self::Exists`],
+    /// because an M2M junction table has no model and the GFK case
+    /// only needs a literal `SELECT 1`. [`RelCorrelation`] carries the
+    /// link back to the outer row and, for a GFK, the content-type
+    /// check.
     RelExists {
         table: &'static str,
         correlation: RelCorrelation,
@@ -330,9 +290,9 @@ pub enum WhereExpr {
 }
 
 /// Aggregate function for a correlated raw-table relation aggregate
-/// ([`Expr::RelAggregate`]). Distinct from [`AggregateExpr`] because the
-/// raw-table path (M2M / GFK, issue #830) has no `ModelSchema` and only
-/// supports this fixed set — `COUNT(*)` / `SUM` / `AVG` / `MAX` / `MIN`.
+/// ([`Expr::RelAggregate`]). Separate from [`AggregateExpr`]: the
+/// raw-table path (M2M / GFK) has no `ModelSchema` and supports only
+/// `COUNT(*)` / `SUM` / `AVG` / `MAX` / `MIN`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelAggKind {
     Count,
@@ -342,13 +302,12 @@ pub enum RelAggKind {
     Min,
 }
 
-/// Content-type discriminator for a generic-FK (GFK) relation — AND-ed
-/// into a [`RelCorrelation::Fk`] so a polymorphic child table is
-/// filtered to rows pointing at *this* parent model. Emits
-/// `<ct_column> = (SELECT <ct_pk> FROM <ct_table> WHERE <ct_table_col> =
-/// '<parent_table>')`, resolving the parent's content-type id via a
-/// nested subquery keyed on the compile-time-constant parent table name
-/// (so no async content-type lookup is needed at query-build time).
+/// Content-type check for a generic FK. AND-ed into a
+/// [`RelCorrelation::Fk`] so a polymorphic child table keeps only the
+/// rows that point at *this* parent model. Emits `<ct_column> =
+/// (SELECT <ct_pk> FROM <ct_table> WHERE <ct_table_col> =
+/// '<parent_table>')`: the parent's content-type id is resolved in
+/// SQL, so no async lookup is needed while the query is built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CtFilter {
     pub ct_column: &'static str,
@@ -362,10 +321,10 @@ pub struct CtFilter {
 /// [`Expr::RelAggregate`]) correlates back to the enclosing row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelCorrelation {
-    /// `<table>.<fk_column> = <outer>.<outer_column>` (plus an optional
-    /// GFK content-type filter). Covers an M2M junction (`fk_column` =
-    /// junction src column) and a generic child (`fk_column` = the
-    /// `object_pk` column, with `ct` set).
+    /// `<table>.<fk_column> = <outer>.<outer_column>`, plus an
+    /// optional GFK content-type check. Covers an M2M junction
+    /// (`fk_column` is the junction's source column) and a generic
+    /// child (`fk_column` is the `object_pk` column, with `ct` set).
     Fk {
         fk_column: &'static str,
         outer_column: &'static str,
@@ -391,17 +350,15 @@ impl WhereExpr {
         matches!(self, Self::And(items) if items.is_empty())
     }
 
-    /// Build an AND of leaf filters. Convenience for the common case
-    /// of "a list of predicates joined with AND" (the legacy
-    /// `Vec<Filter>` shape).
+    /// Build an AND of leaf filters — the common "list of predicates
+    /// joined with AND" case.
     #[must_use]
     pub fn and_predicates(filters: Vec<Filter>) -> Self {
         Self::And(filters.into_iter().map(Self::Predicate).collect())
     }
 
-    /// Append an AND predicate. If `self` is already `And(_)`, the
-    /// child is pushed in place; otherwise `self` is wrapped in a new
-    /// `And` together with the new child.
+    /// Add a predicate with AND. An existing `And(_)` takes the child
+    /// in place; anything else is wrapped in a new `And` next to it.
     pub fn push_and(&mut self, child: Self) {
         match self {
             Self::And(items) => items.push(child),
@@ -415,11 +372,10 @@ impl WhereExpr {
         }
     }
 
-    /// If this expression is a flat AND of leaf predicates (or a
-    /// single `Predicate`), return the predicate list. Returns `None`
-    /// for any tree containing `Or` or nested `And`. Useful for
-    /// callers that want to inspect a legacy "AND-only" WHERE without
-    /// pattern-matching the full tree.
+    /// The predicate list when this is a single `Predicate` or a flat
+    /// AND of predicates; `None` for any tree with `Or` or a nested
+    /// `And`. Lets a caller inspect an AND-only WHERE without walking
+    /// the whole tree.
     #[must_use]
     pub fn as_flat_and(&self) -> Option<Vec<&Filter>> {
         match self {
@@ -434,12 +390,10 @@ impl WhereExpr {
                 }
                 Some(out)
             }
-            // ColumnCompare is a leaf predicate but it doesn't carry a
-            // `Filter` (the rhs is an `Expr`, not a `SqlValue`), so the
-            // flat-AND view can't surface it as a `&Filter` reference.
-            // Callers using `as_flat_and` only handle literal `Filter`
-            // predicates anyway. Subquery-shaped predicates (#5) also
-            // fall outside the legacy flat-AND view.
+            // None of these hold a plain `Filter`: the compare
+            // variants carry an `Expr` right side, and the subquery
+            // shapes carry a whole query, so the flat-AND view cannot
+            // hand any of them back as a `&Filter`.
             Self::ColumnCompare(_)
             | Self::Or(_)
             | Self::Xor(_)
@@ -452,12 +406,11 @@ impl WhereExpr {
         }
     }
 
-    /// Walk the tree and validate every leaf predicate against `model`.
+    /// Walk the tree and check every leaf predicate against `model`.
     ///
     /// # Errors
-    /// Returns [`QueryError::UnknownField`] for a predicate whose
-    /// column is missing from the model, propagated up through
-    /// composite nodes.
+    /// Returns [`QueryError::UnknownField`] when a predicate names a
+    /// column the model does not have, at any depth.
     pub fn validate(&self, model: &'static ModelSchema) -> Result<(), QueryError> {
         match self {
             Self::Predicate(f) => {
@@ -476,8 +429,7 @@ impl WhereExpr {
                         field: cf.column.to_owned(),
                     });
                 }
-                // Validate every column reference inside the rhs Expr
-                // tree against the model schema.
+                // Check every column named inside the rhs Expr tree.
                 validate_expr_columns(model, &cf.rhs)?;
                 Ok(())
             }
@@ -488,17 +440,15 @@ impl WhereExpr {
                 Ok(())
             }
             Self::Not(child) => child.validate(model),
-            // Subquery predicates (#5) validate their inner SELECT
-            // against the inner SELECT's own model — that walk runs
-            // when the inner queryset was compiled. From the outer
-            // model's perspective there is nothing to check beyond
-            // the column on the LHS of `InSubquery`.
+            // A subquery predicate checks its inner SELECT against
+            // that SELECT's own model, when the inner queryset is
+            // compiled. The outer model only owns the left column of
+            // `InSubquery`.
             Self::Exists(_) | Self::NotExists(_) => Ok(()),
-            // Raw-table relation existence (M2M / GFK, issue #830) — the
-            // `table`/correlation columns live on a junction or
-            // polymorphic child, not on `model`; the framework builds
-            // them from trusted relation metadata. Nothing to validate
-            // against the outer model.
+            // Raw-table relation existence (M2M / GFK): the table and
+            // correlation columns live on a junction or polymorphic
+            // child, not on `model`, and the framework builds them
+            // from trusted relation metadata.
             Self::RelExists { .. } => Ok(()),
             Self::InSubquery { column, .. } => {
                 if model.field_by_column(column).is_none() {
@@ -509,20 +459,17 @@ impl WhereExpr {
                 }
                 Ok(())
             }
-            // ExprCompare is used inside JOIN ON predicates where both
-            // sides typically carry their own table alias via
-            // `Expr::AliasedColumn`. Validating against a single
-            // `model` would either be wrong (mismatching alias) or
-            // duplicate work (the alias-side schema isn't reachable
-            // here). Surface column typos at runtime; the JOIN writer
-            // emits clean SQL on the happy path.
+            // ExprCompare is used in JOIN ON predicates, where both
+            // sides usually carry their own alias. `model` is the
+            // wrong schema for the alias side, and that schema is not
+            // reachable here, so a bad column shows up at runtime.
             Self::ExprCompare { .. } => Ok(()),
         }
     }
 }
 
-/// Recursively walk an [`Expr`] and confirm every `Column` reference
-/// resolves on `model`. Literals + arithmetic ops are passed through.
+/// Walk an [`Expr`] and confirm every `Column` it names resolves on
+/// `model`. Literals and arithmetic pass straight through.
 fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(), QueryError> {
     match expr {
         Expr::Literal(_) => Ok(()),
@@ -557,29 +504,20 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
             }
             Ok(())
         }
-        // Inner subquery validates against its own model when the
-        // user compiles it; nothing to check from the outer model
-        // beyond that. `OuterRef` names a column on the outer
-        // model — and from the perspective of the inner-walk it's
-        // a free name; the outer query's compile() validates it
-        // against the outer schema when it embeds this subquery.
-        // `AliasedColumn` (issue #80) carries its own table alias so
-        // it doesn't resolve against the passed-in model.
-        // `AggregateSubquery` (issue #830) wraps an AggregateQuery over
-        // the *child* model; its columns resolve there, and any
-        // `OuterRef` names an outer column validated when the outer
-        // query embeds it — nothing to check against this model.
+        // None of these resolve against `model`. A `Subquery` or
+        // `AggregateSubquery` is checked against its own model when
+        // that query is compiled. An `OuterRef` names a column on the
+        // outer model, checked when the outer query embeds this one.
+        // `AliasedColumn` carries its own table alias, and
+        // `RelAggregate` reads a raw relation table (M2M junction or
+        // GFK child) built from trusted relation metadata.
         Expr::Subquery(_)
         | Expr::AggregateSubquery(_)
         | Expr::OuterRef(_)
-        // `RelAggregate` (issue #830) aggregates a raw relation table
-        // (M2M junction/target or GFK child); its columns live there,
-        // not on `model`, and the framework builds it from trusted
-        // relation metadata — nothing to validate against this model.
         | Expr::RelAggregate { .. }
         | Expr::AliasedColumn { .. } => Ok(()),
-        // Window (issue #7) — args / partition_by / order_by all
-        // reference the outer model's columns. Validate them.
+        // A window's args, partition_by and order_by all name columns
+        // on this model, so check them.
         Expr::Window(w) => {
             for col in &w.partition_by {
                 if model.field_by_column(col).is_none() {
@@ -602,15 +540,13 @@ fn validate_expr_columns(model: &'static ModelSchema, expr: &Expr) -> Result<(),
             }
             Ok(())
         }
-        // Aggregate (issue #74) — bare-column args (Sum("col"), etc.)
-        // hold raw `&'static str` names that this validator doesn't
-        // visit today; that's a pre-existing gap. Window-shaped
-        // aggregates are validated via the dedicated walker called
-        // from AggregateBuilder::compile().
+        // Known gap: bare-column aggregate args (`Sum("col")`) hold
+        // raw names this walker never visits. Window-shaped
+        // aggregates are checked by the dedicated walker that
+        // `AggregateBuilder::compile()` calls.
         Expr::Aggregate(_) => Ok(()),
-        // JsonPath (issue #296 / T2.3) — only the `source` expression
-        // references a model column; path steps are JSON-pointer
-        // keys/indices.
+        // Only `source` names a model column; the path steps are JSON
+        // keys and indices.
         Expr::JsonPath { source, .. } => validate_expr_columns(model, source),
     }
 }
@@ -627,46 +563,39 @@ impl From<Filter> for WhereExpr {
     }
 }
 
-/// Compiled `SELECT` over a single model with an optional WHERE
-/// clause expressed as a [`WhereExpr`] tree.
+/// Compiled `SELECT` over one model, with an optional `WHERE` given
+/// as a [`WhereExpr`] tree.
 ///
-/// v0.7 ships full AND/OR/nested support. The legacy "flat AND of
-/// predicates" shape is `WhereExpr::and_predicates(filters)` for
-/// callers who built up a `Vec<Filter>` directly.
-///
-/// `limit` and `offset` are `None` by default and emit no clauses.
-/// `search`, when present, adds a parenthesized `(col ILIKE $N OR …)`
-/// clause AND-joined with `where_clause`. `joins` adds `LEFT JOIN`
-/// clauses and pulls extra columns into the projection under aliased
-/// names.
+/// `limit` and `offset` are `None` by default and emit no clause.
+/// `search`, when set, adds a parenthesized `(col ILIKE $N OR …)`
+/// group AND-ed to `where_clause`. `joins` adds JOIN clauses and
+/// pulls extra columns into the projection under aliased names.
 #[derive(Debug, Clone)]
 pub struct SelectQuery {
     pub model: &'static ModelSchema,
     pub where_clause: WhereExpr,
     pub search: Option<SearchClause>,
     pub joins: Vec<Join>,
-    /// Derived-table joins — `JOIN [LATERAL] (<subquery>) AS alias ON …`
-    /// (Eloquent `joinSub` / `joinLateral`, issue #828). Emitted in the
-    /// `FROM` clause after the model [`Self::joins`]. Empty by default.
+    /// Derived-table joins — `JOIN [LATERAL] (<subquery>) AS alias ON
+    /// …` (Eloquent `joinSub` / `joinLateral`). Emitted in the `FROM`
+    /// clause after the model [`Self::joins`]. Empty by default.
     pub subquery_joins: Vec<SubqueryJoin>,
-    /// `ORDER BY` clauses, in the order they should appear in SQL.
-    /// Slice 9.0b + issue #76. Emitted after WHERE / JOIN / GROUP BY
-    /// but before LIMIT / OFFSET. Empty = no `ORDER BY`.
+    /// `ORDER BY` items, in the order they appear in SQL. Emitted
+    /// after WHERE / JOIN / GROUP BY and before LIMIT / OFFSET.
+    /// Empty = no `ORDER BY`.
     pub order_by: Vec<OrderItem>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
-    /// Row-lock mode appended after LIMIT/OFFSET — Django's
-    /// `select_for_update(skip_locked=, of=, nowait=, no_key=)`. Issue
-    /// #21. `None` (default) emits no lock clause. Must run inside a
-    /// transaction on PG and MySQL; SQLite has no row-level lock
-    /// syntax (transaction-scope locks are implicit), so the writer
-    /// no-ops on that backend.
+    /// Row lock appended after LIMIT/OFFSET.
+    /// `None` emits no lock clause. Run it inside a transaction on PG
+    /// and MySQL; SQLite has no row-level lock syntax, so the writer
+    /// does nothing there.
     pub lock_mode: Option<LockMode>,
-    /// Set-algebra branches that combine with this query — Django's
-    /// `.union(other_qs, all=)` / `.intersection(other_qs)` /
-    /// `.difference(other_qs)`. Issue #25. Empty (default) emits a
-    /// plain `SELECT …`. Non-empty wraps every branch in parens and
-    /// joins them with the matching keyword:
+    /// Set-algebra branches combined with this query, via
+    /// `.union()` / `.intersection()` /
+    /// `.difference()`. Empty emits a plain `SELECT …`.
+    /// Non-empty wraps every branch in parens and joins them with the
+    /// matching keyword:
     ///
     /// ```text
     /// (SELECT … this query …)
@@ -678,46 +607,44 @@ pub struct SelectQuery {
     /// ```
     ///
     /// Each branch keeps its own WHERE / ORDER BY / LIMIT inside the
-    /// parens. The compound's outer `order_by` / `limit` / `offset` /
+    /// parens. The outer `order_by` / `limit` / `offset` /
     /// `lock_mode` apply to the merged result.
     pub compound: Vec<CompoundBranch>,
-    /// Column-list override for pure projection — Django's `.values()`
-    /// / `.values_list()` shape (issue #22). `None` (default) emits
-    /// every scalar field on the model; `Some(cols)` emits exactly
-    /// `cols` in the order given. Joins still contribute their
-    /// `project` columns. Validated at builder time so every column
-    /// resolves on the model schema.
+    /// Column list for a pure projection, from `.values_dict()` /
+    /// `.values_list()`. `None` emits every scalar field on the
+    /// model; `Some(cols)` emits exactly `cols`, in that order. Joins
+    /// still add their `project` columns. Checked when the query is
+    /// built, so every column resolves on the model schema.
     pub projection: Option<Vec<&'static str>>,
-    /// Django `.distinct(*fields)` — issue #264 / T1.2. `None` is the
-    /// default (no DISTINCT clause). `Some(DistinctMode::All)` emits
-    /// `SELECT DISTINCT ...`. `Some(DistinctMode::On(cols))` emits PG
-    /// `SELECT DISTINCT ON (cols) ...` natively; on MySQL/SQLite the
-    /// writer wraps the query in a `ROW_NUMBER() OVER (PARTITION BY
-    /// cols ORDER BY <order_by>) AS __rn` subquery with an outer
-    /// `WHERE __rn = 1` so the "first row per group" semantics carry.
+    /// DISTINCT mode. `None` emits no DISTINCT clause.
+    /// `Some(DistinctMode::All)` emits `SELECT DISTINCT ...`.
+    /// `Some(DistinctMode::On(cols))` emits PG `SELECT DISTINCT ON
+    /// (cols) ...`; on MySQL and SQLite the writer wraps the query in
+    /// a `ROW_NUMBER() OVER (PARTITION BY cols ORDER BY <order_by>)
+    /// AS __rn` subquery with an outer `WHERE __rn = 1`, which keeps
+    /// the "first row per group" meaning.
     pub distinct: Option<DistinctMode>,
-    /// #1034 — outer-compound `ORDER BY` that applies to the COMBINED
-    /// result of a set operation. Holds the clauses chained AFTER the
-    /// first `.union()` / `.intersection()` / `.difference()` call.
-    /// Empty when there is no compound, or when ordering was set
-    /// BEFORE the first set-op call (those scope to the head branch and
-    /// live in [`Self::order_by`], which the writer wraps). Emitted
-    /// after the last branch.
+    /// `ORDER BY` for the COMBINED result of a set operation: the
+    /// clauses chained AFTER the first `.union()` / `.intersection()`
+    /// / `.difference()` call. Empty when there is no compound, or
+    /// when the ordering was set BEFORE the first set-op call — that
+    /// one belongs to the head branch and lives in
+    /// [`Self::order_by`], which the writer wraps. Emitted after the
+    /// last branch.
     pub compound_order_by: Vec<OrderItem>,
-    /// #1034 — outer-compound `LIMIT` on the merged result (chained
-    /// after the first set-op call). See [`Self::compound_order_by`].
+    /// `LIMIT` on the merged result, chained after the first set-op
+    /// call. See [`Self::compound_order_by`].
     pub compound_limit: Option<i64>,
-    /// #1034 — outer-compound `OFFSET` on the merged result (chained
-    /// after the first set-op call). See [`Self::compound_order_by`].
+    /// `OFFSET` on the merged result, chained after the first set-op
+    /// call. See [`Self::compound_order_by`].
     pub compound_offset: Option<i64>,
 }
 
 impl SelectQuery {
-    /// Construct an empty `SelectQuery` against `model` — every
-    /// non-required field defaults to its identity value
-    /// (`WhereExpr::And(vec![])` = vacuously true, empty Vecs,
-    /// `None` Options). Callers layer the actual filter / order /
-    /// limit on top via the struct-update shorthand:
+    /// Construct an empty `SelectQuery` against `model`: no filters
+    /// (`WhereExpr::And(vec![])`, vacuously true), empty lists, `None`
+    /// options. Layer the real filter / order / limit on top with
+    /// struct update, so a new field does not break existing callers:
     ///
     /// ```ignore
     /// use rustango::core::SelectQuery;
@@ -727,19 +654,12 @@ impl SelectQuery {
     ///     ..SelectQuery::new(MyModel::SCHEMA)
     /// };
     /// ```
-    ///
-    /// #562 — the 11-field struct literal recurs verbatim in ~50
-    /// call sites. Every time a new field gets added (`distinct`,
-    /// `compound`, ...), all 50 sites have to be touched. Using
-    /// `SelectQuery::new(...)` + struct-update syntax means new
-    /// fields just slot into the constructor and existing callers
-    /// compile unchanged.
     #[must_use]
     pub fn new(model: &'static ModelSchema) -> Self {
         Self {
             model,
-            // `And(vec![])` is the writer's vacuously-true shape
-            // (`Or(vec![])` is rejected) — see `WhereExpr` doc.
+            // Vacuously true; the writer rejects `Or(vec![])` —
+            // see the `WhereExpr` doc.
             where_clause: WhereExpr::And(Vec::new()),
             search: None,
             joins: Vec::new(),
@@ -757,9 +677,9 @@ impl SelectQuery {
         }
     }
 
-    /// Construct a single-PK-lookup `SelectQuery` — the most
-    /// common shape across the framework (`admin/views.rs`,
-    /// `template_views.rs`, `viewset/mod.rs`).
+    /// A single-PK lookup — the most common shape in the framework.
+    /// Use it when the WHERE is one `<pk_column> = <value>` and you
+    /// want one row back.
     ///
     /// Equivalent to:
     ///
@@ -774,9 +694,6 @@ impl SelectQuery {
     ///     ..SelectQuery::new(model)
     /// }
     /// ```
-    ///
-    /// Use when the WHERE shape is a single `<pk_column> = <value>`
-    /// and you want one row back.
     #[must_use]
     pub fn by_pk(model: &'static ModelSchema, pk_column: &'static str, pk_value: SqlValue) -> Self {
         Self {
@@ -790,10 +707,8 @@ impl SelectQuery {
         }
     }
 
-    /// Multi-PK `IN (...)` lookup. Companion to [`by_pk`] for the
-    /// bulk-fetch / bulk-delete-by-id shapes that recur in
-    /// `template_views::run_delete_selected_pool`, FK display fetches,
-    /// and "fetch rows for these N pks" routines.
+    /// Multi-PK `IN (...)` lookup. Companion to [`Self::by_pk`] for bulk
+    /// fetch, bulk delete by id, and FK display fetches.
     ///
     /// Equivalent to:
     ///
@@ -808,9 +723,8 @@ impl SelectQuery {
     /// }
     /// ```
     ///
-    /// No `LIMIT` defaulted — caller can layer one on via struct-update
-    /// syntax if needed (`SelectQuery { limit: Some(50),
-    /// ..SelectQuery::by_pk_in(...) }`).
+    /// No `LIMIT` is set. Add one with struct update if you need it:
+    /// `SelectQuery { limit: Some(50), ..SelectQuery::by_pk_in(...) }`.
     #[must_use]
     pub fn by_pk_in(
         model: &'static ModelSchema,
@@ -828,19 +742,18 @@ impl SelectQuery {
     }
 }
 
-/// Distinct mode — Django's `.distinct()` / `.distinct(*fields)`.
-/// Issue #264 / T1.2.
+/// Distinct mode — all columns, or a named subset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DistinctMode {
-    /// `SELECT DISTINCT ...` — works on every dialect identically.
+    /// `SELECT DISTINCT ...` — the same on every dialect.
     All,
-    /// `SELECT DISTINCT ON (cols) ...` — PG-native syntax with portable
+    /// `SELECT DISTINCT ON (cols) ...` on PG, with a portable
     /// `ROW_NUMBER()` fallback on MySQL / SQLite. Empty `cols` is
-    /// rejected at builder time (would degenerate to `DISTINCT`).
+    /// rejected when the query compiles; use `All` instead.
     On(Vec<&'static str>),
 }
 
-/// One branch of a set-algebra compound query. Issue #25.
+/// One branch of a set-algebra compound query.
 #[derive(Debug, Clone)]
 pub struct CompoundBranch {
     /// `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT`.
@@ -850,11 +763,10 @@ pub struct CompoundBranch {
     pub query: Box<SelectQuery>,
 }
 
-/// SQL set-algebra operator — Django's
-/// `QuerySet.union(all=)` / `.intersection()` / `.difference()`.
-/// Issue #25.
+/// SQL set-algebra operator, behind `.union()` / `.intersection()` /
+/// `.difference()`.
 ///
-/// Tri-dialect availability:
+/// Dialect support:
 /// - **Postgres**: all four ops.
 /// - **SQLite**: all four ops.
 /// - **MySQL 8.0+**: `UNION` / `UNION ALL` only. `INTERSECT` / `EXCEPT`
@@ -869,8 +781,7 @@ pub enum SetOp {
     UnionAll,
     /// `INTERSECT` — rows present in every branch.
     Intersection,
-    /// `EXCEPT` — rows in the first branch but not the others
-    /// (Django's `.difference()`).
+    /// `EXCEPT` — rows in the first branch but not the others.
     Difference,
 }
 
@@ -887,62 +798,57 @@ impl SetOp {
     }
 }
 
-/// Manual PartialEq for `CompoundBranch` — nests `SelectQuery` (which
-/// has its own ptr-eq impl on `ModelSchema`).
+/// Manual `PartialEq`: `CompoundBranch` nests `SelectQuery`, which
+/// compares its `ModelSchema` by pointer.
 impl PartialEq for CompoundBranch {
     fn eq(&self, other: &Self) -> bool {
         self.op == other.op && self.query == other.query
     }
 }
 
-/// `SELECT … FOR UPDATE` row-lock options — Django's
-/// `QuerySet.select_for_update(skip_locked=, nowait=, of=, no_key=)`.
-/// Issue #21.
+/// `SELECT … FOR UPDATE` row-lock options — `skip_locked`, `nowait`,
+/// `of` and `no_key`.
 ///
-/// `#[non_exhaustive]` — future per-backend lock flags (e.g. PG's
-/// `FOR KEY SHARE`, MySQL's `LOCK IN SHARE MODE`) can be added without
-/// breaking downstream code that constructs `LockMode { … }` directly.
-/// Build via [`LockMode::default`] + field assignment, or chain the
-/// [`crate::query::QuerySet`] builder methods (`.select_for_update()`,
+/// It is `#[non_exhaustive]`, so a new per-backend flag can be added
+/// without breaking code that builds a `LockMode` directly. Build one
+/// with [`LockMode::default`] plus field assignment, or chain the
+/// [`crate::query::QuerySet`] methods (`.select_for_update()`,
 /// `.skip_locked()`, `.nowait()`, `.no_key()`, `.of(…)`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LockMode {
-    /// PG 9.3+: `FOR NO KEY UPDATE` instead of `FOR UPDATE`. Holds a
-    /// weaker lock that doesn't block other writers that aren't
-    /// touching the row's PK / unique columns. MySQL has no
-    /// equivalent — the writer falls back to `FOR UPDATE`.
+    /// PG 9.3+: `FOR NO KEY UPDATE` instead of `FOR UPDATE`. A weaker
+    /// lock that does not block writers which leave the row's PK and
+    /// unique columns alone. MySQL has no equivalent, so the writer
+    /// falls back to `FOR UPDATE`.
     pub no_key: bool,
-    /// PG / MySQL 8+: `SKIP LOCKED`. Rows currently locked by another
-    /// transaction are silently filtered out instead of waiting.
-    /// Canonical "claim next available row" pattern.
+    /// PG / MySQL 8+: `SKIP LOCKED`. Rows another transaction holds
+    /// are dropped from the result instead of waited for — the usual
+    /// "claim the next free row" pattern.
     pub skip_locked: bool,
-    /// PG / MySQL 8+: `NOWAIT`. Returns an error immediately if any
-    /// row in the result set is currently locked. Mutually exclusive
-    /// with `skip_locked` at the database level — if both are set,
-    /// the writer emits `SKIP LOCKED` (the more permissive option).
+    /// PG / MySQL 8+: `NOWAIT`. Fails at once if any row in the
+    /// result is locked. The database cannot combine it with
+    /// `skip_locked`, so if both are set the writer emits
+    /// `SKIP LOCKED`, the more forgiving one.
     pub nowait: bool,
-    /// PG 9.3+: `FOR UPDATE OF table1, table2, …`. Restricts the lock
-    /// to the named tables when the query JOINs. Aliases / table
-    /// names go in; empty vec emits no `OF` clause. MySQL accepts
-    /// `OF` since 8.0.1. SQLite no-op.
+    /// PG 9.3+: `FOR UPDATE OF table1, table2, …`. Locks only the
+    /// named tables when the query joins. Pass table names or
+    /// aliases; an empty vec emits no `OF` clause. MySQL supports it
+    /// since 8.0.1; on SQLite it does nothing.
     pub of: Vec<&'static str>,
-    /// Suppress the `tracing::warn!` the writer emits when this
-    /// `LockMode` lands on a SQLite query. Issue #290 / T2.9. SQLite
-    /// has no row-level lock syntax — locks are silently dropped, and
-    /// the writer logs at warn-level by default so users notice. Set
-    /// this `true` on test fixtures or single-writer apps where you
-    /// know the SQLite global writer lock is sufficient.
+    /// Do not log the `tracing::warn!` the writer emits when this
+    /// `LockMode` reaches a SQLite query. SQLite has no row-level
+    /// lock syntax, so the clause is dropped and the warning says so.
+    /// Set it on test fixtures or single-writer apps where SQLite's
+    /// global writer lock is enough.
     pub silent_on_sqlite: bool,
 }
 
-/// PartialEq for `SelectQuery` — needed so [`crate::core::Expr`] (which
-/// embeds `Box<SelectQuery>` for issue #5 subqueries) can keep its
-/// `#[derive(PartialEq)]`. `ModelSchema` doesn't implement `PartialEq`
-/// (its fields are heterogeneous + behind static refs), so the `model`
-/// pointer is compared by identity — two queries against the same
-/// schema register equal, which matches every legitimate use case
-/// since model schemas are singletons.
+/// `PartialEq` for `SelectQuery`, so [`crate::core::Expr`] (which
+/// boxes one for subqueries) can keep its derive. `ModelSchema` has no
+/// `PartialEq`, so `model` is compared by pointer: two queries against
+/// the same schema are equal, which is right because schemas are
+/// singletons.
 impl PartialEq for SelectQuery {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self.model, other.model)
@@ -962,8 +868,8 @@ impl PartialEq for SelectQuery {
     }
 }
 
-/// Same ptr-eq treatment for `Join` — it also holds `&'static
-/// ModelSchema` (the join target).
+/// Same pointer comparison for `Join`, which also holds a
+/// `&'static ModelSchema` (the join target).
 impl PartialEq for Join {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self.target, other.target)
@@ -974,77 +880,73 @@ impl PartialEq for Join {
     }
 }
 
-/// Single column in an `ORDER BY` clause. Slice 9.0b — the simple
-/// "field name + ASC/DESC" form that pre-dates [`OrderItem`].
+/// One column plus a direction in an `ORDER BY` — the simple
+/// "field name + ASC/DESC" form.
 ///
-/// New code should prefer [`OrderItem`] (issue #76) which adds Expr
-/// items and `NULLS FIRST/LAST` control. `OrderClause` remains as a
-/// convenience-constructor and converts via `Into<OrderItem>` for
-/// every `SelectQuery` / `AggregateQuery` / window-OVER ORDER BY slot.
+/// Prefer [`OrderItem`] in new code: it also takes an `Expr` and
+/// controls `NULLS FIRST/LAST`. `OrderClause` stays as a short
+/// constructor and converts with `Into<OrderItem>` in every
+/// `SelectQuery` / `AggregateQuery` / window ORDER BY slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderClause {
-    /// SQL column name on the main table — already resolved by
-    /// `QuerySet::order_by` from a Rust-side field name (so the
-    /// writer doesn't re-walk the schema).
+    /// SQL column name on the main table. `QuerySet::order_by`
+    /// already resolved it from the Rust field name, so the writer
+    /// does not walk the schema again.
     pub column: &'static str,
     /// `true` for `DESC`, `false` for the default `ASC`.
     pub desc: bool,
 }
 
-/// Where NULLs sort relative to non-NULL values. Issue #76.
+/// Where NULLs sort next to real values.
 ///
-/// Default semantics differ per dialect: PG and SQLite sort NULLs
-/// LAST on `ASC` and FIRST on `DESC` (the SQL-standard); MySQL
-/// treats NULLs as smaller than every value so they land FIRST on
-/// `ASC` and LAST on `DESC`. Pinning the order explicitly via
-/// `First` or `Last` produces consistent behavior across all three
-/// dialects (the writer emits `IFNULL(…)` workarounds on MySQL,
-/// which has no native `NULLS FIRST`/`NULLS LAST` keywords).
+/// The default differs per dialect: PG and SQLite put NULLs last on
+/// `ASC` and first on `DESC` (the SQL standard), while MySQL treats
+/// NULL as smaller than any value, so it comes first on `ASC` and
+/// last on `DESC`. `First` or `Last` gives the same order on all
+/// three; MySQL has no `NULLS` keywords, so the writer emits an
+/// `IFNULL(…)` workaround there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NullsOrder {
     /// Backend's native default — emits no `NULLS …` clause.
     #[default]
     Default,
-    /// `NULLS FIRST` on PG/SQLite; emulated via `IFNULL(col, '') = ''
-    /// DESC, …` style trick on MySQL.
+    /// `NULLS FIRST` on PG / SQLite; on MySQL an
+    /// `IFNULL(col, '') = '' DESC, …` trick.
     First,
-    /// `NULLS LAST` on PG/SQLite; emulated on MySQL similarly.
+    /// `NULLS LAST` on PG / SQLite; the same kind of trick on MySQL.
     Last,
 }
 
-/// One item in a generalized `ORDER BY` list (issue #76). Carries
-/// either a plain column reference (with optional NULL-ordering) or
-/// an arbitrary [`Expr`] — `lower(col)`, `case(…)`, `F(a) + F(b)`,
-/// any builder result that lowers to `Expr`.
+/// One item of an `ORDER BY` list: a plain column with optional NULL
+/// ordering, any [`Expr`] (`lower(col)`, `case(…)`, `F(a) + F(b)`, or
+/// any builder result), or random order.
 ///
-/// Old-shape `OrderClause` values convert into the `Column` variant
-/// via `Into<OrderItem>` so existing constructors keep working.
+/// An [`OrderClause`] converts into the `Column` variant, so older
+/// constructors keep working.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OrderItem {
-    /// `<col> [DESC] [NULLS FIRST|LAST]`. Equivalent of the legacy
-    /// `OrderClause` with the addition of `NullsOrder`.
+    /// `<col> [DESC] [NULLS FIRST|LAST]` — an [`OrderClause`] plus a
+    /// [`NullsOrder`].
     Column {
         column: &'static str,
         desc: bool,
         nulls: NullsOrder,
     },
-    /// `<expr> [DESC] [NULLS FIRST|LAST]`. The `expr` is emitted via
-    /// the standard `Expr` writer, so function calls / `CASE` /
-    /// arithmetic / etc. all compose.
+    /// `<expr> [DESC] [NULLS FIRST|LAST]`. The `expr` goes through
+    /// the normal `Expr` writer, so function calls, `CASE` and
+    /// arithmetic all work.
     Expr {
         expr: Expr,
         desc: bool,
         nulls: NullsOrder,
     },
-    /// `ORDER BY RANDOM()` (PG / SQLite) or `ORDER BY RAND()` (MySQL).
-    /// Issue #77 — Django's `.order_by('?')` shape. No direction, no
-    /// NULLS clause: random ordering is by definition unordered, and
-    /// the random value is computed per-row so there are no NULLs.
+    /// `ORDER BY RANDOM()` (PG / SQLite) or `ORDER BY RAND()`
+    /// (MySQL). No direction and no NULLS
+    /// clause: the random key is computed per row and is never NULL.
     ///
-    /// **Performance**: forces a full table scan + in-memory sort
-    /// by a per-row random key. The optimizer can't use an index.
-    /// For large tables, prefer a `WHERE pk >= rand_offset LIMIT N`
-    /// pattern instead.
+    /// **Performance**: this forces a full table scan and an
+    /// in-memory sort, with no index to help. On a big table prefer a
+    /// `WHERE pk >= rand_offset LIMIT N` pattern.
     Random,
 }
 
@@ -1059,8 +961,7 @@ impl From<OrderClause> for OrderItem {
 }
 
 impl OrderItem {
-    /// Convenience for the most-common case — `<col> [DESC]`, default
-    /// NULL ordering.
+    /// The common case: `<col> [DESC]` with default NULL ordering.
     #[must_use]
     pub fn column(column: &'static str, desc: bool) -> Self {
         Self::Column {
@@ -1070,7 +971,7 @@ impl OrderItem {
         }
     }
 
-    /// Convenience for `<col> [DESC] [NULLS FIRST|LAST]`.
+    /// `<col> [DESC] [NULLS FIRST|LAST]`.
     #[must_use]
     pub fn column_with_nulls(column: &'static str, desc: bool, nulls: NullsOrder) -> Self {
         Self::Column {
@@ -1080,7 +981,7 @@ impl OrderItem {
         }
     }
 
-    /// Convenience for `<expr> [DESC]` with default NULL ordering.
+    /// `<expr> [DESC]` with default NULL ordering.
     #[must_use]
     pub fn expr(expr: Expr, desc: bool) -> Self {
         Self::Expr {
@@ -1090,22 +991,20 @@ impl OrderItem {
         }
     }
 
-    /// Convenience for `<expr> [DESC] [NULLS FIRST|LAST]`.
+    /// `<expr> [DESC] [NULLS FIRST|LAST]`.
     #[must_use]
     pub fn expr_with_nulls(expr: Expr, desc: bool, nulls: NullsOrder) -> Self {
         Self::Expr { expr, desc, nulls }
     }
 
-    /// Construct a `Random` item — `ORDER BY RANDOM()` / `RAND()`.
-    /// Issue #77.
+    /// A `Random` item — `ORDER BY RANDOM()` / `RAND()`.
     #[must_use]
     pub fn random() -> Self {
         Self::Random
     }
 
-    /// Bare column name when this item is a `Column` variant; `None`
-    /// for `Expr` / `Random` variants. Used by callers that pre-dated
-    /// the enum (admin / template_views / older tests).
+    /// The bare column name for a `Column` item; `None` for `Expr`
+    /// and `Random`.
     #[must_use]
     pub fn column_name(&self) -> Option<&'static str> {
         match self {
@@ -1114,8 +1013,8 @@ impl OrderItem {
         }
     }
 
-    /// `true` if this item sorts descending. `Random` ordering has no
-    /// direction (it's unordered by definition) — returns `false`.
+    /// `true` if this item sorts descending. `Random` has no
+    /// direction, so it returns `false`.
     #[must_use]
     pub fn is_desc(&self) -> bool {
         match self {
@@ -1124,9 +1023,8 @@ impl OrderItem {
         }
     }
 
-    /// The `NullsOrder` setting for this item. `Random` returns
-    /// `Default` — the random key is per-row and non-NULL, so the
-    /// clause has no effect.
+    /// The `NullsOrder` of this item. `Random` returns `Default`: its
+    /// key is per row and never NULL, so the clause does nothing.
     #[must_use]
     pub fn nulls_order(&self) -> NullsOrder {
         match self {
@@ -1136,16 +1034,14 @@ impl OrderItem {
     }
 }
 
-/// Which SQL `JOIN` keyword the writer should emit. Issue #80.
+/// Which SQL `JOIN` keyword the writer emits.
 ///
-/// `Left` is the default — it matches the original FK-driven
-/// `select_related` semantics where every outer row is preserved
-/// regardless of whether a related row exists on the target side.
-/// `Inner` is the common ad-hoc-join shape (drop outer rows with no
-/// match). `Right` and `Full` are accepted by the IR but only emit
-/// successfully on dialects that support them — the writer raises
-/// [`crate::sql::SqlError::JoinKindNotSupported`] on attempts to
-/// emit `Right` on SQLite or `Full` on MySQL / SQLite.
+/// `Left` is the default and matches FK-driven `select_related`,
+/// which keeps every outer row even with no match on the target side.
+/// `Inner` is the usual ad-hoc join and drops unmatched outer rows.
+/// The IR accepts `Right` and `Full`, but not every dialect does: the
+/// writer raises [`crate::sql::SqlError::JoinKindNotSupported`] for
+/// `Right` on SQLite and `Full` on MySQL / SQLite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JoinKind {
     Inner,
@@ -1155,20 +1051,19 @@ pub enum JoinKind {
     Full,
 }
 
-/// A JOIN against a target model. Issue #80 generalized this from
-/// the original FK-only `LEFT JOIN main.fk = alias.target_pk` shape
-/// to carry an arbitrary `WhereExpr` predicate + an explicit
-/// [`JoinKind`].
+/// A JOIN against a target model, with a [`JoinKind`] and any
+/// `WhereExpr` predicate (not only the FK shape
+/// `main.fk = alias.target_pk`).
 ///
 /// The writer emits `<kind> JOIN "<target.table>" AS "<alias>" ON
-/// <on>` and includes each `project` column in the SELECT list
-/// aliased as `"<alias>"."<col>" AS "<alias>__<col>"`. Callers read
-/// joined values from the resulting row by the suffixed name.
+/// <on>` and adds each `project` column to the SELECT list as
+/// `"<alias>"."<col>" AS "<alias>__<col>"`. Read joined values from
+/// the row by that suffixed name.
 ///
-/// When a `SelectQuery` has any joins, the writer also qualifies the
-/// main table's columns as `"<table>"."<col>"` to avoid ambiguity.
-/// Cross-table column references inside `on` use
-/// [`Expr::AliasedColumn`] for explicit `<alias>.<col>` qualification.
+/// When a `SelectQuery` has any join, the writer also qualifies the
+/// main table's columns as `"<table>"."<col>"`, so nothing is
+/// ambiguous. Inside `on`, point at another table with
+/// [`Expr::AliasedColumn`].
 ///
 /// [`Expr::AliasedColumn`]: crate::core::Expr::AliasedColumn
 #[derive(Debug, Clone)]
@@ -1180,42 +1075,23 @@ pub struct Join {
     pub project: Vec<&'static str>,
 }
 
-/// A JOIN whose right-hand side is a **derived table** (a subquery)
-/// rather than a model table — Eloquent's `joinSub` / `leftJoinSub`, and
-/// (with `lateral = true`) `joinLateral` / `leftJoinLateral`. Issue #828.
+/// What a derived-table join selects from: a plain typed `SELECT` or
+/// an aggregate / window query.
 ///
-/// The writer emits `<kind> JOIN [LATERAL] (<subquery>) AS "<alias>" ON
-/// <on>`. The derived table's columns are referenced from `on` (and from
-/// the outer query) via [`Expr::AliasedColumn`] (`"<alias>"."<col>"`) —
-/// there's no model schema to resolve unqualified names against, so the
-/// `on` predicate must qualify every column.
-///
-/// Unlike [`Join`], a `SubqueryJoin` contributes **no** columns to the
-/// SELECT projection: it's a filtering / correlation join, so a typed
-/// fetch still decodes the base model. Read derived values with an
-/// explicit `.values()` projection if needed.
-///
-/// `lateral` requests the `LATERAL` keyword, which lets the subquery
-/// reference columns from earlier `FROM` items (e.g. the outer table) —
-/// the "top-N rows per group" shape. **PG + MySQL ≥ 8.0.14 only**; the
-/// writer raises [`crate::sql::SqlError::LateralJoinNotSupported`] on
-/// SQLite.
-///
-/// Source of a derived-table join (#828, #1035) — either a plain typed
-/// `SELECT` or an aggregate/window query. Window functions compile to an
-/// [`AggregateQuery`], so the [`DerivedSource::Aggregate`] variant lets a
-/// windowed result be joined as a derived table — the missing half of
-/// "filter on a window result" (e.g. keep rows where a per-group `rank`
-/// is `<= N`), which a subquery can express but a bare `WHERE` can't.
+/// Window functions compile to an [`AggregateQuery`], so
+/// [`DerivedSource::Aggregate`] is how a windowed result becomes a
+/// derived table. That is the way to filter on a window result — for
+/// example, keep rows whose per-group `rank` is `<= N`, which a bare
+/// `WHERE` cannot do.
 ///
 /// The four derived-table join builders
-/// ([`crate::query::QuerySet::join_sub`] et al.) take `impl Into<DerivedSource>`,
-/// so a `SelectQuery` or an `AggregateQuery` both work with no ceremony.
+/// ([`crate::query::QuerySet::join_sub`] and friends) take
+/// `impl Into<DerivedSource>`, so both types work directly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DerivedSource {
     /// A plain typed `SELECT` derived table.
     Select(Box<SelectQuery>),
-    /// An aggregate / window query derived table (#1035).
+    /// An aggregate / window query as the derived table.
     Aggregate(Box<AggregateQuery>),
 }
 
@@ -1231,6 +1107,26 @@ impl From<AggregateQuery> for DerivedSource {
     }
 }
 
+/// A JOIN whose right side is a **derived table** (a subquery) rather
+/// than a model table — Eloquent's `joinSub` / `leftJoinSub`, or, with
+/// `lateral = true`, `joinLateral` / `leftJoinLateral`.
+///
+/// The writer emits `<kind> JOIN [LATERAL] (<subquery>) AS "<alias>"
+/// ON <on>`. There is no model schema behind the derived table, so
+/// `on` must qualify every one of its columns with
+/// [`Expr::AliasedColumn`] (`"<alias>"."<col>"`).
+///
+/// Unlike [`Join`], this adds **no** columns to the SELECT
+/// projection: it only filters or correlates, so a typed fetch still
+/// decodes the base model. Use an explicit `.values()` projection to
+/// read derived values.
+///
+/// `lateral` emits the `LATERAL` keyword, which lets the subquery read
+/// columns from earlier `FROM` items, such as the outer table — the
+/// "top-N rows per group" shape. **PG and MySQL ≥ 8.0.14 only**; the
+/// writer raises [`crate::sql::SqlError::LateralJoinNotSupported`] on
+/// SQLite.
+///
 /// [`Expr::AliasedColumn`]: crate::core::Expr::AliasedColumn
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubqueryJoin {
@@ -1238,14 +1134,15 @@ pub struct SubqueryJoin {
     pub subquery: DerivedSource,
     /// Alias the derived table is exposed under (`AS "<alias>"`).
     pub alias: &'static str,
-    /// `INNER` or `LEFT` (the only kinds meaningful for a derived-table
-    /// join; the QuerySet builders only construct these two).
+    /// `INNER` or `LEFT` — the only kinds that make sense for a
+    /// derived table, and the only two the QuerySet builders make.
     pub kind: JoinKind,
-    /// Join predicate. References the derived table as `"<alias>"."<col>"`
-    /// and the outer table by its own name — both via
-    /// [`Expr::AliasedColumn`]. For a `LATERAL` join the correlation
-    /// usually lives in the subquery's own `WHERE`, so `on` is left empty
-    /// (`WhereExpr::And(vec![])`) and the writer emits `ON true`.
+    /// Join predicate. It names the derived table as
+    /// `"<alias>"."<col>"` and the outer table by its own name, both
+    /// through [`Expr::AliasedColumn`]. A `LATERAL` join usually
+    /// correlates inside the subquery's own `WHERE`, so `on` stays
+    /// empty (`WhereExpr::And(vec![])`) and the writer emits
+    /// `ON true`.
     pub on: WhereExpr,
     /// Emit the `LATERAL` keyword (PG / MySQL only).
     pub lateral: bool,
@@ -1261,53 +1158,52 @@ pub struct SearchClause {
     pub query: String,
 }
 
-/// Compiled `INSERT` of a single row.
-///
-/// `columns` and `values` are positional: `values[i]` binds to `columns[i]`.
-/// Conflict resolution for `INSERT … ON CONFLICT` (Postgres-specific).
-///
-/// Attach to [`InsertQuery::on_conflict`] or [`BulkInsertQuery::on_conflict`]
-/// to control what happens when the insert would violate a unique constraint.
+/// What to do when an insert hits a unique constraint. Set it on
+/// [`InsertQuery::on_conflict`] or [`BulkInsertQuery::on_conflict`];
+/// the writer emits the right shape for each dialect.
 #[derive(Debug, Clone)]
 pub enum ConflictClause {
-    /// `ON CONFLICT DO NOTHING` — silently skip duplicate rows.
+    /// `ON CONFLICT DO NOTHING` — skip the duplicate rows.
     DoNothing,
-    /// `ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col` for each
-    /// column in `update_columns`. `target` names the column(s) whose
-    /// uniqueness constraint defines the conflict (typically the PK or a
-    /// `#[rustango(unique)]` column).
+    /// `ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col` for
+    /// every column in `update_columns`. `target` names the columns
+    /// whose unique constraint defines the conflict, usually the PK
+    /// or a `#[rustango(unique)]` column.
     DoUpdate {
         target: Vec<&'static str>,
         update_columns: Vec<&'static str>,
     },
 }
 
-/// `returning` names columns the writer should append after `RETURNING` —
-/// used for `Auto<T>` PKs, where the row is inserted with the column
-/// omitted so Postgres' sequence DEFAULT fires, and the assigned value
-/// is then read back into the model.
+/// Compiled `INSERT` of a single row.
+///
+/// `columns` and `values` are positional: `values[i]` binds to
+/// `columns[i]`.
 #[derive(Debug, Clone)]
 pub struct InsertQuery {
     pub model: &'static ModelSchema,
     pub columns: Vec<&'static str>,
     pub values: Vec<SqlValue>,
-    /// Columns to emit in a `RETURNING` clause. Empty = no clause; the
-    /// executor uses `execute()`. Non-empty = the executor uses
-    /// `fetch_one()` and the caller reads the returned row.
+    /// Columns for the `RETURNING` clause. Empty = no clause and the
+    /// executor calls `execute()`. Non-empty = it calls `fetch_one()`
+    /// and the caller reads the row back. This is how an `Auto<T>` PK
+    /// works: the column is left out of the insert so the sequence
+    /// default fires, then the new value is read back into the model.
     pub returning: Vec<&'static str>,
-    /// Optional `ON CONFLICT` clause. `None` = plain INSERT with no
-    /// conflict handling (errors on constraint violation).
+    /// Optional `ON CONFLICT` clause. `None` = a plain INSERT that
+    /// fails on a constraint violation.
     pub on_conflict: Option<ConflictClause>,
 }
 
 impl InsertQuery {
-    /// Walk each `(column, value)` pair and check it against the field's
-    /// declared bounds (`max_length`, `min`, `max`).
+    /// Check each `(column, value)` pair against the field's declared
+    /// bounds (`max_length`, `min`, `max`).
     ///
     /// # Errors
-    /// Returns [`QueryError::MaxLengthExceeded`] or [`QueryError::OutOfRange`]
-    /// for any violating value, or [`QueryError::UnknownField`] if a column
-    /// in the IR doesn't correspond to any field in `model`.
+    /// Returns [`QueryError::MaxLengthExceeded`] or
+    /// [`QueryError::OutOfRange`] for a bad value, or
+    /// [`QueryError::UnknownField`] if a column is not a field on
+    /// `model`.
     pub fn validate(&self) -> Result<(), QueryError> {
         for (column, value) in self.columns.iter().zip(self.values.iter()) {
             let field =
@@ -1323,21 +1219,19 @@ impl InsertQuery {
     }
 }
 
-/// Compiled multi-row `INSERT` — one round-trip for N rows.
+/// Compiled multi-row `INSERT` — one round trip for N rows.
 ///
-/// `rows[i]` is positional against `columns`: every row supplies the
-/// same column list in the same order. `returning` works the same way
-/// as on [`InsertQuery`]; non-empty means the executor uses
-/// `fetch_all` and returns one row per input row.
+/// `rows[i]` is positional against `columns`: every row gives the
+/// same columns in the same order. `returning` behaves as on
+/// [`InsertQuery`]; non-empty makes the executor use `fetch_all` and
+/// return one row per input row.
 ///
-/// Mixed-shape inserts (some rows opting a column out via the
-/// Postgres `DEFAULT` keyword) are not supported in v0.4 — every row
-/// must carry a value for every column. Models with `Auto<T>` PKs
-/// can either pass `Auto::Unset` for every row (the macro drops the
-/// Auto column from `columns` entirely and the sequence fires) or
-/// `Auto::Set(v)` for every row (the column is included with the
-/// supplied value). Mixed Set/Unset within one bulk_insert is
-/// rejected by the macro at validate time.
+/// Rows cannot differ in shape: no row may drop a column with the
+/// Postgres `DEFAULT` keyword, so every row needs a value for every
+/// column. With an `Auto<T>` PK, pass `Auto::Unset` for every row
+/// (the macro drops that column and the sequence fires) or
+/// `Auto::Set(v)` for every row. Mixing the two in one call is
+/// rejected at validate time.
 #[derive(Debug, Clone)]
 pub struct BulkInsertQuery {
     pub model: &'static ModelSchema,
@@ -1349,14 +1243,13 @@ pub struct BulkInsertQuery {
 }
 
 impl BulkInsertQuery {
-    /// Chainable builder — Django's `bulk_create(update_conflicts=True,
-    /// unique_fields=..., update_fields=...)`. Sets the `on_conflict`
-    /// clause to `DoUpdate { target, update_columns }`. Issue #267 / T1.5.
+    /// Chainable builder — upsert on conflict. Sets `on_conflict` to
+    /// `DoUpdate { target, update_columns }`.
     ///
-    /// Per-dialect emission (handled by the writer):
+    /// The writer emits:
     /// * Postgres / SQLite (3.24+): `ON CONFLICT (target) DO UPDATE SET col = EXCLUDED.col`
-    /// * MySQL: `ON DUPLICATE KEY UPDATE col = VALUES(col)` — target is
-    ///   not emitted (MySQL matches on every UNIQUE index automatically).
+    /// * MySQL: `ON DUPLICATE KEY UPDATE col = VALUES(col)` — no
+    ///   target, because MySQL matches every UNIQUE index by itself.
     #[must_use]
     pub fn on_conflict_do_update(
         mut self,
@@ -1370,12 +1263,12 @@ impl BulkInsertQuery {
         self
     }
 
-    /// Chainable builder — Django's `bulk_create(ignore_conflicts=True)`.
-    /// Sets the `on_conflict` clause to `DoNothing`. Issue #267 / T1.5.
+    /// Chainable builder — skip rows that conflict.
+    /// Sets `on_conflict` to `DoNothing`.
     ///
-    /// Per-dialect emission:
+    /// The writer emits:
     /// * Postgres / SQLite: `ON CONFLICT DO NOTHING`
-    /// * MySQL: `ON DUPLICATE KEY UPDATE <pivot> = <pivot>` — the
+    /// * MySQL: `ON DUPLICATE KEY UPDATE <pivot> = <pivot>`, the
     ///   no-op write trick.
     #[must_use]
     pub fn on_conflict_do_nothing(mut self) -> Self {
@@ -1385,8 +1278,8 @@ impl BulkInsertQuery {
 }
 
 impl BulkInsertQuery {
-    /// Walk every `(column, value)` pair in every row and check it
-    /// against the field's declared bounds.
+    /// Check every `(column, value)` pair in every row against the
+    /// field's declared bounds.
     ///
     /// # Errors
     /// As [`InsertQuery::validate`].
@@ -1407,16 +1300,14 @@ impl BulkInsertQuery {
     }
 }
 
-/// One `column = value` pair in an `UPDATE ... SET ...` clause.
+/// One `column = value` pair in an `UPDATE … SET …`.
 ///
-/// `value` is an [`Expr`] — it can be a literal (most common, `Expr::Literal`),
-/// a column reference (`Expr::Column` / `F("col")` — column-to-column copy),
-/// or an arithmetic tree (`F("col") + 1` — Django's atomic counter pattern).
-///
-/// Existing call sites that pass an [`SqlValue`] lift transparently
-/// via `impl From<SqlValue> for Expr` — the field's `Into`-bound public
-/// builders (`Column::set`, `UpdateBuilder::set`) keep their original
-/// signatures.
+/// `value` is an [`Expr`]: a literal (`Expr::Literal`, the common
+/// case), a column reference (`F("col")`, a column-to-column copy),
+/// or arithmetic (`F("col") + 1`, the atomic counter pattern). An
+/// [`SqlValue`] converts on its own through
+/// `impl From<SqlValue> for Expr`, so `Column::set` and
+/// `UpdateBuilder::set` keep their signatures.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
     pub column: &'static str,
@@ -1425,10 +1316,10 @@ pub struct Assignment {
 
 /// Compiled `UPDATE`.
 ///
-/// `set` are emitted in order before `WHERE`, so their placeholders
-/// come first. An empty `where_clause` (the default `WhereExpr::And(vec![])`)
-/// runs an unfiltered update affecting every row — the caller is
-/// responsible for that being intentional.
+/// `set` is emitted in order before `WHERE`, so its placeholders bind
+/// first. An empty `where_clause` (the default
+/// `WhereExpr::And(vec![])`) updates every row; the caller must mean
+/// that.
 #[derive(Debug, Clone)]
 pub struct UpdateQuery {
     pub model: &'static ModelSchema,
@@ -1437,9 +1328,9 @@ pub struct UpdateQuery {
 }
 
 impl UpdateQuery {
-    /// Walk each `SET column = value` and check it against the field's
-    /// declared bounds. Filters are not checked — they compare against
-    /// existing rows, not write targets.
+    /// Check each `SET column = value` against the field's declared
+    /// bounds. Filters are not checked: they read existing rows
+    /// instead of writing them.
     ///
     /// # Errors
     /// As [`InsertQuery::validate`].
@@ -1452,9 +1343,9 @@ impl UpdateQuery {
                     model: self.model.name,
                     field: assignment.column.to_owned(),
                 })?;
-            // Only literal rhs values are checkable against the field's
-            // declared bounds; column refs and arithmetic trees don't
-            // resolve to a single concrete value at compile time.
+            // Only a literal right side can be checked against the
+            // field's bounds; a column reference or arithmetic tree
+            // has no single value yet.
             if let Some(literal) = assignment.value.as_literal() {
                 validate_value(self.model.name, field, literal)?;
             }
@@ -1473,9 +1364,8 @@ pub struct DeleteQuery {
 }
 
 impl DeleteQuery {
-    /// Construct a `DELETE … WHERE <pk_column> = <pk_value>` shape.
-    /// Companion to [`SelectQuery::by_pk`] for the bulk- and
-    /// single-PK-delete patterns. #562 / #810.
+    /// A `DELETE … WHERE <pk_column> = <pk_value>`. Companion to
+    /// [`SelectQuery::by_pk`].
     #[must_use]
     pub fn by_pk(model: &'static ModelSchema, pk_column: &'static str, pk_value: SqlValue) -> Self {
         Self {
@@ -1488,9 +1378,9 @@ impl DeleteQuery {
         }
     }
 
-    /// Construct a `DELETE … WHERE <pk_column> IN (...)` shape — the
-    /// "delete-selected" admin / API pattern. Companion to
-    /// [`SelectQuery::by_pk_in`]. #810.
+    /// A `DELETE … WHERE <pk_column> IN (...)` — the "delete
+    /// selected" admin and API pattern. Companion to
+    /// [`SelectQuery::by_pk_in`].
     #[must_use]
     pub fn by_pk_in(
         model: &'static ModelSchema,
@@ -1508,50 +1398,50 @@ impl DeleteQuery {
     }
 }
 
-/// Compiled `SELECT COUNT(*)` — same shape as a `DeleteQuery` (model +
-/// where clause); the writer emits `COUNT(*)` projection and no
-/// `LIMIT`/`OFFSET`.
+/// Compiled `SELECT COUNT(*)` — model plus where clause, like a
+/// `DeleteQuery`. The writer emits a `COUNT(*)` projection and no
+/// `LIMIT` / `OFFSET`.
 #[derive(Debug, Clone)]
 pub struct CountQuery {
     pub model: &'static ModelSchema,
     pub where_clause: WhereExpr,
-    /// Optional ILIKE search across the supplied columns. When set
-    /// the count includes only rows that *also* match the search —
-    /// without this the page-number list endpoint reported the
-    /// wrong total whenever `?search=...` was active.
+    /// Optional ILIKE search over the given columns. When set, the
+    /// count keeps only rows that *also* match the search, so a
+    /// paginated list shows the right total while `?search=...` is
+    /// active.
     pub search: Option<SearchClause>,
 }
 
-/// Bulk per-row UPDATE using `UPDATE t SET … FROM (VALUES …)`. One row
-/// in the VALUES clause per input item; the PK identifies which table row
-/// to update.
+/// Bulk per-row UPDATE using `UPDATE t SET … FROM (VALUES …)`: one
+/// VALUES row per input item, and the PK picks the table row to
+/// update.
 ///
-/// All rows must supply the same `update_columns` list in the same order.
-/// The PK column must match `model.primary_key()`.
+/// Every row must give the same `update_columns` in the same order,
+/// and the PK column must match `model.primary_key()`.
 ///
-/// Built via [`crate::sql::bulk_update`] or directly.
+/// Run it with [`crate::sql::bulk_update_pool`], or build it directly.
 #[derive(Debug, Clone)]
 pub struct BulkUpdateQuery {
     pub model: &'static ModelSchema,
-    /// The column names to update (not including the PK).
+    /// The columns to update, not counting the PK.
     pub update_columns: Vec<&'static str>,
-    /// One inner `Vec<SqlValue>` per row: `[pk_value, col1_value, col2_value, …]`.
-    /// The first element is always the PK; the rest align with `update_columns`.
+    /// One `Vec<SqlValue>` per row:
+    /// `[pk_value, col1_value, col2_value, …]`. The first element is
+    /// always the PK; the rest line up with `update_columns`.
     pub rows: Vec<Vec<SqlValue>>,
 }
 
 /// One aggregate expression in an [`AggregateQuery`].
 ///
-/// The flat variants (`Count`, `Sum`, etc.) emit the standard
-/// `AGG(col)` shape; the two recursive wrappers ([`Filtered`] and
-/// [`Coalesced`], issue #6) compose on top to add a `FILTER (WHERE …)`
-/// predicate or a `COALESCE(…, default)` empty-result fallback.
+/// The flat variants (`Count`, `Sum`, …) emit the plain `AGG(col)`
+/// shape. [`Filtered`] and [`Coalesced`] wrap another aggregate to
+/// add a `FILTER (WHERE …)` predicate or a `COALESCE(…, default)`
+/// fallback for an empty result.
 ///
-/// Build via the higher-level helpers in [`crate::core::aggregates`]
+/// Build these with the helpers in [`crate::core::aggregates`]
 /// (`count`/`sum`/`avg`/`max`/`min`/`count_distinct`/`stddev`/
-/// `stddev_pop`/`variance`/`variance_pop`) rather than constructing
-/// these variants directly — the builder enforces the right wrap
-/// order (`Coalesced` outside `Filtered`).
+/// `stddev_pop`/`variance`/`variance_pop`) instead of by hand: they
+/// apply the required wrap order, `Coalesced` outside `Filtered`.
 ///
 /// [`Filtered`]: AggregateExpr::Filtered
 /// [`Coalesced`]: AggregateExpr::Coalesced
@@ -1559,8 +1449,7 @@ pub struct BulkUpdateQuery {
 pub enum AggregateExpr {
     /// `COUNT(*)` or `COUNT(column)` when `column` is `Some`.
     Count(Option<&'static str>),
-    /// `COUNT(DISTINCT column)` — counts distinct values in a column.
-    /// v0.45. Works on PG / MySQL 8+ / SQLite 3.35+.
+    /// `COUNT(DISTINCT column)`. PG, MySQL 8+, SQLite 3.35+.
     CountDistinct(&'static str),
     /// `SUM(column)`.
     Sum(&'static str),
@@ -1570,106 +1459,99 @@ pub enum AggregateExpr {
     Max(&'static str),
     /// `MIN(column)`.
     Min(&'static str),
-    /// `ANY_VALUE(column)` — an arbitrary value from the group's non-null
-    /// inputs (new in Django 6.0, #1025). Lets a functionally-dependent
-    /// column be projected without adding it to GROUP BY. PG 16+
-    /// `any_value()`, MySQL `ANY_VALUE()`, SQLite falls back to `min()`
-    /// (deterministic, satisfies the "arbitrary value" contract).
+    /// `ANY_VALUE(column)` — some value from the group's non-null
+    /// inputs. It lets a functionally dependent column
+    /// be projected without adding it to GROUP BY. PG 16+
+    /// `any_value()`, MySQL `ANY_VALUE()`; on SQLite the writer uses
+    /// `min()`, which is deterministic and still meets the contract.
     AnyValue(&'static str),
-    /// `STDDEV_SAMP(column)` — sample standard deviation. Issue #6.
-    /// Native on PG + MySQL 8+; the writer raises
-    /// [`crate::sql::SqlError::AggregateNotSupported`] on SQLite,
-    /// which has no built-in stddev (matches Django behavior).
+    /// `STDDEV_SAMP(column)` — sample standard deviation. Native on
+    /// PG and MySQL 8+. SQLite has none, so the writer raises
+    /// [`crate::sql::SqlError::AggregateNotSupported`].
     StdDev(&'static str),
-    /// `STDDEV_POP(column)` — population standard deviation. Issue #6.
-    /// Same dialect-support story as [`StdDev`](AggregateExpr::StdDev).
+    /// `STDDEV_POP(column)` — population standard deviation. Same
+    /// dialect support as [`StdDev`](AggregateExpr::StdDev).
     StdDevPop(&'static str),
-    /// `VAR_SAMP(column)` — sample variance. Issue #6.
-    /// Same dialect-support story as [`StdDev`](AggregateExpr::StdDev).
+    /// `VAR_SAMP(column)` — sample variance. Same dialect support as
+    /// [`StdDev`](AggregateExpr::StdDev).
     Variance(&'static str),
-    /// `VAR_POP(column)` — population variance. Issue #6.
-    /// Same dialect-support story as [`StdDev`](AggregateExpr::StdDev).
+    /// `VAR_POP(column)` — population variance. Same dialect support
+    /// as [`StdDev`](AggregateExpr::StdDev).
     VariancePop(&'static str),
-    /// `<inner> FILTER (WHERE <filter>)` on PG / SQLite (3.30+);
-    /// `<inner-with-CASE-WHEN-arg>` on MySQL. Issue #6. Wraps any
-    /// base aggregate (Count/Sum/Avg/Max/Min/CountDistinct/StdDev/
-    /// Variance/etc.) — nested `Filtered` is rejected at emit time
-    /// to keep emission unambiguous.
+    /// `<inner> FILTER (WHERE <filter>)` on PG / SQLite 3.30+; a
+    /// CASE-WHEN argument on MySQL. Wraps any base aggregate. A
+    /// nested `Filtered` is rejected at emit time, so the emission
+    /// stays unambiguous.
     Filtered {
         inner: Box<AggregateExpr>,
         filter: WhereExpr,
     },
-    /// `COALESCE(<inner>, <default>)` — empty-result fallback. Issue #6.
-    /// Always outermost when combined with `Filtered` (builder enforces
-    /// the order); nested `Coalesced` is rejected at emit time.
+    /// `COALESCE(<inner>, <default>)` — a fallback for an empty
+    /// result. Always outermost when combined with `Filtered` (the
+    /// builder enforces that); a nested `Coalesced` is rejected at
+    /// emit time.
     Coalesced {
         inner: Box<AggregateExpr>,
         default: SqlValue,
     },
-    /// Window function — `<fn>(args) OVER (PARTITION BY … ORDER BY …)`.
-    /// Issue #7. Conceptually distinct from an aggregate (operates
-    /// over a frame, not a group), but reuses the `annotate()` slot
-    /// because the projection shape is the same. Use the builders in
-    /// [`crate::core::window`] rather than constructing this variant
-    /// directly.
+    /// Window function — `<fn>(args) OVER (PARTITION BY … ORDER BY
+    /// …)`. Not really an aggregate, since it works over a frame
+    /// rather than a group, but it shares the `annotate()` slot
+    /// because the projection shape is the same. Build it with
+    /// [`crate::core::window`].
     Window(Box<super::window::WindowExpr>),
-    /// PG: `array_agg(column)` — collects column values into a Postgres
-    /// array. With `distinct = true` emits `array_agg(DISTINCT column)`.
-    /// Issue #33. **Postgres-only**: MySQL/SQLite emit
-    /// `SqlError::AggregateNotSupportedInDialect`. The returned column
-    /// is a `text[]` / `int[]` depending on the input type; decode it as
-    /// `Vec<T>` via `serde_json::Value` if the SqlValue decoder doesn't
-    /// recognise the array type natively.
+    /// PG `array_agg(column)`, collecting values into an array, or
+    /// `array_agg(DISTINCT column)` when `distinct`. **Postgres-only**:
+    /// MySQL and SQLite raise
+    /// `SqlError::AggregateNotSupportedInDialect`. The result column
+    /// is a `text[]` or `int[]`; decode it as `Vec<T>` through
+    /// `serde_json::Value` if the `SqlValue` decoder does not know
+    /// that array type.
     ArrayAgg {
         column: &'static str,
         distinct: bool,
     },
-    /// PG: `string_agg(column, delimiter)` — concatenates column values
-    /// with `delimiter`. With `distinct = true` emits
-    /// `string_agg(DISTINCT column, delimiter)`. `delimiter` is bound as
-    /// a parameter so SQL injection through the delimiter is impossible.
-    /// Issue #33. **Postgres-only**.
+    /// PG `string_agg(column, delimiter)`, joining values with
+    /// `delimiter`, or `string_agg(DISTINCT column, delimiter)` when
+    /// `distinct`. The delimiter is bound as a parameter, so it
+    /// cannot carry SQL injection. **Postgres-only**.
     StringAgg {
         column: &'static str,
         delimiter: String,
         distinct: bool,
-        /// `ORDER BY` inside the aggregate (Django 6.0 `Aggregate(order_by=…)`,
-        /// #1026). Empty = backend-arbitrary order. With `distinct`, every
-        /// clause must order by `column` itself (validated at emit).
+        /// `ORDER BY` inside the aggregate. Empty = the backend picks the
+        /// order. With `distinct`, every clause must order by
+        /// `column` itself; that is checked at emit time.
         order_by: Vec<OrderClause>,
     },
-    /// PG: `jsonb_agg(column)` — collects column values into a JSONB
-    /// array. Issue #33. **Postgres-only**.
+    /// PG `jsonb_agg(column)`, collecting values into a JSONB array.
+    /// **Postgres-only**.
     JsonbAgg { column: &'static str },
-    /// Correlated relation aggregate — `withCount`/`withSum`/`withAvg`/
-    /// `withMax`/`withMin` by relation name (issue #830 slice 4/5).
+    /// Correlated relation aggregate — `withCount` / `withSum` /
+    /// `withAvg` / `withMax` / `withMin` by relation name.
     ///
-    /// Wraps the correlated subquery [`Expr`] (always an
-    /// [`Expr::AggregateSubquery`]) produced by the
-    /// [`crate::core::subquery::reverse_has_aggregate`] family. Unlike
-    /// the flat variants, the aggregation happens *inside* the wrapped
-    /// subquery (over the **child** table); from the enclosing query's
-    /// perspective this is a per-row scalar.
+    /// It wraps the correlated subquery [`Expr`] (always an
+    /// [`Expr::AggregateSubquery`]) built by the
+    /// [`crate::core::subquery::reverse_has_aggregate`] family. The
+    /// aggregation happens *inside* that subquery, over the **child**
+    /// table; the outer query sees one scalar per row.
     ///
-    /// It reports [`is_aggregating()`](AggregateExpr::is_aggregating)
-    /// `== true` so the builder's GROUP-BY inference (Django Shape 3)
-    /// projects the parent's scalar columns alongside it — yielding
-    /// `{parent cols…, <rel>_<agg>}` dict rows. Because the count comes
-    /// from a correlated subquery (not a JOIN), it never double-counts.
-    /// The writer emits it via the same `Expr` path the WHERE-clause
-    /// `where_has_count` uses, so it lowers identically on PG / MySQL /
-    /// SQLite.
+    /// [`is_aggregating()`](AggregateExpr::is_aggregating) returns
+    /// `true`, so the builder's GROUP BY inference also projects the
+    /// parent's scalar columns and rows come back as
+    /// `{parent cols…, <rel>_<agg>}`. The value comes from a
+    /// correlated subquery, not a JOIN, so it never double-counts.
     RelatedAggregate(Box<Expr>),
 }
 
 impl AggregateExpr {
-    /// Whether this annotation actually aggregates rows (and therefore
-    /// triggers GROUP BY auto-inference, issue #75).
+    /// Whether this annotation collapses rows, and so makes the
+    /// builder infer a GROUP BY.
     ///
     /// - `Count` / `Sum` / `Avg` / `Max` / `Min` / `CountDistinct` /
     ///   `StdDev*` / `Variance*` / `ArrayAgg` / `StringAgg` / `JsonbAgg`
-    ///   → **aggregating** (collapses rows).
-    /// - `Window` → **not aggregating** (per-row computation over a frame).
+    ///   → **aggregating**.
+    /// - `Window` → **not aggregating** (per row, over a frame).
     /// - `Filtered { inner }` / `Coalesced { inner }` → recurse on `inner`.
     #[must_use]
     pub fn is_aggregating(&self) -> bool {
@@ -1688,13 +1570,13 @@ impl AggregateExpr {
             | AggregateExpr::ArrayAgg { .. }
             | AggregateExpr::StringAgg { .. }
             | AggregateExpr::JsonbAgg { .. }
-            // The wrapped correlated subquery aggregates the *child*
-            // table; from the outer query's view it's a scalar, but we
-            // report `true` so the builder's Shape-3 inference adds the
-            // parent's scalar columns to GROUP BY (and thus the SELECT),
-            // surfacing `{parent cols…, <rel>_<agg>}` rows. The PK is in
-            // GROUP BY, so the correlated reference is functionally
-            // determined — valid under MySQL `ONLY_FULL_GROUP_BY` too.
+            // The wrapped subquery aggregates the *child* table, and
+            // the outer query sees a scalar. Report `true` anyway, so
+            // the builder adds the parent's scalar columns to GROUP
+            // BY and to the SELECT, giving `{parent cols…,
+            // <rel>_<agg>}` rows. The PK is in GROUP BY, so the
+            // correlated value is functionally determined and MySQL
+            // `ONLY_FULL_GROUP_BY` accepts it.
             | AggregateExpr::RelatedAggregate(_) => true,
             AggregateExpr::Window(_) => false,
             AggregateExpr::Filtered { inner, .. } | AggregateExpr::Coalesced { inner, .. } => {
@@ -1703,8 +1585,7 @@ impl AggregateExpr {
         }
     }
 
-    /// Ergonomic constructor for [`AggregateExpr::ArrayAgg`] without
-    /// `DISTINCT`. Issue #33.
+    /// [`AggregateExpr::ArrayAgg`] without `DISTINCT`.
     #[must_use]
     pub const fn array_agg(column: &'static str) -> Self {
         Self::ArrayAgg {
@@ -1713,7 +1594,7 @@ impl AggregateExpr {
         }
     }
 
-    /// Ergonomic constructor for `array_agg(DISTINCT column)`. Issue #33.
+    /// `array_agg(DISTINCT column)`.
     #[must_use]
     pub const fn array_agg_distinct(column: &'static str) -> Self {
         Self::ArrayAgg {
@@ -1722,8 +1603,7 @@ impl AggregateExpr {
         }
     }
 
-    /// Ergonomic constructor for [`AggregateExpr::StringAgg`] without
-    /// `DISTINCT`. Issue #33.
+    /// [`AggregateExpr::StringAgg`] without `DISTINCT`.
     #[must_use]
     pub fn string_agg(column: &'static str, delimiter: impl Into<String>) -> Self {
         Self::StringAgg {
@@ -1734,8 +1614,7 @@ impl AggregateExpr {
         }
     }
 
-    /// Ergonomic constructor for `string_agg(DISTINCT column, delimiter)`.
-    /// Issue #33.
+    /// `string_agg(DISTINCT column, delimiter)`.
     #[must_use]
     pub fn string_agg_distinct(column: &'static str, delimiter: impl Into<String>) -> Self {
         Self::StringAgg {
@@ -1746,9 +1625,10 @@ impl AggregateExpr {
         }
     }
 
-    /// `string_agg(column, delimiter ORDER BY …)` — ordered concatenation
-    /// (Django 6.0 `Aggregate(order_by=…)`, #1026). `order` is a slice of
-    /// `(column, desc)` pairs (the `WindowBuilder::order_by` convention).
+    /// `string_agg(column, delimiter ORDER BY …)` — ordered
+    /// concatenation. `order` is
+    /// a slice of `(column, desc)` pairs, as in
+    /// `WindowBuilder::order_by`.
     #[must_use]
     pub fn string_agg_ordered(
         column: &'static str,
@@ -1769,9 +1649,9 @@ impl AggregateExpr {
         }
     }
 
-    /// `string_agg(DISTINCT column, delimiter ORDER BY …)` (#1026). With
-    /// DISTINCT, `order` may only reference `column` itself — enforced at
-    /// emit time (PG hard requirement; portable-safe everywhere).
+    /// `string_agg(DISTINCT column, delimiter ORDER BY …)`. With
+    /// DISTINCT, `order` may only name `column` itself; PG requires
+    /// that, and the emit step checks it on every dialect.
     #[must_use]
     pub fn string_agg_distinct_ordered(
         column: &'static str,
@@ -1792,7 +1672,7 @@ impl AggregateExpr {
         }
     }
 
-    /// Ergonomic constructor for [`AggregateExpr::JsonbAgg`]. Issue #33.
+    /// [`AggregateExpr::JsonbAgg`].
     #[must_use]
     pub const fn jsonb_agg(column: &'static str) -> Self {
         Self::JsonbAgg { column }
@@ -1806,32 +1686,33 @@ impl AggregateExpr {
 #[derive(Debug, Clone)]
 pub struct AggregateQuery {
     pub model: &'static ModelSchema,
-    /// FK-chain / ad-hoc JOINs (#1040) — lets an aggregate group by a
-    /// *related* column (`values("author.name").annotate(Count)`). Empty
-    /// for the common single-table aggregate. Emitted between `FROM` and
+    /// FK-chain and ad-hoc JOINs, so an aggregate can group by a
+    /// *related* column (`values("author.name").annotate(Count)`).
+    /// Empty for a single-table aggregate. Emitted between `FROM` and
     /// `WHERE`, same shape as [`SelectQuery::joins`].
     pub joins: Vec<Join>,
     pub where_clause: WhereExpr,
     /// Columns to group by. A bare name (`"status"`) is a column on
-    /// `model`; a dotted name (`"author.name"`) references a JOINed
-    /// alias (#1040) and is emitted qualified + skips model validation.
+    /// `model`; a dotted name (`"author.name"`) points at a JOINed
+    /// alias, is emitted qualified, and skips model validation.
     pub group_by: Vec<&'static str>,
-    /// `(alias, expr)` pairs — the alias becomes the key in each result row.
+    /// `(alias, expr)` pairs — the alias is the key in each result
+    /// row.
     ///
-    /// The alias is a [`Cow<'static, str>`] rather than a bare
-    /// `&'static str`: most call sites pass a literal (e.g.
+    /// The alias is a [`Cow<'static, str>`], not a bare
+    /// `&'static str`: most call sites pass a literal (such as
     /// `Cow::Borrowed("post_count")`), but the relation-aggregate
-    /// shortcuts ([`crate::query::QuerySet::annotate_count`] et al.,
-    /// issue #830) auto-name their column from a runtime relation name
-    /// (`{rel}_count`, `{rel}_sum_{col}`), which requires an owned
+    /// shortcuts ([`crate::query::QuerySet::annotate_count`] and
+    /// friends) name the column from a runtime relation name
+    /// (`{rel}_count`, `{rel}_sum_{col}`), which needs an owned
     /// string.
     pub aggregates: Vec<(Cow<'static, str>, AggregateExpr)>,
-    /// Non-projected annotations — Django 3.2 `.alias()`. Same `(name, expr)`
-    /// shape as [`Self::aggregates`] but the writer omits these from the SELECT
-    /// projection. They remain resolvable inside `HAVING` and `ORDER BY` (the
-    /// builder lifts the expression in-place at compile time). Useful when you
-    /// want to filter/order by a derived aggregate without paying the
-    /// column-decode cost. Issue #268.
+    /// Non-projected annotations, from `.alias()`. Same
+    /// `(name, expr)` shape as [`Self::aggregates`], but the writer
+    /// leaves them out of the SELECT projection. They still resolve
+    /// in `HAVING` and `ORDER BY`, because the builder inlines the
+    /// expression at compile time. Use them to filter or order by a
+    /// derived aggregate without paying to decode the column.
     pub aliases: Vec<(Cow<'static, str>, AggregateExpr)>,
     /// Optional HAVING clause (applied after GROUP BY).
     pub having: Option<WhereExpr>,
@@ -1840,12 +1721,11 @@ pub struct AggregateQuery {
     pub offset: Option<i64>,
 }
 
-/// PartialEq for `AggregateQuery` — needed so [`crate::core::Expr`]
-/// (which embeds `Box<AggregateQuery>` for issue #830 correlated
-/// count-comparator subqueries) can keep its `#[derive(PartialEq)]`.
-/// Same treatment as [`SelectQuery`]: `ModelSchema` doesn't implement
-/// `PartialEq`, so `model` is compared by pointer identity — two
-/// queries against the same (singleton) schema register equal.
+/// `PartialEq` for `AggregateQuery`, so [`crate::core::Expr`] (which
+/// boxes one for correlated count-comparator subqueries) can keep its
+/// derive. Same as [`SelectQuery`]: `ModelSchema` has no `PartialEq`,
+/// so `model` is compared by pointer, and two queries against the
+/// same singleton schema are equal.
 impl PartialEq for AggregateQuery {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self.model, other.model)

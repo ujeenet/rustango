@@ -1,6 +1,5 @@
-//! Django-parity #375 — `ModelForm::prepare_save()` returns a
-//! mutable `PreparedSave` (Django's `form.save(commit=False)`
-//! shape) the caller can mutate before
+//! Issue #375 — `ModelForm::prepare_save()` returns a mutable
+//! `PreparedSave` the caller can adjust before
 //! `PreparedSave::commit_pool` actually runs the INSERT.
 //!
 //! Validates the canonical use case: the form omits a column the
@@ -75,8 +74,8 @@ async fn prepare_save_then_set_session_field_then_commit_inserts_row() {
     assert!(prep.is_insert(), "no pk supplied → INSERT");
     assert!(!prep.has("author_id"), "session field intentionally absent");
 
-    // View layer adds the session-derived field before commit —
-    // the same shape as Django's `obj = form.save(commit=False); obj.author = request.user; obj.save()`.
+    // View layer adds the session-derived field before commit:
+    // prepare, set the column the form never saw, then commit.
     prep.set("author_id", SqlValue::I64(42));
     assert!(prep.has("author_id"));
 

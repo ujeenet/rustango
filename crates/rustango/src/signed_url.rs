@@ -6,16 +6,15 @@
 //! - Time-limited file download URLs
 //! - "Click here to verify your email" links
 //!
-//! ## NOT single-use (audit N1)
+//! ## These links are not single-use
 //!
-//! [`verify`] only checks the signature + expiry — it does **not** make
-//! a URL one-time. Until the `expires` window passes, a leaked link
-//! (Referer header, browser history, proxy/access logs, a shared URL)
-//! verifies again and again. For anything that authenticates or mutates
-//! on click (magic-link login, password reset), enforce single use:
-//! either delete/rotate the underlying record after first use, or use
-//! the cache-backed `verify_single_use` variants in
-//! [`crate::auth_flows`].
+//! [`verify`] checks the signature and the expiry, nothing else. A
+//! link that leaks through a Referer header, browser history, a proxy
+//! log or a forwarded message keeps working until it expires.
+//!
+//! For a link that logs someone in or changes data, enforce single
+//! use yourself: delete or rotate the record after the first click,
+//! or use the `verify_single_use` variants in [`crate::auth_flows`].
 //!
 //! ## Quick start
 //!
@@ -39,10 +38,13 @@
 //!
 //! ## How it works
 //!
-//! Appends `?signature=<base64>&expires=<unix_secs>` to the URL. The signature
-//! is HMAC-SHA256 over `<scheme>://<host>/<path>?<sorted-query-without-signature>`.
-//! Sorting the query parameters before signing makes the URL canonical so query
-//! ordering can't be used to forge mismatches.
+//! It appends `?signature=<base64>&expires=<unix_secs>`. The
+//! signature is HMAC-SHA256 over the scheme, host, path and the
+//! sorted query without the signature itself. Sorting first means the
+//! same URL always signs the same, whatever order the params arrive
+//! in.
+//!
+//! [`verify`]: crate::signed_url::verify
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -65,16 +67,15 @@ pub enum SignedUrlError {
 const SIGNATURE_PARAM: &str = "signature";
 const EXPIRES_PARAM: &str = "expires";
 
-/// Sign `url` with `secret`, optionally with an expiry from "now".
+/// Sign `url` with `secret`, with an optional lifetime from now.
 ///
-/// Returns the URL with `?signature=...&expires=...` appended (or `&` if
-/// the URL already has a query string).
+/// It returns the URL with `signature` and `expires` added to the
+/// query string.
 #[must_use]
 pub fn sign(url: &str, secret: &[u8], ttl: Option<Duration>) -> String {
-    // Opposite fallback to `current_unix_secs`, and deliberately so:
-    // both directions fail closed. A broken clock here mints a URL
-    // stamped in 1970, i.e. already expired; answering `u64::MAX`
-    // would mint one that never expires.
+    // The opposite fallback to `current_unix_secs`, on purpose: both
+    // fail closed. A broken clock here stamps the URL in 1970, so it
+    // is already expired. `u64::MAX` would never expire.
     let expires = ttl.map(|d| {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -83,7 +84,7 @@ pub fn sign(url: &str, secret: &[u8], ttl: Option<Duration>) -> String {
     sign_at(url, secret, expires)
 }
 
-/// Sign `url` at a specific unix-seconds expiry — useful for tests.
+/// Like [`sign`], but with the expiry given as unix seconds.
 #[must_use]
 pub fn sign_at(url: &str, secret: &[u8], expires_at: Option<u64>) -> String {
     let (base, mut params) = parse_url(url);
@@ -97,8 +98,8 @@ pub fn sign_at(url: &str, secret: &[u8], expires_at: Option<u64>) -> String {
     rebuild_url(&base, &params)
 }
 
-/// Verify the signature on `url` against `secret`. Returns `Ok(())` when
-/// the URL is valid and (if it has an `expires` param) not yet expired.
+/// Check the signature on `url`. It returns `Ok(())` when the URL is
+/// genuine and, if it carries `expires`, still in date.
 ///
 /// # Errors
 /// [`SignedUrlError`] variants describe the specific failure mode.
@@ -106,7 +107,11 @@ pub fn verify(url: &str, secret: &[u8]) -> Result<(), SignedUrlError> {
     verify_at(url, secret, current_unix_secs())
 }
 
-/// Verify at a specific unix-seconds wall-clock time — useful for tests.
+/// Like [`verify`], but with the current time given in unix seconds.
+/// Useful in tests.
+///
+/// # Errors
+/// See [`SignedUrlError`].
 pub fn verify_at(url: &str, secret: &[u8], now_secs: u64) -> Result<(), SignedUrlError> {
     let (base, mut params) = parse_url(url);
 
@@ -146,19 +151,17 @@ pub fn verify_at(url: &str, secret: &[u8], now_secs: u64) -> Result<(), SignedUr
 
 /// Wall clock in unix seconds, failing **closed**.
 ///
-/// `duration_since` errors when the clock is before 1970 — a dead
-/// RTC battery, a bad NTP step, a container starting at epoch 0.
-/// This used to answer `0`, which makes `now > exp` false for every
-/// timestamp, so every expired URL verified (#1542). `u64::MAX`
-/// expires everything instead: a broken clock should refuse signed
-/// URLs, not honour them forever.
+/// `duration_since` fails when the clock is before 1970: a dead RTC
+/// battery, a bad NTP step, a container that starts at epoch 0. This
+/// answers `u64::MAX` so every URL counts as expired. Answering `0`
+/// would make `now > exp` false for every stamp, so a broken clock
+/// would accept every expired link.
 fn current_unix_secs() -> u64 {
     clock_secs(SystemTime::now().duration_since(UNIX_EPOCH))
 }
 
-/// The fallback itself, split out so it is reachable from a test —
-/// the clock cannot be broken on demand, and asserting this through
-/// `verify_at` would only re-measure the caller's own argument.
+/// The fallback value, split out so a test can reach it. The clock
+/// cannot be broken on demand.
 fn clock_secs<E>(elapsed: Result<Duration, E>) -> u64 {
     elapsed.map_or(u64::MAX, |t| t.as_secs())
 }
@@ -180,7 +183,7 @@ fn parse_url(url: &str) -> (String, Vec<(String, String)>) {
 }
 
 fn canonicalize(base: &str, params: &[(String, String)]) -> String {
-    // Stable sort by key, then value, so query-param ordering can't forge.
+    // Sort by key then value, so param order cannot change the sig.
     let mut sorted: Vec<&(String, String)> = params.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     let qs: Vec<String> = sorted
@@ -225,12 +228,7 @@ fn encode_component(s: &str) -> String {
         .collect()
 }
 
-// `decode_component` was a private percent-decoder duplicated
-// verbatim across `signed_url`, `auth_flows`, and `tenancy::admin`.
-// Consolidated into [`crate::url_codec::url_decode`] — the shared
-// helper also fixes a latent bug where malformed UTF-8 silently
-// wiped the entire output (the old `from_utf8(out).unwrap_or_default()`
-// shape).
+// Percent-decoding lives in `crate::url_codec::url_decode`.
 use crate::url_codec::url_decode as decode_component;
 
 #[cfg(test)]
@@ -340,13 +338,12 @@ mod tests {
 
     #[test]
     fn a_clock_before_1970_expires_everything_instead_of_nothing() {
-        // #1542. `current_unix_secs` answers `u64::MAX` when
-        // `duration_since(UNIX_EPOCH)` fails, so `now > exp` holds for
-        // every stamp a URL can carry. It used to answer `0`, which
-        // made that comparison false for all of them — one dead RTC
-        // battery and every expired signed URL verified again.
+        // `current_unix_secs` answers `u64::MAX` when the clock is
+        // unreadable, so `now > exp` holds for every stamp and all
+        // links expire. With `0` the opposite happens: one dead RTC
+        // battery and every expired link verifies again.
         //
-        // The fallback itself, which is the thing that was wrong:
+        // First, the fallback value itself:
         assert_eq!(
             clock_secs::<()>(Err(())),
             u64::MAX,
@@ -354,7 +351,7 @@ mod tests {
         );
         assert_eq!(clock_secs::<()>(Ok(Duration::from_secs(42))), 42);
 
-        // …and what that value then does to a real verification.
+        // …then what it does to a real verification.
         let url = sign_at("https://example.com/f.pdf", SECRET, Some(2_000_000_000));
         assert_eq!(
             verify_at(&url, SECRET, u64::MAX),
@@ -370,9 +367,9 @@ mod tests {
 
     #[test]
     fn signing_with_a_broken_clock_mints_an_already_dead_url() {
-        // The other direction of #1542: `sign` keeps the `0` fallback
-        // on purpose. A 1970 stamp is refused by any sane clock, where
-        // `u64::MAX` would mint a URL that never expires.
+        // The other direction: `sign` keeps the `0` fallback on
+        // purpose. A 1970 stamp is refused by any working clock,
+        // where `u64::MAX` would mint a URL that never expires.
         let url = sign_at("https://example.com/f.pdf", SECRET, Some(3_600));
         assert_eq!(
             verify_at(&url, SECRET, 1_700_000_000),

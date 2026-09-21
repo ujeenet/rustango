@@ -1,7 +1,7 @@
 # Access decorators
 
-Once a user is authenticated, you gate routes. **Rustango** ships Django's
-`@login_required` family as composable axum **layers**: attach one to a router
+Once a user is authenticated, you gate routes. **Rustango** ships a
+`login_required` family of composable axum **layers**: attach one to a router
 and anonymous requests are turned away — 302'd to your login page (browser flow)
 or answered with 401/403 (API flow) — before they ever reach the handler.
 

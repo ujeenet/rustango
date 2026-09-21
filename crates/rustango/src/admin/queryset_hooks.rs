@@ -1,23 +1,13 @@
-//! Django-shape `ModelAdmin.get_queryset(self, request)` — issue #360.
+//! Request-aware scoping for the admin list view: a hook that reads
+//! the request and narrows the rows the list may show.
 //!
-//! Django lets a ModelAdmin scope its list view by overriding
-//! `get_queryset(request)` — return a filtered queryset based on
-//! the request user, headers, or any other per-request signal.
-//! Common uses:
+//! An inventory registry of `(table, fn(&Parts) -> Vec<Filter>)`
+//! entries. The list view walks it per request and adds the filters to
+//! its WHERE clause. Use it to hide soft-deleted rows, show only rows
+//! the current user owns, or scope by tenant.
 //!
-//! - Hide soft-deleted rows.
-//! - Show only the rows the current user owns.
-//! - Filter by tenant when the admin runs outside the tenancy
-//!   middleware.
-//! - Restrict to a date window pulled from a session cookie.
-//!
-//! rustango's admin had `manager_fn` (compile-time QuerySet
-//! shortcut) and the per-Builder `show_only` / `read_only`
-//! allowlists, but no *request-aware* hook. This module ships the
-//! equivalent: an inventory-collected registry of
-//! `(table, fn(&Parts) -> Vec<Filter>)` entries that the admin
-//! list view walks at request time and appends to the WHERE
-//! clause.
+//! `manager_fn` and the `show_only` / `read_only` allowlists are the
+//! compile-time equivalents; this hook sees the request.
 //!
 //! ## Usage
 //!
@@ -36,25 +26,17 @@
 //! rustango::register_admin_queryset!("blog_post", only_published);
 //! ```
 //!
-//! Now `/admin/blog_post` automatically appends `AND is_published =
-//! true` to its SELECT, no matter what other filter params the URL
-//! carries. Multiple registrations on the same table compose — the
-//! filters from every hook are appended in registration order.
+//! `/admin/blog_post` now always adds `AND is_published = true` to its
+//! SELECT, whatever else the URL asks for. Several hooks on one table
+//! compose: their filters are added in registration order.
 //!
-//! ## Why a hook returning predicates instead of a full QuerySet?
+//! A hook returns predicates rather than a whole queryset because the
+//! list view already builds its SELECT from the admin config, the
+//! query params and custom filters. Adding `Filter`s to that pipeline
+//! composes with search, facets, ordering, pagination and
+//! `list_select_related`, none of which need to know hooks exist.
 //!
-//! rustango's admin already builds its `SELECT` from the
-//! `AdminConfig` + per-request query params + custom filters. The
-//! hook integrates by adding more `Filter`s to that same pipeline,
-//! which is the smallest possible surface — it composes with
-//! search, facets, ordering, pagination, and `list_select_related`
-//! without any of them needing to know hooks exist. Django's full-
-//! QuerySet override is more flexible in principle but the
-//! incremental-filter shape covers 95% of real use cases.
-//!
-//! ## Why inventory storage requires `fn` pointers
-//!
-//! Same const-constructible reason as
+//! Hooks are `fn` pointers for the same const-storage reason as
 //! [`crate::admin::custom_views::CustomViewHandler`] and
 //! [`crate::template_extensions::TeraFilterFn`].
 
@@ -62,22 +44,20 @@ use axum::http::request::Parts;
 
 use crate::core::Filter;
 
-/// Signature of an admin queryset hook. Receives the per-request
-/// [`Parts`] (headers + uri + method + extensions, minus body) and
-/// returns extra [`Filter`]s to append to the list view's WHERE
-/// clause.
+/// An admin queryset hook. Takes the request [`Parts`], which hold
+/// everything but the body, and returns extra [`Filter`]s for the list
+/// view's WHERE clause.
 ///
-/// Plain `fn` pointer (not `Arc<dyn Fn>`) so the registration can
-/// live in `inventory::submit!`'s `static` storage.
+/// A plain `fn` pointer, not `Arc<dyn Fn>`, so the registration fits
+/// in inventory's const storage.
 pub type QuerySetHookFn = fn(&Parts) -> Vec<Filter>;
 
-/// One per-table queryset hook registration. Inventory-collected
-/// via [`crate::register_admin_queryset!`].
+/// One queryset hook registration, collected by inventory via
+/// [`crate::register_admin_queryset!`].
 pub struct AdminQuerySetHook {
-    /// Model table the hook applies to — must match
-    /// `ModelSchema::table` exactly. Hooks registered against a
-    /// table that isn't visible (filtered out by `show_only` etc.)
-    /// run only on the routes that are actually mounted.
+    /// Model table the hook applies to. Must equal
+    /// `ModelSchema::table`. A hook only runs on mounted routes, so a
+    /// table hidden by `show_only` never reaches it.
     pub table: &'static str,
     /// The callable.
     pub hook: QuerySetHookFn,
@@ -85,10 +65,8 @@ pub struct AdminQuerySetHook {
 
 inventory::collect!(AdminQuerySetHook);
 
-/// Return every hook registered for `table`, in registration order.
-/// The admin list view applies them in this order; the surface is
-/// commutative for ANDed predicates so the order is observable
-/// only through tracing logs.
+/// Every hook registered for `table`, in registration order. The
+/// filters are ANDed, so the order only shows up in the logs.
 #[must_use]
 pub fn for_table(table: &str) -> Vec<&'static AdminQuerySetHook> {
     inventory::iter::<AdminQuerySetHook>
@@ -97,12 +75,11 @@ pub fn for_table(table: &str) -> Vec<&'static AdminQuerySetHook> {
         .collect()
 }
 
-/// Register an admin queryset hook scoped to one model.
+/// Register an admin queryset hook for one model.
 ///
-/// See the module-level docs for semantics + use cases. The hook
-/// callable must be a plain `fn` or non-capturing closure that
-/// coerces to [`QuerySetHookFn`] — `inventory::submit!`'s static
-/// storage doesn't accept `Arc<dyn Fn>`.
+/// See the module docs for what it does. The hook must be a plain
+/// `fn`, or a closure with no captures, that coerces to
+/// [`QuerySetHookFn`].
 ///
 /// ```ignore
 /// fn only_owned(parts: &axum::http::request::Parts) -> Vec<rustango::core::Filter> {

@@ -481,7 +481,7 @@ mod advanced_attrs {
     #[serializer(model = V044Comment)]
     struct CommentWithAuthorSlug {
         pub body: String,
-        // DRF SlugRelatedField: serialize the FK as a string slug
+        // Slug-related field: serialize the FK as a string slug
         // (here the author's `name` field) instead of an i64 PK.
         #[serializer(slug = "name", source = "author")]
         pub author_name: String,

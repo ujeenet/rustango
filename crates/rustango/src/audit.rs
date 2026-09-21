@@ -1,57 +1,45 @@
-//! Audit log — single composite-key table that captures every
-//! tracked write (insert, update, delete, soft-delete) across every
-//! model whose declaration carries `#[rustango(audit(...))]`.
+//! Audit log — one table that records every tracked write (insert,
+//! update, delete, soft-delete) for models declared with
+//! `#[rustango(audit(...))]`.
 //!
-//! The composite key is `(entity_table, entity_pk)` rather than a
-//! per-model FK, so one table works for any number of models with
-//! different PK shapes (i64, UUID, composite keys stringified). This
-//! also keeps the schema flat — operators query `WHERE entity_table =
-//! 'post' AND entity_pk = '42'` for a single row's history, and
-//! `WHERE entity_table = 'post' ORDER BY occurred_at DESC` for a
-//! per-table activity feed.
+//! Rows are keyed by `(entity_table, entity_pk)` instead of a per-model FK,
+//! so one flat table serves any number of models with any PK shape. Query
+//! `WHERE entity_table = 'post' AND entity_pk = '42'` for one row's
+//! history, or drop the second clause for a per-table activity feed.
 //!
-//! Audit lives **per-tenant** for tenancy projects (the table is
-//! created in each tenant's schema/database alongside the app's
-//! data) and per-database for stand-alone projects.
+//! The table is **per-tenant** in tenancy projects and per-database
+//! otherwise.
 //!
 //! ## Source of change
 //!
-//! [`AuditSource`] flows through a tokio task-local so request
-//! handlers, seed scripts, and background jobs can declare who's
-//! making the write without threading a context object through every
-//! ORM call. Default is [`AuditSource::System`]. Per-call override is
-//! `Model::save_on_with(conn, source)` — see the macro-generated
-//! variants. Admin handlers install the user's session id when the
-//! request enters; seed scripts can set `AuditSource::System` (or
-//! a custom variant) for their lifetime.
+//! [`AuditSource`] travels in a tokio task-local, so handlers, seed
+//! scripts and jobs can say who made a write without passing a context
+//! object through every ORM call. The default is [`AuditSource::System`].
+//! Override one call with `Model::save_on_with(conn, source)`.
 //!
 //! ## What gets logged
 //!
-//! Per-row writes (`save_on`, `insert_on`, `update_on`, `delete_on`,
-//! `soft_delete_on`, `restore_on`) capture before/after values for
-//! every field listed in the model's `audit(track = "...")`
-//! attribute. Bulk variants (`bulk_insert_on`, `bulk_update_on`)
-//! batch their entries into a single `INSERT INTO audit_log` after
-//! the data write so audit overhead is one extra round-trip even
-//! over thousands of rows.
+//! Per-row writes record before/after values for every field named in the
+//! model's `audit(track = "...")`. Bulk writes collect their entries and
+//! insert them in one statement after the data write, so the cost stays at
+//! one extra round-trip even for thousands of rows.
 
 use serde_json::{Map, Value};
 
 use crate::sql::sqlx;
 
-// PG-typed helpers below import PgRow / PgPool / Row directly.
-// Sqlite/ MySQL paths use the bi-dialect `ensure_table_pool` /
-// `emit_one_pool` further down which dispatch per-backend.
+// The PG-typed helpers below use PgRow / PgPool / Row directly. SQLite and
+// MySQL go through the `*_pool` helpers further down, which dispatch per
+// backend.
 #[cfg(feature = "postgres")]
 use crate::sql::sqlx::{postgres::PgRow, PgPool, Row};
 
 /// Source of the change recorded in the audit log.
 ///
-/// `System` is the default (background jobs, seed scripts, framework
-/// internals). `User { id }` for authenticated request flows — admin
-/// handlers install the session's user id at request entry. `Custom`
-/// is a typed escape hatch for project-specific labels (e.g.
-/// `"webhook:stripe"`, `"cli:backfill"`).
+/// `System` is the default: jobs, seed scripts, framework internals.
+/// `User { id }` is for request flows; admin handlers set it from the
+/// session at request entry. `Custom` holds a project label such as
+/// `"webhook:stripe"` or `"cli:backfill"`.
 #[derive(Debug, Clone)]
 pub enum AuditSource {
     System,
@@ -60,10 +48,8 @@ pub enum AuditSource {
 }
 
 impl AuditSource {
-    /// Stable string representation written to `audit_log.source`.
-    /// Used by the macro-emitted insert paths so the on-disk format
-    /// stays portable (a downstream search index can join by these
-    /// strings without parsing).
+    /// Stable string written to `audit_log.source`. The format is fixed,
+    /// so a downstream index can join on it without parsing.
     #[must_use]
     pub fn as_token(&self) -> String {
         match self {
@@ -81,16 +67,14 @@ impl Default for AuditSource {
 }
 
 tokio::task_local! {
-    /// Task-local audit source. Populated for the duration of an
-    /// admin request, a seed closure, etc.; defaults to
-    /// [`AuditSource::System`] when no scope has been entered (which
-    /// is what `current_source()` returns).
+    /// Task-local audit source, set for the length of a request or a seed
+    /// closure. Outside any scope, `current_source()` returns
+    /// [`AuditSource::System`].
     pub static AUDIT_SOURCE: AuditSource;
 }
 
-/// Read the active audit source. Falls back to [`AuditSource::System`]
-/// when no [`with_source`] scope is active — matches the "writes from
-/// outside any handler are system-attributable" intent.
+/// Read the active audit source. Returns [`AuditSource::System`] when no
+/// [`with_source`] scope is active.
 #[must_use]
 pub fn current_source() -> AuditSource {
     AUDIT_SOURCE
@@ -98,12 +82,11 @@ pub fn current_source() -> AuditSource {
         .unwrap_or(AuditSource::System)
 }
 
-/// Run `fut` with `source` installed as the active audit source. Any
-/// audit-emitting ORM call within the future (single-row OR bulk)
-/// records `source` on every entry it produces.
+/// Run `fut` with `source` as the active audit source. Every audit entry
+/// produced inside the future, single-row or bulk, records it.
 ///
-/// Designed to wrap an admin request handler or a seed-time closure.
-/// Outside such a scope, writes record `AuditSource::System`.
+/// Wrap a request handler or a seed closure with this. Outside such a
+/// scope, writes record `AuditSource::System`.
 pub async fn with_source<F, T>(source: AuditSource, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
@@ -111,9 +94,9 @@ where
     AUDIT_SOURCE.scope(source, fut).await
 }
 
-/// One pending audit log entry. The macro-generated write paths build
-/// these in memory, then [`emit_one`] / [`emit_many`] writes them to
-/// the database alongside (or just after) the data write.
+/// One pending audit log entry. The generated write paths build these in
+/// memory, then [`emit_one`] / [`emit_many`] writes them out with, or just
+/// after, the data write.
 #[derive(Debug, Clone)]
 pub struct PendingEntry {
     pub entity_table: &'static str,
@@ -130,11 +113,9 @@ pub enum AuditOp {
     Delete,
     SoftDelete,
     Restore,
-    /// Non-CRUD operator-side action (e.g. impersonation start /
-    /// end, org config edit, branding upload). Used by the operator
-    /// console's [`crate::tenancy::operator_console`] audit writes.
-    /// (v0.34 — replaces hand-rolled `INSERT INTO rustango_audit_log
-    /// … VALUES ('action', …)` SQL.)
+    /// An operator action that is not a row write: impersonation start or
+    /// end, an org config edit, a branding upload. Written by the operator
+    /// console.
     Action,
 }
 
@@ -152,20 +133,20 @@ impl AuditOp {
     }
 }
 
-/// Emit a single entry against a Postgres executor. Used by per-row
-/// write paths on PG. For bi-dialect emission see [`emit_one_pool`].
+/// Emit a single entry against a Postgres executor. Used by per-row write
+/// paths on PG. For all backends, see [`emit_one_pool`].
 ///
 /// # `occurred_at` is bound, not defaulted
 ///
-/// Every emit path — three dialects, single-row and batch — binds it.
-/// The column default is a backstop for hand-written SQL (#1464).
+/// Every emit path binds it — all three dialects, single-row and batch.
+/// The column default is only a backstop for hand-written SQL.
 ///
-/// SQLite is why: a database created before #1464 still defaults to
-/// `CURRENT_TIMESTAMP`, whose `YYYY-MM-DD HH:MM:SS` sorts *below* the
-/// canonical `…T…` spelling, and `ALTER TABLE` there cannot replace a
-/// default. Every later row would arrive legacy-shaped, inverting
-/// `ORDER BY occurred_at DESC` and making `cleanup_keep_last_n` discard
-/// the newest entries. PG and MySQL bind for uniformity.
+/// SQLite is the reason. An older database still defaults to
+/// `CURRENT_TIMESTAMP`, whose `YYYY-MM-DD HH:MM:SS` spelling sorts *below*
+/// the canonical `…T…` one, and SQLite cannot `ALTER TABLE` a default
+/// away. A defaulted write there would store a legacy-shaped value, which
+/// inverts `ORDER BY occurred_at DESC` and makes `cleanup_keep_last_n`
+/// delete the newest entries. PG and MySQL bind it too, for uniformity.
 ///
 /// # Errors
 /// Driver / SQL failures from the INSERT.
@@ -190,9 +171,9 @@ where
     Ok(())
 }
 
-/// Emit a batch of entries in a single Postgres statement. Used by
-/// bulk write paths on PG. Sqlite/MySQL fall back to per-row
-/// `emit_one_pool` until a bi-dialect batch path lands.
+/// Emit a batch of entries in one Postgres statement. Used by bulk write
+/// paths on PG. SQLite and MySQL loop per row inside a transaction — see
+/// [`emit_many_pool`].
 ///
 /// # Errors
 /// As [`emit_one`].
@@ -204,9 +185,8 @@ where
     if entries.is_empty() {
         return Ok(());
     }
-    // We compose one big multi-row VALUES list rather than UNNEST-ing
-    // 6 typed arrays — keeps the SQL readable and `sqlx` happy with
-    // mixed column types (TEXT + JSONB + TIMESTAMPTZ).
+    // One multi-row VALUES list, not six UNNEST-ed typed arrays: simpler
+    // SQL, and sqlx handles the mixed TEXT + JSONB + TIMESTAMPTZ columns.
     let mut sql = String::from(
         r#"INSERT INTO "rustango_audit_log"
               ("entity_table", "entity_pk", "operation", "source", "changes", "occurred_at")
@@ -232,9 +212,8 @@ where
     }
     let mut q = sqlx::query(&sql);
     for entry in entries {
-        // Stamped per row rather than once for the batch, so a batch
-        // behaves the same here as it does on the MySQL / SQLite
-        // fallback, which loops `emit_one_*`.
+        // Stamped per row, not once per batch, so this matches the
+        // MySQL / SQLite fallback, which loops `emit_one_*`.
         q = q
             .bind(entry.entity_table)
             .bind(&entry.entity_pk)
@@ -247,10 +226,9 @@ where
     Ok(())
 }
 
-/// Build a `{ "field": { "before": <v>, "after": <v> } }` JSON object
-/// from two slices of `(field_name, json_value)` pairs. Skips fields
-/// where the before and after values are equal (`update` of a row
-/// only logs columns that actually changed).
+/// Build a `{ "field": { "before": <v>, "after": <v> } }` JSON object from
+/// two slices of `(field_name, json_value)` pairs. Fields whose value did
+/// not change are left out.
 #[must_use]
 pub fn diff_changes(before: &[(&str, Value)], after: &[(&str, Value)]) -> Value {
     let mut out = Map::new();
@@ -270,9 +248,8 @@ pub fn diff_changes(before: &[(&str, Value)], after: &[(&str, Value)]) -> Value 
     Value::Object(out)
 }
 
-/// Build a `{ "field": <after-value> }` JSON object for create /
-/// soft_delete / restore operations where there's no "before" state
-/// worth recording.
+/// Build a `{ "field": <after-value> }` JSON object for create,
+/// soft_delete and restore, where there is no useful "before" state.
 #[must_use]
 pub fn snapshot_changes(after: &[(&str, Value)]) -> Value {
     let mut out = Map::new();
@@ -282,12 +259,8 @@ pub fn snapshot_changes(after: &[(&str, Value)]) -> Value {
     Value::Object(out)
 }
 
-/// v0.37 — render the audit-log SELECT used by [`fetch_for_entity_pool`]
-/// through the framework's dialect emitters. The audit table is
-/// framework-owned (not a `#[derive(Model)]`) so it doesn't have a
-/// registered `ModelSchema`, but we still want zero hand-rolled SQL
-/// in here — `quote_ident` handles backticks-vs-double-quotes and
-/// `placeholder` handles `$N`-vs-`?` per dialect.
+/// Render the audit-log SELECT used by [`fetch_for_entity_pool`] through
+/// the dialect emitters, so no SQL here is hand-written per backend.
 fn audit_select_sql(dialect: &dyn crate::sql::Dialect) -> String {
     use std::fmt::Write as _;
     let t = dialect.quote_ident("rustango_audit_log");
@@ -311,50 +284,30 @@ fn audit_select_sql(dialect: &dyn crate::sql::Dialect) -> String {
     sql
 }
 
-/// v0.37 — render the `DELETE … WHERE occurred_at < $1` used by
+/// Render the `DELETE … WHERE occurred_at < $1` used by
 /// [`cleanup_older_than_pool`] through the dialect emitter.
 ///
-/// On SQLite the comparison normalises the **stored** side first, so it
-/// is correct whether the row carries the pre-#1464 `CURRENT_TIMESTAMP`
-/// shape or the RFC3339 one written now.
+/// SQLite gets a second leg that normalises the **stored** value before
+/// comparing, so the sweep is correct whether a row holds the old
+/// `CURRENT_TIMESTAMP` shape or the RFC3339 one written today. The
+/// `migrate` sweep converts old rows, but this is a DELETE and runs
+/// before migrations on an upgraded install, where a legacy value sorts
+/// below every canonical cutoff and history would be destroyed.
 ///
-/// This is belt-and-braces with the `migrate` sweep. That sweep
-/// converts the stored rows, and after it runs the second leg never
-/// fires — but it runs on `migrate`, and this is a **DELETE**. Between
-/// upgrading the crate and running migrations, a legacy row compared
-/// against an RFC3339 bind is "less than" everything, so the retention
-/// sweep would delete history it was asked to keep. Everywhere else
-/// that window costs a wrong query result, which is the pre-existing
-/// bug continuing; here it would destroy data.
+/// The shape matters, and two simpler ones are wrong:
 ///
-/// ## Shape, and why not the obvious two
+/// - The leading range must stay bare so the `occurred_at` index is used.
+///   Wrapping the column in `strftime` forces a full scan, O(table)
+///   instead of O(rows deleted).
+/// - Comparing the cutoff in both spellings over-deletes: `' '` sorts
+///   below `'T'`, so every same-date legacy row looks older than a
+///   canonical cutoff, whatever its clock time.
 ///
-/// The **leading range stays bare** so the `occurred_at` index is
-/// usable: `SEARCH … USING INDEX (occurred_at<?)`. Wrapping the column
-/// in a `CASE`/`strftime` — the first version of this — is correct but
-/// forces a `SCAN`, which for a steady keep-last-N-days sweep measured
-/// 1 ms to 97 ms and 35 to 17,864 pages read, and is O(table) rather
-/// than O(rows deleted).
-///
-/// A plain disjunction of the cutoff in both spellings is the natural
-/// next guess and **over-deletes**: `' '` (0x20) sorts below `'T'`
-/// (0x54), so every same-date legacy row is "less than" a canonical
-/// cutoff whatever its clock time. Measured on a mixed corpus it
-/// removed a legacy row an hour *after* the cutoff.
-///
-/// So the second leg is a filter on the first, not an alternative to
-/// it: a row passes the indexed range, and then its own value is
-/// normalised and re-checked against the cutoff.
-///
-/// That second leg **normalises** rather than enumerating spellings.
-/// The version before it matched `NOT LIKE '____-__-__ __:__:__'`,
-/// which recognises only an exactly-19-character value — so
-/// `2026-09-20 08:00:00.123456`, the PG/MySQL dump spelling and what
-/// sqlx writes for a bound `NaiveDateTime`, skipped the guard entirely
-/// and was judged by the bare range, where `' '` sorts below `'T'`.
-/// Rows *hours after* the cutoff were deleted (#1616 rework review,
-/// security-001). Enumerating shapes is the same mistake this guard
-/// exists to prevent, one level down.
+/// So the second leg filters the first rather than replacing it, and it
+/// normalises instead of matching known spellings. A width-keyed `LIKE`
+/// missed `2026-09-20 08:00:00.123456` — the dump spelling, and what
+/// sqlx writes for a bound `NaiveDateTime` — and deleted rows hours
+/// after the cutoff.
 fn audit_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
     let t = dialect.quote_ident("rustango_audit_log");
     let oa = dialect.quote_ident("occurred_at");
@@ -370,23 +323,19 @@ fn audit_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
     format!("DELETE FROM {t} WHERE {oa} < {p1}")
 }
 
-/// Test hook for [`audit_cleanup_older_than_sql`], following the
-/// `__bind_value_*` pattern below.
-///
-/// Exposed so the index-plan guard runs the renderer's own SQL rather
-/// than a copy: a guard that re-types the statement it checks cannot
-/// notice the statement changing, which is the whole failure it exists
-/// to catch.
+/// Test hook for [`audit_cleanup_older_than_sql`]. The index-plan guard
+/// must check the renderer's own SQL: a guard that retypes the statement
+/// cannot notice the statement changing.
 #[doc(hidden)]
 #[must_use]
 pub fn __test_cleanup_older_than_sql(dialect: &dyn crate::sql::Dialect) -> String {
     audit_cleanup_older_than_sql(dialect)
 }
 
-/// v0.37 — render the per-row retention DELETE used by
-/// [`cleanup_keep_last_n_pool`]. `ROW_NUMBER() OVER (PARTITION BY)` is
-/// supported on PG, MySQL 8+, SQLite 3.25+; only quoting + placeholders
-/// vary per dialect.
+/// Render the per-row retention DELETE used by
+/// [`cleanup_keep_last_n_pool`]. `ROW_NUMBER() OVER (PARTITION BY)` works
+/// on PG, MySQL 8+ and SQLite 3.25+, so only quoting and placeholders
+/// differ.
 fn audit_cleanup_keep_last_n_sql(dialect: &dyn crate::sql::Dialect) -> String {
     let t = dialect.quote_ident("rustango_audit_log");
     let id = dialect.quote_ident("id");
@@ -409,15 +358,11 @@ fn audit_cleanup_keep_last_n_sql(dialect: &dyn crate::sql::Dialect) -> String {
     )
 }
 
-/// Read every audit entry for a given (entity_table, entity_pk)
-/// pair, newest first. Convenience for the admin's per-row audit
-/// trail panel.
+/// Read every audit entry for one `(entity_table, entity_pk)` pair,
+/// newest first. Used by the admin's per-row audit trail panel.
 ///
-/// PG-typed back-compat; for non-PG use [`fetch_for_entity_pool`].
-///
-/// #562 — delegates to [`fetch_for_entity_pool`] so the SELECT template
-/// + decode loop lives in one place. The PG-typed signature stays so
-/// older call sites compile unchanged.
+/// Postgres-typed, kept for older call sites; it delegates to
+/// [`fetch_for_entity_pool`], which is the one to use on any backend.
 ///
 /// # Errors
 /// Driver / SQL failures.
@@ -435,16 +380,11 @@ pub async fn fetch_for_entity(
     .await
 }
 
-/// Schema-registration model for `rustango_audit_log`.
-///
-/// Reads still go through [`AuditEntry`] (which keeps its per-dialect
-/// `changes`-column decoders); this struct exists so `makemigrations`
-/// owns the audit-log schema instead of the hand-written `ensure_table`
-/// DDL. It carries the two indexes the ensure DDL created — the
-/// `(entity_table, entity_pk)` composite and one on `occurred_at`
-/// (a plain index; the ensure's `DESC` was a scan optimization the
-/// planner uses either way). Consolidated with `AuditEntry` when the
-/// ensure DDL is removed.
+/// Schema-registration model for `rustango_audit_log`, so
+/// `makemigrations` owns the audit-log schema. Reads go through
+/// [`AuditEntry`], which has the per-dialect `changes`-column decoders.
+/// The two indexes here are the `(entity_table, entity_pk)` composite and
+/// one on `occurred_at`.
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_audit_log",
@@ -454,10 +394,9 @@ pub async fn fetch_for_entity(
 pub struct AuditLog {
     #[rustango(primary_key)]
     pub id: crate::sql::Auto<i64>,
-    // `entity_table` + `entity_pk` are the `index_together` key; they MUST
-    // be bounded so MySQL can index them (an unbounded `TEXT` column can't
-    // be a key without a prefix length — MySQL error 1170). Lengths match
-    // the pre-v0.47 hand-written MySQL DDL to avoid schema drift.
+    // `entity_table` + `entity_pk` are the `index_together` key, so they
+    // MUST have a max_length: MySQL cannot index an unbounded TEXT column
+    // without a prefix length (error 1170).
     #[rustango(max_length = 255)]
     pub entity_table: String,
     #[rustango(max_length = 255)]
@@ -498,13 +437,9 @@ impl AuditEntry {
     }
 }
 
-/// #561 — per-backend AuditEntry row decoders. The `changes`
-/// column lives as JSONB on PG (sqlx-postgres decodes straight to
-/// `Value`), JSON on MySQL (sqlx-mysql wraps via
-/// `sqlx::types::Json<Value>`), and TEXT on SQLite (round-trip
-/// through `serde_json::from_str`). Three siblings keep the audit
-/// list / fetch arms tight without forcing AuditEntry to implement
-/// per-backend `FromRow` blanket impls.
+/// Per-backend row decoder. The `changes` column is JSONB on PG (decodes
+/// straight to `Value`), JSON on MySQL (via `sqlx::types::Json<Value>`)
+/// and TEXT on SQLite (parsed with `serde_json::from_str`).
 #[cfg(feature = "mysql")]
 impl AuditEntry {
     fn from_my_row(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
@@ -545,26 +480,21 @@ impl AuditEntry {
     }
 }
 
-/// Delete audit entries older than `cutoff_days` from `pool`'s
-/// audit table. Returns the number of rows removed.
+/// Delete audit entries older than `cutoff_days` from `pool`'s audit
+/// table. Returns the number of rows removed.
 ///
-/// Useful as a retention-policy hook — operators can wire this into
-/// a daily cron, a tenant-side maintenance task, or a one-off CLI
-/// invocation. Per-tenant scope: each tenant's audit table is its
-/// own retention boundary, so `cleanup_older_than(tenant_pool, 90)`
-/// expires only that tenant's history. The framework doesn't auto-
-/// schedule this — the operator picks the cadence.
+/// Nothing schedules this for you — wire it into a cron job or a
+/// maintenance task. Each tenant's audit table is its own retention
+/// boundary, so this only touches the tenant `pool` points at.
 ///
-/// `cutoff_days = 0` clears the entire table (use with caution); a
-/// negative value is clamped to 0.
+/// `cutoff_days = 0` clears the whole table. A negative value clamps to 0.
 ///
-/// PG-typed; [`cleanup_older_than_pool`] is the tri-dialect one.
+/// Postgres-typed; [`cleanup_older_than_pool`] works on any backend.
 ///
-/// The cutoff is bound from Rust, not `NOW()`. Once [`emit_one`] began
-/// binding `occurred_at` (#1464) a database-side `NOW()` put two clocks
-/// in one comparison: a host running ahead writes rows in the
-/// database's future and a zero-day sweep deletes none of them. Both
-/// live retention tests failed this way against a Docker Postgres.
+/// The cutoff comes from Rust, not `NOW()`. Since [`emit_one`] binds
+/// `occurred_at`, a database-side `NOW()` would compare two clocks: if
+/// the app host runs ahead, its rows sit in the database's future and a
+/// zero-day sweep deletes none of them.
 ///
 /// # Errors
 /// Driver / SQL failures from the DELETE.
@@ -579,26 +509,19 @@ pub async fn cleanup_older_than(pool: &PgPool, cutoff_days: i64) -> Result<u64, 
     Ok(result.rows_affected())
 }
 
-/// Per-row retention: keep the `keep` most recent audit entries
-/// per `(entity_table, entity_pk)` pair, deleting the rest. Useful
-/// when "the last N revisions of every row" is the right retention
-/// shape — e.g. compliance regimes that require keeping the full
-/// edit chain but cap storage growth as the table ages.
+/// Per-row retention: keep the `keep` newest audit entries for each
+/// `(entity_table, entity_pk)` pair and delete the rest. Use it when you
+/// must keep the edit chain of every row but cap how far the table grows.
 ///
-/// Implementation runs a single window-function DELETE: each entry
-/// gets a per-row `ROW_NUMBER()` ordered by `occurred_at DESC, id
-/// DESC`, and rows with rank > `keep` are dropped. One round-trip
-/// regardless of how many `(entity_table, entity_pk)` pairs the
-/// table holds.
+/// One window-function DELETE does the work: each entry gets a
+/// `ROW_NUMBER()` ordered by `occurred_at DESC, id DESC`, and rows ranked
+/// above `keep` are dropped. One round-trip, however many pairs the table
+/// holds.
 ///
-/// `keep = 0` clears the entire table; negative values clamp to 0.
-/// Returns the number of rows removed.
+/// `keep = 0` clears the whole table; negative values clamp to 0. Returns
+/// the number of rows removed.
 ///
-/// **PG-only by SQL syntax**: uses `ROW_NUMBER() OVER (PARTITION
-/// BY …)` which is supported on PG but not uniformly across MySQL
-/// (8.0+ only) and not on older SQLite. Future work could emit a
-/// per-dialect equivalent; until then, MySQL/SQLite apps implement
-/// retention themselves.
+/// Postgres-typed; [`cleanup_keep_last_n_pool`] works on any backend.
 ///
 /// # Errors
 /// Driver / SQL failures from the DELETE.
@@ -624,10 +547,10 @@ pub async fn cleanup_keep_last_n(pool: &PgPool, keep: i64) -> Result<u64, sqlx::
     Ok(result.rows_affected())
 }
 
-/// Convenience for tests + ad-hoc setup: ensure the table exists in
-/// `pool`'s database / schema. No-op when already present.
+/// Make sure the table exists in `pool`'s database or schema. Does nothing
+/// when it is already there. Handy in tests and ad-hoc setup.
 ///
-/// PG-typed back-compat; for non-PG use [`ensure_table_pool`].
+/// Postgres-typed; [`ensure_table_pool`] works on any backend.
 ///
 /// # Errors
 /// Driver / SQL failures from the emitted DDL.
@@ -636,24 +559,21 @@ pub async fn ensure_table(pool: &PgPool) -> Result<(), sqlx::Error> {
     ensure_table_pool(&crate::sql::Pool::Postgres(pool.clone())).await
 }
 
-// ============================================================ bi-dialect audit (v0.23.0-batch16)
+// ============================================================ all-backend audit
 
-/// Bootstrap the audit-log table against either backend. Routes the
-/// per-dialect DDL through the right driver via [`crate::sql::Pool`].
+/// Create the audit-log table on any backend, sending the per-dialect DDL
+/// through the right driver.
 ///
-/// `MySQL` caveat: `CREATE INDEX IF NOT EXISTS` doesn't exist in
-/// `MySQL`. The bootstrap catches duplicate-index errors (1061) and
-/// continues, so the call remains idempotent.
+/// MySQL has no `CREATE INDEX IF NOT EXISTS`, so duplicate-index errors
+/// are ignored and the call stays idempotent.
 ///
 /// # Errors
-/// Driver / SQL failures other than the swallowed duplicate-index
-/// errors on MySQL.
+/// Driver / SQL failures, other than the ignored duplicate-index ones.
 pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Error> {
-    // Drift-free (v0.47): emit `rustango_audit_log` (+ its two indexes)
-    // from `AuditLog::SCHEMA` via the migration render path instead of
-    // hand-written per-dialect DDL. Idempotent (swallows "already
-    // exists"). `audit_log` is a per-DB shared table, so this ensure
-    // remains as a defensive helper alongside the system migrations.
+    // Render the table and its indexes from `AuditLog::SCHEMA` through the
+    // migration path, so this cannot drift from the model. The table is
+    // shared per database, so this stays as a defensive helper next to the
+    // system migrations.
     use crate::core::Model as _;
     let snapshot = crate::migrate::SchemaSnapshot::from_models(&[AuditLog::SCHEMA]);
     let changes =
@@ -676,10 +596,8 @@ pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Erro
     Ok(())
 }
 
-/// Per-row audit emit on a `MySqlConnection`-shape executor —
-/// counterpart of [`emit_one`] using `?` placeholders + backtick
-/// quoting. Used by the macro layer when emitting audited writes
-/// over a MySQL transaction.
+/// MySQL counterpart of [`emit_one`] — `?` placeholders and backtick
+/// quoting. Used for audited writes over a MySQL transaction.
 ///
 /// # Errors
 /// Driver / SQL failures from the INSERT.
@@ -688,7 +606,7 @@ pub async fn emit_one_my<'c, E>(executor: E, entry: &PendingEntry) -> Result<(),
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
-    // `occurred_at` bound, not defaulted — see [`emit_one`].
+    // `occurred_at` is bound, not defaulted — see `emit_one`.
     sqlx::query(
         r#"INSERT INTO `rustango_audit_log`
               (`entity_table`, `entity_pk`, `operation`, `source`, `changes`, `occurred_at`)
@@ -705,10 +623,8 @@ where
     Ok(())
 }
 
-/// SQLite counterpart of [`emit_one`]. Identifier quoting is
-/// double-quote (same as Postgres) and placeholders are positional
-/// `?` (sqlx-sqlite supports both `?` and `?N`). The `changes` JSON
-/// goes into a TEXT column via `sqlx::types::Json`.
+/// SQLite counterpart of [`emit_one`] — double-quoted identifiers and `?`
+/// placeholders. The `changes` JSON goes into a TEXT column.
 ///
 /// # Errors
 /// Driver / SQL failures from the INSERT.
@@ -717,10 +633,10 @@ pub async fn emit_one_sqlite<'c, E>(executor: E, entry: &PendingEntry) -> Result
 where
     E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
 {
-    // `occurred_at` bound, not defaulted — see [`emit_one`]. This is
-    // the dialect the rule exists for: an upgraded database's default
-    // is unfixable, so a defaulted write here is a legacy-shaped row
-    // among canonical ones, forever.
+    // `occurred_at` is bound, not defaulted — see `emit_one`. This is the
+    // dialect the rule exists for: an upgraded database's default cannot
+    // be replaced, so a defaulted write here would store a legacy-shaped
+    // value among canonical ones, forever.
     sqlx::query(
         r#"INSERT INTO "rustango_audit_log"
               ("entity_table", "entity_pk", "operation", "source", "changes", "occurred_at")
@@ -737,11 +653,10 @@ where
     Ok(())
 }
 
-/// Per-row audit emit via [`crate::sql::Pool`] — dispatches to
-/// [`emit_one`] (Postgres) or [`emit_one_my`] (MySQL). **Not
-/// transactional** with the data write — for write-and-audit
-/// atomicity, acquire a connection / transaction yourself and call
-/// the per-backend `emit_one*` directly.
+/// Per-row audit emit over [`crate::sql::Pool`], dispatching to the right
+/// backend helper. **It does not share a transaction with the data
+/// write.** For that, open a transaction yourself and call the
+/// per-backend `emit_one*` on it.
 ///
 /// # Errors
 /// As [`emit_one`].
@@ -759,10 +674,9 @@ pub async fn emit_one_pool(
     }
 }
 
-/// v0.37 — filter shape for the admin's audit-log activity feed.
-/// Each field is optional; `None` means "don't constrain that column".
-/// The `list` / `count` helpers turn this into a WHERE clause
-/// rendered via [`Dialect::placeholder`] + [`Dialect::quote_ident`].
+/// Filter for the admin's audit-log activity feed. Every field is
+/// optional; `None` means the column is not constrained. [`list`] and
+/// [`count`] turn this into a WHERE clause.
 #[derive(Debug, Clone, Default)]
 pub struct AuditFilter {
     pub entity_table: Option<String>,
@@ -772,8 +686,8 @@ pub struct AuditFilter {
 }
 
 impl AuditFilter {
-    /// Walk the active filters and produce `(column, value)` pairs in
-    /// stable order — the order drives placeholder numbering.
+    /// Collect the active filters as `(column, value)` pairs. The order is
+    /// stable because it drives placeholder numbering.
     fn active_pairs(&self) -> Vec<(&'static str, &str)> {
         let mut out = Vec::with_capacity(4);
         if let Some(v) = self.entity_table.as_deref() {
@@ -800,15 +714,12 @@ impl AuditFilter {
     }
 }
 
-/// v0.37 — tri-dialect counterpart of the admin audit-log SELECT.
-/// Returns a page of `AuditEntry` rows ordered newest-first matching
-/// the supplied `AuditFilter`. SQL is rendered through the dialect's
-/// emitters; row decode uses the same JSON-bridge logic as
-/// [`fetch_for_entity_pool`].
+/// One page of audit entries matching `filter`, newest first. Works on
+/// any backend.
 ///
 /// # Errors
-/// Driver / SQL failures from the SELECT, or JSON decode failures on
-/// SQLite if the `changes` TEXT column isn't valid JSON.
+/// Driver / SQL failures from the SELECT, or a JSON decode failure on
+/// SQLite when the `changes` TEXT column is not valid JSON.
 pub async fn list(
     pool: &crate::sql::Pool,
     filter: &AuditFilter,
@@ -818,10 +729,8 @@ pub async fn list(
     let pairs = filter.active_pairs();
     let sql = audit_list_sql(pool.dialect(), &pairs);
     let binds: Vec<&str> = pairs.iter().map(|(_, v)| *v).collect();
-    // #561 — was three byte-similar `bind+fetch+decode` arms. The
-    // bind+fetch can't share generic code (sqlx::Executor is bound
-    // per-Database), but the decode collapses onto the per-backend
-    // `AuditEntry::from_*_row` helpers above.
+    // bind+fetch cannot be shared: `sqlx::Executor` is bound per Database.
+    // Only the decode is shared, via the `AuditEntry::from_*_row` helpers.
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -853,8 +762,8 @@ pub async fn list(
     }
 }
 
-/// v0.37 — tri-dialect total count for the admin audit-log pager,
-/// honoring the same `AuditFilter` as [`list`].
+/// Total row count for the audit-log pager, using the same
+/// [`AuditFilter`] as [`list`].
 ///
 /// # Errors
 /// Driver / SQL failures from the SELECT COUNT(*).
@@ -866,12 +775,8 @@ pub async fn count(pool: &crate::sql::Pool, filter: &AuditFilter) -> Result<i64,
         .iter()
         .map(|(_, v)| SqlValue::String((*v).to_owned()))
         .collect();
-    // #561 — was a 3-arm `match pool` doing the same query_scalar
-    // bind-loop per backend. Routes through `raw_query_pool::<(i64,)>`
-    // for the single-column COUNT result; the tuple decoder works
-    // identically on every backend that has a `FromRow` impl, which
-    // includes the bound triple via the `Maybe*FromRow` blanket
-    // impls.
+    // `raw_query_pool::<(i64,)>` decodes the single COUNT column the same
+    // way on every backend, so no per-backend arm is needed.
     let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&sql, binds, pool)
         .await
         .map_err(|e| match e {
@@ -882,31 +787,24 @@ pub async fn count(pool: &crate::sql::Pool, filter: &AuditFilter) -> Result<i64,
     Ok(rows.into_iter().next().map_or(0, |t| t.0))
 }
 
-/// v0.37 — tri-dialect facet (column, count) groupby for the admin
-/// audit-log right rail. Returns rows ordered count-desc, value-asc.
-/// SQL is rendered via the dialect emitter — `column` is matched
-/// against an allowlist (`entity_table` / `operation` / `source`) to
-/// preclude injection.
+/// `(value, count)` facets for the audit-log side panel, ordered by count
+/// descending then value ascending. `column` must be `entity_table`,
+/// `operation` or `source`.
 ///
 /// # Errors
-/// Driver / SQL failures from the SELECT, or
-/// `Error::ColumnNotFound` when `column` isn't in the allowlist (the
-/// caller has a bug).
+/// Driver / SQL failures from the SELECT, or `Error::ColumnNotFound` when
+/// `column` is not one of the three allowed names.
 pub async fn facet_counts(
     pool: &crate::sql::Pool,
     column: &str,
 ) -> Result<Vec<(String, i64)>, sqlx::Error> {
-    // Allowlist guards against injection — the admin handler always
-    // passes one of these three, but defense-in-depth is cheap.
+    // `column` is interpolated into the SQL, so it must be allowlisted.
     if !matches!(column, "entity_table" | "operation" | "source") {
         return Err(sqlx::Error::ColumnNotFound(column.to_owned()));
     }
     let sql = audit_facet_sql(pool.dialect(), column);
-    // #561 — was three byte-identical `try_get("facet_value") + try_get("facet_count")`
-    // copies, one per backend. The `(String, i64)` tuple decoder
-    // works on every backend via the `Maybe*FromRow` blanket impls;
-    // it decodes positionally so it matches the `SELECT … AS facet_value,
-    // COUNT(*) AS facet_count` column order in `audit_facet_sql`.
+    // The `(String, i64)` tuple decodes positionally, so it matches the
+    // `facet_value, facet_count` column order in `audit_facet_sql`.
     crate::sql::raw_query_pool::<(String, i64)>(&sql, Vec::new(), pool)
         .await
         .map_err(|e| match e {
@@ -915,10 +813,8 @@ pub async fn facet_counts(
         })
 }
 
-/// v0.37 — render the audit-log activity-feed SELECT (paginated, with
-/// optional filter pairs) through the dialect's emitters. `pairs`
-/// supplies the active filter columns in stable order so placeholder
-/// numbering is deterministic.
+/// Render the paginated activity-feed SELECT. `pairs` gives the active
+/// filter columns in a stable order, so placeholder numbering is fixed.
 fn audit_list_sql(dialect: &dyn crate::sql::Dialect, pairs: &[(&'static str, &str)]) -> String {
     use std::fmt::Write as _;
     let t = dialect.quote_ident("rustango_audit_log");
@@ -951,8 +847,7 @@ fn audit_list_sql(dialect: &dyn crate::sql::Dialect, pairs: &[(&'static str, &st
     sql
 }
 
-/// v0.37 — `SELECT COUNT(*) FROM rustango_audit_log [WHERE ...]`
-/// rendered through the dialect emitter.
+/// Render `SELECT COUNT(*) FROM rustango_audit_log [WHERE ...]`.
 fn audit_count_sql(dialect: &dyn crate::sql::Dialect, pairs: &[(&'static str, &str)]) -> String {
     use std::fmt::Write as _;
     let t = dialect.quote_ident("rustango_audit_log");
@@ -966,9 +861,8 @@ fn audit_count_sql(dialect: &dyn crate::sql::Dialect, pairs: &[(&'static str, &s
     sql
 }
 
-/// v0.37 — `SELECT col, COUNT(*) FROM rustango_audit_log GROUP BY col
-/// ORDER BY count DESC, col` rendered through the dialect emitter.
-/// `column` is one of the allowlisted facet columns.
+/// Render the facet group-by. `column` must already be allowlisted by
+/// [`facet_counts`].
 fn audit_facet_sql(dialect: &dyn crate::sql::Dialect, column: &str) -> String {
     let t = dialect.quote_ident("rustango_audit_log");
     let col = dialect.quote_ident(column);
@@ -978,14 +872,11 @@ fn audit_facet_sql(dialect: &dyn crate::sql::Dialect, column: &str) -> String {
     )
 }
 
-/// v0.37 — tri-dialect batched audit emit. On Postgres dispatches to
-/// the one-statement multi-row [`emit_many`] INSERT; on MySQL/SQLite
-/// falls back to a per-row [`emit_one_*`] loop inside a single
-/// transaction (one round-trip per row but committed atomically, so
-/// admin bulk-action audit rows still all-or-nothing).
+/// Batched audit emit on any backend. Postgres uses the one-statement
+/// [`emit_many`] INSERT. MySQL and SQLite loop per row inside one
+/// transaction: a round-trip per row, but still all-or-nothing.
 ///
-/// Used by the admin bulk-action handler and by macro-emitted
-/// `bulk_*_pool` paths. Empty input returns immediately.
+/// Empty input returns at once.
 ///
 /// # Errors
 /// Driver / SQL failures from the INSERT(s) or the transaction.
@@ -1018,27 +909,21 @@ pub async fn emit_many_pool(
     }
 }
 
-/// v0.37 — tri-dialect counterpart of [`fetch_for_entity`]. Decodes
-/// rows through the dialect-agnostic `serde_json::Value` bridge so
-/// the audit panel renders identically across backends. The `changes`
-/// column is JSON-typed on PG/MySQL and TEXT on SQLite — the JSON
-/// bridge decodes either shape into `serde_json::Value`.
+/// All-backend counterpart of [`fetch_for_entity`]. The `changes` column
+/// is JSON on PG and MySQL and TEXT on SQLite; both decode into
+/// `serde_json::Value`, so the audit panel renders the same everywhere.
 ///
 /// # Errors
-/// Driver / SQL failures from the SELECT or JSON decode failures
-/// (e.g. SQLite TEXT that isn't valid JSON).
+/// Driver / SQL failures from the SELECT, or a JSON decode failure, for
+/// example SQLite TEXT that is not valid JSON.
 pub async fn fetch_for_entity_pool(
     pool: &crate::sql::Pool,
     entity_table: &str,
     entity_pk: &str,
 ) -> Result<Vec<AuditEntry>, sqlx::Error> {
-    // Build the SELECT via the dialect's own quoting + placeholder
-    // emitters. Same template for every backend — only `quote_ident`
-    // ("/`) and `placeholder` ($1 / ?) differ.
+    // One SELECT template for every backend; only quoting and
+    // placeholders differ. Decode uses the per-backend `from_*_row`.
     let sql = audit_select_sql(pool.dialect());
-    // #561 — was three byte-similar `bind+fetch+decode` arms.
-    // Decode collapses onto the per-backend `AuditEntry::from_*_row`
-    // helpers (PG/JSONB native, MySQL Json<Value>, SQLite TEXT).
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -1070,19 +955,17 @@ pub async fn fetch_for_entity_pool(
     }
 }
 
-/// v0.37 — tri-dialect counterpart of [`cleanup_older_than`]. The
-/// cutoff timestamp is computed Rust-side (chrono) and bound as a
-/// `TIMESTAMPTZ` / `DATETIME` / ISO-8601 TEXT depending on backend,
-/// so the SQL stays portable (no `NOW() - INTERVAL '… day'`).
+/// All-backend counterpart of [`cleanup_older_than`]. The cutoff is
+/// computed in Rust and bound, so the SQL needs no
+/// `NOW() - INTERVAL '… day'`.
 ///
-/// `cutoff_days = 0` clears the entire table (use with caution); a
-/// negative value is clamped to 0.
+/// `cutoff_days = 0` clears the whole table. A negative value clamps to 0.
 ///
-/// **Under tenancy, pass a tenant-scoped pool.** `rustango_audit_log` is
-/// per-tenant, so this trims whichever tenant `pool` points at — on a
-/// registry pool in schema mode, only `public`, while every tenant's
-/// audit history grows unbounded and the sweep still reports success.
-/// Fan out with [`crate::tenancy::for_each_tenant`] (#1226).
+/// **Under tenancy, pass a tenant-scoped pool.** The audit table is
+/// per-tenant, so this trims only the tenant `pool` points at. Pass a
+/// registry pool in schema mode and it trims `public` alone, reports
+/// success, and every tenant's history keeps growing. Fan out with
+/// [`crate::tenancy::for_each_tenant`].
 ///
 /// # Errors
 /// Driver / SQL failures from the DELETE.
@@ -1094,34 +977,14 @@ pub async fn cleanup_older_than_pool(
     let cutoff = cutoff_days.max(0);
     let cutoff_ts = chrono::Utc::now() - chrono::Duration::days(cutoff);
     let sql = audit_cleanup_older_than_sql(pool.dialect());
-    // #560's SQLite special case is gone as of #1464, and removing it
-    // is required rather than tidy-up: it bound the cutoff in the old
-    // `YYYY-MM-DD HH:MM:SS` shape to match what SQLite's
-    // `CURRENT_TIMESTAMP` default wrote. That default is now a
-    // `strftime` in the RFC3339 shape, and `migrate` converts rows
-    // already stored the old way, so a legacy-shaped bind would be the
-    // side that no longer compares — the same defect, pointed the
-    // other way.
-    //
-    // `occurred_at` reaches the fix through the ordinary path: the
-    // column is `#[rustango(default = "now()")]` on `AuditLog`, and
-    // `ensure_table_pool` renders it from `AuditLog::SCHEMA` through
-    // the dialect's `translate_default_expr`.
-    //
-    // SQLite takes the cutoff twice: once for the indexed range, and
-    // once for the second leg, which normalises the stored side before
-    // comparing. Both are the **canonical** spelling — the second leg
-    // normalises the column rather than the cutoff, so there is no
-    // legacy-spelled bind any more. It used to be
-    // `%Y-%m-%d %H:%M:%S`, paired with a width-keyed `LIKE` that a
-    // space-separated value carrying a fraction walked straight past.
+    // SQLite binds the cutoff twice: once for the indexed range, once for
+    // the second leg. Both use the canonical spelling — the second leg
+    // normalises the stored column, not the cutoff, so no legacy-shaped
+    // value is ever bound here.
     let mut binds = vec![SqlValue::DateTime(cutoff_ts)];
     if pool.dialect().name() == "sqlite" {
         binds.push(SqlValue::DateTime(cutoff_ts));
     }
-    // #561 — was a 3-arm `match pool` that bound per-backend by
-    // hand. The bind dispatch already lives in `raw_execute_pool`'s
-    // internals — share the same path every other helper uses.
     crate::sql::raw_execute_pool(pool, &sql, binds)
         .await
         .map_err(|e| match e {
@@ -1130,18 +993,16 @@ pub async fn cleanup_older_than_pool(
         })
 }
 
-/// v0.37 — tri-dialect counterpart of [`cleanup_keep_last_n`].
-/// `ROW_NUMBER() OVER (PARTITION BY …)` is supported on PG and on
-/// MySQL 8+ / SQLite 3.25+ — the SQL stays the same, only the
-/// identifier quoting differs.
+/// All-backend counterpart of [`cleanup_keep_last_n`].
+/// `ROW_NUMBER() OVER (PARTITION BY …)` works on PG, MySQL 8+ and
+/// SQLite 3.25+, so only identifier quoting differs.
 ///
-/// `keep = 0` clears the entire table; negative values clamp to 0.
+/// `keep = 0` clears the whole table; negative values clamp to 0.
 ///
 /// # Errors
-/// Driver / SQL failures from the DELETE, or an "unsupported window
-/// function" error on ancient MySQL 5.7 / SQLite 3.24-. On those
-/// backends operators should drop in their own retention DELETE
-/// instead of calling this helper.
+/// Driver / SQL failures from the DELETE. On MySQL 5.7 or SQLite 3.24 and
+/// older you get an "unsupported window function" error; there, write
+/// your own retention DELETE instead.
 pub async fn cleanup_keep_last_n_pool(
     pool: &crate::sql::Pool,
     keep: i64,
@@ -1149,8 +1010,6 @@ pub async fn cleanup_keep_last_n_pool(
     use crate::core::SqlValue;
     let keep = keep.max(0);
     let sql = audit_cleanup_keep_last_n_sql(pool.dialect());
-    // #561 — was a 3-arm `match pool` that bound `keep` per-backend
-    // by hand. The bind dispatch lives in `raw_execute_pool`.
     crate::sql::raw_execute_pool(pool, &sql, vec![SqlValue::I64(keep)])
         .await
         .map_err(|e| match e {
@@ -1159,34 +1018,19 @@ pub async fn cleanup_keep_last_n_pool(
         })
 }
 
-/// Run `DELETE` from a `DeleteQuery` and emit an audit entry inside
-/// a single transaction against either backend. Used by the
-/// macro-emitted `Model::delete_pool` for audited models so the data
-/// write and the audit row commit atomically — a crash between the
-/// two leaves the database consistent (either both rolled back or
-/// both committed).
-///
-/// The DELETE is compiled via `pool.dialect().compile_delete(query)`
-/// so identifier quoting + placeholder shape are correct per
-/// backend; binding goes through
-/// [`crate::sql::executor::bind_query`] / `bind_query_my` (private
-/// helpers re-used here through the per-backend arms).
+/// Run a `DeleteQuery` and emit its audit entry in one transaction, so
+/// the row and its audit record commit together. Used by the generated
+/// `Model::delete_pool` for audited models.
 ///
 /// # Errors
-/// Any [`crate::sql::ExecError`] from compile / bind / execute, plus
-/// `sqlx::Error` from the audit emit (wrapped as
-/// `ExecError::Driver`).
+/// Any [`crate::sql::ExecError`] from compile, bind or execute, plus
+/// `sqlx::Error` from the audit emit (wrapped as `ExecError::Driver`).
 pub async fn delete_one_with_audit(
     pool: &crate::sql::Pool,
     query: &crate::core::DeleteQuery,
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
     let stmt = pool.dialect().compile_delete(query)?;
-    // #561 — was a 3-arm `match pool` that opened a per-backend tx,
-    // bound stmt.params, executed, called the per-backend
-    // `emit_one_<backend>`, committed. The new `raw_execute_tx`
-    // combinator (#798) + the `emit_one_tx` shim below let the body
-    // collapse to one flat path.
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
     emit_one_tx(&mut tx, entry).await?;
@@ -1194,11 +1038,8 @@ pub async fn delete_one_with_audit(
     Ok(affected)
 }
 
-/// Per-backend dispatch for the audit emit inside an open `PoolTx`.
-/// Wraps the existing per-backend `emit_one` / `emit_one_my` /
-/// `emit_one_sqlite` helpers (which take a sqlx-typed executor) so
-/// callers can stay on the `PoolTx` API instead of unwrapping the
-/// variant.
+/// Emit an audit entry inside an open `PoolTx`, so callers stay on the
+/// `PoolTx` API instead of unwrapping the backend variant themselves.
 async fn emit_one_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     entry: &PendingEntry,
@@ -1213,23 +1054,15 @@ async fn emit_one_tx(
     }
 }
 
-/// Run `UPDATE` from an `UpdateQuery` and emit an audit entry inside
-/// a single transaction against either backend. Used by the
-/// macro-emitted `Model::save_pool` for audited models so the data
-/// write and the audit row commit atomically.
+/// Run an `UpdateQuery` and emit its audit entry in one transaction.
+/// Used by the generated `Model::save_pool` for audited models.
 ///
-/// This is a **snapshot-style** audit (the entry's `changes` carries
-/// the post-write field values) rather than the diff-style audit the
-/// existing `&PgPool` `Model::save` produces. Diff-style audit
-/// requires a pre-UPDATE SELECT to capture `before` values per
-/// tracked column with their declared Rust types — that's
-/// per-model-per-field codegen the macro emits inline today, and
-/// porting it to a runtime helper is a separate refactor. Until then,
-/// audited writes on `&Pool` lose field-level diff capture but keep
-/// post-state provenance.
+/// The entry is a **snapshot**: `changes` holds the values after the
+/// write, with no `before` side. For a field-level diff, use
+/// [`save_one_with_diff`], which runs the pre-UPDATE SELECT.
 ///
 /// # Errors
-/// Any [`crate::sql::ExecError`] from compile / bind / execute, plus
+/// Any [`crate::sql::ExecError`] from compile, bind or execute, plus
 /// `sqlx::Error` from the audit emit.
 pub async fn save_one_with_audit(
     pool: &crate::sql::Pool,
@@ -1237,8 +1070,6 @@ pub async fn save_one_with_audit(
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
     let stmt = pool.dialect().compile_update(query)?;
-    // #561 — same shape as `delete_one_with_audit`; collapses via
-    // raw_execute_tx (#798) + emit_one_tx shim.
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
     emit_one_tx(&mut tx, entry).await?;
@@ -1246,38 +1077,26 @@ pub async fn save_one_with_audit(
     Ok(affected)
 }
 
-/// Run `INSERT` from an `InsertQuery`, capture the auto-assigned PK
-/// (PG `RETURNING` row vs MySQL `LAST_INSERT_ID()`), and emit an
-/// audit entry inside a single transaction against either backend.
-/// Used by the macro-emitted `Model::insert_pool` for audited models.
+/// Run an `InsertQuery`, capture the auto-assigned PK, and emit the audit
+/// entry in one transaction. Used by the generated `Model::insert_pool`
+/// for audited models.
 ///
-/// Returns [`crate::sql::InsertReturningPool`] — same enum the
-/// non-audited [`crate::sql::insert_returning_pool`] returns. The
-/// macro-generated caller pattern-matches it to populate the
-/// model's `Auto<T>` field (PG arm reads each `returning` column;
-/// MySQL arm assigns the single i64).
+/// Returns the same [`crate::sql::InsertReturningPool`] as the
+/// non-audited [`crate::sql::insert_returning_pool`].
 ///
-/// MySQL caveat: only a single `Auto<T>` PK can be filled in (one
-/// `LAST_INSERT_ID()` value per connection). Multi-Auto-PK models
-/// on MySQL surface `SqlError::OperatorNotSupportedInDialect{op:
-/// "multi-column RETURNING"}` from the writer when the macro
-/// requests >1 returning column — same as the non-audited path.
+/// MySQL fills in only one `Auto<T>` PK, because a connection has a
+/// single `LAST_INSERT_ID()`. A model with more than one returns
+/// `SqlError::OperatorNotSupportedInDialect`, as on the non-audited path.
 ///
 /// # Errors
-/// Any [`crate::sql::ExecError`] from compile / bind / execute, plus
+/// Any [`crate::sql::ExecError`] from compile, bind or execute, plus
 /// `sqlx::Error` from the audit emit.
 pub async fn insert_one_with_audit(
     pool: &crate::sql::Pool,
     query: &crate::core::InsertQuery,
     entry: &PendingEntry,
 ) -> Result<crate::sql::InsertReturningPool, crate::sql::ExecError> {
-    // #561 — was a 3-arm `match pool` block (~70 lines) that opened
-    // a per-backend tx, ran the INSERT via per-backend bind helpers,
-    // captured PG/SQLite RETURNING row vs MySQL LAST_INSERT_ID(),
-    // emitted the audit row, and committed. The framework's
-    // `insert_returning_tx` (executor/mod.rs:1456) already handles
-    // every backend's per-variant return shape; pair it with
-    // `transaction_pool` + `emit_one_tx` for the audit emit.
+    // `insert_returning_tx` already handles each backend's return shape.
     let mut tx = crate::sql::transaction_pool(pool).await?;
     let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
     emit_one_tx(&mut tx, entry).await?;
@@ -1285,15 +1104,9 @@ pub async fn insert_one_with_audit(
     Ok(returning)
 }
 
-/// Local Postgres-typed bind helper — couldn't reuse
-/// `executor::bind_query` (it's private to the executor module).
-/// Same `bind_match!`-shape body, but copied rather than re-exported
-/// to keep the executor surface tight.
-///
-/// Exposed (under a `__`-prefixed name) so macro-emitted bodies in
-/// the audited save_pool diff path (v0.23.0-batch25) can bind
-/// `SqlValue` arguments to the per-backend transaction. Not part of
-/// the public API.
+/// Postgres bind helper, exposed so generated bodies on the audited
+/// `save_pool` diff path can bind `SqlValue` arguments to a transaction.
+/// Not part of the public API.
 #[doc(hidden)]
 #[cfg(feature = "postgres")]
 pub fn __bind_value_pg(
@@ -1303,8 +1116,7 @@ pub fn __bind_value_pg(
     crate::sql::bind_query(q, value)
 }
 
-/// MySQL counterpart of [`__bind_value_pg`] — same purpose, MySQL
-/// driver type.
+/// MySQL counterpart of [`__bind_value_pg`].
 #[doc(hidden)]
 #[cfg(feature = "mysql")]
 pub fn __bind_value_my(
@@ -1314,8 +1126,7 @@ pub fn __bind_value_my(
     crate::sql::bind_query_my(q, value)
 }
 
-/// SQLite counterpart of [`__bind_value_pg`] — same purpose, SQLite
-/// driver type.
+/// SQLite counterpart of [`__bind_value_pg`].
 #[doc(hidden)]
 #[cfg(feature = "sqlite")]
 pub fn __bind_value_sqlite<'q>(
@@ -1325,29 +1136,21 @@ pub fn __bind_value_sqlite<'q>(
     crate::sql::bind_query_sqlite(q, value)
 }
 
-/// Per-row audited save against either backend.
+/// Per-row audited save with a field-level diff, on any backend. All of
+/// it runs in one transaction:
 ///
-/// Slice 17.1 — moved out of the macro into rustango so the
-/// `#[cfg(feature = "postgres")]` / `#[cfg(feature = "mysql")]`
-/// arms no longer leak into consumer-crate macro expansions.
+/// 1. SELECT the tracked columns and decode them as the BEFORE pairs.
+/// 2. Run the compiled UPDATE.
+/// 3. Diff `after_pairs` against BEFORE.
+/// 4. Emit an `Update` audit entry, then commit.
 ///
-/// Steps inside one transaction:
-/// 1. Run the per-backend BEFORE-snapshot SELECT and decode tracked
-///    columns into `(col, json)` pairs via `decode_before_pg` /
-///    `decode_before_my`.
-/// 2. Execute the compiled UPDATE.
-/// 3. Build AFTER pairs via `after_pairs` and diff against BEFORE.
-/// 4. Emit an `Update` audit entry on the same transaction.
-/// 5. Commit.
-///
-/// Closure types reference [`crate::sql::PgReturningRow`] /
-/// [`crate::sql::MyReturningRow`] aliases, which resolve to
-/// uninhabited types when the matching feature is off — keeps
-/// macro-emitted closure bodies typecheckable in any feature config.
+/// The closure argument types ([`crate::sql::PgReturningRow`] and its
+/// siblings) resolve to uninhabited types when a backend feature is off,
+/// so generated closure bodies still typecheck in any feature set.
 ///
 /// # Errors
-/// Any [`crate::sql::ExecError`] from the UPDATE/SELECT, plus
-/// `sqlx::Error` from the audit emit (mapped through `From`).
+/// Any [`crate::sql::ExecError`] from the SELECT or UPDATE, plus
+/// `sqlx::Error` from the audit emit.
 #[allow(clippy::too_many_arguments)]
 pub async fn save_one_with_diff<F1, F2, F3>(
     pool: &crate::sql::Pool,
@@ -1372,13 +1175,10 @@ where
     let _ = (&decode_before_pg, &decode_before_my, &decode_before_sqlite);
     let _ = (select_cols_pg, select_cols_my, select_cols_sqlite);
     let stmt = pool.dialect().compile_update(update_query)?;
-    // #561 — the pre-update SELECT-decode-row genuinely differs per
-    // backend (PgReturningRow / MyReturningRow / SqliteReturningRow
-    // are different concrete types, so each arm has to call its own
-    // `decode_before_*` closure). But the UPDATE + emit + commit suffix
-    // is identical, so wrap the per-backend transaction into a
-    // `PoolTx::<Backend>(tx)` and finish through `raw_execute_tx` +
-    // `emit_one_tx` for the shared trailer.
+    // Only the pre-update SELECT differs per backend: each row type is a
+    // different concrete type, so each arm calls its own
+    // `decode_before_*`. The UPDATE, emit and commit are shared by
+    // wrapping the transaction in a `PoolTx`.
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
@@ -1464,11 +1264,8 @@ where
     }
 }
 
-/// Shared trailer for `save_one_with_audit_diff` arms: run the
-/// UPDATE that was already compiled, then emit the audit row with
-/// the diff if a `before_pairs` snapshot was captured. Lives outside
-/// the per-arm body so the only per-arm code is the pre-update
-/// SELECT (the row decode genuinely differs by backend).
+/// Shared tail of every [`save_one_with_diff`] arm: run the compiled
+/// UPDATE, then emit the audit row if a BEFORE snapshot was captured.
 async fn finish_update_with_audit_diff(
     tx: &mut crate::sql::PoolTx<'_>,
     stmt: &crate::sql::CompiledStatement,
@@ -1477,8 +1274,7 @@ async fn finish_update_with_audit_diff(
     entity_table: &'static str,
     entity_pk: &str,
 ) -> Result<u64, crate::sql::ExecError> {
-    // #1029 — surface the UPDATE's rows-affected (0 when the PK no
-    // longer exists, the Django 6.0 `Model.NotUpdated` signal).
+    // Return rows-affected: 0 means the PK no longer exists.
     let _affected = crate::sql::raw_execute_tx(tx, &stmt.sql, stmt.params.clone()).await?;
     if let Some(before) = before_pairs {
         let entry = PendingEntry {

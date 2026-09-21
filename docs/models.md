@@ -2,11 +2,11 @@
 
 A model is a Rust struct that maps to a database table. Add `#[derive(Model)]`,
 annotate the fields, and **Rustango** generates the schema, a type-safe query
-entry point, and `save`/`find`/`delete` methods — Django's models or Laravel's
-Eloquent, with the compiler checking your columns. This is the **declaration**
-reference: every field type, every primary-key option, and every
-`#[rustango(...)]` attribute. For *querying* models once they're declared, see
-the [ORM cookbook](orm.md).
+entry point, and `save`/`find`/`delete` methods — an Eloquent-style model layer
+with the compiler checking your columns. This is the **declaration** reference:
+every field type, every primary-key option, and every `#[rustango(...)]`
+attribute. For *querying* models once they're declared, see the
+[ORM cookbook](orm.md).
 
 [![Models in Rustango: a #[derive(Model)] struct maps Rust field types to per-dialect columns, the primary key can be an auto-increment Auto<i64> or a custom application-assigned key, and the derive generates SCHEMA + objects() + save/find](img/models.png)](img/models.png)
 
@@ -399,7 +399,7 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `manager(ext = "Trait")` | trait path | generate a custom manager extension trait |
 | `manager_fn` | `"published"` | add a manager accessor beyond `objects()` |
 | `get_latest_by` | `"created_at"` | default column for `latest()`/`earliest()` |
-| `order_with_respect_to` | `"parent"` | Django ordered-relative-to-parent |
+| `order_with_respect_to` | `"parent"` | keep a manual row order within each parent |
 | `index(...)` | `columns`, `method`, `name` | secondary index (btree/gin/gist/brin/hash/bloom/spgist) |
 | `unique_together` | `"a, b"` | composite unique constraint |
 | `index_together` | `"a, b"` | composite non-unique index |

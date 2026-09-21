@@ -1,14 +1,8 @@
-//! Class-level test fixtures — Django's `setUpTestData(cls)`.
+//! Shared test fixtures, built once per test binary.
 //!
-//! Django runs `setUpTestData` once per test class and shares the
-//! resulting objects across every test method. The `tests` framework
-//! wraps each test in a transaction that rolls back, so mutations
-//! during one test don't leak. Rust has no test classes; the
-//! idiomatic equivalent is a per-module `OnceCell` whose async
-//! initializer runs lazily on the first access.
-//!
-//! This module ships the [`setup_test_data!`] / [`setup_test_data_async!`]
-//! macros that wrap that pattern in a Django-shape API:
+//! Build a fixture once and reuse it across the tests in a file. The
+//! [`setup_test_data!`] and [`setup_test_data_async!`] macros wrap a
+//! `OnceLock` or `OnceCell` in a plain function call:
 //!
 //! ```ignore
 //! use rustango::setup_test_data_async;
@@ -31,30 +25,19 @@
 //! }
 //! ```
 //!
-//! ## Scope and caveats vs Django
+//! ## What to watch for
 //!
-//! - **Lifetime**: the fixture lives for the entire test-binary
-//!   process, not "per test class." `cargo test` runs each
-//!   integration-test file as a separate process, which is the
-//!   coarsest analog of Django's class boundary. Test methods in the
-//!   same file share the cell.
-//! - **Transaction rollback**: Django's `TestCase` wraps each test
-//!   in a savepoint that rolls back, so per-test mutations don't
-//!   contaminate the shared fixture. Rustango doesn't ship that
-//!   wrapper yet (issue #39 four-tier TestCase). Treat
-//!   `setup_test_data!` fixtures as **read-only** for now —
-//!   if your tests need to mutate shared state, fall back to
-//!   per-test setup or wrap each test in `atomic!` and explicitly
-//!   roll back.
-//! - **Init failures**: the macro `.unwrap()`s the closure result.
-//!   For richer error handling, write the OnceCell out longhand —
-//!   the macro is sugar for the common case.
-//!
-//! Issue #42.
+//! - The fixture lives as long as the test binary. `cargo test` runs
+//!   each integration-test file in its own process, so tests in one
+//!   file share a fixture and tests in another do not.
+//! - Treat a fixture as read only. Nothing rolls back a change one
+//!   test makes to it, so the next test would see the change. Wrap
+//!   tests that write in [`crate::test_db::with_rollback`].
+//! - The macros panic if the body panics. For real error handling,
+//!   write the `OnceLock` out by hand.
 
-/// Class-level **synchronous** test fixture — Django's
-/// `setUpTestData` for fixtures that don't need an async runtime.
-/// Wraps a [`std::sync::OnceLock`] in a function-call surface.
+/// A shared fixture built by sync code. Wraps a
+/// [`std::sync::OnceLock`].
 ///
 /// ```ignore
 /// rustango::setup_test_data!(pub fn shared_locales() -> Vec<&'static str> {
@@ -68,9 +51,8 @@
 /// }
 /// ```
 ///
-/// The fixture initializer runs at most once per test-binary
-/// process — every subsequent call returns a `&'static Type`
-/// reference to the same value.
+/// The body runs at most once per test binary. Later calls return a
+/// `&'static` reference to the same value.
 #[macro_export]
 macro_rules! setup_test_data {
     ($vis:vis fn $name:ident () -> $ty:ty $body:block) => {
@@ -81,11 +63,9 @@ macro_rules! setup_test_data {
     };
 }
 
-/// Class-level **async** test fixture — Django's `setUpTestData`
-/// for fixtures that need to hit the database (the common case for
-/// model-row fixtures). Wraps a [`tokio::sync::OnceCell`] so
-/// concurrent first-access calls all wait on the same future, with
-/// only one actually running the init body.
+/// A shared fixture built by async code, such as one that inserts
+/// rows. Wraps a [`tokio::sync::OnceCell`], so concurrent first
+/// callers all wait on one run of the body.
 ///
 /// ```ignore
 /// rustango::setup_test_data_async!(pub async fn shared_articles() -> Vec<Article> {
@@ -125,8 +105,7 @@ mod tests {
     fn sync_fixture_returns_static_ref() {
         let n = shared_numbers();
         assert_eq!(n, &vec![1, 2, 3, 4, 5]);
-        // Pointer identity: the second call must return the same
-        // `&'static` — that's the whole point of `OnceLock`.
+        // The second call returns the same reference.
         let n2 = shared_numbers();
         assert!(
             std::ptr::eq(n, n2),
@@ -134,8 +113,7 @@ mod tests {
         );
     }
 
-    // Pin "init runs at most once": share a counter across two
-    // accessor calls.
+    // A counter, to prove the body runs at most once.
     static INIT_RUNS: AtomicUsize = AtomicUsize::new(0);
     setup_test_data!(
         fn counted_fixture() -> i32 {
@@ -146,22 +124,18 @@ mod tests {
 
     #[test]
     fn sync_fixture_init_runs_at_most_once() {
-        // Force-evaluate first.
         let _ = counted_fixture();
         let after_first = INIT_RUNS.load(Ordering::SeqCst);
-        // Second call must not re-run init.
         let _ = counted_fixture();
         let after_second = INIT_RUNS.load(Ordering::SeqCst);
         assert_eq!(after_first, after_second, "init re-ran on second call");
-        // And the count is exactly 1 (other tests don't share this fixture).
+        // No other test uses this fixture, so the count is 1.
         assert!(after_first <= 1, "init counter: {after_first}");
     }
 
     setup_test_data_async!(
         async fn shared_async_fixture() -> Vec<String> {
-            // Touching `tokio::time::sleep` proves the body is actually
-            // an async block. Don't sleep long enough to slow down `cargo
-            // test`.
+            // An await proves the body really is async.
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             vec!["alpha".to_owned(), "beta".to_owned()]
         }
@@ -185,7 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_fixture_init_runs_at_most_once_across_concurrent_callers() {
-        // Fire ten concurrent callers and verify only one ran init.
+        // Ten concurrent callers, one run of the body.
         let calls = (0..10)
             .map(|_| tokio::spawn(async { counted_async_fixture().await }))
             .collect::<Vec<_>>();
@@ -193,13 +167,10 @@ mod tests {
             let v = c.await.unwrap();
             assert_eq!(v, &100);
         }
-        // tokio's OnceCell guarantees single init even under
-        // contention.
         assert_eq!(ASYNC_INIT_RUNS.load(Ordering::SeqCst), 1);
     }
 
-    // Pub-visibility variant — pin that the macro accepts a `vis`
-    // modifier (some test modules `pub use` their fixtures).
+    // The macro accepts a visibility modifier.
     setup_test_data!(
         pub fn pub_shared_pi() -> f64 {
             3.14159

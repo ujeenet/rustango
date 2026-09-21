@@ -1,7 +1,6 @@
-//! Django-shape standalone validators. Issue #54.
+//! Standalone validators.
 //!
-//! Lightweight check functions that mirror Django's
-//! `django.core.validators` module. Each returns `Result<(),
+//! Lightweight check functions. Each returns `Result<(),
 //! ValidationError>` so they compose with `?` inside `Form::clean()`
 //! or any other input-validation flow.
 //!
@@ -19,40 +18,36 @@
 //! ## Scope
 //!
 //! Hand-rolled checks (no `regex` crate dependency) — fast, allocation-free,
-//! and cover the 99% case. The character-class checks here match
-//! Django's defaults for the typical web form:
+//! and cover the 99% case. The character classes are the ones a typical
+//! web form needs:
 //!
 //! - `validate_email` — basic shape check (local-part `@` domain `.` tld).
 //!   NOT RFC 5322. Catches typos like missing `@` or empty parts.
 //! - `validate_url` — accepts `http://` / `https://` schemes with a
 //!   non-empty host. Optional port + path + query.
-//! - `validate_slug` — `[a-zA-Z0-9_-]+`. Django's `slug_re`.
+//! - `validate_slug` — `[a-zA-Z0-9_-]+`, ASCII only.
 //! - `validate_unicode_slug` — letters of any script + digits + `_` + `-`.
-//!   Django's unicode-aware `UnicodeSlugValidator`.
 //! - `validate_prohibit_null_characters` — reject strings containing
-//!   NUL (`\0`). Mirrors Django's `ProhibitNullCharactersValidator`,
-//!   used at form-input boundaries to block null-byte injection.
+//!   NUL (`\0`), at form-input boundaries, to block null-byte
+//!   injection.
 //! - `validate_min_length` / `validate_max_length` — string char count.
 //! - `validate_min_value` / `validate_max_value` — i64 numeric bounds.
 //! - `validate_min_value_f64` / `validate_max_value_f64` — float
 //!   bounds, for prices / measurements / scientific values that
 //!   don't fit `i64`.
 //! - `validate_integer` — parses as `i64`.
-//! - `validate_decimal` — `max_digits` + `decimal_places` bounds
-//!   (Django's `DecimalValidator`).
+//! - `validate_decimal` — `max_digits` + `decimal_places` bounds.
 //! - `validate_file_size_max` / `validate_file_mime_type` —
-//!   Django-shape file-upload size + MIME allowlist checks.
-//! - `validate_step_value` — Django's `StepValueValidator` —
-//!   `n == offset + k*step` for non-negative integer `k`.
+//!   file-upload size + MIME allowlist checks.
+//! - `validate_step_value` — `n == offset + k*step` for non-negative
+//!   integer `k`.
 //! - `validate_ipv4_address` / `validate_ipv6_address` — dotted-quad /
 //!   colon-hex address shape via `std::net::Ipv4Addr` / `Ipv6Addr`.
-//! - `validate_comma_separated_integer_list` — `"1,2,3"`. Django's
-//!   `validate_comma_separated_integer_list`.
+//! - `validate_comma_separated_integer_list` — `"1,2,3"`.
 //! - `validate_email_list` — comma-separated list of email addresses,
 //!   one per "CC" field entry.
 //! - `validate_phone_e164` — E.164 international phone format
-//!   (`+` followed by 1–15 digits). Not a Django built-in but
-//!   widely needed in the same role.
+//!   (`+` followed by 1–15 digits).
 //! - `validate_hex_color` — `#rgb` / `#rrggbb` / `#rrggbbaa` /
 //!   `#rgba` web-color hex codes. For color-picker form fields.
 //! - `validate_uuid` — RFC 4122 UUID string format. Useful for
@@ -208,8 +203,8 @@ pub fn is_email(s: &str) -> bool {
     validate_email(s).is_ok()
 }
 
-/// Django-parity `validate_email_with_name(value)` — accepts both
-/// a bare email (`user@host.tld`) and the RFC 5322 display-name form
+/// Accepts both a bare email (`user@host.tld`) and the RFC 5322
+/// display-name form
 /// (`"Display Name" <user@host.tld>` or `Display Name <user@host.tld>`).
 ///
 /// Useful for `From:` / `To:` / `Cc:` header values where operators
@@ -294,7 +289,7 @@ pub fn is_url(s: &str) -> bool {
 
 // ------------------------------------------------------------------ slug
 
-/// Validate that `s` is a Django-shape slug: `[a-zA-Z0-9_-]+`, no
+/// Validate that `s` is a slug: `[a-zA-Z0-9_-]+`, no
 /// other characters, must be non-empty.
 ///
 /// # Errors
@@ -325,10 +320,8 @@ pub fn is_slug(s: &str) -> bool {
 }
 
 /// Validate a unicode-aware slug. Allows any Unicode alphanumeric
-/// character plus `_` and `-`. Mirrors Django's
-/// `validate_unicode_slug`, which is the variant Django falls back
-/// to under `SLUG_VALIDATOR = UnicodeSlugValidator` (set via the
-/// `Field(allow_unicode=True)` shape).
+/// character plus `_` and `-`. Use this instead of [`validate_slug`]
+/// when slugs come from non-Latin titles.
 ///
 /// # Errors
 /// `ValidationError { code: "invalid_unicode_slug", ... }`.
@@ -359,12 +352,11 @@ pub fn is_unicode_slug(s: &str) -> bool {
 
 // ------------------------------------------------------------------ null-character guard
 
-/// Reject strings containing NUL (`\0`). Mirrors Django's
-/// `ProhibitNullCharactersValidator`. Null bytes inside user input
-/// are a known injection vector against C-string-aware downstream
-/// systems (database drivers, file paths, syscalls) and almost
-/// never represent legitimate user intent — Django runs this
-/// validator on every CharField by default.
+/// Reject strings containing NUL (`\0`). Null bytes inside user
+/// input are a known injection vector against C-string-aware
+/// downstream systems (database drivers, file paths, syscalls) and
+/// almost never represent legitimate user intent, so it is worth
+/// running on every free-text field.
 ///
 /// # Errors
 /// `ValidationError { code: "null_characters_not_allowed", ... }`.
@@ -385,12 +377,9 @@ pub fn validate_prohibit_null_characters(s: &str) -> Result<(), ValidationError>
 /// digits, no other characters. This is the format every modern
 /// phone API (Twilio, AWS SNS, Vonage) expects.
 ///
-/// Not a Django built-in — Django delegates phone validation to
-/// the `django-phonenumber-field` package which depends on
-/// `phonenumbers` (the Google libphonenumber port). E.164 is a
-/// reasonable lowest-common-denominator that doesn't require a
-/// 20MB country-codes database. For full national-format /
-/// region-aware parsing, plug a `phonenumbers`-backed validator
+/// E.164 is a lowest-common-denominator check that needs no
+/// country-codes database. For full national-format or
+/// region-aware parsing, plug a libphonenumber-backed validator
 /// alongside this one.
 ///
 /// Examples:
@@ -1022,7 +1011,7 @@ fn validate_base64_impl(s: &str, urlsafe: bool) -> Result<(), ValidationError> {
 /// **Shape check only — does NOT verify the signature.** The whole
 /// point of this validator is to catch a typoed / truncated JWT at
 /// form-input time before the real JWT library returns a less clear
-/// error. Use [`crate::auth`] / `jsonwebtoken` to actually verify
+/// error. Use [`crate::auth_backends`] / `jsonwebtoken` to actually verify
 /// the signature and claims.
 ///
 /// # Errors
@@ -1408,8 +1397,8 @@ pub fn validate_postal_code_uk(s: &str) -> Result<(), ValidationError> {
 
 // ------------------------------------------------------------------ length / value bounds
 
-/// Reject strings shorter than `min` characters (Unicode code points,
-/// not bytes — matches Django's `MinLengthValidator`).
+/// Reject strings shorter than `min` characters — Unicode code
+/// points, not bytes.
 ///
 /// # Errors
 /// `ValidationError { code: "min_length", ... }` if the string is too short.
@@ -1498,15 +1487,13 @@ pub fn validate_max_value_f64(n: f64, max: f64) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Django-parity `StepValueValidator(limit_value, offset=0)` —
-/// validate that `n` equals `offset + k * step` for some non-negative
-/// integer `k`. Used to enforce HTML5 `<input type=number step="…">`
-/// semantics from the server side.
+/// Validate that `n` equals `offset + k * step` for some
+/// non-negative integer `k`. Enforces HTML5
+/// `<input type=number step="…">` semantics on the server side.
 ///
 /// `step` must be positive; passing zero or negative returns a
-/// `ValidationError` with code `"invalid_step"` (Django raises
-/// `ValueError` at validator construction; we surface it as a
-/// validation failure for ergonomics).
+/// `ValidationError` with code `"invalid_step"` rather than
+/// panicking, so a bad constant surfaces as a validation failure.
 ///
 /// Tolerance for floating-point round-off: the value is considered
 /// "on-step" if the absolute residue from `(n - offset) / step` to
@@ -1557,10 +1544,8 @@ pub fn validate_step_value(n: f64, step: f64, offset: f64) -> Result<(), Validat
 
 // ------------------------------------------------------------------ integer / decimal
 
-/// Validate that `s` parses as a signed 64-bit integer. Django's
-/// `validate_integer`. Leading/trailing whitespace is rejected
-/// (Django's implementation calls `int()` which is strict about
-/// surrounding whitespace).
+/// Validate that `s` parses as a signed 64-bit integer.
+/// Leading and trailing whitespace is rejected.
 ///
 /// # Errors
 /// `ValidationError { code: "invalid_integer", ... }`.
@@ -1576,10 +1561,9 @@ pub fn validate_integer(s: &str) -> Result<(), ValidationError> {
         .map_err(|_| ValidationError::new("invalid_integer", "Enter a valid integer."))
 }
 
-/// Validate a decimal-number string under Django's
-/// `DecimalValidator` shape: at most `max_digits` total digits
-/// (excluding sign + decimal point), and at most `decimal_places`
-/// digits after the point.
+/// Validate a decimal-number string: at most `max_digits` total
+/// digits (excluding sign + decimal point), and at most
+/// `decimal_places` digits after the point.
 ///
 /// `max_digits` is the **total** digit count — pre- and
 /// post-decimal combined. So `12.34` is 4 digits, 2 decimal_places.
@@ -1614,7 +1598,7 @@ pub fn validate_decimal(
         return Err(ValidationError::new("invalid_decimal", "Enter a number."));
     }
     // Drop leading zeros from int_part when counting, so "007.5"
-    // has 2 digits not 4 — matches Django's Decimal coercion.
+    // has 2 digits, not 4.
     let int_digits = int_part.trim_start_matches('0').len();
     let frac_digits = frac_part.len();
     if let Some(places) = decimal_places {
@@ -1668,9 +1652,8 @@ pub fn validate_ipv6_address(s: &str) -> Result<(), ValidationError> {
         .map_err(|_| ValidationError::new("invalid_ipv6_address", "Enter a valid IPv6 address."))
 }
 
-/// Django-parity `validate_ipv46_address(value)` — accept EITHER
-/// an IPv4 or an IPv6 address. Used by Django's `GenericIPAddressField`
-/// when the protocol is set to "both" (the default).
+/// Accept EITHER an IPv4 or an IPv6 address — the check for a field
+/// that takes both families.
 ///
 /// # Errors
 /// `ValidationError { code: "invalid_ip_address", ... }` when `s`
@@ -1692,21 +1675,17 @@ pub fn validate_ipv46_address(s: &str) -> Result<(), ValidationError> {
     ))
 }
 
-/// Django-parity
-/// [`django.utils.ipv6.clean_ipv6_address(ip, unpack_ipv4=False)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.ipv6.clean_ipv6_address) —
-/// normalize an IPv6 address into the canonical RFC 5952 compressed
+/// Normalize an IPv6 address into the canonical RFC 5952 compressed
 /// form (lowercase hex, longest zero-run replaced with `::`, leading
 /// zeros dropped per group).
 ///
 /// Use when storing or comparing IPv6 addresses so different textual
 /// representations of the same address fold to one canonical string.
-/// Returns `None` if `ip` doesn't parse as IPv6 — Django raises
-/// `ValidationError`; rustango surfaces the gap as `Option::None`
-/// for ergonomic `?` propagation.
+/// Returns `None` if `ip` doesn't parse as IPv6.
 ///
-/// `unpack_ipv4 = true` mirrors Django's flag: when the address is
-/// IPv4-mapped (`::ffff:192.0.2.1`), return the dotted-quad IPv4 form
-/// instead. When `false`, the IPv4-mapped form is preserved.
+/// `unpack_ipv4 = true`: when the address is IPv4-mapped
+/// (`::ffff:192.0.2.1`), return the dotted-quad IPv4 form instead.
+/// When `false`, the IPv4-mapped form is preserved.
 ///
 /// ```ignore
 /// use rustango::validators::clean_ipv6_address;
@@ -1733,8 +1712,6 @@ pub fn clean_ipv6_address(ip: &str, unpack_ipv4: bool) -> Option<String> {
 }
 
 /// Validate that `s` parses as either an IPv4 or IPv6 address.
-/// Mirrors Django's `GenericIPAddressField(protocol="both")` (the
-/// default). Issue #337 / Django-parity.
 ///
 /// # Errors
 /// `ValidationError { code: "invalid_ip_address", ... }` when the
@@ -1750,12 +1727,11 @@ pub fn validate_ip_address(s: &str) -> Result<(), ValidationError> {
     ))
 }
 
-/// Validate that `s` looks like a safe filesystem path string. Mirrors
-/// the *structural* half of Django's `FilePathField` validation:
+/// Validate that `s` looks like a safe filesystem path string:
 /// non-empty, no NUL bytes, no `..` parent-directory segments (path
-/// traversal). Does NOT touch the filesystem — caller's responsibility
-/// to verify existence + readability + sandbox membership when that
-/// matters. Issue #338.
+/// traversal). This is the *structural* half only — it does NOT
+/// touch the filesystem, so the caller still has to verify
+/// existence, readability and sandbox membership.
 ///
 /// Accepted shapes:
 /// - Relative: `docs/intro.md`, `assets/logo.png`
@@ -1832,12 +1808,11 @@ pub fn validate_email_list(s: &str) -> Result<(), ValidationError> {
 }
 
 /// Validate that `s` is a comma-separated list of integers
-/// (`"1,2,3"`). Empty string is rejected (Django returns an error
-/// — use `Option<String>` upstream if the field is optional).
+/// (`"1,2,3"`). Empty string is rejected — use `Option<String>`
+/// upstream if the field is optional.
 ///
 /// Whitespace around individual entries is tolerated (`"1, 2, 3"`
-/// passes) since this is how operators typically type lists into
-/// forms — Django accepts it too.
+/// passes), since that is how people type lists into forms.
 ///
 /// # Errors
 /// `ValidationError { code: "invalid_comma_separated_integer_list", ... }`.
@@ -1860,14 +1835,13 @@ pub fn validate_comma_separated_integer_list(s: &str) -> Result<(), ValidationEr
     Ok(())
 }
 
-/// Django-parity
-/// [`int_list_validator(sep, allow_negative)`](https://docs.djangoproject.com/en/6.0/ref/validators/#django.core.validators.int_list_validator) —
-/// parameterized variant of [`validate_comma_separated_integer_list`].
+/// Parameterized variant of
+/// [`validate_comma_separated_integer_list`].
 ///
 /// Accepts a list of integers separated by `sep`. When
-/// `allow_negative` is false (Django default), a leading `-` on
-/// any list element rejects the entire input. Whitespace around
-/// each element is allowed and trimmed.
+/// `allow_negative` is false, a leading `-` on any list element
+/// rejects the entire input. Whitespace around each element is
+/// allowed and trimmed.
 ///
 /// Use `validate_comma_separated_integer_list(s)` for the
 /// canonical `sep=","`, `allow_negative=false` shape; this
@@ -1933,10 +1907,9 @@ pub fn int_list_validator(s: &str, sep: &str, allow_negative: bool) -> Result<()
     Ok(())
 }
 
-/// Django-parity `FileExtensionValidator(allowed_extensions=[...])` —
-/// reject filenames whose extension (case-insensitive) isn't on the
+/// Reject filenames whose extension (case-insensitive) isn't on the
 /// allowlist. The extension is everything after the LAST `.` in the
-/// filename — `archive.tar.gz` has extension `gz`, matching Django.
+/// filename, so `archive.tar.gz` has extension `gz`.
 /// `allowed_extensions` entries are compared lowercase; pass them
 /// without the leading dot (`["jpg", "png"]`, not `[".jpg"]`).
 ///
@@ -1979,22 +1952,19 @@ pub fn validate_file_extension(
     Ok(())
 }
 
-/// Django-parity `validate_image_file_extension` — convenience around
-/// [`validate_file_extension`] that allows the same defaults Django
-/// uses: `bmp / dib / gif / tif / tiff / jfif / jpe / jpg / jpeg /
+/// Convenience around [`validate_file_extension`] that allows the
+/// usual image extensions: `bmp / dib / gif / tif / tiff / jfif / jpe / jpg / jpeg /
 /// pbm / pgm / ppm / pnm / png / apng / blp / bufr / cur / pcx /
 /// dcx / dds / ps / eps / fit / fits / fli / flc / ftc / ftu / gbr /
 /// gif / grib / h5 / hdf / jp2 / j2k / jpc / jpf / jpx / j2c / icns /
 /// ico / im / iim / mic / mpo / msp / palm / pcd / pdf / pxr / psd /
 /// bw / rgb / rgba / sgi / ras / tga / icb / vda / vst / webp / wmf /
-/// emf / xbm / xpm`. Matches Pillow's `Image.registered_extensions`
-/// snapshot Django ships.
+/// emf / xbm / xpm`.
 ///
 /// # Errors
 /// Forwarded from [`validate_file_extension`].
 pub fn validate_image_file_extension(filename: &str) -> Result<(), ValidationError> {
-    // Pillow's registered image extensions as of Django 6.0 — the
-    // exact list Django's `validate_image_file_extension` walks.
+    // The image extensions common decoders register.
     const IMAGE_EXTENSIONS: &[&str] = &[
         "apng", "bmp", "blp", "bufr", "bw", "cur", "dcx", "dds", "dib", "emf", "eps", "fit",
         "fits", "flc", "fli", "ftc", "ftu", "gbr", "gif", "grib", "h5", "hdf", "icb", "icns",
@@ -2006,14 +1976,12 @@ pub fn validate_image_file_extension(filename: &str) -> Result<(), ValidationErr
     validate_file_extension(filename, IMAGE_EXTENSIONS)
 }
 
-/// Django-shape file-size cap — reject uploads whose byte length
-/// exceeds `max_bytes`. Pair with `uploads::save_uploads` (which
-/// streams + caps at the transport layer) when the form-level check
-/// needs to produce a Django-compatible `FormErrors` entry instead
-/// of a 413 response.
+/// File-size cap — reject uploads whose byte length exceeds
+/// `max_bytes`. Pair with `uploads::save_uploads` (which streams and
+/// caps at the transport layer) when the form-level check should
+/// produce a field error instead of a 413 response.
 ///
-/// Message-shape mirrors Django's `FILE_UPLOAD_MAX_MEMORY_SIZE`
-/// rejection: `"File size {actual} exceeds {max} bytes."`.
+/// The message reads `"File size {actual} exceeds {max} bytes."`.
 ///
 /// # Errors
 /// `ValidationError { code: "file_too_large", ... }` when `actual_bytes
@@ -2032,11 +2000,10 @@ pub fn validate_file_size_max(actual_bytes: u64, max_bytes: u64) -> Result<(), V
 /// caller. Each bound is optional — pass `None` to skip that
 /// side.
 ///
-/// Django ships dimension validation via PIL inside `ImageField`;
-/// rustango doesn't pull in image processing, so the caller is
-/// expected to extract `(width, height)` from the file using
-/// whichever image lib they choose (`image`, `imageinfo`,
-/// `kamadak-exif`, etc.) then feed them through this validator.
+/// rustango does not pull in image processing, so the caller
+/// extracts `(width, height)` with whichever image crate they
+/// prefer (`image`, `imageinfo`, `kamadak-exif`, …) and feeds them
+/// through this validator.
 ///
 /// Bounds are pixel counts. All four bounds default to "no check"
 /// when `None`; the function returns `Ok(())` when every supplied
@@ -2101,7 +2068,7 @@ pub fn validate_image_dimensions(
     Ok(())
 }
 
-/// Django-shape MIME-type allowlist — reject uploads whose
+/// MIME-type allowlist — reject uploads whose
 /// `Content-Type` (or per-part media-type for multipart forms) isn't
 /// in `allowed_mimetypes`. Comparison is case-insensitive on the
 /// `type/subtype` portion and ignores any trailing `; charset=...`
@@ -2324,9 +2291,8 @@ pub fn is_ipv46_address(s: &str) -> bool {
     validate_ipv46_address(s).is_ok()
 }
 
-/// `true` when `s` would pass [`validate_ip_address`] — alias of
-/// [`is_ipv46_address`] for symmetry with Django's
-/// `validate_ip_address`. Boolean form for filter chains.
+/// `true` when `s` would pass [`validate_ip_address`] — an alias of
+/// [`is_ipv46_address`]. Boolean form for filter chains.
 #[must_use]
 pub fn is_ip_address(s: &str) -> bool {
     validate_ip_address(s).is_ok()
@@ -2455,8 +2421,8 @@ mod tests {
 
     #[test]
     fn slug_rejects_non_ascii_letters() {
-        // Django's default slug_re is ASCII-only; the unicode-aware
-        // form is opt-in. Match that.
+        // The default slug check is ASCII-only; the unicode-aware
+        // form is opt-in.
         assert!(validate_slug("café").is_err());
     }
 
@@ -2542,7 +2508,7 @@ mod tests {
 
     #[test]
     fn integer_rejects_surrounding_whitespace() {
-        // Django's `int()` rejects whitespace — we match.
+        // Surrounding whitespace is rejected, not trimmed.
         assert!(validate_integer(" 42").is_err());
         assert!(validate_integer("42 ").is_err());
         assert!(validate_integer("").is_err());
@@ -3667,7 +3633,7 @@ mod tests {
         assert!(validate_postal_code_uk("").is_err());
     }
 
-    // -------- validate_file_extension (Django parity) --------
+    // -------- validate_file_extension --------
 
     #[test]
     fn file_extension_accepts_allowed() {
@@ -3677,7 +3643,7 @@ mod tests {
 
     #[test]
     fn file_extension_case_insensitive() {
-        // Django parity: uppercase extension still matches lowercase allowlist.
+        // An uppercase extension still matches a lowercase allowlist.
         assert!(validate_file_extension("PHOTO.JPG", &["jpg"]).is_ok());
         assert!(validate_file_extension("photo.Jpeg", &["jpeg"]).is_ok());
     }
@@ -3697,7 +3663,7 @@ mod tests {
 
     #[test]
     fn file_extension_uses_last_dot_only() {
-        // Django parity: archive.tar.gz has extension "gz", not "tar.gz".
+        // archive.tar.gz has extension "gz", not "tar.gz".
         assert!(validate_file_extension("archive.tar.gz", &["gz"]).is_ok());
         assert!(validate_file_extension("archive.tar.gz", &["tar.gz"]).is_err());
     }
@@ -3722,7 +3688,7 @@ mod tests {
 
     #[test]
     fn image_file_extension_rejects_documents() {
-        // Common non-image extensions Django would reject.
+        // Common non-image extensions.
         assert!(validate_image_file_extension("doc.txt").is_err());
         assert!(validate_image_file_extension("script.js").is_err());
         assert!(validate_image_file_extension("malware.exe").is_err());
@@ -3734,7 +3700,7 @@ mod tests {
         assert!(validate_image_file_extension("Photo.PNG").is_ok());
     }
 
-    // -------- validate_file_size_max (Django parity) --------
+    // -------- validate_file_size_max --------
 
     #[test]
     fn file_size_max_accepts_under_limit() {
@@ -3758,7 +3724,7 @@ mod tests {
         assert!(validate_file_size_max(1, 0).is_err());
     }
 
-    // -------- validate_file_mime_type (Django parity) --------
+    // -------- validate_file_mime_type --------
 
     #[test]
     fn file_mime_type_accepts_exact_match() {
@@ -3800,7 +3766,7 @@ mod tests {
         assert!(validate_file_mime_type("application/json", &["image/*"]).is_err());
     }
 
-    // -------- validate_step_value (Django parity) --------
+    // -------- validate_step_value --------
 
     #[test]
     fn step_value_accepts_multiples_of_step() {
@@ -3861,7 +3827,7 @@ mod tests {
         assert!(validate_step_value(7.0, 5.0, 0.0).is_err());
     }
 
-    // -------- clean_ipv6_address (Django parity) --------
+    // -------- clean_ipv6_address --------
 
     #[test]
     fn clean_ipv6_compresses_zero_run() {
@@ -3921,7 +3887,7 @@ mod tests {
         assert!(clean_ipv6_address("192.0.2.1", false).is_none());
     }
 
-    // -------- validate_ipv46_address (Django parity) --------
+    // -------- validate_ipv46_address --------
 
     #[test]
     fn ipv46_accepts_ipv4() {
@@ -4001,7 +3967,7 @@ mod tests {
 
     #[test]
     fn int_list_trims_whitespace_around_elements() {
-        // Django shape: whitespace around each element is tolerated.
+        // Whitespace around each element is tolerated.
         assert!(int_list_validator("1, 2, 3", ",", false).is_ok());
         assert!(int_list_validator("  10 ,  20 ,  30  ", ",", false).is_ok());
     }

@@ -5,8 +5,7 @@
 //! backend caps that: 65535 on Postgres (an int16 on the wire), 32766 on
 //! modern SQLite, `max_allowed_packet` on MySQL. Before this fix
 //! `bulk_insert_pool` emitted a single statement no matter the size, so
-//! a large import failed with an opaque driver error. Django's
-//! `bulk_create` batches for exactly this reason.
+//! a large import failed with an opaque driver error.
 //!
 //! SQLite is the right place to test it: its 32766 ceiling is the
 //! lowest of the three, so the row count stays small enough to run in

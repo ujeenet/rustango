@@ -7,9 +7,8 @@ para clientes de API, una vista HTML emite una página renderizada para un naveg
 construyen a partir del mismo `#[derive(Model)]`, y puedes servir un modelo de *ambas* formas a la
 vez.
 
-Son el equivalente en **Rustango** de las vistas genéricas basadas en clases de Django
-(`ListView`, `DetailView`, `CreateView`, `UpdateView`, `DeleteView`) o de los controladores de
-recursos de Laravel que devuelven vistas Blade. Renderizan mediante plantillas
+Cada tipo de vista (`ListView`, `DetailView`, `CreateView`, `UpdateView`,
+`DeleteView`) cubre un caso estándar y renderiza mediante plantillas
 [Tera](https://keats.github.io/tera/).
 
 [![Vistas HTML en Rustango: un modelo alimenta ListView, DetailView y CreateView/UpdateView/DeleteView, cada una renderizando una plantilla Tera en una página renderizada en el servidor](../img/html-views.png)](../img/html-views.png)
@@ -57,7 +56,6 @@ Esta es la primera decisión. Ambas convierten un modelo en endpoints; difieren 
 | Ante una entrada inválida | `400` + un mapa de errores JSON indexado por campo | vuelve a renderizar el formulario con los errores mostrados |
 | Lee un listado como | un sobre JSON paginado | una `<table>`/bucle en tu plantilla |
 | Habitualmente autenticada con | tokens / JWT / claves de API | cookies de sesión |
-| Análogo en Django | DRF `ModelViewSet` | vistas genéricas basadas en clases |
 
 No tienes que elegir globalmente — elige por recurso, y puedes montar **ambas
 sobre el mismo modelo** (ver [abajo](#servir-un-modelo-de-ambas-formas)). Reglas generales:

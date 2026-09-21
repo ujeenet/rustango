@@ -19,8 +19,9 @@
 //! - **Token bucket**: each key (IP or user id) gets `capacity` tokens.
 //! - On each request, one token is removed. If empty, return 429.
 //! - Tokens refill at `capacity / refill_period` per second.
-//! - Buckets live in an in-process `tokio::sync::Mutex<HashMap>`. Process-local —
-//!   for distributed enforcement, integrate with the cache layer (future slice).
+//! - Buckets live in an in-process map, so each process limits on its
+//!   own. For one shared limit across processes, use the
+//!   `rate_limit_cache` module instead.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -33,20 +34,16 @@ use axum::http::{header, HeaderValue, Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
 
-/// Ceiling on distinct in-flight buckets (GHSA-rj6w).
+/// Ceiling on how many buckets the map may hold.
 ///
-/// At ~64 bytes of key plus a 24-byte `Bucket`, 100k entries is a few
-/// megabytes — high enough that a real deployment never reaches it
-/// (it would need 100k distinct clients inside one `refill_period`),
-/// low enough that a flood of forged header values cannot exhaust
-/// memory. The shared-cache limiter has no equivalent because its
-/// entries carry the cache's own TTL.
+/// 100k entries costs a few megabytes. That is more clients than a
+/// real deployment sees inside one `refill_period`, but low enough
+/// that a flood of forged header values cannot exhaust memory.
 const MAX_BUCKETS: usize = 100_000;
 
-/// Warn (at most once per process) that the limiter could not derive a
-/// per-client key and is falling back to a shared bucket — a
-/// misconfiguration that turns the limiter into a site-wide throttle
-/// (#1252). Rate-limited to one line so a hot path can't flood logs.
+/// Warn once per process that the limiter cannot tell clients apart
+/// and is using one shared bucket. That turns the limiter into a
+/// site-wide throttle. Logged once so a hot path cannot flood logs.
 fn warn_missing_discriminator(what: &str) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
@@ -62,11 +59,10 @@ fn warn_missing_discriminator(what: &str) {
     }
 }
 
-/// Warn (once) that a forwarding header arrived but no [`TrustedRealIp`]
-/// did, so the limiter is keying on the connecting socket and every
-/// client behind that proxy shares one bucket (#1398). Either
-/// `RealIpLayer` is not mounted, it is mounted *after* the limiter so its
-/// extension does not exist yet, or no proxies were declared trusted.
+/// Warn once that a forwarding header arrived but no
+/// [`TrustedRealIp`] did, so every client behind that proxy shares
+/// one bucket. Either `RealIpLayer` is missing, it is mounted after
+/// the limiter, or no proxies were marked trusted.
 ///
 /// [`TrustedRealIp`]: crate::real_ip::TrustedRealIp
 fn warn_forwarded_but_unresolved(req: &Request<Body>) {
@@ -88,19 +84,17 @@ fn warn_forwarded_but_unresolved(req: &Request<Body>) {
     }
 }
 
-/// The client IP the limiters key on: the forwarded address when it
-/// arrived over a **trusted** proxy, otherwise the connecting socket
-/// (#1398).
+/// The client IP the limiters key on: the forwarded address if it
+/// came through a **trusted** proxy, otherwise the connecting socket.
 ///
-/// Deliberately [`TrustedRealIp`] and not [`RealIp`]. `RealIp` is only a
-/// claim made by whoever sent the header — keying a limiter on that would
-/// turn "the limit is too coarse behind a proxy" into "the limit is
-/// bypassable by sending a header", which is the worse of the two
-/// failures. Only [`RealIpLayer::trust_proxies`] can produce the trusted
-/// form, so the operator names the hops and nothing is inferred.
+/// This uses [`TrustedRealIp`], never [`RealIp`]. A `RealIp` is only a
+/// claim by whoever sent the header. Keying on it would let any client
+/// pick its own bucket and skip the limit entirely. Only
+/// [`RealIpLayer::trust_proxies`] produces the trusted form, so an
+/// operator must name the proxy hops; nothing is guessed.
 ///
-/// Header parsing lives entirely in `RealIpLayer`; the limiters never
-/// read `X-Forwarded-For` themselves.
+/// All header parsing lives in `RealIpLayer`. The limiters never read
+/// `X-Forwarded-For` themselves.
 ///
 /// [`TrustedRealIp`]: crate::real_ip::TrustedRealIp
 /// [`RealIp`]: crate::real_ip::RealIp
@@ -126,21 +120,19 @@ pub(crate) fn client_ip_key(req: &Request<Body>) -> String {
 pub enum KeyBy {
     /// Use the connecting client's IP address (`ConnectInfo<SocketAddr>`).
     ///
-    /// Requires the server to be built with
-    /// `into_make_service_with_connect_info::<SocketAddr>()`. If it is
-    /// **not**, every request falls back to one shared bucket, so one
-    /// client throttles the whole site — a self-inflicted DoS. The
-    /// limiter logs a one-time warning when this happens (#1252); make
-    /// sure your bind wires up `ConnectInfo`.
+    /// Serve with
+    /// `into_make_service_with_connect_info::<SocketAddr>()`. Without
+    /// it, every request shares one bucket, so a single client can
+    /// throttle the whole site. The limiter warns once if that happens.
     Ip,
-    /// Use the value of a request header (e.g. `"x-api-key"` or `"authorization"`).
+    /// Use the value of a request header, such as `"x-api-key"`.
     ///
-    /// In the cache-backed limiter the value is **hashed** before use as
-    /// a key, so a shared cache never exposes a raw credential (#1252).
-    /// Requests missing the header fall back to one shared bucket and
-    /// log a one-time warning, as with `Ip`.
+    /// The cache-backed limiter hashes the value first, so a shared
+    /// cache never holds a raw credential. Requests without the header
+    /// share one bucket and log a warning, as with `Ip`.
     Header(&'static str),
-    /// Single global bucket — coarse but easy. Good for "max N requests/sec for the whole endpoint".
+    /// One bucket for everything. Coarse, but fine for "max N
+    /// requests/sec on this endpoint".
     Global,
 }
 
@@ -197,14 +189,10 @@ impl RateLimitLayer {
 
     /// Override the distinct-bucket ceiling (default [`MAX_BUCKETS`]).
     ///
-    /// Raise it if you genuinely serve more than 100k distinct clients
-    /// inside one `refill_period` and have the memory for it; lower it
-    /// on a small instance. `0` is treated as 1 — a limiter with no
-    /// buckets cannot limit.
-    ///
-    /// Also what makes the eviction path testable: a guard can set a
-    /// small ceiling and actually reach it, rather than passing because
-    /// the code never ran (GHSA-rj6w).
+    /// Raise it if you really serve more than 100k distinct clients
+    /// inside one `refill_period` and have the memory. Lower it on a
+    /// small instance. `0` becomes 1: a limiter with no buckets cannot
+    /// limit. Tests also use a small ceiling to reach the eviction path.
     #[must_use]
     pub fn max_buckets(mut self, n: usize) -> Self {
         self.max_buckets = n.max(1);
@@ -218,32 +206,25 @@ impl RateLimitLayer {
         self.capacity as f64 / self.refill_period.as_secs_f64()
     }
 
-    /// Bound the bucket map before inserting a new key (GHSA-rj6w).
+    /// Bound the bucket map before inserting a new key. With
+    /// `KeyBy::Header` the key is an attacker-chosen header value, so
+    /// an unbounded map is a way to kill the process.
     ///
-    /// Nothing removed entries before this, and with
-    /// `KeyBy::Header` the key is the raw header value — entirely
-    /// attacker-chosen and uncapped in length. One request per random
-    /// value grew the map until the process died.
+    /// **The sweep drops only buckets that are full.** A full bucket
+    /// and a missing bucket behave the same: a new key starts at
+    /// `tokens = capacity`, and a bucket left alone for
+    /// `refill_period` has refilled to exactly that. So dropping it
+    /// cannot give anyone one extra request. Dropping a partly spent
+    /// bucket would, and that is a rate-limit bypass.
     ///
-    /// The sweep is exact rather than heuristic: **a bucket that has
-    /// refilled to capacity is indistinguishable from one that does
-    /// not exist.** A fresh key is inserted with `tokens = capacity`,
-    /// and a bucket idle for `refill_period` has refilled to exactly
-    /// that. So dropping it cannot hand an attacker a single extra
-    /// request, which is what would make an eviction policy a bypass.
+    /// If every bucket is still partly spent, the hard cap kicks in
+    /// and drops the **fullest** ones, which are the cheapest to lose.
     ///
-    /// The hard cap behind it covers the case the sweep cannot — a
-    /// burst of distinct keys inside one `refill_period`, where every
-    /// bucket still holds spent tokens. There the **fullest** go first,
-    /// because they are the ones closest to costing nothing.
-    ///
-    /// Both passes rank on *projected* tokens, never on age. Age is the
-    /// obvious proxy and it is backwards: `last_refill` moves on every
-    /// take, so the least-recently-touched bucket is the one that spent
-    /// its budget and then went quiet — precisely the bucket an
-    /// attacker wants evicted. An earlier draft of this evicted by age
-    /// and `a_swept_key_is_not_a_free_pass` caught it handing a spent
-    /// client a fresh allowance.
+    /// **Both passes rank on projected tokens, never on age.** Ranking
+    /// by age is backwards: `last_refill` moves on every take, so the
+    /// least recently used bucket is the one that spent its budget and
+    /// went quiet. That is exactly the bucket an attacker wants
+    /// evicted, because evicting it returns a full allowance.
     fn make_room(&self, store: &mut HashMap<String, Bucket>, now: Instant) {
         if store.len() < self.max_buckets {
             return;
@@ -256,8 +237,7 @@ impl RateLimitLayer {
             (b.tokens + elapsed * rate).min(cap)
         };
 
-        // Exact: a bucket at capacity hands out the same number of
-        // requests as one that does not exist.
+        // A bucket at capacity allows the same as a missing one.
         store.retain(|_, b| projected(b) < cap);
         if store.len() < self.max_buckets {
             return;
@@ -282,8 +262,8 @@ impl RateLimitLayer {
         let cap = self.capacity as f64;
         let rate = self.rate_per_sec();
         let mut store = self.store.lock().await;
-        // Only a *new* key can grow the map, so the sweep rides the
-        // miss path and the hot path stays a lookup (GHSA-rj6w).
+        // Only a new key grows the map, so sweep on the miss path and
+        // keep the hot path a plain lookup.
         if !store.contains_key(key) {
             self.make_room(&mut store, now);
         }
@@ -315,10 +295,9 @@ impl RateLimitLayer {
     fn extract_key(&self, req: &Request<Body>) -> String {
         match &self.key_by {
             KeyBy::Ip => client_ip_key(req),
-            // Unlike the cache-backed limiter, this store is a
-            // process-local `HashMap` that never leaves memory, so the
-            // header value is not persisted anywhere an attacker could
-            // read it — no hashing needed here (#1252).
+            // This map stays in process memory and is never written
+            // anywhere, so the raw header value needs no hashing. The
+            // cache-backed limiter does hash it.
             KeyBy::Header(name) => req
                 .headers()
                 .get(*name)

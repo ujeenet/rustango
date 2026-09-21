@@ -8,8 +8,8 @@
 //! file for another backend and **172 have no MySQL or PG counterpart at
 //! all** — not because those features are SQLite-only, but because
 //! writing the second and third copy by hand costs more than it returns.
-//! The `django6_*` files already solved this for eight features; nothing
-//! generalized it.
+//! The `orm_*` scenario files already solved this for eight features;
+//! nothing generalized it.
 //!
 //! Those two numbers are checked by `docs_live_suite_counts`, because
 //! the first draft of this comment said 30 and 167 against a tree that
@@ -44,6 +44,8 @@
 //! to be written down rather than assumed. Each arm carries a `because`
 //! string that is printed when the assertion fails, so the next reader
 //! gets the reason and not just the number.
+//!
+//! [`Backend::pool`]: crate::testkit::matrix::Backend::pool
 
 use std::sync::OnceLock;
 
@@ -242,7 +244,7 @@ pub async fn drop_table(pool: &Pool, table: &str) {
 /// Two ways out:
 ///
 /// - **Framework-managed tables** (`rustango_*`): use the `setup:` form
-///   of [`tri_dialect_test!`] and call
+///   of [`tri_dialect_test!`](crate::tri_dialect_test) and call
 ///   [`crate::testkit::migrate_framework`], which builds through the
 ///   real migration path and emits the index correctly on all three.
 /// - **A model the suite owns**: follow `migrate_ddl_tri.rs`, which
@@ -464,7 +466,7 @@ impl<T> Divergence<T> {
 /// Replaces the three near-identical `mod pg_live / mysql_live /
 /// sqlite_live` blocks each converted file used to carry — about 55
 /// lines each, of which the only real content was the DDL and the pool
-/// URL. Both of those now come from [`Backend::pool`] and
+/// URL. Both of those now come from [`Backend::pool`](self::Backend::pool) and
 /// [`fresh_table`], so what is left is the scenario list, written once
 /// instead of three times.
 ///

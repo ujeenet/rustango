@@ -1,27 +1,33 @@
-//! Model Context Protocol (MCP) server — expose rustango apps to external
-//! ML agents over JSON-RPC 2.0 / Streamable HTTP.
+//! A Model Context Protocol server, so an outside agent can use your
+//! app over JSON-RPC 2.0 and Streamable HTTP.
 //!
-//! Epic #1013. **Slice 1 (#1014)** ships the foundation: the `src/mcp/`
-//! module + `mcp` Cargo feature, the JSON-RPC 2.0 envelope, the
-//! Streamable-HTTP transport (`POST` request / `GET` SSE notification
-//! stream), and the `initialize` + `ping` methods. No auth, tools,
-//! skills, prompts, or resources yet — those land in Slices 2–6.
+//! What is here: the JSON-RPC envelope, the transport (`POST` for
+//! requests, `GET` for an SSE notification stream), the
+//! `initialize` and `ping` methods, agent authentication with scoped
+//! JWTs, [`tools`](crate::mcp::tools), [`resources`](crate::mcp::resources)
+//! and prompts, [`progress`](crate::mcp::progress) reporting with
+//! cancellation, [`pagination`](crate::mcp::pagination),
+//! [`oauth`](crate::mcp::oauth) discovery, and the
+//! [`utilities`](crate::mcp::utilities) methods.
+//!
+//! Behind the `mcp` Cargo feature.
 //!
 //! ## Mounting
 //!
 //! ```ignore
-//! // Single-tenant:
+//! // One tenant:
 //! let api = axum::Router::new().nest("/mcp", rustango::mcp::router(pool));
 //! rustango::manage::Cli::new().api(api).run().await?;
 //!
-//! // Multi-tenant (tenancy Builder injects the TenantContext):
+//! // Many tenants, where the tenancy Builder injects the context:
 //! let api = axum::Router::new().nest("/mcp", rustango::mcp::tenant_router());
 //! ```
 //!
-//! An MCP client then completes the lifecycle handshake — `initialize`
-//! (capability negotiation) followed by a `notifications/initialized`
-//! ack — and can `ping` to check liveness, all over the single `POST`
-//! endpoint.
+//! Use [`secure_tenant_router`](crate::mcp::secure_tenant_router)
+//! instead to require an agent token.
+//! Either way, the client starts with `initialize` to agree on
+//! capabilities, acks with `notifications/initialized`, and can then
+//! `ping` to check the server is alive.
 
 pub mod auth;
 mod handlers;
@@ -49,7 +55,7 @@ pub use router::{router, secure_tenant_router, tenant_router, tenant_router_auth
 pub use tools::{
     call_tool, list_tools, McpContext, McpError, McpTool, McpToolFuture, McpToolHandler,
 };
-// Hidden, but must be `pub` for the `register_mcp_tool!` expansion.
+// Hidden, but `pub` because `register_mcp_tool!` expands to it.
 #[doc(hidden)]
 pub use tools::{JsonValue, __deserialize_args, __schema_of};
 pub use types::{

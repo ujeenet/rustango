@@ -145,8 +145,7 @@ impl<T, K: serde::Serialize> serde::Serialize for ForeignKey<T, K> {
 /// produces an `Unloaded` reference (#1454).
 ///
 /// Together the two make a foreign-key column round-trip through JSON
-/// as its key, which is what a REST client sends and what DRF's
-/// `PrimaryKeyRelatedField` does.
+/// as its key, which is what a REST client sends.
 ///
 /// Without this, `#[derive(Serializer)]` could not carry a foreign-key
 /// column **at all**: a serializer field must match its model field's
@@ -322,7 +321,8 @@ where
     ///   built with an out-of-band value.
     /// * [`ExecError::MissingPrimaryKey`] — the target model has no
     ///   `#[rustango(primary_key)]` field (programming error).
-    /// * Any [`ExecError`] produced by the underlying [`Fetcher`].
+    /// * Any [`ExecError`] produced by the underlying
+    ///   [`FetcherPool`](crate::sql::FetcherPool).
     pub async fn get(&mut self, pool: &PgPool) -> Result<&T, ExecError> {
         self.get_on(pool).await
     }

@@ -1,9 +1,9 @@
-//! Django parity — `Meta.proxy = True` flag. rustango spells the
-//! attribute as `#[rustango(proxy)]` (bare → true) or
+//! The proxy-model flag — a model that shares another's table.
+//! Spelled as `#[rustango(proxy)]` (bare → true) or
 //! `#[rustango(proxy = true | false)]`. Stored on
 //! `ModelSchema::proxy`.
 //!
-//! Declarative-only today: migration / admin / DRF surfaces still
+//! Declarative-only today: migration / admin / REST surfaces still
 //! treat every model as table-owning. The metadata is the
 //! foundation for skipping `CreateTable` emission on proxies (parent
 //! owns the table) and for routing per-instance method resolution to

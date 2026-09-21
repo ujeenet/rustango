@@ -8,10 +8,8 @@ pub enum QueryError {
     #[error("model `{model}` has no field `{field}`")]
     UnknownField { model: &'static str, field: String },
 
-    /// `bulk_update()` was asked to update the primary-key column, which
-    /// identifies each row in the `WHERE`/`CASE` join and so cannot be
-    /// reassigned. Mirrors Django's
-    /// `ValueError("bulk_update() cannot be used with primary key fields.")`.
+    /// `bulk_update()` was asked to change the primary key. The key
+    /// picks out each row in the `WHERE`/`CASE` join, so it cannot move.
     #[error("`bulk_update` cannot update the primary-key field `{model}.{field}`")]
     BulkUpdatePrimaryKey { model: &'static str, field: String },
 
@@ -42,9 +40,7 @@ pub enum QueryError {
         max: Option<i64>,
     },
 
-    /// `#[rustango(choices = "…")]` declared a closed set of allowed
-    /// values and the bound value isn't one of them. Mirrors Django's
-    /// `ValidationError` raised on save when `choices` is set.
+    /// The value is not one of the `#[rustango(choices = "…")]` entries.
     #[error(
         "field `{model}.{field}` value `{value}` is not one of the declared choices: {allowed:?}"
     )]
@@ -55,9 +51,9 @@ pub enum QueryError {
         allowed: Vec<&'static str>,
     },
 
-    /// `#[rustango(validators = "email,url")]` named a validator that's
-    /// not in the dispatch table. Names must match one of the entries
-    /// documented on [`crate::core::FieldSchema::validators`].
+    /// `#[rustango(validators = "email,url")]` named a validator that
+    /// does not exist. [`crate::core::FieldSchema::validators`] lists
+    /// the valid names.
     #[error("field `{model}.{field}` references unknown validator `{validator}`")]
     UnknownValidator {
         model: &'static str,
@@ -65,9 +61,8 @@ pub enum QueryError {
         validator: &'static str,
     },
 
-    /// One of the named [`crate::core::FieldSchema::validators`] rejected
-    /// the bound value. Mirrors Django's `ValidationError` raised on
-    /// save when a custom validator on `Field.validators=[]` fails.
+    /// One of the field's [`crate::core::FieldSchema::validators`]
+    /// rejected the value.
     #[error("field `{model}.{field}` validator `{validator}` rejected value: {reason}")]
     ValidatorFailed {
         model: &'static str,
@@ -76,10 +71,9 @@ pub enum QueryError {
         reason: String,
     },
 
-    /// `QuerySet::select_related("foo")` couldn't be lowered: the
-    /// field doesn't exist, isn't a `ForeignKey<T>`, the target
-    /// table isn't registered in `inventory`, or the target has no
-    /// primary key. Slice 9.0d.
+    /// `QuerySet::select_related("foo")` could not be lowered: no such
+    /// field, the field is not a `ForeignKey<T>`, the target table is
+    /// not registered in `inventory`, or the target has no primary key.
     #[error("select_related(`{field}`) on model `{model}` is invalid: {reason}")]
     SelectRelatedInvalid {
         model: &'static str,
@@ -87,20 +81,15 @@ pub enum QueryError {
         reason: String,
     },
 
-    /// `AggregateBuilder::filter(alias, op, value)` was called with
-    /// an `op` that doesn't compose against an aggregate LHS via
-    /// [`crate::core::WhereExpr::ExprCompare`]. After issue #87,
-    /// the supported set is the binary-comparison ops (`Eq`/`Ne`/
-    /// `Lt`/`Lte`/`Gt`/`Gte`) plus the SQL-92 standard predicates
-    /// (`In`/`NotIn`, `Between`, `IsNull`, `Like`/`NotLike`,
-    /// `ILike`/`NotILike`). The JSON-op family + null-safe equality
-    /// (`IsDistinctFrom` / `IsNotDistinctFrom`) still need
-    /// dialect-specific writers that take a `&str` for the LHS,
-    /// so they're rejected here.
+    /// `AggregateBuilder::filter(alias, op, value)` got an `op` that
+    /// does not compose against an aggregate left side via
+    /// [`crate::core::WhereExpr::ExprCompare`]. Comparisons and the
+    /// standard predicates (`In`, `Between`, `IsNull`, `Like`, …) work;
+    /// the JSON ops and null-safe equality (`IsDistinctFrom` /
+    /// `IsNotDistinctFrom`) do not, because they need a `&str` left side.
     ///
-    /// Drop into [`crate::query::AggregateBuilder::having`] with a
-    /// pre-built `WhereExpr` if you really need one of the
-    /// remaining ops against an aggregate.
+    /// For those, build a `WhereExpr` yourself and pass it to
+    /// [`crate::query::AggregateBuilder::having`].
     #[error(
         "HAVING auto-routing for annotation alias `{alias}` doesn't support \
          {op:?} (JSON-op family + null-safe equality). Build a `WhereExpr` \
@@ -108,13 +97,9 @@ pub enum QueryError {
     )]
     HavingOpNotSupported { alias: String, op: super::Op },
 
-    /// Django-shape `.filter("field__lookup", value)` got a lookup
-    /// suffix the parser doesn't recognize. Issue #71. The supported
-    /// set (exact / iexact / contains / icontains / startswith /
-    /// istartswith / endswith / iendswith / gt / gte / lt / lte / ne
-    /// / in / isnull / between / range) is documented on
-    /// [`crate::query::QuerySet::filter`]. Chained lookups
-    /// (`author__name__icontains`) aren't supported in v1.
+    /// `.filter("field__lookup", value)` got a suffix the parser does
+    /// not know. [`crate::query::QuerySet::filter`] lists the supported
+    /// set; the error message repeats it.
     #[error(
         "unknown lookup suffix `__{suffix}` on field `{field}` — \
          supported: exact, iexact, contains, icontains, startswith, \
@@ -127,11 +112,11 @@ pub enum QueryError {
     )]
     UnknownLookup { field: String, suffix: String },
 
-    /// Relation-spanning lookup (`author__name`) used in a context that
-    /// doesn't yet support the implicit JOIN — `update()` / `delete()` /
-    /// `.aggregate()`. Supported in `filter()` / `exclude()` /
-    /// `order_by()` on the SELECT path (#1031); elsewhere, add the JOIN
-    /// explicitly via `.join(...)` + `col_filter`.
+    /// A relation-spanning lookup (`author__name`) was used where the
+    /// implicit JOIN is not available: `update()`, `delete()` and
+    /// `.aggregate()`. It works in `filter()`, `exclude()` and
+    /// `order_by()` on a SELECT. Elsewhere add the JOIN yourself with
+    /// `.join(...)` plus `col_filter`.
     #[error(
         "relation-spanning lookup `{key}` is only supported in \
          filter()/exclude()/order_by() on a SELECT; for update/delete/\
@@ -139,10 +124,8 @@ pub enum QueryError {
     )]
     RelationSpanUnsupportedHere { key: String },
 
-    /// Django-shape `.filter("field__lookup", value)` got a value
-    /// whose shape doesn't fit the chosen lookup. Issue #71.
-    /// Examples: `__in` with a non-list, `__isnull` with a
-    /// non-bool, `__between` with a list that isn't exactly 2
+    /// The value does not fit the lookup: `__in` without a list,
+    /// `__isnull` without a bool, `__between` without exactly two
     /// elements.
     #[error(
         "lookup `__{suffix}` on field `{field}` requires {expected}; \
@@ -155,14 +138,10 @@ pub enum QueryError {
         actual: &'static str,
     },
 
-    /// `.values(cols)` was called without a subsequent aggregating
-    /// `.annotate(name, ...)`. Issue #75 v1 supports `.values()` only
-    /// as a GROUP BY hint paired with an aggregate annotation; pure
-    /// projection (returning `Vec<HashMap<String, SqlValue>>` with
-    /// only the requested columns) needs a separate writer path and
-    /// is queued for a follow-up. Until then, use the typed
-    /// `QuerySet::fetch(...)` path to read whole rows, or build an
-    /// `AggregateQuery` directly if you need a custom SELECT shape.
+    /// `.values(cols)` was called with no aggregating `.annotate(...)`
+    /// after it. Here `.values()` is only a GROUP BY hint, so it needs
+    /// an aggregate. For plain projection use `QuerySet::values_dict`,
+    /// `values_list` or `values_list_flat` instead.
     #[error(
         "AggregateBuilder::values({cols:?}) requires at least one \
          aggregating annotation (Count / Sum / Avg / Max / Min / \
@@ -172,27 +151,23 @@ pub enum QueryError {
     )]
     ValuesRequiresAggregate { cols: Vec<&'static str> },
 
-    /// `.values_dict(&[])` / `.values_list(&[])` was called with an
-    /// empty column list. Issue #22. A projection with zero columns
-    /// would emit `SELECT FROM …` which every dialect rejects as a
-    /// syntax error; we surface the problem at builder time with a
-    /// clear message instead.
+    /// `.values_dict(&[])` / `.values_list(&[])` got an empty column
+    /// list. Zero columns would emit `SELECT FROM …`, which every
+    /// dialect rejects, so we catch it while building.
     #[error(
         "`.values_dict(...)` / `.values_list(...)` requires at least \
          one column. Pass the column names you want in the projection."
     )]
     EmptyValuesProjection,
 
-    /// `.distinct_on(&[])` was called with an empty column list — would
-    /// degenerate to `.distinct()` and is almost always a bug. Issue
-    /// #264 / T1.2.
+    /// `.distinct_on(&[])` got an empty column list. It would behave
+    /// like `.distinct()`, which is almost always a bug.
     #[error("`.distinct_on(...)` requires at least one column; use `.distinct()` for plain SELECT DISTINCT")]
     DistinctOnEmpty,
 
-    /// `.distinct_on(cols)` was called but the queryset's `ORDER BY`
-    /// doesn't lead with those columns. Django enforces the same
-    /// constraint at runtime — the order is what makes the
-    /// "first row per group" deterministic. Issue #264 / T1.2.
+    /// `.distinct_on(cols)` needs those columns at the head of
+    /// `ORDER BY`. The order is what makes "first row per group"
+    /// deterministic.
     #[error(
         "`.distinct_on({distinct_on:?})` requires those columns at the head of `.order_by(...)`; \
          got order_by={order_by:?}"

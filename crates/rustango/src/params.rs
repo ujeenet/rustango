@@ -1,10 +1,9 @@
-//! Method-adaptive params extractor — one handler serves `GET /x?a=1`
-//! and `QUERY /x` with body `a=1` (issue #1109, epic #1107).
+//! Method-adaptive params extractor: one handler serves `GET /x?a=1` and
+//! `QUERY /x` with body `a=1`.
 //!
-//! [`Params<T>`] deserializes `T` from the request querystring on GET /
-//! HEAD and from the request body on QUERY (RFC 10008), so a search or
-//! filter endpoint accepts either transport with no branching in the
-//! handler:
+//! [`Params<T>`] reads `T` from the querystring on GET/HEAD and from the
+//! body on QUERY (RFC 10008), so a search or filter endpoint takes either
+//! transport with no branching in the handler:
 //!
 //! ```ignore
 //! use rustango::params::Params;
@@ -23,28 +22,25 @@
 //! let app = axum::Router::new().route("/search", get(search).query(search));
 //! ```
 //!
-//! On QUERY the body is read by `Content-Type`:
-//! - `application/x-www-form-urlencoded` (or no `Content-Type`) → parsed
-//!   with the same `serde_urlencoded` codepath as the querystring, so `T`
-//!   deserializes identically on both transports.
-//! - `application/json` (or a `…+json` suffix) → parsed with `serde_json`.
+//! On QUERY the body is parsed by `Content-Type`:
+//! - `application/x-www-form-urlencoded`, or no `Content-Type` → the same
+//!   `serde_urlencoded` path as the querystring, so `T` deserializes the
+//!   same way on both transports.
+//! - `application/json`, or any `…+json` suffix → `serde_json`.
 //! - anything else → `415 Unsupported Media Type`.
 //!
-//! Any method other than GET / HEAD / QUERY is rejected with `405`.
-//! Request-body size is enforced upstream by the body-limit layer, so an
-//! oversized QUERY body is rejected before it reaches this extractor.
+//! Any other method gets `405`. Body size is capped upstream by the
+//! body-limit layer.
 //!
 //! ## Arrays and nested criteria
 //!
-//! The urlencoded path uses `serde_urlencoded` — exactly like axum's
-//! [`Query`](axum::extract::Query) / [`Form`](axum::extract::Form) — so it
-//! is **flat and single-value**: it can't express nested structures, and a
-//! repeated key (`?tag=a&tag=b`) does not merge into a `Vec` — it's a
-//! `duplicate field` error (rejected, not last-wins). When a search needs
-//! arrays or nesting, that is exactly what QUERY unlocks: send a JSON body
-//! (`application/json`), which deserializes with full `serde_json`
-//! fidelity. The GET/urlencoded transport stays for the flat,
-//! drop-in-compatible case.
+//! The urlencoded path is flat and single-value, like axum's
+//! [`Query`](axum::extract::Query) and [`Form`](axum::extract::Form): it
+//! cannot express nesting, and a repeated key (`?tag=a&tag=b`) is a
+//! `duplicate field` error, not a `Vec`. For arrays or nesting, send a
+//! JSON body on QUERY.
+//!
+//! [`Params<T>`]: crate::params::Params
 
 use axum::body::Bytes;
 use axum::extract::{FromRequest, Request};
@@ -78,14 +74,12 @@ where
         }
 
         if method == *crate::http_query::QUERY {
-            // Read Content-Type before the body — `Bytes::from_request`
-            // consumes `req`.
+            // Read Content-Type first: `Bytes::from_request` consumes `req`.
             let kind = body_kind(&req)?;
             let bytes = Bytes::from_request(req, state)
                 .await
                 .map_err(|e| ParamsRejection::BodyRead(Box::new(e.into_response())))?;
-            // Body parse failure → 422, matching axum's `Form` (a
-            // well-formed request whose *content* is unprocessable).
+            // Body parse failure → 422, matching axum's `Form`.
             let value = match kind {
                 BodyKind::UrlEncoded => serde_urlencoded::from_bytes(&bytes)
                     .map_err(|e| ParamsRejection::DeserializeBody(e.to_string()))?,
@@ -105,11 +99,10 @@ enum BodyKind {
     Json,
 }
 
-/// Classify a QUERY body by its `Content-Type`, or reject unsupported
-/// media types with `415`. A *missing* `Content-Type` is treated as
-/// urlencoded, mirroring the leniency HTML form posts get; a *present but
-/// unreadable* one is a media type we don't support, so it's a clean 415
-/// rather than a silent urlencoded downgrade.
+/// Classify a QUERY body by its `Content-Type`; unsupported types get
+/// `415`. A missing header means urlencoded, like an HTML form post. A
+/// header that is present but unreadable is a 415, never a silent
+/// downgrade to urlencoded.
 fn body_kind(req: &Request) -> Result<BodyKind, ParamsRejection> {
     let Some(ct) = req.headers().get(CONTENT_TYPE) else {
         return Ok(BodyKind::UrlEncoded);
@@ -139,22 +132,20 @@ pub enum ParamsRejection {
     /// [`Query`](axum::extract::Query)).
     DeserializeQuery(String),
     /// The QUERY body didn't deserialize into `T` (`422`, matching axum's
-    /// [`Form`](axum::extract::Form) — a well-formed request whose content
-    /// is unprocessable).
+    /// [`Form`](axum::extract::Form): the request is well-formed but its
+    /// content is unprocessable).
     DeserializeBody(String),
     /// A QUERY body arrived with an unsupported `Content-Type` (`415`).
     UnsupportedMediaType(String),
     /// The request used a method other than GET / HEAD / QUERY (`405`).
     MethodNotAllowed,
-    /// The body itself couldn't be read (size limit, IO) — the underlying
-    /// `Bytes` rejection response, passed through verbatim. Boxed to keep
-    /// the enum (and every `Result` over it) small.
+    /// The body could not be read (size limit, IO). Carries the `Bytes`
+    /// rejection response as-is. Boxed to keep the enum small.
     BodyRead(Box<Response>),
 }
 
-// Manual `Debug` (parity with the other extractor rejections) — the
-// `BodyRead` payload is an axum `Response`, which isn't `Debug`, so it
-// can't be derived.
+// Hand-written because the `BodyRead` payload is an axum `Response`,
+// which is not `Debug`.
 impl std::fmt::Debug for ParamsRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -348,9 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_query_body_is_422() {
-        // Well-formed request, unprocessable content (page not a u32) —
-        // 422, matching axum's `Form` body semantics (vs 400 for a
-        // querystring).
+        // `page` is not a u32: well-formed request, bad content → 422.
         let (s, _) = text(
             send(
                 app(),
@@ -367,8 +356,8 @@ mod tests {
 
     #[tokio::test]
     async fn method_other_than_get_head_query_is_405_with_allow() {
-        // Mount on POST so the request reaches the extractor (routing would
-        // otherwise 405 first); the extractor's own method guard fires.
+        // Mount on POST so the request reaches the extractor; otherwise
+        // routing would 405 first.
         let app = Router::new().route("/p", post(show));
         let resp = send(
             app,

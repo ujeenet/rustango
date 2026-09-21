@@ -1,19 +1,18 @@
-//! Django 6.0 ORM parity — execution-based verification.
+//! ORM aggregation behaviour — execution-based verification.
 //! Scenario groups A (conditional aggregation) + F (grouping shapes).
 //!
 //! Each scenario body is shared across the three backends; the
 //! cfg-gated modules at the bottom own pool construction + DDL and
-//! call into `scenarios::check_*`. Where rustango diverges from
-//! Django 6.0 on a given dialect, the scenario pins the *current*
-//! error so the suite goes red the moment the gap is fixed (and the
-//! parity audit row must then be updated).
+//! call into `scenarios::check_*`. Where a dialect can't do the thing
+//! at all, the scenario pins the *current* error so the suite goes red
+//! the moment the gap is fixed.
 //!
-//! Django scenarios covered (docs.djangoproject.com/en/6.0):
-//! - `aggregate(total=Count("id"), published=Count("id", filter=Q(...)))`
-//! - `Sum("price", filter=Q(...), default=0)`
-//! - `Count("category", distinct=True)`
-//! - compound `Q` trees inside `filter=`
-//! - `.values("category").annotate(n=Count("id"), max_price=Max("price"))`
+//! Scenarios covered:
+//! - `aggregate(total=count_all(), published=count(...) filtered)`
+//! - filtered `sum` with a `default`
+//! - `count_distinct` over a low-cardinality column
+//! - compound `Q` trees inside a filtered aggregate
+//! - `.values("category").annotate(n=…, max_price=…)`
 //! - filter-on-annotation → HAVING routing (WHERE vs HAVING split)
 //! - `.alias()` non-projected annotations
 //! - `StdDev` (sample) — dialect support matrix
@@ -102,16 +101,14 @@ mod scenarios {
         }
     }
 
-    /// Django: `aggregate(total=Count("id"), published=Count("id",
-    /// filter=Q(status="published")))` — total + conditional count in
-    /// one round trip. PG/SQLite emit `FILTER (WHERE …)`; MySQL is
-    /// rewritten to `COUNT(CASE WHEN … THEN id END)`.
+    /// Total + conditional count in one round trip. PG/SQLite emit
+    /// `FILTER (WHERE …)`; MySQL is rewritten to
+    /// `COUNT(CASE WHEN … THEN id END)`.
     ///
-    /// DIVERGENCE NOTE (Django 6.0 audit §26): bare
-    /// `.aggregate().annotate(...)` is rustango's Shape-3 (GROUP BY
-    /// every scalar column → per-row results, i.e. Django's
-    /// `.annotate()`); Django's single-row `aggregate()` shape
-    /// requires the explicit `.values(&[])` empty projection.
+    /// NOTE: bare `.aggregate().annotate(...)` is Shape 3 — GROUP BY
+    /// every scalar column, so it yields one row per source row. The
+    /// single-row whole-table aggregate needs the explicit
+    /// `.values(&[])` empty projection, as below.
     pub async fn check_total_vs_filtered_count(pool: &Pool) {
         let rows = Post::objects()
             .aggregate()
@@ -129,10 +126,9 @@ mod scenarios {
         assert_eq!(as_i64(&rows[0], "published"), 3);
     }
 
-    /// Django: `Sum("price", filter=Q(status="archived"), default=0)`
-    /// — no row matches, so the COALESCE default must surface instead
-    /// of NULL. Pins the `COALESCE(SUM(...) FILTER (...), 0)` wrap
-    /// order.
+    /// Filtered `sum` with a `default`: no row matches, so the
+    /// COALESCE default must surface instead of NULL. Pins the
+    /// `COALESCE(SUM(...) FILTER (...), 0)` wrap order.
     pub async fn check_filtered_sum_default(pool: &Pool) {
         let rows = Post::objects()
             .aggregate()
@@ -151,8 +147,8 @@ mod scenarios {
         assert_eq!(as_i64(&rows[0], "archived_revenue"), 0);
     }
 
-    /// Django: `Count("category", distinct=True)` — 6 rows over 2
-    /// distinct categories.
+    /// `count_distinct("category")` — 6 rows over 2 distinct
+    /// categories.
     pub async fn check_count_distinct(pool: &Pool) {
         let rows = Post::objects()
             .aggregate()
@@ -188,7 +184,7 @@ mod scenarios {
         assert_eq!(as_i64(&rows[0], "n"), 3);
     }
 
-    /// Django Shape 2: `.values("category").annotate(...)` → GROUP BY
+    /// Shape 2: `.values("category").annotate(...)` → GROUP BY
     /// category. Both groups have 3 rows; max prices differ.
     pub async fn check_values_annotate_group_by(pool: &Pool) {
         let rows = Post::objects()
@@ -226,7 +222,7 @@ mod scenarios {
         assert_eq!(as_i64(&rows[0], "n"), 2);
     }
 
-    /// Django 3.2+ `.alias()` — usable in filter/order_by but omitted
+    /// `.alias()` — usable in filter/order_by but omitted
     /// from the SELECT projection.
     pub async fn check_alias_is_not_projected(pool: &Pool) {
         let rows = Post::objects()
@@ -248,7 +244,7 @@ mod scenarios {
 
     /// `StdDev` (sample) dialect matrix: native on PG + MySQL 8;
     /// SQLite has no built-in stddev — rustango pins the documented
-    /// rejection (matches Django, which also errors on SQLite).
+    /// rejection.
     pub async fn check_stddev_dialect_matrix(pool: &Pool) {
         let res = Post::objects()
             .aggregate()
@@ -268,7 +264,7 @@ mod scenarios {
                 }
                 other => panic!(
                     "expected AggregateNotSupported on sqlite, got {other:?} — \
-                     if stddev now works there, update the Django 6.0 parity audit"
+                     if stddev now works there, update the dialect support matrix"
                 ),
             }
         } else {
@@ -333,7 +329,7 @@ mod pg_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("DATABASE_URL not set — skipping the PG arm of this django6 test");
+                    eprintln!("DATABASE_URL not set — skipping the PG arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;
@@ -449,7 +445,7 @@ mod mysql_live {
             async fn $name() {
                 let _g = live_lock().lock().await;
                 let Some(pool) = fresh_pool().await else {
-                    eprintln!("MYSQL_TEST_URL unset — skipping MySQL django6 test");
+                    eprintln!("MYSQL_TEST_URL unset — skipping the MySQL arm of this scenario");
                     return;
                 };
                 scenarios::seed(&pool).await;

@@ -1,4 +1,4 @@
-//! The in-process rate limiter's bucket map is bounded (GHSA-rj6w).
+//! The in-process rate limiter's bucket map is bounded.
 //!
 //! Nothing removed entries before this. With `KeyBy::Header` the key is
 //! the raw header value — attacker-chosen and uncapped — so one request
@@ -107,6 +107,6 @@ async fn a_swept_key_is_not_a_free_pass() {
         StatusCode::TOO_MANY_REQUESTS,
         "the spent bucket must survive the flood. If this is OK, pressure \
          on the store bought the attacker a fresh allowance and the \
-         eviction policy is a rate-limit bypass (GHSA-rj6w)."
+         eviction policy is a rate-limit bypass."
     );
 }

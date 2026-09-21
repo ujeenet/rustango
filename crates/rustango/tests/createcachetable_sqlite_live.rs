@@ -1,6 +1,6 @@
 #![cfg(all(feature = "sqlite", feature = "cache"))]
-//! Live SQLite test for `DatabaseCache::ensure_table` — Django
-//! `manage createcachetable` parity. The framework's CLI wrapper
+//! Live SQLite test for `DatabaseCache::ensure_table` — create the
+//! backing table on demand. The framework's CLI wrapper
 //! (`manage createcachetable` / `create-cache-table`) is a thin
 //! pass-through over `ensure_table`; we test the method directly
 //! here.

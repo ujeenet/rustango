@@ -1,36 +1,18 @@
-//! Request ID middleware — assign a unique ID to every incoming request.
+//! Request ID middleware: give every request a unique ID.
 //!
-//! Adds an `X-Request-Id` response header and exposes the value via the
-//! [`RequestId`] axum extractor.
+//! It sets an `X-Request-Id` response header and exposes the value
+//! through the [`RequestId`] extractor. By default an inbound
+//! `X-Request-Id` is reused, so an ID can follow a call across
+//! services. [`RequestIdLayer::always_generate`] ignores it.
 //!
-//! Honors an inbound `X-Request-Id` header by default (useful for chained
-//! services that want to propagate IDs end-to-end), or always generates
-//! a fresh one with [`RequestIdLayer::always_generate`].
+//! ## Getting the id into your logs
 //!
-//! ## Getting the id onto your log lines
-//!
-//! **Mount [`crate::tracing_layer::TracingLayer`] as well**, and then
-//! you do not have to do anything else. Since #1480 the request span
-//! declares a `request_id` field and [`record`] fills it, so **every**
-//! event emitted during the request carries it — including ones from
-//! the ORM and from code that has never heard of a request id.
-//!
-//! That layer is not optional for this. [`record`] is
-//! `Span::current().record("request_id", …)`, which is a **no-op**
-//! when the current span has no such field — so this layer on its own
-//! sets the response header and leaves your log lines bare.
-//! `Cli::mount_observability` mounts both for you; wiring the router
-//! by hand means mounting both by hand.
-//!
-//! This header used to show `tracing::info!(req_id = %id.0, …)` on
-//! every call site instead. That is the tedious way, it silently
-//! misses the events you did not write, and the field name differs
-//! from the span's, so following it puts a *second*,
-//! differently-named id on the same line (#1505). Correcting that
-//! without naming the span layer was its own defect: a reader
-//! dropping `req_id` from a router that mounts only this layer loses
-//! correlation entirely, which is worse than what they started with
-//! (#1606 review, correctness).
+//! Mount [`crate::tracing_layer::TracingLayer`] as well. Its request
+//! span declares a `request_id` field and [`record`] fills it, so
+//! every event during the request carries the id, including events
+//! from the ORM. Without that layer [`record`] does nothing and you
+//! get only the response header. `Cli::mount_observability` mounts
+//! both for you.
 //!
 //! ## Quick start
 //!
@@ -50,6 +32,10 @@
 //!     format!("request {}", id.0)
 //! }
 //! ```
+//!
+//! [`RequestId`]: crate::request_id::RequestId
+//! [`RequestIdLayer::always_generate`]: crate::request_id::RequestIdLayer::always_generate
+//! [`record`]: crate::request_id::record
 
 use std::sync::Arc;
 
@@ -63,11 +49,11 @@ use axum::Router;
 
 const HEADER_NAME: &str = "x-request-id";
 
-/// Configuration for the request-ID middleware.
+/// Settings for the request-ID middleware.
 #[derive(Clone)]
 pub struct RequestIdLayer {
-    /// When `true`, always generate a fresh ID even if the client sent one.
-    /// Useful when you don't trust client-supplied values.
+    /// Generate a fresh ID even when the client sent one. Use this
+    /// when you do not trust client values.
     pub always_generate: bool,
 }
 
@@ -78,7 +64,7 @@ impl Default for RequestIdLayer {
 }
 
 impl RequestIdLayer {
-    /// Default: honor inbound `X-Request-Id`, generate one if absent.
+    /// Reuse an inbound `X-Request-Id`, or generate one if absent.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -86,7 +72,7 @@ impl RequestIdLayer {
         }
     }
 
-    /// Always generate a fresh ID — ignore any client-supplied value.
+    /// Always generate a fresh ID and ignore what the client sent.
     #[must_use]
     pub fn always_generate() -> Self {
         Self {
@@ -95,7 +81,7 @@ impl RequestIdLayer {
     }
 }
 
-/// Extension trait — `.request_id(layer)` on Router.
+/// Adds `.request_id(layer)` to a router.
 pub trait RequestIdRouterExt {
     #[must_use]
     fn request_id(self, layer: RequestIdLayer) -> Self;
@@ -113,8 +99,8 @@ impl<S: Clone + Send + Sync + 'static> RequestIdRouterExt for Router<S> {
     }
 }
 
-/// Extracted request ID. Always present when [`RequestIdLayer`] is in
-/// the middleware stack — empty string otherwise.
+/// The request ID. Set when [`RequestIdLayer`] is mounted, and an
+/// empty string when it is not.
 #[derive(Debug, Clone)]
 pub struct RequestId(pub String);
 
@@ -141,12 +127,8 @@ async fn handle(cfg: Arc<RequestIdLayer>, mut req: Request<Body>, next: Next) ->
             .map_or_else(generate_id, str::to_owned)
     };
 
-    // Put the id on the enclosing request span, so every event emitted
-    // during this request carries it without the handler doing anything.
-    //
-    // This layer mounts inside `tracing_layer`'s span, so `current()` is
-    // that span. Outside one — a hand-built router that mounts this and
-    // not the span layer — `record` on a disabled span is a no-op, and
+    // Put the id on the enclosing request span so every event during
+    // this request carries it. Without that span this is a no-op and
     // the extractor below still works.
     record(&id);
 
@@ -160,15 +142,9 @@ async fn handle(cfg: Arc<RequestIdLayer>, mut req: Request<Body>, next: Next) ->
 
 /// Record `id` on the current request span.
 ///
-/// Mirrors [`crate::tenant_log::record`]: the span declares
-/// `request_id` as an empty field and this fills it partway through, so
-/// the value reaches every event emitted under the span — the ORM's
-/// included — without any of them knowing a request id exists.
-///
-/// Before #1480 the module's own documentation told you to write
-/// `req_id = %id.0` on every call site by hand, which is both the
-/// tedious way and the one that silently misses the events you did not
-/// write.
+/// Like [`crate::tenant_log::record`]: the span declares an empty
+/// `request_id` field and this fills it, so every event under the
+/// span carries the id. It does nothing if no such span is active.
 pub fn record(id: &str) {
     tracing::Span::current().record("request_id", id);
 }
@@ -182,8 +158,8 @@ fn generate_id() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Reject inbound IDs with control chars, line breaks, or absurd lengths.
-/// Defends against header-injection attacks via X-Request-Id.
+/// Reject inbound IDs that are too long or hold control characters
+/// or line breaks. This blocks header injection via `X-Request-Id`.
 fn is_safe(s: &str) -> bool {
     s.len() <= 128
         && s.chars()

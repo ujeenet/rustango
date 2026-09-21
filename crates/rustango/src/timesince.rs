@@ -1,25 +1,18 @@
-//! Django `django.utils.timesince` parity — human duration strings.
+//! Human-readable durations: "4 days, 6 hours".
 //!
-//! [`timesince`] returns the time elapsed between two `DateTime<Utc>`
-//! values as a human-readable string like `"4 days, 6 hours"`. The
-//! mirror [`timeuntil`] returns the duration from `now` to a future
-//! target.
+//! [`timesince`] gives the time from a past moment up to now, as a
+//! string such as `"4 days, 6 hours"`. [`timeuntil`] does the same
+//! for a future moment.
 //!
-//! Both helpers match Django's behavior:
+//! * Units are year, month, week, day, hour and minute. A year is
+//!   365 days and a month is 30 days. Seconds are never shown.
+//! * `depth` is how many units to print. `2` gives
+//!   `"4 days, 6 hours"`, `1` gives `"4 days"`.
+//! * A delta that is zero, negative or under a minute gives
+//!   `"0 minutes"`.
 //!
-//! * Unit table: year (365.25 d) → month (30.44 d) → week → day →
-//!   hour → minute. Seconds are reported only when nothing larger
-//!   applies (Django itself omits seconds; we emit `"0 minutes"`
-//!   for sub-minute deltas to match the documented contract).
-//! * `depth` controls how many adjacent units are included
-//!   (`depth = 2` produces `"4 days, 6 hours"`; `depth = 1`
-//!   collapses to `"4 days"`).
-//! * Non-positive deltas return `"0 minutes"` — Django treats
-//!   "future" as zero in [`timesince`] and "past" as zero in
-//!   [`timeuntil`].
-//!
-//! The Tera filter wrappers in [`crate::humanize`] use a simpler
-//! single-unit format; this module is the public Rust API.
+//! [`crate::humanize`] has Tera filters with a simpler one-unit
+//! format; this module is the Rust API.
 //!
 //! # Example
 //!
@@ -34,6 +27,8 @@
 //! let future = now + chrono::Duration::seconds(2 * 3600 + 30 * 60);
 //! assert_eq!(timeuntil(future, Some(now), 2), "2 hours, 30 minutes");
 //! ```
+//!
+//! [`timeuntil`]: crate::timesince::timeuntil
 
 use chrono::{DateTime, Utc};
 
@@ -41,10 +36,8 @@ const MINUTE: i64 = 60;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
 const WEEK: i64 = 7 * DAY;
-// 30.44 days — Django uses 30 in its CHUNKS table; we round to
-// match `humanize::magnitude_string`'s existing month behavior.
+// Flat 30- and 365-day buckets: no calendar maths.
 const MONTH: i64 = 30 * DAY;
-// 365.25 days; Django's `timesince` source uses 365 too.
 const YEAR: i64 = 365 * DAY;
 
 const CHUNKS: &[(i64, &str)] = &[
@@ -89,29 +82,28 @@ fn build(seconds: i64, depth: usize) -> String {
         }
     }
     if parts.is_empty() {
-        // Sub-minute delta — Django returns "0 minutes" by contract.
+        // Less than a minute.
         return "0 minutes".to_owned();
     }
     parts.join(", ")
 }
 
-/// `timesince(d, now=None, depth=2)` — duration from `d` to `now`.
+/// How long ago `d` was, counted up to `now`.
 ///
-/// `now` defaults to `Utc::now()` when `None`. `depth` controls how
-/// many adjacent units appear in the output; clamped to `[1, 6]`.
-/// Returns `"0 minutes"` when `d` is in the future or the delta is
-/// below one minute.
+/// `now` defaults to `Utc::now()`. `depth` is how many units to
+/// print, clamped to `1..=6`. Returns `"0 minutes"` if `d` is in the
+/// future or less than a minute ago.
 pub fn timesince(d: DateTime<Utc>, now: Option<DateTime<Utc>>, depth: usize) -> String {
     let now = now.unwrap_or_else(Utc::now);
     let delta = now.signed_duration_since(d).num_seconds();
     build(delta, depth)
 }
 
-/// `timeuntil(d, now=None, depth=2)` — duration from `now` to `d`.
+/// How far ahead `d` is, counted from `now`. The mirror of
+/// [`timesince`].
 ///
-/// Inverse of [`timesince`] for future-pointing targets. `now`
-/// defaults to `Utc::now()`. Returns `"0 minutes"` when `d` is in
-/// the past or the delta is below one minute.
+/// `now` defaults to `Utc::now()`. Returns `"0 minutes"` if `d` is
+/// in the past or less than a minute away.
 pub fn timeuntil(d: DateTime<Utc>, now: Option<DateTime<Utc>>, depth: usize) -> String {
     let now = now.unwrap_or_else(Utc::now);
     let delta = d.signed_duration_since(now).num_seconds();
@@ -150,8 +142,7 @@ mod tests {
 
     #[test]
     fn timesince_skips_zero_intermediate_unit() {
-        // 1 year + 0 months + 0 weeks + 0 days + 5 hours — depth=2
-        // should produce "1 year, 5 hours" (skip zero buckets).
+        // Empty buckets between year and hour are skipped.
         let now = t(2026, 6, 5, 12, 0, 0);
         let past = now - Duration::seconds(YEAR + 5 * HOUR);
         assert_eq!(timesince(past, Some(now), 2), "1 year, 5 hours");
@@ -190,9 +181,7 @@ mod tests {
         let now = t(2026, 6, 5, 12, 0, 0);
         let past = now
             - Duration::seconds(2 * YEAR + 3 * MONTH + 4 * WEEK + 5 * DAY + 6 * HOUR + 7 * MINUTE);
-        // depth=99 → clamps to 6 (max units); but since the months/weeks
-        // bucket calculation interacts with carry, we just assert it
-        // includes all six unit names.
+        // depth=99 clamps to 6, the number of units.
         let s = timesince(past, Some(now), 99);
         assert!(s.contains("year"));
         assert!(s.contains("hour") || s.contains("minute"));
@@ -222,8 +211,7 @@ mod tests {
 
     #[test]
     fn timesince_now_none_uses_utc_now() {
-        // Smoke test: when `now` is None we call Utc::now(). For a
-        // value sufficiently in the past the result is non-zero.
+        // `None` falls back to Utc::now().
         let past = Utc::now() - Duration::seconds(2 * DAY + 5 * HOUR);
         let s = timesince(past, None, 2);
         assert!(s.contains("day"));

@@ -1,4 +1,4 @@
-//! Django-parity #361 — `register_admin_object_permission!` adds
+//! Issue #361 — `register_admin_object_permission!` adds
 //! per-row enforcement to the admin's `add` / `change` / `delete`
 //! / `view` write paths. Each registered hook is consulted at
 //! request time; a `false` return yields 403.

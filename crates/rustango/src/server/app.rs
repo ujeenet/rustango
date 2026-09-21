@@ -1,6 +1,6 @@
 //! `rustango::server::AppBuilder` — single-pool bi-dialect bootstrap.
 //!
-//! The Django-style multi-tenant [`super::Builder`] is hardcoded to
+//! The multi-tenant [`super::Builder`] is hardcoded to
 //! `PgPool` (it owns a `TenantPools` registry whose connections are
 //! Postgres). For apps that don't need tenancy and want to run on
 //! SQLite (or MySQL), this is a parallel, simpler builder that takes

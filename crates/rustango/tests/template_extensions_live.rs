@@ -1,4 +1,4 @@
-//! Django-parity #383 — `register_template_filter!` /
+//! Issue #383 — `register_template_filter!` /
 //! `register_template_function!` register custom Tera filters +
 //! functions in an inventory-collected registry. The framework's
 //! `template_extensions::apply_to_tera` walks the registry and

@@ -1,42 +1,36 @@
-//! Django-shape random-string helpers — `get_random_string` /
+//! Random strings — `get_random_string` /
 //! `get_random_token_urlsafe`.
 //!
-//! Mirrors `django.utils.crypto.get_random_string(length,
-//! allowed_chars=…)` — generates a uniformly-random string of
-//! `length` characters drawn from `allowed_chars`. Output is
-//! suitable for session identifiers, password-reset tokens, email
-//! verification codes — anywhere Django code reaches for
-//! `get_random_string`.
+//! A uniformly random string of `length` characters drawn from
+//! `allowed_chars`. Use it for session IDs, password-reset tokens
+//! and email verification codes.
 //!
-//! Two CSPRNGs, by shape of draw: bulk fills take `OsRng` directly,
-//! per-character draws take `rand::thread_rng` (ChaCha12, seeded and
-//! periodically reseeded from the OS) to avoid a syscall per
-//! character. Both are cryptographically secure. The module used to
-//! claim `OsRng` throughout while `get_random_string` used
-//! `thread_rng` (#1536).
+//! Both generators here are cryptographically secure. Bulk fills use
+//! `OsRng`; per-character draws use `rand::thread_rng` (ChaCha12,
+//! seeded and reseeded from the OS) to avoid one syscall per
+//! character. Never swap either for a fast, non-crypto PRNG.
 //!
 //! ```ignore
 //! use rustango::random::{get_random_string, get_random_string_default,
 //!                       get_random_token_urlsafe, ALPHANUM_CHARS};
 //!
-//! // Default Django shape — 12 alphanumeric chars.
+//! // Default alphabet — 12 alphanumeric chars.
 //! let session_id: String = get_random_string_default(12);
 //!
-//! // Custom allowlist — Django shape, second arg.
+//! // Custom allowlist as the second arg.
 //! let pin: String = get_random_string(6, "0123456789");
 //!
 //! // URL-safe base64 — better entropy/char than alphanumeric for
 //! // reset-token use cases.
 //! let reset_token: String = get_random_token_urlsafe(32);
 //!
-//! // Re-export of the default Django allowlist.
+//! // The default allowlist.
 //! assert!(ALPHANUM_CHARS.contains('a'));
 //! ```
 //!
 //! ## Choosing length
 //!
-//! For security tokens (session IDs, reset URLs, API keys) target
-//! at least 128 bits of entropy. Quick reference:
+//! Security tokens need at least 128 bits of entropy:
 //!
 //! | Alphabet                    | Entropy per char | 128-bit length |
 //! |-----------------------------|------------------|----------------|
@@ -44,31 +38,26 @@
 //! | alphanumeric mixed-case (62)| 5.95 bits        | 22 chars       |
 //! | URL-safe base64 (64)        | 6 bits           | 22 chars       |
 //!
-//! The default `get_random_string_default(N)` uses the mixed-case
-//! alphanumeric alphabet to match Django's pre-4.2 `RANDOM_STRING_CHARS`.
+//! `get_random_string_default(N)` uses the mixed-case alphanumeric
+//! alphabet, [`ALPHANUM_CHARS`](crate::random::ALPHANUM_CHARS).
 
 use rand::{Rng, RngCore};
 
-/// Django's default `get_random_string` allowlist — ASCII letters
-/// + digits, mixed case. Mirrors
-/// `django.utils.crypto.RANDOM_STRING_CHARS`.
+/// Mixed-case ASCII letters and digits — the default
+/// `get_random_string` alphabet.
 pub const ALPHANUM_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-/// Django-parity
-/// [`get_random_string(length, allowed_chars=…)`](https://docs.djangoproject.com/en/6.0/ref/utils/#django.utils.crypto.get_random_string) —
-/// return a uniformly-random string of `length` characters chosen
-/// from `allowed_chars`. Uses `rand::thread_rng` — a CSPRNG seeded
-/// from the OS — so it is suitable for security-sensitive tokens.
+/// Return a uniformly random string of `length` characters chosen
+/// from `allowed_chars`. Backed by `rand::thread_rng`, a CSPRNG
+/// seeded from the OS, so it is safe for security tokens.
 ///
-/// `allowed_chars` is taken as a `&str` so callers can pass either
-/// the predefined [`ALPHANUM_CHARS`] / [`URL_SAFE_CHARS`] /
-/// [`DIGITS_CHARS`] / [`HEX_CHARS`] / [`UPPERCASE_HEX_CHARS`] or
-/// any custom set.
+/// Pass any of [`ALPHANUM_CHARS`], [`URL_SAFE_CHARS`],
+/// [`DIGITS_CHARS`], [`HEX_CHARS`], [`UPPERCASE_HEX_CHARS`], or your
+/// own alphabet.
 ///
 /// # Panics
-/// Panics if `allowed_chars` is empty (Django raises `IndexError`;
-/// we surface the bug with a clear message — empty alphabet has no
-/// sensible semantics).
+/// Panics if `allowed_chars` is empty. An empty alphabet has no
+/// meaning, so this is always a caller bug.
 ///
 /// ```ignore
 /// use rustango::random::get_random_string;
@@ -89,47 +78,43 @@ pub fn get_random_string(length: usize, allowed_chars: &str) -> String {
         .collect()
 }
 
-/// Django-parity convenience — `get_random_string(length)` with
-/// the default mixed-case alphanumeric alphabet ([`ALPHANUM_CHARS`]).
-/// Equivalent to `get_random_string(length, ALPHANUM_CHARS)`.
+/// `get_random_string(length, ALPHANUM_CHARS)` — the default
+/// alphabet.
 #[must_use]
 pub fn get_random_string_default(length: usize) -> String {
     get_random_string(length, ALPHANUM_CHARS)
 }
 
-/// URL-safe base64 alphabet (RFC 4648 §5) — 64 chars, padding
-/// stripped. Drop-in for `token_urlsafe(N)` from Python's `secrets`
-/// module. Each char carries 6 bits of entropy.
+/// URL-safe base64 alphabet (RFC 4648 §5), 64 chars, no padding.
+/// 6 bits of entropy per char. Matches Python's
+/// `secrets.token_urlsafe`.
 pub const URL_SAFE_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-/// `[0-9]` — for numeric PINs / verification codes.
+/// `[0-9]`, for PINs and verification codes.
 pub const DIGITS_CHARS: &str = "0123456789";
 
-/// Lowercase hex `[0-9a-f]` — for compact opaque identifiers.
+/// Lowercase hex `[0-9a-f]`, for compact opaque identifiers.
 pub const HEX_CHARS: &str = "0123456789abcdef";
 
 /// Uppercase hex `[0-9A-F]`.
 pub const UPPERCASE_HEX_CHARS: &str = "0123456789ABCDEF";
 
-/// Lowercase letters only `[a-z]` — useful for case-insensitive
-/// reference codes / coupon codes.
+/// Lowercase letters `[a-z]`, for case-insensitive reference or
+/// coupon codes.
 pub const LOWERCASE_CHARS: &str = "abcdefghijklmnopqrstuvwxyz";
 
-/// Uppercase letters only `[A-Z]` — same use case, uppercase
-/// presentation.
+/// Uppercase letters `[A-Z]`.
 pub const UPPERCASE_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 /// Mixed-case letters `[a-zA-Z]` (no digits).
 pub const LETTERS_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-/// Generate a URL-safe random token of `length` characters — 6
-/// bits of entropy per char. Equivalent to
-/// `get_random_string(length, URL_SAFE_CHARS)` but slightly faster
-/// (uses raw byte sampling + bit masking rather than character
-/// indexing).
+/// URL-safe random token of `length` characters, 6 bits of entropy
+/// each. Same result as `get_random_string(length, URL_SAFE_CHARS)`,
+/// but faster: it masks raw `OsRng` bytes instead of indexing chars.
 ///
-/// Default token length 32 chars (192 bits) is comfortably above
-/// the 128-bit security target for session / reset URLs.
+/// 32 chars gives 192 bits, well past the 128-bit target for session
+/// and reset URLs.
 ///
 /// ```ignore
 /// use rustango::random::get_random_token_urlsafe;
@@ -150,12 +135,11 @@ pub fn get_random_token_urlsafe(length: usize) -> String {
         .collect()
 }
 
-/// Generate a random lowercase-hex string of `length` characters.
-/// Convenience wrapper for `get_random_string(length, HEX_CHARS)`.
+/// Random lowercase-hex string. Wraps
+/// `get_random_string(length, HEX_CHARS)`.
 ///
-/// 4 bits of entropy per char — `length = 32` ≈ 128 bits, the
-/// usual security target for opaque identifiers, idempotency keys,
-/// short signed-state tokens.
+/// 4 bits per char, so `length = 32` is about 128 bits — enough for
+/// opaque IDs, idempotency keys and short state tokens.
 ///
 /// ```ignore
 /// use rustango::random::random_hex;
@@ -168,12 +152,10 @@ pub fn random_hex(length: usize) -> String {
     get_random_string(length, HEX_CHARS)
 }
 
-/// Generate a random alphanumeric string of `length` characters
-/// (`[a-zA-Z0-9]`). Convenience wrapper for
+/// Random `[a-zA-Z0-9]` string. Wraps
 /// `get_random_string(length, ALPHANUM_CHARS)`.
 ///
-/// ~5.95 bits of entropy per char (62-char alphabet) — `length = 22`
-/// is roughly 128 bits.
+/// About 5.95 bits per char, so `length = 22` is roughly 128 bits.
 ///
 /// ```ignore
 /// use rustango::random::random_alphanum;
@@ -186,12 +168,10 @@ pub fn random_alphanum(length: usize) -> String {
     get_random_string(length, ALPHANUM_CHARS)
 }
 
-/// Generate a random mixed-case letter string of `length` characters
-/// (`[a-zA-Z]`). No digits. Convenience wrapper for
+/// Random `[a-zA-Z]` string, no digits. Wraps
 /// `get_random_string(length, LETTERS_CHARS)`.
 ///
-/// ~5.7 bits of entropy per char (52-char alphabet) — `length = 23`
-/// is roughly 128 bits.
+/// About 5.7 bits per char, so `length = 23` is roughly 128 bits.
 ///
 /// ```ignore
 /// use rustango::random::random_letters;
@@ -204,12 +184,10 @@ pub fn random_letters(length: usize) -> String {
     get_random_string(length, LETTERS_CHARS)
 }
 
-/// Generate a random lowercase-letter string of `length` characters
-/// (`[a-z]`). Convenience wrapper for
+/// Random `[a-z]` string. Wraps
 /// `get_random_string(length, LOWERCASE_CHARS)`.
 ///
-/// ~4.7 bits of entropy per char — `length = 28` is roughly 128
-/// bits.
+/// About 4.7 bits per char, so `length = 28` is roughly 128 bits.
 ///
 /// ```ignore
 /// use rustango::random::random_lowercase;
@@ -221,8 +199,7 @@ pub fn random_lowercase(length: usize) -> String {
     get_random_string(length, LOWERCASE_CHARS)
 }
 
-/// Generate a random uppercase-letter string of `length` characters
-/// (`[A-Z]`). Convenience wrapper for
+/// Random `[A-Z]` string. Wraps
 /// `get_random_string(length, UPPERCASE_CHARS)`.
 ///
 /// ```ignore
@@ -235,10 +212,9 @@ pub fn random_uppercase(length: usize) -> String {
     get_random_string(length, UPPERCASE_CHARS)
 }
 
-/// Generate a random numeric-only string of `length` digits
-/// (`[0-9]`). Convenience wrapper for
-/// `get_random_string(length, DIGITS_CHARS)`. Useful for OTP codes,
-/// PINs, short verification tokens sent over SMS.
+/// Random `[0-9]` string. Wraps
+/// `get_random_string(length, DIGITS_CHARS)`. Good for OTP codes,
+/// PINs and short SMS verification tokens.
 ///
 /// ```ignore
 /// use rustango::random::random_digits;
@@ -279,9 +255,8 @@ mod tests {
 
     #[test]
     fn get_random_string_each_call_is_different() {
-        // Probability of two 32-char alphanumeric strings colliding is
-        // ~1 / 62^32 — astronomically unlikely. If this ever fails the
-        // RNG is broken (or seeded constant).
+        // Collision odds are ~1 / 62^32. A failure means the RNG is
+        // broken or seeded with a constant.
         let a = get_random_string(32, ALPHANUM_CHARS);
         let b = get_random_string(32, ALPHANUM_CHARS);
         assert_ne!(a, b, "two consecutive calls returned identical strings");
@@ -289,9 +264,8 @@ mod tests {
 
     #[test]
     fn get_random_string_distributes_across_alphabet() {
-        // Over a 1024-char sample drawn from a 4-char alphabet, every
-        // char should appear at least once. (P(missing one) ~ (3/4)^1024
-        // ~= 0 — flake-free.)
+        // 1024 draws from a 4-char alphabet: every char must show up.
+        // P(missing one) is (3/4)^1024, so this cannot flake.
         let s = get_random_string(1024, "abcd");
         let unique: HashSet<char> = s.chars().collect();
         assert_eq!(unique.len(), 4);
@@ -305,9 +279,8 @@ mod tests {
 
     #[test]
     fn get_random_string_handles_unicode_alphabet() {
-        // Django's docstring guarantees the alphabet is treated as
-        // a sequence of chars, not bytes — multi-byte UTF-8 entries
-        // must work.
+        // The alphabet is a sequence of chars, not bytes, so
+        // multi-byte UTF-8 entries must work.
         let s = get_random_string(64, "αβγδ");
         assert_eq!(s.chars().count(), 64);
         assert!(s.chars().all(|c| "αβγδ".contains(c)));
@@ -338,8 +311,8 @@ mod tests {
 
     #[test]
     fn url_safe_alphabet_has_64_chars() {
-        // 64 = 2^6, so each char carries exactly 6 bits — the masking
-        // shortcut in get_random_token_urlsafe relies on this.
+        // 64 = 2^6, so each char is exactly 6 bits. The masking
+        // shortcut in get_random_token_urlsafe depends on it.
         assert_eq!(URL_SAFE_CHARS.chars().count(), 64);
     }
 

@@ -1,5 +1,5 @@
-//! Unit coverage for `Range<T>` PostgreSQL range columns — Django
-//! `RangeField` family (#343). No database required: asserts the derived
+//! Unit coverage for `Range<T>` PostgreSQL range columns
+//! (#343). No database required: asserts the derived
 //! schema's `FieldType::Range` mapping, the per-dialect column-type
 //! emission (`int4range` / `int8range` / `numrange` / `daterange` /
 //! `tstzrange` on PG; degraded `TEXT` on MySQL / SQLite), and the

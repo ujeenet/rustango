@@ -1,4 +1,4 @@
-//! Django-parity #379 — `ListView::context_object_name` /
+//! Issue #379 — `ListView::context_object_name` /
 //! `DetailView::context_object_name` / `DetailView::lookup_field`.
 //! Verifies the Tera context picks up the renamed binding and
 //! that `lookup_field` lets the DetailView probe by a non-PK

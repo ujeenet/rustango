@@ -1,19 +1,13 @@
-//! `GET /login` + `POST /login` + `POST /logout` + auth middleware
-//! for the bare admin's session auth (#253 slice A).
+//! Session auth for the bare admin: `GET`/`POST /login`, `POST /logout`
+//! and the gate middleware.
 //!
-//! Mounted by [`crate::admin::Builder::with_session_auth`]. Layered
-//! as middleware so every non-login route requires a valid session
-//! cookie; the gate redirects to `/login` (relative to
-//! `state.config.admin_prefix`) on missing / expired cookies.
+//! Mounted by [`crate::admin::Builder::with_session_auth`]. Every route
+//! except `/login` needs a valid session cookie. A missing or expired
+//! cookie redirects to `/login` under `state.config.admin_prefix`.
 //!
-//! ## Reuse with `tenancy::admin`
-//!
-//! The HMAC signing primitive comes from `crate::session` (shared
-//! with `tenancy::session`). The password-verify call goes through
-//! `crate::passwords::verify` — the same primitive the tenancy
-//! `auth::authenticate_user` flow uses. Only the user model
-//! (`AdminUser` vs `tenancy::User`) and the cookie shape differ;
-//! all the crypto + password machinery lives in one place.
+//! Signing uses `crate::session` and password checks use
+//! `crate::passwords::verify`: the same primitives tenancy uses. Only
+//! the user model and the cookie shape differ.
 
 use std::sync::Arc;
 
@@ -31,9 +25,9 @@ use super::urls::AppState;
 use super::user::AdminUser;
 use crate::core::{Filter, Model, Op, SelectQuery, SqlValue, WhereExpr};
 
-/// Public (unauthenticated) routes — `/login` + `/logout`. Merged
-/// into the admin router BEFORE the auth middleware is applied so
-/// the login form itself stays publicly reachable.
+/// Unauthenticated routes: `/login` and `/logout`. Merged into the
+/// admin router before the auth middleware, so the login form itself
+/// stays reachable.
 pub(crate) fn public_router(state: AppState) -> Router {
     Router::new()
         .route("/login", get(login_form).post(login_submit))
@@ -41,17 +35,16 @@ pub(crate) fn public_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Authenticated routes that ride on top of the session middleware.
-/// `/account/password` lives here so an unauthenticated visitor
-/// can't reach the password-change form. Mounted from
+/// Routes that sit behind the session middleware, so an unauthenticated
+/// visitor can't reach the password-change form. Mounted from
 /// [`crate::admin::Builder::build`] when `with_session_auth` is set.
 pub(crate) fn protected_router(state: AppState) -> Router {
     let router = Router::new().route(
         "/account/password",
         get(change_password_form).post(change_password_submit),
     );
-    // Issue #367 — TOTP two-factor enrollment (self-service, behind the
-    // session gate). Only mounted when the `totp` feature is on.
+    // Self-service TOTP enrollment, behind the session gate. Only
+    // mounted when the `totp` feature is on.
     #[cfg(feature = "totp")]
     let router = router.route(
         "/account/totp",
@@ -66,11 +59,10 @@ async fn login_form(State(state): State<AppState>, headers: axum::http::HeaderMa
     login_response(&state, &headers, None).await
 }
 
-/// Build the login-page response, seeding a double-submit CSRF token
-/// (audit M3): the cookie is set on the GET (if not already present) and
-/// the matching token is embedded as a hidden form field, so the POST
-/// can be validated in [`login_submit`] without relying on outer
-/// middleware placement.
+/// Render the login page and seed a double-submit CSRF token. The GET
+/// sets the cookie (if it is missing) and embeds the matching token as
+/// a hidden field, so [`login_submit`] can check it without relying on
+/// outer middleware.
 async fn login_response(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -90,7 +82,7 @@ async fn login_response(
 
 async fn render_login_form(state: &AppState, error: Option<&str>, csrf_input: &str) -> String {
     let admin_prefix = &state.config.admin_prefix;
-    // SSO buttons — one per enabled `SsoProvider` row (admin-sso).
+    // One SSO button per enabled `SsoProvider` row.
     #[cfg(feature = "admin-sso")]
     let sso_providers =
         super::sso_provider::list_enabled(&state.pool, &format!("{admin_prefix}/login")).await;
@@ -116,10 +108,9 @@ async fn render_login_form(state: &AppState, error: Option<&str>, csrf_input: &s
             .unwrap_or("Rustango Admin"),
         "admin_prefix": admin_prefix,
         "static_url": &state.config.static_url,
-        // Issue #367 — show the optional authenticator-code field when
-        // the `totp` feature is compiled in. The field is harmless for
-        // non-enrolled users (left blank), so a build-time flag is
-        // enough; no per-request DB lookup on the login GET.
+        // Show the authenticator-code field when `totp` is compiled in.
+        // Users who are not enrolled just leave it blank, so a
+        // build-time flag is enough and the login GET needs no lookup.
         "totp_enabled": cfg!(feature = "totp"),
     });
     render_template("login.html", &ctx)
@@ -131,19 +122,15 @@ async fn render_login_form(state: &AppState, error: Option<&str>, csrf_input: &s
 struct LoginInput {
     username: String,
     password: String,
-    /// Double-submit CSRF token (audit M3). Optional so a missing field
-    /// is handled as a failed check (re-render) rather than a 422 form
-    /// rejection.
+    /// Double-submit CSRF token. Optional, so a missing field re-renders
+    /// the form instead of failing the whole POST with a 422.
     #[serde(rename = "_csrf", default)]
     csrf_token: Option<String>,
-    /// Authenticator (TOTP) code — issue #367. Optional: only enrolled
-    /// users need it, and the field is always present on the form so a
-    /// 2FA user submits username + password + code in one step (no
-    /// hidden-password second round). Ignored when the `totp` feature is
-    /// off or the user has no confirmed device.
-    // Read only when the `totp` feature compiles the 2FA challenge; the
-    // field stays on the form unconditionally so enabling the feature
-    // doesn't change the wire format.
+    /// Authenticator (TOTP) code. Only enrolled users need it. The form
+    /// always carries the field, so a 2FA user sends username, password
+    /// and code in one step, and turning the feature on does not change
+    /// the wire format. Ignored without the `totp` feature or without a
+    /// confirmed device.
     #[cfg_attr(not(feature = "totp"), allow(dead_code))]
     #[serde(default)]
     totp_code: Option<String>,
@@ -168,10 +155,9 @@ async fn login_submit(
             .into_response();
     };
 
-    // Audit M3 — validate the double-submit CSRF token before touching
-    // the database or verifying credentials. A cross-site forged POST
-    // can't read the SameSite=Lax CSRF cookie to echo it back, so it
-    // fails here. The token is seeded + embedded by `login_response`.
+    // Check the double-submit CSRF token before any database work or
+    // password check. A cross-site POST cannot read the SameSite=Lax
+    // cookie to echo the token back, so it fails here.
     if !crate::forms::csrf::verify_form_token(&headers, form.csrf_token.as_deref()) {
         return login_response(
             &state,
@@ -181,10 +167,9 @@ async fn login_submit(
         .await;
     }
 
-    // Schema-driven lookup so we don't depend on tenancy's
-    // typed query helpers — the bare admin compiles without `tenancy`.
+    // Schema-driven lookup: the bare admin compiles without `tenancy`,
+    // so it cannot use tenancy's typed query helpers.
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
-    // #562 — by_pk constructor for the single-column-lookup shape.
     let select = SelectQuery::by_pk(
         AdminUser::SCHEMA,
         "username",
@@ -196,8 +181,8 @@ async fn login_submit(
         .flatten();
 
     let Some(row) = row else {
-        // H1: spend a verify's worth of work on the unknown-user path
-        // so timing doesn't reveal whether the username exists.
+        // Spend a verify's worth of work on the unknown-user path, so
+        // timing does not reveal whether the username exists.
         crate::passwords::verify_dummy(&form.password);
         send_user_login_failed(UserLoginFailedContext {
             source: "admin",
@@ -219,11 +204,11 @@ async fn login_submit(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Audit M1 — per-account brute-force lockout, on by default. The key
-    // is scoped (`admin:<id>`) so it can't collide with operator/tenant
-    // ids, and uses the resolved id (not the raw username) so an attacker
-    // can't lock arbitrary accounts. A locked account short-circuits
-    // before the password verify.
+    // Per-account brute-force lockout, on by default. The key is scoped
+    // (`admin:<id>`) so it cannot collide with operator or tenant ids,
+    // and it uses the resolved id, not the raw username, so an attacker
+    // cannot lock accounts at will. A locked account stops here, before
+    // the password verify.
     #[cfg(feature = "cache")]
     if crate::account_lockout::shared()
         .is_locked(&format!("admin:{id}"))
@@ -244,8 +229,8 @@ async fn login_submit(
         .await;
     }
 
-    // Verify before the active check so active vs inactive accounts take
-    // the same time (audit H1).
+    // Verify before the active check, so active and inactive accounts
+    // take the same time.
     let password_ok = crate::passwords::verify(&form.password, stored_hash).unwrap_or(false);
 
     if !is_active {
@@ -256,14 +241,14 @@ async fn login_submit(
             request: meta.clone(),
         })
         .await;
-        // Audit M4 — do NOT reveal that the account exists-but-disabled.
-        // Return the same generic message as unknown-user / wrong-password
-        // so the login form can't be used to enumerate accounts. The
-        // Inactive signal above still records the real reason for audit.
+        // Do **not** reveal that the account exists but is disabled.
+        // Use the same generic message as unknown user or wrong
+        // password, so the form cannot be used to enumerate accounts.
+        // The signal above still records the real reason.
         return login_response(&state, &headers, Some("Invalid credentials.")).await;
     }
     if !password_ok {
-        // Audit M1 — count this failure toward the per-account lockout.
+        // Count this failure toward the per-account lockout.
         #[cfg(feature = "cache")]
         {
             let _ = crate::account_lockout::shared()
@@ -280,18 +265,16 @@ async fn login_submit(
         return login_response(&state, &headers, Some("Invalid credentials.")).await;
     }
 
-    // Issue #367 — two-factor challenge. If the user has a confirmed
-    // TOTP device, a valid authenticator code is required before the
-    // session is granted. The password is already verified at this
-    // point; a missing/wrong code re-renders the login form (the
-    // password counts as "spent" so we don't reveal 2FA-enrolled status
-    // any differently than a normal failure beyond the message).
+    // Two-factor challenge. A user with a confirmed TOTP device must
+    // send a valid code before the session is granted. The password is
+    // already verified here; a missing or wrong code re-renders the
+    // login form.
     #[cfg(feature = "totp")]
     {
         if let Some(totp_secret) = super::totp_store::confirmed_secret(&state.pool, id).await {
             let code = form.totp_code.as_deref().unwrap_or("").trim();
-            // 30s step, 6 digits, ±1 window — standard authenticator app
-            // defaults, tolerant of one step of clock skew.
+            // 30s step, 6 digits, ±1 window: the authenticator-app
+            // defaults, which allow one step of clock skew.
             if code.is_empty() || !crate::totp::verify(&totp_secret, code, 30, 6, 1) {
                 send_user_login_failed(UserLoginFailedContext {
                     source: "admin",
@@ -310,14 +293,14 @@ async fn login_submit(
         }
     }
 
-    // Audit M1 — successful login clears the failure counter + any lock.
+    // A successful login clears the failure counter and any lock.
     #[cfg(feature = "cache")]
     crate::account_lockout::shared()
         .clear(&format!("admin:{id}"))
         .await;
 
-    // Audit N8 — bind the cookie to a fingerprint of the current
-    // password hash so a password change/reset invalidates it.
+    // Bind the cookie to a fingerprint of the current password hash, so
+    // a password change or reset invalidates it.
     let auth_hash = session::password_fingerprint(&secret, stored_hash);
     let cookie_value = session::encode(
         &secret,
@@ -375,9 +358,8 @@ async fn change_password_submit(
     State(state): State<AppState>,
     Form(form): Form<ChangePasswordInput>,
 ) -> Response {
-    // The middleware guarantees a session is in scope here; if not,
-    // bail loudly — a request reaching this handler without one is
-    // a programmer bug.
+    // The middleware guarantees a session here. Reaching this handler
+    // without one is a bug, so bail loudly.
     let Some(session) = super::session::current() else {
         return (StatusCode::UNAUTHORIZED, "session required").into_response();
     };
@@ -399,10 +381,9 @@ async fn change_password_submit(
         .into_response();
     }
 
-    // Look up the current row by user_id (from the session) so we
-    // can verify the *current* password before mutating the hash.
+    // Load the row by the session's user_id, so the current password
+    // can be verified before the hash is replaced.
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
-    // #562 — by_pk constructor.
     let select = SelectQuery::by_pk(AdminUser::SCHEMA, "id", SqlValue::I64(session.user_id));
     let row = crate::sql::select_one_row_as_json(&state.pool, &select, &fields)
         .await
@@ -436,7 +417,7 @@ async fn change_password_submit(
         }
     };
 
-    // Schema-driven UPDATE — keeps the bare admin compiling without
+    // Schema-driven UPDATE, so the bare admin compiles without
     // tenancy's typed query helpers.
     use crate::core::{Assignment, Expr, UpdateQuery};
     let q = UpdateQuery {
@@ -460,12 +441,10 @@ async fn change_password_submit(
         .into_response();
     }
 
-    // Audit N8 — the cookie this request carries holds the OLD password
-    // fingerprint, so the gate would sign this session out on the next
-    // request. Re-issue the cookie with the NEW fingerprint so the
-    // current device stays signed in while every *other* device's
-    // pre-change cookie is invalidated (mirrors Django's
-    // update_session_auth_hash).
+    // This request's cookie holds the OLD password fingerprint, so the
+    // gate would sign it out on the next request. Re-issue the cookie
+    // with the new fingerprint: this device stays signed in, and every
+    // other device's pre-change cookie stops working.
     let mut resp = Html(render_change_password_form(
         &state,
         Some("Password updated."),
@@ -519,15 +498,15 @@ fn render_change_password_form(
     )
 }
 
-// ===================================================== TOTP 2FA enrollment (#367)
+// ========================================================== TOTP 2FA enrollment
 
 #[cfg(feature = "totp")]
 #[derive(serde::Deserialize)]
 struct TotpEnrollInput {
     #[serde(default)]
     totp_code: Option<String>,
-    /// Present (`reset=1`) when re-enrolling from an already-enabled
-    /// account — wipes the current device and shows a fresh setup.
+    /// Set to `reset=1` to re-enroll an already-enabled account: wipes
+    /// the current device and shows a fresh setup.
     #[serde(default)]
     reset: Option<String>,
 }
@@ -574,8 +553,8 @@ async fn totp_enroll_form(State(state): State<AppState>) -> Response {
     if device.as_ref().is_some_and(|d| d.confirmed) {
         return Html(render_totp_enroll(&state, true, "", "", None, None)).into_response();
     }
-    // Reuse the pending secret if one exists, else generate + persist a
-    // fresh (unconfirmed) one so a page reload is stable.
+    // Reuse a pending secret if there is one, else store a fresh
+    // unconfirmed one, so a page reload shows the same setup.
     let secret = match device.and_then(|d| crate::totp::TotpSecret::from_base32(&d.secret_base32)) {
         Some(s) => s,
         None => {
@@ -698,9 +677,8 @@ async fn logout_submit(State(state): State<AppState>, headers: axum::http::Heade
     use crate::signals::auth::{meta_from_headers, send_user_logged_out, UserLoggedOutContext};
     let meta = meta_from_headers(&headers, Some("/logout"));
 
-    // Best-effort session decode so the signal carries the user id /
-    // username when the cookie is still valid. Receivers that key off
-    // those fields fall through to the `None` branch cleanly.
+    // Best-effort decode, so the signal carries the user id and
+    // username when the cookie is still valid.
     let (user_id, username) = state
         .config
         .session_secret
@@ -743,35 +721,27 @@ async fn logout_submit(State(state): State<AppState>, headers: axum::http::Heade
 
 // ============================================================ Middleware
 
-/// State threaded into the auth middleware — the signing secret +
-/// the login URL to redirect to on missing session. Cloned per
-/// request, kept Arc<…> so the underlying key isn't copied.
+/// State for the auth middleware: the signing secret and the login URL
+/// to redirect to. Cloned per request; the key stays behind an `Arc` so
+/// it is not copied.
 #[derive(Clone)]
 pub(crate) struct SessionGate {
     pub(crate) secret: Arc<AdminSessionSecret>,
     pub(crate) login_path: String,
-    /// #253 slice C — when `true`, non-superuser sessions are
-    /// rejected with a 403 page. Default for the bare admin; mirrors
-    /// Django's `is_staff` requirement (the bare admin has no
-    /// per-model permission system yet, so the only access tier is
-    /// "superuser"). Future epics layering in real permissions can
-    /// flip this off and consult a `user_perms` set instead.
+    /// When `true`, a non-superuser session gets a 403 page. On by
+    /// default for the bare admin.
     pub(crate) require_superuser: bool,
-    /// Audit N8 — pool for the per-request password-fingerprint check
-    /// that invalidates cookies minted before a password change.
+    /// Pool for the per-request password-fingerprint check that rejects
+    /// cookies minted before a password change.
     pub(crate) pool: crate::sql::Pool,
 }
 
-/// Gate every admin request behind a valid session cookie. The
-/// `/login` route bypasses the gate (mounted before this middleware
-/// applies on the outer Router); embedded static assets at
-/// `/__static__/...` also pass through.
+/// Require a valid session cookie on every admin request. `/login` and
+/// the embedded static assets under `/__static__/` pass through.
 ///
-/// On valid session: inserts `Extension<AdminSession>` into the
-/// request so handlers can read the current user. When
-/// `gate.require_superuser` is set (the bare-admin default), a
-/// non-superuser session is rejected with a 403 page — Django's
-/// "must be staff to access /admin" shape.
+/// A valid session is inserted as `Extension<AdminSession>` so handlers
+/// can read the current user. With `gate.require_superuser` set (the
+/// bare-admin default), a non-superuser session gets a 403 page.
 pub(crate) async fn require_session(
     State(gate): State<SessionGate>,
     mut request: Request<Body>,
@@ -783,52 +753,47 @@ pub(crate) async fn require_session(
     }
 
     if let Some((mut session, cookie_auth_hash)) = read_session_cookie(&request, &gate.secret) {
-        // Audit N8 + P1 — one per-request lookup re-derives the user's
-        // LIVE state: it invalidates cookies minted before a password
-        // change (fingerprint mismatch), and re-checks `active` +
-        // `is_superuser` from the DB instead of trusting the cookie's
-        // cached copy — so a deactivated or demoted admin loses access
-        // immediately, not at the 8h cookie expiry.
+        // One lookup per request re-reads the user's live state. It
+        // rejects cookies minted before a password change, and re-reads
+        // `active` and `is_superuser` from the database instead of
+        // trusting the cookie. A deactivated or demoted admin loses
+        // access at once, not at cookie expiry.
         match gate_live_check(&gate, session.user_id, &cookie_auth_hash).await {
             // Password changed / user deleted / deactivated → force re-login.
             GateCheck::Reject => return Redirect::to(&gate.login_path).into_response(),
             // Row found + fingerprint matches: trust the LIVE flag.
             GateCheck::Live { is_superuser } => session.is_superuser = is_superuser,
-            // Transient DB error: fail open on the *fingerprint/active*
-            // checks (the cookie HMAC + exp still bound the session) but
-            // keep the cookie's cached `is_superuser` for the gate below.
+            // Transient DB error: fail open on the fingerprint and
+            // active checks (the cookie HMAC and expiry still bound the
+            // session) and keep the cookie's `is_superuser`.
             GateCheck::DbError => {}
         }
         if gate.require_superuser && !session.is_superuser {
-            // #253 slice C — render a 403 inline rather than redirect
-            // to /login, so the operator gets a clear "you are signed
-            // in but not allowed here" signal instead of an infinite
-            // login → 403 → login loop.
+            // Render a 403 here instead of redirecting to /login. A
+            // redirect would loop: login, 403, login again.
             return forbidden_page(&session);
         }
         request.extensions_mut().insert(session.clone());
-        // Scope the task-local so `chrome_context` (deep in the
-        // template render stack) can read it without every handler
-        // threading the session through its argument list.
+        // Scope the task-local so `chrome_context`, deep in the render
+        // stack, can read the session without every handler passing it
+        // down as an argument.
         return super::session::CURRENT_SESSION
             .scope(session, next.run(request))
             .await;
     }
 
-    // No valid session — bounce to the login form. Use 303 See Other
-    // so the GET semantics are preserved (browsers follow with GET).
+    // No valid session: bounce to the login form with a 303 See Other,
+    // so the browser follows with a GET.
     Redirect::to(&gate.login_path).into_response()
 }
 
-/// #253 slice C — minimal 403 page for non-superuser sessions. Plain
-/// HTML, no chrome (chrome rendering needs the same auth gate to
-/// have already passed). The body invites the operator to contact
-/// their administrator and offers a link to sign out + back to
-/// login.
+/// Minimal 403 page for a non-superuser session. Plain HTML with no
+/// chrome: rendering the chrome needs this same gate to have passed.
+/// The body offers a sign-out button.
 fn forbidden_page(session: &AdminSession) -> Response {
-    // Tiny inline escape — the page renders BEFORE the admin chrome
-    // (the gate fires before `next.run`), so we can't reach the
-    // chrome's `render::escape` helper without rebuilding state.
+    // Inline escape. The gate runs before `next.run`, so the chrome's
+    // `render::escape` helper is not reachable here without rebuilding
+    // state, and the username must still be escaped.
     let mut username = String::with_capacity(session.username.len());
     for ch in session.username.chars() {
         match ch {
@@ -878,22 +843,20 @@ fn read_session_cookie(
 
 /// Outcome of the gate's per-request liveness lookup.
 enum GateCheck {
-    /// Row found and the password fingerprint matches; carries the
-    /// user's LIVE `is_superuser` so the gate doesn't trust the cookie.
+    /// Row found and the password fingerprint matches. Carries the live
+    /// `is_superuser`, so the gate does not trust the cookie's copy.
     Live { is_superuser: bool },
-    /// Force re-login: password changed (fingerprint mismatch), user
-    /// deleted, or the account is deactivated.
+    /// Force a re-login: password changed, user deleted, or account
+    /// deactivated.
     Reject,
-    /// Transient DB error — caller fails open on the liveness checks
-    /// (the cookie HMAC + exp still bound the session).
+    /// Transient DB error. The caller fails open on the live checks; the
+    /// cookie HMAC and expiry still bound the session.
     DbError,
 }
 
-/// Audit N8 + P1 — re-derive the user's live state in one lookup:
-/// recompute the password fingerprint (invalidate cookies minted before
-/// a password change), and read live `active` / `is_superuser` so a
-/// deactivated or demoted admin loses access immediately rather than at
-/// cookie expiry.
+/// Re-read the user's live state in one lookup: the password
+/// fingerprint, which rejects cookies minted before a password change,
+/// plus live `active` and `is_superuser`.
 async fn gate_live_check(gate: &SessionGate, user_id: i64, cookie_auth_hash: &str) -> GateCheck {
     let fields: Vec<&'static crate::core::FieldSchema> = AdminUser::SCHEMA.fields.iter().collect();
     let select = SelectQuery::by_pk(AdminUser::SCHEMA, "id", SqlValue::I64(user_id));
@@ -906,8 +869,8 @@ async fn gate_live_check(gate: &SessionGate, user_id: i64, cookie_auth_hash: &st
             if session::password_fingerprint(&gate.secret, current) != cookie_auth_hash {
                 return GateCheck::Reject; // password changed since login
             }
-            // `active` defaults true (matches the login check) so a
-            // missing/null column doesn't lock everyone out; a real
+            // `active` defaults to true, as in the login check, so a
+            // missing or null column does not lock everyone out. A real
             // `false` revokes the session.
             let active = row.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
             if !active {
@@ -933,8 +896,8 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt as _;
 
-    // A lazily-connected pool — these tests exercise the CSRF gate,
-    // which runs BEFORE any DB access, so the pool is never queried.
+    // A lazily-connected pool. These tests exercise the CSRF gate,
+    // which runs before any DB access, so the pool is never queried.
     fn test_state() -> AppState {
         let pool = Pool::Postgres(
             PgPool::connect_lazy("postgres://_:_@127.0.0.1:1/_unused")
@@ -990,7 +953,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // Re-render (200), NOT a 303 redirect — and no session cookie.
+        // Re-render (200), not a 303 redirect, and no session cookie.
         assert_eq!(resp.status(), StatusCode::OK);
         let issued_session = resp.headers().get_all(header::SET_COOKIE).iter().any(|c| {
             c.to_str()

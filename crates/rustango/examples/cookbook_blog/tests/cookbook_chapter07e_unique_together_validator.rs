@@ -1,4 +1,4 @@
-//! Cookbook Chapter 7e — DRF-shape `UniqueTogetherValidator`.
+//! Cookbook Chapter 7e — `UniqueTogetherValidator`.
 //!
 //! The composite UNIQUE INDEX from Chapter 2c rejects duplicate
 //! `(org_id, user_id)` pairs at the DB. Without a pre-check, the
@@ -70,7 +70,7 @@ async fn validator_rejects_with_per_field_errors_on_create() {
     let err = mf.validate_unique_together(&pool.clone().into(), None).await
         .expect_err("validator must reject the duplicate pair");
     let s = format!("{err:?}");
-    // Errors are keyed by both columns — DRF-shape per-field surface.
+    // Errors are keyed by both columns — one entry per offending field.
     assert!(s.contains("\"org_id\""), "expected `org_id` in errors: {s}");
     assert!(s.contains("\"user_id\""), "expected `user_id` in errors: {s}");
     assert!(s.to_lowercase().contains("already exists"),

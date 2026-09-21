@@ -1,5 +1,5 @@
 //! End-to-end live test for `ViewSet::filter_backend(...)` on SQLite
-//! (DRF `filter_backends` parity, #1010). A registered backend
+//! (issue #1010). A registered backend
 //! contributes extra `WHERE` predicates on the list action, ANDed with
 //! the built-in `filter_fields`.
 

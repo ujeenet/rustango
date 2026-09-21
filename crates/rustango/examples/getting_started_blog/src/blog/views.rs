@@ -1,4 +1,4 @@
-//! App views — request handlers (Django-style "views").
+//! App views — the request handlers this app mounts.
 //!
 //! Each handler is a stateless async fn; `urls.rs` mounts them
 //! under their HTTP paths. For pure-CRUD admin needs you don't

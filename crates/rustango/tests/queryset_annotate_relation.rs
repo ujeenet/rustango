@@ -7,7 +7,7 @@
 //! `Model::reverse_relations()` and projects a **correlated** aggregate
 //! subquery — `(SELECT COUNT(*) FROM <child> WHERE <child_fk> =
 //! <outer>.<pk>) AS <name>_count` — alongside the parent's scalar
-//! columns (Django Shape 3: GROUP BY every parent column). Because the
+//! columns (Shape 3: GROUP BY every parent column). Because the
 //! aggregate comes from a correlated subquery rather than a JOIN it
 //! never double-counts. The generated SQL is standard across
 //! PG / MySQL / SQLite apart from identifier quoting; these tests pin

@@ -20,14 +20,14 @@ use super::Postgres;
 use crate::core::{BulkInsertQuery, DeleteQuery, InsertQuery, SelectQuery, UpdateQuery};
 use crate::sql::Dialect as _;
 
-/// Like [`insert`] but accepts any sqlx executor — `&PgPool`,
-/// `&mut PgConnection`, or a transaction. Tenant-scoped writes need
-/// this: schema-mode tenants share the registry pool and rely on the
-/// per-checkout `SET search_path`, so passing `&PgPool` would silently
-/// hit the wrong schema.
+/// Like [`insert_pool`](crate::sql::insert_pool) but accepts any sqlx
+/// executor — `&PgPool`, `&mut PgConnection`, or a transaction.
+/// Tenant-scoped writes need this: schema-mode tenants share the
+/// registry pool and rely on the per-checkout `SET search_path`, so
+/// passing `&PgPool` would silently hit the wrong schema.
 ///
 /// # Errors
-/// As [`insert`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn insert_on<'c, E>(executor: E, query: &InsertQuery) -> Result<(), ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -42,10 +42,12 @@ where
     Ok(())
 }
 
-/// Like [`insert_returning`] but accepts any sqlx executor.
+/// Like [`insert_returning_pool`](crate::sql::insert_returning_pool)
+/// but accepts any sqlx executor.
 ///
 /// # Errors
-/// As [`insert_returning`].
+/// [`ExecError`] if `returning` is empty, the query is invalid, or the
+/// driver rejects it.
 pub async fn insert_returning_on<'c, E>(
     executor: E,
     query: &InsertQuery,
@@ -66,10 +68,11 @@ where
     Ok(row)
 }
 
-/// Like [`bulk_insert`] but accepts any sqlx executor.
+/// Like [`bulk_insert_pool`](crate::sql::bulk_insert_pool) but accepts
+/// any sqlx executor.
 ///
 /// # Errors
-/// As [`bulk_insert`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn bulk_insert_on<'c, E>(
     executor: E,
     query: &BulkInsertQuery,
@@ -91,10 +94,11 @@ where
     }
 }
 
-/// Like [`update`] but accepts any sqlx executor.
+/// Like [`update_pool`](crate::sql::update_pool) but accepts any sqlx
+/// executor.
 ///
 /// # Errors
-/// As [`update`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn update_on<'c, E>(executor: E, query: &UpdateQuery) -> Result<u64, ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -109,10 +113,11 @@ where
     Ok(result.rows_affected())
 }
 
-/// Like [`delete`] but accepts any sqlx executor.
+/// Like [`delete_pool`](crate::sql::delete_pool) but accepts any sqlx
+/// executor.
 ///
 /// # Errors
-/// As [`delete`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn delete_on<'c, E>(executor: E, query: &DeleteQuery) -> Result<u64, ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -126,13 +131,14 @@ where
     Ok(result.rows_affected())
 }
 
-/// Like [`select_rows`] but accepts any sqlx executor — `&PgPool`,
-/// `&mut PgConnection`, or a `Transaction`. Required for tenancy
-/// projects whose per-request connection comes from
-/// [`crate::extractors::Tenant`] rather than a single global pool.
+/// Like [`select_rows_pool`](crate::sql::select_rows_pool) but accepts
+/// any sqlx executor — `&PgPool`, `&mut PgConnection`, or a
+/// `Transaction`. Required for tenancy projects whose per-request
+/// connection comes from [`crate::extractors::Tenant`] rather than a
+/// single global pool.
 ///
 /// # Errors
-/// As [`select_rows`].
+/// [`ExecError`] if the query is invalid or the driver rejects it.
 pub async fn select_rows_on<'c, E>(
     executor: E,
     query: &SelectQuery,

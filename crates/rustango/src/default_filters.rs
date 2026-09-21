@@ -1,14 +1,6 @@
-//! Django `defaultfilters` template filters as Tera filters. Issue #61.
+//! Everyday template filters, registered on Tera.
 //!
-//! Django built-ins that Tera doesn't ship out of the box and that
-//! templates reach for constantly: `pluralize`, `truncatewords`,
-//! `linebreaks`, `default_if_none`, `add`, `cut`, `divisibleby`,
-//! `floatformat`, `escapejs`, `yesno`, `get_digit`, `dictsort`,
-//! `slugify_unicode`, `iriencode`, `wordwrap`, `mask_email`,
-//! `mask_card`, `mask_phone`, `dictsortreversed`, `oxford_join`,
-//! `initials`, `truncatechars`, `normalize_whitespace`, `wordcount`,
-//! `phone2numeric`, `linenumbers`, `ljust`, `rjust`, `center`. Call
-//! [`register_filters`] on a Tera instance to make them available:
+//! Call [`register_filters`] on a Tera instance to make them available:
 //!
 //! ```ignore
 //! let mut tera = tera::Tera::default();
@@ -16,19 +8,20 @@
 //! // now {{ count | pluralize }} renders "" / "s"
 //! ```
 //!
-//! Tera already ships `linebreaksbr`, `striptags`, `truncate`,
-//! `wordcount` — those aren't repeated here. This module only adds
-//! the *missing* defaultfilters group.
+//! These are the text and number filters Tera does not ship, plus a
+//! few extras such as `mask_email`, `mask_card`, `oxford_join` and
+//! `initials`. See [`register_filters`] for the full list.
 //!
-//! Matches [Django defaultfilters](https://docs.djangoproject.com/en/6.0/ref/templates/builtins/)
-//! output character-for-character on the English (en-US) locale.
+//! Output is en-US.
+//!
+//! [`register_filters`]: crate::default_filters::register_filters
 
 use std::collections::HashMap;
 
 use tera::{to_value, Tera, Value};
 
-/// Register every defaultfilters filter on `tera`. Call from app
-/// setup (typically right after `Tera::new(...)` / `Tera::default()`).
+/// Register every filter in this module on `tera`. Call it during app
+/// setup, right after `Tera::new(...)` or `Tera::default()`.
 pub fn register_filters(tera: &mut Tera) {
     tera.register_filter("pluralize", pluralize);
     tera.register_filter("truncatewords", truncatewords);
@@ -81,7 +74,7 @@ pub fn register_filters(tera: &mut Tera) {
 // ------------------------------------------------------------------ pluralize
 
 /// `pluralize` — return the singular/plural suffix that matches an
-/// integer-like value. Django:
+/// integer-like value:
 /// - `{{ 1|pluralize }}` → `""`
 /// - `{{ 2|pluralize }}` → `"s"`
 /// - `{{ 1|pluralize:"es" }}` → `""`
@@ -89,9 +82,9 @@ pub fn register_filters(tera: &mut Tera) {
 /// - `{{ 1|pluralize:"y,ies" }}` → `"y"`
 /// - `{{ 2|pluralize:"y,ies" }}` → `"ies"`
 ///
-/// Non-integer / non-collection values panic in Django; we mirror
-/// the safer pass-through behaviour and return `""` so a typoed
-/// variable doesn't blow up the page.
+/// A value that is neither a number nor a collection returns `""`
+/// rather than erroring, so a typo in a variable name does not break
+/// the page.
 fn pluralize(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let count = count_for_pluralize(value);
     let suffix_arg = args
@@ -102,13 +95,9 @@ fn pluralize(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value
     Ok(to_value(crate::text::pluralize(count, suffix_arg))?)
 }
 
-/// Resolve the count that drives pluralize. Django accepts ints,
-/// floats, and collections (where len() decides). We mirror that:
-/// - integer → use directly
-/// - float → truncate to integer
-/// - array / map / string → use length
-/// - anything else → 0 (so the plural form wins; matches Django's
-///   "non-iterable defaults to 0" branch).
+/// The count that drives pluralize: an integer is
+/// used directly, a float is truncated, an array, map or string uses its
+/// length, and anything else is 0, so the plural form wins.
 fn count_for_pluralize(value: &Value) -> i64 {
     if let Some(n) = value.as_i64() {
         return n;
@@ -134,17 +123,15 @@ fn count_for_pluralize(value: &Value) -> i64 {
 // ------------------------------------------------------------------ truncatewords
 
 /// `truncatewords` — keep the first N words, append `…` if any
-/// were dropped. Django:
+/// were dropped:
 /// - `{{ "Joel is a slug"|truncatewords:2 }}` → `"Joel is …"`
 /// - `{{ "two words"|truncatewords:5 }}` → `"two words"`
 ///
-/// Negative / zero / non-integer arguments produce an empty string
-/// (matching Django). Whitespace handling: collapse-on-emit so a
-/// multi-space input round-trips as single-spaced output.
+/// A zero, negative or non-integer argument gives an empty string.
+/// Runs of whitespace collapse to a single space in the output.
 fn truncatewords(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
-        // Pass non-string values through unchanged — Django panics
-        // here; we prefer not to.
+        // Non-string values pass through rather than erroring.
         return Ok(value.clone());
     };
     let n = args
@@ -153,23 +140,19 @@ fn truncatewords(value: &Value, args: &HashMap<String, Value>) -> tera::Result<V
         .and_then(Value::as_i64)
         .unwrap_or(-1);
     if n <= 0 {
-        // Django filter shape: 0 / negative / non-int → empty string.
-        // Distinct from text::truncate_words(s, 0, " …") which would
-        // emit a stray suffix.
+        // Not `text::truncate_words(s, 0, …)`, which emits a stray
+        // suffix. An empty string is the right answer here.
         return Ok(to_value("")?);
     }
     let n = usize::try_from(n).unwrap_or(0);
-    // Algorithm identical to `text::truncate_words` for n > 0 —
-    // single source of truth.
     Ok(to_value(crate::text::truncate_words(s, n, " …"))?)
 }
 
 // ------------------------------------------------------------------ linebreaks
 
-/// `linebreaks` — turn plain-text line breaks into HTML. Django:
-/// blank-line-separated chunks become `<p>` blocks; single newlines
-/// inside a chunk become `<br>`. The input is HTML-escaped first so
-/// raw `<script>` in user input doesn't leak through.
+/// `linebreaks` — turn plain-text line breaks into HTML. A blank line
+/// starts a new `<p>`; a single newline becomes `<br>`. The input is
+/// HTML-escaped first, so raw `<script>` cannot leak through.
 ///
 /// - `"foo\nbar"` → `"<p>foo<br>bar</p>"`
 /// - `"foo\n\nbar"` → `"<p>foo</p>\n\n<p>bar</p>"`
@@ -181,20 +164,17 @@ fn linebreaks(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
     if s.is_empty() {
         return Ok(to_value("")?);
     }
-    // Identical algorithm to `text::linebreaks(s, autoescape=true)` —
-    // single source of truth.
     Ok(to_value(crate::text::linebreaks(s, true))?)
 }
 
 // ------------------------------------------------------------------ default_if_none
 
-/// `default_if_none` — replace `null` with the argument. Distinct
-/// from Tera's built-in `default` filter (which replaces *undefined*
-/// values). Django:
+/// `default_if_none` — replace `null` with the argument. Tera's built-in
+/// `default` replaces *undefined* values instead.
 /// - `{{ user.bio|default_if_none:"(no bio)" }}` → `"(no bio)"` when
-///   the bio field is JSON null
+///   `bio` is JSON null
 /// - `{{ "hello"|default_if_none:"x" }}` → `"hello"`
-/// - Empty string is NOT null — it passes through.
+/// - An empty string is not null, so it passes through.
 fn default_if_none(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     if value.is_null() {
         let fallback = args
@@ -209,36 +189,31 @@ fn default_if_none(value: &Value, args: &HashMap<String, Value>) -> tera::Result
 
 // ------------------------------------------------------------------ add
 
-/// `add` — Django's universal addition filter. Numeric inputs add
-/// numerically; string inputs concatenate; mismatched types fall
-/// back to a stringified concat. Django:
+/// `add` — a universal addition filter. Numbers add, strings
+/// join, arrays concatenate, and anything else falls back to joining
+/// the two stringified values.
 /// - `{{ 4|add:5 }}` → `"9"`
 /// - `{{ "abc"|add:"def" }}` → `"abcdef"`
-/// - `{{ [1, 2]|add:[3, 4] }}` → `"[1, 2, 3, 4]"` (list concat)
-///
-/// We mirror the numeric / string / list-concat paths. Anything
-/// that can't be coerced into either side falls back to string
-/// concatenation of `to_string()` views — same conservative shape
-/// Django takes.
+/// - `{{ [1, 2]|add:[3, 4] }}` → `"[1, 2, 3, 4]"`
 fn add(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let rhs = args.get("value").or_else(|| args.values().next());
     let Some(rhs) = rhs else {
         return Ok(value.clone());
     };
-    // Numeric path: both sides have a numeric representation.
+    // Numeric path: both sides read as numbers.
     if let (Some(a), Some(b)) = (value.as_i64(), rhs.as_i64()) {
         return Ok(to_value(a + b)?);
     }
     if let (Some(a), Some(b)) = (value.as_f64(), rhs.as_f64()) {
         return Ok(to_value(a + b)?);
     }
-    // List-concat path: both sides are arrays.
+    // Both sides are arrays: concatenate.
     if let (Some(a), Some(b)) = (value.as_array(), rhs.as_array()) {
         let mut out = a.clone();
         out.extend(b.iter().cloned());
         return Ok(Value::Array(out));
     }
-    // String / mixed path — concatenate the stringified views.
+    // Strings, or mixed types: join the stringified values.
     let lhs_s = value_to_string(value);
     let rhs_s = value_to_string(rhs);
     Ok(to_value(format!("{lhs_s}{rhs_s}"))?)
@@ -255,13 +230,10 @@ fn value_to_string(v: &Value) -> String {
 // ------------------------------------------------------------------ cut
 
 /// `cut` — remove every occurrence of the argument from the value.
-/// Django:
 /// - `{{ "Hello, world"|cut:"l" }}` → `"Heo, word"`
 /// - `{{ "abc abc"|cut:"abc" }}` → `" "` (one space remains)
 ///
-/// Empty argument returns the value unchanged so a typoed
-/// `{{ x|cut:"" }}` doesn't infinite-loop or replace every empty
-/// position.
+/// An empty argument returns the value unchanged.
 fn cut(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -276,13 +248,9 @@ fn cut(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
 
 // ------------------------------------------------------------------ divisibleby
 
-/// `divisibleby` — `true` when value is evenly divisible by the
-/// argument. Django:
-/// - `{{ 6|divisibleby:3 }}` → `"True"` (Django renders bool)
-/// - `{{ 7|divisibleby:3 }}` → `"False"`
-///
-/// Non-integer / zero-divisor returns `false`. Most useful in `{% if %}`
-/// guards: `{% if forloop.counter|divisibleby:3 %}new row{% endif %}`.
+/// `divisibleby` — `true` when the value divides evenly by the argument.
+/// A non-integer value or a zero divisor gives `false`. Mostly used in
+/// `{% if %}`: `{% if forloop.counter|divisibleby:3 %}new row{% endif %}`.
 fn divisibleby(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let n = match value.as_i64() {
         Some(n) => n,
@@ -304,22 +272,15 @@ fn divisibleby(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
 
 // ------------------------------------------------------------------ floatformat
 
-/// `floatformat` — Django's locale-aware float formatter. Distinct
-/// from generic `round`:
-/// - `{{ 34.23234 }}` → `"34.23234"` (no filter, no rounding)
-/// - `{{ 34.23234|floatformat }}` → `"34.2"` (default 1 decimal)
-/// - `{{ 34.00000|floatformat }}` → `"34"` (trailing zeros dropped
-///   when the decimal is exactly zero)
-/// - `{{ 34.23234|floatformat:3 }}` → `"34.232"` (N decimals)
-/// - `{{ 34.00000|floatformat:3 }}` → `"34.000"` (positive arg keeps
-///   trailing zeros)
-/// - `{{ 34.23234|floatformat:-3 }}` → `"34.232"` (negative arg
-///   drops trailing zeros — `34.0|floatformat:-3` → `"34"`)
+/// `floatformat` — a float formatter, not a plain `round`:
+/// - `{{ 34.23234|floatformat }}` → `"34.2"` (one decimal by default)
+/// - `{{ 34.00000|floatformat }}` → `"34"` (a zero decimal is dropped)
+/// - `{{ 34.23234|floatformat:3 }}` → `"34.232"`
+/// - `{{ 34.00000|floatformat:3 }}` → `"34.000"` (positive keeps zeros)
+/// - `{{ 34.0|floatformat:-3 }}` → `"34"` (negative drops zeros)
 ///
-/// The negative-precision drop is Django's distinguishing trick:
-/// `{{ price|floatformat:-2 }}` reads as "two decimals max, hide
-/// them when value is a round number." Useful for prices /
-/// percentages where `$5.00` should render as `$5`.
+/// A negative precision means "at most N decimals, hidden when the
+/// value is round". Good for prices, where `$5.00` should read `$5`.
 fn floatformat(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(f) = value.as_f64() else {
         return Ok(value.clone());
@@ -334,19 +295,17 @@ fn floatformat(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
 
 // ------------------------------------------------------------------ escapejs
 
-/// `escapejs` — escape a string for safe embedding inside a JS
-/// string literal in HTML. Django:
+/// `escapejs` — escape a string so it is safe inside a JS string
+/// literal in HTML:
 ///
 /// ```html
 /// <script>var s = "{{ value|escapejs }}";</script>
 /// ```
 ///
-/// Escapes characters that have either HTML or JS-context meaning,
-/// so neither `</script>` injection nor JS-syntax breakage is
-/// possible regardless of operator input. Quotes, slashes, brackets,
-/// `&`, `=`, `-`, `;`, backticks, line separators (U+2028 / U+2029)
-/// and every control character all turn into `\uXXXX` escapes;
-/// everything else passes through.
+/// Every character that means something to HTML or to JS becomes a
+/// `\uXXXX` escape: quotes, slashes, brackets, `&`, `=`, `-`, `;`,
+/// backticks, U+2028 / U+2029 and all control characters. So no input
+/// can inject `</script>` or break the JS syntax.
 fn escapejs(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -356,23 +315,20 @@ fn escapejs(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
 
 // ------------------------------------------------------------------ yesno
 
-/// `yesno` — three-way string mapper for booleans. Django:
+/// `yesno` — map a boolean, or null, onto one of up to three strings.
 /// - `{{ true|yesno:"yes,no" }}` → `"yes"`
 /// - `{{ false|yesno:"yes,no" }}` → `"no"`
 /// - `{{ null|yesno:"yes,no,maybe" }}` → `"maybe"`
-/// - `{{ null|yesno:"yes,no" }}` → `"no"` (no third token → use "no")
+/// - `{{ null|yesno:"yes,no" }}` → `"no"` (no third token)
 ///
-/// Argument shape: comma-separated `"yes,no"` or `"yes,no,maybe"`.
-/// Missing arg defaults to Django's `"yes,no,maybe"`.
+/// The argument is comma-separated and defaults to `"yes,no,maybe"`.
 fn yesno(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let raw = args
         .get("choices")
         .or_else(|| args.values().next())
         .and_then(Value::as_str)
         .unwrap_or("yes,no,maybe");
-    // The Tera filter treats non-null non-boolean values as truthy
-    // (matching the legacy behavior). Convert via Option<bool>:
-    // null → None, bool → Some(b), other → Some(true).
+    // null → None, bool → Some(b), anything else → Some(true).
     let opt = if value.is_null() {
         None
     } else {
@@ -383,16 +339,13 @@ fn yesno(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
 
 // ------------------------------------------------------------------ get_digit
 
-/// `get_digit` — extract the Nth digit (1-indexed, from the RIGHT)
-/// of an integer. Django:
-/// - `{{ 1234|get_digit:1 }}` → `"4"` (rightmost)
-/// - `{{ 1234|get_digit:2 }}` → `"3"`
+/// `get_digit` — the Nth digit of an integer, counted from the right
+/// starting at 1.
+/// - `{{ 1234|get_digit:1 }}` → `"4"`
 /// - `{{ 1234|get_digit:4 }}` → `"1"`
 /// - `{{ 1234|get_digit:5 }}` → `"0"` (past the leftmost digit)
 ///
-/// Non-integer values pass through unchanged. Argument `< 1`
-/// returns the value as-is (Django's documented passthrough on
-/// invalid index).
+/// A non-integer value, or an index below 1, passes through unchanged.
 fn get_digit(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(n) = value.as_i64() else {
         return Ok(value.clone());
@@ -410,20 +363,13 @@ fn get_digit(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value
 
 // ------------------------------------------------------------------ dictsort
 
-/// `dictsort` — sort a list of objects by a named key. Django:
-/// - `{{ users|dictsort:"name" }}` → list reordered alphabetically
-///   by each entry's `name` field
-/// - `{{ users|dictsort:"age" }}` → reordered numerically by `age`
+/// `dictsort` — stable sort of a list of objects by a named key, for
+/// example `{{ users|dictsort:"name" }}`.
 ///
-/// Sort is stable and uses the JSON `Value` Ord we implement here:
-/// numbers and booleans first (numerically/by bool order), then
-/// strings (lexicographic), then everything else (compared via the
-/// JSON string form). Non-list input passes through unchanged.
-/// Entries missing the key sort first (treated as `null`).
+/// Ordering follows [`compare_values`]. Entries missing the key count as
+/// `null` and sort first. Non-list input passes through unchanged.
 ///
-/// Nested key paths (`"address.city"`) are NOT supported in this
-/// slice — Django allows dotted paths; we add them when the first
-/// caller needs them.
+/// Dotted key paths such as `"address.city"` are not supported.
 fn dictsort(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(arr) = value.as_array() else {
         return Ok(value.clone());
@@ -445,11 +391,8 @@ fn dictsort(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value>
     Ok(Value::Array(sorted))
 }
 
-/// `dictsortreversed` — Django's `dictsortreversed`. Descending
-/// counterpart of [`dictsort`]: stable sort by named key, largest
-/// first. Same semantics: missing-key entries treated as null and
-/// sort to the END (lowest after reversal). Non-list input passes
-/// through. Empty key is a no-op (returns unchanged).
+/// `dictsortreversed` — [`dictsort`] in descending order. Missing-key
+/// entries count as `null`, so they sort last here.
 fn dictsortreversed(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(arr) = value.as_array() else {
         return Ok(value.clone());
@@ -473,24 +416,20 @@ fn dictsortreversed(value: &Value, args: &HashMap<String, Value>) -> tera::Resul
 
 // ------------------------------------------------------------------ oxford_join
 
-/// `oxford_join` — join a list of strings as a natural-language
-/// list with the Oxford (serial) comma. Single-arg variant uses
-/// the default conjunction `"and"`:
+/// `oxford_join` — join a list into a natural-language list with the
+/// Oxford comma. The conjunction defaults to `"and"`:
 ///
-/// - `[]` → `""`
 /// - `["a"]` → `"a"`
 /// - `["a", "b"]` → `"a and b"` (no comma)
-/// - `["a", "b", "c"]` → `"a, b, and c"` (Oxford comma)
-/// - `["a", "b", "c", "d"]` → `"a, b, c, and d"`
+/// - `["a", "b", "c"]` → `"a, b, and c"`
 ///
-/// Two-arg variant lets you switch the conjunction:
+/// Pass `conj` to change it:
 ///
 /// ```jinja
 /// {{ items | oxford_join(conj="or") }}  {# "a, b, or c" #}
 /// ```
 ///
-/// Non-string list elements get stringified via `to_string()`.
-/// Non-array input passes through unchanged.
+/// Non-string elements are stringified. Non-array input passes through.
 fn oxford_join(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(arr) = value.as_array() else {
         return Ok(value.clone());
@@ -512,24 +451,13 @@ fn oxford_join(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
 
 // ------------------------------------------------------------------ initials
 
-/// `initials` — return the uppercase first character of each
-/// whitespace-separated word in the input. Used for the
-/// avatar-fallback shape every web app builds (one or two letters
-/// inside a colored circle when no profile picture is uploaded).
+/// `initials` — the uppercase first letter of each word, for the avatar
+/// fallback shown when a user has no picture. `count` caps how many you
+/// get. Leading non-letters are skipped, so `"123 Alice"` gives `"A"`.
 ///
-/// Behaviour:
-/// - Default: first character of every word, uppercased.
-/// - `count` argument: limit to the first N initials.
-/// - Non-alphabetic leading chars are skipped so `"123 Alice"`
-///   yields `"A"` not `"1"`.
-/// - Single string of one char yields that uppercased char.
-///
-/// Examples:
-/// - `"Alice"` → `"A"`
 /// - `"Alice Bob"` → `"AB"`
 /// - `"alice m. bob"` → `"AMB"`
 /// - `"alice m. bob" | initials(count=2)` → `"AM"`
-/// - `""` → `""`
 fn initials(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -544,23 +472,17 @@ fn initials(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value>
 
 // ------------------------------------------------------------------ truncatechars
 
-/// `truncatechars` — Django's `truncatechars`. Truncate the input
-/// to at most `count` characters; if any chars were dropped,
-/// append `…` (single ellipsis char). The ellipsis counts toward
-/// the `count` budget — `truncatechars(5)` produces at most 5
-/// chars of output total.
+/// `truncatechars` — cut the input to at most `count` characters and
+/// append `…` if anything was dropped. The `…` counts toward `count`, so
+/// the output is never longer than `count`. Tera's built-in `truncate`
+/// differs: it adds a literal `...` on top of the count.
 ///
-/// Distinct from Tera's built-in `truncate` (which adds the
-/// ellipsis BEYOND the count, and uses the literal `...`).
+/// - `"Joel is a slug" | truncatechars(count=7)` → `"Joel i…"`
+/// - `"Hi" | truncatechars(count=10)` → `"Hi"`
+/// - `"abcd" | truncatechars(count=3)` → `"ab…"`
+/// - `"any" | truncatechars(count=0)` → `""`
 ///
-/// Examples:
-/// - `"Joel is a slug" | truncatechars(count=7)` → `"Joel i…"` (7 chars)
-/// - `"Hi" | truncatechars(count=10)` → `"Hi"` (no truncation needed)
-/// - `"abc" | truncatechars(count=3)` → `"abc"` (boundary)
-/// - `"abcd" | truncatechars(count=3)` → `"ab…"` (3 chars total)
-/// - `"any" | truncatechars(count=0)` → `""` (zero budget)
-///
-/// Negative / non-integer `count` returns the input unchanged.
+/// A negative or non-integer `count` returns the input unchanged.
 fn truncatechars(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -578,23 +500,18 @@ fn truncatechars(value: &Value, args: &HashMap<String, Value>) -> tera::Result<V
 
 // ------------------------------------------------------------------ truncatechars_html / truncatewords_html
 
-/// `truncatechars_html` — HTML-tag-aware version of `truncatechars`.
-/// Counts visible characters OUTSIDE tag brackets; maintains an
-/// open-tag stack so the result is well-formed HTML.
-///
-/// Django shape: the ellipsis (`…`) counts toward the `count`
-/// budget just like `truncatechars`. We keep `count - 1` visible
-/// chars from the input, then append `…` (the rendered ellipsis
-/// is 1 visible char). Self-closing void elements (`<br>`,
-/// `<img>`, etc.) don't stack.
+/// `truncatechars_html` — [`truncatechars`] that understands tags. It
+/// counts only visible characters and tracks open tags, so the result is
+/// still well-formed HTML. Void elements such as `<br>` are not stacked.
+/// As with [`truncatechars`], the `…` counts toward `count`.
 ///
 /// ```jinja
 /// {{ "<p>hello world</p>" | truncatechars_html(count=7) }}
 /// {# → "<p>hello …</p>" — 6 visible chars + ellipsis = 7 total #}
 /// ```
 ///
-/// Negative / non-integer `count` returns the input unchanged.
-/// `count = 0` returns the empty string (Django shape).
+/// A negative or non-integer `count` returns the input unchanged;
+/// `count = 0` returns an empty string.
 fn truncatechars_html(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -607,7 +524,7 @@ fn truncatechars_html(value: &Value, args: &HashMap<String, Value>) -> tera::Res
         Some(n) if n >= 0 => n as usize,
         _ => return Ok(value.clone()),
     };
-    // Reserve 1 visible char for the ellipsis (Django shape).
+    // Reserve one visible char for the ellipsis.
     let visible_budget = n.saturating_sub(1);
     Ok(to_value(crate::text::truncate_html_chars(
         s,
@@ -616,9 +533,8 @@ fn truncatechars_html(value: &Value, args: &HashMap<String, Value>) -> tera::Res
     ))?)
 }
 
-/// `truncatewords_html` — HTML-tag-aware version of `truncatewords`.
-/// Counts whitespace-separated words OUTSIDE tag brackets; closes
-/// any open tags after the truncation suffix.
+/// `truncatewords_html` — `truncatewords` that understands tags. It
+/// counts only words outside tags and closes any open tags at the end.
 ///
 /// ```jinja
 /// {{ "<p>Joel is a slug</p>" | truncatewords_html(count=2) }}
@@ -641,12 +557,9 @@ fn truncatewords_html(value: &Value, args: &HashMap<String, Value>) -> tera::Res
 
 // ------------------------------------------------------------------ urlize
 
-/// `urlize` — Django's auto-linker. Replace `http(s)://...`,
-/// `www.host.tld/...`, and `user@host.tld` shapes with `<a>`
-/// elements. Wraps the public `text::urlize`.
-///
-/// Optional `nofollow=true` argument adds `rel="nofollow"` to
-/// every anchor (default off — matches Django's `urlize`).
+/// `urlize` — turn `http(s)://…`, `www.host.tld/…` and `user@host.tld`
+/// into `<a>` elements. Pass `nofollow=true` to add `rel="nofollow"`;
+/// it is off by default.
 ///
 /// ```jinja
 /// {{ "see http://example.com" | urlize | safe }}
@@ -667,10 +580,9 @@ fn urlize_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<V
 
 // ------------------------------------------------------------------ avoid_wrapping
 
-/// `avoid_wrapping` — replace ASCII spaces with non-breaking
-/// spaces (U+00A0) so the phrase stays on one line. Wraps the
-/// public `text::avoid_wrapping`. Useful for dates / version
-/// strings / multi-word brand names that look ugly when broken.
+/// `avoid_wrapping` — replace spaces with non-breaking spaces so the
+/// phrase stays on one line. Good for dates, version strings and brand
+/// names that look wrong when broken across lines.
 ///
 /// ```jinja
 /// {{ "June 5" | avoid_wrapping }}   {# → "June\u{a0}5" #}
@@ -684,19 +596,12 @@ fn avoid_wrapping_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Res
 
 // ------------------------------------------------------------------ normalize_whitespace
 
-/// `normalize_whitespace` — collapse any run of whitespace
-/// (spaces, tabs, newlines, NBSP, etc.) into a single space, and
-/// trim leading + trailing whitespace.
-///
-/// Useful for sanitizing free-text fields before display in a
-/// single-line context (admin list columns, email subjects, page
-/// titles) where the original line breaks shouldn't show.
+/// `normalize_whitespace` — collapse every run of whitespace into one
+/// space and trim the ends. Use it on free text shown on a single line,
+/// such as an admin column, an email subject or a page title.
 ///
 /// - `"  hello   world  "` → `"hello world"`
 /// - `"line\n\n\twith tabs"` → `"line with tabs"`
-/// - `""` → `""`
-///
-/// Non-string input passes through unchanged.
 fn normalize_whitespace(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -704,9 +609,8 @@ fn normalize_whitespace(value: &Value, _: &HashMap<String, Value>) -> tera::Resu
     Ok(to_value(crate::text::normalize_whitespace(s))?)
 }
 
-/// Total ordering across heterogeneous JSON `Value`s. Null < bool <
-/// number < string < array < object. Within a type, use the type's
-/// natural ordering (numeric for numbers, lexicographic for strings).
+/// Total order over JSON values: null < bool < number < string < array
+/// < object. Two values of the same type use that type's own order.
 fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     fn rank(v: &Value) -> u8 {
@@ -733,25 +637,21 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             .partial_cmp(&y.as_f64().unwrap_or(0.0))
             .unwrap_or(Equal),
         (Value::String(x), Value::String(y)) => x.cmp(y),
-        // Arrays + Objects: fall back to JSON-stringified compare so
-        // the sort stays deterministic. Rarely needed in practice.
+        // Arrays and objects compare by their JSON text, so the sort
+        // stays deterministic.
         _ => a.to_string().cmp(&b.to_string()),
     }
 }
 
 // ------------------------------------------------------------------ slugify_unicode
 
-/// `slugify_unicode` — Django's `slugify(allow_unicode=True)` variant.
-/// Convert a value to a URL-safe slug while preserving non-ASCII
-/// letters. Useful for blog-post slugs / handles in apps that serve
-/// users typing in scripts other than Latin.
+/// `slugify_unicode` — makes a URL-safe slug but keeps non-ASCII
+/// letters, so it works for users who
+/// write in a non-Latin script.
 ///
-/// Behaviour:
-/// - lowercase everything,
-/// - keep Unicode letters / digits and `_`,
-/// - collapse runs of whitespace / hyphens / other punctuation into
-///   a single `-`,
-/// - strip leading + trailing `-`.
+/// It lowercases everything, keeps Unicode letters, digits and `_`,
+/// turns every run of other characters into one `-`, and trims `-` from
+/// both ends.
 ///
 /// ```jinja
 /// {{ "Hello World!" | slugify_unicode }}   {# → "hello-world" #}
@@ -759,9 +659,8 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
 /// {{ "café-au-lait" | slugify_unicode }}   {# → "café-au-lait" #}
 /// ```
 ///
-/// Tera ships an ASCII-only `slugify` already — that filter
-/// transliterates non-ASCII to ASCII or drops it. Use this one
-/// when the project actively wants Unicode in URLs.
+/// Tera's own `slugify` is ASCII-only: it transliterates or drops
+/// non-ASCII. Use this one when you want Unicode in URLs.
 fn slugify_unicode(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -776,8 +675,7 @@ fn slugify_unicode(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Va
             out.push('-');
             last_was_dash = true;
         }
-        // Anything else when last_was_dash is true: skip (collapse run).
-        // Same when the output is empty (no leading dash).
+        // Otherwise skip: collapse the run, and never lead with a dash.
     }
     while out.ends_with('-') {
         out.pop();
@@ -787,50 +685,36 @@ fn slugify_unicode(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Va
 
 // ------------------------------------------------------------------ iriencode
 
-/// `iriencode` — Django's encoder for [IRIs](https://tools.ietf.org/html/rfc3987).
-/// Percent-encodes only the bytes that aren't valid in a URI:
-/// non-ASCII characters and a handful of reserved-but-unsafe ones.
-/// Everything else (`/`, `:`, `?`, `#`, `=`, `&`, `-`, `_`, `.`,
-/// `~`, etc.) passes through unchanged.
-///
-/// Useful for href attributes when you already have a URL with
-/// non-ASCII content (a hash, a translated path) and want it
-/// browser-safe without mangling the URL structure:
+/// `iriencode` — encode an [IRI](https://tools.ietf.org/html/rfc3987)
+/// for use as a URL. Only the bytes a URI cannot hold are
+/// percent-encoded; `/`, `:`, `?`, `#`, `=`, `&` and friends stay as
+/// they are, so the URL structure survives:
 ///
 /// ```jinja
 /// <a href="{{ url | iriencode }}">link</a>
 /// ```
 ///
-/// Distinct from Tera's `urlencode` which is for query-string
-/// VALUES — it percent-encodes everything except `[a-zA-Z0-9_-]`
-/// (no `/`, no `:`, etc.), so passing a URL through `urlencode`
-/// breaks the URL structure. Use `iriencode` for href / src
-/// attributes; use `urlencode` for individual query-string values.
+/// Use it for `href` and `src`. Tera's `urlencode` is for a single
+/// query-string value: it encodes everything but `[a-zA-Z0-9_-]`, which
+/// would break a whole URL.
 fn iriencode(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
     };
-    // Identical algorithm + safe-byte set to `url_codec::iri_to_uri` —
-    // single source of truth.
     Ok(to_value(crate::url_codec::iri_to_uri(s))?)
 }
 
 // ------------------------------------------------------------------ wordwrap
 
-/// `wordwrap` — wrap text at word boundaries so no rendered line
-/// exceeds `width` columns. Django:
+/// `wordwrap` — wrap text at word boundaries so no line is longer than
+/// `width`. Useful for plain-text email, SMS and fixed-width displays.
 ///
 /// - `{{ "Joel is a slug"|wordwrap:5 }}` → `"Joel\nis a\nslug"`
 /// - `{{ "one two three"|wordwrap:7 }}` → `"one two\nthree"`
 ///
-/// Useful for plain-text emails / SMS / fixed-width displays.
-/// Existing `\n` newlines in the input are honored — content
-/// already wrapped never gets re-flowed across an explicit line
-/// break.
-///
-/// Words longer than `width` are *not* hyphenated — they end up
-/// on a line of their own (same as Django's textwrap-backed
-/// behaviour). `width <= 0` returns the input unchanged.
+/// Existing newlines are kept, so already-wrapped text is not reflowed.
+/// A word longer than `width` gets its own line rather than a hyphen.
+/// `width <= 0` returns the input unchanged.
 fn wordwrap(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -844,35 +728,26 @@ fn wordwrap(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value>
         return Ok(value.clone());
     }
     let width = usize::try_from(width).unwrap_or(usize::MAX);
-    // Identical algorithm to `text::wrap` — single source of truth.
     Ok(to_value(crate::text::wrap(s, width))?)
 }
 
 // ------------------------------------------------------------------ mask_email
 
-/// `mask_email` — render a partly-obscured email address for
-/// display in admin lists / audit logs where leaking the full
-/// address would be a privacy / PII concern.
+/// `mask_email` — hide most of an email address, for admin lists and
+/// audit logs where the full address would be over-sharing.
 ///
-/// Format: first + last char of local part stay; middle is
-/// replaced with three `*`. Domain is unchanged. Local parts of
-/// 0–2 chars degrade gracefully (no double-show).
+/// The first and last character of the local part stay and the middle
+/// becomes `***`. The domain is untouched. A string with no `@` passes
+/// through, and this does not check that the input is a valid address —
+/// use [`crate::validators::validate_email`] for that.
 ///
 /// - `alice@example.com` → `a***e@example.com`
-/// - `bob@example.com` → `b***b@example.com`
 /// - `a@example.com` → `*@example.com`
-/// - `@example.com` → `@example.com` (empty local, unchanged shape)
-/// - `not-an-email` → `not-an-email` (no `@`, passes through)
-///
-/// Pure transform — emits the masked string. Doesn't validate the
-/// input is actually a valid email (use [`crate::validators::validate_email`]
-/// before storage if that matters).
+/// - `not-an-email` → `not-an-email`
 fn mask_email(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
     };
-    // Preserve pass-through behavior for non-email shapes (no `@`)
-    // so a non-email passing through the filter doesn't transform.
     if !s.contains('@') {
         return Ok(value.clone());
     }
@@ -881,23 +756,18 @@ fn mask_email(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
 
 // ------------------------------------------------------------------ mask_card
 
-/// `mask_card` — render the canonical "************1234"-style
-/// masked credit card number from a digit string. Strips spaces
-/// and hyphens (typical human-typed shape) before masking.
-///
-/// Format: every digit except the LAST 4 is replaced with `*`.
-/// If the input has fewer than 5 digits, the whole thing is
-/// masked. Non-digit input passes through unchanged.
+/// `mask_card` — mask a card number as `************1234`. Spaces and
+/// hyphens are stripped first, then every digit but the last four
+/// becomes `*`. Four digits or fewer are masked completely, and input
+/// with no digits passes through.
 ///
 /// - `"4111 1111 1111 1111"` → `"************1111"`
-/// - `"4111111111111111"` → `"************1111"`
-/// - `"4111"` → `"****"` (≤ 4 digits, fully masked)
-/// - `"not a card"` → `"not a card"` (no digits, passes through)
+/// - `"4111"` → `"****"`
+/// - `"not a card"` → `"not a card"`
 ///
-/// Pair with [`crate::validators::validate_creditcard_luhn`] at
-/// intake; use this filter at render time when displaying a
-/// stored / processed card for confirmation. Helpful in admin
-/// UIs that show order details with a "card on file" line.
+/// Validate at intake with
+/// [`crate::validators::validate_creditcard_luhn`]; use this at render
+/// time, for example on a "card on file" line.
 fn mask_card(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -907,18 +777,13 @@ fn mask_card(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
 
 // ------------------------------------------------------------------ mask_phone
 
-/// `mask_phone` — render a partly-obscured phone number. Keeps
-/// the original separator characters in place; masks every digit
-/// except the last 4. Useful for admin lists / order summaries
-/// where a full phone number would be PII over-share.
+/// `mask_phone` — mask every digit of a phone number but the last four,
+/// keeping the separators. Use it in admin lists and order summaries.
 ///
 /// - `"+1 415 555 2671"` → `"+* *** *** 2671"`
 /// - `"(415) 555-2671"` → `"(***) ***-2671"`
-/// - `"4155552671"` → `"******2671"`
-/// - `"123"` → `"***"` (≤ 4 digits → all masked)
-/// - `"no digits"` → `"no digits"` (passes through)
-///
-/// Non-string passes through unchanged.
+/// - `"123"` → `"***"` (four digits or fewer are fully masked)
+/// - `"no digits"` → `"no digits"`
 fn mask_phone(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -928,10 +793,8 @@ fn mask_phone(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
 
 // ------------------------------------------------------------------ wordcount
 
-/// `wordcount` — count whitespace-separated tokens in the input.
-/// Django:
-/// - `{{ "Joel is a slug"|wordcount }}` → `4`
-/// - `{{ ""|wordcount }}` → `0`
+/// `wordcount` — number of whitespace-separated words.
+/// `{{ "Joel is a slug"|wordcount }}` → `4`.
 fn wordcount(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     Ok(to_value(crate::text::wordcount(s))?)
@@ -939,14 +802,10 @@ fn wordcount(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
 
 // ------------------------------------------------------------------ phone2numeric
 
-/// `phone2numeric` — convert phone-keypad letters to the matching digit.
-/// Django:
-/// - `{{ "1-800-COLLECT"|phone2numeric }}` → `"1-800-2655328"`
-///
-/// Mapping (lower + upper, standard ITU E.161):
-/// `abc → 2`, `def → 3`, `ghi → 4`, `jkl → 5`, `mno → 6`,
-/// `pqrs → 7`, `tuv → 8`, `wxyz → 9`. Non-letter characters pass
-/// through unchanged.
+/// `phone2numeric` — turn phone-keypad letters into digits, using the
+/// standard ITU E.161 mapping (`abc → 2` … `wxyz → 9`). Case does not
+/// matter, and non-letters pass through.
+/// `{{ "1-800-COLLECT"|phone2numeric }}` → `"1-800-2655328"`.
 fn phone2numeric(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -956,14 +815,10 @@ fn phone2numeric(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Valu
 
 // ------------------------------------------------------------------ linenumbers
 
-/// `linenumbers` — prepend each line of the input with its 1-based
-/// line number, zero-padded to the width of the largest line number.
-/// Django:
-/// - `{{ "one\ntwo\nthree"|linenumbers }}` →
-///   `"1. one\n2. two\n3. three"`
-///
-/// Width adjusts as the line count grows — 100 lines render with
-/// `"  1. …"` through `"100. …"`.
+/// `linenumbers` — put a 1-based line number in front of every line,
+/// padded to the width of the largest number. So `"one\ntwo\nthree"`
+/// becomes `"1. one\n2. two\n3. three"`, while 100 lines run from
+/// `"  1. …"` to `"100. …"`.
 fn linenumbers(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let Some(s) = value.as_str() else {
         return Ok(value.clone());
@@ -980,55 +835,48 @@ fn pad_arg(args: &HashMap<String, Value>) -> usize {
         .unwrap_or(0) as usize
 }
 
-/// `ljust:N` — left-justify (pad right with spaces) to width N.
-/// Django:
-/// - `{{ "Joel"|ljust:10 }}` → `"Joel      "`
-///
-/// Values already at or beyond N pass through unchanged.
+/// `ljust:N` — pad on the right with spaces to width N.
+/// `{{ "Joel"|ljust:10 }}` → `"Joel      "`. A value already N or
+/// longer passes through unchanged.
 fn ljust(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     let width = pad_arg(args);
     Ok(to_value(crate::text::ljust(s, width))?)
 }
 
-/// `rjust:N` — right-justify (pad left with spaces) to width N.
-/// Django:
-/// - `{{ "Joel"|rjust:10 }}` → `"      Joel"`
+/// `rjust:N` — pad on the left with spaces to width N.
+/// `{{ "Joel"|rjust:10 }}` → `"      Joel"`.
 fn rjust(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     let width = pad_arg(args);
     Ok(to_value(crate::text::rjust(s, width))?)
 }
 
-/// `center:N` — center value in a field of width N. Django:
-/// - `{{ "Joel"|center:10 }}` → `"   Joel   "`
-///
-/// When the padding doesn't split evenly, the extra space goes on
-/// the right (matching Django's `str.center`).
+/// `center:N` — center the value in a field of width N.
+/// `{{ "Joel"|center:10 }}` → `"   Joel   "`. When the padding does not
+/// split evenly, the extra space goes on the right.
 fn center_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     let width = pad_arg(args);
     Ok(to_value(crate::text::center(s, width))?)
 }
 
-/// Django `{{ value|striptags }}` — remove HTML tags, returning plain
-/// text content. Not a sanitizer (matches Django's docs warning); use
-/// only on already-trusted input.
+/// `striptags` — remove HTML tags and return the text. **This is not a
+/// sanitizer.** Use it only on input you already trust.
 fn striptags(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     Ok(to_value(crate::text::strip_tags(s))?)
 }
 
-/// Django `{{ value|capfirst }}` — capitalize the first character of
-/// the input string only (no other transformations).
+/// `capfirst` — uppercase the first character and leave the rest alone.
 fn capfirst(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     Ok(to_value(crate::text::capfirst(s))?)
 }
 
-/// Django `{{ value|addslashes }}` — add backslashes before quotes
-/// and backslashes. Useful when escaping strings for CSV / JS
-/// literals where Tera's autoescape doesn't apply.
+/// `addslashes` — put a backslash before every quote and backslash.
+/// Useful for CSV or JS literals, where Tera's autoescape does not
+/// apply.
 fn addslashes(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     let mut out = String::with_capacity(s.len() + 8);
@@ -1043,9 +891,8 @@ fn addslashes(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> 
     Ok(to_value(out)?)
 }
 
-/// Django `{{ value|length_is:"N" }}` — return `true` iff the value's
-/// length equals `N`. For strings, `length` is char-count (not byte-
-/// count); for arrays/objects it's element/key count.
+/// `length_is:"N"` — `true` when the length equals `N`. A string counts
+/// characters, not bytes; an array or object counts its entries.
 fn length_is(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let target = args
         .get("arg")
@@ -1068,9 +915,8 @@ fn length_is(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value
     Ok(to_value(actual == target)?)
 }
 
-/// Django `{{ value|make_list }}` — convert a string to its list of
-/// characters, or an integer to its list of digits. Mostly useful in
-/// `{% for char in value|make_list %}` template iteration.
+/// `make_list` — split a string into its characters, or a number into
+/// its digits, for `{% for char in value|make_list %}`.
 fn make_list(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let chars: Vec<String> = match value {
         Value::String(s) => s.chars().map(|c| c.to_string()).collect(),
@@ -1081,18 +927,16 @@ fn make_list(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     Ok(to_value(chars)?)
 }
 
-/// Django `{{ value|pprint }}` — pretty-print debug repr of the value.
-/// rustango uses `serde_json::to_string_pretty` (2-space indent) so
-/// the output is machine-readable rather than Python-`repr` shaped.
+/// `pprint` — pretty-print the value for debugging. The output is
+/// indented JSON, not Python's `repr`.
 fn pprint(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
     Ok(to_value(s)?)
 }
 
-/// Django `{{ value|urlizetrunc:"N" }}` — same as `|urlize` except
-/// link text is truncated to at most `N` characters (with `...`
-/// appended if a URL was cut). The URL the link points to is
-/// unaffected; only the visible anchor text shortens.
+/// `urlizetrunc:"N"` — like `urlize`, but the visible link text is cut
+/// to at most `N` characters, with `...` appended. The `href` itself
+/// does not change.
 fn urlizetrunc(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = value.as_str().unwrap_or("");
     let limit = args
@@ -1108,9 +952,8 @@ fn urlizetrunc(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
     Ok(to_value(out)?)
 }
 
-/// Walk a urlized HTML string and truncate the visible text of each
-/// `<a>` anchor to `limit` chars, appending `...` if cut. Leaves the
-/// `href` attribute alone.
+/// Cut the visible text of each `<a>` in a urlized string to `limit`
+/// characters, appending `...`. The `href` is left alone.
 fn truncate_link_text(html: &str, limit: usize) -> String {
     if limit == usize::MAX {
         return html.to_owned();
@@ -1125,7 +968,7 @@ fn truncate_link_text(html: &str, limit: usize) -> String {
                 out.push_str(tag);
                 i += close + 1;
                 if tag.starts_with("<a ") || tag == "<a>" {
-                    // Capture anchor text until </a>.
+                    // Take the anchor text up to </a>.
                     if let Some(end) = html[i..].find("</a>") {
                         let anchor_text = &html[i..i + end];
                         if anchor_text.chars().count() > limit {
@@ -1149,18 +992,17 @@ fn truncate_link_text(html: &str, limit: usize) -> String {
     out
 }
 
-/// Django `{% widthratio this_value max_value max_width %}` —
-/// compute `round((this_value / max_value) * max_width)`. Tera
-/// function shape uses kwargs:
+/// `widthratio` — compute `round((value / max) * width)`, for bar
+/// charts and progress bars. A Tera function with keyword
+/// arguments:
 ///
 /// ```jinja
 /// <div style="width: {{ widthratio(value=this, max=upper, width=200) }}px"></div>
 /// ```
 ///
-/// Returns 0 when `max` is 0 or any input is non-numeric (matches
-/// Django's defensive behavior of not panicking on zero-divide). All
-/// three args accept integer or float; rounding is banker's-round
-/// (`round_ties_even`).
+/// Each argument may be an integer or a float. The result is 0 when
+/// `max` is 0 or an argument is not a number, so a zero divisor never
+/// panics.
 fn widthratio(args: &HashMap<String, Value>) -> tera::Result<Value> {
     let as_f = |k: &str| -> Option<f64> {
         args.get(k).and_then(|v| match v {
@@ -1185,13 +1027,9 @@ fn widthratio(args: &HashMap<String, Value>) -> tera::Result<Value> {
     Ok(to_value(result)?)
 }
 
-/// `{{ value|is_blank }}` → boolean. Wraps [`text::is_blank`].
-/// True for empty string, whitespace-only strings, and JSON null.
-/// Non-string scalars (numbers, booleans, arrays, objects) all
-/// return `false` — only string-shaped fields are blank-able in
-/// the template sense.
-///
-/// Common idiom: `{% if user.bio|is_blank %}(no bio yet){% endif %}`.
+/// `is_blank` — `true` for null, an empty string, or a string of only
+/// whitespace. Everything else is `false`.
+/// Typical use: `{% if user.bio|is_blank %}(no bio yet){% endif %}`.
 fn is_blank_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let blank = match value {
         Value::Null => true,
@@ -1201,11 +1039,10 @@ fn is_blank_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Va
     Ok(to_value(blank)?)
 }
 
-/// `{{ s|truncate_middle(width=10, placeholder="…") }}` — head +
-/// ellipsis + tail truncation, surfaces [`text::truncate_middle`]
-/// to templates for SHA / UUID / hash / path display in tight cells.
-///
-/// `width` defaults to 32, `placeholder` defaults to `"…"`.
+/// `truncate_middle` — keep the head and tail and put a placeholder in
+/// the middle, for showing a SHA, UUID or path in a narrow cell.
+/// `width` defaults to 32 and `placeholder` to `"…"`:
+/// `{{ s|truncate_middle(width=10) }}`.
 fn truncate_middle_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let s = match value {
         Value::String(s) => s.as_str(),
@@ -1230,10 +1067,9 @@ fn truncate_middle_filter(value: &Value, args: &HashMap<String, Value>) -> tera:
     ))?)
 }
 
-/// Django `{{ value|json_script:"id" }}` — render the value as a
-/// `<script id="id" type="application/json">...</script>` block,
-/// XSS-defang escaped for safe embedding inside HTML. Defaults the
-/// element id to `"id"` (Django default — caller usually overrides).
+/// `json_script:"id"` — render the value inside a
+/// `<script id="…" type="application/json">` block, escaped so it is
+/// safe in HTML. The element id defaults to `"id"`; pass your own.
 fn json_script(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
     let element_id = args
         .get("arg")
@@ -1245,15 +1081,13 @@ fn json_script(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
     Ok(to_value(rendered)?)
 }
 
-/// Django `{{ value|unordered_list }}` — recursively render a nested
-/// array as an HTML `<ul>...</ul>` tree. The input shape is Django's
-/// list-of-lists convention: each level alternates between a label
-/// and an optional list of sub-items, e.g.
+/// `unordered_list` — render a nested array as a `<ul>` tree. The
+/// input is a list of lists, where a label may be followed
+/// by a list of its children:
 /// `["States", ["Kansas", ["Lawrence", "Topeka"], "Illinois"]]`.
 ///
-/// Each text node is autoescaped (matches Django's autoescape-on
-/// default). To bypass escaping for already-safe HTML, pipe through
-/// `|safe` after `|unordered_list`.
+/// Text nodes are escaped. Add `|safe` afterwards if the content is
+/// already trusted HTML.
 fn unordered_list(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let arr = match value {
         Value::Array(a) => a,
@@ -1284,11 +1118,8 @@ fn render_unordered_list(items: &[Value], out: &mut String) {
     }
 }
 
-/// Django `{{ value|filesizeformat }}` — human-readable byte size
-/// (e.g. "13 KB", "4.1 MB"). Aliases `humanize::naturalsize` for
-/// Django template-tag parity (`filesizeformat` is the canonical
-/// Django name even though `humanize::naturalsize` is the helper
-/// users call from Rust handler code).
+/// `filesizeformat` — a byte count as "13 KB" or "4.1 MB". An alias
+/// of `humanize::naturalsize`.
 fn filesizeformat(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
     let n = match value {
         Value::Number(n) => n.as_f64().unwrap_or(0.0),
@@ -1307,7 +1138,7 @@ mod tests {
 
     fn args_pos(v: Value) -> HashMap<String, Value> {
         // Tera passes positional filter args via the "0" key (or any
-        // key — Django's `:arg` becomes a single named arg in Tera's
+        // key — a `:arg` becomes a single named arg in Tera's
         // shape). Both registration paths put the arg through, so
         // we just stuff it under "0" / "suffix" — `pluralize` looks
         // at both.
@@ -1352,7 +1183,7 @@ mod tests {
 
     #[test]
     fn pluralize_uses_array_length() {
-        // Django: passing a list runs pluralize against len(list).
+        // Passing a list runs pluralize against its length.
         let one = pluralize(&json!(["a"]), &HashMap::new()).unwrap();
         assert_eq!(one, json!(""));
         let three = pluralize(&json!(["a", "b", "c"]), &HashMap::new()).unwrap();
@@ -1375,7 +1206,7 @@ mod tests {
 
     #[test]
     fn truncatewords_collapses_multi_whitespace() {
-        // Django normalizes whitespace on join. Input has tabs +
+        // Whitespace is normalized on join. Input has tabs +
         // multiple spaces; output is single-spaced.
         let out = truncatewords(&json!("a\tb   c"), &args_pos(json!(2))).unwrap();
         assert_eq!(out, json!("a b …"));
@@ -1444,9 +1275,8 @@ mod tests {
 
     #[test]
     fn default_if_none_empty_string_is_not_null() {
-        // Empty string is a real value — passes through. Distinct
-        // from Django's `default` filter which treats falsy as
-        // missing.
+        // Empty string is a real value — it passes through. Only
+        // null is treated as missing.
         let out = default_if_none(&json!(""), &args_pos(json!("fallback"))).unwrap();
         assert_eq!(out, json!(""));
     }
@@ -1637,7 +1467,7 @@ mod tests {
 
     #[test]
     fn add_mixed_types_stringifies_concat() {
-        // "5" + 3 → "53" (Django shape). Both sides stringify, then
+        // "5" + 3 → "53". Both sides stringify, then
         // concatenate.
         let out = add(&json!("5"), &args_pos(json!(3))).unwrap();
         assert_eq!(out, json!("53"));
@@ -1660,7 +1490,7 @@ mod tests {
     #[test]
     fn cut_empty_needle_returns_input_unchanged() {
         // Guard against infinite-replace loops and against silently
-        // gluing every empty position; Django no-ops on empty needle.
+        // gluing every empty position; an empty needle is a no-op.
         let out = cut(&json!("hello"), &args_pos(json!(""))).unwrap();
         assert_eq!(out, json!("hello"));
     }
@@ -2657,8 +2487,8 @@ mod tests {
         register_filters(&mut tera);
         tera.add_raw_template("t", "{{ value|capfirst }}").unwrap();
         let mut ctx = tera::Context::new();
-        ctx.insert("value", "django");
-        assert_eq!(tera.render("t", &ctx).unwrap(), "Django");
+        ctx.insert("value", "hello");
+        assert_eq!(tera.render("t", &ctx).unwrap(), "Hello");
     }
 
     // -------- addslashes --------
@@ -2813,7 +2643,7 @@ mod tests {
 
     #[test]
     fn unordered_list_renders_nested_levels() {
-        // Django shape: label followed by optional sub-array.
+        // A label followed by an optional sub-array.
         let input = json!(["States", ["Kansas", ["Lawrence", "Topeka"], "Illinois"]]);
         let out = unordered_list(&input, &HashMap::new())
             .unwrap()

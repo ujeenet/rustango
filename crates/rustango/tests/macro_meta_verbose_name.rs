@@ -1,6 +1,6 @@
 //! `#[rustango(verbose_name = "...", verbose_name_plural = "...")]` on a
-//! model struct (Django parity #320 — `Meta.verbose_name` /
-//! `Meta.verbose_name_plural`).
+//! model struct (#320 — the human-readable singular / plural label
+//! for the model).
 //!
 //! Covers:
 //! - macro threads both values onto `ModelSchema::verbose_name` /

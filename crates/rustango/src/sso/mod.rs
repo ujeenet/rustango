@@ -11,7 +11,7 @@
 //! builds one [`OAuth2Provider`] per login.
 //!
 //! It reuses the existing [`crate::oauth2`] handshake
-//! ([`OAuth2Provider::begin`]/[`complete`](OAuth2Provider::complete) +
+//! ([`OAuth2Provider::begin`]/[`complete`](crate::oauth2::OAuth2Provider::complete) +
 //! [`seal_flow`]/[`open_flow`]) to prove identity, then the *caller*
 //! links the verified email to an existing user and mints that surface's
 //! normal session cookie. The admin flow is **link-to-existing** — SSO
@@ -21,6 +21,12 @@
 //! The client secret is resolved from a reference (`env://…`) by the
 //! caller before building the provider, so the raw secret never lands in
 //! a DB column or a config file (mirrors `Org.database_url`).
+//!
+//! [`SsoProvider`]: crate::sso::SsoProvider
+//! [`OAuth2Provider`]: crate::oauth2::OAuth2Provider
+//! [`OAuth2Provider::begin`]: crate::oauth2::OAuth2Provider::begin
+//! [`seal_flow`]: crate::oauth2::seal_flow
+//! [`open_flow`]: crate::oauth2::open_flow
 
 pub mod provider;
 pub use provider::{list_enabled, resolve_by_slug, SsoProvider};
@@ -164,7 +170,7 @@ pub fn parse_scopes(scopes: Option<&str>) -> Option<Vec<String>> {
 /// Resolve a `secret_ref` for the **bare admin** (no tenancy in the
 /// dependency set): `env://VAR` reads the environment; anything else is a
 /// literal. The tenant surfaces use the richer
-/// [`crate::tenancy::secrets::ChainSecretsResolver`] instead.
+/// [`ChainSecretsResolver`](crate::tenancy::ChainSecretsResolver) instead.
 ///
 /// # Errors
 /// [`SsoError::Secret`] when an `env://` variable is unset.
