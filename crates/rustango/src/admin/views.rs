@@ -22,7 +22,7 @@ use super::helpers::{
 };
 use super::render;
 use super::templates::render_with_chrome;
-use super::urls::AppState;
+use super::urls::{AppState, CREATE_SEGMENT};
 
 /// Render a `data.<key>` cell: read a JSON column at the given key
 /// path and emit an HTML-escaped scalar.
@@ -1420,7 +1420,8 @@ pub(crate) fn post_save_redirect(
     if form.contains_key("_continue") {
         format!("{admin_prefix}/{table}/{pk_value}")
     } else if form.contains_key("_addanother") {
-        format!("{admin_prefix}/{table}/add")
+        // `/new`, not `/add` — that is the route `urls.rs` mounts.
+        format!("{admin_prefix}/{table}/{CREATE_SEGMENT}")
     } else {
         format!("{admin_prefix}/{table}")
     }
@@ -2418,7 +2419,10 @@ mod tests {
     #[test]
     fn addanother_redirects_to_create_form() {
         let url = post_save_redirect("/__admin", "post", "42", &form_with("_addanother"));
-        assert_eq!(url, "/__admin/post/add");
+        // Spelled out rather than built from `CREATE_SEGMENT`: against the
+        // const this would pass whatever the const said. This used to
+        // assert `/add`, which no route has ever served (#1635).
+        assert_eq!(url, "/__admin/post/new");
     }
 
     #[test]
