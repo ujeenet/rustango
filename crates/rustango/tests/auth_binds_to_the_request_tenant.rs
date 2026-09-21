@@ -1,21 +1,9 @@
 //! A credential must not authenticate on another tenant's host
 //! (GHSA-c4gg-mvfq-h268).
 //!
-//! `require_auth` used to take a `Pool` and move it into the layer's
-//! state when the router was built. Every request then authenticated
-//! against that one database, whatever host it arrived on — so a user
-//! of tenant A presenting their credential to tenant B's host was
-//! looked up in A, found, and admitted to B.
-//!
-//! Downstream amplified rather than contained it:
-//! `AuthenticatedUser.is_superuser` rides in a request extension and is
-//! trusted without a re-query, and per-tenant `Auto<i64>` sequences mean
-//! ids collide from 1 — so A's admin became B's admin, operating on B's
-//! rows under A's identity.
-//!
-//! The vulnerable wiring was taught six times across three doc pages
-//! and prescribed by the cookbook as the multi-tenant recipe, so this
-//! was not an integrator mistake to document around.
+//! `require_auth` used to take a `Pool` captured when the router was
+//! built, so every request authenticated against that one database
+//! whatever host it arrived on.
 //!
 //! Two tenants, two SQLite databases, one router. The credential exists
 //! in `alpha` only.

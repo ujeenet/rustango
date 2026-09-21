@@ -18,10 +18,6 @@
 //!         .require_perm("post.add")   // inner — checked after auth
 //!     .require_auth(backends);        // outer — checked first
 //!
-//! // No pool argument: the credential is checked against the tenant
-//! // resolved from the request's own host. Passing one is what
-//! // GHSA-c4gg-mvfq-h268 was — see `RouterAuthExt`.
-//!
 //! async fn profile(CurrentUser(user): CurrentUser) -> impl IntoResponse {
 //!     match user {
 //!         Some(u) => format!("hello {}", u.username).into_response(),
@@ -99,18 +95,8 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentUser {
 /// tenant resolved from **this request's** host, never one captured
 /// when the router was built (GHSA-c4gg-mvfq-h268).
 ///
-/// The middleware used to hold a `Pool` moved in at mount time, so a
-/// credential from tenant A authenticated on tenant B's host: the
-/// backends did their username / prefix / `sub` lookup against whatever
-/// database the router happened to be constructed with. Downstream made
-/// it worse rather than containing it — `AuthenticatedUser.is_superuser`
-/// travels in a request extension and is trusted without a re-query, and
-/// per-tenant `Auto<i64>` sequences mean ids collide from 1.
-///
-/// Erased over the backend because `TenantContext` is generic and this
-/// middleware is not. The three arms mirror the three `Tenant`
-/// extractor impls; whichever context the app mounted is the one that
-/// answers.
+/// Erased over the backend because the two context types are generic
+/// and this middleware is not; whichever the app mounted answers.
 ///
 /// **Fails closed.** No context, no tenant, or a resolver error all
 /// reject — an unresolvable tenant is exactly the case where guessing
@@ -310,28 +296,16 @@ async fn perm_middleware(
 ///
 /// # These took a `Pool` until 0.57.11
 ///
-/// They no longer do, and the change is the fix for
-/// GHSA-c4gg-mvfq-h268 rather than tidying. The pool was moved in when
-/// the router was built and then used for every request, so a
-/// credential issued by tenant A authenticated on tenant B's host —
-/// the backends looked the user up in whichever database the router
-/// happened to be constructed with, and `is_superuser` travelled
-/// onward in a request extension without a re-query.
-///
-/// The pool now comes from the tenant resolved for each request. There
-/// is deliberately no variant that accepts one: a caller-supplied pool
-/// is the vulnerability, and every other credential path in the crate
-/// (`tenant_console`, `member_auth`, `impersonation_handoff`,
-/// `require_bearer`, MCP agent keys) already binds to the resolved
-/// tenant. This module is gated on the `tenancy` feature, so a pool
-/// chosen once per process is never the right answer here.
-///
-/// Migration is dropping the argument:
+/// Dropping the argument is the migration:
 ///
 /// ```text
 /// .require_auth(backends, pool.clone())  →  .require_auth(backends)
 /// .require_perm("post.add", pool)        →  .require_perm("post.add")
 /// ```
+///
+/// The pool now comes from the tenant resolved for each request. A
+/// caller-supplied one authenticated every host against one database
+/// (GHSA-c4gg-mvfq-h268), so no variant accepts one.
 ///
 /// The tenancy layer must be mounted outside these — without a
 /// `TenantContext` in extensions they fail closed with a 500 rather
